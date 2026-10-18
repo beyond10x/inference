@@ -1,0 +1,275 @@
+# The model layer of docs/design/inference.md: what computation can be performed and what it
+# requires (§3.2). Every declaration cites the design line it was read from; there is no code.
+domain: inference.model
+
+summary: >-
+  A Model is a trained inference artifact or hosted endpoint, described by its modalities, its
+  code and weight licences and its checksum. An Adapter is the concrete implementation that
+  connects one model or backend to the framework's contracts; it reports the contract revision it
+  implements, how and where it runs, and the capabilities it claims and must pass conformance
+  tests for. Output streaming, incremental input, input during output and native duplex are
+  separate capabilities: a persistent connection proves none of them.
+
+naming:
+  wire: model
+  display: Model
+
+types:
+  - name: inference.model.ModelId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.model.AdapterId
+    kind: newtype
+    of: Uuid
+
+  # The core streaming capability matrix.
+  # read from: docs/design/inference.md:419-427
+  - name: inference.model.Capability
+    kind: enum
+    variants:
+      - output_streaming
+      - incremental_input
+      - concurrent_input_output
+      - native_duplex
+      - revisable_input
+      - tool_calling
+      - interruptible
+      - resumable_model_state
+      - audio_text_alignment
+
+  # First-class media modalities; the initial runtime implements Text, Audio, Structured and
+  # Control.
+  # read from: docs/design/inference.md:288-299
+  - name: inference.model.Modality
+    kind: enum
+    variants: [Text, Audio, Structured, Image, Video, Control]
+
+  # Where an adapter is allowed to run.
+  # read from: docs/design/inference.md:438
+  - name: inference.model.Locality
+    kind: enum
+    variants: [same_process, local_worker, self_hosted_cluster, external_provider]
+
+  # The five execution forms a backend adapter may run as.
+  # read from: docs/design/inference.md:876-880
+  - name: inference.model.ExecutionForm
+    kind: enum
+    variants: [in_process, native_ffi, subprocess, local_service, hosted_service]
+
+entities:
+  # A trained inference artifact or hosted model endpoint, described by capabilities and
+  # resources; it owns model identity, modality support and constraints. Family and checkpoint,
+  # code licence and weight licence as separate entries, and the artifact checksum.
+  # read from: docs/design/inference.md:98
+  # read from: docs/design/inference.md:433
+  # read from: docs/design/inference.md:439
+  # read from: docs/design/inference.md:944-952
+  - name: inference.model.Model
+    naming:
+      summary: A trained inference artifact or hosted model endpoint.
+    identity:
+      name: model_id
+      type: inference.model.ModelId
+    fields:
+      - name: family
+        type: String
+      - name: checkpoint
+        type: String
+      - name: code_license
+        type: String
+      - name: weight_license
+        type: String
+      - name: checksum
+        type: String
+      - name: input_modalities
+        type: List<inference.model.Modality>
+      - name: output_modalities
+        type: List<inference.model.Modality>
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
+  # A concrete implementation connecting a model or backend to the framework contracts; it owns
+  # the model-specific transport, decoding and backend lifecycle, reports the contract revision it
+  # implements, and claims capabilities it must pass the conformance tests for.
+  # read from: docs/design/inference.md:99
+  # read from: docs/design/inference.md:279
+  # read from: docs/design/inference.md:899
+  - name: inference.model.Adapter
+    naming:
+      summary: The concrete implementation that connects one model or backend to the contracts.
+    identity:
+      name: adapter_id
+      type: inference.model.AdapterId
+    fields:
+      - name: model_id
+        type: inference.model.ModelId
+      - name: backend
+        type: String
+      - name: contract_revision
+        type: String
+      - name: execution_form
+        type: inference.model.ExecutionForm
+      - name: locality
+        type: inference.model.Locality
+      - name: capabilities
+        type: List<inference.model.Capability>
+      - name: max_concurrency
+        type: Integer
+    relations:
+      # An adapter connects one model; the model artifact stands on its own.
+      # read from: docs/design/inference.md:99
+      - name: model
+        kind: references
+        target: inference.model.Model
+        cardinality: one
+        via: model_id
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
+errors:
+  - name: inference.model.NonPositiveConcurrency
+    summary: An adapter's maximum concurrency must be at least one.
+    fields:
+      - name: submitted
+        type: Integer
+
+commands:
+  - name: inference.model.DeclareModel
+    input:
+      - name: family
+        type: String
+      - name: checkpoint
+        type: String
+      - name: code_license
+        type: String
+      - name: weight_license
+        type: String
+      - name: checksum
+        type: String
+      - name: input_modalities
+        type: List<inference.model.Modality>
+      - name: output_modalities
+        type: List<inference.model.Modality>
+    outcomes:
+      - name: declared
+        creates: inference.model.Model
+        instance: model_id
+        sets:
+          family: input.family
+          checkpoint: input.checkpoint
+          code_license: input.code_license
+          weight_license: input.weight_license
+          checksum: input.checksum
+          input_modalities: input.input_modalities
+          output_modalities: input.output_modalities
+        emits:
+          - inference.model.ModelDeclared
+        payload:
+          inference.model.ModelDeclared:
+            model_id: {generated: true}
+            family: input.family
+            checkpoint: input.checkpoint
+        summary: The model is declared with its licences and checksum.
+
+  # read from: docs/design/inference.md:435
+  - name: inference.model.DeclareAdapter
+    input:
+      - name: model_id
+        type: inference.model.ModelId
+      - name: backend
+        type: String
+      - name: contract_revision
+        type: String
+      - name: execution_form
+        type: inference.model.ExecutionForm
+      - name: locality
+        type: inference.model.Locality
+      - name: capabilities
+        type: List<inference.model.Capability>
+      - name: max_concurrency
+        type: Integer
+    outcomes:
+      - name: declared
+        when: max_concurrency > 0
+        creates: inference.model.Adapter
+        instance: adapter_id
+        sets:
+          model_id: input.model_id
+          backend: input.backend
+          contract_revision: input.contract_revision
+          execution_form: input.execution_form
+          locality: input.locality
+          capabilities: input.capabilities
+          max_concurrency: input.max_concurrency
+        emits:
+          - inference.model.AdapterDeclared
+        payload:
+          inference.model.AdapterDeclared:
+            adapter_id: {generated: true}
+            model_id: input.model_id
+            capabilities: input.capabilities
+        summary: The adapter is declared with the capabilities it claims.
+
+      - name: refused
+        error: inference.model.NonPositiveConcurrency
+        payload:
+          inference.model.NonPositiveConcurrency:
+            submitted: input.max_concurrency
+        summary: The concurrency limit was not positive, and nothing was declared.
+
+events:
+  - name: inference.model.ModelDeclared
+    fields:
+      - name: model_id
+        type: inference.model.ModelId
+      - name: family
+        type: String
+      - name: checkpoint
+        type: String
+
+  - name: inference.model.AdapterDeclared
+    fields:
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: model_id
+        type: inference.model.ModelId
+      - name: capabilities
+        type: List<inference.model.Capability>
+
+views:
+  - name: inference.model.Models
+    source: inference.model.Model
+    consistency: read_your_writes
+    fields:
+      - name: model_id
+        type: inference.model.ModelId
+      - name: family
+        type: String
+      - name: checkpoint
+        type: String
+      - name: code_license
+        type: String
+      - name: weight_license
+        type: String
+
+  - name: inference.model.Adapters
+    source: inference.model.Adapter
+    consistency: read_your_writes
+    fields:
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: model_id
+        type: inference.model.ModelId
+      - name: contract_revision
+        type: String
+      - name: locality
+        type: inference.model.Locality
+      - name: capabilities
+        type: List<inference.model.Capability>
+      - name: max_concurrency
+        type: Integer

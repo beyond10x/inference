@@ -1,0 +1,232 @@
+# Tool calling of docs/design/inference.md §15: an inference and orchestration concern, outside
+# model adapters, with proposal, authorization, execution and result as separate events. The
+# ToolCall lifecycle beyond Proposed grows with the tools-and-turns stories; the barrier that a
+# provisional transcript never initiates a side-effecting call is declared now.
+domain: inference.tools
+
+summary: >-
+  A Tool is an external capability with an identity, a schema revision and a side-effect class:
+  read-only, idempotent write or non-idempotent write. A ToolCall is a proposal a generation makes,
+  correlated to that generation and classified by the basis of the input that led to it. A
+  side-effecting call proposed on provisional input is refused before it exists.
+
+naming:
+  wire: tools
+  display: Tools
+
+types:
+  - name: inference.tools.ToolId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.tools.ToolCallId
+    kind: newtype
+    of: Uuid
+
+  # read from: docs/design/inference.md:851
+  - name: inference.tools.SideEffectClass
+    kind: enum
+    variants: [read_only, idempotent_write, non_idempotent_write]
+
+  # Whether the input that led to a proposal was committed or still provisional.
+  # read from: docs/design/inference.md:625
+  # read from: docs/design/inference.md:866
+  - name: inference.tools.InputBasis
+    kind: enum
+    variants: [committed, provisional]
+
+entities:
+  # An external capability invoked through a controlled request/result protocol; it owns
+  # permission-gated side effects or data retrieval. Structured identity, schema revision,
+  # side-effect classification and whether human confirmation is required.
+  # read from: docs/design/inference.md:106
+  # read from: docs/design/inference.md:848
+  # read from: docs/design/inference.md:851
+  # read from: docs/design/inference.md:853
+  - name: inference.tools.Tool
+    naming:
+      summary: An external capability with a schema and a side-effect class.
+    identity:
+      name: tool_id
+      type: inference.tools.ToolId
+    fields:
+      - name: name
+        type: String
+      - name: schema_revision
+        type: String
+      - name: side_effect
+        type: inference.tools.SideEffectClass
+      - name: requires_confirmation
+        type: Boolean
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
+  # A structured tool proposal, distinguishable from user-visible prose and correlated to the
+  # generation that made it. The lifecycle proposal, authorization, execution, result or failure
+  # is declared with its first state here and completed by the tools-and-turns stories.
+  # read from: docs/design/inference.md:374
+  # read from: docs/design/inference.md:849-850
+  - name: inference.tools.ToolCall
+    naming:
+      summary: A tool proposal a generation made, correlated to it.
+    identity:
+      name: call_id
+      type: inference.tools.ToolCallId
+    fields:
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: side_effect
+        type: inference.tools.SideEffectClass
+      - name: input_basis
+        type: inference.tools.InputBasis
+      - name: arguments
+        type: Json
+    relations:
+      - name: tool
+        kind: references
+        target: inference.tools.Tool
+        cardinality: one
+        via: tool_id
+      - name: generation
+        kind: references
+        target: inference.stream.Generation
+        cardinality: one
+        via: generation_id
+    lifecycle:
+      initial: Proposed
+      states: [Proposed]
+      terminal: [Proposed]
+
+errors:
+  # read from: docs/design/inference.md:866
+  - name: inference.tools.ProvisionalInputBarrier
+    summary: A speculative or provisional transcript must not directly initiate side-effecting tool execution; the proposal is refused.
+    fields:
+      - name: side_effect
+        type: inference.tools.SideEffectClass
+
+commands:
+  - name: inference.tools.DeclareTool
+    input:
+      - name: name
+        type: String
+      - name: schema_revision
+        type: String
+      - name: side_effect
+        type: inference.tools.SideEffectClass
+      - name: requires_confirmation
+        type: Boolean
+    outcomes:
+      - name: declared
+        creates: inference.tools.Tool
+        instance: tool_id
+        sets:
+          name: input.name
+          schema_revision: input.schema_revision
+          side_effect: input.side_effect
+          requires_confirmation: input.requires_confirmation
+        emits:
+          - inference.tools.ToolDeclared
+        payload:
+          inference.tools.ToolDeclared:
+            tool_id: {generated: true}
+            name: input.name
+            side_effect: input.side_effect
+        summary: The tool is known with its schema revision and side-effect class.
+
+  # Side-effecting tools require committed user input by default.
+  # read from: docs/design/inference.md:625
+  # read from: docs/design/inference.md:866
+  - name: inference.tools.ProposeToolCall
+    input:
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: side_effect
+        type: inference.tools.SideEffectClass
+      - name: input_basis
+        type: inference.tools.InputBasis
+      - name: arguments
+        type: Json
+    outcomes:
+      - name: barred
+        when:
+          all:
+            - input_basis == provisional
+            - side_effect != read_only
+        error: inference.tools.ProvisionalInputBarrier
+        payload:
+          inference.tools.ProvisionalInputBarrier:
+            side_effect: input.side_effect
+        summary: The proposal rested on provisional input and would have had a side effect; nothing was proposed.
+
+      - name: proposed
+        creates: inference.tools.ToolCall
+        instance: call_id
+        sets:
+          tool_id: input.tool_id
+          generation_id: input.generation_id
+          side_effect: input.side_effect
+          input_basis: input.input_basis
+          arguments: input.arguments
+        emits:
+          - inference.tools.ToolCallProposed
+        payload:
+          inference.tools.ToolCallProposed:
+            call_id: {generated: true}
+            tool_id: input.tool_id
+            generation_id: input.generation_id
+        summary: The proposal exists and awaits authorization.
+
+events:
+  - name: inference.tools.ToolDeclared
+    fields:
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: name
+        type: String
+      - name: side_effect
+        type: inference.tools.SideEffectClass
+
+  - name: inference.tools.ToolCallProposed
+    fields:
+      - name: call_id
+        type: inference.tools.ToolCallId
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: generation_id
+        type: inference.stream.GenerationId
+
+views:
+  - name: inference.tools.Tools
+    source: inference.tools.Tool
+    consistency: read_your_writes
+    fields:
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: name
+        type: String
+      - name: side_effect
+        type: inference.tools.SideEffectClass
+      - name: requires_confirmation
+        type: Boolean
+
+  - name: inference.tools.ToolCalls
+    source: inference.tools.ToolCall
+    consistency: read_your_writes
+    fields:
+      - name: call_id
+        type: inference.tools.ToolCallId
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: side_effect
+        type: inference.tools.SideEffectClass
+      - name: input_basis
+        type: inference.tools.InputBasis
