@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:workspace-skeleton
 kind: story
-status: active
+status: implemented
 title: Cargo workspace skeleton; inference-core carries the model vocabulary
 summary: A Cargo workspace under crates/ with task check running fmt, clippy and test; inference-core declares the inference.model vocabulary and the shared identifiers.
 relations:
@@ -12,6 +12,8 @@ scope:
 - confidence: cited
   path: AGENTS.md
 - confidence: cited
+  path: Cargo.lock
+- confidence: cited
   path: Cargo.toml
 - confidence: cited
   path: README.md
@@ -19,14 +21,21 @@ scope:
   path: Taskfile.yml
 - confidence: cited
   path: crates/inference-core
-- confidence: inferred
+- confidence: cited
   path: crates/inference-core/Cargo.toml
-- confidence: inferred
+- confidence: cited
+  path: crates/inference-core/src/id.rs
+- confidence: cited
   path: crates/inference-core/src/lib.rs
-revision: 13
+- confidence: cited
+  path: crates/inference-core/src/model.rs
+- confidence: cited
+  path: crates/inference-core/tests
+revision: 21
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-18T23:10:50Z", actor: "human:timo", revision: 12, decided_on: {"recorded":{"review_outcome":2}}}
 - {from: "proposed", to: "active", at: "2026-10-18T23:10:50Z", actor: "human:timo", revision: 13, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "active", to: "implemented", at: "2026-10-18T23:33:12Z", actor: "human:timo", revision: 14, decided_on: {"recorded":{"test_result":1,"review_outcome":5,"verification":1}}}
 ---
 ## Context
 
@@ -77,3 +86,20 @@ Derived 2026-10-19 by `story-scoper`. Every line is **cited** (read from the sto
 - **Confidence:** high — every path is named in the body and its presence or absence confirmed in the tree (`Cargo.toml`, `crates/`, `examples/` absent; `Taskfile.yml`, `AGENTS.md`, `README.md` present)
 - **Would collide with:** any unit touching the root `Cargo.toml` (members, metadata, lints), the `check` task of `Taskfile.yml`, the Commands block of `AGENTS.md`, `README.md`, or `crates/inference-core/` (its `src/lib.rs` module list and its `Cargo.toml` dependency list in particular)
 - **Safety fact:** the tree holds no Rust and no commits (`git log`: "does not have any commits yet"; `Cargo.toml`, `Cargo.lock`, `crates/`, `examples/` absent; `.gitignore:1` already ignores `/target`), so the new workspace and crate can break no existing build, and the edits to existing files are additive except the one clause at `AGENTS.md:27` — step 2 (`ls`, `git log`), unproven. Where the symbol search stops: the wire names `output_streaming`, `same_process`, `in_process` (`ess/domains/model.yaml:31,52,58`) are what `.engineering/drafts/suite.json` sends (30, 5 and 2 occurrences) and what the next story replays; `Modality` is PascalCase (`Control`, line 46) while the other three enums are snake_case, so one `rename_all` cannot cover all four — step 2, unproven
+
+## Scope as landed
+
+Confirmed 2026-10-19 by wave one (implementor's confirmation table, unit commit 7c2e316). Corrections are
+shown, not deleted.
+
+- `crates/inference-core/Cargo.toml` — was inferred, **confirmed**: the crate's manifest.
+- `crates/inference-core/src/lib.rs` — was inferred, **confirmed**: it declares the modules `id` and `model`.
+- **Landed beyond the derived scope:** `Cargo.lock` (committed, 30 packages), `crates/inference-core/src/id.rs`
+  (the shared identifiers and the canonical-Uuid reader), `crates/inference-core/src/model.rs` (the
+  `inference.model` vocabulary), `crates/inference-core/tests/` (the story's three checks and the cases of two
+  adversary passes), and one Layout row in `AGENTS.md`.
+- **Wrong at the time of reading:** the safety fact "the tree holds no Rust and no commits"; the base had two
+  commits. The rest of that fact held.
+- **Confirmed:** "one `rename_all` cannot cover all four enums"; `Modality` is PascalCase, the other three
+  snake_case.
+- Typed scope entries now list every path above as cited.

@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-18T23:32:48Z",
+  "actor": "human:timo",
+  "artifact": "story:workspace-skeleton",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "task check",
+    "reference": "VERIFIED: baseline wave/one 533366a runs 2 steps, no cargo, exit 0; treatment impl/workspace-skeleton 7c2e316 runs 5 steps, 18 cases (3 story checks) ok, exit 0"
+  }
+}
