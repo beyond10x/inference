@@ -6,7 +6,10 @@ tasks:
       - task: check
 
   check:
-    desc: Specification and planning store validation. Format, lint and tests join as code lands.
+    desc: Specification and planning store validation, then format, lint and tests of the workspace.
     cmds:
       - ess specify validate --path ess
       - aep plan artifact validate
+      - cargo fmt --all --check
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo test --workspace
