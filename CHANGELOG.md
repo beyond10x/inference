@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- The Cargo workspace under `crates/` and its first crate, `inference-core`: the `inference.model`
+  vocabulary of `ess/domains/model.yaml` (models, adapters, capabilities, modalities, locality,
+  execution form, the concurrency refusal) and the shared identifiers of runs, nodes, streams,
+  generations and sessions, read only in the canonical Uuid spelling.
+- `task check` runs `cargo fmt`, `cargo clippy -D warnings` and `cargo test` after the
+  specification and planning checks.
+
 ## [0.1.0] — 2026-10-19
 
 The design, its specification and its plan. No code yet.

@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-18T23:33:12Z",
+  "actor": "human:timo",
+  "artifact": "story:workspace-skeleton",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check (5 steps, each exit 0; cargo test 18 passed, 0 failed)",
+    "reference": "wave/one 664208b"
+  }
+}
