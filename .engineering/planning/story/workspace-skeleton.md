@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:workspace-skeleton
 kind: story
-status: draft
+status: active
 title: Cargo workspace skeleton; inference-core carries the model vocabulary
 summary: A Cargo workspace under crates/ with task check running fmt, clippy and test; inference-core declares the inference.model vocabulary and the shared identifiers.
 relations:
@@ -23,7 +23,10 @@ scope:
   path: crates/inference-core/Cargo.toml
 - confidence: inferred
   path: crates/inference-core/src/lib.rs
-revision: 11
+revision: 13
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-18T23:10:50Z", actor: "human:timo", revision: 12, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "proposed", to: "active", at: "2026-10-18T23:10:50Z", actor: "human:timo", revision: 13, decided_on: {"recorded":{"review_outcome":2}}}
 ---
 ## Context
 
