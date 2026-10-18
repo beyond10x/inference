@@ -17,6 +17,7 @@ on this repository. `README.md` is for people.
 
 | path | what |
 |---|---|
+| `Cargo.toml`, `crates/` | the Cargo workspace; one crate per directory under `crates/`, `inference-core` first |
 | `docs/design/` | design documents and their reviews |
 | `ess/` | the ESS specification: `system.yaml`, `ess-inputs.yaml` and one domain document per layer of the design under `domains/` (model, policy, graph, stream, tools, session); every declaration carries a `read from:` line naming the design line it was read from |
 | `.engineering/planning` | the AEP planning store; change it only through `aep plan artifact` verbs |
@@ -27,10 +28,13 @@ on this repository. `README.md` is for people.
 ## Commands
 
 ```
-task check                      # specification and planning store validation; format, lint and tests join as code lands
+task check                      # specification and planning store validation, then format, lint and tests
 ess specify validate --path ess
 ess verify conform synthesize --path ess --out .engineering/drafts/suite.json   # the scenarios the specification obliges; 0 refusals is the bar
 aep plan artifact validate
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 git add <paths> && b10x-gates bot -- commit -F <file>   # staging is plain git; the route refuses add
 b10x-gates scan-text --policy <file> <path>...           # release and pull-request bodies before they are sent; no policy found is "not scanned", never "passed"
 ```
