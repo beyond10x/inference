@@ -1,0 +1,66 @@
+# inference
+
+Rust contracts, adapters, pipelines and a runtime for AI inference. This file is for agents working
+on this repository. `README.md` is for people.
+
+## Start here
+
+| read | for |
+|---|---|
+| `docs/design/inference.md` | the design (v0.2, 2026-10-16): vocabulary, contracts, streaming semantics, graph, runtime, roadmap, open questions |
+| `docs/design/review-2026-10-18.md` | the review of that design: findings, what the plan does differently, and why |
+| `docs/handoff/2026-10-19-planning.md` | where the planning session stopped: what is in the store, what is left (un-reviewed post-round fixes, open blockers) |
+| `aep plan artifact list` | the plan: epics, stories, blockers and their status |
+| `aep plan artifact waves --kind story --status draft` | what can be worked next |
+
+## Layout
+
+| path | what |
+|---|---|
+| `docs/design/` | design documents and their reviews |
+| `ess/` | the ESS specification: `system.yaml`, `ess-inputs.yaml` and one domain document per layer of the design under `domains/` (model, policy, graph, stream, tools, session); every declaration carries a `read from:` line naming the design line it was read from |
+| `.engineering/planning` | the AEP planning store; change it only through `aep plan artifact` verbs |
+| `.engineering/drafts` | scratch bodies for `aep plan artifact … --from`; git-ignored |
+| `.github/workflows/` | `check.yml` runs `task check` with pinned `ess` and `aep` releases; `shared-gates.yml` calls the common source gates of `beyond10x/gates` at an exact commit |
+| `CHANGELOG.md` | one entry per release, written before the tag |
+
+## Commands
+
+```
+task check                      # specification and planning store validation; format, lint and tests join as code lands
+ess specify validate --path ess
+ess verify conform synthesize --path ess --out .engineering/drafts/suite.json   # the scenarios the specification obliges; 0 refusals is the bar
+aep plan artifact validate
+git add <paths> && b10x-gates bot -- commit -F <file>   # staging is plain git; the route refuses add
+b10x-gates scan-text --policy <file> <path>...           # release and pull-request bodies before they are sent; no policy found is "not scanned", never "passed"
+```
+
+## Rules
+
+- Anything committed here that runs is Rust, with clap derive for command lines. A model worker in
+  another language is an external process this repository talks to over a versioned protocol; it is
+  not committed here.
+- Spec first: a story that introduces a noun declares it in `ess/` before code builds on it, checked
+  with `ess specify validate --path ess`. A story's acceptance is a set of named conformance
+  scenarios.
+- This is a composition library. `inference-core`, the text, audio, STT, LLM, TTS, tools and duplex
+  contract crates and `inference-pipeline` carry no concrete model, backend or provider
+  implementation. A concrete integration is an adapter crate that depends on the contracts, never
+  the reverse. The repository ships libraries: no binary, server or CLI.
+- Other beyond10x repositories (`llm`, `llm-gateway`, `loom`) are not dependencies and the plan
+  treats them as absent (owner decision, 2026-10-18). An adapter to one may be written later.
+- The planning store is the plan. Work is recorded there, never only in a document or a chat.
+- Work in a managed worktree (`worktree create --purpose <what>`), build into its own `target/`.
+- Every commit, push, pull request and tag goes through the bot route (`b10x-gates bot -- <git
+  args>`); API writes through `b10x-gates api`. Local hooks are optional; the shared gates on
+  GitHub are the authority, and `main` is integrated only with its `Security and privacy` and
+  `inference / task check` runs green.
+- A release is a bare annotated version tag (`0.1.0`) on gated `main`, pushed through the bot
+  route, then `b10x-gates gh -- release create <tag> --verify-tag --notes-file <file>` with a
+  notes file that passed `b10x-gates scan-text`. The `CHANGELOG.md` entry lands in the commit
+  the tag points at. No binary is published: this repository ships libraries.
+- The CI pins (`ess`, `aep`, go-task, the actions' commits, the `common.yml` commit) move only by
+  a commit here that names the new version and its checksum.
+- This repository is public. Committed text names no private repository, session or decision id,
+  host detail or person.
+- No comments in `Taskfile.yml`, `Cargo.toml` or any other config or manifest file.

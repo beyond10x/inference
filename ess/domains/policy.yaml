@@ -1,0 +1,98 @@
+# Deployment profiles of docs/design/inference.md §21.1: which compute a pipeline may admit and
+# what its default egress is. Hosted adapters are explicit opt-in; an unavailable local model never
+# triggers implicit remote fallback.
+domain: inference.policy
+
+summary: >-
+  A DeploymentProfile names the compute a pipeline admits and its default egress. The four
+  profiles of the design are offline_strict, self_hosted_lan, self_hosted_cluster and
+  hybrid_opt_in; a pipeline references one, and the planner refuses an adapter whose locality the
+  profile does not admit.
+
+naming:
+  wire: policy
+  display: Policy
+
+types:
+  - name: inference.policy.ProfileId
+    kind: newtype
+    of: Uuid
+
+  # read from: docs/design/inference.md:1046-1049
+  - name: inference.policy.ProfileKind
+    kind: enum
+    variants: [offline_strict, self_hosted_lan, self_hosted_cluster, hybrid_opt_in]
+
+  # The default egress column of the profile table.
+  # read from: docs/design/inference.md:1046-1049
+  - name: inference.policy.Egress
+    kind: enum
+    variants: [denied, internal_allowlist, authenticated_internal, per_provider_allowlist]
+
+entities:
+  # read from: docs/design/inference.md:1042-1049
+  # read from: docs/design/inference.md:905-907
+  - name: inference.policy.DeploymentProfile
+    naming:
+      summary: The compute a pipeline admits and its default egress.
+    identity:
+      name: profile_id
+      type: inference.policy.ProfileId
+    fields:
+      - name: kind
+        type: inference.policy.ProfileKind
+      - name: egress
+        type: inference.policy.Egress
+      - name: admitted
+        type: List<inference.model.Locality>
+    lifecycle:
+      initial: Active
+      states: [Active]
+      terminal: [Active]
+
+commands:
+  - name: inference.policy.DeclareProfile
+    input:
+      - name: kind
+        type: inference.policy.ProfileKind
+      - name: egress
+        type: inference.policy.Egress
+      - name: admitted
+        type: List<inference.model.Locality>
+    outcomes:
+      - name: declared
+        creates: inference.policy.DeploymentProfile
+        instance: profile_id
+        sets:
+          kind: input.kind
+          egress: input.egress
+          admitted: input.admitted
+        emits:
+          - inference.policy.ProfileDeclared
+        payload:
+          inference.policy.ProfileDeclared:
+            profile_id: {generated: true}
+            kind: input.kind
+        summary: The profile exists and can be referenced by a pipeline.
+
+events:
+  - name: inference.policy.ProfileDeclared
+    fields:
+      - name: profile_id
+        type: inference.policy.ProfileId
+      - name: kind
+        type: inference.policy.ProfileKind
+
+views:
+  - name: inference.policy.Profiles
+    source: inference.policy.DeploymentProfile
+    consistency: read_your_writes
+    fields:
+      - name: profile_id
+        type: inference.policy.ProfileId
+      - name: kind
+        type: inference.policy.ProfileKind
+      - name: egress
+        type: inference.policy.Egress
+      - name: admitted
+        type: List<inference.model.Locality>

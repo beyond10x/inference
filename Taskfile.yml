@@ -1,0 +1,12 @@
+version: '3'
+
+tasks:
+  default:
+    cmds:
+      - task: check
+
+  check:
+    desc: Specification and planning store validation. Format, lint and tests join as code lands.
+    cmds:
+      - ess specify validate --path ess
+      - aep plan artifact validate

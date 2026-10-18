@@ -1,0 +1,8 @@
+version: aep.project/5
+
+protocol: adp/1
+profile: development.standard
+protocols: git+https://github.com/beyond10x/aep#dc0598d5ca0301e05424c1007cf7d32f7a4dd5dd
+planning_scope: "inference"
+store:
+  git: {}

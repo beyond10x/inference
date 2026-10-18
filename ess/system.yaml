@@ -1,0 +1,20 @@
+format: ess/25
+system: inference
+version: v1
+
+summary: >-
+  The nouns of the inference design (docs/design/inference.md, v0.2) and their relations: the
+  models and adapters that can compute, the typed graph of nodes, ports and edges a pipeline
+  declares and the run that executes it, the provisional and committed spans and segments that
+  stream through it, the tool calls a generation proposes, the session an application opens above
+  runs, and the deployment profile that admits compute and egress. Every declaration cites the
+  design line it was read from; no code exists yet, and a relation the design does not settle
+  carries an UNMAPPED marker instead of a guess.
+
+domains:
+  - inference.model
+  - inference.policy
+  - inference.graph
+  - inference.stream
+  - inference.tools
+  - inference.session

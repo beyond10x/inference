@@ -1,0 +1,1022 @@
+# The graph layer of docs/design/inference.md: a pipeline is a directed, typed, validated graph
+# of nodes and edges (§10); it becomes runnable only after binding adapters, validating
+# compatibility and producing an execution plan (§10.1); a run executes that plan (§12).
+domain: inference.graph
+
+summary: >-
+  A Pipeline declares named Nodes with typed Ports, Edges that connect an output port to a
+  compatible input port with finite buffering, Bindings of nodes to adapters, the interaction mode
+  and the deployment profile. Validation checks the graph before it runs; planning computes the
+  effective capabilities from the weakest node or edge and refuses a mandatory capability no bound
+  adapter implements. A Run is one execution of a planned pipeline through Created, Validating,
+  Preparing, Active, Draining and Completed, with Failed and Cancelled explicit.
+
+naming:
+  wire: graph
+  display: Graph
+
+types:
+  - name: inference.graph.PipelineId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.graph.NodeId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.graph.PortId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.graph.EdgeId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.graph.BindingId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.graph.RunId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.graph.NodeInstanceId
+    kind: newtype
+    of: Uuid
+
+  # The node types the design admits: a node is not necessarily a model.
+  # read from: docs/design/inference.md:461-469
+  - name: inference.graph.NodeRole
+    kind: enum
+    variants: [source, model, transform, policy, tool, fan_out, fan_in, sink]
+
+  # read from: docs/design/inference.md:473
+  - name: inference.graph.PortDirection
+    kind: enum
+    variants: [input, output]
+
+  # read from: docs/design/inference.md:481
+  - name: inference.graph.Essentiality
+    kind: enum
+    variants: [essential, optional, control_only]
+
+  # Which events can be dropped or coalesced versus which require reliable delivery.
+  # read from: docs/design/inference.md:482
+  - name: inference.graph.Delivery
+    kind: enum
+    variants: [reliable, droppable, coalescable]
+
+  # read from: docs/design/inference.md:515
+  - name: inference.graph.InteractionMode
+    kind: enum
+    variants: [batch, turn_based, continuous, duplex]
+
+  # The overload behaviours of the per-data-class table, named: pause the producer, drop, coalesce
+  # or supersede, deliver or fail explicitly, drop stale epochs.
+  # read from: docs/design/inference.md:679-689
+  - name: inference.graph.OverloadPolicy
+    kind: enum
+    variants: [pause, drop, coalesce, fail, drop_stale_epochs]
+
+entities:
+  # A validated graph of nodes and edges with declared inputs and outputs; it owns composition
+  # and requested behaviour. Its declaration carries identity and schema revision, the interaction
+  # mode, required capabilities and the policy it runs under.
+  # read from: docs/design/inference.md:103
+  # read from: docs/design/inference.md:507-517
+  # read from: docs/design/inference.md:519
+  - name: inference.graph.Pipeline
+    naming:
+      summary: A directed, typed, validated graph of nodes and edges; a declaration, not an execution.
+    identity:
+      name: pipeline_id
+      type: inference.graph.PipelineId
+    fields:
+      - name: name
+        type: String
+      - name: schema_revision
+        type: String
+      - name: mode
+        type: inference.graph.InteractionMode
+      - name: profile_id
+        type: inference.policy.ProfileId
+      - name: required_capabilities
+        type: List<inference.model.Capability>
+      - name: effective_capabilities
+        type: Optional<List<inference.model.Capability>>
+    relations:
+      - name: nodes
+        kind: owns
+        target: inference.graph.Node
+        cardinality: many
+        via: pipeline_id
+      - name: edges
+        kind: owns
+        target: inference.graph.Edge
+        cardinality: many
+        via: pipeline_id
+      - name: bindings
+        kind: owns
+        target: inference.graph.Binding
+        cardinality: many
+        via: pipeline_id
+      # Privacy, network and tool permissions are part of the declaration; the profile stands on
+      # its own.
+      # read from: docs/design/inference.md:516
+      - name: profile
+        kind: references
+        target: inference.policy.DeploymentProfile
+        cardinality: one
+        via: profile_id
+    lifecycle:
+      initial: Declared
+      states: [Declared, Validated, Planned]
+      terminal: [Planned]
+      transitions:
+        - name: validate
+          from: [Declared]
+          to: Validated
+        - name: plan
+          from: [Validated]
+          to: Planned
+
+  # An executable processor with named typed input and output ports; it can wrap a model or be
+  # deterministic. Its declaration names a role and the capabilities it requires of its binding.
+  # read from: docs/design/inference.md:100
+  # read from: docs/design/inference.md:509
+  # read from: docs/design/inference.md:560-571
+  - name: inference.graph.Node
+    naming:
+      summary: A processor with named typed ports; a model, a transform, a policy, a tool, a source or a sink.
+    identity:
+      name: node_id
+      type: inference.graph.NodeId
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: name
+        type: String
+      - name: role
+        type: inference.graph.NodeRole
+      - name: requires
+        type: List<inference.model.Capability>
+    relations:
+      - name: ports
+        kind: owns
+        target: inference.graph.Port
+        cardinality: many
+        via: node_id
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
+  # An input or output endpoint carrying a declared family of typed events or media: its
+  # modality, whether frames arrive incrementally and need an end marker, whether provisional data
+  # may arrive, whether it is essential, and which events may be dropped.
+  # read from: docs/design/inference.md:101
+  # read from: docs/design/inference.md:473-482
+  - name: inference.graph.Port
+    naming:
+      summary: A named, typed input or output endpoint of a node.
+    identity:
+      name: port_id
+      type: inference.graph.PortId
+    fields:
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: name
+        type: String
+      - name: direction
+        type: inference.graph.PortDirection
+      - name: modality
+        type: inference.model.Modality
+      - name: essentiality
+        type: inference.graph.Essentiality
+      - name: delivery
+        type: inference.graph.Delivery
+      - name: incremental
+        type: Boolean
+      - name: end_marker_required
+        type: Boolean
+      - name: provisional_allowed
+        type: Boolean
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
+  # A bounded channel connecting an output port to a compatible input port; every edge specifies
+  # finite buffering and an overload behaviour.
+  # read from: docs/design/inference.md:102
+  # read from: docs/design/inference.md:679
+  - name: inference.graph.Edge
+    naming:
+      summary: A bounded channel from an output port to a compatible input port.
+    identity:
+      name: edge_id
+      type: inference.graph.EdgeId
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: from_port
+        type: inference.graph.PortId
+      - name: to_port
+        type: inference.graph.PortId
+      - name: capacity
+        type: Integer
+      - name: overload
+        type: inference.graph.OverloadPolicy
+    invariants:
+      - capacity > 0
+    relations:
+      - name: source
+        kind: references
+        target: inference.graph.Port
+        cardinality: one
+        via: from_port
+      - name: sink
+        kind: references
+        target: inference.graph.Port
+        cardinality: one
+        via: to_port
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
+  # The selection of a concrete adapter for a node, made at composition or deployment time.
+  # read from: docs/design/inference.md:248
+  # read from: docs/design/inference.md:519
+  - name: inference.graph.Binding
+    naming:
+      summary: One node bound to one concrete adapter.
+    identity:
+      name: binding_id
+      type: inference.graph.BindingId
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: adapter_id
+        type: inference.model.AdapterId
+    relations:
+      - name: node
+        kind: references
+        target: inference.graph.Node
+        cardinality: one
+        via: node_id
+      - name: adapter
+        kind: references
+        target: inference.model.Adapter
+        cardinality: one
+        via: adapter_id
+    lifecycle:
+      initial: Bound
+      states: [Bound]
+      terminal: [Bound]
+
+  # One invocation or long-lived run of a pipeline; the runtime owns its scheduling, health and
+  # cancellation. Its states are the design's, with failure and cancellation explicit.
+  # read from: docs/design/inference.md:104
+  # read from: docs/design/inference.md:671-673
+  - name: inference.graph.Run
+    naming:
+      summary: One execution of a planned pipeline.
+    identity:
+      name: run_id
+      type: inference.graph.RunId
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+    relations:
+      - name: pipeline
+        kind: references
+        target: inference.graph.Pipeline
+        cardinality: one
+        via: pipeline_id
+      - name: instances
+        kind: owns
+        target: inference.graph.NodeInstance
+        cardinality: many
+        via: run_id
+    lifecycle:
+      initial: Created
+      states: [Created, Validating, Preparing, Active, Draining, Completed, Failed, Cancelled]
+      terminal: [Completed, Failed, Cancelled]
+      transitions:
+        - name: validate
+          from: [Created]
+          to: Validating
+        - name: prepare
+          from: [Validating]
+          to: Preparing
+        - name: activate
+          from: [Preparing]
+          to: Active
+        - name: drain
+          from: [Active]
+          to: Draining
+        - name: complete
+          from: [Draining]
+          to: Completed
+        - name: fail
+          from: [Validating, Preparing, Active]
+          to: Failed
+        - name: cancel
+          from: [Created, Validating, Preparing, Active, Draining]
+          to: Cancelled
+
+  # A node as it participates in one run. The design gives it a lifecycle akin to describe,
+  # prepare, start, exchange, drain or cancel, stop; it is declared here with its first state only
+  # and grows with the graph-minimum stories.
+  # read from: docs/design/inference.md:673
+  # read from: docs/design/inference.md:655
+  - name: inference.graph.NodeInstance
+    naming:
+      summary: A node as it participates in one run.
+    identity:
+      name: instance_id
+      type: inference.graph.NodeInstanceId
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: node_id
+        type: inference.graph.NodeId
+    relations:
+      - name: node
+        kind: references
+        target: inference.graph.Node
+        cardinality: one
+        via: node_id
+    lifecycle:
+      initial: Described
+      states: [Described]
+      terminal: [Described]
+
+errors:
+  # read from: docs/design/inference.md:679
+  - name: inference.graph.UnboundedEdge
+    summary: Every edge must specify finite buffering; a capacity below one is refused.
+    fields:
+      - name: submitted
+        type: Integer
+
+  # read from: docs/design/inference.md:521-534
+  - name: inference.graph.IncompatibleGraph
+    summary: The graph planner found a missing node or port, an incompatible edge, an unbounded cycle, an unreachable mandatory output or a disallowed data flow.
+
+  # read from: docs/design/inference.md:453
+  - name: inference.graph.CapabilityMismatch
+    summary: A mandatory capability is not satisfied by the bound adapters; planning fails with this diagnostic rather than a silent downgrade.
+
+  - name: inference.graph.PipelineStateConflict
+    summary: The pipeline is not in a state this command acts from, so nothing moved.
+    fields:
+      - name: current
+        type: inference.graph.Pipeline.State
+
+  - name: inference.graph.RunStateConflict
+    summary: The run is not in a state this command acts from, so nothing moved.
+    fields:
+      - name: current
+        type: inference.graph.Run.State
+
+commands:
+  # read from: docs/design/inference.md:507-517
+  - name: inference.graph.DeclarePipeline
+    input:
+      - name: name
+        type: String
+      - name: schema_revision
+        type: String
+      - name: mode
+        type: inference.graph.InteractionMode
+      - name: profile_id
+        type: inference.policy.ProfileId
+      - name: required_capabilities
+        type: List<inference.model.Capability>
+    outcomes:
+      - name: declared
+        creates: inference.graph.Pipeline
+        instance: pipeline_id
+        sets:
+          name: input.name
+          schema_revision: input.schema_revision
+          mode: input.mode
+          profile_id: input.profile_id
+          required_capabilities: input.required_capabilities
+          effective_capabilities: {cleared: true}
+        emits:
+          - inference.graph.PipelineDeclared
+        payload:
+          inference.graph.PipelineDeclared:
+            pipeline_id: {generated: true}
+            name: input.name
+        summary: The pipeline is declared and holds no nodes yet.
+
+  - name: inference.graph.AddNode
+    input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: name
+        type: String
+      - name: role
+        type: inference.graph.NodeRole
+      - name: requires
+        type: List<inference.model.Capability>
+    outcomes:
+      - name: added
+        creates: inference.graph.Node
+        instance: node_id
+        sets:
+          pipeline_id: input.pipeline_id
+          name: input.name
+          role: input.role
+          requires: input.requires
+        emits:
+          - inference.graph.NodeAdded
+        payload:
+          inference.graph.NodeAdded:
+            node_id: {generated: true}
+            pipeline_id: input.pipeline_id
+            name: input.name
+        summary: The node is part of the pipeline's declaration.
+
+  - name: inference.graph.AddPort
+    input:
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: name
+        type: String
+      - name: direction
+        type: inference.graph.PortDirection
+      - name: modality
+        type: inference.model.Modality
+      - name: essentiality
+        type: inference.graph.Essentiality
+      - name: delivery
+        type: inference.graph.Delivery
+      - name: incremental
+        type: Boolean
+      - name: end_marker_required
+        type: Boolean
+      - name: provisional_allowed
+        type: Boolean
+    outcomes:
+      - name: added
+        creates: inference.graph.Port
+        instance: port_id
+        sets:
+          node_id: input.node_id
+          name: input.name
+          direction: input.direction
+          modality: input.modality
+          essentiality: input.essentiality
+          delivery: input.delivery
+          incremental: input.incremental
+          end_marker_required: input.end_marker_required
+          provisional_allowed: input.provisional_allowed
+        emits:
+          - inference.graph.PortAdded
+        payload:
+          inference.graph.PortAdded:
+            port_id: {generated: true}
+            node_id: input.node_id
+            name: input.name
+        summary: The port is declared on its node.
+
+  # read from: docs/design/inference.md:679
+  - name: inference.graph.ConnectPorts
+    input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: from_port
+        type: inference.graph.PortId
+      - name: to_port
+        type: inference.graph.PortId
+      - name: capacity
+        type: Integer
+      - name: overload
+        type: inference.graph.OverloadPolicy
+    outcomes:
+      - name: connected
+        when: capacity > 0
+        creates: inference.graph.Edge
+        instance: edge_id
+        sets:
+          pipeline_id: input.pipeline_id
+          from_port: input.from_port
+          to_port: input.to_port
+          capacity: input.capacity
+          overload: input.overload
+        emits:
+          - inference.graph.PortsConnected
+        payload:
+          inference.graph.PortsConnected:
+            edge_id: {generated: true}
+            from_port: input.from_port
+            to_port: input.to_port
+        summary: The edge exists with finite buffering and an overload behaviour.
+
+      - name: unbounded
+        error: inference.graph.UnboundedEdge
+        payload:
+          inference.graph.UnboundedEdge:
+            submitted: input.capacity
+        summary: The capacity was not positive, and no edge was created.
+
+  # read from: docs/design/inference.md:248
+  - name: inference.graph.BindNode
+    input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: adapter_id
+        type: inference.model.AdapterId
+    outcomes:
+      - name: bound
+        creates: inference.graph.Binding
+        instance: binding_id
+        sets:
+          pipeline_id: input.pipeline_id
+          node_id: input.node_id
+          adapter_id: input.adapter_id
+        emits:
+          - inference.graph.NodeBound
+        payload:
+          inference.graph.NodeBound:
+            binding_id: {generated: true}
+            node_id: input.node_id
+            adapter_id: input.adapter_id
+        summary: The node has a concrete adapter.
+
+  # The graph planner verifies the ten conditions of §10.2 before anything runs.
+  # read from: docs/design/inference.md:521-534
+  - name: inference.graph.ValidatePipeline
+    input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+    outcomes:
+      - name: rejected
+        external: the graph planner finds a missing node or port, an incompatible edge, an unbounded cycle, an unreachable mandatory output or a disallowed data flow
+        error: inference.graph.IncompatibleGraph
+        summary: The graph is not valid, the diagnostics say why, and the pipeline stays Declared.
+
+      - name: validated
+        moves: inference.graph.Pipeline.validate
+        instance: pipeline_id
+        emits:
+          - inference.graph.PipelineValidated
+        payload:
+          inference.graph.PipelineValidated:
+            pipeline_id: input.pipeline_id
+        summary: Every node and port exists, every edge is compatible, every cycle is bounded.
+
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.PipelineStateConflict
+        payload:
+          inference.graph.PipelineStateConflict:
+            current: {subject: state}
+        summary: The pipeline is not Declared, so nothing was validated.
+
+  # Planning computes effective capabilities from the weakest required edge or node and fails
+  # with an actionable diagnostic on an unmet mandatory capability; a downgrade is never silent.
+  # read from: docs/design/inference.md:444
+  # read from: docs/design/inference.md:453
+  - name: inference.graph.PlanPipeline
+    input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+    outcomes:
+      - name: mismatch
+        external: a mandatory capability of a node or of the pipeline is not implemented by its bound adapter, so the effective capabilities fall short of what is required
+        error: inference.graph.CapabilityMismatch
+        summary: Planning fails with the unmet capability named, and the pipeline stays Validated.
+
+      - name: planned
+        moves: inference.graph.Pipeline.plan
+        instance: pipeline_id
+        sets:
+          effective_capabilities: {generated: true}
+        emits:
+          - inference.graph.PipelinePlanned
+        payload:
+          inference.graph.PipelinePlanned:
+            pipeline_id: input.pipeline_id
+        summary: The pipeline has an execution plan and its effective capabilities are known.
+
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.PipelineStateConflict
+        payload:
+          inference.graph.PipelineStateConflict:
+            current: {subject: state}
+        summary: The pipeline is not Validated, so nothing was planned.
+
+  # read from: docs/design/inference.md:651
+  - name: inference.graph.CreateRun
+    input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+    outcomes:
+      - name: created
+        creates: inference.graph.Run
+        instance: run_id
+        sets:
+          pipeline_id: input.pipeline_id
+        emits:
+          - inference.graph.RunCreated
+        payload:
+          inference.graph.RunCreated:
+            run_id: {generated: true}
+            pipeline_id: input.pipeline_id
+        summary: The run exists and has not started validating.
+
+  - name: inference.graph.ValidateRun
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+    outcomes:
+      - name: validating
+        moves: inference.graph.Run.validate
+        instance: run_id
+        emits:
+          - inference.graph.RunValidating
+        payload:
+          inference.graph.RunValidating:
+            run_id: input.run_id
+        summary: The run is validating its plan against the resources at hand.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.RunStateConflict
+        payload:
+          inference.graph.RunStateConflict:
+            current: {subject: state}
+
+  - name: inference.graph.PrepareRun
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+    outcomes:
+      - name: preparing
+        moves: inference.graph.Run.prepare
+        instance: run_id
+        emits:
+          - inference.graph.RunPreparing
+        payload:
+          inference.graph.RunPreparing:
+            run_id: input.run_id
+        summary: Node instances are being prepared and resources admitted.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.RunStateConflict
+        payload:
+          inference.graph.RunStateConflict:
+            current: {subject: state}
+
+  - name: inference.graph.ActivateRun
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+    outcomes:
+      - name: active
+        moves: inference.graph.Run.activate
+        instance: run_id
+        emits:
+          - inference.graph.RunActivated
+        payload:
+          inference.graph.RunActivated:
+            run_id: input.run_id
+        summary: Events flow along the edges.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.RunStateConflict
+        payload:
+          inference.graph.RunStateConflict:
+            current: {subject: state}
+
+  - name: inference.graph.DrainRun
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+    outcomes:
+      - name: draining
+        moves: inference.graph.Run.drain
+        instance: run_id
+        emits:
+          - inference.graph.RunDraining
+        payload:
+          inference.graph.RunDraining:
+            run_id: input.run_id
+        summary: No new input is admitted; in-flight events complete.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.RunStateConflict
+        payload:
+          inference.graph.RunStateConflict:
+            current: {subject: state}
+
+  - name: inference.graph.CompleteRun
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+    outcomes:
+      - name: completed
+        moves: inference.graph.Run.complete
+        instance: run_id
+        emits:
+          - inference.graph.RunCompleted
+        payload:
+          inference.graph.RunCompleted:
+            run_id: input.run_id
+        summary: The run drained and released its worker resources.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.RunStateConflict
+        payload:
+          inference.graph.RunStateConflict:
+            current: {subject: state}
+
+  # A failed node surfaces a typed, actionable error to the run controller.
+  # read from: docs/design/inference.md:1006
+  - name: inference.graph.FailRun
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: reason
+        type: String
+    outcomes:
+      - name: failed
+        moves: inference.graph.Run.fail
+        instance: run_id
+        emits:
+          - inference.graph.RunFailed
+        payload:
+          inference.graph.RunFailed:
+            run_id: input.run_id
+            reason: input.reason
+        summary: The run is Failed with a typed reason; partial completion is explicit.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.RunStateConflict
+        payload:
+          inference.graph.RunStateConflict:
+            current: {subject: state}
+
+  # Cancellation of delivery is distinct from cancellation of computation.
+  # read from: docs/design/inference.md:641
+  - name: inference.graph.CancelRun
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+    outcomes:
+      - name: cancelled
+        moves: inference.graph.Run.cancel
+        instance: run_id
+        emits:
+          - inference.graph.RunCancelled
+        payload:
+          inference.graph.RunCancelled:
+            run_id: input.run_id
+        summary: The run is Cancelled; stale output from it is rejected at irreversible sinks.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.RunStateConflict
+        payload:
+          inference.graph.RunStateConflict:
+            current: {subject: state}
+
+  - name: inference.graph.DescribeNodeInstance
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: node_id
+        type: inference.graph.NodeId
+    outcomes:
+      - name: described
+        creates: inference.graph.NodeInstance
+        instance: instance_id
+        sets:
+          run_id: input.run_id
+          node_id: input.node_id
+        emits:
+          - inference.graph.NodeInstanceDescribed
+        payload:
+          inference.graph.NodeInstanceDescribed:
+            instance_id: {generated: true}
+            run_id: input.run_id
+            node_id: input.node_id
+        summary: The node has an instance in this run.
+
+events:
+  - name: inference.graph.PipelineDeclared
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: name
+        type: String
+
+  - name: inference.graph.NodeAdded
+    fields:
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: name
+        type: String
+
+  - name: inference.graph.PortAdded
+    fields:
+      - name: port_id
+        type: inference.graph.PortId
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: name
+        type: String
+
+  - name: inference.graph.PortsConnected
+    fields:
+      - name: edge_id
+        type: inference.graph.EdgeId
+      - name: from_port
+        type: inference.graph.PortId
+      - name: to_port
+        type: inference.graph.PortId
+
+  - name: inference.graph.NodeBound
+    fields:
+      - name: binding_id
+        type: inference.graph.BindingId
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: adapter_id
+        type: inference.model.AdapterId
+
+  - name: inference.graph.PipelineValidated
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+
+  - name: inference.graph.PipelinePlanned
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+
+  - name: inference.graph.RunCreated
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+
+  - name: inference.graph.RunValidating
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+
+  - name: inference.graph.RunPreparing
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+
+  - name: inference.graph.RunActivated
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+
+  - name: inference.graph.RunDraining
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+
+  - name: inference.graph.RunCompleted
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+
+  - name: inference.graph.RunFailed
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: reason
+        type: String
+
+  - name: inference.graph.RunCancelled
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+
+  - name: inference.graph.NodeInstanceDescribed
+    fields:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+      - name: run_id
+        type: inference.graph.RunId
+      - name: node_id
+        type: inference.graph.NodeId
+
+views:
+  - name: inference.graph.Pipelines
+    source: inference.graph.Pipeline
+    consistency: read_your_writes
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: name
+        type: String
+      - name: schema_revision
+        type: String
+      - name: mode
+        type: inference.graph.InteractionMode
+      - name: profile_id
+        type: inference.policy.ProfileId
+      - name: required_capabilities
+        type: List<inference.model.Capability>
+      - name: effective_capabilities
+        type: Optional<List<inference.model.Capability>>
+      - name: state
+        type: inference.graph.Pipeline.State
+
+  - name: inference.graph.Nodes
+    source: inference.graph.Node
+    consistency: read_your_writes
+    fields:
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: name
+        type: String
+      - name: role
+        type: inference.graph.NodeRole
+      - name: requires
+        type: List<inference.model.Capability>
+
+  - name: inference.graph.Ports
+    source: inference.graph.Port
+    consistency: read_your_writes
+    fields:
+      - name: port_id
+        type: inference.graph.PortId
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: name
+        type: String
+      - name: direction
+        type: inference.graph.PortDirection
+      - name: modality
+        type: inference.model.Modality
+      - name: provisional_allowed
+        type: Boolean
+
+  - name: inference.graph.Edges
+    source: inference.graph.Edge
+    consistency: read_your_writes
+    fields:
+      - name: edge_id
+        type: inference.graph.EdgeId
+      - name: from_port
+        type: inference.graph.PortId
+      - name: to_port
+        type: inference.graph.PortId
+      - name: capacity
+        type: Integer
+      - name: overload
+        type: inference.graph.OverloadPolicy
+
+  - name: inference.graph.Bindings
+    source: inference.graph.Binding
+    consistency: read_your_writes
+    fields:
+      - name: binding_id
+        type: inference.graph.BindingId
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: adapter_id
+        type: inference.model.AdapterId
+
+  - name: inference.graph.Runs
+    source: inference.graph.Run
+    consistency: read_your_writes
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: state
+        type: inference.graph.Run.State
+
+  - name: inference.graph.NodeInstances
+    source: inference.graph.NodeInstance
+    consistency: read_your_writes
+    fields:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+      - name: run_id
+        type: inference.graph.RunId
+      - name: node_id
+        type: inference.graph.NodeId

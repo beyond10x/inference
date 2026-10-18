@@ -1,0 +1,93 @@
+# The optional session facade of docs/design/inference.md §13: an application-level interaction
+# lifetime above graph runs, never the foundational unit of the library. Declared with its first
+# state; the session-facade stories complete the lifecycle (opened, ready, draining, closed).
+domain: inference.session
+
+summary: >-
+  A Session is an optional application-level interaction lifetime that may span several graph
+  runs and model requests; it owns history, logical identity and interaction policy, and it is
+  configured over one pipeline in one interaction mode. Transport persistence is not model
+  persistence: the session is stable while the runs below it come and go.
+
+naming:
+  wire: session
+  display: Session
+
+types:
+  - name: inference.session.SessionId
+    kind: newtype
+    of: Uuid
+
+entities:
+  # read from: docs/design/inference.md:105
+  # read from: docs/design/inference.md:711-719
+  # read from: docs/design/inference.md:731
+  - name: inference.session.Session
+    naming:
+      summary: An optional application-level interaction lifetime above graph runs.
+    identity:
+      name: session_id
+      type: inference.session.SessionId
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: mode
+        type: inference.graph.InteractionMode
+    relations:
+      - name: pipeline
+        kind: references
+        target: inference.graph.Pipeline
+        cardinality: one
+        via: pipeline_id
+      # UNMAPPED: a session "potentially spans multiple graph runs" (docs/design/inference.md:105)
+      # and the event envelope's session_id is optional (docs/design/inference.md:310), so a run
+      # may exist with no session. Whether a session owns its runs or only references them, and
+      # from which side the link is held, the design does not say. Open question for the owner;
+      # the session-facade epic settles it before its first story.
+    lifecycle:
+      initial: Opened
+      states: [Opened]
+      terminal: [Opened]
+
+commands:
+  # read from: docs/design/inference.md:713
+  - name: inference.session.OpenSession
+    input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: mode
+        type: inference.graph.InteractionMode
+    outcomes:
+      - name: opened
+        creates: inference.session.Session
+        instance: session_id
+        sets:
+          pipeline_id: input.pipeline_id
+          mode: input.mode
+        emits:
+          - inference.session.SessionOpened
+        payload:
+          inference.session.SessionOpened:
+            session_id: {generated: true}
+            pipeline_id: input.pipeline_id
+        summary: The session exists over its pipeline and mode.
+
+events:
+  - name: inference.session.SessionOpened
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+
+views:
+  - name: inference.session.Sessions
+    source: inference.session.Session
+    consistency: read_your_writes
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: mode
+        type: inference.graph.InteractionMode

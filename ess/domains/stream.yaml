@@ -1,0 +1,736 @@
+# The streaming semantics of docs/design/inference.md §11: provisional, committed and
+# irreversible are three classes, and this domain is their state machine. Inbound text moves from
+# hypothesis to committed span inside a turn; outbound text moves from tentative delta to
+# committed segment to queued to played, and played audio cannot be unsaid; a generation is the
+# epoch an interruption supersedes.
+domain: inference.stream
+
+summary: >-
+  A Turn is the control boundary of one input turn, distinct from the commit of its Spans. A Span
+  is inbound text that is a Hypothesis until it is Committed; a revision changes a hypothesis and
+  is refused on a committed span. A Generation is one model output epoch within a run; an
+  interruption supersedes it. An OutputSegment is outbound text that is Tentative until Committed,
+  then Queued for synthesis, then Played once the sink acknowledges it; synthesis consumes only
+  committed segments, cancellation discards unplayed segments, and a played segment is never
+  discarded.
+
+naming:
+  wire: stream
+  display: Stream
+
+types:
+  - name: inference.stream.TurnId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.stream.SpanId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.stream.StreamId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.stream.GenerationId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.stream.SegmentId
+    kind: newtype
+    of: Uuid
+
+entities:
+  # Turn completion is a control boundary declaring a whole input turn complete, distinct from
+  # the commit of individual spans.
+  # read from: docs/design/inference.md:606
+  - name: inference.stream.Turn
+    naming:
+      summary: One input turn; its completion is a control boundary, not a commit.
+    identity:
+      name: turn_id
+      type: inference.stream.TurnId
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+    relations:
+      - name: run
+        kind: references
+        target: inference.graph.Run
+        cardinality: one
+        via: run_id
+    lifecycle:
+      initial: Open
+      states: [Open, Completed]
+      terminal: [Completed]
+      transitions:
+        - name: complete
+          from: [Open]
+          to: Completed
+
+  # Inbound text: a hypothesis is subject to later replacement, a revision is an explicit change
+  # to an identified provisional span, a committed span is an immutable unit downstream nodes may
+  # treat as stable. A stable prefix may be committed before the utterance is complete.
+  # read from: docs/design/inference.md:603-605
+  # read from: docs/design/inference.md:608
+  - name: inference.stream.Span
+    naming:
+      summary: A unit of inbound text, provisional until committed and immutable after.
+    identity:
+      name: span_id
+      type: inference.stream.SpanId
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: turn_id
+        type: inference.stream.TurnId
+      - name: stream_id
+        type: inference.stream.StreamId
+      - name: sequence
+        type: Integer
+      - name: text
+        type: String
+    relations:
+      - name: run
+        kind: references
+        target: inference.graph.Run
+        cardinality: one
+        via: run_id
+      # A committed span is durable transcript history and outlives the turn boundary it arrived
+      # in, so the turn is referenced, not an owner.
+      # read from: docs/design/inference.md:606
+      # read from: docs/design/inference.md:990
+      - name: turn
+        kind: references
+        target: inference.stream.Turn
+        cardinality: one
+        via: turn_id
+    lifecycle:
+      initial: Hypothesis
+      states: [Hypothesis, Committed]
+      terminal: [Committed]
+      transitions:
+        - name: commit
+          from: [Hypothesis]
+          to: Committed
+
+  # One generation epoch of a producing node within a run. On interruption the current epoch is
+  # marked superseded and stale results from it are rejected at irreversible sinks.
+  # read from: docs/design/inference.md:315
+  # read from: docs/design/inference.md:634
+  # read from: docs/design/inference.md:637
+  - name: inference.stream.Generation
+    naming:
+      summary: One output epoch of a node within a run; an interruption supersedes it.
+    identity:
+      name: generation_id
+      type: inference.stream.GenerationId
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: epoch
+        type: Integer
+    relations:
+      - name: run
+        kind: references
+        target: inference.graph.Run
+        cardinality: one
+        via: run_id
+      - name: producer
+        kind: references
+        target: inference.graph.Node
+        cardinality: one
+        via: node_id
+      # A segment has no meaning outside the generation that produced it; cancellation of the
+      # generation discards its unplayed segments.
+      # read from: docs/design/inference.md:628
+      - name: segments
+        kind: owns
+        target: inference.stream.OutputSegment
+        cardinality: many
+        via: generation_id
+    lifecycle:
+      initial: Active
+      states: [Active, Completed, Superseded, Cancelled]
+      terminal: [Completed, Superseded, Cancelled]
+      transitions:
+        - name: complete
+          from: [Active]
+          to: Completed
+        - name: supersede
+          from: [Active]
+          to: Superseded
+        - name: cancel
+          from: [Active]
+          to: Cancelled
+
+  # Outbound text: generated or tentative, committed, queued for synthesis, played and confirmed
+  # by a sink acknowledgement. Speech already played is irreversible.
+  # read from: docs/design/inference.md:614-618
+  # read from: docs/design/inference.md:620
+  - name: inference.stream.OutputSegment
+    naming:
+      summary: A unit of outbound text from tentative delta to played audio.
+    identity:
+      name: segment_id
+      type: inference.stream.SegmentId
+    fields:
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: sequence
+        type: Integer
+      - name: text
+        type: String
+    lifecycle:
+      initial: Tentative
+      states: [Tentative, Committed, Queued, Played, Discarded]
+      terminal: [Played, Discarded]
+      transitions:
+        - name: commit
+          from: [Tentative]
+          to: Committed
+        - name: queue
+          from: [Committed]
+          to: Queued
+        - name: play
+          from: [Queued]
+          to: Played
+        - name: discard
+          from: [Tentative, Committed, Queued]
+          to: Discarded
+
+errors:
+  - name: inference.stream.TurnStateConflict
+    summary: The turn is not Open, so nothing moved.
+    fields:
+      - name: current
+        type: inference.stream.Turn.State
+
+  # read from: docs/design/inference.md:1105
+  - name: inference.stream.CommittedSpanImmutable
+    summary: A revision cannot rewrite a committed span.
+
+  - name: inference.stream.SpanNotFound
+    summary: No span carries the identity the command named.
+
+  - name: inference.stream.SpanStateConflict
+    summary: The span is not a Hypothesis, so nothing moved.
+    fields:
+      - name: current
+        type: inference.stream.Span.State
+
+  - name: inference.stream.GenerationStateConflict
+    summary: The generation is not Active, so nothing moved.
+    fields:
+      - name: current
+        type: inference.stream.Generation.State
+
+  - name: inference.stream.SegmentStateConflict
+    summary: The segment is not in a state this command acts from; a played segment cannot be unsaid, a tentative one cannot be spoken.
+    fields:
+      - name: current
+        type: inference.stream.OutputSegment.State
+
+commands:
+  - name: inference.stream.OpenTurn
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+    outcomes:
+      - name: opened
+        creates: inference.stream.Turn
+        instance: turn_id
+        sets:
+          run_id: input.run_id
+        emits:
+          - inference.stream.TurnOpened
+        payload:
+          inference.stream.TurnOpened:
+            turn_id: {generated: true}
+            run_id: input.run_id
+        summary: An input turn is open and spans may arrive in it.
+
+  # read from: docs/design/inference.md:606
+  - name: inference.stream.CompleteTurn
+    input:
+      - name: turn_id
+        type: inference.stream.TurnId
+    outcomes:
+      - name: completed
+        moves: inference.stream.Turn.complete
+        instance: turn_id
+        emits:
+          - inference.stream.TurnCompleted
+        payload:
+          inference.stream.TurnCompleted:
+            turn_id: input.turn_id
+        summary: The whole input turn is declared complete.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.stream.TurnStateConflict
+        payload:
+          inference.stream.TurnStateConflict:
+            current: {subject: state}
+
+  # read from: docs/design/inference.md:603
+  # read from: docs/design/inference.md:334
+  - name: inference.stream.EmitHypothesis
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: turn_id
+        type: inference.stream.TurnId
+      - name: stream_id
+        type: inference.stream.StreamId
+      - name: sequence
+        type: Integer
+      - name: text
+        type: String
+    outcomes:
+      - name: emitted
+        creates: inference.stream.Span
+        instance: span_id
+        sets:
+          run_id: input.run_id
+          turn_id: input.turn_id
+          stream_id: input.stream_id
+          sequence: input.sequence
+          text: input.text
+        emits:
+          - inference.stream.TranscriptHypothesis
+        payload:
+          inference.stream.TranscriptHypothesis:
+            span_id: {generated: true}
+            turn_id: input.turn_id
+            sequence: input.sequence
+            text: input.text
+        summary: A provisional span exists; downstream may speculate on it, side effects may not.
+
+  # A revision is an explicit change to an identified provisional span; a committed span is
+  # immutable, and a revision of one is the first contract test of the design.
+  # read from: docs/design/inference.md:604
+  # read from: docs/design/inference.md:1105
+  - name: inference.stream.ReviseSpan
+    input:
+      - name: span_id
+        type: inference.stream.SpanId
+      - name: text
+        type: String
+    outcomes:
+      - name: revised
+        when_subject_state: Hypothesis
+        updates: inference.stream.Span
+        instance: span_id
+        sets:
+          text: input.text
+        emits:
+          - inference.stream.TranscriptRevision
+        payload:
+          inference.stream.TranscriptRevision:
+            span_id: input.span_id
+            text: input.text
+        summary: The hypothesis now reads the revised text.
+      - name: immutable
+        error: inference.stream.CommittedSpanImmutable
+        summary: The span is Committed; the revision is refused and the text is unchanged.
+      - name: no-such-span
+        unknown_instance: true
+        error: inference.stream.SpanNotFound
+        summary: No span carries this identity; nothing was revised.
+
+  # read from: docs/design/inference.md:605
+  - name: inference.stream.CommitSpan
+    input:
+      - name: span_id
+        type: inference.stream.SpanId
+    outcomes:
+      - name: committed
+        moves: inference.stream.Span.commit
+        instance: span_id
+        emits:
+          - inference.stream.TranscriptCommitted
+        payload:
+          inference.stream.TranscriptCommitted:
+            span_id: input.span_id
+            text: {subject: text}
+        summary: The span is immutable and safe for side-effecting consumers.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.stream.SpanStateConflict
+        payload:
+          inference.stream.SpanStateConflict:
+            current: {subject: state}
+
+  # read from: docs/design/inference.md:335
+  - name: inference.stream.StartGeneration
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: epoch
+        type: Integer
+    outcomes:
+      - name: started
+        creates: inference.stream.Generation
+        instance: generation_id
+        sets:
+          run_id: input.run_id
+          node_id: input.node_id
+          epoch: input.epoch
+        emits:
+          - inference.stream.GenerationStarted
+        payload:
+          inference.stream.GenerationStarted:
+            generation_id: {generated: true}
+            run_id: input.run_id
+            epoch: input.epoch
+        summary: A new output epoch is active for the node.
+
+  - name: inference.stream.CompleteGeneration
+    input:
+      - name: generation_id
+        type: inference.stream.GenerationId
+    outcomes:
+      - name: completed
+        moves: inference.stream.Generation.complete
+        instance: generation_id
+        emits:
+          - inference.stream.GenerationCompleted
+        payload:
+          inference.stream.GenerationCompleted:
+            generation_id: input.generation_id
+        summary: The generation produced its last output.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.stream.GenerationStateConflict
+        payload:
+          inference.stream.GenerationStateConflict:
+            current: {subject: state}
+
+  # Interruption step 1: mark the current generation epoch as superseded.
+  # read from: docs/design/inference.md:634
+  - name: inference.stream.SupersedeGeneration
+    input:
+      - name: generation_id
+        type: inference.stream.GenerationId
+    outcomes:
+      - name: superseded
+        moves: inference.stream.Generation.supersede
+        instance: generation_id
+        emits:
+          - inference.stream.GenerationSuperseded
+        payload:
+          inference.stream.GenerationSuperseded:
+            generation_id: input.generation_id
+        summary: Stale results from this epoch are rejected at irreversible sinks.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.stream.GenerationStateConflict
+        payload:
+          inference.stream.GenerationStateConflict:
+            current: {subject: state}
+
+  # read from: docs/design/inference.md:641
+  - name: inference.stream.CancelGeneration
+    input:
+      - name: generation_id
+        type: inference.stream.GenerationId
+    outcomes:
+      - name: cancelled
+        moves: inference.stream.Generation.cancel
+        instance: generation_id
+        emits:
+          - inference.stream.GenerationCancelled
+        payload:
+          inference.stream.GenerationCancelled:
+            generation_id: input.generation_id
+        summary: Delivery from this generation is cancelled; computation may still finish.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.stream.GenerationStateConflict
+        payload:
+          inference.stream.GenerationStateConflict:
+            current: {subject: state}
+
+  # read from: docs/design/inference.md:614
+  # read from: docs/design/inference.md:335
+  - name: inference.stream.EmitTextDelta
+    input:
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: sequence
+        type: Integer
+      - name: text
+        type: String
+    outcomes:
+      - name: emitted
+        creates: inference.stream.OutputSegment
+        instance: segment_id
+        sets:
+          generation_id: input.generation_id
+          sequence: input.sequence
+          text: input.text
+        emits:
+          - inference.stream.TextDelta
+        payload:
+          inference.stream.TextDelta:
+            segment_id: {generated: true}
+            generation_id: input.generation_id
+            sequence: input.sequence
+            text: input.text
+        summary: Tentative text exists; it is not yet safe to speak or publish.
+
+  # read from: docs/design/inference.md:615
+  - name: inference.stream.CommitSegment
+    input:
+      - name: segment_id
+        type: inference.stream.SegmentId
+    outcomes:
+      - name: committed
+        moves: inference.stream.OutputSegment.commit
+        instance: segment_id
+        emits:
+          - inference.stream.TextSegmentCommitted
+        payload:
+          inference.stream.TextSegmentCommitted:
+            segment_id: input.segment_id
+            text: {subject: text}
+        summary: The segment may be synthesised and published.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.stream.SegmentStateConflict
+        payload:
+          inference.stream.SegmentStateConflict:
+            current: {subject: state}
+
+  # TTS normally consumes committed output segments, not arbitrary tentative tokens: queueing a
+  # Tentative segment is a wrong-state refusal.
+  # read from: docs/design/inference.md:626
+  # read from: docs/design/inference.md:616
+  - name: inference.stream.QueueForSynthesis
+    input:
+      - name: segment_id
+        type: inference.stream.SegmentId
+    outcomes:
+      - name: queued
+        moves: inference.stream.OutputSegment.queue
+        instance: segment_id
+        emits:
+          - inference.stream.SegmentQueued
+        payload:
+          inference.stream.SegmentQueued:
+            segment_id: input.segment_id
+        summary: The committed segment is queued for synthesis and playback.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.stream.SegmentStateConflict
+        payload:
+          inference.stream.SegmentStateConflict:
+            current: {subject: state}
+
+  # Only the client or media sink can confirm playback.
+  # read from: docs/design/inference.md:388
+  # read from: docs/design/inference.md:618
+  - name: inference.stream.AcknowledgePlayback
+    input:
+      - name: segment_id
+        type: inference.stream.SegmentId
+    outcomes:
+      - name: played
+        moves: inference.stream.OutputSegment.play
+        instance: segment_id
+        emits:
+          - inference.stream.AudioPlayed
+        payload:
+          inference.stream.AudioPlayed:
+            segment_id: input.segment_id
+        summary: The user heard it; this segment can no longer be discarded.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.stream.SegmentStateConflict
+        payload:
+          inference.stream.SegmentStateConflict:
+            current: {subject: state}
+
+  # Cancellation suppresses stale unplayed media and uncommitted output; it cannot unsay what the
+  # user heard, so a Played segment refuses.
+  # read from: docs/design/inference.md:628
+  # read from: docs/design/inference.md:620
+  - name: inference.stream.DiscardSegment
+    input:
+      - name: segment_id
+        type: inference.stream.SegmentId
+    outcomes:
+      - name: discarded
+        moves: inference.stream.OutputSegment.discard
+        instance: segment_id
+        emits:
+          - inference.stream.SegmentDiscarded
+        payload:
+          inference.stream.SegmentDiscarded:
+            segment_id: input.segment_id
+        summary: The unplayed segment is gone and will not be spoken.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.stream.SegmentStateConflict
+        payload:
+          inference.stream.SegmentStateConflict:
+            current: {subject: state}
+
+events:
+  - name: inference.stream.TurnOpened
+    fields:
+      - name: turn_id
+        type: inference.stream.TurnId
+      - name: run_id
+        type: inference.graph.RunId
+
+  - name: inference.stream.TurnCompleted
+    fields:
+      - name: turn_id
+        type: inference.stream.TurnId
+
+  - name: inference.stream.TranscriptHypothesis
+    fields:
+      - name: span_id
+        type: inference.stream.SpanId
+      - name: turn_id
+        type: inference.stream.TurnId
+      - name: sequence
+        type: Integer
+      - name: text
+        type: String
+
+  - name: inference.stream.TranscriptRevision
+    fields:
+      - name: span_id
+        type: inference.stream.SpanId
+      - name: text
+        type: String
+
+  - name: inference.stream.TranscriptCommitted
+    fields:
+      - name: span_id
+        type: inference.stream.SpanId
+      - name: text
+        type: String
+
+  - name: inference.stream.GenerationStarted
+    fields:
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: run_id
+        type: inference.graph.RunId
+      - name: epoch
+        type: Integer
+
+  - name: inference.stream.GenerationCompleted
+    fields:
+      - name: generation_id
+        type: inference.stream.GenerationId
+
+  - name: inference.stream.GenerationSuperseded
+    fields:
+      - name: generation_id
+        type: inference.stream.GenerationId
+
+  - name: inference.stream.GenerationCancelled
+    fields:
+      - name: generation_id
+        type: inference.stream.GenerationId
+
+  - name: inference.stream.TextDelta
+    fields:
+      - name: segment_id
+        type: inference.stream.SegmentId
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: sequence
+        type: Integer
+      - name: text
+        type: String
+
+  - name: inference.stream.TextSegmentCommitted
+    fields:
+      - name: segment_id
+        type: inference.stream.SegmentId
+      - name: text
+        type: String
+
+  - name: inference.stream.SegmentQueued
+    fields:
+      - name: segment_id
+        type: inference.stream.SegmentId
+
+  - name: inference.stream.AudioPlayed
+    fields:
+      - name: segment_id
+        type: inference.stream.SegmentId
+
+  - name: inference.stream.SegmentDiscarded
+    fields:
+      - name: segment_id
+        type: inference.stream.SegmentId
+
+views:
+  - name: inference.stream.Turns
+    source: inference.stream.Turn
+    consistency: read_your_writes
+    fields:
+      - name: turn_id
+        type: inference.stream.TurnId
+      - name: run_id
+        type: inference.graph.RunId
+      - name: state
+        type: inference.stream.Turn.State
+
+  - name: inference.stream.Spans
+    source: inference.stream.Span
+    consistency: read_your_writes
+    fields:
+      - name: span_id
+        type: inference.stream.SpanId
+      - name: run_id
+        type: inference.graph.RunId
+      - name: turn_id
+        type: inference.stream.TurnId
+      - name: stream_id
+        type: inference.stream.StreamId
+      - name: sequence
+        type: Integer
+      - name: text
+        type: String
+      - name: state
+        type: inference.stream.Span.State
+
+  - name: inference.stream.Generations
+    source: inference.stream.Generation
+    consistency: read_your_writes
+    fields:
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: run_id
+        type: inference.graph.RunId
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: epoch
+        type: Integer
+      - name: state
+        type: inference.stream.Generation.State
+
+  - name: inference.stream.Segments
+    source: inference.stream.OutputSegment
+    consistency: read_your_writes
+    fields:
+      - name: segment_id
+        type: inference.stream.SegmentId
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: sequence
+        type: Integer
+      - name: text
+        type: String
+      - name: state
+        type: inference.stream.OutputSegment.State
