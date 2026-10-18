@@ -56,7 +56,7 @@ scope:
   path: crates/inference-testkit/tests/target/tools.rs
 - confidence: cited
   path: ess/SKIPPED.md
-revision: 26
+revision: 27
 ---
 ## Context
 
@@ -99,3 +99,16 @@ Derived 2026-10-19 by `story-scoper`. Every line is **cited** (read from the sto
 - **Confidence:** high — the story names every file by path; the only two that pre-exist in the tree (`Taskfile.yml`, `AGENTS.md`) are 12 and 53 lines and the edited blocks are identified
 - **Would collide with:** any unit touching `crates/inference-testkit` (the later stream, graph, tools and session stories fill files this story creates, so they sequence after it); any unit editing `Taskfile.yml` `check` or the `AGENTS.md` Commands block (`story:workspace-skeleton` writes the same lines this story replaces, ordered by `depends_on`); and, without sharing a file, any unit that changes the scenario set `ess verify conform synthesize --path ess` emits (an edit to `ess/domains/*.yaml` or a new domain in `ess/system.yaml`), because the `unsupported == ess/SKIPPED.md` equality in `tests/conform.rs` turns one added or removed scenario into a red test unless that unit edits `ess/SKIPPED.md` too — cited (Step 2 assertion, Step 3)
 - **Safety fact:** `ess/SKIPPED.md` sits inside `ess/` and changes neither `ess specify validate --path ess` nor the synthesized suite, because `ess/ess-inputs.yaml:3-11` lists the seven specification documents explicitly and a Markdown file beside them is not one of them — step 2 (pointed at the file), unproven: not run with the file present
+
+## Wire integers
+
+Added 2026-10-19 from wave one (`review-result:adversary-workspace-skeleton-pass-1`, finding F1).
+
+`ess verify conform synthesize` writes every number of a scenario request as a float, so an ESS
+`Integer` arrives as `1.0` or `0.0` (`DeclareAdapter/outcome/declared` and `/refused`). The
+`inference-core` types keep `Integer` as `i64` and their derived `Deserialize` refuses `1.0`
+(`crates/inference-core/tests/adversary_model_wire.rs`). The target in `tests/target/model.rs`
+therefore does not deserialize a request into `DeclareAdapter`: it reads each field of the
+`SemanticCommandRequest` and converts an ESS `Integer` from an integral float to `i64`, refusing a
+fractional or out-of-range value as `error`, never as `passed`. The same rule holds for every later
+domain module of the target.
