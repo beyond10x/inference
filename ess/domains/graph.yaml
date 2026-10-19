@@ -410,11 +410,15 @@ entities:
           from: [Created, Validating, Preparing, Active, Draining]
           to: Cancelled
 
-  # A node as it participates in one run. The design gives it a lifecycle akin to describe,
-  # prepare, start, exchange, drain or cancel, stop; it is declared here with its first state only
-  # and grows with the graph-minimum stories.
+  # A node as it participates in one run, with the lifecycle describe, prepare, start, exchange,
+  # drain or cancel, stop. Exchange is what a Started instance does, not a state of its own; a
+  # cancelled instance still stops. Cancel and fail leave Described because prepare is issued on a
+  # Described instance and may return an error, and a run cancelled or failed while Preparing may
+  # hold Described instances that must still reach a terminal state.
   # read from: docs/design/inference.md:673
   # read from: docs/design/inference.md:655
+  # read from: docs/design/inference.md:484
+  # read from: docs/design/inference.md:1006
   - name: inference.graph.NodeInstance
     naming:
       summary: A node as it participates in one run.
@@ -434,8 +438,27 @@ entities:
         via: node_id
     lifecycle:
       initial: Described
-      states: [Described]
-      terminal: [Described]
+      states: [Described, Prepared, Started, Draining, Cancelling, Stopped, Failed]
+      terminal: [Stopped, Failed]
+      transitions:
+        - name: prepare
+          from: [Described]
+          to: Prepared
+        - name: start
+          from: [Prepared]
+          to: Started
+        - name: drain
+          from: [Started]
+          to: Draining
+        - name: cancel
+          from: [Described, Prepared, Started, Draining]
+          to: Cancelling
+        - name: stop
+          from: [Prepared, Draining, Cancelling]
+          to: Stopped
+        - name: fail
+          from: [Described, Prepared, Started, Draining]
+          to: Failed
 
 errors:
   # read from: docs/design/inference.md:679
@@ -586,6 +609,13 @@ errors:
     fields:
       - name: current
         type: inference.graph.Run.State
+
+  # read from: docs/design/inference.md:673
+  - name: inference.graph.NodeInstanceStateConflict
+    summary: The node instance is not in a state this command acts from, so nothing moved.
+    fields:
+      - name: current
+        type: inference.graph.NodeInstance.State
 
 commands:
   # read from: docs/design/inference.md:507-517
@@ -1338,6 +1368,144 @@ commands:
             node_id: input.node_id
         summary: The node has an instance in this run.
 
+  # The runtime drives each instance of a run through describe, prepare, start, exchange, drain or
+  # cancel, stop. Each command moves the one instance it names and emits its own event; which run
+  # transition issues it is the runtime's coupling, so no Run command moves an instance here.
+  # read from: docs/design/inference.md:673
+  # read from: docs/design/inference.md:655
+  - name: inference.graph.PrepareNodeInstance
+    input:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+    outcomes:
+      - name: prepared
+        moves: inference.graph.NodeInstance.prepare
+        instance: instance_id
+        emits:
+          - inference.graph.NodeInstancePrepared
+        payload:
+          inference.graph.NodeInstancePrepared:
+            instance_id: input.instance_id
+        summary: The node instance is prepared and holds the resources it needs to start.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.NodeInstanceStateConflict
+        payload:
+          inference.graph.NodeInstanceStateConflict:
+            current: {subject: state}
+  # read from: docs/design/inference.md:673
+  # read from: docs/design/inference.md:484
+  - name: inference.graph.StartNodeInstance
+    input:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+    outcomes:
+      - name: started
+        moves: inference.graph.NodeInstance.start
+        instance: instance_id
+        emits:
+          - inference.graph.NodeInstanceStarted
+        payload:
+          inference.graph.NodeInstanceStarted:
+            instance_id: input.instance_id
+        summary: The node instance is started and exchanges events along its edges.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.NodeInstanceStateConflict
+        payload:
+          inference.graph.NodeInstanceStateConflict:
+            current: {subject: state}
+  # read from: docs/design/inference.md:673
+  - name: inference.graph.DrainNodeInstance
+    input:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+    outcomes:
+      - name: draining
+        moves: inference.graph.NodeInstance.drain
+        instance: instance_id
+        emits:
+          - inference.graph.NodeInstanceDraining
+        payload:
+          inference.graph.NodeInstanceDraining:
+            instance_id: input.instance_id
+        summary: The node instance admits no new input and completes its in-flight events.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.NodeInstanceStateConflict
+        payload:
+          inference.graph.NodeInstanceStateConflict:
+            current: {subject: state}
+  # read from: docs/design/inference.md:673
+  - name: inference.graph.CancelNodeInstance
+    input:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+    outcomes:
+      - name: cancelling
+        moves: inference.graph.NodeInstance.cancel
+        instance: instance_id
+        emits:
+          - inference.graph.NodeInstanceCancelling
+        payload:
+          inference.graph.NodeInstanceCancelling:
+            instance_id: input.instance_id
+        summary: The node instance abandons its in-flight events and is to stop.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.NodeInstanceStateConflict
+        payload:
+          inference.graph.NodeInstanceStateConflict:
+            current: {subject: state}
+  # read from: docs/design/inference.md:673
+  - name: inference.graph.StopNodeInstance
+    input:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+    outcomes:
+      - name: stopped
+        moves: inference.graph.NodeInstance.stop
+        instance: instance_id
+        emits:
+          - inference.graph.NodeInstanceStopped
+        payload:
+          inference.graph.NodeInstanceStopped:
+            instance_id: input.instance_id
+        summary: The node instance stopped and released what it held.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.NodeInstanceStateConflict
+        payload:
+          inference.graph.NodeInstanceStateConflict:
+            current: {subject: state}
+  # A node instance whose prepare, start or exchange returns an error fails with that error as its
+  # reason; the runtime then fails the run with a FailureReason naming the node.
+  # read from: docs/design/inference.md:1006
+  # read from: docs/design/inference.md:673
+  - name: inference.graph.FailNodeInstance
+    input:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+      - name: reason
+        type: String
+    outcomes:
+      - name: failed
+        moves: inference.graph.NodeInstance.fail
+        instance: instance_id
+        emits:
+          - inference.graph.NodeInstanceFailed
+        payload:
+          inference.graph.NodeInstanceFailed:
+            instance_id: input.instance_id
+            reason: input.reason
+        summary: The node instance failed with the error it returned.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.graph.NodeInstanceStateConflict
+        payload:
+          inference.graph.NodeInstanceStateConflict:
+            current: {subject: state}
+
 events:
   - name: inference.graph.PipelineDeclared
     fields:
@@ -1444,6 +1612,38 @@ events:
         type: inference.graph.RunId
       - name: node_id
         type: inference.graph.NodeId
+
+  - name: inference.graph.NodeInstancePrepared
+    fields:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+
+  - name: inference.graph.NodeInstanceStarted
+    fields:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+
+  - name: inference.graph.NodeInstanceDraining
+    fields:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+
+  - name: inference.graph.NodeInstanceCancelling
+    fields:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+
+  - name: inference.graph.NodeInstanceStopped
+    fields:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+
+  - name: inference.graph.NodeInstanceFailed
+    fields:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+      - name: reason
+        type: String
 
 views:
   - name: inference.graph.Pipelines
@@ -1560,3 +1760,5 @@ views:
         type: inference.graph.RunId
       - name: node_id
         type: inference.graph.NodeId
+      - name: state
+        type: inference.graph.NodeInstance.State
