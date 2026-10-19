@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T22:11:50Z",
+  "actor": "human:timo",
+  "artifact": "story:native-speech-contract",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-native-speech-contract-pass-1",
+    "reference": "F4 inference-duplex ledger.rs close cancels and fail fails the response in progress before the session event; later output refused NotOpen; spec UNMAPPED note",
+    "review": "review-result:adversary-native-speech-contract-pass-1",
+    "outcome": "fixed"
+  }
+}
