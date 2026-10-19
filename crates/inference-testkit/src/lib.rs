@@ -27,7 +27,8 @@ pub mod graph;
 /// their views, and the log that records their events in envelopes.
 pub mod stream;
 
-/// `inference.tools`: empty until the tool-call stores land.
+/// `inference.tools`: the in-memory stores of the declared tools and of the tool calls through
+/// their lifecycle, and their views.
 pub mod tools;
 
 /// `inference.session`: empty until the session stores land.

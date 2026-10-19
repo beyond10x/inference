@@ -1,0 +1,17 @@
+[package]
+name = "inference-tools"
+description = "Tool vocabulary of the inference framework: tools and their side-effect classes, the tool-call lifecycle from proposal to result, and the executor contract."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+inference-core = { path = "../inference-core" }
+inference-text = { path = "../inference-text" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
