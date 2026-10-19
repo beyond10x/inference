@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:outbound-text-generations-and-segments
 kind: story
-status: draft
+status: active
 title: 'Generations and output segments: tentative, committed, queued, played'
 summary: inference-core gains Generation and inference-text gains OutputSegment with their lifecycles; the target answers the 46 generation and segment scenarios.
 relations:
@@ -24,7 +24,10 @@ scope:
   path: crates/inference-text
 - confidence: cited
   path: ess/SKIPPED.md
-revision: 21
+revision: 23
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T04:35:10Z", actor: "human:timo", revision: 22, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "proposed", to: "active", at: "2026-10-19T04:35:11Z", actor: "human:timo", revision: 23, decided_on: {"recorded":{"review_outcome":2}}}
 ---
 ## Context
 
