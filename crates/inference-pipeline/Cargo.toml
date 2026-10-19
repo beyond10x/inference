@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 inference-core = { path = "../inference-core" }
+inference-tools = { path = "../inference-tools" }
 serde.workspace = true
 uuid.workspace = true
 

@@ -1,6 +1,8 @@
 //! The mock source and sink nodes of a text-only pipeline, and what they share with the mock
 //! model node of [`crate::llm`]: the payload the pipeline's edges carry, the run's event log, and
-//! an exchange task per node.
+//! an exchange task per node. The source and the sink are generic over the payload, with the text
+//! pipeline's [`PipelinePayload`] as the default, so that a pipeline of other payloads, such as
+//! the Structured tool calls of `inference-pipeline`'s tool nodes, is driven by the same mocks.
 //!
 //! A started node exchanges events on a thread of its own, polling its endpoints with an
 //! executor of its own, so the runtime that drives it commits to none. The thread holds the
@@ -20,9 +22,9 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
+use inference_core::endpoint::{InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
-use inference_core::id::{NodeId, RunId, StreamId};
+use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
 use inference_text::{SpanId, TranscriptCommitted};
 
@@ -36,6 +38,12 @@ pub enum PipelinePayload {
     Stream(StreamEvent),
     /// A control event; its envelope's `kind` is [`ControlKind::as_str`].
     Control(ControlKind),
+}
+
+impl From<ControlKind> for PipelinePayload {
+    fn from(kind: ControlKind) -> Self {
+        Self::Control(kind)
+    }
 }
 
 /// The event log of one run, shared by its nodes and the test: every `inference.stream` event a
@@ -192,6 +200,16 @@ pub(crate) struct Exchange {
     probe: Weak<()>,
     done: Arc<Watched<bool>>,
     thread: Option<JoinHandle<()>>,
+    panicked: Option<String>,
+}
+
+/// Marks the task done when its thread leaves its work, returning or unwinding.
+struct Done(Arc<Watched<bool>>);
+
+impl Drop for Done {
+    fn drop(&mut self) {
+        self.0.update(|done| *done = true);
+    }
 }
 
 impl Exchange {
@@ -202,7 +220,15 @@ impl Exchange {
             token: Some(token),
             done: Arc::new(Watched::new(false)),
             thread: None,
+            panicked: None,
         }
+    }
+
+    /// Nothing, unless the task's thread panicked: then the error naming the panic.
+    pub(crate) fn panic(&self) -> Result<(), NodeError> {
+        self.panicked
+            .clone()
+            .map_or(Ok(()), |panic| Err(NodeError::new(panic)))
     }
 
     /// A weak reference to the task's token: alive until the task ended.
@@ -214,20 +240,28 @@ impl Exchange {
     /// dropped what it took.
     pub(crate) fn spawn(&mut self, work: impl FnOnce() + Send + 'static) {
         let token = self.token.take();
-        let done = Arc::clone(&self.done);
+        let done = Done(Arc::clone(&self.done));
         self.thread = Some(thread::spawn(move || {
+            let _done = done;
             work();
             drop(token);
-            done.update(|done| *done = true);
         }));
     }
 
-    /// Waits until the task ended, then joins its thread; a task never spawned has ended.
+    /// Waits until the task ended, then joins its thread; a task never spawned has ended. A
+    /// panic of the thread is kept for [`Exchange::panic`].
     pub(crate) async fn finished(&mut self) {
         self.token = None;
         if let Some(thread) = self.thread.take() {
             self.done.until(|done| done.then_some(())).await;
-            let _ = thread.join();
+            if let Err(panic) = thread.join() {
+                let message = panic
+                    .downcast_ref::<&str>()
+                    .map(|message| (*message).to_owned())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "a panic without a message".to_owned());
+                self.panicked = Some(format!("the node's exchange panicked: {message}"));
+            }
         }
     }
 }
@@ -334,9 +368,16 @@ impl Emitter {
         })
     }
 
+    /// The envelope of `held`, naming its generation, on the same stream.
+    fn held<P>(&mut self, held: Held<P>) -> EventEnvelope<P> {
+        let mut envelope = self.envelope(held.kind, held.payload);
+        envelope.generation_id = held.generation_id;
+        envelope
+    }
+
     /// The envelope of the control event `kind`, on the same stream.
-    pub(crate) fn control(&mut self, kind: ControlKind) -> EventEnvelope<PipelinePayload> {
-        self.envelope(kind.as_str().to_owned(), PipelinePayload::Control(kind))
+    pub(crate) fn control<P: From<ControlKind>>(&mut self, kind: ControlKind) -> EventEnvelope<P> {
+        self.envelope(kind.as_str().to_owned(), P::from(kind))
     }
 }
 
@@ -385,11 +426,52 @@ pub(crate) fn started<P>(
     node_id.ok_or_else(|| NodeError::new("the node was started before it was described"))
 }
 
+/// How a [`TextSource`] records an envelope it emits before sending it.
+type Record<P> = fn(&RunLog, &EventEnvelope<P>) -> Result<(), String>;
+
+/// Records the `inference.stream` event of `envelope` in `log`, as [`Emitter::stream`] does.
+fn record_stream(log: &RunLog, envelope: &EventEnvelope<PipelinePayload>) -> Result<(), String> {
+    let PipelinePayload::Stream(event) = &envelope.payload else {
+        return Ok(());
+    };
+    log.record(EventEnvelope {
+        schema_version: envelope.schema_version,
+        event_id: envelope.event_id,
+        run_id: envelope.run_id,
+        session_id: envelope.session_id,
+        stream_id: envelope.stream_id,
+        sequence: envelope.sequence,
+        producer: envelope.producer,
+        port: envelope.port.clone(),
+        kind: envelope.kind.clone(),
+        generation_id: envelope.generation_id,
+        timestamp: envelope.timestamp,
+        timebase: envelope.timebase,
+        causation_id: envelope.causation_id,
+        payload: event.clone(),
+    })
+    .map_err(|refusal| refusal.to_string())
+}
+
+/// Records nothing: the log records `inference.stream` events only.
+const fn record_nothing<P>(_: &RunLog, _: &EventEnvelope<P>) -> Result<(), String> {
+    Ok(())
+}
+
+/// One event a [`TextSource`] holds: the `kind` and the generation of its envelope, and its
+/// payload.
+#[derive(Debug)]
+struct Held<P> {
+    kind: String,
+    generation_id: Option<GenerationId>,
+    payload: P,
+}
+
 /// What a [`TextSource`] holds and has done.
-#[derive(Debug, Default)]
-struct SourceState {
-    held: VecDeque<String>,
-    released: VecDeque<String>,
+#[derive(Debug)]
+struct SourceState<P> {
+    held: VecDeque<Held<P>>,
+    released: VecDeque<Held<P>>,
     end_released: bool,
     end_sent: bool,
     closed: bool,
@@ -398,28 +480,48 @@ struct SourceState {
     failure: Option<String>,
 }
 
+impl<P> SourceState<P> {
+    fn holding(held: impl IntoIterator<Item = Held<P>>) -> Self {
+        Self {
+            held: held.into_iter().collect(),
+            released: VecDeque::new(),
+            end_released: false,
+            end_sent: false,
+            closed: false,
+            cancelled: false,
+            emitted: 0,
+            failure: None,
+        }
+    }
+}
+
 /// What the source's exchange does next.
-enum SourceStep {
-    Text(String),
+enum SourceStep<P> {
+    Event(Held<P>),
     End,
     Done,
 }
 
-/// A mock source node: it holds a fixed list of texts and, once started, emits the next one each
-/// time the test releases it, as an `inference.stream.TranscriptCommitted` on its one output
-/// edge, then the end of input, a control event of kind `stop`, when the test releases it. Once
-/// drained it admits no further release and emits the texts released before the drain; once
-/// cancelled it emits nothing more.
+/// A mock source node: it holds a fixed list of events and, once started, emits the next one
+/// each time the test releases it on its one output edge, then the end of input, a control event
+/// of kind `stop`, when the test releases it. Once drained it admits no further release and emits
+/// the events released before the drain; once cancelled it emits nothing more.
+///
+/// A source of a text-only pipeline ([`TextSource::new`]) holds texts, each emitted as an
+/// `inference.stream.TranscriptCommitted` recorded in the run's [`RunLog`]; a scripted source
+/// ([`TextSource::scripted`]) holds events of any payload, a Structured tool call among them,
+/// and records none.
 #[derive(Debug)]
-pub struct TextSource {
+pub struct TextSource<P = PipelinePayload> {
     run_id: RunId,
     log: RunLog,
+    record: Record<P>,
     node_id: Option<NodeId>,
-    state: Arc<Watched<SourceState>>,
+    state: Arc<Watched<SourceState<P>>>,
     exchange: Exchange,
 }
 
-impl fmt::Debug for Watched<SourceState> {
+impl<P: fmt::Debug> fmt::Debug for Watched<SourceState<P>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.read(|state| state.fmt(f))
     }
@@ -433,39 +535,121 @@ impl TextSource {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
+        let held = texts.into_iter().map(|text| {
+            let event = StreamEvent::TranscriptCommitted(TranscriptCommitted {
+                span_id: SpanId::generate(),
+                text: text.into(),
+            });
+            Held {
+                kind: event.name().to_owned(),
+                generation_id: event.generation_id(),
+                payload: PipelinePayload::Stream(event),
+            }
+        });
         Self {
             run_id,
             log,
+            record: record_stream,
             node_id: None,
-            state: Arc::new(Watched::new(SourceState {
-                held: texts.into_iter().map(Into::into).collect(),
-                ..SourceState::default()
-            })),
+            state: Arc::new(Watched::new(SourceState::holding(held))),
+            exchange: Exchange::new(),
+        }
+    }
+}
+
+impl<P: Send + 'static> TextSource<P> {
+    /// A source of the run `run_id` holding `events`, each the `kind` of its envelope, the
+    /// generation the envelope names and its payload. It records nothing.
+    #[must_use]
+    pub fn scripted<I>(run_id: RunId, events: I) -> Self
+    where
+        I: IntoIterator<Item = (String, Option<GenerationId>, P)>,
+    {
+        let held = events
+            .into_iter()
+            .map(|(kind, generation_id, payload)| Held {
+                kind,
+                generation_id,
+                payload,
+            });
+        Self {
+            run_id,
+            log: RunLog::new(),
+            record: record_nothing,
+            node_id: None,
+            state: Arc::new(Watched::new(SourceState::holding(held))),
             exchange: Exchange::new(),
         }
     }
 
     /// The test's side of the source.
     #[must_use]
-    pub fn handle(&self) -> SourceHandle {
+    pub fn handle(&self) -> SourceHandle<P> {
         SourceHandle {
             state: Arc::clone(&self.state),
             task: self.exchange.probe(),
         }
     }
 
+    fn failure(&self) -> Result<(), NodeError> {
+        self.state
+            .read(|state| state.failure.clone())
+            .map_or(Ok(()), |failure| Err(NodeError::new(failure)))
+    }
+}
+
+impl<P: From<ControlKind> + Send + 'static> TextSource<P> {
+    /// Sends the end of input along `output`, again while the edge is full, until the edge takes
+    /// it, refuses it otherwise, or the source is cancelled.
+    async fn end(
+        state: &Watched<SourceState<P>>,
+        output: &dyn OutputEndpoint<P>,
+        emitter: &mut Emitter,
+    ) -> Result<(), String> {
+        loop {
+            match output.send(emitter.control(ControlKind::Stop)).await {
+                Ok(()) => return Ok(()),
+                Err(SendError::Full(_)) if !state.read(|state| state.cancelled) => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(refused) => return Err(refused.to_string()),
+            }
+        }
+    }
+
+    /// Emits what the test releases until the source is done; once a send failed, the end of
+    /// input is still sent, so that the run drains and the drain reports the failure.
     async fn exchange(
-        state: Arc<Watched<SourceState>>,
-        output: Box<dyn OutputEndpoint<PipelinePayload>>,
+        state: Arc<Watched<SourceState<P>>>,
+        output: Box<dyn OutputEndpoint<P>>,
         mut emitter: Emitter,
+        log: RunLog,
+        record: Record<P>,
     ) {
+        let end_taken = Self::emit(&state, output.as_ref(), &mut emitter, &log, record).await;
+        let failed = state.read(|state| state.failure.is_some() && !state.cancelled);
+        if failed && !end_taken {
+            let _first_failure_is_kept = Self::end(&state, output.as_ref(), &mut emitter).await;
+        }
+    }
+
+    /// Emits what the test releases until the source is done, recording the first failure;
+    /// whether the edge took the end of input.
+    async fn emit(
+        state: &Watched<SourceState<P>>,
+        output: &dyn OutputEndpoint<P>,
+        emitter: &mut Emitter,
+        log: &RunLog,
+        record: Record<P>,
+    ) -> bool {
+        let mut end_taken = false;
         loop {
             let step = state
                 .until(|state| {
                     if state.cancelled || state.failure.is_some() {
                         Some(SourceStep::Done)
-                    } else if let Some(text) = state.released.pop_front() {
-                        Some(SourceStep::Text(text))
+                    } else if let Some(held) = state.released.pop_front() {
+                        Some(SourceStep::Event(held))
                     } else if state.end_released && !state.end_sent {
                         state.end_sent = true;
                         Some(SourceStep::End)
@@ -477,48 +661,50 @@ impl TextSource {
                 })
                 .await;
             let sent = match step {
-                SourceStep::Text(text) => {
-                    let committed = TranscriptCommitted {
-                        span_id: SpanId::generate(),
-                        text,
-                    };
-                    emit(
-                        output.as_ref(),
-                        &mut emitter,
-                        StreamEvent::TranscriptCommitted(committed),
-                    )
-                    .await
-                    .map(|()| state.update(|state| state.emitted += 1))
+                SourceStep::Event(held) => {
+                    let envelope = emitter.held(held);
+                    match record(log, &envelope) {
+                        Ok(()) => output
+                            .send(envelope)
+                            .await
+                            .map(|()| state.update(|state| state.emitted += 1))
+                            .map_err(|refused| refused.to_string()),
+                        Err(refusal) => Err(refusal),
+                    }
                 }
-                SourceStep::End => output
-                    .send(emitter.control(ControlKind::Stop))
-                    .await
-                    .map_err(|refused| refused.to_string()),
-                SourceStep::Done => return,
+                SourceStep::End => {
+                    let ended = Self::end(state, output, emitter).await;
+                    end_taken = ended.is_ok();
+                    ended
+                }
+                SourceStep::Done => return end_taken,
             };
             if let Err(failure) = sent {
                 state.update(|state| state.failure = Some(failure));
             }
         }
     }
-
-    fn failure(&self) -> Result<(), NodeError> {
-        self.state
-            .read(|state| state.failure.clone())
-            .map_or(Ok(()), |failure| Err(NodeError::new(failure)))
-    }
 }
 
-/// The test's side of a [`TextSource`]: releases its texts and its end of input, and reads what
+/// The test's side of a [`TextSource`]: releases its events and its end of input, and reads what
 /// it emitted.
-#[derive(Debug, Clone)]
-pub struct SourceHandle {
-    state: Arc<Watched<SourceState>>,
+#[derive(Debug)]
+pub struct SourceHandle<P = PipelinePayload> {
+    state: Arc<Watched<SourceState<P>>>,
     task: Weak<()>,
 }
 
-impl SourceHandle {
-    /// Releases the next held text; false, admitting nothing, once every text was released or
+impl<P> Clone for SourceHandle<P> {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            task: Weak::clone(&self.task),
+        }
+    }
+}
+
+impl<P> SourceHandle<P> {
+    /// Releases the next held event; false, admitting nothing, once every event was released or
     /// the end of input was, or once the source was drained or cancelled.
     #[must_use]
     pub fn release(&self) -> bool {
@@ -529,7 +715,7 @@ impl SourceHandle {
             state
                 .held
                 .pop_front()
-                .map(|text| state.released.push_back(text))
+                .map(|held| state.released.push_back(held))
                 .is_some()
         })
     }
@@ -547,13 +733,13 @@ impl SourceHandle {
         })
     }
 
-    /// How many texts the source emitted: the ones its edge took.
+    /// How many events the source emitted: the ones its edge took.
     #[must_use]
     pub fn emitted(&self) -> usize {
         self.state.read(|state| state.emitted)
     }
 
-    /// Waits at most `patience` until the source emitted `count` texts.
+    /// Waits at most `patience` until the source emitted `count` events.
     #[must_use]
     pub fn wait_emitted(&self, count: usize, patience: Duration) -> bool {
         self.state.wait(patience, |state| state.emitted >= count)
@@ -566,7 +752,7 @@ impl SourceHandle {
     }
 }
 
-impl NodeImplementation<PipelinePayload> for TextSource {
+impl<P: From<ControlKind> + Send + 'static> NodeImplementation<P> for TextSource<P> {
     fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
         self.node_id = Some(node.node_id());
         Box::pin(future::ready(()))
@@ -576,10 +762,7 @@ impl NodeImplementation<PipelinePayload> for TextSource {
         Box::pin(future::ready(Ok(())))
     }
 
-    fn start(
-        &mut self,
-        mut endpoints: NodeEndpoints<PipelinePayload>,
-    ) -> NodeFuture<'_, Result<(), NodeError>> {
+    fn start(&mut self, mut endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
         let started = started(self.node_id, &endpoints, 0, 1).map(|node_id| {
             let output = endpoints.outputs.remove(0);
             let emitter = Emitter::new(
@@ -589,8 +772,9 @@ impl NodeImplementation<PipelinePayload> for TextSource {
                 self.log.clone(),
             );
             let state = Arc::clone(&self.state);
+            let (log, record) = (self.log.clone(), self.record);
             self.exchange.spawn(move || {
-                block_on(Self::exchange(state, output.endpoint, emitter));
+                block_on(Self::exchange(state, output.endpoint, emitter, log, record));
             });
         });
         Box::pin(future::ready(started))
@@ -600,6 +784,7 @@ impl NodeImplementation<PipelinePayload> for TextSource {
         self.state.update(|state| state.closed = true);
         Box::pin(async move {
             self.exchange.finished().await;
+            self.exchange.panic()?;
             self.failure()
         })
     }
@@ -618,55 +803,57 @@ impl NodeImplementation<PipelinePayload> for TextSource {
 }
 
 /// What a [`TextSink`] received.
-#[derive(Debug, Default)]
-struct SinkState {
-    received: Vec<EventEnvelope<PipelinePayload>>,
+#[derive(Debug)]
+struct SinkState<P> {
+    received: Vec<EventEnvelope<P>>,
     cancelled: bool,
 }
 
-/// A mock sink node: once started it collects every envelope its one input edge delivers, until
-/// the edge is closed or the sink is cancelled.
+/// A mock sink node: once started it collects every envelope its one input edge delivers, of
+/// whatever payload, until the edge is closed or the sink is cancelled.
 #[derive(Debug)]
-pub struct TextSink {
-    state: Arc<Watched<SinkState>>,
+pub struct TextSink<P = PipelinePayload> {
+    state: Arc<Watched<SinkState<P>>>,
     exchange: Exchange,
 }
 
-impl fmt::Debug for Watched<SinkState> {
+impl<P: fmt::Debug> fmt::Debug for Watched<SinkState<P>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.read(|state| state.fmt(f))
     }
 }
 
-impl Default for TextSink {
+impl<P> Default for TextSink<P> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            state: Arc::new(Watched::new(SinkState {
+                received: Vec::new(),
+                cancelled: false,
+            })),
+            exchange: Exchange::new(),
+        }
     }
 }
 
 impl TextSink {
-    /// A sink that has received nothing.
+    /// A sink of a text-only pipeline that has received nothing.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            state: Arc::new(Watched::new(SinkState::default())),
-            exchange: Exchange::new(),
-        }
+        Self::default()
     }
+}
 
+impl<P: Send + 'static> TextSink<P> {
     /// The test's side of the sink.
     #[must_use]
-    pub fn handle(&self) -> SinkHandle {
+    pub fn handle(&self) -> SinkHandle<P> {
         SinkHandle {
             state: Arc::clone(&self.state),
             task: self.exchange.probe(),
         }
     }
 
-    async fn exchange(
-        state: Arc<Watched<SinkState>>,
-        mut input: Box<dyn InputEndpoint<PipelinePayload>>,
-    ) {
+    async fn exchange(state: Arc<Watched<SinkState<P>>>, mut input: Box<dyn InputEndpoint<P>>) {
         while let Some(Some(envelope)) =
             recv_unless(input.as_mut(), &state, |state| state.cancelled).await
         {
@@ -676,19 +863,43 @@ impl TextSink {
 }
 
 /// The test's side of a [`TextSink`]: what it received.
-#[derive(Debug, Clone)]
-pub struct SinkHandle {
-    state: Arc<Watched<SinkState>>,
+#[derive(Debug)]
+pub struct SinkHandle<P = PipelinePayload> {
+    state: Arc<Watched<SinkState<P>>>,
     task: Weak<()>,
 }
 
-impl SinkHandle {
+impl<P> Clone for SinkHandle<P> {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            task: Weak::clone(&self.task),
+        }
+    }
+}
+
+impl<P: Clone> SinkHandle<P> {
     /// Every envelope the sink received, in the order it received them.
     #[must_use]
-    pub fn received(&self) -> Vec<EventEnvelope<PipelinePayload>> {
+    pub fn received(&self) -> Vec<EventEnvelope<P>> {
         self.state.read(|state| state.received.clone())
     }
 
+    /// Waits at most `patience` until the sink received `count` envelopes.
+    #[must_use]
+    pub fn wait_received(&self, count: usize, patience: Duration) -> bool {
+        self.state
+            .wait(patience, |state| state.received.len() >= count)
+    }
+
+    /// A weak reference to the sink's exchange task, alive until the task ended.
+    #[must_use]
+    pub fn task(&self) -> Weak<()> {
+        Weak::clone(&self.task)
+    }
+}
+
+impl SinkHandle {
     /// The text of every `inference.stream.TextSegmentCommitted` the sink received, in order.
     #[must_use]
     pub fn committed(&self) -> Vec<String> {
@@ -700,12 +911,6 @@ impl SinkHandle {
     pub fn wait_committed(&self, count: usize, patience: Duration) -> bool {
         self.state
             .wait(patience, |state| committed(&state.received).len() >= count)
-    }
-
-    /// A weak reference to the sink's exchange task, alive until the task ended.
-    #[must_use]
-    pub fn task(&self) -> Weak<()> {
-        Weak::clone(&self.task)
     }
 }
 
@@ -721,7 +926,7 @@ fn committed(received: &[EventEnvelope<PipelinePayload>]) -> Vec<String> {
         .collect()
 }
 
-impl NodeImplementation<PipelinePayload> for TextSink {
+impl<P: Send + 'static> NodeImplementation<P> for TextSink<P> {
     fn describe(&mut self, _: &Node) -> NodeFuture<'_, ()> {
         Box::pin(future::ready(()))
     }
@@ -730,10 +935,7 @@ impl NodeImplementation<PipelinePayload> for TextSink {
         Box::pin(future::ready(Ok(())))
     }
 
-    fn start(
-        &mut self,
-        mut endpoints: NodeEndpoints<PipelinePayload>,
-    ) -> NodeFuture<'_, Result<(), NodeError>> {
+    fn start(&mut self, mut endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
         let started = shape(&endpoints, 1, 0).map(|()| {
             let input = endpoints.inputs.remove(0);
             let state = Arc::clone(&self.state);
@@ -747,6 +949,7 @@ impl NodeImplementation<PipelinePayload> for TextSink {
     fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
         Box::pin(async move {
             self.exchange.finished().await;
+            self.exchange.panic()?;
             Ok(())
         })
     }
