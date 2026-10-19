@@ -7,9 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+tools = ["dep:inference-tools"]
+
 [dependencies]
 inference-core = { path = "../inference-core" }
 inference-text = { path = "../inference-text" }
+inference-tools = { path = "../inference-tools", optional = true }
 
 [lints]
 workspace = true

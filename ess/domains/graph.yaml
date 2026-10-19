@@ -36,6 +36,10 @@ types:
     kind: newtype
     of: Uuid
 
+  - name: inference.graph.FeedbackLoopId
+    kind: newtype
+    of: Uuid
+
   - name: inference.graph.RunId
     kind: newtype
     of: Uuid
@@ -320,6 +324,47 @@ entities:
       states: [Declared]
       terminal: [Declared]
 
+  # A feedback loop declaration with its bounded control rule: the edge it names is the feedback
+  # edge, and `max_iterations` is its iteration rule, how many times one generation may go round
+  # the loop along that edge before the loop terminates; the edge's capacity is its queue bound.
+  # A cycle that runs through such an edge is bounded; every other cycle is invalid.
+  # read from: docs/design/inference.md:517
+  # read from: docs/design/inference.md:529
+  # read from: docs/design/inference.md:546
+  # UNMAPPED: the feedback edge's scheduler (design 546). The design asks for a defined scheduler
+  # without naming the choices; the runtime has one, so no field selects it yet. Open question for
+  # the owner.
+  - name: inference.graph.FeedbackLoop
+    naming:
+      summary: A feedback edge of a pipeline with the iteration rule that bounds the loop it closes.
+    identity:
+      name: feedback_id
+      type: inference.graph.FeedbackLoopId
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: edge_id
+        type: inference.graph.EdgeId
+      - name: max_iterations
+        type: Integer
+    invariants:
+      - max_iterations > 0
+    relations:
+      - name: pipeline
+        kind: references
+        target: inference.graph.Pipeline
+        cardinality: one
+        via: pipeline_id
+      - name: edge
+        kind: references
+        target: inference.graph.Edge
+        cardinality: one
+        via: edge_id
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
   # The selection of a concrete adapter for a node, made at composition or deployment time.
   # read from: docs/design/inference.md:248
   # read from: docs/design/inference.md:519
@@ -471,6 +516,14 @@ errors:
       - name: submitted
         type: Integer
 
+  # A feedback edge must have a termination or iteration rule; one below one iteration is refused.
+  # read from: docs/design/inference.md:546
+  - name: inference.graph.UnboundedFeedback
+    summary: A feedback loop's iteration rule must allow at least one iteration; a maximum below one is refused.
+    fields:
+      - name: submitted
+        type: Integer
+
   # read from: docs/design/inference.md:102
   # read from: docs/design/inference.md:1108
   # read from: docs/design/inference.md:1124
@@ -564,6 +617,13 @@ errors:
     fields:
       - name: port_id
         type: inference.graph.PortId
+
+  # read from: docs/design/inference.md:525
+  - name: inference.graph.EdgeNotFound
+    summary: No edge carries the identity the command named.
+    fields:
+      - name: edge_id
+        type: inference.graph.EdgeId
 
   # read from: docs/design/inference.md:525
   - name: inference.graph.RunNotFound
@@ -960,15 +1020,82 @@ commands:
             adapter_id: input.adapter_id
         summary: The node has a concrete adapter.
 
+  # A pipeline declares its feedback loops with their bounded control rules while it is Declared,
+  # as the other parts of its declaration.
+  # Not refused here: an edge of another pipeline. That guard compares the edge's `pipeline_id`
+  # with the input, which ess 0.60.0 synthesis cannot witness (ESS-SYNTH-003); such a loop bounds
+  # no cycle of the pipeline it names, and validation reads only the loops whose edge is the
+  # pipeline's.
+  # read from: docs/design/inference.md:517
+  # read from: docs/design/inference.md:519
+  # read from: docs/design/inference.md:546
+  - name: inference.graph.DeclareFeedbackLoop
+    input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: edge_id
+        type: inference.graph.EdgeId
+      - name: max_iterations
+        type: Integer
+    outcomes:
+      - name: unknown-pipeline
+        when_related: {via: input.pipeline_id, exists: false}
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.pipeline_id
+        summary: No pipeline carries the identity, and no feedback loop was declared.
+
+      - name: unknown-edge
+        when_related: {via: input.edge_id, exists: false}
+        error: inference.graph.EdgeNotFound
+        payload:
+          inference.graph.EdgeNotFound:
+            edge_id: input.edge_id
+        summary: No edge carries the identity, and no feedback loop was declared.
+
+      - name: unbounded
+        when: max_iterations <= 0
+        error: inference.graph.UnboundedFeedback
+        payload:
+          inference.graph.UnboundedFeedback:
+            submitted: input.max_iterations
+        summary: The iteration rule allows no iteration, and no feedback loop was declared.
+
+      - name: not-declared
+        when_related: {via: input.pipeline_id, predicate: state != Declared}
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.pipeline_id
+            required: Declared
+        summary: The pipeline was already validated, and no feedback loop was declared.
+
+      - name: declared
+        creates: inference.graph.FeedbackLoop
+        instance: feedback_id
+        sets:
+          pipeline_id: input.pipeline_id
+          edge_id: input.edge_id
+          max_iterations: input.max_iterations
+        emits:
+          - inference.graph.FeedbackLoopDeclared
+        payload:
+          inference.graph.FeedbackLoopDeclared:
+            feedback_id: {generated: true}
+            edge_id: input.edge_id
+            max_iterations: input.max_iterations
+        summary: The edge is a feedback edge of the pipeline, bounded by its iteration rule.
+
   # The graph planner verifies the conditions of §10.2 that need the whole graph before anything
   # runs: every named node and port exists, every edge is compatible, every cycle is bounded,
   # every mandatory output is reachable and every data flow is allowed. Their outcome is the
-  # planner's to decide, so it is external; the diagnostics name each finding.
+  # planner's to decide, so it is external; the diagnostics name each finding. A cycle is bounded
+  # when it runs through an edge of the pipeline that a FeedbackLoop of the pipeline names; a
+  # cycle through no such edge is an unbounded cycle.
   # read from: docs/design/inference.md:453
   # read from: docs/design/inference.md:521-534
-  # UNMAPPED: a feedback-loop declaration (design 517, 529, 546: a feedback edge has a defined
-  # scheduler, queue bounds and a termination or iteration rule). No noun carries it yet, so
-  # "every cycle is bounded" rests on the planner alone. Which fields it has is open.
+  # read from: docs/design/inference.md:546
   - name: inference.graph.ValidatePipeline
     input:
       - name: pipeline_id
@@ -1550,6 +1677,15 @@ events:
       - name: adapter_id
         type: inference.model.AdapterId
 
+  - name: inference.graph.FeedbackLoopDeclared
+    fields:
+      - name: feedback_id
+        type: inference.graph.FeedbackLoopId
+      - name: edge_id
+        type: inference.graph.EdgeId
+      - name: max_iterations
+        type: Integer
+
   - name: inference.graph.PipelineValidated
     fields:
       - name: pipeline_id
@@ -1736,6 +1872,19 @@ views:
         type: inference.graph.NodeId
       - name: adapter_id
         type: inference.model.AdapterId
+
+  - name: inference.graph.FeedbackLoops
+    source: inference.graph.FeedbackLoop
+    consistency: read_your_writes
+    fields:
+      - name: feedback_id
+        type: inference.graph.FeedbackLoopId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: edge_id
+        type: inference.graph.EdgeId
+      - name: max_iterations
+        type: Integer
 
   - name: inference.graph.Runs
     source: inference.graph.Run
