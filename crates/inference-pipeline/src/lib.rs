@@ -3,7 +3,7 @@
 //! `inference-pipeline` holds the declaration half of `ess/domains/graph.yaml`: a [`Pipeline`] of
 //! named [`Node`]s with typed [`Port`]s, [`Edge`]s that connect an output port to an input port
 //! with finite buffering, and [`Binding`]s of nodes to adapters. A pipeline definition is not an
-//! execution; this crate stops at the declaration and its validation.
+//! execution; this crate stops at the declaration, its validation and its plan.
 //!
 //! A [`Declaration`] holds the declared entities and runs the five declaration commands
 //! ([`Declaration::declare_pipeline`], [`Declaration::add_node`], [`Declaration::add_port`],
@@ -20,9 +20,17 @@
 //! [`Declaration::validate_pipeline`] runs checks 1, 2, 3, 5, 6 and 9 of §10.2 over a Declared
 //! pipeline and moves it to Validated only when none finds anything; otherwise it answers
 //! [`IncompatibleGraph`] naming each [`GraphFinding`]. A pipeline built through the typed builder
-//! is validated the same way, by the identity [`Declaration::build`] returns. The crate depends on
-//! `inference-core` only and carries no concrete model, backend or provider. Serialized names are
-//! the ESS names.
+//! is validated by the identity [`Declaration::build`] returns, and [`Declaration::validate`]
+//! answers the validated form, a [`ValidatedPipeline`], which nothing else produces.
+//!
+//! Planning is check 4 of §10.2 and the rule of §8.3: [`Declaration::plan`] takes a
+//! [`ValidatedPipeline`], so a pipeline that was not validated cannot be planned through the
+//! builder, and [`Declaration::plan_pipeline`] runs `inference.graph.PlanPipeline` by identity.
+//! Both compute the pipeline's effective capabilities from the weakest node on every required path
+//! and refuse a node left without the adapter its requirements need ([`NodeUnbound`]) or an unmet
+//! mandatory capability ([`CapabilityMismatch`]); the planned form is a [`PlannedPipeline`]. The
+//! crate depends on `inference-core` only and carries no concrete model, backend or provider.
+//! Serialized names are the ESS names.
 
 use std::error::Error;
 use std::fmt;
@@ -35,6 +43,7 @@ use inference_core::policy::ProfileId;
 
 mod builder;
 mod declaration;
+mod planning;
 mod validation;
 
 pub use builder::{
@@ -45,6 +54,7 @@ pub use declaration::{
     AddNodeError, BindNodeError, Catalog, ConnectPortsError, Declaration, ValidatePipelineError,
 };
 pub use inference_core::id::NodeId;
+pub use planning::{PlanPipelineError, PlannedPipeline, ValidatedPipeline};
 
 inference_core::uuid_newtype!(
     /// `inference.graph.PipelineId`: identifies a [`Pipeline`].
@@ -247,6 +257,62 @@ impl fmt::Display for IncompatibleGraph {
 }
 
 impl Error for IncompatibleGraph {}
+
+/// `inference.graph.PlanPipeline`: the input that plans a [`Pipeline`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanPipeline {
+    pub pipeline_id: PipelineId,
+}
+
+/// `inference.graph.PipelinePlanned`: the pipeline has an execution plan and its effective
+/// capabilities are known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelinePlanned {
+    pub pipeline_id: PipelineId,
+}
+
+/// `inference.graph.CapabilityMismatch`: a mandatory capability is not satisfied by the bound
+/// adapters, so planning failed rather than downgrade silently. `node_id` names the node whose
+/// binding falls short; a capability the pipeline requires as a whole names no node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityMismatch {
+    pub node_id: Option<NodeId>,
+    pub capability: Capability,
+}
+
+impl fmt::Display for CapabilityMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.node_id {
+            Some(node_id) => write!(
+                f,
+                "the node {node_id} requires {:?}, which its bound adapter does not implement",
+                self.capability
+            ),
+            None => write!(
+                f,
+                "the pipeline requires {:?}, which its effective capabilities lack",
+                self.capability
+            ),
+        }
+    }
+}
+
+impl Error for CapabilityMismatch {}
+
+/// `inference.graph.NodeUnbound`: a node whose requirements need an adapter has no binding, so
+/// the pipeline is not runnable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUnbound {
+    pub node_id: NodeId,
+}
+
+impl fmt::Display for NodeUnbound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the node {} has no adapter bound", self.node_id)
+    }
+}
+
+impl Error for NodeUnbound {}
 
 /// `inference.graph.PipelineStateConflict`: the pipeline is not in a state the command acts from,
 /// so nothing moved. `current` is the state it is in.

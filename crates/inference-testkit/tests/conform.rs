@@ -84,6 +84,21 @@ const GRAPH_VALIDATION_SCENARIOS: [&str; 14] = [
     "inference.graph.Edge/invariant/after/inference.graph.ConnectPorts/connected",
 ];
 
+/// The nine `inference.graph` scenarios this target answers by planning a pipeline: the five of
+/// `PlanPipeline`, its transition and the three state refusals that reach Planned or start from
+/// Declared.
+const GRAPH_PLANNING_SCENARIOS: [&str; 9] = [
+    "inference.graph.PlanPipeline/outcome/locality-denied",
+    "inference.graph.PlanPipeline/outcome/mismatch",
+    "inference.graph.PlanPipeline/outcome/planned",
+    "inference.graph.PlanPipeline/outcome/unbound",
+    "inference.graph.PlanPipeline/outcome/wrong-state",
+    "inference.graph.Pipeline/transition/plan/by/inference.graph.PlanPipeline/planned",
+    "inference.graph.Pipeline/state/Declared/refuses/inference.graph.PlanPipeline",
+    "inference.graph.Pipeline/state/Planned/refuses/inference.graph.PlanPipeline",
+    "inference.graph.Pipeline/state/Planned/refuses/inference.graph.ValidatePipeline",
+];
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -261,6 +276,7 @@ fn the_suite_runs_against_the_testkit_target() {
         .chain(POLICY_SCENARIOS)
         .chain(GRAPH_SCENARIOS)
         .chain(GRAPH_VALIDATION_SCENARIOS)
+        .chain(GRAPH_PLANNING_SCENARIOS)
     {
         assert!(
             passed.contains(id),
