@@ -31,6 +31,15 @@ pub fn encode_pcm16_24k(frame: &AudioFrame) -> Result<Vec<u8>, RealtimeError> {
             format.channels
         )));
     }
+    if matches!(
+        format.encoding,
+        AudioEncoding::PcmMulaw | AudioEncoding::PcmAlaw
+    ) {
+        return Err(RealtimeError::Audio(format!(
+            "{:?} is G.711; it goes to a session of that format as it is, through append_encoded",
+            format.encoding
+        )));
+    }
     let rate = u64::from(format.sample_rate.get());
     let channels = usize::from(format.channels.get());
     if format.encoding == AudioEncoding::PcmS16le && channels == 1 && rate == RATE {
@@ -49,6 +58,9 @@ pub fn encode_pcm16_24k(frame: &AudioFrame) -> Result<Vec<u8>, RealtimeError> {
                     }
                     AudioEncoding::PcmF32le => {
                         f32::from_le_bytes([channel[0], channel[1], channel[2], channel[3]])
+                    }
+                    AudioEncoding::PcmMulaw | AudioEncoding::PcmAlaw => {
+                        unreachable!("G.711 frames are refused above")
                     }
                 })
                 .sum();
