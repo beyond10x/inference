@@ -28,6 +28,10 @@ const INPUT_CAPACITY: usize = 64;
 /// Output frames buffered ahead of the reader.
 const OUTPUT_CAPACITY: usize = 256;
 
+/// The kind of a failed stream start the service itself refused, with which its
+/// [`NovaSonicError::Connect`] message begins.
+pub(crate) const SERVICE_ERROR: &str = "the service returned an error";
+
 /// A Nova Sonic client: a Bedrock runtime client and the model id it invokes.
 #[derive(Debug, Clone)]
 pub struct NovaSonic {
@@ -176,7 +180,7 @@ fn failure_kind<E, R>(error: &SdkError<E, R>) -> &'static str {
             "dispatch failure: credentials, configuration or connection"
         }
         SdkError::ResponseError(_) => "the response could not be read",
-        SdkError::ServiceError(_) => "the service returned an error",
+        SdkError::ServiceError(_) => SERVICE_ERROR,
         _ => "an unknown failure",
     }
 }
