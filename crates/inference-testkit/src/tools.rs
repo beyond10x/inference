@@ -16,6 +16,9 @@
 //! [`ToolsDomain::tools_view`] and [`ToolsDomain::tool_calls_view`]; both are `read_your_writes`,
 //! and every row is read from the stores at the call.
 //!
+//! [`MockToolExecutor`] is the scripted mock of the executor contract of `inference-tools`: a
+//! table of tools, each with a [`Script`], and a log of every [`Invocation`] it received.
+//!
 //! [`Tool::declare_as`]: inference_tools::Tool::declare_as
 //! [`ToolCall`]: inference_tools::ToolCall
 //! [`StreamDomain`]: crate::stream::StreamDomain
@@ -592,6 +595,11 @@ impl ToolsDomain {
             .collect()
     }
 }
+
+/// The scripted mock of the executor contract, with its log of invocations.
+mod mock_tool_executor;
+
+pub use mock_tool_executor::{Invocation, MockToolExecutor, Script};
 
 #[cfg(test)]
 mod tests {
