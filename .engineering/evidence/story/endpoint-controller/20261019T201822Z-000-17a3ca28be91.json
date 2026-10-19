@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T20:18:22Z",
+  "actor": "human:timo",
+  "artifact": "story:endpoint-controller",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --all-features --test endpoint_controller (VERIFIED, new behaviour: on base cf6bc47 with inert nodes the two acceptance cases fail, \"the first tone opens a turn\" and 0 refusals where 2 were expected; treatment passes 3 cases, 20 of 20 repeats; the adversary's drained-run case was red until closed edges were handled like stop, its 4 other cases each kill a mutant the unit's suite let through; a vad case fails on an undeclared envelope kind; conform 296 of 317, 21 unsupported, unchanged)"
+  }
+}

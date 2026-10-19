@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T20:15:46Z",
+  "actor": "human:timo",
+  "artifact": "story:endpoint-controller",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-endpoint-controller-pass-1",
+    "reference": "F2 pipeline turn_policy.rs a refused OpenTurn is recorded TurnOutcome::NotOpened and the node goes on; endpoint_controller refusing-store case",
+    "review": "review-result:adversary-endpoint-controller-pass-1",
+    "outcome": "fixed"
+  }
+}

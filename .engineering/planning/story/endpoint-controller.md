@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:endpoint-controller
 kind: story
-status: draft
+status: implemented
 title: 'Endpoint controller: VAD and turn-policy nodes complete turns'
 summary: A deterministic energy VAD node and a turn-policy node open and complete inference.stream Turns as the single turn authority; no new noun.
 relations:
@@ -32,7 +32,11 @@ scope:
   path: crates/inference-testkit/src/stt.rs
 - confidence: cited
   path: crates/inference-testkit/src/stt/synthetic_audio.rs
-revision: 17
+revision: 22
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T19:33:33Z", actor: "human:timo", revision: 18, decided_on: {"recorded":{"review_outcome":4}}}
+- {from: "proposed", to: "active", at: "2026-10-19T19:33:34Z", actor: "human:timo", revision: 19, decided_on: {"recorded":{"review_outcome":4}}}
+- {from: "active", to: "implemented", at: "2026-10-19T20:18:22Z", actor: "human:timo", revision: 22, decided_on: {"recorded":{"test_result":1,"review_outcome":13,"verification":1}}}
 ---
 ## Context
 
@@ -146,3 +150,13 @@ body names, checked against `ess/` and the neighbour bodies.
 - **Confidence:** high — the body names every file it creates or edits and the round-2 fix settled the shared registration files; the three inferred lines are one-line registration edits the named files force, in manifests that do not exist yet
 - **Would collide with:** any unit editing `crates/inference-pipeline/src/nodes/mod.rs` or the `[dependencies]` table of `crates/inference-pipeline/Cargo.toml` (the authority story, ordered by `depends_on`; `story:tool-feedback-loop` and `story:tool-safe-retries` edit `tool_authority.rs` and `tool_executor.rs`, different files); any unit editing the testkit's `stt` module file or the `[dependencies]`/`[features]` tables of `crates/inference-testkit/Cargo.toml` (six stories record that file, all upstream of this one through `story:text-pipeline-end-to-end depends_on epic:contracts-and-testkit`); any unit adding to `[dev-dependencies]` of `crates/inference-runtime/Cargo.toml`; `Cargo.lock` once it exists (every dependency-adding unit; regenerated, not merged, so not recorded as an entry); and, without a shared file, any unit changing the node-instance trait signature in `inference-pipeline` or `Turn`/`CompleteTurn` in `inference-text`, an API break rather than a textual conflict — cited
 - **Safety fact:** the nodes issue only `OpenTurn` and `CompleteTurn`, whose store, outcomes and `wrong-state` refusal already exist (`ess/domains/stream.yaml:308-355`) and are already claimed passing by `story:inbound-text-spans-and-envelope`, so this story moves no `ess/` line and no `ess/SKIPPED.md` line and cannot turn `tests/conform.rs` red, and every edit to an existing file is an additive registration line (`mod.rs`, `Cargo.toml`) — step 2 (`file:line`), unproven. Where the symbol search stops: whether `inference-audio` reaches the testkit through the `stt` feature (Cargo exposes direct dependencies only; the body's claim is step 1), and whether `inference-audio` is a "declared port type" `inference-pipeline` may depend on (`docs/design/inference.md:241`, the body's reading; `AGENTS.md` Rules keep that crate free of model, backend and provider implementations, and an energy threshold is none of those) — step 1, unproven
+
+## Gaps left by wave 15
+
+- The speech activity between the detector and the turn policy is declared in `ess/domains/stream.yaml`
+  as `inference.stream.SpeechStarted` (onset) and `inference.stream.SpeechEnded` (offset); the
+  envelope kinds are those names (adversary pass 1, F3, fixed in this wave).
+- The endpoint latency is not measured (Out of scope).
+- A run whose consumer node fails still waits for a cancel: the source's `stop` meets a closed edge
+  and `drive()` does not end. Already recorded under story:tool-call-interruption, "Gaps left by
+  wave 14"; the F2 case reached it while red.

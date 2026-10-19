@@ -14,7 +14,7 @@ serde.workspace = true
 
 [dev-dependencies]
 inference-llm = { path = "../inference-llm" }
-inference-testkit = { path = "../inference-testkit", features = ["llm", "run"] }
+inference-testkit = { path = "../inference-testkit", features = ["llm", "run", "stt"] }
 inference-text = { path = "../inference-text" }
 inference-tools = { path = "../inference-tools" }
 serde_json.workspace = true

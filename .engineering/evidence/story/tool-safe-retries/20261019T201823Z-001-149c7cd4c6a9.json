@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T20:18:23Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-safe-retries",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check (5 steps, each exit 0; cargo test 991 passed, 0 failed) (wave/15 3b19c20)"
+  }
+}
