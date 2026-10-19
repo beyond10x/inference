@@ -25,7 +25,7 @@ scope:
   path: crates/inference-testkit/src/mock_tool_executor.rs
 - confidence: cited
   path: crates/inference-tools
-revision: 13
+revision: 14
 ---
 ## Context
 
@@ -132,3 +132,17 @@ absent), so every `crates/` path is one the plan declares, not one on disk.
 - **Confidence:** medium — the executor node, the mock executor and `inference-tools` are named in the body and the authority node by a `depends_on` neighbour, but the LLM node, one of the four behaviour bullets, has a file in no body and is placed only through an upstream inferred entry, and the test file is named only as "beside the loop test"
 - **Would collide with:** any unit touching `crates/inference-pipeline/src/nodes/tool_executor.rs` or `tool_authority.rs`; `crates/inference-testkit/src/mock_tool_executor.rs`; the executor contract in `crates/inference-tools`; the model node or mock LLM in `crates/inference-testkit/src/llm.rs`; and, without sharing a file, any unit changing the ToolCall terminal set or the rejection-reason enum (`crates/inference-tools`, `ess/domains/tools.yaml`) or how generation events reach nodes in `crates/inference-runtime`
 - **Safety fact:** Completed, Failed and Rejected are terminal and `reject` leaves only Proposed and Authorized (`story:tool-call-lifecycle` step 1), and `superseded` is a variant of the rejection enum that story declares (step 4), so a supersede can move no Completed call and the no-rollback rule (design 856) is a property of the state machine, not a guard this story adds at each sink; the story adds no `ess/` noun, so the synthesized suite and `ess/SKIPPED.md` are unchanged — step 1 for the machine (stated in the lifecycle body; `ess/domains/tools.yaml:131-134` still has Proposed only, so no `file:line` exists for it), unproven. Where the symbol search stops: which ToolCall store the authority and executor share, so that `StartToolCall` on a call just rejected `superseded` answers `wrong-state` instead of starting (named nowhere); how `GenerationSuperseded` reaches the three nodes (design 636, no body places it); the `cancelled` log entry, a mock-internal record with no `ess/` noun — unproven
+
+## Gaps left by wave 14
+
+From wave 14 (`review-result:adversary-tool-authority-and-executor-nodes-pass-1`, the fix round's
+"Not done"):
+
+- The tool authority and executor nodes check the cancel flag and then send
+  (`crates/inference-pipeline/src/nodes/`); a cancel landing between the check and the send can
+  still let one envelope through. This story owns behaviour on interruption, so it closes that
+  window (or states why one late envelope is harmless downstream).
+- A consumer node whose exchange fails drops its input; the source's `stop` is then refused with
+  `Closed` and the run waits until it is cancelled. `crates/inference-runtime/src/drive.rs`
+  documents the gap (a source that ends without `stop` never drains the run). A failed node
+  should end the run; the run controller's `fail_node` is the path.
