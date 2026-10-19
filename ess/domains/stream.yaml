@@ -917,9 +917,33 @@ events:
   # each event below is the payload of one, named by the envelope's kind.
   # read from: docs/design/inference.md:303-318
   # UNMAPPED: design event names not declared here (names are not frozen,
-  # docs/design/inference.md:342): SpeechStarted, SpeechEnded (STT), StructuredOutput (LLM),
-  # SynthesisStarted, AudioChunk and alignment updates (TTS), and the duplex family
-  # (docs/design/inference.md:334-337). No command here causes them yet.
+  # docs/design/inference.md:342): StructuredOutput (LLM), SynthesisStarted, AudioChunk and
+  # alignment updates (TTS), and the duplex family (docs/design/inference.md:334-337). No command
+  # here causes them yet.
+
+  # Speech activity started in the audio of a stream: onset is the sample clock position of the
+  # first sample of the speech. A voice activity detector, a policy node, emits it; no command of
+  # this domain causes it, and a turn policy reads it to open a turn. VAD is not full turn-taking
+  # by itself, so the event opens no turn of its own.
+  # read from: docs/design/inference.md:334
+  # read from: docs/design/inference.md:466
+  # read from: docs/design/inference.md:917
+  - name: inference.stream.SpeechStarted
+    fields:
+      - name: onset
+        type: inference.audio.SampleClockPosition
+
+  # Speech activity ended in the audio of a stream: offset is the sample clock position of the
+  # first sample after the speech. A voice activity detector emits it once the silence has lasted
+  # its hold time, or at the end of input; a turn policy reads it as the endpoint of a turn.
+  # read from: docs/design/inference.md:334
+  # read from: docs/design/inference.md:466
+  # read from: docs/design/inference.md:917
+  - name: inference.stream.SpeechEnded
+    fields:
+      - name: offset
+        type: inference.audio.SampleClockPosition
+
   - name: inference.stream.TurnOpened
     fields:
       - name: turn_id

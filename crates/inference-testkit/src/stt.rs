@@ -18,6 +18,8 @@
 //! At the end of input every cue left runs, whatever its frame count. [`frames`] is a fixture of
 //! silent frames and [`script`] a script fitting six of them; [`stream_envelope`] carries an
 //! event of the mock into the [`EventLog`](crate::stream::EventLog) of the stream domain.
+//! [`synthetic_audio`] generates frames of tone and silence, such as the speech and pauses a voice
+//! activity detector is tested on.
 //!
 //! It declares a maximum concurrency of one and holds to it: while one recognition of a
 //! recogniser, or of a clone of it, runs, a second start is refused with
@@ -67,6 +69,13 @@ use inference_stt::{
 };
 
 use crate::stream::StreamEvent;
+
+/// The STT contract the mock implements, re-exported with the vocabulary crates it re-exports, so
+/// that a test reaches `inference-audio`'s frames through the testkit alone.
+pub use inference_stt;
+
+/// Synthetic audio: tone and silence, generated, never recorded.
+pub mod synthetic_audio;
 
 /// What a [`MockRecogniser`] claims, and so how it behaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
