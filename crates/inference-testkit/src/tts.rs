@@ -23,6 +23,10 @@
 //! [`SynthesisHandle::acknowledge_playback`] with the [`PlaybackReceipt`] it makes by consuming
 //! them.
 //!
+//! Behind the `run` feature, `TtsNode` is the graph node of a voice pipeline over the mock: it
+//! synthesises every committed segment an LLM node emits and, playing, acknowledges its playback
+//! through the sink double.
+//!
 //! It declares a maximum concurrency of one and holds to it: while one synthesis of a
 //! synthesiser, or of a clone of it, runs, a second start is refused with
 //! [`ConcurrencyLimitReached`]. A synthesis runs until its handle is dropped.
@@ -77,6 +81,18 @@ use inference_tts::{
     FrameOfAnotherSegment, OfferRefused, PlaybackReceipt, PlaybackRefused, SegmentAudio,
     SegmentNotHeld, SynthesisEvent, SynthesisHandle, SynthesisOutput, Synthesiser, UtteranceEnded,
 };
+
+/// The TTS contract the mock implements, re-exported with the vocabulary crates it re-exports, so
+/// that a test reaches `inference-tts`' types through the testkit alone.
+pub use inference_tts;
+
+/// The mock TTS node of a voice pipeline, behind the `run` feature: a [`TtsNode`] synthesises the
+/// committed segments of an LLM node on one synthesis of a [`MockSynthesiser`].
+#[cfg(feature = "run")]
+mod node;
+
+#[cfg(feature = "run")]
+pub use node::{Spoken, TtsHandle, TtsNode, TtsPayload};
 
 /// What a [`MockSynthesiser`] claims, and so how it behaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -9,13 +9,14 @@ repository.workspace = true
 publish = false
 
 [features]
-run = ["dep:inference-runtime"]
+run = ["dep:inference-runtime", "dep:inference-facade"]
 stt = ["dep:inference-stt"]
 llm = ["dep:inference-llm", "inference-llm/tools"]
 tts = ["dep:inference-tts"]
 
 [dependencies]
 inference-core = { path = "../inference-core" }
+inference-facade = { path = "../inference-facade", optional = true }
 inference-llm = { path = "../inference-llm", optional = true }
 inference-pipeline = { path = "../inference-pipeline" }
 inference-runtime = { path = "../inference-runtime", optional = true }
