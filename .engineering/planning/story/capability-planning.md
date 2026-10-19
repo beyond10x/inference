@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:capability-planning
 kind: story
-status: draft
+status: implemented
 title: 'Plan a pipeline: effective capabilities from the weakest node and the capability-mismatch refusal'
 summary: PlanPipeline, §8.3 intersection as a property test, A-13 refusal naming node and capability
 relations:
@@ -24,7 +24,11 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 17
+revision: 22
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T07:56:59Z", actor: "human:timo", revision: 18}
+- {from: "proposed", to: "active", at: "2026-10-19T07:56:59Z", actor: "human:timo", revision: 19}
+- {from: "active", to: "implemented", at: "2026-10-19T08:29:22Z", actor: "human:timo", revision: 22, decided_on: {"recorded":{"test_result":1,"review_outcome":6,"verification":1}}}
 ---
 # Story: capability-planning
 
@@ -105,3 +109,20 @@ Derived 2026-10-19 by `story-scoper`. Every line is **cited** (read from the sto
 Added 2026-10-19 from wave 8 (`review-result:adversary-pipeline-validation-pass-1`, acceptance note).
 
 `story:pipeline-validation` step 3 asked for "the Validated form of the typed builder" as the return value; it was not built: `inference_pipeline::Builder::build` (`crates/inference-pipeline/src/builder.rs`) still returns the bare pipeline identity, and validation is a separate call by that identity. Planning is the first consumer that needs a validated pipeline, so this story gives the typed builder a validated form: a handle that only `ValidatePipeline`'s `validated` outcome produces, and that planning takes, so planning an unvalidated pipeline does not compile through the builder.
+
+## No required path
+
+Decided in wave 9 after adversary pass 1:
+
+- When the pipeline has no essential source-to-sink path, every bound node contributes its
+  adapters to the intersection. A capability the pipeline requires and a contributing adapter
+  lacks is refused `CapabilityMismatch` with no node, as `ess/domains/graph.yaml` words the
+  `mismatch` outcome ("a mandatory capability of a node or of the pipeline is not implemented by
+  its bound adapter").
+- A pipeline with no node has no contributing adapter, so nothing falls short and it plans, with
+  an empty effective set: no capability is claimed that no adapter implements. The conform
+  scenario `PlanPipeline/outcome/planned` plans such a pipeline.
+- A forced planning outcome in the testkit target carries every non-Optional field of its
+  declared error: the planner's own finding where it has one, otherwise a deterministic value
+  (the first declared node; the first capability the pipeline requires, else the first of
+  `Capability::ALL`). `locality-denied` likewise.

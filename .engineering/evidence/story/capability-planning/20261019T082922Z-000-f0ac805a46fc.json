@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T08:29:22Z",
+  "actor": "human:timo",
+  "artifact": "story:capability-planning",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-pipeline -p inference-testkit --all-features (VERIFIED, new behaviour: baseline wave/9 55ffd7f answers PlanPipeline unsupported and has no Declaration::plan; treatment passes planning 13, adversary1_planning 5 + 33, conform 32 with 52 of 229 scenarios passed: A-13 tool_calling refusal naming node and capability, NodeUnbound naming the node, the intersection property)"
+  }
+}
