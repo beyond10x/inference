@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T06:18:31Z",
+  "actor": "human:timo",
+  "artifact": "story:inbound-text-spans-and-envelope",
+  "kind": "story",
+  "revision": 30,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check (5 steps, each exit 0; cargo test 260 passed, 0 failed) (wave/5 93d3014)"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T06:18:30Z",
+  "actor": "human:timo",
+  "artifact": "story:inbound-text-spans-and-envelope",
+  "kind": "story",
+  "revision": 30,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-testkit --all-features --test conform and --test envelope (VERIFIED: baseline wave/5 75df5fb passes 12 of 229 and has no envelope; treatment impl/inbound-text-spans-and-envelope passes 15, adding CommitSpan/wrong-state, CompleteTurn/wrong-state and ReviseSpan/no-such-span, failed 0, error 0; the event log refuses a duplicate id, a non-increasing sequence, a kind mismatch and a generation mismatch)"
+  }
+}

@@ -27,15 +27,18 @@ const MODEL_SCENARIOS: [&str; 4] = [
     "inference.model.DeclareAdapter/outcome/unknown-model",
 ];
 
-/// The eight `inference.stream` scenarios this target answers without a run.
-const STREAM_SCENARIOS: [&str; 8] = [
+/// The eleven `inference.stream` scenarios this target answers without a run.
+const STREAM_SCENARIOS: [&str; 11] = [
     "inference.stream.AcknowledgePlayback/outcome/wrong-state",
     "inference.stream.CancelGeneration/outcome/wrong-state",
     "inference.stream.CommitSegment/outcome/wrong-state",
+    "inference.stream.CommitSpan/outcome/wrong-state",
     "inference.stream.CompleteGeneration/outcome/wrong-state",
     "inference.stream.CompleteSynthesis/outcome/wrong-state",
+    "inference.stream.CompleteTurn/outcome/wrong-state",
     "inference.stream.DiscardSegment/outcome/wrong-state",
     "inference.stream.QueueForSynthesis/outcome/wrong-state",
+    "inference.stream.ReviseSpan/outcome/no-such-span",
     "inference.stream.SupersedeGeneration/outcome/wrong-state",
 ];
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:llm-contract
 kind: story
-status: draft
+status: implemented
 title: 'LLM contract with a mock generator: streaming and input-during-output verified apart'
 summary: inference-llm is the generation contract over Generation and OutputSegment; the testkit mock generator declares output_streaming apart from concurrent_input_output and §23.1 test 2 verifies the two independently.
 relations:
@@ -18,7 +18,11 @@ scope:
   path: crates/inference-testkit/src/llm.rs
 - confidence: inferred
   path: crates/inference-testkit/tests/llm.rs
-revision: 8
+revision: 11
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T05:24:21Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "proposed", to: "active", at: "2026-10-19T05:24:21Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "active", to: "implemented", at: "2026-10-19T06:18:32Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"test_result":1,"review_outcome":12,"verification":1}}}
 ---
 ## Context
 

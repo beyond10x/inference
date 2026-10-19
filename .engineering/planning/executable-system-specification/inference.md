@@ -8,7 +8,7 @@ summary: Six domains, 17 entities, 36 commands; validates on ess 0.60.0; 153 syn
 relations:
 - specifies: product-requirements:inference
 - derived_from: architecture-design:inference
-revision: 5
+revision: 8
 transitions:
 - {from: "draft", to: "validated", at: "2026-10-18T21:12:53Z", actor: "human:timo", revision: 2}
 ---
@@ -21,18 +21,23 @@ transitions:
 | `ess/domains/model.yaml` | `inference.model`: Model, Adapter; Capability, Modality, Locality, ExecutionForm |
 | `ess/domains/policy.yaml` | `inference.policy`: DeploymentProfile; ProfileKind, Egress |
 | `ess/domains/graph.yaml` | `inference.graph`: Pipeline, Node, Port, Edge, Binding, Run, NodeInstance; the run lifecycle |
-| `ess/domains/stream.yaml` | `inference.stream`: Turn, Span, Generation, OutputSegment; the provisional/committed/irreversible state machine |
+| `ess/domains/stream.yaml` | `inference.stream`: Turn, Span, Generation, OutputSegment; the provisional/committed/irreversible state machine; the event envelope (EventEnvelope, Timebase, EventId) |
 | `ess/domains/tools.yaml` | `inference.tools`: Tool, ToolCall; the provisional-input barrier |
 | `ess/domains/session.yaml` | `inference.session`: Session |
 | `ess/domains/audio.yaml` | `inference.audio`: types only; AudioEncoding, AudioFormat, SampleClockPosition, AudioFrame |
 
 Every declaration carries a `read from: docs/design/inference.md:<line>` comment naming the design
-line it was read from (258 such lines across the seven documents, `grep -c 'read from:'`).
+line it was read from (282 such lines across the seven documents, `grep -c 'read from:'`).
 
 ## What it declares
 
-From `ess specify compile --path ess --format json`: 17 entities, 36 commands, 36 events,
-13 errors, 17 views, 49 types.
+From `ess specify compile --path ess --format json`: 17 entities, 41 commands, 40 events,
+34 errors, 17 views, 60 types (2026-10-19, after story:inbound-text-spans-and-envelope; before it
+the same compile read 57 types and every other count as now). The three new types are
+`inference.stream.EventId` (newtype of Uuid), `inference.stream.Timebase` (enum:
+audio_frame_time, inference_execution_time, wall_time, playback_time) and
+`inference.stream.EventEnvelope` (struct: schema_version, event_id, run_id, session_id, stream_id,
+sequence, producer, port, kind, generation_id, timestamp, timebase, causation_id, payload).
 
 ## Evidence
 
@@ -42,6 +47,8 @@ From `ess specify compile --path ess --format json`: 17 entities, 36 commands, 3
 | `ess verify conform synthesize --path ess --out .engineering/drafts/suite.json` | `153 scenario(s) (0 authored), 0 refusal(s)`, 0 notes | 2026-10-18 |
 | `ess specify validate --path ess`, after `inference.audio` (story:audio-vocabulary) | `inference v1 — 8 file(s), 4 scenario(s), valid`, exit 0 (before: `7 file(s), 4 scenario(s), valid`) | 2026-10-19 |
 | `ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json`, after `inference.audio` (story:audio-vocabulary) | `229 scenario(s) (4 authored), 3 refusal(s)`, exit 0; before the domain the same `229 scenario(s) (4 authored), 3 refusal(s)`, the 229 scenario ids identical and the three refusals the ESS-SYNTH-001 ones on `inference.graph.CancelRun/cancelled`, `inference.stream.CancelGeneration/cancelled` and `inference.stream.SupersedeGeneration/superseded`; the domain declares `types:` only | 2026-10-19 |
+| `ess specify validate --path ess`, after the event envelope (story:inbound-text-spans-and-envelope) | `inference v1 — 8 file(s), 4 scenario(s), valid`, exit 0 (before: the same line) | 2026-10-19 |
+| `ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json`, after the event envelope (story:inbound-text-spans-and-envelope) | `229 scenario(s) (4 authored), 3 refusal(s)`, exit 0; before the declaration the same; the 229 scenario ids and their bodies identical, inference.stream 83; the change declares `types:` only | 2026-10-19 |
 
 Scenarios per domain, 2026-10-19 (229 with `--scenarios ess/scenarios`): graph 104, stream 83, session 21, tools 13, model 4, policy 4. On 2026-10-18 (153, before the specification fixes): graph 85, stream 60, model 3, tools 3, policy 1, session 1.
 

@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T06:15:08Z",
+  "actor": "human:timo",
+  "artifact": "story:llm-contract",
+  "kind": "story",
+  "revision": 10,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-llm-contract-pass-2",
+    "reference": "F3 inference-llm/src/lib.rs:185 no PartialEq",
+    "review": "review-result:adversary-llm-contract-pass-2",
+    "outcome": "fixed"
+  }
+}
