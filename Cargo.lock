@@ -272,6 +272,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-pipeline"
+version = "0.3.0"
+dependencies = [
+ "inference-core",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "inference-stt"
 version = "0.3.0"
 dependencies = [
@@ -288,6 +298,7 @@ dependencies = [
  "ess-primitives",
  "inference-core",
  "inference-llm",
+ "inference-pipeline",
  "inference-stt",
  "inference-text",
  "serde",
