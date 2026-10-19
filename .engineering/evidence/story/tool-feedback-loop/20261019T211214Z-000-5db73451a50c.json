@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T21:12:14Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-feedback-loop",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-tool-feedback-loop-pass-1",
+    "reference": "F7 pipeline validation.rs check 5 reads only the pipeline's own feedback loops; guarded by adversary1_feedback_validation",
+    "review": "review-result:adversary-tool-feedback-loop-pass-1",
+    "outcome": "fixed"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T21:20:17Z",
+  "actor": "human:timo",
+  "artifact": "story:session-run-link",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-testkit --all-features --test conform (VERIFIED, new behaviour: on base 78ab255 with the spec change and no store the run fails, 296 passed and 28 unsupported of 324, first failure AttachRun/outcome/attached; treatment passes 324 of 324 with none unsupported; the adversary's three cases each kill a mutant the 28 pinned scenarios let through; testkit 747 passed)"
+  }
+}

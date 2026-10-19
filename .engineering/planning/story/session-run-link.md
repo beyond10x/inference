@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:session-run-link
 kind: story
-status: active
+status: implemented
 title: Session to Run link declared and the session store answering its scenarios
 summary: A session references its current run, attach and ready are guarded, and the testkit answers every inference.session scenario.
 relations:
@@ -21,10 +21,11 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/session.yaml
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T20:42:41Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-10-19T20:42:41Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-19T21:20:17Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":5,"verification":1}}}
 ---
 ## Context
 

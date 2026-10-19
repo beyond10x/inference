@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T21:20:16Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-feedback-loop",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --all-features --test tool_feedback_loop (VERIFIED, new behaviour: on base 0bc17d0 with stubs the acceptance cases fail 3 of 3, the bounded cycle refused UnboundedCycle and no decision or rejection recorded; treatment passes 5 cases, 20 of 20 repeats; with the authority's exhausted check disabled or the node integrating exhausted, the exhausted case fails; with the declared bound ignored the declared-bound case fails; the adversary's 3 red cases now pass and its 8 guards kill 4 mutants; conform 302 of 323 on this base, 21 unsupported)"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T21:16:21Z",
+  "actor": "human:timo",
+  "artifact": "story:session-run-link",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-session-run-link-pass-1",
+    "reference": "F5 ess session.yaml re-attaching the held run: UNMAPPED marker with the ESS-SYNTH-003 refusal; testkit session.rs case pins the current behaviour",
+    "review": "review-result:adversary-session-run-link-pass-1",
+    "outcome": "fixed"
+  }
+}

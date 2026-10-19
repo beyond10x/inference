@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:tool-feedback-loop
 kind: story
-status: active
+status: implemented
 title: LLM to executor feedback loop with a bounded iteration rule
 summary: The LLM node gains tool_call and tool_result ports, the cycle through authority and executor is bounded, the result reinjects on the same generation, and the proposal past the bound is rejected as exhausted.
 relations:
@@ -38,10 +38,11 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 21
+revision: 22
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T20:29:31Z", actor: "human:timo", revision: 20, decided_on: {"recorded":{"review_outcome":1}}}
 - {from: "proposed", to: "active", at: "2026-10-19T20:29:31Z", actor: "human:timo", revision: 21, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "active", to: "implemented", at: "2026-10-19T21:20:16Z", actor: "human:timo", revision: 22, decided_on: {"recorded":{"test_result":1,"review_outcome":10,"verification":1}}}
 ---
 ## Context
 
