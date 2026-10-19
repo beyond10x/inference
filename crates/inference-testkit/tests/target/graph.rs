@@ -1,9 +1,10 @@
-//! `inference.graph`: the five declaration commands and `ValidatePipeline`, the five views and the
-//! six events of `ess/domains/graph.yaml`, answered by [`GraphDomain`].
+//! `inference.graph`: the five declaration commands, `ValidatePipeline` and `PlanPipeline`, the
+//! five views and the seven events of `ess/domains/graph.yaml`, answered by [`GraphDomain`].
 //!
 //! Each request field is read on its own ([`Input`]); the outcome, the error and the event come
-//! from what the store returned. `DeclarePipeline` and `BindNode` read the declared profiles and
-//! adapters through [`GraphCatalog`] over the `inference.policy` and `inference.model` stores. A
+//! from what the store returned. `DeclarePipeline`, `BindNode` and `PlanPipeline` read the
+//! declared profiles and adapters through [`GraphCatalog`] over the `inference.policy` and
+//! `inference.model` stores. A
 //! command's consistency token is the target's ([`Stores::token`]), and a read demanding a token
 //! the stores have not reached is an error ([`Stores::require`]). An observed event's position is
 //! its place in the target's one publication order ([`Stores::graph_position`]).
@@ -15,9 +16,18 @@
 //! the findings the checks make over that pipeline, none for a valid or unknown one, and moves
 //! nothing.
 //!
-//! Planning and runs (`PlanPipeline`, the run commands, the views `Runs` and `NodeInstances` and
-//! their events) are [`TargetError::Unsupported`]: no store decides them yet, and they are not
-//! faked. `ess/SKIPPED.md` names the story for each.
+//! `PlanPipeline` naming a pipeline no record carries takes `wrong-state` the same way. Its
+//! outcomes `unbound`, `mismatch` and `locality-denied` are declared `external`: the store takes
+//! the first two when planning finds them, and a scenario may force any of the three on the next
+//! invocation, which then moves nothing and answers the forced error with every field its
+//! declaration does not make `Optional`: what the planner finds for that same refusal over that
+//! pipeline, and otherwise a stand-in read from the declaration ([`forced_plan`]). The store never
+//! decides `locality-denied` (check 8 is not planned yet), so a forced one always carries
+//! stand-ins.
+//!
+//! Runs (the run commands, the views `Runs` and `NodeInstances` and their events) are
+//! [`TargetError::Unsupported`]: no store decides them yet, and they are not faked.
+//! `ess/SKIPPED.md` names the story for each.
 
 use std::collections::BTreeMap;
 
@@ -28,14 +38,17 @@ use ess_conformance::target::{
     TargetError, ViewRow,
 };
 use ess_primitives::node::Node;
-use inference_core::model::Capability;
+use inference_core::model::{AdapterId, Capability, Locality};
+use inference_core::policy::ProfileId;
 use inference_pipeline::{
-    AddNode, AddNodeError, AddPort, BindNode, BindNodeError, Binding, ConnectPorts,
-    ConnectPortsError, DeclarePipeline, Edge, GraphFinding, NodeAdded, NodeBound, PipelineDeclared,
-    PipelineNotFound, PipelineNotReady, PipelineValidated, Port, PortAdded, PortsConnected,
-    ValidatePipeline, ValidatePipelineError,
+    AddNode, AddNodeError, AddPort, BindNode, BindNodeError, Binding, CapabilityMismatch, Catalog,
+    ConnectPorts, ConnectPortsError, Declaration, DeclarePipeline, Edge, GraphFinding, NodeAdded,
+    NodeBound, NodeId, NodeUnbound, PipelineDeclared, PipelineId, PipelineNotFound,
+    PipelineNotReady, PipelinePlanned, PipelineValidated, PlanPipeline, PlanPipelineError, Port,
+    PortAdded, PortsConnected, ValidatePipeline, ValidatePipelineError,
 };
 use inference_testkit::graph::{GraphCatalog, GraphDomain, GraphEvent};
+use uuid::Uuid;
 
 use super::{
     Input, Stores, boolean_node, integer_node, named_list_node, named_node, text_node, unreadable,
@@ -51,9 +64,14 @@ const ADD_PORT: &str = "inference.graph.AddPort";
 const CONNECT_PORTS: &str = "inference.graph.ConnectPorts";
 const BIND_NODE: &str = "inference.graph.BindNode";
 const VALIDATE_PIPELINE: &str = "inference.graph.ValidatePipeline";
+const PLAN_PIPELINE: &str = "inference.graph.PlanPipeline";
 
-/// The one outcome of an answered command that `ess/domains/graph.yaml` declares external.
+/// The outcome of `ValidatePipeline` that `ess/domains/graph.yaml` declares external.
 const REJECTED: &str = "rejected";
+/// The outcomes of `PlanPipeline` that `ess/domains/graph.yaml` declares external.
+const UNBOUND: &str = "unbound";
+const MISMATCH: &str = "mismatch";
+const LOCALITY_DENIED: &str = "locality-denied";
 
 const PIPELINE_DECLARED: &str = "inference.graph.PipelineDeclared";
 const NODE_ADDED: &str = "inference.graph.NodeAdded";
@@ -61,6 +79,7 @@ const PORT_ADDED: &str = "inference.graph.PortAdded";
 const PORTS_CONNECTED: &str = "inference.graph.PortsConnected";
 const NODE_BOUND: &str = "inference.graph.NodeBound";
 const PIPELINE_VALIDATED: &str = "inference.graph.PipelineValidated";
+const PIPELINE_PLANNED: &str = "inference.graph.PipelinePlanned";
 
 const PROFILE_NOT_FOUND: &str = "inference.policy.ProfileNotFound";
 const PIPELINE_NOT_FOUND: &str = "inference.graph.PipelineNotFound";
@@ -71,6 +90,9 @@ const UNBOUNDED_EDGE: &str = "inference.graph.UnboundedEdge";
 const INCOMPATIBLE_EDGE: &str = "inference.graph.IncompatibleEdge";
 const ADAPTER_NOT_FOUND: &str = "inference.graph.AdapterNotFound";
 const INCOMPATIBLE_GRAPH: &str = "inference.graph.IncompatibleGraph";
+const NODE_UNBOUND: &str = "inference.graph.NodeUnbound";
+const CAPABILITY_MISMATCH: &str = "inference.graph.CapabilityMismatch";
+const LOCALITY_DENIED_ERROR: &str = "inference.graph.LocalityDenied";
 const PIPELINE_STATE_CONFLICT: &str = "inference.graph.PipelineStateConflict";
 
 const PIPELINES: &str = "inference.graph.Pipelines";
@@ -101,24 +123,31 @@ pub fn execute_command(
         CONNECT_PORTS => connect_ports(domain, request)?,
         BIND_NODE => bind_node(domain, &catalog, request)?,
         VALIDATE_PIPELINE => validate_pipeline(domain, forced.is_some(), request)?,
+        PLAN_PIPELINE => plan_pipeline(domain, &catalog, forced.as_ref(), request)?,
         _ => return Err(unsupported(&name)),
     };
     stores.publish();
     Ok(result.with_consistency(stores.token()?))
 }
 
-/// Accepts a force of `ValidatePipeline/rejected`, the one external outcome of a command this
-/// module answers; refuses a force of another `ValidatePipeline` outcome as an error, as no
-/// specification-declared external outcome, and any other command's as unsupported.
+/// Accepts a force of `ValidatePipeline/rejected` or of `PlanPipeline/unbound`, `mismatch` or
+/// `locality-denied`, the external outcomes of the commands this module answers; refuses a force
+/// of another outcome of those two commands as an error, as no specification-declared external
+/// outcome, and any other command's as unsupported.
 pub fn configure_external_outcome(
     stores: &mut Stores,
     request: &ExternalOutcomeControl,
 ) -> Result<(), TargetError> {
     let command = request.force.command.to_string();
-    if command != VALIDATE_PIPELINE {
-        return Err(unsupported(&request.force.to_string()));
-    }
-    if request.force != outcome(VALIDATE_PIPELINE, REJECTED) {
+    let external: &[&str] = match command.as_str() {
+        VALIDATE_PIPELINE => &[REJECTED],
+        PLAN_PIPELINE => &[UNBOUND, MISMATCH, LOCALITY_DENIED],
+        _ => return Err(unsupported(&request.force.to_string())),
+    };
+    if !external
+        .iter()
+        .any(|branch| request.force == outcome(&command, branch))
+    {
         return Err(unreadable(
             format!("forcing `{}`", request.force),
             "it is not an outcome `ess/domains/graph.yaml` declares external",
@@ -348,6 +377,129 @@ fn rejected(findings: &[GraphFinding]) -> Result<SemanticCommandResult, TargetEr
     )
 }
 
+fn plan_pipeline(
+    domain: &mut GraphDomain,
+    catalog: &GraphCatalog<'_>,
+    forced: Option<&OutcomeRef>,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let plan = PlanPipeline {
+        pipeline_id: input.named("pipeline_id")?,
+    };
+    input.finish()?;
+    if let Some(forced) = forced {
+        return forced_plan(forced, domain.declaration(), catalog, plan.pipeline_id);
+    }
+    Ok(match domain.plan_pipeline(plan, catalog) {
+        Ok(event) => SemanticCommandResult::took(outcome(PLAN_PIPELINE, "planned"))
+            .emitting(pipeline_planned(&event)?.in_activity(request.correlation.clone())),
+        Err(PlanPipelineError::UnknownPipeline(_)) => {
+            SemanticCommandResult::took(outcome(PLAN_PIPELINE, "wrong-state")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(PIPELINE_STATE_CONFLICT)),
+            )
+        }
+        Err(PlanPipelineError::WrongState(conflict)) => {
+            SemanticCommandResult::took(outcome(PLAN_PIPELINE, "wrong-state")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(PIPELINE_STATE_CONFLICT))
+                    .with("current", named_node(&conflict.current)?),
+            )
+        }
+        Err(PlanPipelineError::Unbound(error)) => {
+            SemanticCommandResult::took(outcome(PLAN_PIPELINE, UNBOUND))
+                .with_error(node_unbound(error)?)
+        }
+        Err(PlanPipelineError::Mismatch(error)) => {
+            SemanticCommandResult::took(outcome(PLAN_PIPELINE, MISMATCH))
+                .with_error(capability_mismatch(error)?)
+        }
+    })
+}
+
+/// The answer of a forced `PlanPipeline` outcome: its error, carrying every field its declaration
+/// does not make `Optional`. Each is what the planner decides over that pipeline when it decides
+/// that same refusal; otherwise a stand-in read from the declaration, so that two runs answer
+/// alike: the pipeline's first declared node, the first capability it requires (else the first of
+/// [`Capability::ALL`]), and for `locality-denied` its first binding's node, adapter and that
+/// adapter's locality (else the first of [`Locality::ALL`]) with the pipeline's profile. Where no
+/// record names a node, an adapter or a profile, the nil identity stands in.
+fn forced_plan(
+    forced: &OutcomeRef,
+    declaration: &Declaration,
+    catalog: &GraphCatalog<'_>,
+    pipeline_id: PipelineId,
+) -> Result<SemanticCommandResult, TargetError> {
+    let decided = declaration.plan_of(pipeline_id, catalog);
+    let pipeline = declaration.pipeline(pipeline_id);
+    let first_node = declaration
+        .nodes()
+        .find(|node| node.pipeline_id() == pipeline_id)
+        .map_or_else(|| NodeId::from(Uuid::nil()), |node| node.node_id());
+    let error = if *forced == outcome(PLAN_PIPELINE, UNBOUND) {
+        node_unbound(match decided {
+            Err(PlanPipelineError::Unbound(error)) => error,
+            _ => NodeUnbound {
+                node_id: first_node,
+            },
+        })?
+    } else if *forced == outcome(PLAN_PIPELINE, MISMATCH) {
+        capability_mismatch(match decided {
+            Err(PlanPipelineError::Mismatch(error)) => error,
+            _ => CapabilityMismatch {
+                node_id: None,
+                capability: pipeline
+                    .and_then(|pipeline| pipeline.required_capabilities().first().copied())
+                    .unwrap_or(Capability::ALL[0]),
+            },
+        })?
+    } else {
+        let binding = declaration
+            .bindings()
+            .find(|binding| binding.pipeline_id() == pipeline_id);
+        let adapter_id = binding.map_or_else(
+            || AdapterId::from(Uuid::nil()),
+            |binding| binding.adapter_id(),
+        );
+        DeclaredErrorValue::new(parse::<ErrorRef>(LOCALITY_DENIED_ERROR))
+            .with(
+                "node_id",
+                named_node(&binding.map_or(first_node, |binding| binding.node_id()))?,
+            )
+            .with("adapter_id", named_node(&adapter_id)?)
+            .with(
+                "locality",
+                named_node(
+                    &catalog
+                        .adapter(adapter_id)
+                        .map_or(Locality::ALL[0], |adapter| adapter.locality()),
+                )?,
+            )
+            .with(
+                "profile_id",
+                named_node(&pipeline.map_or_else(
+                    || ProfileId::from(Uuid::nil()),
+                    |pipeline| pipeline.profile_id(),
+                ))?,
+            )
+    };
+    Ok(SemanticCommandResult::took(forced.clone()).with_error(error))
+}
+
+/// `NodeUnbound`, naming the node.
+fn node_unbound(error: NodeUnbound) -> Result<DeclaredErrorValue, TargetError> {
+    Ok(DeclaredErrorValue::new(parse::<ErrorRef>(NODE_UNBOUND))
+        .with("node_id", named_node(&error.node_id)?))
+}
+
+/// `CapabilityMismatch`, naming the node (null for the pipeline as a whole) and the capability.
+fn capability_mismatch(error: CapabilityMismatch) -> Result<DeclaredErrorValue, TargetError> {
+    Ok(
+        DeclaredErrorValue::new(parse::<ErrorRef>(CAPABILITY_MISMATCH))
+            .with("node_id", optional_node(error.node_id.as_ref())?)
+            .with("capability", named_node(&error.capability)?),
+    )
+}
+
 /// The node of an ESS `Optional` of a value [`named_node`] writes: null when absent.
 fn optional_node<T: serde::Serialize>(value: Option<&T>) -> Result<Node, TargetError> {
     value.map_or(Ok(Node::Null), named_node)
@@ -448,6 +600,7 @@ pub fn observe_events(
         PORTS_CONNECTED,
         NODE_BOUND,
         PIPELINE_VALIDATED,
+        PIPELINE_PLANNED,
     ]
     .contains(&wanted.as_str())
     {
@@ -463,6 +616,7 @@ pub fn observe_events(
             GraphEvent::PortsConnected(event) => ports_connected(event)?,
             GraphEvent::NodeBound(event) => node_bound(event)?,
             GraphEvent::PipelineValidated(event) => pipeline_validated(event)?,
+            GraphEvent::PipelinePlanned(event) => pipeline_planned(event)?,
         };
         if event.event == request.event {
             let position = stores.graph_position(index)?;
@@ -508,6 +662,11 @@ fn node_bound(event: &NodeBound) -> Result<ObservedEvent, TargetError> {
 
 fn pipeline_validated(event: &PipelineValidated) -> Result<ObservedEvent, TargetError> {
     Ok(ObservedEvent::new(parse::<EventRef>(PIPELINE_VALIDATED))
+        .with("pipeline_id", named_node(&event.pipeline_id)?))
+}
+
+fn pipeline_planned(event: &PipelinePlanned) -> Result<ObservedEvent, TargetError> {
+    Ok(ObservedEvent::new(parse::<EventRef>(PIPELINE_PLANNED))
         .with("pipeline_id", named_node(&event.pipeline_id)?))
 }
 
@@ -1132,27 +1291,30 @@ mod tests {
             matches!(&declared, Err(TargetError::Unavailable { .. })),
             "{declared:?}"
         );
-        let planning = force("inference.graph.PlanPipeline/mismatch");
+        let planned = force("inference.graph.PlanPipeline/planned");
         assert!(
-            matches!(&planning, Err(TargetError::Unsupported { .. })),
-            "{planning:?}"
+            matches!(&planned, Err(TargetError::Unavailable { .. })),
+            "{planned:?}"
+        );
+        let run = force("inference.graph.CreateRun/created");
+        assert!(
+            matches!(&run, Err(TargetError::Unsupported { .. })),
+            "{run:?}"
         );
     }
 
     #[test]
-    fn planning_and_runs_are_unsupported_not_faked() {
+    fn runs_are_unsupported_not_faked() {
         let mut stores = Stores::default();
-        for name in ["inference.graph.PlanPipeline", "inference.graph.CreateRun"] {
-            let answer = execute_command(&mut stores, &command(name, &[]));
-            assert!(
-                matches!(&answer, Err(TargetError::Unsupported { .. })),
-                "{name}: {answer:?}"
-            );
-        }
+        let answer = execute_command(&mut stores, &command("inference.graph.CreateRun", &[]));
+        assert!(
+            matches!(&answer, Err(TargetError::Unsupported { .. })),
+            "{answer:?}"
+        );
         let event = observe_events(
             &mut stores,
             &EventObservationRequest {
-                event: "inference.graph.PipelinePlanned"
+                event: "inference.graph.RunCreated"
                     .parse::<EventRef>()
                     .expect("an event name"),
                 correlation: correlation(),
@@ -1163,5 +1325,293 @@ mod tests {
             matches!(&event, Err(TargetError::Unsupported { .. })),
             "{event:?}"
         );
+    }
+
+    fn plan(stores: &mut Stores, pipeline_id: Node) -> SemanticCommandResult {
+        run(
+            stores,
+            "inference.graph.PlanPipeline",
+            &[("pipeline_id", pipeline_id)],
+        )
+    }
+
+    /// Forces `outcome`, written `<command>/<outcome>`, through the module.
+    fn force(stores: &mut Stores, outcome: &str) -> Result<(), TargetError> {
+        let (command, branch) = outcome.split_once('/').expect("a command and an outcome");
+        super::configure_external_outcome(
+            stores,
+            &ExternalOutcomeControl {
+                force: OutcomeRef::new(
+                    command.parse::<CommandRef>().expect("a command name"),
+                    branch.parse().expect("an outcome name"),
+                ),
+                correlation: correlation(),
+            },
+        )
+    }
+
+    fn state_of(stores: &mut Stores) -> Node {
+        rows(stores, "inference.graph.Pipelines")[0]["state"].clone()
+    }
+
+    /// A Validated pipeline holding one model node that requires `requires`, bound to the
+    /// adapter of [`adapter`] (which implements `output_streaming` only) when `bound`.
+    fn one_model(stores: &mut Stores, requires: &[&str], bound: bool) -> (Node, Node) {
+        let profile_id = profile(stores);
+        let pipeline_id = pipeline(stores, profile_id);
+        let node_id = emitted(
+            &run(
+                stores,
+                "inference.graph.AddNode",
+                &[
+                    ("pipeline_id", pipeline_id.clone()),
+                    ("name", text("llm")),
+                    ("role", text("model")),
+                    ("requires", list(requires)),
+                ],
+            ),
+            "node_id",
+        );
+        if bound {
+            let adapter_id = adapter(stores);
+            let bound = run(
+                stores,
+                "inference.graph.BindNode",
+                &[
+                    ("pipeline_id", pipeline_id.clone()),
+                    ("node_id", node_id.clone()),
+                    ("adapter_id", adapter_id),
+                ],
+            );
+            assert_eq!(branch(&bound), "inference.graph.BindNode/bound");
+        }
+        let validated = validate(stores, pipeline_id.clone());
+        assert_eq!(
+            branch(&validated),
+            "inference.graph.ValidatePipeline/validated"
+        );
+        (pipeline_id, node_id)
+    }
+
+    #[test]
+    fn a_validated_pipeline_is_planned_once_and_its_event_is_placed_in_order() {
+        let mut stores = Stores::default();
+        let profile_id = profile(&mut stores);
+        let pipeline_id = pipeline(&mut stores, profile_id);
+        validate(&mut stores, pipeline_id.clone());
+
+        let planned = plan(&mut stores, pipeline_id.clone());
+        assert_eq!(branch(&planned), "inference.graph.PlanPipeline/planned");
+        assert_eq!(emitted(&planned, "pipeline_id"), pipeline_id);
+        assert_eq!(planned.direct_events[0].payload.len(), 1);
+        assert_eq!(
+            planned.consistency.as_ref().map(|token| token.as_str()),
+            Some("seq:4")
+        );
+        let row = &rows(&mut stores, "inference.graph.Pipelines")[0];
+        assert_eq!(row["state"], text("Planned"));
+        assert_eq!(
+            row["effective_capabilities"],
+            list(&[]),
+            "a pipeline with no node has no effective capability"
+        );
+        assert_eq!(row["downgrades"], list(&[]));
+        let placed: Vec<_> = observed(&mut stores, "inference.graph.PipelinePlanned")
+            .iter()
+            .map(|event| (event.sequence, event.payload["pipeline_id"].clone()))
+            .collect();
+        assert_eq!(placed, [(Some(4), pipeline_id.clone())]);
+
+        for refused in [
+            plan(&mut stores, pipeline_id.clone()),
+            validate(&mut stores, pipeline_id),
+        ] {
+            assert!(
+                branch(&refused).ends_with("/wrong-state"),
+                "{}",
+                branch(&refused)
+            );
+            let error = refused.error.as_ref().expect("a declared error");
+            assert_eq!(
+                error.error.to_string(),
+                "inference.graph.PipelineStateConflict"
+            );
+            assert_eq!(
+                error.fields,
+                BTreeMap::from([("current".to_owned(), text("Planned"))])
+            );
+            assert!(refused.direct_events.is_empty());
+        }
+    }
+
+    #[test]
+    fn planning_a_declared_or_unknown_pipeline_is_wrong_state() {
+        let mut stores = Stores::default();
+        let profile_id = profile(&mut stores);
+        let pipeline_id = pipeline(&mut stores, profile_id);
+
+        let declared = plan(&mut stores, pipeline_id);
+        assert_eq!(
+            branch(&declared),
+            "inference.graph.PlanPipeline/wrong-state"
+        );
+        assert_eq!(
+            declared.error.as_ref().expect("a declared error").fields,
+            BTreeMap::from([("current".to_owned(), text("Declared"))])
+        );
+        assert_eq!(state_of(&mut stores), text("Declared"));
+
+        let unknown = plan(&mut stores, text(UNKNOWN));
+        assert_eq!(branch(&unknown), "inference.graph.PlanPipeline/wrong-state");
+        let error = unknown.error.as_ref().expect("a declared error");
+        assert_eq!(
+            error.error.to_string(),
+            "inference.graph.PipelineStateConflict"
+        );
+        assert!(error.fields.is_empty(), "{error:?}");
+    }
+
+    #[test]
+    fn a_node_short_of_tool_calling_is_refused_naming_the_node_and_the_capability() {
+        let mut stores = Stores::default();
+        let (pipeline_id, node_id) = one_model(&mut stores, &["tool_calling"], true);
+
+        let refused = plan(&mut stores, pipeline_id.clone());
+        assert_eq!(branch(&refused), "inference.graph.PlanPipeline/mismatch");
+        let error = refused.error.as_ref().expect("a declared error");
+        assert_eq!(
+            error.error.to_string(),
+            "inference.graph.CapabilityMismatch"
+        );
+        let fields = BTreeMap::from([
+            ("node_id".to_owned(), node_id),
+            ("capability".to_owned(), text("tool_calling")),
+        ]);
+        assert_eq!(error.fields, fields);
+        assert!(refused.direct_events.is_empty());
+        assert_eq!(state_of(&mut stores), text("Validated"));
+
+        force(&mut stores, "inference.graph.PlanPipeline/mismatch").expect("mismatch is external");
+        let forced = plan(&mut stores, pipeline_id);
+        assert_eq!(branch(&forced), "inference.graph.PlanPipeline/mismatch");
+        assert_eq!(
+            forced.error.as_ref().expect("a declared error").fields,
+            fields,
+            "a forced mismatch names what the planner finds"
+        );
+    }
+
+    #[test]
+    fn a_node_requiring_tool_calling_with_no_binding_is_refused_as_unbound() {
+        let mut stores = Stores::default();
+        let (pipeline_id, node_id) = one_model(&mut stores, &["tool_calling"], false);
+
+        let refused = plan(&mut stores, pipeline_id);
+        assert_eq!(branch(&refused), "inference.graph.PlanPipeline/unbound");
+        let error = refused.error.as_ref().expect("a declared error");
+        assert_eq!(error.error.to_string(), "inference.graph.NodeUnbound");
+        assert_eq!(
+            error.fields,
+            BTreeMap::from([("node_id".to_owned(), node_id)])
+        );
+        assert!(refused.direct_events.is_empty());
+        assert_eq!(state_of(&mut stores), text("Validated"));
+    }
+
+    #[test]
+    fn a_forced_planning_refusal_answers_the_next_plan_only_and_moves_nothing() {
+        let mut stores = Stores::default();
+        let (pipeline_id, node_id) = one_model(&mut stores, &[], true);
+        let events = stores.graph.events().len();
+        let adapter_id = rows(&mut stores, "inference.graph.Bindings")[0]["adapter_id"].clone();
+        let profile_id = rows(&mut stores, "inference.graph.Pipelines")[0]["profile_id"].clone();
+        let fields = |pairs: &[(&str, Node)]| -> BTreeMap<String, Node> {
+            pairs
+                .iter()
+                .map(|(field, value)| ((*field).to_owned(), value.clone()))
+                .collect()
+        };
+
+        for (outcome, error, carried) in [
+            (
+                "unbound",
+                "inference.graph.NodeUnbound",
+                fields(&[("node_id", node_id.clone())]),
+            ),
+            (
+                "mismatch",
+                "inference.graph.CapabilityMismatch",
+                fields(&[
+                    ("node_id", Node::Null),
+                    ("capability", text("output_streaming")),
+                ]),
+            ),
+            (
+                "locality-denied",
+                "inference.graph.LocalityDenied",
+                fields(&[
+                    ("node_id", node_id.clone()),
+                    ("adapter_id", adapter_id.clone()),
+                    ("locality", text("same_process")),
+                    ("profile_id", profile_id.clone()),
+                ]),
+            ),
+        ] {
+            let name = format!("inference.graph.PlanPipeline/{outcome}");
+            force(&mut stores, &name).expect("the outcome is external");
+            let forced = plan(&mut stores, pipeline_id.clone());
+            assert_eq!(branch(&forced), name);
+            let answered = forced.error.as_ref().expect("a declared error");
+            assert_eq!(answered.error.to_string(), error);
+            assert_eq!(
+                answered.fields, carried,
+                "the planner finds no such refusal, so the first declared values are named"
+            );
+            assert!(forced.direct_events.is_empty());
+            assert_eq!(state_of(&mut stores), text("Validated"));
+            assert_eq!(stores.graph.events().len(), events);
+        }
+
+        let nil = text("00000000-0000-0000-0000-000000000000");
+        for (outcome, carried) in [
+            ("unbound", fields(&[("node_id", nil.clone())])),
+            (
+                "mismatch",
+                fields(&[
+                    ("node_id", Node::Null),
+                    ("capability", text("output_streaming")),
+                ]),
+            ),
+            (
+                "locality-denied",
+                fields(&[
+                    ("node_id", nil.clone()),
+                    ("adapter_id", nil.clone()),
+                    ("locality", text("same_process")),
+                    ("profile_id", nil.clone()),
+                ]),
+            ),
+        ] {
+            let name = format!("inference.graph.PlanPipeline/{outcome}");
+            force(&mut stores, &name).expect("the outcome is external");
+            let forced = plan(&mut stores, text(UNKNOWN));
+            assert_eq!(branch(&forced), name);
+            assert_eq!(
+                forced.error.as_ref().expect("a declared error").fields,
+                carried,
+                "no record names a node, an adapter or a profile, so the nil identity stands in"
+            );
+        }
+
+        let planned = plan(&mut stores, pipeline_id);
+        assert_eq!(
+            branch(&planned),
+            "inference.graph.PlanPipeline/planned",
+            "the force lapses after one invocation"
+        );
+        assert!(matches!(
+            force(&mut stores, "inference.graph.PlanPipeline/wrong-state"),
+            Err(TargetError::Unavailable { .. })
+        ));
     }
 }
