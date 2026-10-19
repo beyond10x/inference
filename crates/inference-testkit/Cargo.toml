@@ -21,6 +21,7 @@ inference-pipeline = { path = "../inference-pipeline" }
 inference-runtime = { path = "../inference-runtime", optional = true }
 inference-stt = { path = "../inference-stt", optional = true }
 inference-text = { path = "../inference-text" }
+inference-tools = { path = "../inference-tools" }
 inference-tts = { path = "../inference-tts", optional = true }
 uuid.workspace = true
 
