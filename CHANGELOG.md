@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.3.0] — 2026-10-19
+
+### Added
+
+- `inference-core` follows the 0.2.0 model vocabulary (`orchestrated_duplex`, a model's
+  `provenance` and `source_revision`, `ModelNotFound`) and gains `Model::declare_as` and
+  `Adapter::declare_as` for stores that assign identifiers, `Generation` with its lifecycle, and the
+  event envelope (`EventEnvelope`, `Timebase`, `EventId`).
+- `inference-audio`: audio frames, formats and sample clock positions, declared first as the
+  `inference.audio` domain in `ess/domains/audio.yaml`; frame data is canonical base64 on the wire.
+- `inference-text`: output segments (tentative, committed, queued, synthesized, played, discarded),
+  turns and spans; a committed span is immutable.
+- `inference-llm`: the LLM contract, with no concrete model. Deltas stream only where the adapter
+  claims `output_streaming`, and input is taken during output only where it claims
+  `concurrent_input_output`; admitted input is bound to the generation that admitted it.
+- `inference-testkit`: in-memory stores per domain, the event log, a conformance target driven by
+  the `ess-conformance` runner whose results `ess verify conform report` admits, and the mock
+  generator behind the `llm` feature. `ess/SKIPPED.md` names every scenario the target does not
+  answer yet and the story that will.
+- `task check` builds and tests with `--all-features`.
+
+### Changed
+
+- The specification adds the `inference.audio` domain and the event envelope types to
+  `inference.stream` (`ess verify diff` against 0.2.0: 8 changes, all compatible); the synthesized
+  suite is unchanged at 229 scenarios.
+
+### Known issues
+
+- The testkit target answers 15 of the 229 scenarios; the other 214, most of which arrange a run,
+  are named in `ess/SKIPPED.md` with the story that will answer them.
+- `ess verify conform synthesize` still refuses the three `affects` cascades (ESS-SYNTH-001); the
+  authored scenarios execute them against the interpreted target.
+- The conformance results the testkit writes carry a fixed `completed_at`, not the run's own time.
+
 ## [0.2.0] — 2026-10-19
 
 ### Added
