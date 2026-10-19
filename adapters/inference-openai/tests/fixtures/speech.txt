@@ -1,0 +1,7 @@
+speech.wav is synthesized, not recorded from a person. It was generated with eSpeak NG 1.52.0:
+
+espeak-ng -v en-us -s 150 -w speech.wav "What is the capital of France?"
+
+The output is 16-bit signed PCM, mono, 22050 Hz, 47523 samples (2.16 s), and regenerates byte for
+byte with that version (sha256 c02e3025012e3f3b2d564940365bc79146964f33837dd6921fe1e969455534f2).
+The live test resamples it to the 24 kHz PCM16 the Realtime API takes.
