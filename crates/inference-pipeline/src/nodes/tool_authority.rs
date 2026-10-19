@@ -29,17 +29,35 @@
 //! tool whose schema uses another keyword, or one of these in a form other than JSON Schema's,
 //! fails the node's preparation rather than being validated in part.
 //!
+//! The authority keeps every call it decided in a record ([`AuthorityHandle::calls`], the
+//! `inference.tools.ToolCalls` view of its calls) that an executor node answering to it shares
+//! ([`ToolExecutorNode::answering_to`](super::ToolExecutorNode::answering_to)): the executor starts
+//! and ends each call on that record, and the authority rejects on it, each move made under the
+//! record's lock, so a call is either rejected before it starts or started before it is rejected,
+//! never both.
+//!
+//! Interrupted: on an envelope of kind `inference.stream.GenerationSuperseded` or
+//! `inference.stream.GenerationCancelled` naming a generation (`docs/design/inference.md`
+//! 632-639), the authority withdraws every call of that generation it holds for confirmation, so
+//! the hook can no longer answer it, and rejects it, and every call of it the record holds
+//! Authorized, `superseded`, in the order they were proposed; a call already Started, Completed or
+//! Failed is left as it is, since nothing is rolled back (856). It then passes the envelope on, on
+//! its edge of authorized calls, so that an executor running a call of the generation signals its
+//! cancellation. Every later proposal of the generation is rejected `superseded`.
+//!
 //! On the end of input, a control event of kind `stop`, or once its input edge is closed, the
 //! node waits for the host to answer every call it holds, then passes the end of input on, on
 //! each of its output edges, and ends. Cancelled, it abandons the calls it holds and sends nothing
-//! more.
+//! more: the check and each poll of a send are made under the lock the cancel is taken under, so
+//! a send is either complete before the cancel or not made.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::future;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::Poll;
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId};
@@ -79,6 +97,130 @@ pub enum AuthorityOutcome {
 pub struct Decision {
     pub call: ToolCall,
     pub outcome: AuthorityOutcome,
+}
+
+/// The kinds of the envelopes that interrupt a generation: its `GenerationSuperseded` and its
+/// `GenerationCancelled`.
+const INTERRUPTIONS: [&str; 2] = [
+    "inference.stream.GenerationSuperseded",
+    "inference.stream.GenerationCancelled",
+];
+
+/// Whether an envelope of `kind` interrupts the generation it names.
+pub(crate) fn interrupts(kind: &str) -> bool {
+    INTERRUPTIONS.contains(&kind)
+}
+
+/// Sends `envelope` on `endpoint` unless `cancelled` holds of the state `watched` keeps, which
+/// the node's cancel sets under the same lock: the check and each poll of the send are made
+/// holding it, so the send is either made before the cancel or not at all, and a cancel taken
+/// while the send waits for room ends the wait. Once cancelled, nothing is sent and the answer is
+/// `Ok`.
+pub(crate) async fn send_unless<S, P>(
+    watched: &Watched<S>,
+    cancelled: fn(&S) -> bool,
+    endpoint: &dyn OutputEndpoint<P>,
+    envelope: EventEnvelope<P>,
+) -> Result<(), String> {
+    let mut sending = endpoint.send(envelope);
+    future::poll_fn(|cx| {
+        let mut guard = watched.lock();
+        if cancelled(&guard.0) {
+            return Poll::Ready(Ok(()));
+        }
+        guard.1 = Some(cx.waker().clone());
+        sending
+            .as_mut()
+            .poll(cx)
+            .map(|sent| sent.map_err(|refused| refused.to_string()))
+    })
+    .await
+}
+
+/// The record of the calls an authority decided and an executor answering to it moved: each call
+/// as its last command left it, in the order it was first recorded. Clones share one record.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CallRecord(Arc<Mutex<Vec<ToolCall>>>);
+
+impl CallRecord {
+    fn lock(&self) -> MutexGuard<'_, Vec<ToolCall>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The call carrying `call_id`, as the record holds it.
+    pub(crate) fn get(&self, call_id: ToolCallId) -> Option<ToolCall> {
+        self.lock()
+            .iter()
+            .find(|call| call.call_id() == call_id)
+            .cloned()
+    }
+
+    /// Records `call` in place of the call of its identity, or after the others.
+    pub(crate) fn put(&self, call: ToolCall) {
+        let mut calls = self.lock();
+        put(&mut calls, call);
+    }
+
+    /// Moves the call of `delivered`'s identity, as the record holds it or, when it holds none,
+    /// as delivered, by `command`, under the record's lock: the moved call is recorded and
+    /// answered with the command's event; a refusal answers the call as it was, and nothing is
+    /// recorded.
+    pub(crate) fn moved<T, E>(
+        &self,
+        delivered: ToolCall,
+        command: impl FnOnce(&ToolCall) -> Result<(ToolCall, T), E>,
+    ) -> Result<(ToolCall, T), (ToolCall, E)> {
+        let mut calls = self.lock();
+        let call = calls
+            .iter()
+            .find(|call| call.call_id() == delivered.call_id())
+            .cloned()
+            .unwrap_or(delivered);
+        match command(&call) {
+            Ok((moved, event)) => {
+                put(&mut calls, moved.clone());
+                Ok((moved, event))
+            }
+            Err(refused) => Err((call, refused)),
+        }
+    }
+
+    /// Rejects every call of `generation_id` the record holds Proposed or Authorized with
+    /// `reason`, under the record's lock, in the order the record holds them.
+    fn reject_generation(
+        &self,
+        generation_id: GenerationId,
+        reason: RejectionReason,
+    ) -> Vec<(ToolCall, ToolCallRejected)> {
+        let mut calls = self.lock();
+        let mut rejected = Vec::new();
+        for call in calls.iter_mut() {
+            if call.generation_id() != generation_id {
+                continue;
+            }
+            if let Ok((moved, event)) = call.reject(reason) {
+                *call = moved.clone();
+                rejected.push((moved, event));
+            }
+        }
+        rejected
+    }
+
+    /// Every call, in the order it was first recorded.
+    pub(crate) fn all(&self) -> Vec<ToolCall> {
+        self.lock().clone()
+    }
+}
+
+/// Puts `call` in place of the call of its identity among `calls`, or after them.
+fn put(calls: &mut Vec<ToolCall>, call: ToolCall) {
+    match calls
+        .iter_mut()
+        .find(|held| held.call_id() == call.call_id())
+    {
+        Some(held) => *held = call,
+        None => calls.push(call),
+    }
 }
 
 /// A call held for confirmation, with the envelope that proposed it.
@@ -162,6 +304,7 @@ pub struct ToolAuthority {
     rejections: Option<PortId>,
     node_id: Option<NodeId>,
     state: Arc<Watched<AuthorityState>>,
+    calls: CallRecord,
     task: Task,
 }
 
@@ -182,6 +325,7 @@ impl ToolAuthority {
             rejections: None,
             node_id: None,
             state: Arc::new(Watched::new(AuthorityState::default())),
+            calls: CallRecord::default(),
             task: Task::new(),
         }
     }
@@ -256,6 +400,7 @@ impl ToolAuthority {
     pub fn handle(&self) -> AuthorityHandle {
         AuthorityHandle {
             state: Arc::clone(&self.state),
+            calls: self.calls.clone(),
         }
     }
 
@@ -271,6 +416,7 @@ impl ToolAuthority {
 #[derive(Debug, Clone)]
 pub struct AuthorityHandle {
     state: Arc<Watched<AuthorityState>>,
+    calls: CallRecord,
 }
 
 impl AuthorityHandle {
@@ -316,6 +462,19 @@ impl AuthorityHandle {
     pub fn decisions(&self) -> Vec<Decision> {
         self.state.read(|state| state.decisions.clone())
     }
+
+    /// Every call the authority decided, as the last command of the authority or of an executor
+    /// answering to it left it, in the order the authority first decided them: the rows of the
+    /// `inference.tools.ToolCalls` view of its calls.
+    #[must_use]
+    pub fn calls(&self) -> Vec<ToolCall> {
+        self.calls.all()
+    }
+
+    /// The record the authority keeps its calls in, for an executor answering to it.
+    pub(crate) fn record(&self) -> CallRecord {
+        self.calls.clone()
+    }
 }
 
 /// One started exchange of a [`ToolAuthority`].
@@ -323,8 +482,10 @@ struct Exchanging<P> {
     tools: Arc<HashMap<ToolId, Tool>>,
     max_iterations: Option<NonZeroUsize>,
     state: Arc<Watched<AuthorityState>>,
-    /// Every call the authority held or decided, as it last left it.
-    known: HashMap<ToolCallId, ToolCall>,
+    /// Every call the authority held or decided, as the last command left it.
+    calls: CallRecord,
+    /// The generations an interruption named.
+    interrupted: HashSet<GenerationId>,
     /// How many proposals of each generation the authority decided.
     iterations: HashMap<GenerationId, usize>,
     input: Box<dyn InputEndpoint<P>>,
@@ -347,11 +508,9 @@ enum OutputEdge {
 }
 
 impl<P: ToolPayload> Exchanging<P> {
-    /// Sends `envelope` on `edge`, unless the authority was cancelled: it then sends nothing more.
+    /// Sends `envelope` on `edge`, unless the authority was cancelled: it then sends nothing more
+    /// ([`send_unless`]).
     async fn send(&self, edge: OutputEdge, envelope: EventEnvelope<P>) -> Result<(), String> {
-        if self.state.read(|state| state.cancelled) {
-            return Ok(());
-        }
         let sending = match edge {
             OutputEdge::Authorized => &self.output,
             OutputEdge::Rejected => match &self.rejected {
@@ -359,11 +518,47 @@ impl<P: ToolPayload> Exchanging<P> {
                 None => return Ok(()),
             },
         };
-        sending
-            .endpoint
-            .send(envelope)
-            .await
-            .map_err(|refused| refused.to_string())
+        send_unless(
+            &self.state,
+            |state| state.cancelled,
+            sending.endpoint.as_ref(),
+            envelope,
+        )
+        .await
+    }
+
+    /// Acts on `envelope`, which interrupts the generation it names; see the module
+    /// documentation.
+    async fn interruption(&mut self, envelope: EventEnvelope<P>) -> Result<(), String> {
+        let generation_id = envelope.generation_id.ok_or_else(|| {
+            format!(
+                "an envelope of kind {} names no generation to interrupt",
+                envelope.kind
+            )
+        })?;
+        self.interrupted.insert(generation_id);
+        self.state.update(|state| {
+            state
+                .held
+                .retain(|held| held.call.generation_id() != generation_id);
+        });
+        let rejected = self
+            .calls
+            .reject_generation(generation_id, RejectionReason::Superseded);
+        for (call, event) in rejected {
+            let decision = Decision {
+                call,
+                outcome: AuthorityOutcome::Rejected(event),
+            };
+            self.decided(decision, envelope.event_id).await?;
+        }
+        let mut forwarded = self
+            .output
+            .emitter
+            .envelope(&envelope.kind, None, envelope.payload);
+        forwarded.generation_id = Some(generation_id);
+        forwarded.causation_id = Some(envelope.event_id);
+        self.send(OutputEdge::Authorized, forwarded).await
     }
 
     /// The end of input, on each output edge.
@@ -406,8 +601,7 @@ impl<P: ToolPayload> Exchanging<P> {
             AuthorityOutcome::WrongState(_) => None,
         };
         if !matches!(decision.outcome, AuthorityOutcome::WrongState(_)) {
-            self.known
-                .insert(decision.call.call_id(), decision.call.clone());
+            self.calls.put(decision.call.clone());
         }
         self.state.update(|state| state.decisions.push(decision));
         match sent {
@@ -455,16 +649,20 @@ impl<P: ToolPayload> Exchanging<P> {
         }
     }
 
-    /// The decision for the proposed `call`: a call held or decided already, then the iteration
-    /// rule, then the tool, then the schema, then the policy.
+    /// The decision for the proposed `call`: a call held or decided already, then a generation
+    /// an interruption named, then the iteration rule, then the tool, then the schema, then the
+    /// policy.
     fn decide(&mut self, call: &ToolCall) -> Result<Decision, String> {
-        if let Some(known) = self.known.get(&call.call_id()) {
+        if let Some(known) = self.calls.get(call.call_id()) {
             return Ok(Decision {
-                call: known.clone(),
                 outcome: AuthorityOutcome::WrongState(ToolCallStateConflict {
                     current: known.state(),
                 }),
+                call: known,
             });
+        }
+        if self.interrupted.contains(&call.generation_id()) {
+            return Self::reject(call, RejectionReason::Superseded);
         }
         let iteration = self.iterations.entry(call.generation_id()).or_default();
         *iteration += 1;
@@ -546,6 +744,7 @@ impl<P: ToolPayload> Exchanging<P> {
                         end_of_input = true;
                     }
                     Some(_) => {}
+                    None if interrupts(&envelope.kind) => self.interruption(envelope).await?,
                     None => {
                         self.proposal(envelope.payload, &envelope.kind, envelope.event_id)
                             .await?;
@@ -605,7 +804,8 @@ impl<P: ToolPayload> NodeImplementation<P> for ToolAuthority {
                     tools: Arc::clone(&self.tools),
                     max_iterations: self.max_iterations,
                     state: Arc::clone(&self.state),
-                    known: HashMap::new(),
+                    calls: self.calls.clone(),
+                    interrupted: HashSet::new(),
                     iterations: HashMap::new(),
                     input: input.endpoint,
                     output: sending(output),
@@ -823,9 +1023,107 @@ fn admits(schema: &Json, value: &Json) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::future::{self, Future};
+    use std::pin::pin;
+    use std::sync::Mutex;
+    use std::task::{Context, Poll, Waker};
+
+    use inference_core::endpoint::{EndpointFuture, OutputEndpoint, SendError};
+    use inference_core::envelope::{EventEnvelope, EventId, Timebase};
+    use inference_core::id::{NodeId, RunId, StreamId};
     use serde_json::json;
 
-    use super::{admits, supported};
+    use super::super::Watched;
+    use super::{admits, send_unless, supported};
+
+    /// An edge that takes an envelope on the second poll of its send: the first finds it full.
+    #[derive(Default)]
+    struct FullOnce {
+        taken: Mutex<Vec<u8>>,
+    }
+
+    impl OutputEndpoint<u8> for FullOnce {
+        fn send(
+            &self,
+            envelope: EventEnvelope<u8>,
+        ) -> EndpointFuture<'_, Result<(), SendError<u8>>> {
+            let mut waited = false;
+            Box::pin(future::poll_fn(move |cx| {
+                if !waited {
+                    waited = true;
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                self.taken
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(envelope.payload);
+                Poll::Ready(Ok(()))
+            }))
+        }
+    }
+
+    fn envelope(payload: u8) -> EventEnvelope<u8> {
+        EventEnvelope {
+            schema_version: 1,
+            event_id: EventId::generate(),
+            run_id: RunId::generate(),
+            session_id: None,
+            stream_id: StreamId::generate(),
+            sequence: 1,
+            producer: NodeId::generate(),
+            port: "out".to_owned(),
+            kind: "x".to_owned(),
+            generation_id: None,
+            timestamp: 0,
+            timebase: Timebase::WallTime,
+            causation_id: None,
+            payload,
+        }
+    }
+
+    #[test]
+    fn a_cancel_taken_while_a_send_waits_ends_it_and_nothing_reaches_the_edge() {
+        let edge = FullOnce::default();
+        let cancelled = Watched::new(false);
+        let mut context = Context::from_waker(Waker::noop());
+        let mut sending = pin!(send_unless(
+            &cancelled,
+            |cancelled| *cancelled,
+            &edge,
+            envelope(1)
+        ));
+        assert!(sending.as_mut().poll(&mut context).is_pending());
+        cancelled.update(|cancelled| *cancelled = true);
+        assert_eq!(sending.as_mut().poll(&mut context), Poll::Ready(Ok(())));
+        assert!(
+            edge.taken.lock().expect("unpoisoned").is_empty(),
+            "nothing after the cancel"
+        );
+
+        let mut sent = pin!(send_unless(
+            &cancelled,
+            |cancelled| *cancelled,
+            &edge,
+            envelope(2)
+        ));
+        assert_eq!(sent.as_mut().poll(&mut context), Poll::Ready(Ok(())));
+        assert!(
+            edge.taken.lock().expect("unpoisoned").is_empty(),
+            "nor once cancelled"
+        );
+
+        let open = Watched::new(false);
+        let mut taken = pin!(send_unless(
+            &open,
+            |cancelled| *cancelled,
+            &edge,
+            envelope(3)
+        ));
+        assert!(taken.as_mut().poll(&mut context).is_pending());
+        assert_eq!(taken.as_mut().poll(&mut context), Poll::Ready(Ok(())));
+        assert_eq!(*edge.taken.lock().expect("unpoisoned"), [3]);
+    }
 
     #[test]
     fn the_schema_subset_admits_what_json_schema_admits_and_refuses_what_it_refuses() {

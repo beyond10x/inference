@@ -41,9 +41,10 @@ pub enum ToolOutcome {
 
 /// A running generation whose model proposes tool calls; see the module documentation.
 pub trait ToolCalling: GenerationHandle {
-    /// Takes the proposal the generation's latest model request ended with, once that request's
-    /// text has been delivered; none while text of it is still to be delivered, when it ended in
-    /// prose only, or when its proposal was taken already.
+    /// Takes the next proposal the generation's latest model request ended with, once that
+    /// request's text has been delivered; a request may end with several, the calls of one round,
+    /// taken one by one in order. None while text of it is still to be delivered, when it ended
+    /// in prose only, or when every proposal of it was taken already.
     fn take_proposal(&mut self) -> Option<ToolProposal>;
 
     /// Issues the generation's next model request with `outcome` appended; its text and any
