@@ -19,7 +19,11 @@
 //! and refuse a run no record carries with [`RunNotFound`]. `DescribeNodeInstance` refuses, in this
 //! order, a run no record carries, a node no pipeline declares ([`NodeNotFound`]) and a run that is
 //! neither Preparing nor Active ([`RunNotRunning`]); a node of another pipeline than the run's is
-//! not refused, as the specification orders it. Runs and node instances take their identities
+//! not refused, as the specification orders it. The six node instance commands, `PrepareNodeInstance`
+//! through `FailNodeInstance`, move an instance by its own transitions and move no run, and a Run
+//! command moves no instance: which run transition drives which instance is the run controller's
+//! in `inference-runtime`. Behind the same feature, [`RecordingNode`] is the recording mock of the
+//! node contract that controller drives. Runs and node instances take their identities
 //! from a counter of their own in the same space, `{IDENTITY_SPACE:08x}-0001-4000-8000-000000000001`
 //! first, so that no run or instance carries the identity of a declared entity. The views
 //! `inference.graph.Runs` and `NodeInstances` are [`GraphDomain::runs`] and
@@ -33,6 +37,7 @@
 //! [`GraphDomain::runs`]: crate::graph::GraphDomain::runs
 //! [`GraphDomain::node_instances`]: crate::graph::GraphDomain::node_instances
 //! [`GraphCatalog`]: crate::graph::GraphCatalog
+//! [`RecordingNode`]: crate::graph::RecordingNode
 //! [`IDENTITY_SPACE`]: crate::graph::IDENTITY_SPACE
 //! [`PolicyDomain`]: crate::policy::PolicyDomain
 //! [`ModelDomain`]: crate::model::ModelDomain
@@ -59,8 +64,10 @@ use inference_pipeline::{
 };
 #[cfg(feature = "run")]
 use inference_runtime::run::{
-    NodeInstance, NodeInstanceDescribed, Run, RunActivated, RunCancelled, RunCompleted, RunCreated,
-    RunDraining, RunFailed, RunPreparing, RunValidating,
+    NodeInstance, NodeInstanceCancelling, NodeInstanceDescribed, NodeInstanceDraining,
+    NodeInstanceFailed, NodeInstancePrepared, NodeInstanceStarted, NodeInstanceStopped, Run,
+    RunActivated, RunCancelled, RunCompleted, RunCreated, RunDraining, RunFailed, RunPreparing,
+    RunValidating,
 };
 
 use crate::model::ModelDomain;
@@ -110,6 +117,24 @@ pub enum GraphEvent {
     /// `inference.graph.NodeInstanceDescribed`.
     #[cfg(feature = "run")]
     NodeInstanceDescribed(NodeInstanceDescribed),
+    /// `inference.graph.NodeInstancePrepared`.
+    #[cfg(feature = "run")]
+    NodeInstancePrepared(NodeInstancePrepared),
+    /// `inference.graph.NodeInstanceStarted`.
+    #[cfg(feature = "run")]
+    NodeInstanceStarted(NodeInstanceStarted),
+    /// `inference.graph.NodeInstanceDraining`.
+    #[cfg(feature = "run")]
+    NodeInstanceDraining(NodeInstanceDraining),
+    /// `inference.graph.NodeInstanceCancelling`.
+    #[cfg(feature = "run")]
+    NodeInstanceCancelling(NodeInstanceCancelling),
+    /// `inference.graph.NodeInstanceStopped`.
+    #[cfg(feature = "run")]
+    NodeInstanceStopped(NodeInstanceStopped),
+    /// `inference.graph.NodeInstanceFailed`.
+    #[cfg(feature = "run")]
+    NodeInstanceFailed(NodeInstanceFailed),
 }
 
 /// The declared profiles and adapters a [`GraphDomain`] reads, from their own stores.
@@ -333,7 +358,9 @@ mod runs {
         NodeNotFound, PipelineId, PipelineNotFound, PipelineNotReady, PipelineState,
     };
     use inference_runtime::run::{
-        FailureReason, NodeInstance, NodeInstanceDescribed, NodeInstanceId, Run, RunActivated,
+        FailureReason, NodeInstance, NodeInstanceCancelling, NodeInstanceDescribed,
+        NodeInstanceDraining, NodeInstanceFailed, NodeInstanceId, NodeInstancePrepared,
+        NodeInstanceStarted, NodeInstanceStateConflict, NodeInstanceStopped, Run, RunActivated,
         RunCancelled, RunCompleted, RunCreated, RunDraining, RunFailed, RunNotFound, RunNotRunning,
         RunPreparing, RunStateConflict, RunValidating,
     };
@@ -429,6 +456,168 @@ mod runs {
                 Self::UnknownNode(error) => Some(error),
                 Self::RunNotRunning(error) => Some(error),
             }
+        }
+    }
+
+    /// Why a node instance command (`PrepareNodeInstance`, `StartNodeInstance`,
+    /// `DrainNodeInstance`, `CancelNodeInstance`, `StopNodeInstance`, `FailNodeInstance`) moved
+    /// nothing. Both are the command's `wrong-state` outcome.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum NodeInstanceMoveError {
+        /// No stored instance carries the identity sent; there is no state to report.
+        Unknown(NodeInstanceId),
+        /// The instance is in a state the command's transition does not leave.
+        Conflict(NodeInstanceStateConflict),
+    }
+
+    impl fmt::Display for NodeInstanceMoveError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Unknown(instance_id) => {
+                    write!(f, "no node instance carries the identity {instance_id}")
+                }
+                Self::Conflict(error) => fmt::Display::fmt(error, f),
+            }
+        }
+    }
+
+    impl Error for NodeInstanceMoveError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match self {
+                Self::Unknown(_) => None,
+                Self::Conflict(error) => Some(error),
+            }
+        }
+    }
+
+    impl GraphDomain {
+        /// Runs `inference.graph.PrepareNodeInstance`: Described to Prepared.
+        ///
+        /// # Errors
+        ///
+        /// [`NodeInstanceMoveError::Unknown`] when no stored instance carries `instance_id`,
+        /// [`NodeInstanceMoveError::Conflict`] when it is not Described. Nothing moves and no
+        /// event is recorded.
+        pub fn prepare_node_instance(
+            &mut self,
+            instance_id: NodeInstanceId,
+        ) -> Result<NodeInstancePrepared, NodeInstanceMoveError> {
+            self.move_instance(
+                instance_id,
+                NodeInstance::prepare,
+                GraphEvent::NodeInstancePrepared,
+            )
+        }
+
+        /// Runs `inference.graph.StartNodeInstance`: Prepared to Started.
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::prepare_node_instance`], when the instance is not Prepared.
+        pub fn start_node_instance(
+            &mut self,
+            instance_id: NodeInstanceId,
+        ) -> Result<NodeInstanceStarted, NodeInstanceMoveError> {
+            self.move_instance(
+                instance_id,
+                NodeInstance::start,
+                GraphEvent::NodeInstanceStarted,
+            )
+        }
+
+        /// Runs `inference.graph.DrainNodeInstance`: Started to Draining.
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::prepare_node_instance`], when the instance is not Started.
+        pub fn drain_node_instance(
+            &mut self,
+            instance_id: NodeInstanceId,
+        ) -> Result<NodeInstanceDraining, NodeInstanceMoveError> {
+            self.move_instance(
+                instance_id,
+                NodeInstance::drain,
+                GraphEvent::NodeInstanceDraining,
+            )
+        }
+
+        /// Runs `inference.graph.CancelNodeInstance`: Described, Prepared, Started or Draining to
+        /// Cancelling.
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::prepare_node_instance`], when the instance is Cancelling or terminal.
+        pub fn cancel_node_instance(
+            &mut self,
+            instance_id: NodeInstanceId,
+        ) -> Result<NodeInstanceCancelling, NodeInstanceMoveError> {
+            self.move_instance(
+                instance_id,
+                NodeInstance::cancel,
+                GraphEvent::NodeInstanceCancelling,
+            )
+        }
+
+        /// Runs `inference.graph.StopNodeInstance`: Prepared, Draining or Cancelling to Stopped.
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::prepare_node_instance`], when the instance is Described, Started or
+        /// terminal.
+        pub fn stop_node_instance(
+            &mut self,
+            instance_id: NodeInstanceId,
+        ) -> Result<NodeInstanceStopped, NodeInstanceMoveError> {
+            self.move_instance(
+                instance_id,
+                NodeInstance::stop,
+                GraphEvent::NodeInstanceStopped,
+            )
+        }
+
+        /// Runs `inference.graph.FailNodeInstance`: Described, Prepared, Started or Draining to
+        /// Failed, recording `reason` in its [`NodeInstanceFailed`].
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::prepare_node_instance`], when the instance is Cancelling or terminal.
+        pub fn fail_node_instance(
+            &mut self,
+            instance_id: NodeInstanceId,
+            reason: String,
+        ) -> Result<NodeInstanceFailed, NodeInstanceMoveError> {
+            let slot = self.instance_slot(instance_id)?;
+            let (moved, event) = slot.fail(reason).map_err(NodeInstanceMoveError::Conflict)?;
+            *slot = moved;
+            self.events
+                .push(GraphEvent::NodeInstanceFailed(event.clone()));
+            Ok(event)
+        }
+
+        /// Moves the instance carrying `instance_id` by `transition`, stores it and records its
+        /// event.
+        fn move_instance<E: Clone>(
+            &mut self,
+            instance_id: NodeInstanceId,
+            transition: fn(&NodeInstance) -> Result<(NodeInstance, E), NodeInstanceStateConflict>,
+            record: fn(E) -> GraphEvent,
+        ) -> Result<E, NodeInstanceMoveError> {
+            let slot = self.instance_slot(instance_id)?;
+            let (moved, event) = transition(slot).map_err(NodeInstanceMoveError::Conflict)?;
+            *slot = moved;
+            self.events.push(record(event.clone()));
+            Ok(event)
+        }
+
+        /// The stored instance carrying `instance_id`, to move it.
+        fn instance_slot(
+            &mut self,
+            instance_id: NodeInstanceId,
+        ) -> Result<&mut NodeInstance, NodeInstanceMoveError> {
+            self.instances
+                .iter_mut()
+                .find(|instance| instance.instance_id() == instance_id)
+                .ok_or(NodeInstanceMoveError::Unknown(instance_id))
         }
     }
 
@@ -629,7 +818,181 @@ mod runs {
 }
 
 #[cfg(feature = "run")]
-pub use runs::{CreateRunError, DescribeNodeInstanceError, RUN_IDENTITY_GROUP, RunMoveError};
+pub use runs::{
+    CreateRunError, DescribeNodeInstanceError, NodeInstanceMoveError, RUN_IDENTITY_GROUP,
+    RunMoveError,
+};
+
+/// The recording mock of the node contract, behind the `run` feature: a [`RecordingNode`]
+/// implements [`NodeImplementation`] for any payload, records every call the runtime makes in a
+/// [`NodeCalls`] shared with the test, fails on demand at one fallible step and stalls once on
+/// demand at one step.
+///
+/// [`NodeImplementation`]: inference_pipeline::NodeImplementation
+#[cfg(feature = "run")]
+mod recording {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
+
+    /// One call the runtime made on a [`RecordingNode`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum NodeCall {
+        /// `describe`.
+        Describe,
+        /// `prepare`, whether or not it returned an error.
+        Prepare,
+        /// `start`, with how many input and output endpoints the node was handed.
+        Start { inputs: usize, outputs: usize },
+        /// `drain`, whether or not it returned an error.
+        Drain,
+        /// `cancel`.
+        Cancel,
+        /// `stop`.
+        Stop,
+    }
+
+    /// A step of the lifecycle that may return an error, where a [`RecordingNode`] can be told to.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FallibleStep {
+        Prepare,
+        Start,
+        Drain,
+    }
+
+    /// A call of the lifecycle, where a [`RecordingNode`] can be told to stall.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum LifecycleStep {
+        Describe,
+        Prepare,
+        Start,
+        Drain,
+        Cancel,
+        Stop,
+    }
+
+    /// The calls a [`RecordingNode`] received, in order; a clone reads the same record.
+    #[derive(Debug, Clone, Default)]
+    pub struct NodeCalls(Arc<Mutex<Vec<NodeCall>>>);
+
+    impl NodeCalls {
+        /// Every call so far, in the order it was made.
+        #[must_use]
+        pub fn calls(&self) -> Vec<NodeCall> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        fn record(&self, call: NodeCall) {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(call);
+        }
+    }
+
+    /// A node that does nothing but record each call and answer it, failing at one step or
+    /// stalling once at one step on demand. Its endpoints are dropped as soon as it is started.
+    #[derive(Debug, Clone, Default)]
+    pub struct RecordingNode {
+        calls: NodeCalls,
+        failing: Option<(FallibleStep, NodeError)>,
+        stalling: Option<LifecycleStep>,
+    }
+
+    impl RecordingNode {
+        /// A node that answers every call.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// A node that returns `error` at `step` and answers every other call.
+        #[must_use]
+        pub fn failing_at(step: FallibleStep, error: NodeError) -> Self {
+            Self {
+                calls: NodeCalls::default(),
+                failing: Some((step, error)),
+                stalling: None,
+            }
+        }
+
+        /// The record of the node's calls, shared with the node.
+        #[must_use]
+        pub fn calls(&self) -> NodeCalls {
+            self.calls.clone()
+        }
+
+        /// Records `call` and answers it, with the error set for `step` if there is one.
+        fn answer(&self, call: NodeCall, step: FallibleStep) -> Result<(), NodeError> {
+            self.calls.record(call);
+            match &self.failing {
+                Some((failing, error)) if *failing == step => Err(error.clone()),
+                _ => Ok(()),
+            }
+        }
+
+        /// The same node, whose first call of `step` never completes, as a caller's timeout or
+        /// `select!` sees a slow node; later calls of `step` answer as usual. The call is recorded.
+        #[must_use]
+        pub fn stalling_at(mut self, step: LifecycleStep) -> Self {
+            self.stalling = Some(step);
+            self
+        }
+
+        /// `value`, now, or never if this is the stalled call of `step`.
+        fn reply<T: Send + 'static>(&mut self, step: LifecycleStep, value: T) -> NodeFuture<'_, T> {
+            if self.stalling == Some(step) {
+                self.stalling = None;
+                Box::pin(std::future::pending())
+            } else {
+                Box::pin(std::future::ready(value))
+            }
+        }
+    }
+
+    impl<P> NodeImplementation<P> for RecordingNode {
+        fn describe(&mut self, _: &Node) -> NodeFuture<'_, ()> {
+            self.calls.record(NodeCall::Describe);
+            self.reply(LifecycleStep::Describe, ())
+        }
+
+        fn prepare(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+            let answer = self.answer(NodeCall::Prepare, FallibleStep::Prepare);
+            self.reply(LifecycleStep::Prepare, answer)
+        }
+
+        fn start(&mut self, endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
+            let call = NodeCall::Start {
+                inputs: endpoints.inputs.len(),
+                outputs: endpoints.outputs.len(),
+            };
+            drop(endpoints);
+            let answer = self.answer(call, FallibleStep::Start);
+            self.reply(LifecycleStep::Start, answer)
+        }
+
+        fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+            let answer = self.answer(NodeCall::Drain, FallibleStep::Drain);
+            self.reply(LifecycleStep::Drain, answer)
+        }
+
+        fn cancel(&mut self) -> NodeFuture<'_, ()> {
+            self.calls.record(NodeCall::Cancel);
+            self.reply(LifecycleStep::Cancel, ())
+        }
+
+        fn stop(&mut self) -> NodeFuture<'_, ()> {
+            self.calls.record(NodeCall::Stop);
+            self.reply(LifecycleStep::Stop, ())
+        }
+    }
+}
+
+#[cfg(feature = "run")]
+pub use recording::{FallibleStep, LifecycleStep, NodeCall, NodeCalls, RecordingNode};
 
 #[cfg(test)]
 mod tests {

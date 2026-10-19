@@ -255,6 +255,58 @@ const RUN_ROUTED_SCENARIOS: [&str; 71] = [
     "inference.stream.Turn/transition/complete/by/inference.stream.CompleteTurn/completed",
 ];
 
+/// The 46 `inference.graph` scenarios of the node-instance lifecycle this target answers: the
+/// moving and `wrong-state` outcomes of the six instance commands, each transition, and each
+/// command a state does not leave by.
+const NODE_INSTANCE_SCENARIOS: [&str; 46] = [
+    "inference.graph.CancelNodeInstance/outcome/cancelling",
+    "inference.graph.CancelNodeInstance/outcome/wrong-state",
+    "inference.graph.DrainNodeInstance/outcome/draining",
+    "inference.graph.DrainNodeInstance/outcome/wrong-state",
+    "inference.graph.FailNodeInstance/outcome/failed",
+    "inference.graph.FailNodeInstance/outcome/wrong-state",
+    "inference.graph.NodeInstance/state/Cancelling/refuses/inference.graph.CancelNodeInstance",
+    "inference.graph.NodeInstance/state/Cancelling/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Cancelling/refuses/inference.graph.FailNodeInstance",
+    "inference.graph.NodeInstance/state/Cancelling/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Cancelling/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Described/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Described/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Described/refuses/inference.graph.StopNodeInstance",
+    "inference.graph.NodeInstance/state/Draining/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Draining/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Draining/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.CancelNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.FailNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.StopNodeInstance",
+    "inference.graph.NodeInstance/state/Prepared/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Prepared/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Started/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Started/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Started/refuses/inference.graph.StopNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.CancelNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.FailNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.StopNodeInstance",
+    "inference.graph.NodeInstance/transition/cancel/by/inference.graph.CancelNodeInstance/cancelling",
+    "inference.graph.NodeInstance/transition/drain/by/inference.graph.DrainNodeInstance/draining",
+    "inference.graph.NodeInstance/transition/fail/by/inference.graph.FailNodeInstance/failed",
+    "inference.graph.NodeInstance/transition/prepare/by/inference.graph.PrepareNodeInstance/prepared",
+    "inference.graph.NodeInstance/transition/start/by/inference.graph.StartNodeInstance/started",
+    "inference.graph.NodeInstance/transition/stop/by/inference.graph.StopNodeInstance/stopped",
+    "inference.graph.PrepareNodeInstance/outcome/prepared",
+    "inference.graph.PrepareNodeInstance/outcome/wrong-state",
+    "inference.graph.StartNodeInstance/outcome/started",
+    "inference.graph.StartNodeInstance/outcome/wrong-state",
+    "inference.graph.StopNodeInstance/outcome/stopped",
+    "inference.graph.StopNodeInstance/outcome/wrong-state",
+];
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -435,6 +487,7 @@ fn the_suite_runs_against_the_testkit_target() {
         .chain(GRAPH_PLANNING_SCENARIOS)
         .chain(RUN_SCENARIOS)
         .chain(RUN_ROUTED_SCENARIOS)
+        .chain(NODE_INSTANCE_SCENARIOS)
     {
         assert!(
             passed.contains(id),
