@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:endpoint-controller
 kind: story
-status: draft
+status: active
 title: 'Endpoint controller: VAD and turn-policy nodes complete turns'
 summary: A deterministic energy VAD node and a turn-policy node open and complete inference.stream Turns as the single turn authority; no new noun.
 relations:
@@ -32,7 +32,10 @@ scope:
   path: crates/inference-testkit/src/stt.rs
 - confidence: cited
   path: crates/inference-testkit/src/stt/synthetic_audio.rs
-revision: 17
+revision: 19
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T19:33:33Z", actor: "human:timo", revision: 18, decided_on: {"recorded":{"review_outcome":4}}}
+- {from: "proposed", to: "active", at: "2026-10-19T19:33:34Z", actor: "human:timo", revision: 19, decided_on: {"recorded":{"review_outcome":4}}}
 ---
 ## Context
 
