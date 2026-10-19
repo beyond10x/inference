@@ -35,7 +35,7 @@ mod tool_authority;
 mod tool_executor;
 
 pub use tool_authority::{AuthorityHandle, AuthorityOutcome, Decision, ToolAuthority};
-pub use tool_executor::ToolExecutorNode;
+pub use tool_executor::{ExecutorHandle, StartRefusal, ToolCallMeasure, ToolExecutorNode};
 
 /// An event of `inference.tools.ToolCall`'s lifecycle, as its command emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
