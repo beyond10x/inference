@@ -7,8 +7,10 @@
 //! `cargo test -p inference-aws --features live --test nova_sonic_duplex_live -- --ignored`.
 //!
 //! Both stream `tests/fixtures/question-16k.wav` ("What is the capital of France?", the command
-//! that made it is in `tests/fixtures/question-16k.txt`). They print what the session delivered
-//! and the usage it recorded, and nothing about the account.
+//! that made it is in `tests/fixtures/question-16k.txt`); the evidence probe sends
+//! `tests/fixtures/during-16k.wav` ("And what about Portugal?", `during-16k.txt`) during the
+//! answer, its marker said by neither the question nor the answer to it. They print what the
+//! session delivered and the usage it recorded, and nothing about the account.
 #![cfg(feature = "live")]
 
 use std::num::{NonZeroU16, NonZeroU32};
@@ -38,11 +40,13 @@ fn pcm(sample_rate: u32) -> AudioFormat {
     }
 }
 
-fn clip_pcm() -> Vec<u8> {
-    let wav = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/question-16k.wav"
-    ))
+/// The samples of the committed clip `tests/fixtures/<name>`.
+fn clip_pcm(name: &str) -> Vec<u8> {
+    let wav = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name),
+    )
     .expect("the speech clip is committed");
     let mut at = 12;
     while at + 8 <= wav.len() {
@@ -114,7 +118,7 @@ fn one_audio_in_audio_out_session_through_the_contract() {
         .open(config(true))
         .unwrap_or_else(|error| panic!("the session opens: {error}"));
 
-    let clip = clip_pcm();
+    let clip = clip_pcm("question-16k.wav");
     let mut input = frames(&clip, 0);
     let after = (input.len() * FRAME_SAMPLES) as u64;
     input.extend(silence(30, after));
@@ -201,18 +205,20 @@ fn one_audio_in_audio_out_session_through_the_contract() {
 #[ignore = "calls Amazon Bedrock: needs credentials, model access and AWS_REGION, and costs money"]
 fn native_duplex_evidence_agrees_with_the_claim() {
     let mut model = model();
-    let clip = clip_pcm();
-    let mut opening = frames(&clip, 0);
+    let question = clip_pcm("question-16k.wav");
+    let mut opening = frames(&question, 0);
     let after = (opening.len() * FRAME_SAMPLES) as u64;
     opening.extend(silence(2, after));
     let start = after + 32_000;
-    let mut during = frames(&clip, start);
-    during.extend(silence(2, start + (clip.len() / 2) as u64 + 320));
+    let follow_up = clip_pcm("during-16k.wav");
+    let mut during = frames(&follow_up, start);
+    let after = start + (during.len() * FRAME_SAMPLES) as u64;
+    during.extend(silence(2, after));
     let probe = NativeDuplexProbe {
         config: config(true),
         opening,
         during,
-        marker: "france".to_owned(),
+        marker: "portugal".to_owned(),
         wait: Duration::from_millis(500),
         patience: 60,
     };
