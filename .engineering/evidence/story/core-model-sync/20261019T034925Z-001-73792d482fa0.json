@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T03:49:25Z",
+  "actor": "human:timo",
+  "artifact": "story:core-model-sync",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check (5 steps, each exit 0; cargo test 23 passed, 0 failed) (wave/two dc28339)"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T03:49:25Z",
+  "actor": "human:timo",
+  "artifact": "story:core-model-sync",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-core (VERIFIED: baseline wave/two b35a05b 18 passed, Capability::ALL 9 members, no provenance, source_revision or ModelNotFound; treatment impl/core-model-sync 9765f80 23 passed, ALL 10 members ending orchestrated_duplex, the three acceptance cases ok)"
+  }
+}
