@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T07:20:50Z",
+  "actor": "human:timo",
+  "artifact": "story:pipeline-declaration",
+  "kind": "story",
+  "revision": 23,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-pipeline-declaration-pass-1",
+    "reference": "F6 testkit/tests/adversary1_target.rs:335 probes ValidatePipeline",
+    "review": "review-result:adversary-pipeline-declaration-pass-1",
+    "outcome": "fixed"
+  }
+}

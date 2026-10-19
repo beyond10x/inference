@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T07:22:03Z",
+  "actor": "human:timo",
+  "artifact": "story:pipeline-declaration",
+  "kind": "story",
+  "revision": 23,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-testkit --all-features --test conform; cargo test -p inference-pipeline (VERIFIED: baseline wave/7 2ce95de passes 15 of 229; treatment passes 29, the 14 declaration and profile ids among them, failed 0, error 0; the builder and the commands yield the same declaration)"
+  }
+}
