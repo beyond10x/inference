@@ -11,8 +11,11 @@
 
 use uuid::Uuid;
 
-/// Parses `text` as a Uuid if it is in the canonical hyphenated form and nothing else.
-pub(crate) fn parse_canonical_uuid(text: &str) -> Option<Uuid> {
+/// Parses `text` as a Uuid if it is in the canonical hyphenated form and nothing else. Public for
+/// [`uuid_newtype!`](crate::uuid_newtype) only.
+#[doc(hidden)]
+#[must_use]
+pub fn parse_canonical_uuid(text: &str) -> Option<Uuid> {
     let mut groups = text.split('-');
     for width in [8, 4, 4, 4, 12] {
         let group = groups.next()?;
@@ -26,22 +29,41 @@ pub(crate) fn parse_canonical_uuid(text: &str) -> Option<Uuid> {
     Uuid::parse_str(text).ok()
 }
 
+/// Declares an identifier newtype of [`uuid::Uuid`] as this module describes it: serialized as the
+/// Uuid string it wraps, read only in the canonical hyphenated form, with `generate`, `as_uuid`,
+/// both `From` conversions and `Display`.
+///
+/// It is exported so that the other crates of the workspace declare their identifiers the same
+/// way, `inference.stream.SegmentId` of `inference-text` among them. It reaches `serde` and `uuid`
+/// through `inference-core`, so the declaring crate needs neither as a dependency of its own.
+#[doc(hidden)]
+#[macro_export]
 macro_rules! uuid_newtype {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, ::serde::Serialize)]
-        #[serde(transparent)]
-        pub struct $name(::uuid::Uuid);
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct $name($crate::__private::uuid::Uuid);
 
-        impl<'de> ::serde::Deserialize<'de> for $name {
+        impl $crate::__private::serde::Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error>
+            where
+                S: $crate::__private::serde::Serializer,
+            {
+                $crate::__private::serde::Serialize::serialize(&self.0, serializer)
+            }
+        }
+
+        impl<'de> $crate::__private::serde::Deserialize<'de> for $name {
             fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
             where
-                D: ::serde::Deserializer<'de>,
+                D: $crate::__private::serde::Deserializer<'de>,
             {
-                let text = <::std::string::String as ::serde::Deserialize>::deserialize(deserializer)?;
+                let text = <::std::string::String as $crate::__private::serde::Deserialize>::deserialize(
+                    deserializer,
+                )?;
                 $crate::id::parse_canonical_uuid(&text).map(Self).ok_or_else(|| {
-                    <D::Error as ::serde::de::Error>::invalid_value(
-                        ::serde::de::Unexpected::Str(&text),
+                    <D::Error as $crate::__private::serde::de::Error>::invalid_value(
+                        $crate::__private::serde::de::Unexpected::Str(&text),
                         &"a Uuid in the canonical hyphenated form 8-4-4-4-12",
                     )
                 })
@@ -52,23 +74,23 @@ macro_rules! uuid_newtype {
             /// A new random (version 4) identifier.
             #[must_use]
             pub fn generate() -> Self {
-                Self(::uuid::Uuid::new_v4())
+                Self($crate::__private::uuid::Uuid::new_v4())
             }
 
             /// The Uuid this identifier wraps.
             #[must_use]
-            pub const fn as_uuid(&self) -> ::uuid::Uuid {
+            pub const fn as_uuid(&self) -> $crate::__private::uuid::Uuid {
                 self.0
             }
         }
 
-        impl ::std::convert::From<::uuid::Uuid> for $name {
-            fn from(uuid: ::uuid::Uuid) -> Self {
+        impl ::std::convert::From<$crate::__private::uuid::Uuid> for $name {
+            fn from(uuid: $crate::__private::uuid::Uuid) -> Self {
                 Self(uuid)
             }
         }
 
-        impl ::std::convert::From<$name> for ::uuid::Uuid {
+        impl ::std::convert::From<$name> for $crate::__private::uuid::Uuid {
             fn from(id: $name) -> Self {
                 id.0
             }
@@ -82,7 +104,7 @@ macro_rules! uuid_newtype {
     };
 }
 
-pub(crate) use uuid_newtype;
+pub(crate) use crate::uuid_newtype;
 
 uuid_newtype!(
     /// `inference.graph.RunId`: identifies a run.

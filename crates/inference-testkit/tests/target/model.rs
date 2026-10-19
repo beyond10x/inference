@@ -2,9 +2,9 @@
 //! [`ModelDomain`].
 //!
 //! Each request field is read on its own ([`Input`]); the outcome, the error and the event come
-//! from what the store returned. A command's consistency token is the number of events the store
-//! has recorded, and a read demanding a token the store has not reached is an error: the store
-//! is synchronous, so a read never has anything to wait for.
+//! from what the store returned. A command's consistency token is the target's
+//! ([`Stores::token`]), and a read demanding a token the stores have not reached is an error
+//! ([`Stores::require`]).
 
 use std::collections::BTreeMap;
 
@@ -13,15 +13,12 @@ use ess_conformance::target::{
     DeclaredErrorValue, EventObservationRequest, ObservedEvent, SemanticCommandRequest,
     SemanticCommandResult, SemanticViewRequest, SemanticViewResult, TargetError, ViewRow,
 };
-use ess_primitives::consistency::ConsistencyToken;
 use inference_core::model::{AdapterDeclared, DeclareAdapter, DeclareModel, ModelDeclared};
 use inference_testkit::model::{
     AdaptersRow, DeclareAdapterError, ModelDomain, ModelEvent, ModelsRow,
 };
 
-use super::{
-    Input, Stores, integer_node, named_list_node, named_node, text_node, unreadable, unsupported,
-};
+use super::{Input, Stores, integer_node, named_list_node, named_node, text_node, unsupported};
 
 /// The prefix of every name this module answers.
 pub const DOMAIN: &str = "inference.model";
@@ -49,7 +46,7 @@ pub fn execute_command(
         DECLARE_ADAPTER => declare_adapter(domain, request)?,
         _ => return Err(unsupported(&name)),
     };
-    Ok(result.with_consistency(token(domain)?))
+    Ok(result.with_consistency(stores.token()?))
 }
 
 fn declare_model(
@@ -115,15 +112,7 @@ pub fn query_view(
 ) -> Result<SemanticViewResult, TargetError> {
     let domain = &stores.model;
     let name = request.view.to_string();
-    if let Some(demanded) = request.consistency.token() {
-        let reached = token(domain)?;
-        if sequence(demanded) > sequence(&reached) {
-            return Err(unreadable(
-                format!("reading `{name}`"),
-                format!("the read demands {demanded:?}, and the store has reached {reached:?}"),
-            ));
-        }
-    }
+    stores.require(&name, &request.consistency)?;
     let rows = match name.as_str() {
         MODELS => domain
             .models_view()
@@ -223,21 +212,6 @@ fn adapters_row(row: &AdaptersRow) -> Result<ViewRow, TargetError> {
             integer_node(row.max_concurrency),
         ),
     ]))
-}
-
-/// The token of everything the store has recorded: `seq:` and the number of its events.
-fn token(domain: &ModelDomain) -> Result<ConsistencyToken, TargetError> {
-    ConsistencyToken::new(format!("seq:{}", domain.events().len()))
-        .map_err(|error| unreadable("writing a consistency token", format!("{error:?}")))
-}
-
-/// The sequence a token of [`token`] carries; a token this module did not write is beyond any.
-fn sequence(token: &ConsistencyToken) -> u64 {
-    token
-        .as_str()
-        .strip_prefix("seq:")
-        .and_then(|digits| digits.parse().ok())
-        .unwrap_or(u64::MAX)
 }
 
 fn outcome(command: &str, branch: &str) -> OutcomeRef {

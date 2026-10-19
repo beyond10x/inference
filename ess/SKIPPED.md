@@ -123,20 +123,14 @@ this file with it.
 ## inference.stream
 
 - inference.stream.AcknowledgePlayback/outcome/played: answered by story:run-lifecycle
-- inference.stream.AcknowledgePlayback/outcome/wrong-state: answered by story:outbound-text-generations-and-segments
-- inference.stream.CancelGeneration/outcome/wrong-state: answered by story:outbound-text-generations-and-segments
 - inference.stream.CommitSegment/outcome/committed: answered by story:run-lifecycle
-- inference.stream.CommitSegment/outcome/wrong-state: answered by story:outbound-text-generations-and-segments
 - inference.stream.CommitSpan/outcome/committed: answered by story:run-lifecycle
 - inference.stream.CommitSpan/outcome/wrong-state: answered by story:inbound-text-spans-and-envelope
 - inference.stream.CompleteGeneration/outcome/completed: answered by story:run-lifecycle
-- inference.stream.CompleteGeneration/outcome/wrong-state: answered by story:outbound-text-generations-and-segments
 - inference.stream.CompleteSynthesis/outcome/synthesized: answered by story:run-lifecycle
-- inference.stream.CompleteSynthesis/outcome/wrong-state: answered by story:outbound-text-generations-and-segments
 - inference.stream.CompleteTurn/outcome/completed: answered by story:run-lifecycle
 - inference.stream.CompleteTurn/outcome/wrong-state: answered by story:inbound-text-spans-and-envelope
 - inference.stream.DiscardSegment/outcome/discarded: answered by story:run-lifecycle
-- inference.stream.DiscardSegment/outcome/wrong-state: answered by story:outbound-text-generations-and-segments
 - inference.stream.EmitHypothesis/outcome/emitted: answered by story:run-lifecycle
 - inference.stream.EmitHypothesis/outcome/run-not-active: answered by story:run-lifecycle
 - inference.stream.EmitHypothesis/outcome/turn-not-open: answered by story:run-lifecycle
@@ -188,7 +182,6 @@ this file with it.
 - inference.stream.OutputSegment/transition/queue/by/inference.stream.QueueForSynthesis/queued: answered by story:run-lifecycle
 - inference.stream.OutputSegment/transition/synthesize/by/inference.stream.CompleteSynthesis/synthesized: answered by story:run-lifecycle
 - inference.stream.QueueForSynthesis/outcome/queued: answered by story:run-lifecycle
-- inference.stream.QueueForSynthesis/outcome/wrong-state: answered by story:outbound-text-generations-and-segments
 - inference.stream.ReviseSpan/outcome/immutable: answered by story:run-lifecycle
 - inference.stream.ReviseSpan/outcome/no-such-span: answered by story:inbound-text-spans-and-envelope
 - inference.stream.ReviseSpan/outcome/revised: answered by story:run-lifecycle
@@ -199,7 +192,6 @@ this file with it.
 - inference.stream.StartGeneration/outcome/started: answered by story:run-lifecycle
 - inference.stream.StartGeneration/outcome/unknown-node: answered by story:run-lifecycle
 - inference.stream.StartGeneration/outcome/unknown-run: answered by story:run-lifecycle
-- inference.stream.SupersedeGeneration/outcome/wrong-state: answered by story:outbound-text-generations-and-segments
 - inference.stream.Turn/state/Completed/refuses/inference.stream.CompleteTurn: answered by story:run-lifecycle
 - inference.stream.Turn/transition/complete/by/inference.stream.CompleteTurn/completed: answered by story:run-lifecycle
 - inference.stream/authored/cancel-generation-discards-unplayed-segments: answered by story:run-lifecycle
