@@ -47,25 +47,21 @@
 //! [`RunNotFound`]: inference_runtime::run::RunNotFound
 //! [`RunNotRunning`]: inference_runtime::run::RunNotRunning
 
-use std::error::Error;
-use std::fmt;
-
-use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Adapter, AdapterId};
 use inference_core::policy::{DeploymentProfile, ProfileId, ProfileNotFound};
+#[cfg(feature = "run")]
+use inference_pipeline::PlannedPipeline;
 use inference_pipeline::{
     AddNode, AddNodeError, AddPort, AddPortError, BindNode, BindNodeError, Catalog, ConnectPorts,
-    ConnectPortsError, Declaration, DeclarePipeline, NodeAdded, NodeBound, NodeNotFound,
-    PipelineDeclared, PipelineId, PipelineNotFound, PipelineNotReady, PipelinePlanned,
-    PipelineState, PipelineValidated, PlanPipeline, PlanPipelineError, PlannedPipeline, PortAdded,
-    PortsConnected, ValidatePipeline, ValidatePipelineError, ValidatedPipeline,
+    ConnectPortsError, Declaration, DeclarePipeline, NodeAdded, NodeBound, PipelineDeclared,
+    PipelinePlanned, PipelineValidated, PlanPipeline, PlanPipelineError, PortAdded, PortsConnected,
+    ValidatePipeline, ValidatePipelineError, ValidatedPipeline,
 };
+#[cfg(feature = "run")]
 use inference_runtime::run::{
-    FailureReason, NodeInstance, NodeInstanceDescribed, NodeInstanceId, Run, RunActivated,
-    RunCancelled, RunCompleted, RunCreated, RunDraining, RunFailed, RunNotFound, RunNotRunning,
-    RunPreparing, RunStateConflict, RunValidating,
+    NodeInstance, NodeInstanceDescribed, Run, RunActivated, RunCancelled, RunCompleted, RunCreated,
+    RunDraining, RunFailed, RunPreparing, RunValidating,
 };
-use uuid::Uuid;
 
 use crate::model::ModelDomain;
 use crate::policy::PolicyDomain;
@@ -88,22 +84,31 @@ pub enum GraphEvent {
     /// `inference.graph.PipelinePlanned`.
     PipelinePlanned(PipelinePlanned),
     /// `inference.graph.RunCreated`.
+    #[cfg(feature = "run")]
     RunCreated(RunCreated),
     /// `inference.graph.RunValidating`.
+    #[cfg(feature = "run")]
     RunValidating(RunValidating),
     /// `inference.graph.RunPreparing`.
+    #[cfg(feature = "run")]
     RunPreparing(RunPreparing),
     /// `inference.graph.RunActivated`.
+    #[cfg(feature = "run")]
     RunActivated(RunActivated),
     /// `inference.graph.RunDraining`.
+    #[cfg(feature = "run")]
     RunDraining(RunDraining),
     /// `inference.graph.RunCompleted`.
+    #[cfg(feature = "run")]
     RunCompleted(RunCompleted),
     /// `inference.graph.RunFailed`.
+    #[cfg(feature = "run")]
     RunFailed(RunFailed),
     /// `inference.graph.RunCancelled`.
+    #[cfg(feature = "run")]
     RunCancelled(RunCancelled),
     /// `inference.graph.NodeInstanceDescribed`.
+    #[cfg(feature = "run")]
     NodeInstanceDescribed(NodeInstanceDescribed),
 }
 
@@ -128,106 +133,19 @@ impl Catalog for GraphCatalog<'_> {
 /// testkit issues under (see [`crate::policy::IDENTITY_SPACE`]).
 pub const IDENTITY_SPACE: u32 = 3;
 
-/// The second group of every run and node instance identity the domain issues, which no declared
-/// entity's identity carries.
-pub const RUN_IDENTITY_GROUP: u16 = 1;
-
-/// Why `inference.graph.CreateRun` created no run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CreateRunError {
-    /// The `unknown-pipeline` outcome: no pipeline carries the identity sent.
-    UnknownPipeline(PipelineNotFound),
-    /// The `not-planned` outcome: the pipeline is not Planned.
-    NotPlanned(PipelineNotReady),
-}
-
-impl fmt::Display for CreateRunError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownPipeline(error) => fmt::Display::fmt(error, f),
-            Self::NotPlanned(error) => fmt::Display::fmt(error, f),
-        }
-    }
-}
-
-impl Error for CreateRunError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::UnknownPipeline(error) => Some(error),
-            Self::NotPlanned(error) => Some(error),
-        }
-    }
-}
-
-/// Why a moving run command (`ValidateRun`, `PrepareRun`, `ActivateRun`, `DrainRun`,
-/// `CompleteRun`, `FailRun`, `CancelRun`) moved nothing. Both are the command's `wrong-state`
-/// outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunMoveError {
-    /// No stored run carries the identity sent; there is no state to report.
-    Unknown(RunNotFound),
-    /// The run is in a state the command's transition does not leave.
-    Conflict(RunStateConflict),
-}
-
-impl fmt::Display for RunMoveError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unknown(error) => fmt::Display::fmt(error, f),
-            Self::Conflict(error) => fmt::Display::fmt(error, f),
-        }
-    }
-}
-
-impl Error for RunMoveError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Unknown(error) => Some(error),
-            Self::Conflict(error) => Some(error),
-        }
-    }
-}
-
-/// Why `inference.graph.DescribeNodeInstance` described no instance, in the order it is decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DescribeNodeInstanceError {
-    /// The `unknown-run` outcome: no stored run carries the identity sent.
-    UnknownRun(RunNotFound),
-    /// The `unknown-node` outcome: no declared node carries the identity sent.
-    UnknownNode(NodeNotFound),
-    /// The `run-not-running` outcome: the run is neither Preparing nor Active.
-    RunNotRunning(RunNotRunning),
-}
-
-impl fmt::Display for DescribeNodeInstanceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownRun(error) => fmt::Display::fmt(error, f),
-            Self::UnknownNode(error) => fmt::Display::fmt(error, f),
-            Self::RunNotRunning(error) => fmt::Display::fmt(error, f),
-        }
-    }
-}
-
-impl Error for DescribeNodeInstanceError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::UnknownRun(error) => Some(error),
-            Self::UnknownNode(error) => Some(error),
-            Self::RunNotRunning(error) => Some(error),
-        }
-    }
-}
-
 /// `inference.graph` in memory: the declared entities, the validated and planned forms of the
 /// pipelines, the runs and their node instances, and the events their commands emitted.
 #[derive(Debug)]
 pub struct GraphDomain {
     declaration: Declaration,
     validated: Vec<ValidatedPipeline>,
+    #[cfg(feature = "run")]
     planned: Vec<PlannedPipeline>,
+    #[cfg(feature = "run")]
     runs: Vec<Run>,
+    #[cfg(feature = "run")]
     instances: Vec<NodeInstance>,
+    #[cfg(feature = "run")]
     issued: u128,
     events: Vec<GraphEvent>,
 }
@@ -237,9 +155,13 @@ impl Default for GraphDomain {
         Self {
             declaration: Declaration::counted_in(IDENTITY_SPACE),
             validated: Vec::new(),
+            #[cfg(feature = "run")]
             planned: Vec::new(),
+            #[cfg(feature = "run")]
             runs: Vec::new(),
+            #[cfg(feature = "run")]
             instances: Vec::new(),
+            #[cfg(feature = "run")]
             issued: 0,
             events: Vec::new(),
         }
@@ -380,182 +302,10 @@ impl GraphDomain {
         let event = PipelinePlanned {
             pipeline_id: planned.pipeline_id(),
         };
+        #[cfg(feature = "run")]
         self.planned.push(planned);
         self.events.push(GraphEvent::PipelinePlanned(event));
         Ok(event)
-    }
-
-    /// Runs `inference.graph.CreateRun`: builds a Created [`Run`] from the Planned form of the
-    /// pipeline, stores it and records its [`RunCreated`].
-    ///
-    /// # Errors
-    ///
-    /// [`CreateRunError::UnknownPipeline`] when no declared pipeline carries `pipeline_id`,
-    /// otherwise [`CreateRunError::NotPlanned`] when it is not Planned. Nothing is stored, no
-    /// event is recorded and no identity is issued.
-    pub fn create_run(&mut self, pipeline_id: PipelineId) -> Result<RunCreated, CreateRunError> {
-        if self.declaration.pipeline(pipeline_id).is_none() {
-            return Err(CreateRunError::UnknownPipeline(PipelineNotFound {
-                pipeline_id,
-            }));
-        }
-        let planned = self
-            .planned
-            .iter()
-            .find(|planned| planned.pipeline_id() == pipeline_id)
-            .ok_or(CreateRunError::NotPlanned(PipelineNotReady {
-                pipeline_id,
-                required: PipelineState::Planned,
-            }))?;
-        let (run, event) =
-            Run::create_as(RunId::from(Self::run_identity(self.issued + 1)), planned);
-        self.issued += 1;
-        self.runs.push(run);
-        self.events.push(GraphEvent::RunCreated(event));
-        Ok(event)
-    }
-
-    /// Runs `inference.graph.ValidateRun`: Created to Validating.
-    ///
-    /// # Errors
-    ///
-    /// [`RunMoveError::Unknown`] when no stored run carries `run_id`,
-    /// [`RunMoveError::Conflict`] when it is not Created. Nothing moves and no event is recorded.
-    pub fn validate_run(&mut self, run_id: RunId) -> Result<RunValidating, RunMoveError> {
-        self.move_run(run_id, Run::validate, GraphEvent::RunValidating)
-    }
-
-    /// Runs the `preparing` outcome of `inference.graph.PrepareRun`: Validating to Preparing.
-    /// Its external `refused` outcome is not decided here: whether the runtime can admit the
-    /// run's resources is the runtime's to observe.
-    ///
-    /// # Errors
-    ///
-    /// As [`GraphDomain::validate_run`], when the run is not Validating.
-    pub fn prepare_run(&mut self, run_id: RunId) -> Result<RunPreparing, RunMoveError> {
-        self.move_run(run_id, Run::prepare, GraphEvent::RunPreparing)
-    }
-
-    /// Runs `inference.graph.ActivateRun`: Preparing to Active.
-    ///
-    /// # Errors
-    ///
-    /// As [`GraphDomain::validate_run`], when the run is not Preparing.
-    pub fn activate_run(&mut self, run_id: RunId) -> Result<RunActivated, RunMoveError> {
-        self.move_run(run_id, Run::activate, GraphEvent::RunActivated)
-    }
-
-    /// Runs `inference.graph.DrainRun`: Active to Draining.
-    ///
-    /// # Errors
-    ///
-    /// As [`GraphDomain::validate_run`], when the run is not Active.
-    pub fn drain_run(&mut self, run_id: RunId) -> Result<RunDraining, RunMoveError> {
-        self.move_run(run_id, Run::drain, GraphEvent::RunDraining)
-    }
-
-    /// Runs `inference.graph.CompleteRun`: Draining to Completed.
-    ///
-    /// # Errors
-    ///
-    /// As [`GraphDomain::validate_run`], when the run is not Draining.
-    pub fn complete_run(&mut self, run_id: RunId) -> Result<RunCompleted, RunMoveError> {
-        self.move_run(run_id, Run::complete, GraphEvent::RunCompleted)
-    }
-
-    /// Runs `inference.graph.FailRun`: Validating, Preparing, Active or Draining to Failed, with
-    /// `failure` set on the run.
-    ///
-    /// # Errors
-    ///
-    /// As [`GraphDomain::validate_run`], when the run is Created or terminal.
-    pub fn fail_run(
-        &mut self,
-        run_id: RunId,
-        failure: FailureReason,
-    ) -> Result<RunFailed, RunMoveError> {
-        let slot = self.run_slot(run_id)?;
-        let (moved, event) = slot.fail(failure).map_err(RunMoveError::Conflict)?;
-        *slot = moved;
-        self.events.push(GraphEvent::RunFailed(event.clone()));
-        Ok(event)
-    }
-
-    /// Runs the run half of `inference.graph.CancelRun`: any state but a terminal one to
-    /// Cancelled. The stream half, the run's Active generations cancelled and its unplayed
-    /// segments discarded, is [`crate::stream::StreamDomain::cancel_run`].
-    ///
-    /// # Errors
-    ///
-    /// As [`GraphDomain::validate_run`], when the run is terminal.
-    pub fn cancel_run(&mut self, run_id: RunId) -> Result<RunCancelled, RunMoveError> {
-        self.move_run(run_id, Run::cancel, GraphEvent::RunCancelled)
-    }
-
-    /// Runs `inference.graph.DescribeNodeInstance`: stores the Described instance of `node_id` in
-    /// the run and records its [`NodeInstanceDescribed`].
-    ///
-    /// # Errors
-    ///
-    /// In this order: [`DescribeNodeInstanceError::UnknownRun`],
-    /// [`DescribeNodeInstanceError::UnknownNode`] when no declared node carries `node_id`, and
-    /// [`DescribeNodeInstanceError::RunNotRunning`]. Nothing is stored, no event is recorded and
-    /// no identity is issued.
-    pub fn describe_node_instance(
-        &mut self,
-        run_id: RunId,
-        node_id: NodeId,
-    ) -> Result<NodeInstanceDescribed, DescribeNodeInstanceError> {
-        let run = self
-            .run(run_id)
-            .ok_or(DescribeNodeInstanceError::UnknownRun(RunNotFound {
-                run_id,
-            }))?;
-        if self.declaration.node(node_id).is_none() {
-            return Err(DescribeNodeInstanceError::UnknownNode(NodeNotFound {
-                node_id,
-            }));
-        }
-        let instance_id = NodeInstanceId::from(Self::run_identity(self.issued + 1));
-        let (instance, event) = NodeInstance::describe_as(instance_id, run, node_id)
-            .map_err(DescribeNodeInstanceError::RunNotRunning)?;
-        self.issued += 1;
-        self.instances.push(instance);
-        self.events.push(GraphEvent::NodeInstanceDescribed(event));
-        Ok(event)
-    }
-
-    /// Moves the run carrying `run_id` by `transition`, stores it and records its event.
-    fn move_run<E: Clone>(
-        &mut self,
-        run_id: RunId,
-        transition: fn(&Run) -> Result<(Run, E), RunStateConflict>,
-        record: fn(E) -> GraphEvent,
-    ) -> Result<E, RunMoveError> {
-        let slot = self.run_slot(run_id)?;
-        let (moved, event) = transition(slot).map_err(RunMoveError::Conflict)?;
-        *slot = moved;
-        self.events.push(record(event.clone()));
-        Ok(event)
-    }
-
-    /// The stored run carrying `run_id`, to move it.
-    fn run_slot(&mut self, run_id: RunId) -> Result<&mut Run, RunMoveError> {
-        self.runs
-            .iter_mut()
-            .find(|run| run.run_id() == run_id)
-            .ok_or(RunMoveError::Unknown(RunNotFound { run_id }))
-    }
-
-    /// The `count`th run or node instance identity: `{IDENTITY_SPACE:08x}-0001-4000-8000-` and
-    /// `count` in the last twelve digits.
-    fn run_identity(count: u128) -> Uuid {
-        Uuid::from_u128(
-            (u128::from(IDENTITY_SPACE) << 96)
-                | (u128::from(RUN_IDENTITY_GROUP) << 80)
-                | 0x0000_0000_0000_4000_8000_0000_0000_0000
-                | count,
-        )
     }
 
     /// The declared pipelines and what they own.
@@ -564,29 +314,322 @@ impl GraphDomain {
         &self.declaration
     }
 
-    /// The run carrying `run_id`, if one was created.
-    #[must_use]
-    pub fn run(&self, run_id: RunId) -> Option<&Run> {
-        self.runs.iter().find(|run| run.run_id() == run_id)
-    }
-
-    /// The view `inference.graph.Runs`: every run, in the order they were created.
-    pub fn runs(&self) -> impl Iterator<Item = &Run> {
-        self.runs.iter()
-    }
-
-    /// The view `inference.graph.NodeInstances`: every node instance, in the order they were
-    /// described.
-    pub fn node_instances(&self) -> impl Iterator<Item = &NodeInstance> {
-        self.instances.iter()
-    }
-
     /// Every event emitted, in the order it was emitted.
     #[must_use]
     pub fn events(&self) -> &[GraphEvent] {
         &self.events
     }
 }
+
+/// The run half of the domain, behind the `run` feature: the run commands, their errors and
+/// the views of the runs and node instances.
+#[cfg(feature = "run")]
+mod runs {
+    use std::error::Error;
+    use std::fmt;
+
+    use inference_core::id::{NodeId, RunId};
+    use inference_pipeline::{
+        NodeNotFound, PipelineId, PipelineNotFound, PipelineNotReady, PipelineState,
+    };
+    use inference_runtime::run::{
+        FailureReason, NodeInstance, NodeInstanceDescribed, NodeInstanceId, Run, RunActivated,
+        RunCancelled, RunCompleted, RunCreated, RunDraining, RunFailed, RunNotFound, RunNotRunning,
+        RunPreparing, RunStateConflict, RunValidating,
+    };
+    use uuid::Uuid;
+
+    use super::{GraphDomain, GraphEvent, IDENTITY_SPACE};
+
+    /// The second group of every run and node instance identity the domain issues, which no declared
+    /// entity's identity carries.
+    pub const RUN_IDENTITY_GROUP: u16 = 1;
+
+    /// Why `inference.graph.CreateRun` created no run.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CreateRunError {
+        /// The `unknown-pipeline` outcome: no pipeline carries the identity sent.
+        UnknownPipeline(PipelineNotFound),
+        /// The `not-planned` outcome: the pipeline is not Planned.
+        NotPlanned(PipelineNotReady),
+    }
+
+    impl fmt::Display for CreateRunError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::UnknownPipeline(error) => fmt::Display::fmt(error, f),
+                Self::NotPlanned(error) => fmt::Display::fmt(error, f),
+            }
+        }
+    }
+
+    impl Error for CreateRunError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match self {
+                Self::UnknownPipeline(error) => Some(error),
+                Self::NotPlanned(error) => Some(error),
+            }
+        }
+    }
+
+    /// Why a moving run command (`ValidateRun`, `PrepareRun`, `ActivateRun`, `DrainRun`,
+    /// `CompleteRun`, `FailRun`, `CancelRun`) moved nothing. Both are the command's `wrong-state`
+    /// outcome.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RunMoveError {
+        /// No stored run carries the identity sent; there is no state to report.
+        Unknown(RunNotFound),
+        /// The run is in a state the command's transition does not leave.
+        Conflict(RunStateConflict),
+    }
+
+    impl fmt::Display for RunMoveError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Unknown(error) => fmt::Display::fmt(error, f),
+                Self::Conflict(error) => fmt::Display::fmt(error, f),
+            }
+        }
+    }
+
+    impl Error for RunMoveError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match self {
+                Self::Unknown(error) => Some(error),
+                Self::Conflict(error) => Some(error),
+            }
+        }
+    }
+
+    /// Why `inference.graph.DescribeNodeInstance` described no instance, in the order it is decided.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum DescribeNodeInstanceError {
+        /// The `unknown-run` outcome: no stored run carries the identity sent.
+        UnknownRun(RunNotFound),
+        /// The `unknown-node` outcome: no declared node carries the identity sent.
+        UnknownNode(NodeNotFound),
+        /// The `run-not-running` outcome: the run is neither Preparing nor Active.
+        RunNotRunning(RunNotRunning),
+    }
+
+    impl fmt::Display for DescribeNodeInstanceError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::UnknownRun(error) => fmt::Display::fmt(error, f),
+                Self::UnknownNode(error) => fmt::Display::fmt(error, f),
+                Self::RunNotRunning(error) => fmt::Display::fmt(error, f),
+            }
+        }
+    }
+
+    impl Error for DescribeNodeInstanceError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match self {
+                Self::UnknownRun(error) => Some(error),
+                Self::UnknownNode(error) => Some(error),
+                Self::RunNotRunning(error) => Some(error),
+            }
+        }
+    }
+
+    impl GraphDomain {
+        /// Runs `inference.graph.CreateRun`: builds a Created [`Run`] from the Planned form of the
+        /// pipeline, stores it and records its [`RunCreated`].
+        ///
+        /// # Errors
+        ///
+        /// [`CreateRunError::UnknownPipeline`] when no declared pipeline carries `pipeline_id`,
+        /// otherwise [`CreateRunError::NotPlanned`] when it is not Planned. Nothing is stored, no
+        /// event is recorded and no identity is issued.
+        pub fn create_run(
+            &mut self,
+            pipeline_id: PipelineId,
+        ) -> Result<RunCreated, CreateRunError> {
+            if self.declaration.pipeline(pipeline_id).is_none() {
+                return Err(CreateRunError::UnknownPipeline(PipelineNotFound {
+                    pipeline_id,
+                }));
+            }
+            let planned = self
+                .planned
+                .iter()
+                .find(|planned| planned.pipeline_id() == pipeline_id)
+                .ok_or(CreateRunError::NotPlanned(PipelineNotReady {
+                    pipeline_id,
+                    required: PipelineState::Planned,
+                }))?;
+            let (run, event) =
+                Run::create_as(RunId::from(Self::run_identity(self.issued + 1)), planned);
+            self.issued += 1;
+            self.runs.push(run);
+            self.events.push(GraphEvent::RunCreated(event));
+            Ok(event)
+        }
+
+        /// Runs `inference.graph.ValidateRun`: Created to Validating.
+        ///
+        /// # Errors
+        ///
+        /// [`RunMoveError::Unknown`] when no stored run carries `run_id`,
+        /// [`RunMoveError::Conflict`] when it is not Created. Nothing moves and no event is recorded.
+        pub fn validate_run(&mut self, run_id: RunId) -> Result<RunValidating, RunMoveError> {
+            self.move_run(run_id, Run::validate, GraphEvent::RunValidating)
+        }
+
+        /// Runs the `preparing` outcome of `inference.graph.PrepareRun`: Validating to Preparing.
+        /// Its external `refused` outcome is not decided here: whether the runtime can admit the
+        /// run's resources is the runtime's to observe.
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::validate_run`], when the run is not Validating.
+        pub fn prepare_run(&mut self, run_id: RunId) -> Result<RunPreparing, RunMoveError> {
+            self.move_run(run_id, Run::prepare, GraphEvent::RunPreparing)
+        }
+
+        /// Runs `inference.graph.ActivateRun`: Preparing to Active.
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::validate_run`], when the run is not Preparing.
+        pub fn activate_run(&mut self, run_id: RunId) -> Result<RunActivated, RunMoveError> {
+            self.move_run(run_id, Run::activate, GraphEvent::RunActivated)
+        }
+
+        /// Runs `inference.graph.DrainRun`: Active to Draining.
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::validate_run`], when the run is not Active.
+        pub fn drain_run(&mut self, run_id: RunId) -> Result<RunDraining, RunMoveError> {
+            self.move_run(run_id, Run::drain, GraphEvent::RunDraining)
+        }
+
+        /// Runs `inference.graph.CompleteRun`: Draining to Completed.
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::validate_run`], when the run is not Draining.
+        pub fn complete_run(&mut self, run_id: RunId) -> Result<RunCompleted, RunMoveError> {
+            self.move_run(run_id, Run::complete, GraphEvent::RunCompleted)
+        }
+
+        /// Runs `inference.graph.FailRun`: Validating, Preparing, Active or Draining to Failed, with
+        /// `failure` set on the run.
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::validate_run`], when the run is Created or terminal.
+        pub fn fail_run(
+            &mut self,
+            run_id: RunId,
+            failure: FailureReason,
+        ) -> Result<RunFailed, RunMoveError> {
+            let slot = self.run_slot(run_id)?;
+            let (moved, event) = slot.fail(failure).map_err(RunMoveError::Conflict)?;
+            *slot = moved;
+            self.events.push(GraphEvent::RunFailed(event.clone()));
+            Ok(event)
+        }
+
+        /// Runs the run half of `inference.graph.CancelRun`: any state but a terminal one to
+        /// Cancelled. The stream half, the run's Active generations cancelled and its unplayed
+        /// segments discarded, is [`crate::stream::StreamDomain::cancel_run`].
+        ///
+        /// # Errors
+        ///
+        /// As [`GraphDomain::validate_run`], when the run is terminal.
+        pub fn cancel_run(&mut self, run_id: RunId) -> Result<RunCancelled, RunMoveError> {
+            self.move_run(run_id, Run::cancel, GraphEvent::RunCancelled)
+        }
+
+        /// Runs `inference.graph.DescribeNodeInstance`: stores the Described instance of `node_id` in
+        /// the run and records its [`NodeInstanceDescribed`].
+        ///
+        /// # Errors
+        ///
+        /// In this order: [`DescribeNodeInstanceError::UnknownRun`],
+        /// [`DescribeNodeInstanceError::UnknownNode`] when no declared node carries `node_id`, and
+        /// [`DescribeNodeInstanceError::RunNotRunning`]. Nothing is stored, no event is recorded and
+        /// no identity is issued.
+        pub fn describe_node_instance(
+            &mut self,
+            run_id: RunId,
+            node_id: NodeId,
+        ) -> Result<NodeInstanceDescribed, DescribeNodeInstanceError> {
+            let run = self
+                .run(run_id)
+                .ok_or(DescribeNodeInstanceError::UnknownRun(RunNotFound {
+                    run_id,
+                }))?;
+            if self.declaration.node(node_id).is_none() {
+                return Err(DescribeNodeInstanceError::UnknownNode(NodeNotFound {
+                    node_id,
+                }));
+            }
+            let instance_id = NodeInstanceId::from(Self::run_identity(self.issued + 1));
+            let (instance, event) = NodeInstance::describe_as(instance_id, run, node_id)
+                .map_err(DescribeNodeInstanceError::RunNotRunning)?;
+            self.issued += 1;
+            self.instances.push(instance);
+            self.events.push(GraphEvent::NodeInstanceDescribed(event));
+            Ok(event)
+        }
+
+        /// Moves the run carrying `run_id` by `transition`, stores it and records its event.
+        fn move_run<E: Clone>(
+            &mut self,
+            run_id: RunId,
+            transition: fn(&Run) -> Result<(Run, E), RunStateConflict>,
+            record: fn(E) -> GraphEvent,
+        ) -> Result<E, RunMoveError> {
+            let slot = self.run_slot(run_id)?;
+            let (moved, event) = transition(slot).map_err(RunMoveError::Conflict)?;
+            *slot = moved;
+            self.events.push(record(event.clone()));
+            Ok(event)
+        }
+
+        /// The stored run carrying `run_id`, to move it.
+        fn run_slot(&mut self, run_id: RunId) -> Result<&mut Run, RunMoveError> {
+            self.runs
+                .iter_mut()
+                .find(|run| run.run_id() == run_id)
+                .ok_or(RunMoveError::Unknown(RunNotFound { run_id }))
+        }
+
+        /// The `count`th run or node instance identity: `{IDENTITY_SPACE:08x}-0001-4000-8000-` and
+        /// `count` in the last twelve digits.
+        fn run_identity(count: u128) -> Uuid {
+            Uuid::from_u128(
+                (u128::from(IDENTITY_SPACE) << 96)
+                    | (u128::from(RUN_IDENTITY_GROUP) << 80)
+                    | 0x0000_0000_0000_4000_8000_0000_0000_0000
+                    | count,
+            )
+        }
+
+        /// The run carrying `run_id`, if one was created.
+        #[must_use]
+        pub fn run(&self, run_id: RunId) -> Option<&Run> {
+            self.runs.iter().find(|run| run.run_id() == run_id)
+        }
+
+        /// The view `inference.graph.Runs`: every run, in the order they were created.
+        pub fn runs(&self) -> impl Iterator<Item = &Run> {
+            self.runs.iter()
+        }
+
+        /// The view `inference.graph.NodeInstances`: every node instance, in the order they were
+        /// described.
+        pub fn node_instances(&self) -> impl Iterator<Item = &NodeInstance> {
+            self.instances.iter()
+        }
+    }
+}
+
+#[cfg(feature = "run")]
+pub use runs::{CreateRunError, DescribeNodeInstanceError, RUN_IDENTITY_GROUP, RunMoveError};
 
 #[cfg(test)]
 mod tests {
@@ -852,6 +895,7 @@ mod tests {
         assert_eq!(domain.events().len(), recorded);
     }
 
+    #[cfg(feature = "run")]
     #[test]
     fn runs_take_identities_apart_from_the_declaration_and_a_refusal_takes_none() {
         use inference_core::id::{NodeId, RunId};

@@ -74,8 +74,8 @@ use inference_core::generation::{
     GenerationState, GenerationStateConflict, GenerationSuperseded, StartGeneration,
 };
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
-use inference_pipeline::NodeNotFound;
-use inference_runtime::run::{Run, RunNotFound, RunState, RunStateConflict};
+#[cfg(feature = "run")]
+use inference_runtime::run::{RunNotFound, RunStateConflict};
 use inference_text::{
     AudioPlayed, CommittedSpanImmutable, EmitHypothesis, EmitTextDelta, OpenTurn, OutputSegment,
     ReviseSpan, SegmentDiscarded, SegmentId, SegmentQueued, SegmentState, SegmentStateConflict,
@@ -83,8 +83,6 @@ use inference_text::{
     TextSegmentCommitted, TranscriptCommitted, TranscriptHypothesis, TranscriptRevision, Turn,
     TurnCompleted, TurnId, TurnNotFound, TurnOpened, TurnState, TurnStateConflict,
 };
-
-use crate::graph::GraphDomain;
 
 /// The store of `inference.stream.Turn`, in the order the turns were opened.
 #[derive(Debug, Clone, Default)]
@@ -466,41 +464,16 @@ impl Error for TurnMoveError {
     }
 }
 
-/// Why `inference.stream.OpenTurn` opened no turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenTurnError {
-    /// The `unknown-run` outcome: no stored run carries the identity sent.
-    UnknownRun(RunNotFound),
-    /// The `run-not-active` outcome: the run is not Active; `current` is the state it holds.
-    RunNotActive(RunStateConflict),
-}
-
-impl fmt::Display for OpenTurnError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownRun(error) => fmt::Display::fmt(error, f),
-            Self::RunNotActive(error) => fmt::Display::fmt(error, f),
-        }
-    }
-}
-
-impl Error for OpenTurnError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::UnknownRun(error) => Some(error),
-            Self::RunNotActive(error) => Some(error),
-        }
-    }
-}
-
 /// Why `inference.stream.EmitHypothesis` created no span. [`StreamDomain::emit_hypothesis`]
 /// decides the two turn refusals only; [`StreamDomain::emit_hypothesis_in`] decides all four, in
 /// the order `UnknownRun`, `UnknownTurn`, `RunNotActive`, `TurnNotOpen`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmitHypothesisError {
     /// The `unknown-run` outcome: no stored run carries the identity sent.
+    #[cfg(feature = "run")]
     UnknownRun(RunNotFound),
     /// The `run-not-active` outcome: the run is not Active; `current` is the state it holds.
+    #[cfg(feature = "run")]
     RunNotActive(RunStateConflict),
     /// The `unknown-turn` outcome: no stored turn carries the identity sent.
     UnknownTurn(TurnNotFound),
@@ -511,7 +484,9 @@ pub enum EmitHypothesisError {
 impl fmt::Display for EmitHypothesisError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "run")]
             Self::UnknownRun(error) => fmt::Display::fmt(error, f),
+            #[cfg(feature = "run")]
             Self::RunNotActive(error) => fmt::Display::fmt(error, f),
             Self::UnknownTurn(error) => fmt::Display::fmt(error, f),
             Self::TurnNotOpen(error) => fmt::Display::fmt(error, f),
@@ -522,59 +497,13 @@ impl fmt::Display for EmitHypothesisError {
 impl Error for EmitHypothesisError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            #[cfg(feature = "run")]
             Self::UnknownRun(error) => Some(error),
+            #[cfg(feature = "run")]
             Self::RunNotActive(error) => Some(error),
             Self::UnknownTurn(error) => Some(error),
             Self::TurnNotOpen(error) => Some(error),
         }
-    }
-}
-
-/// Why `inference.stream.StartGeneration` started no generation, in the order
-/// [`StreamDomain::start_generation_in`] decides it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartGenerationError {
-    /// The `unknown-run` outcome: no stored run carries the identity sent.
-    UnknownRun(RunNotFound),
-    /// The `unknown-node` outcome: no declared node carries the identity sent.
-    UnknownNode(NodeNotFound),
-    /// The `run-not-active` outcome: the run is not Active; `current` is the state it holds.
-    RunNotActive(RunStateConflict),
-}
-
-impl fmt::Display for StartGenerationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownRun(error) => fmt::Display::fmt(error, f),
-            Self::UnknownNode(error) => fmt::Display::fmt(error, f),
-            Self::RunNotActive(error) => fmt::Display::fmt(error, f),
-        }
-    }
-}
-
-impl Error for StartGenerationError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::UnknownRun(error) => Some(error),
-            Self::UnknownNode(error) => Some(error),
-            Self::RunNotActive(error) => Some(error),
-        }
-    }
-}
-
-/// The stored run carrying `run_id`, or [`RunNotFound`].
-fn stored_run(graph: &GraphDomain, run_id: RunId) -> Result<&Run, RunNotFound> {
-    graph.run(run_id).ok_or(RunNotFound { run_id })
-}
-
-/// Refuses a run that is not Active with the state it holds.
-fn active(run: &Run) -> Result<(), RunStateConflict> {
-    if run.state() == RunState::Active {
-        Ok(())
-    } else {
-        Err(RunStateConflict {
-            current: run.state(),
-        })
     }
 }
 
@@ -1065,73 +994,6 @@ impl StreamDomain {
         )
     }
 
-    /// Runs `inference.stream.OpenTurn` against the runs `graph` holds: refuses a run it does not
-    /// hold, then one that is not Active, and otherwise opens the turn as
-    /// [`StreamDomain::open_turn`] does.
-    ///
-    /// # Errors
-    ///
-    /// [`OpenTurnError::UnknownRun`], then [`OpenTurnError::RunNotActive`]. Nothing is stored, no
-    /// event is recorded and no identity is issued.
-    pub fn open_turn_in(
-        &mut self,
-        graph: &GraphDomain,
-        input: OpenTurn,
-    ) -> Result<TurnOpened, OpenTurnError> {
-        let run = stored_run(graph, input.run_id).map_err(OpenTurnError::UnknownRun)?;
-        active(run).map_err(OpenTurnError::RunNotActive)?;
-        Ok(self.open_turn(input))
-    }
-
-    /// Runs `inference.stream.EmitHypothesis` against the runs `graph` holds and the turns this
-    /// store holds: an identity no record carries is refused before a state, run before turn, and
-    /// otherwise the span is emitted as [`StreamDomain::emit_hypothesis`] does.
-    ///
-    /// # Errors
-    ///
-    /// In this order: [`EmitHypothesisError::UnknownRun`], [`EmitHypothesisError::UnknownTurn`],
-    /// [`EmitHypothesisError::RunNotActive`], [`EmitHypothesisError::TurnNotOpen`]. Nothing is
-    /// stored, no event is recorded and no identity is issued.
-    pub fn emit_hypothesis_in(
-        &mut self,
-        graph: &GraphDomain,
-        input: EmitHypothesis,
-    ) -> Result<TranscriptHypothesis, EmitHypothesisError> {
-        let run = stored_run(graph, input.run_id).map_err(EmitHypothesisError::UnknownRun)?;
-        if self.turns.get(input.turn_id).is_none() {
-            return Err(EmitHypothesisError::UnknownTurn(TurnNotFound {
-                turn_id: input.turn_id,
-            }));
-        }
-        active(run).map_err(EmitHypothesisError::RunNotActive)?;
-        self.emit_hypothesis(input)
-    }
-
-    /// Runs `inference.stream.StartGeneration` against the runs and nodes `graph` holds: an
-    /// identity no record carries is refused before a state, run before node, and otherwise the
-    /// generation is started as [`StreamDomain::start_generation`] does. A node of another
-    /// pipeline than the run's is not refused, as the specification orders it.
-    ///
-    /// # Errors
-    ///
-    /// In this order: [`StartGenerationError::UnknownRun`], [`StartGenerationError::UnknownNode`],
-    /// [`StartGenerationError::RunNotActive`]. Nothing is stored, no event is recorded and no
-    /// identity is issued.
-    pub fn start_generation_in(
-        &mut self,
-        graph: &GraphDomain,
-        input: StartGeneration,
-    ) -> Result<GenerationStarted, StartGenerationError> {
-        let run = stored_run(graph, input.run_id).map_err(StartGenerationError::UnknownRun)?;
-        if graph.declaration().node(input.node_id).is_none() {
-            return Err(StartGenerationError::UnknownNode(NodeNotFound {
-                node_id: input.node_id,
-            }));
-        }
-        active(run).map_err(StartGenerationError::RunNotActive)?;
-        Ok(self.start_generation(input))
-    }
-
     /// The stream half of the `cancelled` outcome of `inference.graph.CancelRun`, for a run the
     /// graph store has just cancelled: every Active generation of `run_id` moves to Cancelled and
     /// every segment of `run_id` that is not Played or already Discarded moves to Discarded. A
@@ -1312,6 +1174,172 @@ impl StreamDomain {
             .collect()
     }
 }
+
+/// The run-reading half of the store, behind the `run` feature: `OpenTurn`, `EmitHypothesis`
+/// and `StartGeneration` decided against the runs and nodes of the `inference.graph` store.
+#[cfg(feature = "run")]
+mod runs {
+    use std::error::Error;
+    use std::fmt;
+
+    use inference_core::generation::{GenerationStarted, StartGeneration};
+    use inference_core::id::RunId;
+    use inference_pipeline::NodeNotFound;
+    use inference_runtime::run::{Run, RunNotFound, RunState, RunStateConflict};
+    use inference_text::{
+        EmitHypothesis, OpenTurn, TranscriptHypothesis, TurnNotFound, TurnOpened,
+    };
+
+    use super::{EmitHypothesisError, StreamDomain};
+    use crate::graph::GraphDomain;
+
+    /// Why `inference.stream.OpenTurn` opened no turn.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OpenTurnError {
+        /// The `unknown-run` outcome: no stored run carries the identity sent.
+        UnknownRun(RunNotFound),
+        /// The `run-not-active` outcome: the run is not Active; `current` is the state it holds.
+        RunNotActive(RunStateConflict),
+    }
+
+    impl fmt::Display for OpenTurnError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::UnknownRun(error) => fmt::Display::fmt(error, f),
+                Self::RunNotActive(error) => fmt::Display::fmt(error, f),
+            }
+        }
+    }
+
+    impl Error for OpenTurnError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match self {
+                Self::UnknownRun(error) => Some(error),
+                Self::RunNotActive(error) => Some(error),
+            }
+        }
+    }
+
+    /// Why `inference.stream.StartGeneration` started no generation, in the order
+    /// [`StreamDomain::start_generation_in`] decides it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum StartGenerationError {
+        /// The `unknown-run` outcome: no stored run carries the identity sent.
+        UnknownRun(RunNotFound),
+        /// The `unknown-node` outcome: no declared node carries the identity sent.
+        UnknownNode(NodeNotFound),
+        /// The `run-not-active` outcome: the run is not Active; `current` is the state it holds.
+        RunNotActive(RunStateConflict),
+    }
+
+    impl fmt::Display for StartGenerationError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::UnknownRun(error) => fmt::Display::fmt(error, f),
+                Self::UnknownNode(error) => fmt::Display::fmt(error, f),
+                Self::RunNotActive(error) => fmt::Display::fmt(error, f),
+            }
+        }
+    }
+
+    impl Error for StartGenerationError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match self {
+                Self::UnknownRun(error) => Some(error),
+                Self::UnknownNode(error) => Some(error),
+                Self::RunNotActive(error) => Some(error),
+            }
+        }
+    }
+
+    /// The stored run carrying `run_id`, or [`RunNotFound`].
+    fn stored_run(graph: &GraphDomain, run_id: RunId) -> Result<&Run, RunNotFound> {
+        graph.run(run_id).ok_or(RunNotFound { run_id })
+    }
+
+    /// Refuses a run that is not Active with the state it holds.
+    fn active(run: &Run) -> Result<(), RunStateConflict> {
+        if run.state() == RunState::Active {
+            Ok(())
+        } else {
+            Err(RunStateConflict {
+                current: run.state(),
+            })
+        }
+    }
+
+    impl StreamDomain {
+        /// Runs `inference.stream.OpenTurn` against the runs `graph` holds: refuses a run it does not
+        /// hold, then one that is not Active, and otherwise opens the turn as
+        /// [`StreamDomain::open_turn`] does.
+        ///
+        /// # Errors
+        ///
+        /// [`OpenTurnError::UnknownRun`], then [`OpenTurnError::RunNotActive`]. Nothing is stored, no
+        /// event is recorded and no identity is issued.
+        pub fn open_turn_in(
+            &mut self,
+            graph: &GraphDomain,
+            input: OpenTurn,
+        ) -> Result<TurnOpened, OpenTurnError> {
+            let run = stored_run(graph, input.run_id).map_err(OpenTurnError::UnknownRun)?;
+            active(run).map_err(OpenTurnError::RunNotActive)?;
+            Ok(self.open_turn(input))
+        }
+
+        /// Runs `inference.stream.EmitHypothesis` against the runs `graph` holds and the turns this
+        /// store holds: an identity no record carries is refused before a state, run before turn, and
+        /// otherwise the span is emitted as [`StreamDomain::emit_hypothesis`] does.
+        ///
+        /// # Errors
+        ///
+        /// In this order: [`EmitHypothesisError::UnknownRun`], [`EmitHypothesisError::UnknownTurn`],
+        /// [`EmitHypothesisError::RunNotActive`], [`EmitHypothesisError::TurnNotOpen`]. Nothing is
+        /// stored, no event is recorded and no identity is issued.
+        pub fn emit_hypothesis_in(
+            &mut self,
+            graph: &GraphDomain,
+            input: EmitHypothesis,
+        ) -> Result<TranscriptHypothesis, EmitHypothesisError> {
+            let run = stored_run(graph, input.run_id).map_err(EmitHypothesisError::UnknownRun)?;
+            if self.turns.get(input.turn_id).is_none() {
+                return Err(EmitHypothesisError::UnknownTurn(TurnNotFound {
+                    turn_id: input.turn_id,
+                }));
+            }
+            active(run).map_err(EmitHypothesisError::RunNotActive)?;
+            self.emit_hypothesis(input)
+        }
+
+        /// Runs `inference.stream.StartGeneration` against the runs and nodes `graph` holds: an
+        /// identity no record carries is refused before a state, run before node, and otherwise the
+        /// generation is started as [`StreamDomain::start_generation`] does. A node of another
+        /// pipeline than the run's is not refused, as the specification orders it.
+        ///
+        /// # Errors
+        ///
+        /// In this order: [`StartGenerationError::UnknownRun`], [`StartGenerationError::UnknownNode`],
+        /// [`StartGenerationError::RunNotActive`]. Nothing is stored, no event is recorded and no
+        /// identity is issued.
+        pub fn start_generation_in(
+            &mut self,
+            graph: &GraphDomain,
+            input: StartGeneration,
+        ) -> Result<GenerationStarted, StartGenerationError> {
+            let run = stored_run(graph, input.run_id).map_err(StartGenerationError::UnknownRun)?;
+            if graph.declaration().node(input.node_id).is_none() {
+                return Err(StartGenerationError::UnknownNode(NodeNotFound {
+                    node_id: input.node_id,
+                }));
+            }
+            active(run).map_err(StartGenerationError::RunNotActive)?;
+            Ok(self.start_generation(input))
+        }
+    }
+}
+
+#[cfg(feature = "run")]
+pub use runs::{OpenTurnError, StartGenerationError};
 
 #[cfg(test)]
 mod tests {
