@@ -33,7 +33,8 @@ pub mod stream;
 /// their lifecycle, their views, and the scripted mock of the executor contract.
 pub mod tools;
 
-/// `inference.session`: empty until the session stores land.
+/// `inference.session`: the in-memory store of the sessions, each holding its current run, and its
+/// view.
 pub mod session;
 
 /// The scripted mock recogniser of the STT contract, in two capability configurations, and
@@ -41,7 +42,8 @@ pub mod session;
 #[cfg(feature = "stt")]
 pub mod stt;
 
-/// The scripted mock generator of the LLM contract, in three capability configurations.
+/// The scripted mock generator of the LLM contract, in three capability configurations, which
+/// may also be scripted to propose tool calls.
 #[cfg(feature = "llm")]
 pub mod llm;
 

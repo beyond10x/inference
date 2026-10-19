@@ -366,6 +366,40 @@ const TOOLS_SCENARIOS: [&str; 53] = [
     "inference.tools.ToolCall/transition/start/by/inference.tools.StartToolCall/started",
 ];
 
+/// Every `inference.session` scenario the suite synthesizes, 28: opening a session over a planned
+/// pipeline, attaching a run with the forced pipeline mismatch, readiness with and without a
+/// current run, the drain and the close, their transitions and every state refusal.
+const SESSION_SCENARIOS: [&str; 28] = [
+    "inference.session.AttachRun/outcome/attached",
+    "inference.session.AttachRun/outcome/no-such-session",
+    "inference.session.AttachRun/outcome/pipeline-mismatch",
+    "inference.session.CloseSession/outcome/draining",
+    "inference.session.CloseSession/outcome/no-such-session",
+    "inference.session.CompleteSessionClose/outcome/closed",
+    "inference.session.CompleteSessionClose/outcome/no-such-session",
+    "inference.session.MarkSessionReady/outcome/no-current-run",
+    "inference.session.MarkSessionReady/outcome/no-such-session",
+    "inference.session.MarkSessionReady/outcome/ready",
+    "inference.session.OpenSession/outcome/mode-mismatch",
+    "inference.session.OpenSession/outcome/not-planned",
+    "inference.session.OpenSession/outcome/opened",
+    "inference.session.OpenSession/outcome/unknown-pipeline",
+    "inference.session.Session/state/Closed/refuses/inference.session.AttachRun",
+    "inference.session.Session/state/Closed/refuses/inference.session.CloseSession",
+    "inference.session.Session/state/Closed/refuses/inference.session.CompleteSessionClose",
+    "inference.session.Session/state/Closed/refuses/inference.session.MarkSessionReady",
+    "inference.session.Session/state/Draining/refuses/inference.session.AttachRun",
+    "inference.session.Session/state/Draining/refuses/inference.session.CloseSession",
+    "inference.session.Session/state/Draining/refuses/inference.session.MarkSessionReady",
+    "inference.session.Session/state/Opened/refuses/inference.session.CompleteSessionClose",
+    "inference.session.Session/state/Ready/refuses/inference.session.CompleteSessionClose",
+    "inference.session.Session/state/Ready/refuses/inference.session.MarkSessionReady",
+    "inference.session.Session/transition/attach/by/inference.session.AttachRun/attached",
+    "inference.session.Session/transition/close/by/inference.session.CompleteSessionClose/closed",
+    "inference.session.Session/transition/drain/by/inference.session.CloseSession/draining",
+    "inference.session.Session/transition/ready/by/inference.session.MarkSessionReady/ready",
+];
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -548,6 +582,7 @@ fn the_suite_runs_against_the_testkit_target() {
         .chain(RUN_ROUTED_SCENARIOS)
         .chain(NODE_INSTANCE_SCENARIOS)
         .chain(TOOLS_SCENARIOS)
+        .chain(SESSION_SCENARIOS)
     {
         assert!(
             passed.contains(id),

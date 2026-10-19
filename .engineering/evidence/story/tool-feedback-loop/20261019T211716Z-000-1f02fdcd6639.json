@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T21:17:16Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-feedback-loop",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-tool-feedback-loop-pass-1",
+    "reference": "F1 testkit llm/node.rs a drain with tools counts as end of input; the awaited outcome is integrated before completion; adversary1_tool_feedback_loop drain case green",
+    "review": "review-result:adversary-tool-feedback-loop-pass-1",
+    "outcome": "fixed"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T21:17:17Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-feedback-loop",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-tool-feedback-loop-pass-1",
+    "reference": "F9 testkit llm/node.rs the unreachable barred branch removed; a refused proposal fails the node; deviation from the story's barred-drop wording recorded in the unit commit",
+    "review": "review-result:adversary-tool-feedback-loop-pass-1",
+    "outcome": "fixed"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T21:17:17Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-feedback-loop",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-tool-feedback-loop-pass-1",
+    "reference": "F8 pipeline tool_authority.rs ToolAuthority::bounded_by reads max_iterations from the declared FeedbackLoop; a disagreeing rule is refused at prepare; tool_feedback_loop declared-bound case",
+    "review": "review-result:adversary-tool-feedback-loop-pass-1",
+    "outcome": "fixed"
+  }
+}

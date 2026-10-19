@@ -4,11 +4,11 @@ id: executable-system-specification:inference
 kind: executable-system-specification
 status: validated
 title: ESS specification of the inference nouns (ess/)
-summary: Six domains, 17 entities, 36 commands; validates on ess 0.60.0; 153 synthesized scenarios, 0 refusals.
+summary: Seven domains, 18 entities, 54 commands; validates on ess 0.60.0; 330 synthesized scenarios (4 authored), 3 refusals.
 relations:
 - specifies: product-requirements:inference
 - derived_from: architecture-design:inference
-revision: 8
+revision: 11
 transitions:
 - {from: "draft", to: "validated", at: "2026-10-18T21:12:53Z", actor: "human:timo", revision: 2}
 ---
@@ -31,13 +31,18 @@ line it was read from (282 such lines across the seven documents, `grep -c 'read
 
 ## What it declares
 
-From `ess specify compile --path ess --format json`: 17 entities, 41 commands, 40 events,
-34 errors, 17 views, 60 types (2026-10-19, after story:inbound-text-spans-and-envelope; before it
-the same compile read 57 types and every other count as now). The three new types are
-`inference.stream.EventId` (newtype of Uuid), `inference.stream.Timebase` (enum:
-audio_frame_time, inference_execution_time, wall_time, playback_time) and
-`inference.stream.EventEnvelope` (struct: schema_version, event_id, run_id, session_id, stream_id,
-sequence, producer, port, kind, generation_id, timestamp, timebase, causation_id, payload).
+From `ess specify compile --path ess --format json` on 2026-10-19 after wave 16: 18 entities, 54
+commands, 55 events, 41 errors, 18 views, 65 types. Since the count before it (17 entities, 41
+commands, 40 events, 34 errors, 17 views, 60 types, after story:inbound-text-spans-and-envelope),
+among the additions, story:endpoint-controller declared
+`inference.stream.SpeechStarted` and `SpeechEnded`, story:tool-feedback-loop declared
+`inference.graph.FeedbackLoop` (a feedback edge of a pipeline with `max_iterations > 0`), its
+command `DeclareFeedbackLoop`, event, two errors and view, and story:session-run-link gave
+`inference.session.Session` its current run (`run_id`, relation to `inference.graph.Run`) and the
+command `AttachRun`.
+
+The event envelope types (`inference.stream.EventId`, `Timebase`, `EventEnvelope`) are those of
+story:inbound-text-spans-and-envelope.
 
 ## Evidence
 
@@ -50,7 +55,12 @@ sequence, producer, port, kind, generation_id, timestamp, timebase, causation_id
 | `ess specify validate --path ess`, after the event envelope (story:inbound-text-spans-and-envelope) | `inference v1 — 8 file(s), 4 scenario(s), valid`, exit 0 (before: the same line) | 2026-10-19 |
 | `ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json`, after the event envelope (story:inbound-text-spans-and-envelope) | `229 scenario(s) (4 authored), 3 refusal(s)`, exit 0; before the declaration the same; the 229 scenario ids and their bodies identical, inference.stream 83; the change declares `types:` only | 2026-10-19 |
 
-Scenarios per domain, 2026-10-19 (229 with `--scenarios ess/scenarios`): graph 104, stream 83, session 21, tools 13, model 4, policy 4. On 2026-10-18 (153, before the specification fixes): graph 85, stream 60, model 3, tools 3, policy 1, session 1.
+
+| `ess specify validate --path ess`, after the feedback loop and the session to run link (story:tool-feedback-loop, story:session-run-link) | `inference v1 — 8 file(s), 4 scenario(s), valid`, exit 0 | 2026-10-19 |
+| `ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json`, after the same two stories | `330 scenario(s) (4 authored), 3 refusal(s)`, exit 0; before them `317 scenario(s) (4 authored), 3 refusal(s)`; the same three ESS-SYNTH-001 refusals; no scenario id removed; six added in inference.graph (`DeclareFeedbackLoop` outcomes and the FeedbackLoop invariant) and seven in inference.session (`AttachRun` and the attach transition) | 2026-10-19 |
+| `cargo test -p inference-testkit --all-features --test conform`, after the same two stories | every scenario answered, none unsupported; `ess/SKIPPED.md` lists no id | 2026-10-19 |
+
+Scenarios per domain, 2026-10-19 after wave 16 (330 with `--scenarios ess/scenarios`): graph 158, stream 83, tools 53, session 28, model 4, policy 4.
 
 ## How the specification answers the design's open questions 1 to 3
 

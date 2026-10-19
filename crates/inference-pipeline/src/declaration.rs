@@ -1,5 +1,5 @@
-//! [`Declaration`]: the declared pipelines, nodes, ports, edges and bindings, the five
-//! declaration commands of `ess/domains/graph.yaml` over them, and `ValidatePipeline`.
+//! [`Declaration`]: the declared pipelines, nodes, ports, edges, feedback loops and bindings, the
+//! six declaration commands of `ess/domains/graph.yaml` over them, and `ValidatePipeline`.
 
 use std::error::Error;
 use std::fmt;
@@ -11,12 +11,13 @@ use inference_core::model::{Adapter, AdapterId};
 use inference_core::policy::{DeploymentProfile, ProfileId, ProfileNotFound};
 
 use crate::{
-    AdapterNotFound, AddNode, AddPort, BindNode, Binding, BindingId, ConnectPorts, DeclarePipeline,
-    Edge, EdgeDefect, EdgeId, GraphFinding, IncompatibleEdge, IncompatibleGraph, Node, NodeAdded,
-    NodeBound, NodeId, NodeNotFound, OverloadPolicy, Pipeline, PipelineDeclared, PipelineId,
-    PipelineNotFound, PipelineNotReady, PipelineState, PipelineStateConflict, PipelineValidated,
-    Port, PortAdded, PortDirection, PortId, PortNotFound, PortsConnected, UnboundedEdge,
-    ValidatePipeline,
+    AdapterNotFound, AddNode, AddPort, BindNode, Binding, BindingId, ConnectPorts,
+    DeclareFeedbackLoop, DeclarePipeline, Edge, EdgeDefect, EdgeId, EdgeNotFound, FeedbackLoop,
+    FeedbackLoopDeclared, FeedbackLoopId, GraphFinding, IncompatibleEdge, IncompatibleGraph, Node,
+    NodeAdded, NodeBound, NodeId, NodeNotFound, OverloadPolicy, Pipeline, PipelineDeclared,
+    PipelineId, PipelineNotFound, PipelineNotReady, PipelineState, PipelineStateConflict,
+    PipelineValidated, Port, PortAdded, PortDirection, PortId, PortNotFound, PortsConnected,
+    UnboundedEdge, UnboundedFeedback, ValidatePipeline,
 };
 
 /// What a declaration references and does not hold: the declared deployment profiles of
@@ -126,6 +127,42 @@ impl Error for ConnectPortsError {
     }
 }
 
+/// Why `inference.graph.DeclareFeedbackLoop` declared nothing. The refusals are decided in this
+/// order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclareFeedbackLoopError {
+    /// The `unknown-pipeline` outcome.
+    UnknownPipeline(PipelineNotFound),
+    /// The `unknown-edge` outcome: no edge carries `edge_id`.
+    UnknownEdge(EdgeNotFound),
+    /// The `unbounded` outcome: the maximum was below one.
+    Unbounded(UnboundedFeedback),
+    /// The `not-declared` outcome: the pipeline was already validated.
+    NotDeclared(PipelineNotReady),
+}
+
+impl fmt::Display for DeclareFeedbackLoopError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownPipeline(error) => fmt::Display::fmt(error, f),
+            Self::UnknownEdge(error) => fmt::Display::fmt(error, f),
+            Self::Unbounded(error) => fmt::Display::fmt(error, f),
+            Self::NotDeclared(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for DeclareFeedbackLoopError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::UnknownPipeline(error) => Some(error),
+            Self::UnknownEdge(error) => Some(error),
+            Self::Unbounded(error) => Some(error),
+            Self::NotDeclared(error) => Some(error),
+        }
+    }
+}
+
 /// Why `inference.graph.BindNode` bound nothing. The refusals are decided in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindNodeError {
@@ -217,6 +254,7 @@ pub struct Declaration {
     nodes: Vec<Node>,
     ports: Vec<Port>,
     edges: Vec<Edge>,
+    feedback_loops: Vec<FeedbackLoop>,
     bindings: Vec<Binding>,
     identities: Identities,
 }
@@ -349,6 +387,41 @@ impl Declaration {
         ))
     }
 
+    /// Runs `inference.graph.DeclareFeedbackLoop`: the edge is a feedback edge of the pipeline,
+    /// bounded by the iteration rule the input carries. An edge of another pipeline is not refused
+    /// here; such a loop bounds no cycle of the pipeline it names (check 5).
+    ///
+    /// # Errors
+    ///
+    /// In this order: [`DeclareFeedbackLoopError::UnknownPipeline`];
+    /// [`DeclareFeedbackLoopError::UnknownEdge`] when no edge carries `edge_id`;
+    /// [`DeclareFeedbackLoopError::Unbounded`] carrying the maximum sent when it is below one;
+    /// [`DeclareFeedbackLoopError::NotDeclared`].
+    pub fn declare_feedback_loop(
+        &mut self,
+        input: DeclareFeedbackLoop,
+    ) -> Result<FeedbackLoopDeclared, DeclareFeedbackLoopError> {
+        let pipeline =
+            self.pipeline(input.pipeline_id)
+                .ok_or(DeclareFeedbackLoopError::UnknownPipeline(
+                    PipelineNotFound {
+                        pipeline_id: input.pipeline_id,
+                    },
+                ))?;
+        if !self.edges.iter().any(|edge| edge.edge_id == input.edge_id) {
+            return Err(DeclareFeedbackLoopError::UnknownEdge(EdgeNotFound {
+                edge_id: input.edge_id,
+            }));
+        }
+        let max_iterations = bounded(input.max_iterations).ok_or(
+            DeclareFeedbackLoopError::Unbounded(UnboundedFeedback {
+                submitted: input.max_iterations,
+            }),
+        )?;
+        Self::declared(pipeline).map_err(DeclareFeedbackLoopError::NotDeclared)?;
+        Ok(self.insert_feedback_loop(input.pipeline_id, input.edge_id, max_iterations))
+    }
+
     /// Runs `inference.graph.BindNode`. A node of another pipeline is not refused here.
     ///
     /// # Errors
@@ -466,6 +539,11 @@ impl Declaration {
     /// Every edge, in declaration order.
     pub fn edges(&self) -> impl Iterator<Item = &Edge> {
         self.edges.iter()
+    }
+
+    /// Every feedback loop, in declaration order.
+    pub fn feedback_loops(&self) -> impl Iterator<Item = &FeedbackLoop> {
+        self.feedback_loops.iter()
     }
 
     /// Every binding, in declaration order.
@@ -588,6 +666,26 @@ impl Declaration {
         }
     }
 
+    pub(crate) fn insert_feedback_loop(
+        &mut self,
+        pipeline_id: PipelineId,
+        edge_id: EdgeId,
+        max_iterations: NonZeroUsize,
+    ) -> FeedbackLoopDeclared {
+        let feedback_id = FeedbackLoopId::from(self.issue());
+        self.feedback_loops.push(FeedbackLoop {
+            feedback_id,
+            pipeline_id,
+            edge_id,
+            max_iterations,
+        });
+        FeedbackLoopDeclared {
+            feedback_id,
+            edge_id,
+            max_iterations: i64::try_from(max_iterations.get()).unwrap_or(i64::MAX),
+        }
+    }
+
     pub(crate) fn insert_binding(
         &mut self,
         pipeline_id: PipelineId,
@@ -609,8 +707,9 @@ impl Declaration {
     }
 }
 
-/// The capacity an ESS `Integer` gives an edge: none below one. On a target whose `usize` is
-/// narrower than `i64`, a capacity beyond `usize::MAX` is held as `usize::MAX`.
+/// The capacity an ESS `Integer` gives an edge, or the maximum it gives a feedback loop: none
+/// below one. On a target whose `usize` is narrower than `i64`, a value beyond `usize::MAX` is
+/// held as `usize::MAX`.
 fn bounded(capacity: i64) -> Option<NonZeroUsize> {
     if capacity < 1 {
         return None;

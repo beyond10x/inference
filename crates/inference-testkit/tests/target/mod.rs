@@ -12,16 +12,16 @@
 //!
 //! An observed event's position is the target's too: [`Stores::publish`] places every event a
 //! store recorded in the target's one publication order, and [`Stores::model_position`],
-//! [`Stores::policy_position`], [`Stores::graph_position`], [`Stores::stream_position`] and
-//! [`Stores::tools_position`] read its place there. Each store orders its own events only, as an
+//! [`Stores::policy_position`], [`Stores::graph_position`], [`Stores::stream_position`],
+//! [`Stores::tools_position`] and [`Stores::session_position`] read its place there. Each store orders its own events only, as an
 //! envelope's `sequence` orders one stream only, so the merge order across domains is the
 //! target's, the recorder's, and the one thing a module reads that no store holds.
 //!
 //! Identities are the stores' too, and no two stores issue the same one: each counts in its own
 //! space of the first eight hex digits, `inference.stream` in 0, `inference.model` in 1,
-//! `inference.policy` in 2, `inference.graph` in 3 and `inference.tools` in 4, so an identity of
-//! one domain sent where
-//! another's belongs names no row.
+//! `inference.policy` in 2, `inference.graph` in 3, `inference.tools` in 4 and
+//! `inference.session` in 5, so an identity of one domain sent where another's belongs names no
+//! row.
 //!
 //! A scenario forcing an `external` outcome ([`ConformanceTarget::configure_external_outcome`]) goes
 //! to the module of the command's domain, which accepts it only for an outcome it answers and its
@@ -80,6 +80,7 @@ struct Publication {
     graph: Vec<u64>,
     stream: Vec<u64>,
     tools: Vec<u64>,
+    session: Vec<u64>,
 }
 
 impl Stores {
@@ -89,24 +90,27 @@ impl Stores {
     /// returns. Events recorded straight into the stores between two calls, as a test arranges a
     /// generation that no command can start yet, are placed at the next call, in the order
     /// `inference.model`, `inference.policy`, `inference.graph`, `inference.stream`,
-    /// `inference.tools`. A story that fills a module adds its events here.
+    /// `inference.tools`, `inference.session`. A story that fills a module adds its events here.
     pub fn publish(&mut self) {
         let mut placed = self.publication.model.len()
             + self.publication.policy.len()
             + self.publication.graph.len()
             + self.publication.stream.len()
-            + self.publication.tools.len();
+            + self.publication.tools.len()
+            + self.publication.session.len();
         let model = self.model.events().len();
         let policy = self.policy.events().len();
         let graph = self.graph.events().len();
         let stream = self.stream.events().len();
         let tools = self.tools.events().len();
+        let session = self.session.events().len();
         for (positions, recorded) in [
             (&mut self.publication.model, model),
             (&mut self.publication.policy, policy),
             (&mut self.publication.graph, graph),
             (&mut self.publication.stream, stream),
             (&mut self.publication.tools, tools),
+            (&mut self.publication.session, session),
         ] {
             while positions.len() < recorded {
                 placed += 1;
@@ -157,6 +161,12 @@ impl Stores {
         Self::placed(&self.publication.tools, "inference.tools", index)
     }
 
+    /// The position, from 1, of the `index`th event (from 0) the `inference.session` store
+    /// recorded, in the target's one publication order.
+    pub fn session_position(&self, index: usize) -> Result<u64, TargetError> {
+        Self::placed(&self.publication.session, "inference.session", index)
+    }
+
     /// The position [`Stores::publish`] gave the `index`th event of `domain`; an event it has not
     /// placed is an error, never a guessed position.
     fn placed(positions: &[u64], domain: &str, index: usize) -> Result<u64, TargetError> {
@@ -180,7 +190,8 @@ impl Stores {
             + self.policy.events().len()
             + self.graph.events().len()
             + self.stream.events().len()
-            + self.tools.events().len();
+            + self.tools.events().len()
+            + self.session.events().len();
         u64::try_from(events).unwrap_or(u64::MAX)
     }
 
@@ -304,6 +315,7 @@ impl ConformanceTarget for Target {
         let name = request.force.command.to_string();
         match domain(&name) {
             graph::DOMAIN => graph::configure_external_outcome(stores, &request),
+            session::DOMAIN => session::configure_external_outcome(stores, &request),
             _ => Err(TargetError::unsupported(
                 format!("forcing `{}`", request.force),
                 "no answered outcome of this domain is declared external",
