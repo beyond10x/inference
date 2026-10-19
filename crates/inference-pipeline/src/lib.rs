@@ -29,9 +29,12 @@
 //! builder, and [`Declaration::plan_pipeline`] runs `inference.graph.PlanPipeline` by identity.
 //! Both compute the pipeline's effective capabilities from the weakest node on every required path
 //! and refuse a node left without the adapter its requirements need ([`NodeUnbound`]) or an unmet
-//! mandatory capability ([`CapabilityMismatch`]); the planned form is a [`PlannedPipeline`]. The
-//! crate depends on `inference-core` only and carries no concrete model, backend or provider.
-//! Serialized names are the ESS names.
+//! mandatory capability ([`CapabilityMismatch`]); the planned form is a [`PlannedPipeline`].
+//!
+//! A node implementation writes one trait, [`NodeImplementation`] ([`node`]): describe, prepare,
+//! start with its edge endpoints, drain or cancel, stop, which the runtime drives for each node
+//! instance of a run. The crate depends on `inference-core` only and carries no concrete model,
+//! backend or provider. Serialized names are the ESS names.
 
 use std::error::Error;
 use std::fmt;
@@ -44,6 +47,7 @@ use inference_core::policy::ProfileId;
 
 mod builder;
 mod declaration;
+pub mod node;
 mod planning;
 mod validation;
 
@@ -56,6 +60,7 @@ pub use declaration::{
     ValidatePipelineError,
 };
 pub use inference_core::id::NodeId;
+pub use node::{NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInput, NodeOutput};
 pub use planning::{PlanPipelineError, PlannedPipeline, ValidatedPipeline};
 
 inference_core::uuid_newtype!(

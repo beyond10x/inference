@@ -312,6 +312,7 @@ version = "0.3.0"
 dependencies = [
  "inference-core",
  "inference-pipeline",
+ "inference-testkit",
  "serde",
  "serde_json",
 ]

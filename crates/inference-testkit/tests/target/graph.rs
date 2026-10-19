@@ -1,6 +1,6 @@
 //! `inference.graph`: the five declaration commands, `ValidatePipeline`, `PlanPipeline`, the eight
-//! Run commands and `DescribeNodeInstance`, the seven views and the sixteen events of
-//! `ess/domains/graph.yaml`, answered by [`GraphDomain`].
+//! Run commands, `DescribeNodeInstance` and the six node instance commands, the seven views and
+//! the twenty-two events of `ess/domains/graph.yaml`, answered by [`GraphDomain`].
 //!
 //! Each request field is read on its own ([`Input`]); the outcome, the error and the event come
 //! from what the store returned. `DeclarePipeline`, `BindNode` and `PlanPipeline` read the
@@ -41,6 +41,12 @@
 //! `FailRun` reads its `failure` field by field: `detail` and an optional `node_id`, absent or
 //! null for none; a `FailureReason` is written with `node_id` null when it names no node.
 //!
+//! The six node instance commands, `PrepareNodeInstance` through `FailNodeInstance`, move the
+//! instance they name in the store and emit their own event only; one naming an instance no record
+//! carries takes its `wrong-state` outcome with no `current`, as a run command does. A Run command
+//! moves no instance here: which run transition drives which instance is the run controller's in
+//! `inference-runtime`. The view `NodeInstances` carries each instance's `state`.
+//!
 //! `PrepareRun`'s `refused` outcome is declared `external`: the store never decides it (whether
 //! the runtime can admit a run's resources is not observed here), and a scenario may force it on
 //! the next invocation, which then moves nothing and answers `AdmissionDenied` with a stand-in
@@ -69,11 +75,12 @@ use inference_pipeline::{
 };
 use inference_runtime::RunId;
 use inference_runtime::run::{
-    AdmissionRefusal, FailureReason, NodeInstance, NodeInstanceDescribed, Run, RunCreated,
-    RunFailed, RunStateConflict,
+    AdmissionRefusal, FailureReason, NodeInstance, NodeInstanceDescribed, NodeInstanceId, Run,
+    RunCreated, RunFailed, RunStateConflict,
 };
 use inference_testkit::graph::{
-    CreateRunError, DescribeNodeInstanceError, GraphCatalog, GraphDomain, GraphEvent, RunMoveError,
+    CreateRunError, DescribeNodeInstanceError, GraphCatalog, GraphDomain, GraphEvent,
+    NodeInstanceMoveError, RunMoveError,
 };
 use inference_testkit::stream::StreamDomain;
 use uuid::Uuid;
@@ -102,6 +109,12 @@ const COMPLETE_RUN: &str = "inference.graph.CompleteRun";
 const FAIL_RUN: &str = "inference.graph.FailRun";
 const CANCEL_RUN: &str = "inference.graph.CancelRun";
 const DESCRIBE_NODE_INSTANCE: &str = "inference.graph.DescribeNodeInstance";
+const PREPARE_NODE_INSTANCE: &str = "inference.graph.PrepareNodeInstance";
+const START_NODE_INSTANCE: &str = "inference.graph.StartNodeInstance";
+const DRAIN_NODE_INSTANCE: &str = "inference.graph.DrainNodeInstance";
+const CANCEL_NODE_INSTANCE: &str = "inference.graph.CancelNodeInstance";
+const STOP_NODE_INSTANCE: &str = "inference.graph.StopNodeInstance";
+const FAIL_NODE_INSTANCE: &str = "inference.graph.FailNodeInstance";
 
 /// The outcome of `ValidatePipeline` that `ess/domains/graph.yaml` declares external.
 const REJECTED: &str = "rejected";
@@ -128,9 +141,15 @@ const RUN_COMPLETED: &str = "inference.graph.RunCompleted";
 const RUN_FAILED: &str = "inference.graph.RunFailed";
 const RUN_CANCELLED: &str = "inference.graph.RunCancelled";
 const NODE_INSTANCE_DESCRIBED: &str = "inference.graph.NodeInstanceDescribed";
+const NODE_INSTANCE_PREPARED: &str = "inference.graph.NodeInstancePrepared";
+const NODE_INSTANCE_STARTED: &str = "inference.graph.NodeInstanceStarted";
+const NODE_INSTANCE_DRAINING: &str = "inference.graph.NodeInstanceDraining";
+const NODE_INSTANCE_CANCELLING: &str = "inference.graph.NodeInstanceCancelling";
+const NODE_INSTANCE_STOPPED: &str = "inference.graph.NodeInstanceStopped";
+const NODE_INSTANCE_FAILED: &str = "inference.graph.NodeInstanceFailed";
 
 /// Every event this module observes.
-const EVENTS: [&str; 16] = [
+const EVENTS: [&str; 22] = [
     PIPELINE_DECLARED,
     NODE_ADDED,
     PORT_ADDED,
@@ -147,6 +166,12 @@ const EVENTS: [&str; 16] = [
     RUN_FAILED,
     RUN_CANCELLED,
     NODE_INSTANCE_DESCRIBED,
+    NODE_INSTANCE_PREPARED,
+    NODE_INSTANCE_STARTED,
+    NODE_INSTANCE_DRAINING,
+    NODE_INSTANCE_CANCELLING,
+    NODE_INSTANCE_STOPPED,
+    NODE_INSTANCE_FAILED,
 ];
 
 const PROFILE_NOT_FOUND: &str = "inference.policy.ProfileNotFound";
@@ -163,6 +188,7 @@ const CAPABILITY_MISMATCH: &str = "inference.graph.CapabilityMismatch";
 const LOCALITY_DENIED_ERROR: &str = "inference.graph.LocalityDenied";
 const PIPELINE_STATE_CONFLICT: &str = "inference.graph.PipelineStateConflict";
 const RUN_STATE_CONFLICT: &str = "inference.graph.RunStateConflict";
+const NODE_INSTANCE_STATE_CONFLICT: &str = "inference.graph.NodeInstanceStateConflict";
 const RUN_NOT_FOUND: &str = "inference.graph.RunNotFound";
 const RUN_NOT_RUNNING: &str = "inference.graph.RunNotRunning";
 const ADMISSION_DENIED: &str = "inference.graph.AdmissionDenied";
@@ -252,6 +278,52 @@ pub fn execute_command(
         FAIL_RUN => fail_run(domain, request)?,
         CANCEL_RUN => cancel_run(domain, &mut stores.stream, request)?,
         DESCRIBE_NODE_INSTANCE => describe_node_instance(domain, request)?,
+        PREPARE_NODE_INSTANCE => {
+            let answer = domain.prepare_node_instance(instance_id(request)?);
+            instance_moved(
+                PREPARE_NODE_INSTANCE,
+                "prepared",
+                answer.map(GraphEvent::NodeInstancePrepared),
+                request,
+            )?
+        }
+        START_NODE_INSTANCE => {
+            let answer = domain.start_node_instance(instance_id(request)?);
+            instance_moved(
+                START_NODE_INSTANCE,
+                "started",
+                answer.map(GraphEvent::NodeInstanceStarted),
+                request,
+            )?
+        }
+        DRAIN_NODE_INSTANCE => {
+            let answer = domain.drain_node_instance(instance_id(request)?);
+            instance_moved(
+                DRAIN_NODE_INSTANCE,
+                "draining",
+                answer.map(GraphEvent::NodeInstanceDraining),
+                request,
+            )?
+        }
+        CANCEL_NODE_INSTANCE => {
+            let answer = domain.cancel_node_instance(instance_id(request)?);
+            instance_moved(
+                CANCEL_NODE_INSTANCE,
+                "cancelling",
+                answer.map(GraphEvent::NodeInstanceCancelling),
+                request,
+            )?
+        }
+        STOP_NODE_INSTANCE => {
+            let answer = domain.stop_node_instance(instance_id(request)?);
+            instance_moved(
+                STOP_NODE_INSTANCE,
+                "stopped",
+                answer.map(GraphEvent::NodeInstanceStopped),
+                request,
+            )?
+        }
+        FAIL_NODE_INSTANCE => fail_node_instance(domain, request)?,
         _ => return Err(unsupported(&name)),
     };
     stores.publish();
@@ -396,6 +468,57 @@ fn describe_node_instance(
                 )
         }
     })
+}
+
+/// The one field of a node instance command but `FailNodeInstance`.
+fn instance_id(request: &SemanticCommandRequest) -> Result<NodeInstanceId, TargetError> {
+    let mut input = Input::of(request);
+    let instance_id = input.named("instance_id")?;
+    input.finish()?;
+    Ok(instance_id)
+}
+
+/// The answer of a node instance command: `branch` and its event, or `wrong-state`, whose
+/// `NodeInstanceStateConflict` carries no `current` for an instance no record carries.
+fn instance_moved(
+    command: &str,
+    branch: &str,
+    answer: Result<GraphEvent, NodeInstanceMoveError>,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    Ok(match answer {
+        Ok(event) => SemanticCommandResult::took(outcome(command, branch))
+            .emitting(graph_event(&event)?.in_activity(request.correlation.clone())),
+        Err(NodeInstanceMoveError::Unknown(_)) => {
+            SemanticCommandResult::took(outcome(command, "wrong-state")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(NODE_INSTANCE_STATE_CONFLICT)),
+            )
+        }
+        Err(NodeInstanceMoveError::Conflict(conflict)) => {
+            SemanticCommandResult::took(outcome(command, "wrong-state")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(NODE_INSTANCE_STATE_CONFLICT))
+                    .with("current", named_node(&conflict.current)?),
+            )
+        }
+    })
+}
+
+/// `FailNodeInstance`: `instance_id` and `reason`, a string.
+fn fail_node_instance(
+    domain: &mut GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let instance_id = input.named("instance_id")?;
+    let reason = input.text("reason")?;
+    input.finish()?;
+    let answer = domain.fail_node_instance(instance_id, reason);
+    instance_moved(
+        FAIL_NODE_INSTANCE,
+        "failed",
+        answer.map(GraphEvent::NodeInstanceFailed),
+        request,
+    )
 }
 
 /// An `inference.graph.FailureReason` read field by field: `detail`, a string, and `node_id`, a
@@ -949,6 +1072,12 @@ fn graph_event(event: &GraphEvent) -> Result<ObservedEvent, TargetError> {
             ObservedEvent::new(parse::<EventRef>(name)).with("run_id", named_node(&run_id)?),
         )
     };
+    let instance = |name: &str, instance_id: NodeInstanceId| {
+        Ok::<_, TargetError>(
+            ObservedEvent::new(parse::<EventRef>(name))
+                .with("instance_id", named_node(&instance_id)?),
+        )
+    };
     match event {
         GraphEvent::PipelineDeclared(event) => pipeline_declared(event),
         GraphEvent::NodeAdded(event) => node_added(event),
@@ -966,6 +1095,25 @@ fn graph_event(event: &GraphEvent) -> Result<ObservedEvent, TargetError> {
         GraphEvent::RunFailed(event) => run_failed(event),
         GraphEvent::RunCancelled(event) => run(RUN_CANCELLED, event.run_id),
         GraphEvent::NodeInstanceDescribed(event) => node_instance_described(event),
+        GraphEvent::NodeInstancePrepared(event) => {
+            instance(NODE_INSTANCE_PREPARED, event.instance_id)
+        }
+        GraphEvent::NodeInstanceStarted(event) => {
+            instance(NODE_INSTANCE_STARTED, event.instance_id)
+        }
+        GraphEvent::NodeInstanceDraining(event) => {
+            instance(NODE_INSTANCE_DRAINING, event.instance_id)
+        }
+        GraphEvent::NodeInstanceCancelling(event) => {
+            instance(NODE_INSTANCE_CANCELLING, event.instance_id)
+        }
+        GraphEvent::NodeInstanceStopped(event) => {
+            instance(NODE_INSTANCE_STOPPED, event.instance_id)
+        }
+        GraphEvent::NodeInstanceFailed(event) => {
+            Ok(instance(NODE_INSTANCE_FAILED, event.instance_id)?
+                .with("reason", text_node(&event.reason)))
+        }
     }
 }
 
@@ -1010,6 +1158,7 @@ fn node_instances_row(instance: &NodeInstance) -> Result<ViewRow, TargetError> {
         ),
         ("run_id".to_owned(), named_node(&instance.run_id())?),
         ("node_id".to_owned(), named_node(&instance.node_id())?),
+        ("state".to_owned(), named_node(&instance.state())?),
     ]))
 }
 
@@ -2136,7 +2285,129 @@ mod tests {
                 ("instance_id".to_owned(), instance_id),
                 ("run_id".to_owned(), run_id),
                 ("node_id".to_owned(), node_id),
+                ("state".to_owned(), text("Described")),
             ])]
+        );
+    }
+
+    #[test]
+    fn a_node_instance_moves_by_its_own_commands_and_a_refused_one_reports_its_state() {
+        let mut stores = Stores::default();
+        let (pipeline_id, node_id) = planned(&mut stores);
+        let run_id = emitted(&create(&mut stores, pipeline_id), "run_id");
+        on_run(&mut stores, "ValidateRun", &run_id);
+        on_run(&mut stores, "PrepareRun", &run_id);
+        let described = run(
+            &mut stores,
+            "inference.graph.DescribeNodeInstance",
+            &[("run_id", run_id.clone()), ("node_id", node_id)],
+        );
+        let instance_id = emitted(&described, "instance_id");
+        let on_instance = |stores: &mut Stores, command: &str, instance_id: &Node| {
+            run(
+                stores,
+                &format!("inference.graph.{command}"),
+                &[("instance_id", instance_id.clone())],
+            )
+        };
+        let state = |stores: &mut Stores| {
+            let instances = rows(stores, "inference.graph.NodeInstances");
+            assert_eq!(instances.len(), 1, "{instances:?}");
+            instances[0]["state"].clone()
+        };
+
+        let early = on_instance(&mut stores, "StartNodeInstance", &instance_id);
+        assert_eq!(
+            branch(&early),
+            "inference.graph.StartNodeInstance/wrong-state"
+        );
+        let error = early.error.as_ref().expect("a declared error");
+        assert_eq!(
+            error.error.to_string(),
+            "inference.graph.NodeInstanceStateConflict"
+        );
+        assert_eq!(
+            error.fields,
+            BTreeMap::from([("current".to_owned(), text("Described"))])
+        );
+        assert!(early.direct_events.is_empty());
+        assert_eq!(state(&mut stores), text("Described"));
+
+        for (command, outcome, now) in [
+            ("PrepareNodeInstance", "prepared", "Prepared"),
+            ("StartNodeInstance", "started", "Started"),
+            ("DrainNodeInstance", "draining", "Draining"),
+            ("CancelNodeInstance", "cancelling", "Cancelling"),
+            ("StopNodeInstance", "stopped", "Stopped"),
+        ] {
+            let moved = on_instance(&mut stores, command, &instance_id);
+            assert_eq!(
+                branch(&moved),
+                format!("inference.graph.{command}/{outcome}")
+            );
+            assert_eq!(emitted(&moved, "instance_id"), instance_id);
+            assert_eq!(state(&mut stores), text(now));
+        }
+        assert_eq!(
+            observed(&mut stores, "inference.graph.NodeInstanceStopped").len(),
+            1
+        );
+        assert_eq!(
+            rows(&mut stores, "inference.graph.Runs")[0]["state"],
+            text("Preparing"),
+            "an instance command moves no run"
+        );
+
+        let unknown = run(
+            &mut stores,
+            "inference.graph.FailNodeInstance",
+            &[("instance_id", text(UNKNOWN)), ("reason", text("gone"))],
+        );
+        assert_eq!(
+            branch(&unknown),
+            "inference.graph.FailNodeInstance/wrong-state"
+        );
+        let error = unknown.error.as_ref().expect("a declared error");
+        assert!(error.fields.is_empty(), "no record holds a state to report");
+    }
+
+    #[test]
+    fn a_failed_node_instance_records_its_reason_in_its_event() {
+        let mut stores = Stores::default();
+        let (pipeline_id, node_id) = planned(&mut stores);
+        let run_id = emitted(&create(&mut stores, pipeline_id), "run_id");
+        on_run(&mut stores, "ValidateRun", &run_id);
+        on_run(&mut stores, "PrepareRun", &run_id);
+        let described = run(
+            &mut stores,
+            "inference.graph.DescribeNodeInstance",
+            &[("run_id", run_id), ("node_id", node_id)],
+        );
+        let instance_id = emitted(&described, "instance_id");
+
+        let failed = run(
+            &mut stores,
+            "inference.graph.FailNodeInstance",
+            &[
+                ("instance_id", instance_id.clone()),
+                ("reason", text("the device is gone")),
+            ],
+        );
+        assert_eq!(branch(&failed), "inference.graph.FailNodeInstance/failed");
+        assert_eq!(emitted(&failed, "reason"), text("the device is gone"));
+        let observed = observed(&mut stores, "inference.graph.NodeInstanceFailed");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].payload["instance_id"], instance_id);
+        assert_eq!(observed[0].payload["reason"], text("the device is gone"));
+
+        let again = run(
+            &mut stores,
+            "inference.graph.FailNodeInstance",
+            &[("instance_id", instance_id), ("reason", text("again"))],
+        );
+        assert_eq!(
+            again.error.as_ref().expect("a declared error").fields,
+            BTreeMap::from([("current".to_owned(), text("Failed"))])
         );
     }
 
