@@ -1,10 +1,11 @@
 //! The scripted mock of the executor contract of `inference-tools`.
 //!
 //! A [`MockToolExecutor`] is constructed with a table of tools, each with a [`Script`]: the result
-//! it answers, the typed failure it answers, or an overrun, which answers no result before the
-//! deadline. It records every invocation, with the call's identity, before it answers, so a test
-//! reads how often and with what each call reached it; a call for a tool the table lacks is
-//! recorded and fails with an `execution_error` naming the tool.
+//! it answers, the typed failure it answers to every attempt, a failure it answers to the first
+//! attempts of a call before it answers a result, or an overrun, which answers no result before
+//! the deadline. It records every invocation, every attempt among them, with the call's identity,
+//! before it answers, so a test reads how often and with what each call reached it; a call for a
+//! tool the table lacks is recorded and fails with an `execution_error` naming the tool.
 
 use std::collections::HashMap;
 use std::future;
@@ -23,8 +24,15 @@ use inference_tools::{
 pub enum Script {
     /// Answers this result at once.
     Result(Json),
-    /// Answers this failure at once.
+    /// Answers this failure at once, to every attempt: it fails permanently.
     Failure(ToolFailure),
+    /// Answers `failure` at once to the first `failures` attempts of each call, told apart by its
+    /// call_id, and `result` at once to every later one.
+    FailThenSucceed {
+        failures: usize,
+        failure: ToolFailure,
+        result: Json,
+    },
     /// Answers nothing before the deadline: a `deadline_exceeded` failure once it passed, or a
     /// `cancelled` one once the call was cancelled. It wakes no task itself, so its caller polls
     /// it again by the deadline.
@@ -77,15 +85,32 @@ impl ToolExecutor for MockToolExecutor {
         deadline: Instant,
         cancellation: &'a CancellationSignal,
     ) -> ExecutionFuture<'a> {
-        self.log().push(Invocation {
-            call_id: call.call_id(),
-            tool_id: call.tool_id(),
-            generation_id: call.generation_id(),
-            arguments: call.arguments().clone(),
-        });
+        let earlier = {
+            let mut log = self.log();
+            let earlier = log
+                .iter()
+                .filter(|invocation| invocation.call_id == call.call_id())
+                .count();
+            log.push(Invocation {
+                call_id: call.call_id(),
+                tool_id: call.tool_id(),
+                generation_id: call.generation_id(),
+                arguments: call.arguments().clone(),
+            });
+            earlier
+        };
         match self.table.get(&call.tool_id()) {
             Some(Script::Result(result)) => Box::pin(future::ready(Ok(result.clone()))),
             Some(Script::Failure(failure)) => Box::pin(future::ready(Err(failure.clone()))),
+            Some(Script::FailThenSucceed {
+                failures,
+                failure,
+                result,
+            }) => Box::pin(future::ready(if earlier < *failures {
+                Err(failure.clone())
+            } else {
+                Ok(result.clone())
+            })),
             Some(Script::Overrun) => Box::pin(future::poll_fn(move |_| {
                 if cancellation.is_cancelled() {
                     Poll::Ready(Err(ToolFailure {
@@ -233,5 +258,42 @@ mod tests {
             calls[0].generation_id()
         );
         assert_eq!(mock.invocations()[0].arguments, json!({"n": 1}));
+    }
+
+    #[test]
+    fn a_call_scripted_to_fail_twice_fails_two_attempts_then_succeeds_and_each_call_counts_alone() {
+        let flaky = tool("flaky");
+        let failure = ToolFailure {
+            kind: ToolFailureKind::ExecutionError,
+            detail: "hiccup".to_owned(),
+        };
+        let mock = MockToolExecutor::new([(
+            flaky.tool_id(),
+            Script::FailThenSucceed {
+                failures: 2,
+                failure: failure.clone(),
+                result: json!({"ok": true}),
+            },
+        )]);
+        let signal = CancellationSignal::new();
+        let later = Instant::now() + Duration::from_secs(60);
+        let (first, second) = (proposed(&flaky), proposed(&flaky));
+        let answers = [&first, &first, &second, &first, &first].map(|call| {
+            let Poll::Ready(answer) = poll(mock.execute(call, later, &signal)) else {
+                panic!("the script answers at once");
+            };
+            answer
+        });
+        assert_eq!(
+            answers,
+            [
+                Err(failure.clone()),
+                Err(failure.clone()),
+                Err(failure),
+                Ok(json!({"ok": true})),
+                Ok(json!({"ok": true})),
+            ]
+        );
+        assert_eq!(mock.invocations().len(), 5, "every attempt is recorded");
     }
 }
