@@ -308,6 +308,7 @@ impl NodeImplementation<PipelinePayload> for ModelNode {
         self.signal.update(|signal| signal.drain = true);
         Box::pin(async move {
             self.exchange.finished().await;
+            self.exchange.panic()?;
             self.failure()
         })
     }
