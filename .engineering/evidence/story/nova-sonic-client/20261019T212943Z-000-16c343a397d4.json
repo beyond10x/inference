@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T21:29:43Z",
+  "actor": "human:timo",
+  "artifact": "story:nova-sonic-client",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-nova-sonic-client-pass-1",
+    "reference": "F1 inference-aws client.rs error messages are a fixed phrase per kind plus the service error code; no SDK, credential or service text; adversary1_redaction green",
+    "review": "review-result:adversary-nova-sonic-client-pass-1",
+    "outcome": "fixed"
+  }
+}

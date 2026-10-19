@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T21:24:15Z",
+  "actor": "human:timo",
+  "artifact": "story:nova-sonic-client",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-nova-sonic-client-pass-1",
+    "reference": "F2 inference-aws session.rs configuration passthrough, roles, endpointing names, decoder object fields and content-end tracking; eleven mutants guarded by adversary1_session and adversary1_decode",
+    "review": "review-result:adversary-nova-sonic-client-pass-1",
+    "outcome": "fixed"
+  }
+}

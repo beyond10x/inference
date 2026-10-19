@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:nova-sonic-adapter
 kind: story
-status: draft
+status: active
 title: Amazon Nova Sonic as an inference-duplex native speech model
 summary: The Nova Sonic client implements the duplex contract and passes its conformance cases offline.
 relations:
@@ -13,7 +13,10 @@ relations:
 scope:
 - confidence: inferred
   path: adapters/inference-aws
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T22:12:12Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-19T22:12:13Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 

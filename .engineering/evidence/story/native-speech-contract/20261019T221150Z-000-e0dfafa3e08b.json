@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T22:11:50Z",
+  "actor": "human:timo",
+  "artifact": "story:native-speech-contract",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-native-speech-contract-pass-1",
+    "reference": "F1 inference-duplex ledger.rs a known response id is refused ResponseIdReused; spec error declared, adapter-issued ids UNMAPPED (ESS-SYNTH-001)",
+    "review": "review-result:adversary-native-speech-contract-pass-1",
+    "outcome": "fixed"
+  }
+}

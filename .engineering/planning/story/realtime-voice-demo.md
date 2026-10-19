@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-voice-demo
 kind: story
-status: draft
+status: active
 title: Talk to a realtime model from a laptop
 summary: examples/realtime-voice wires microphone, native speech model and speaker, with barge-in and one demo tool.
 relations:
@@ -14,7 +14,10 @@ relations:
 scope:
 - confidence: inferred
   path: examples/realtime-voice
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T22:29:55Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-19T22:29:55Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 
