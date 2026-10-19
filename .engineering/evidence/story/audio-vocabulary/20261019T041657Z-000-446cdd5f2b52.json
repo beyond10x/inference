@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T04:16:57Z",
+  "actor": "human:timo",
+  "artifact": "story:audio-vocabulary",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-audio-vocabulary-pass-2",
+    "reference": "F-A crates/inference-audio/src/lib.rs:134",
+    "review": "review-result:adversary-audio-vocabulary-pass-2",
+    "outcome": "fixed"
+  }
+}

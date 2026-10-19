@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T04:29:51Z",
+  "actor": "human:timo",
+  "artifact": "story:audio-vocabulary",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check (5 steps, each exit 0; cargo test 73 passed, 0 failed) (wave/3 9ccd832)"
+  }
+}

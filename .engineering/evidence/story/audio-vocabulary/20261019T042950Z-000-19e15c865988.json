@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T04:29:50Z",
+  "actor": "human:timo",
+  "artifact": "story:audio-vocabulary",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-audio --all-features; ess verify conform synthesize (VERIFIED, new behaviour: baseline edf8ca7 has no inference.audio domain and no inference-audio crate; treatment 87a5562 validates 8 files, 21 package cases ok, suite 229 scenarios with ids identical to the baseline)"
+  }
+}
