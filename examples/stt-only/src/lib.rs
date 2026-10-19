@@ -13,7 +13,8 @@ use inference_testkit::stt::{MockConfiguration, MockRecogniser, frames, script};
 ///
 /// # Panics
 ///
-/// When the mock refuses input before its end was marked, which it does not.
+/// When the mock refuses to start a recognition it runs no other of, or refuses input before its
+/// end was marked, which it does not.
 #[must_use]
 pub fn run() -> Vec<String> {
     let mut recogniser = MockRecogniser::new(
@@ -21,13 +22,15 @@ pub fn run() -> Vec<String> {
         ModelId::generate(),
         script(),
     );
-    let mut recognition = recogniser.start(RecognitionRequest::new(
-        RunId::generate(),
-        TurnId::generate(),
-        StreamId::generate(),
-        NodeId::generate(),
-        "text_out",
-    ));
+    let mut recognition = recogniser
+        .start(RecognitionRequest::new(
+            RunId::generate(),
+            TurnId::generate(),
+            StreamId::generate(),
+            NodeId::generate(),
+            "text_out",
+        ))
+        .expect("a fresh recogniser runs no other recognition");
     let mut events = Vec::new();
     for frame in frames(6) {
         recognition.offer_frame(frame).expect("input has not ended");

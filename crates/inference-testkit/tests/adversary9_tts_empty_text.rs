@@ -35,8 +35,9 @@ fn a_segment_without_words_gets_one_frame_and_can_be_played() {
     };
     for text in ["", "   "] {
         for configuration in MockConfiguration::ALL {
-            let mut handle =
-                MockSynthesiser::new(configuration, ModelId::generate(), format).start();
+            let mut handle = MockSynthesiser::new(configuration, ModelId::generate(), format)
+                .start()
+                .expect("a fresh synthesiser runs nothing else");
             let segment = committed(text);
             let id = segment.segment_id();
             handle.offer_segment(segment).expect("queued");
@@ -52,7 +53,7 @@ fn a_segment_without_words_gets_one_frame_and_can_be_played() {
                 1,
                 "{configuration:?}, {text:?}: one frame at least"
             );
-            let held = handle.output().segment(id).expect("held").clone();
+            let held = handle.output().segment(id).expect("held").snapshot();
             assert_eq!(held.state(), SegmentState::Synthesized, "{configuration:?}");
             let played = sink
                 .acknowledge(&mut handle, id)
