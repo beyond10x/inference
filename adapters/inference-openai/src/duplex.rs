@@ -6,7 +6,8 @@
 //!
 //! The contract is synchronous: each session owns a single-threaded Tokio runtime and blocks on
 //! the client for each operation. A session must therefore not be driven from inside an async
-//! runtime; an async caller runs it on a blocking thread.
+//! runtime; an async caller runs it on a blocking thread. Dropping a session is safe anywhere:
+//! its runtime is shut down without blocking.
 //!
 //! How the provider maps onto the contract:
 //!
@@ -16,15 +17,22 @@
 //! * Turn detection off is `turn_detection: null`; server and semantic detection carry
 //!   `create_response` from `auto_response` and `interrupt_response` from `auto_interrupt`.
 //!   Silence and prefix padding tune `server_vad` only, sensitivity tunes `semantic_vad` only (as
-//!   its eagerness); a tuning the chosen mode cannot take is refused at open. With turn detection
-//!   off and `auto_response` on, the binding sends `response.create` after each caller commit,
-//!   since the API creates responses on commit only under turn detection.
+//!   its eagerness); a tuning the chosen mode cannot take is refused at open. With
+//!   `auto_response` on, the binding sends `response.create` after each caller commit, in every
+//!   turn detection mode: the API creates a response by itself only for a turn its own detection
+//!   ends, never for a client `input_audio_buffer.commit`.
 //! * Each `response.created` gets a new [`ResponseId`]; provider response ids map to it and are
 //!   never reused. `response.done` ends the response as completed, cancelled (the caller's
 //!   cancellation already recorded is not recorded again), or failed for `failed` and
 //!   `incomplete`. Its `usage` is the response's total and is recorded as the running total.
 //! * The server's `input_audio_buffer.committed` that acknowledges a caller's commit is not a
-//!   second commit; one the server's own turn detection makes is.
+//!   second commit; one the server's own turn detection makes is. A caller's commit the server
+//!   refuses (an `error` whose code begins `input_audio_buffer_commit`) is owed no
+//!   acknowledgement.
+//! * The usage of `conversation.item.input_audio_transcription.completed`, in tokens, is recorded
+//!   as the transcription usage; a usage in seconds has no place in the contract and is not.
+//! * A handshake the server refuses with HTTP 401 or 403 fails the open as rejected; any other
+//!   failure to connect as a closed transport.
 //! * Truncation converts the heard sample to `audio_end_ms` of the response's audio item.
 //! * Tool results go back as `function_call_output` items; the caller creates the response that
 //!   uses them.
@@ -39,11 +47,13 @@ use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPositio
 use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
+use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
     NativeSpeechModel, OpenError, ResponseId, ResponseUsage, SessionConfig as SpeechConfig,
     SessionError, SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
-    SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TokenCounts, TuningOption,
-    TuningSupport, TurnDetection as SpeechTurnDetection, TurnSensitivity, Unsupported,
+    SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TokenCounts, TranscriptionUsage,
+    TuningOption, TuningSupport, TurnDetection as SpeechTurnDetection, TurnSensitivity,
+    Unsupported,
 };
 use inference_tools::Json;
 use tokio::runtime::Runtime;
@@ -54,7 +64,9 @@ use crate::config::{
 };
 use crate::credential::CredentialSource;
 use crate::error::RealtimeError;
-use crate::event::{ResponseStatus, ServerError, ServerEvent, Usage};
+use crate::event::{
+    ResponseStatus, ServerError, ServerEvent, TranscriptionUsage as ClientTranscriptionUsage, Usage,
+};
 
 /// The input transcription model the binding asks for unless told otherwise.
 pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
@@ -101,6 +113,29 @@ pub fn claims() -> Vec<Capability> {
         Capability::ToolCalling,
         Capability::Interruptible,
     ]
+}
+
+/// Whether [`claims`] agree with an outcome of `conformance::native_duplex_evidence`: the
+/// binding claims `native_duplex` exactly when the model gave the evidence.
+///
+/// # Errors
+/// The reason, when the outcome says nothing about the model: the session did not open, failed,
+/// was refused before the input during output, or never answered. Comparing such an outcome
+/// with the claims would pass vacuously.
+pub fn native_duplex_verdict(
+    outcome: &Result<NativeDuplexEvidence, NoNativeDuplex>,
+) -> Result<bool, String> {
+    if let Err(
+        failure @ (NoNativeDuplex::Open(_)
+        | NoNativeDuplex::Failed(_)
+        | NoNativeDuplex::Refused(_)
+        | NoNativeDuplex::NoOutput
+        | NoNativeDuplex::Silent),
+    ) = outcome
+    {
+        return Err(format!("the model was never put to the test: {failure}"));
+    }
+    Ok(claims().contains(&Capability::NativeDuplex) == outcome.is_ok())
 }
 
 /// The Realtime wire format of a contract audio format, when the API takes it.
@@ -288,7 +323,7 @@ impl NativeSpeechModel for OpenAiRealtime {
             Instant::now(),
         )?;
         Ok(OpenAiRealtimeSession {
-            runtime,
+            runtime: Some(runtime),
             client: Some(client),
             ledger,
             responses: HashMap::new(),
@@ -303,6 +338,7 @@ impl NativeSpeechModel for OpenAiRealtime {
 /// The contract's failure of a client error.
 fn failure(error: &RealtimeError) -> SessionFailure {
     let kind = match error {
+        RealtimeError::Connect(refused) if refused.is_refusal() => SessionFailureKind::Rejected,
         RealtimeError::Closed { .. } | RealtimeError::Transport(_) | RealtimeError::Connect(_) => {
             SessionFailureKind::TransportClosed
         }
@@ -320,8 +356,11 @@ fn failure(error: &RealtimeError) -> SessionFailure {
 }
 
 /// One open Realtime session through the contract.
+///
+/// It owns the runtime it blocks on, held until it is dropped. Dropping it shuts that runtime
+/// down without blocking, so a session may be dropped anywhere, inside async code too.
 pub struct OpenAiRealtimeSession {
-    runtime: Runtime,
+    runtime: Option<Runtime>,
     client: Option<RealtimeClient>,
     ledger: SessionLedger,
     /// Provider response id to the contract's.
@@ -333,6 +372,15 @@ pub struct OpenAiRealtimeSession {
     /// Caller commits the server has not acknowledged yet.
     caller_commits: usize,
     server_errors: Vec<ServerError>,
+}
+
+impl Drop for OpenAiRealtimeSession {
+    fn drop(&mut self) {
+        drop(self.client.take());
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 impl std::fmt::Debug for OpenAiRealtimeSession {
@@ -367,14 +415,14 @@ impl OpenAiRealtimeSession {
             Box<dyn std::future::Future<Output = Result<(), RealtimeError>> + 'a>,
         >,
     {
-        let Some(client) = self.client.as_mut() else {
+        let (Some(client), Some(runtime)) = (self.client.as_mut(), self.runtime.as_ref()) else {
             return self
                 .ledger
                 .session()
                 .require_open()
                 .map_err(SessionError::NotOpen);
         };
-        if let Err(error) = self.runtime.block_on(operation(client)) {
+        if let Err(error) = runtime.block_on(operation(client)) {
             let _ = self.ledger.fail(failure(&error));
             return self
                 .ledger
@@ -446,8 +494,24 @@ impl OpenAiRealtimeSession {
                     let _ = self.ledger.output_transcript(id, delta, now);
                 }
             }
-            ServerEvent::InputTranscript { transcript, .. } => {
+            ServerEvent::InputTranscript {
+                transcript, usage, ..
+            } => {
                 let _ = self.ledger.input_transcribed(transcript, now);
+                if let Some(ClientTranscriptionUsage::Tokens {
+                    input_tokens,
+                    output_tokens,
+                    ..
+                }) = usage
+                {
+                    let _ = self.ledger.transcription_usage(
+                        TranscriptionUsage {
+                            input_tokens,
+                            output_tokens,
+                        },
+                        now,
+                    );
+                }
             }
             ServerEvent::SpeechStarted { audio_start_ms, .. } => {
                 if let Some(position) = at(audio_start_ms) {
@@ -512,7 +576,16 @@ impl OpenAiRealtimeSession {
                     ),
                 };
             }
-            ServerEvent::Error(error) => self.server_errors.push(error),
+            ServerEvent::Error(error) => {
+                let refused_commit = error
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| code.starts_with("input_audio_buffer_commit"));
+                if refused_commit && self.caller_commits > 0 {
+                    self.caller_commits -= 1;
+                }
+                self.server_errors.push(error);
+            }
             ServerEvent::SessionCreated { .. }
             | ServerEvent::SessionUpdated { .. }
             | ServerEvent::AudioDone { .. }
@@ -561,8 +634,7 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
         self.ledger.commit_input(Instant::now())?;
         self.caller_commits += 1;
         self.send(|client| Box::pin(client.commit_audio()))?;
-        let config = self.ledger.session().config();
-        if config.auto_response && config.turn_detection == SpeechTurnDetection::Disabled {
+        if self.ledger.session().config().auto_response {
             self.send(|client| Box::pin(client.create_response()))?;
         }
         Ok(())
@@ -613,8 +685,8 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
 
     fn close(&mut self) -> Result<(), SessionError> {
         self.ledger.close()?;
-        if let Some(client) = self.client.take() {
-            let _ = self.runtime.block_on(client.close());
+        if let (Some(client), Some(runtime)) = (self.client.take(), self.runtime.as_ref()) {
+            let _ = runtime.block_on(client.close());
         }
         Ok(())
     }
@@ -630,10 +702,12 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
                 self.ledger.check_liveness(Instant::now());
                 return self.ledger.next_event();
             }
-            let client = self.client.as_mut()?;
-            let read = self
-                .runtime
-                .block_on(async { tokio::time::timeout(left, client.next_event()).await });
+            let (Some(client), Some(runtime)) = (self.client.as_mut(), self.runtime.as_ref())
+            else {
+                return None;
+            };
+            let read =
+                runtime.block_on(async { tokio::time::timeout(left, client.next_event()).await });
             match read {
                 Ok(Ok(event)) => self.record(event),
                 Ok(Err(RealtimeError::Stalled(_))) | Err(_) => {

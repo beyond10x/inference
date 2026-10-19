@@ -282,6 +282,50 @@ fn any_completed(event: &SessionEvent) -> bool {
     matches!(event, SessionEvent::ResponseCompleted(_))
 }
 
+/// A server that refuses the opening handshake with `status`, as the API refuses a bad key.
+#[expect(
+    clippy::result_large_err,
+    reason = "the handshake callback's error type is tungstenite's, fixed by its `Callback` trait"
+)]
+fn refusing(status: u16) -> (Endpoint, Runtime, JoinHandle<()>) {
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    use tokio_tungstenite::tungstenite::http::StatusCode;
+    let runtime = Runtime::new().unwrap();
+    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = runtime.spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let _ = tokio_tungstenite::accept_hdr_async(stream, move |_: &Request, _: Response| {
+            let mut refusal = ErrorResponse::new(Some("refused".to_owned()));
+            *refusal.status_mut() = StatusCode::from_u16(status).unwrap();
+            Err(refusal)
+        })
+        .await;
+    });
+    let endpoint =
+        Endpoint::new("gpt-realtime-2.1").with_url(format!("ws://{address}/v1/realtime"));
+    (endpoint, runtime, task)
+}
+
+#[test]
+fn a_refused_key_is_a_rejection_and_an_unreachable_server_a_closed_transport() {
+    for (status, kind) in [
+        (401, SessionFailureKind::Rejected),
+        (403, SessionFailureKind::Rejected),
+        (503, SessionFailureKind::TransportClosed),
+    ] {
+        let (endpoint, runtime, task) = refusing(status);
+        let refused = OpenAiRealtime::new(endpoint, Box::new(FixedSource), OPENAI_KEY_NAME)
+            .open(config(TurnDetection::Disabled, false))
+            .err();
+        runtime.block_on(task).unwrap();
+        assert!(
+            matches!(&refused, Some(OpenError::Failed(failure)) if failure.kind == kind),
+            "HTTP {status}: {refused:?}"
+        );
+    }
+}
+
 #[test]
 fn the_declared_capabilities_are_the_realtime_apis() {
     let declared = capabilities();

@@ -15,7 +15,14 @@
 //! The client never reads a key itself: the caller injects a [`CredentialSource`] and names the
 //! secret to resolve ([`EnvironmentSource`]; with feature `keychain`, `KeychainSource` over the OS
 //! keychain through the `secrets` library). The credential is sent once, in the opening
-//! handshake, and is not kept, printed or logged.
+//! handshake, and this crate does not keep, print or log it.
+//!
+//! The WebSocket library below it does log it: `tungstenite` writes the raw handshake request,
+//! the `Authorization: Bearer` header with the key included, at trace level through the `log`
+//! facade, under targets beginning with `tungstenite`. A library cannot cap the logger of the
+//! program that embeds it, so an embedder that installs a logger must keep those targets below
+//! trace, for example with the filter `tungstenite=debug` (`RUST_LOG` for `env_logger`, or an
+//! `EnvFilter` directive for `tracing-subscriber` with its `log` bridge).
 //!
 //! Audio goes in either as PCM16 at 24 kHz, resampled from `inference-audio` frames where needed
 //! ([`encode_pcm16_24k`]), or as G.711 mu-law or A-law at 8 kHz, passed through
@@ -46,5 +53,5 @@ pub use credential::{
     Credential, CredentialError, CredentialFuture, CredentialSource, EnvironmentSource,
     OPENAI_KEY_NAME, OPENAI_KEY_VARIABLE,
 };
-pub use error::RealtimeError;
-pub use event::{ResponseStatus, ServerError, ServerEvent, Usage};
+pub use error::{ConnectError, RealtimeError};
+pub use event::{ResponseStatus, ServerError, ServerEvent, TranscriptionUsage, Usage};

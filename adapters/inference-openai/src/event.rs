@@ -49,8 +49,13 @@ pub enum ServerEvent {
     },
     /// `conversation.item.input_audio_transcription.delta`.
     InputTranscriptDelta { item_id: String, delta: String },
-    /// `conversation.item.input_audio_transcription.completed`.
-    InputTranscript { item_id: String, transcript: String },
+    /// `conversation.item.input_audio_transcription.completed`, with the usage the server
+    /// reported for the transcription.
+    InputTranscript {
+        item_id: String,
+        transcript: String,
+        usage: Option<TranscriptionUsage>,
+    },
     /// `input_audio_buffer.speech_started`.
     SpeechStarted {
         item_id: String,
@@ -147,6 +152,7 @@ impl ServerEvent {
             "conversation.item.input_audio_transcription.completed" => Self::InputTranscript {
                 item_id: event.string("item_id")?,
                 transcript: event.string("transcript")?,
+                usage: event.transcription_usage()?,
             },
             "input_audio_buffer.speech_started" => Self::SpeechStarted {
                 item_id: event.string("item_id")?,
@@ -284,19 +290,70 @@ impl<'a> Fields<'a> {
             event_type: self.event_type,
             raw,
         });
+        let detail = |details: Option<Fields<'_>>, field: &str| {
+            details.and_then(|details| details.optional_unsigned(field))
+        };
+        let input_text_tokens = detail(input, "text_tokens");
+        let input_audio_tokens = detail(input, "audio_tokens");
+        let output_text_tokens = detail(output, "text_tokens");
+        let output_audio_tokens = detail(output, "audio_tokens");
+        let input_tokens = usage
+            .optional_unsigned("input_tokens")
+            .unwrap_or_else(|| input_text_tokens.unwrap_or(0) + input_audio_tokens.unwrap_or(0));
+        let output_tokens = usage
+            .optional_unsigned("output_tokens")
+            .unwrap_or_else(|| output_text_tokens.unwrap_or(0) + output_audio_tokens.unwrap_or(0));
         Ok(Some(Usage {
-            total_tokens: usage.unsigned("total_tokens")?,
-            input_tokens: usage.unsigned("input_tokens")?,
-            output_tokens: usage.unsigned("output_tokens")?,
-            input_text_tokens: input.and_then(|details| details.optional_unsigned("text_tokens")),
-            input_audio_tokens: input.and_then(|details| details.optional_unsigned("audio_tokens")),
-            cached_input_tokens: input
-                .and_then(|details| details.optional_unsigned("cached_tokens")),
-            output_text_tokens: output.and_then(|details| details.optional_unsigned("text_tokens")),
-            output_audio_tokens: output
-                .and_then(|details| details.optional_unsigned("audio_tokens")),
+            total_tokens: usage
+                .optional_unsigned("total_tokens")
+                .unwrap_or(input_tokens + output_tokens),
+            input_tokens,
+            output_tokens,
+            input_text_tokens,
+            input_audio_tokens,
+            cached_input_tokens: detail(input, "cached_tokens"),
+            output_text_tokens,
+            output_audio_tokens,
         }))
     }
+
+    /// The `usage` of a completed input transcription; `None` when the server sent none.
+    fn transcription_usage(&self) -> Result<Option<TranscriptionUsage>, RealtimeError> {
+        if self.get("usage").is_none() {
+            return Ok(None);
+        }
+        let usage = self.nested("usage")?;
+        if usage.optional_string("type")?.as_deref() == Some("duration") {
+            let seconds = usage
+                .get("seconds")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| self.missing("seconds", "the number"))?;
+            return Ok(Some(TranscriptionUsage::Duration { seconds }));
+        }
+        let input_tokens = usage.optional_unsigned("input_tokens").unwrap_or(0);
+        let output_tokens = usage.optional_unsigned("output_tokens").unwrap_or(0);
+        Ok(Some(TranscriptionUsage::Tokens {
+            total_tokens: usage
+                .optional_unsigned("total_tokens")
+                .unwrap_or(input_tokens + output_tokens),
+            input_tokens,
+            output_tokens,
+        }))
+    }
+}
+
+/// The usage of a completed input transcription: tokens of the transcription model, or, for a
+/// model billed by time, the seconds of audio it transcribed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TranscriptionUsage {
+    Tokens {
+        total_tokens: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    Duration {
+        seconds: f64,
+    },
 }
 
 impl ResponseStatus {
