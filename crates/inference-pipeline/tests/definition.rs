@@ -247,6 +247,48 @@ fn a_definition_declares_what_the_builder_declares_and_validates_and_plans() {
 }
 
 #[test]
+fn an_exposure_naming_an_input_and_an_output_alike_is_refused_and_an_edge_is_told_by_direction() {
+    let known = known();
+    let text = |direction| PortDescriptor::new("text", direction, Modality::Text, TEXT);
+    let mut descriptors = descriptors();
+    descriptors
+        .declare(DeclareNodeDescriptor {
+            kind: NodeKind::new("relay"),
+            role: NodeRole::Transform,
+            requires: Vec::new(),
+            ports: vec![text(PortDirection::Input), text(PortDirection::Output)],
+        })
+        .expect("a new kind");
+    let mut json = text_pipeline(&known);
+    json["nodes"][1] = json!({"name": "model", "kind": "relay"});
+    json["edges"][0]["to"]["port"] = json!("text");
+    json["edges"][1]["from"]["port"] = json!("text");
+    json["bindings"] = json!([]);
+    json["required_capabilities"] = json!([]);
+    let mut declaration = Declaration::counted();
+    declaration
+        .declare_definition(&definition(&json), &descriptors, &known)
+        .expect("each edge names the relay's port of its direction");
+
+    json["exposures"] = json!([{
+        "name": "reply",
+        "port": {"node": "model", "port": "text"},
+        "capacity": 1,
+        "overload": "pause"
+    }]);
+    let mut declaration = Declaration::counted();
+    assert_eq!(
+        declaration.declare_definition(&definition(&json), &descriptors, &known),
+        Err(DefinitionError::Rejected(vec![finding(
+            DefinitionDefect::AmbiguousPort,
+            "model",
+            Some("text")
+        )]))
+    );
+    assert_eq!(declaration, Declaration::counted(), "nothing was declared");
+}
+
+#[test]
 fn an_unknown_kind_is_refused_naming_the_node() {
     let known = known();
     let mut json = text_pipeline(&known);
