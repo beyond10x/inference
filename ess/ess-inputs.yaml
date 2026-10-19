@@ -8,4 +8,8 @@ specification:
   - domains/stream.yaml
   - domains/tools.yaml
   - domains/session.yaml
-scenarios: []
+scenarios:
+  - scenarios/supersede-discards-unplayed.yaml
+  - scenarios/cancel-generation-discards-unplayed.yaml
+  - scenarios/cancel-run-discards-unplayed.yaml
+  - scenarios/draining-run-fails.yaml

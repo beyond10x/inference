@@ -1,0 +1,63 @@
+type: ess-scenario/1
+domain: inference.graph
+scenario: draining-run-fails
+summary: A run that is Draining can fail, and the Runs view shows the typed failure; the Draining-to-Failed transition is reached by no synthesized scenario.
+arrange:
+  - instance: profile
+    entity: inference.policy.DeploymentProfile
+  - instance: pipeline
+    entity: inference.graph.Pipeline
+  - instance: run
+    entity: inference.graph.Run
+timeline:
+  - at: 2026-01-05T09:00:00Z
+    command: inference.policy.DeclareProfile
+    input: {kind: offline_strict, egress: denied, admitted: []}
+    outcome: declared
+    capture: {instance: profile, event: inference.policy.ProfileDeclared, field: profile_id}
+  - at: 2026-01-05T09:00:01Z
+    command: inference.graph.DeclarePipeline
+    input:
+      name: draining
+      schema_revision: r1
+      mode: turn_based
+      profile_id: {$instance: profile}
+      required_capabilities: [output_streaming]
+    outcome: declared
+    capture: {instance: pipeline, event: inference.graph.PipelineDeclared, field: pipeline_id}
+  - at: 2026-01-05T09:00:02Z
+    command: inference.graph.ValidatePipeline
+    input: {pipeline_id: {$instance: pipeline}}
+    outcome: validated
+  - at: 2026-01-05T09:00:03Z
+    command: inference.graph.PlanPipeline
+    input: {pipeline_id: {$instance: pipeline}}
+    outcome: planned
+  - at: 2026-01-05T09:00:04Z
+    command: inference.graph.CreateRun
+    input: {pipeline_id: {$instance: pipeline}}
+    outcome: created
+    capture: {instance: run, event: inference.graph.RunCreated, field: run_id}
+  - at: 2026-01-05T09:00:05Z
+    command: inference.graph.ValidateRun
+    input: {run_id: {$instance: run}}
+    outcome: validating
+  - at: 2026-01-05T09:00:06Z
+    command: inference.graph.PrepareRun
+    input: {run_id: {$instance: run}}
+    outcome: preparing
+  - at: 2026-01-05T09:00:07Z
+    command: inference.graph.ActivateRun
+    input: {run_id: {$instance: run}}
+    outcome: active
+  - at: 2026-01-05T09:00:08Z
+    command: inference.graph.DrainRun
+    input: {run_id: {$instance: run}}
+    outcome: draining
+  - at: 2026-01-05T09:00:09Z
+    command: inference.graph.FailRun
+    input: {run_id: {$instance: run}, failure: {detail: worker lost while draining}}
+    outcome: failed
+assert:
+  - view: inference.graph.Runs
+    contains: {run_id: {$instance: run}, state: Failed}

@@ -22,7 +22,7 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 9
+revision: 16
 ---
 # Story: pipeline-validation
 
@@ -47,8 +47,8 @@ Every check is vacuous over an empty pipeline: `inference.graph.Pipeline/transit
 
 ## Steps
 
-1. Specification first: `inference.graph.IncompatibleGraph` has no fields and its summary says the diagnostics say why. Add a field `findings: List<String>` to that error in `ess/domains/graph.yaml` so the reason travels with the error, run `ess specify validate --path ess` and `ess verify conform synthesize --path ess --out .engineering/drafts/suite.json` (0 refusals), and say in the PR that this step came first.
-2. Contract: `IncompatibleGraph { findings }` in `inference-pipeline`, one finding per failed check naming the check number and the node, port or edge id.
+1. Specification: nothing to add. `ess/domains/graph.yaml` already gives `inference.graph.IncompatibleGraph` the field `findings: List<inference.graph.GraphFinding>`, a finding being a `defect` (`inference.graph.GraphDefect`: `missing_node_or_port`, `incompatible_edge`, `unbounded_cycle`, `unreachable_mandatory_output`, `disallowed_data_flow`) with an optional `node_id` and `port_id`. Run `ess specify validate --path ess` and `ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json` (no refusal beyond the three ESS-SYNTH-001 refusals the authored scenarios cover).
+2. Contract: `IncompatibleGraph { findings }` in `inference-pipeline`, one `GraphFinding` per failed check, its `defect` the variant of that check (1 `missing_node_or_port`; 2 and 3 `incompatible_edge`; 5 `unbounded_cycle`; 6 `unreachable_mandatory_output`; 9 `disallowed_data_flow`) and its `node_id` and `port_id` naming where it is; a finding on an edge names the edge's source port.
 3. Behaviour: `ValidatePipeline` runs checks 1, 2, 3, 5, 6 and 9 over the declaration and moves the pipeline to Validated only when all pass; the Validated form of the typed builder is the return value.
 4. Testkit: the runner answers `ValidatePipeline` with `validated`, `wrong-state` and the injected `rejected`; `ess/SKIPPED.md` loses exactly the five ids named under Acceptance (`story:testkit-conformance-target`, step 3).
 5. Tests: one Rust test per check with a minimal failing graph and the finding it produces (§23.3 test 1, incompatible ports before execution, and test 2, unbounded cycles and disallowed data flows: `docs/design/inference.md:1124-1125`), plus one passing chain source to transform to sink.
@@ -64,17 +64,17 @@ All `inferable`, from `ess/domains/graph.yaml`:
 
 ## Acceptance
 
-The validator passes the scenarios `inference.graph.ValidatePipeline/outcome/rejected`, `inference.graph.ValidatePipeline/outcome/validated`, `inference.graph.ValidatePipeline/outcome/wrong-state`, `inference.graph.Pipeline/transition/validate/by/inference.graph.ValidatePipeline/validated` and `inference.graph.Pipeline/state/Validated/refuses/inference.graph.ValidatePipeline` (today `unsupported`, each named in `ess/SKIPPED.md`) with none of the five left in that file, and the Rust tests for checks 1, 2, 3, 5, 6 and 9 each refuse their minimal failing graph with a finding naming the check and the offending id while the chain source to transform to sink validates.
+The validator passes the scenarios `inference.graph.ValidatePipeline/outcome/rejected`, `inference.graph.ValidatePipeline/outcome/validated`, `inference.graph.ValidatePipeline/outcome/wrong-state`, `inference.graph.Pipeline/transition/validate/by/inference.graph.ValidatePipeline/validated` and `inference.graph.Pipeline/state/Validated/refuses/inference.graph.ValidatePipeline` (today `unsupported`, each named in `ess/SKIPPED.md`) with none of the five left in that file, and the Rust tests for checks 1, 2, 3, 5, 6 and 9 each refuse their minimal failing graph with a finding whose `defect` is that check's `GraphDefect` and whose `node_id` or `port_id` names the offending node or port while the chain source to transform to sink validates. The 9 ids under `## Scenarios routed from earlier stories` are in `passed` as well, with none of them left in `ess/SKIPPED.md`.
 
 ## Out of Scope
 
-Check 4 (`story:capability-planning`); checks 7 (resources), 8 (locality against the profile; the `ess/domains/policy.yaml` summary says the planner refuses it, owned by the epic that proves A-04) and 10; bounded feedback declarations (`story:tool-feedback-loop`); media format and timebase compatibility.
+Check 4 (`story:capability-planning`); checks 7 (resources), 8 (locality against the profile; refused at planning, `inference.graph.PlanPipeline` outcome `locality-denied`, `story:capability-planning`) and 10; bounded feedback declarations (`story:tool-feedback-loop`); media format and timebase compatibility.
 
 ## Ambiguities
 
 - `inferable`: the scenario `inference.graph.Pipeline/state/Planned/refuses/inference.graph.ValidatePipeline` needs a Planned pipeline and belongs to `story:capability-planning`.
 - `inferable`: an unconnected `optional` port is allowed by check 6 because `inference.graph.Essentiality` distinguishes it from `essential` (line 481); nothing else is read into the enum.
-- Decision taken here, reversible in `ess/domains/graph.yaml`: the `findings` field on `inference.graph.IncompatibleGraph` (step 1), so that line 453 (actionable diagnostics) holds on the wire.
+- `inferable`: line 453 (actionable diagnostics) holds on the wire through the `findings` field graph.yaml declares on `inference.graph.IncompatibleGraph`. Decision taken here, reversible in `inference-pipeline`: a finding on an edge names the edge's source port, because `GraphFinding` carries no edge id.
 
 ## Open Questions
 
@@ -86,9 +86,9 @@ Derived 2026-10-19 by `story-scoper`. Every line is **cited** (read from the sto
 **inferred** (a reading that could be wrong).
 
 - **Primary surface:** `crates/inference-pipeline` — cited: steps 2 and 3 land `IncompatibleGraph { findings }` and `ValidatePipeline` in `inference-pipeline`; the path is the one `story:pipeline-declaration` (Context) creates under the `crates/*` glob of `story:workspace-skeleton` (step 1). The crate does not exist yet.
-- **Files:** `ess/domains/graph.yaml` — cited: step 1 adds `findings: List<String>` to `inference.graph.IncompatibleGraph` (declared at line 367, raised at line 565).
+- **Files:** `ess/domains/graph.yaml` — cited: step 1 adds `findings: List<String>` to `inference.graph.IncompatibleGraph` (declared at line 456, raised at line 915).
 - **Files:** `ess/SKIPPED.md` — cited: step 4 and Acceptance remove exactly five `inference.graph` ids. The file does not exist yet; `story:testkit-conformance-target` step 3 creates it with one `## graph` section.
-- **Symbols:** `inference.graph.ValidatePipeline` (`ess/domains/graph.yaml:558-584`), `inference.graph.IncompatibleGraph` (`:367`, `:565`), `inference.graph.PipelineStateConflict` (`:374`), `inference.graph.Essentiality` (`:59`), `Port.provisional_allowed` (`:202`), `incremental` (`:478`) — cited. No Rust symbol exists yet; no `.rs` file is in the tree.
+- **Symbols:** `inference.graph.ValidatePipeline` (`ess/domains/graph.yaml:908-937`), `inference.graph.IncompatibleGraph` (`:456`, `:915`), `inference.graph.PipelineStateConflict` (`:495`), `inference.graph.Essentiality` (`:59`), `Port.provisional_allowed` (`:267`), `incremental` (`:723`) — cited. No Rust symbol exists yet; no `.rs` file is in the tree.
 - **Also likely:** `crates/inference-testkit/tests/target/graph.rs` — inferred: step 4 says the runner answers `ValidatePipeline` with `validated`, `wrong-state` and the injected `rejected`; the per-domain target file is where `story:testkit-conformance-target` (step 2) and `story:pipeline-declaration` (step 5) put every `inference.graph` answer.
 - **Also likely:** `crates/inference-testkit/src/graph.rs` — inferred: the `graph` store module of the same split holds the pipeline state the Declared to Validated move changes.
 - **Also likely:** `crates/inference-testkit/tests/target/mod.rs` — inferred: the `rejected` scenario opens with `configure_external_outcome` / `force` (`suite.json`, `inference.graph.ValidatePipeline/outcome/rejected`), the first of only two such steps in the system (the other is `PlanPipeline/mismatch`); if `ess_conformance` routes a forced outcome through the `ConformanceTarget` impl rather than inside its `Runner`, the shared dispatch changes here, and `story:testkit-conformance-target` step 2 does not mention that step.
@@ -96,4 +96,18 @@ Derived 2026-10-19 by `story-scoper`. Every line is **cited** (read from the sto
 - **Not this story's:** `ess/domains/tools.yaml` and `ess/domains/policy.yaml` (named as other epics' surfaces), root `Cargo.toml` (glob members; `story:workspace-skeleton` step 1 says no story of this epic edits the list), `Taskfile.yml`, `AGENTS.md`, `README.md` (no step changes them), `.engineering/drafts/suite.json` (regenerated at test time and git-ignored) — cited.
 - **Confidence:** medium — the story names the crate and both documents, but no code exists, so every path under `crates/` is read from the layout its dependencies promise rather than from a tree, and the injected-outcome mechanism is unplaced.
 - **Would collide with:** any unit touching the validation half of `crates/inference-pipeline`; the `graph` domain files of `crates/inference-testkit` (`tests/target/graph.rs`, `src/graph.rs`); the `## graph` section of `ess/SKIPPED.md`; the errors and `ValidatePipeline` blocks of `ess/domains/graph.yaml`; and, if injection goes through it, `crates/inference-testkit/tests/target/mod.rs`, which every testkit story shares — inferred.
-- **Safety fact:** `inference.graph.IncompatibleGraph` is declared once (`ess/domains/graph.yaml:367`) and raised by exactly one outcome, `ValidatePipeline/rejected` (`ess/domains/graph.yaml:565`), and no other file under `ess/` names it, so adding `findings` changes one command's error contract and no other command, event or domain — step 2 (`rg -n IncompatibleGraph ess/`, 2 hits), unproven. Where the search stops: the synthesized `rejected` scenario asserts only `expect_error: inference.graph.IncompatibleGraph` with no field today; whether synthesize emits a payload assertion for `findings` is what step 1's 0-refusals run proves — cited.
+- **Safety fact:** `inference.graph.IncompatibleGraph` is declared once (`ess/domains/graph.yaml:456`) and raised by exactly one outcome, `ValidatePipeline/rejected` (`ess/domains/graph.yaml:915`), and no other file under `ess/` names it, so adding `findings` changes one command's error contract and no other command, event or domain — step 2 (`rg -n IncompatibleGraph ess/`, 2 hits), unproven. Where the search stops: the synthesized `rejected` scenario asserts only `expect_error: inference.graph.IncompatibleGraph` with no field today; whether synthesize emits a payload assertion for `findings` is what step 1's 0-refusals run proves — cited.
+
+## Scenarios routed from earlier stories
+
+Ids that `story:pipeline-declaration`'s commands answer but whose arrangement validates a pipeline, so they pass first when this story answers `inference.graph.ValidatePipeline`.
+
+- `inference.graph.AddNode/outcome/added`
+- `inference.graph.ConnectPorts/outcome/connected`
+- `inference.graph.Edge/invariant/after/inference.graph.ConnectPorts/connected`
+- `inference.graph.BindNode/outcome/bound`
+- `inference.graph.AddNode/outcome/not-declared`
+- `inference.graph.ConnectPorts/outcome/not-declared`
+- `inference.graph.BindNode/outcome/unknown-node`
+- `inference.graph.BindNode/outcome/unknown-adapter`
+- `inference.graph.BindNode/outcome/not-declared`

@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T01:09:18Z",
+  "actor": "human:timo",
+  "artifact": "story:ess-defect-fixes",
+  "kind": "story",
+  "revision": 11,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "ess verify conform run --path ess --scenarios ess/scenarios --target interpreted --report-format 2: 229 passed, 0 failed (ess 0.60.0)"
+  }
+}

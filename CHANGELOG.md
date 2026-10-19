@@ -10,6 +10,19 @@
   generations and sessions, read only in the canonical Uuid spelling.
 - `task check` runs `cargo fmt`, `cargo clippy -D warnings` and `cargo test` after the
   specification and planning checks.
+- `ess/scenarios/`: four authored scenarios for what ess 0.60.0 synthesis does not reach: the
+  discard cascades of supersede, cancel and run cancellation (ESS-SYNTH-001), and a Draining run
+  that fails.
+
+### Changed
+
+- The specification fixes 66 findings of a hardening pass and five reviews (13 P1): a superseded
+  or cancelled generation emits, commits, queues and plays nothing more; the tool barrier reads
+  the tool's class and the span's state instead of the caller's claim; profiles are checked
+  against the design's table; runs, sessions and graph edits refuse the wrong pipeline or run
+  state; refusals carry typed diagnostics. Breaking against 0.1.0 (`ess verify diff`, exit 4):
+  new enum members, `FailRun.failure: FailureReason` replacing `reason`, new required inputs on
+  `DeclareModel`, `DeclareTool` and `ProposeToolCall`, the new `DeclareProfile` refusal.
 
 ## [0.1.0] — 2026-10-19
 
