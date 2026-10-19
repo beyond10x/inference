@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:core-model-sync
 kind: story
-status: draft
+status: active
 title: inference-core follows the model vocabulary changed by the spec fixes
 summary: Capability orchestrated_duplex, Model provenance and source_revision, the ModelNotFound error, in inference-core.
 relations:
@@ -13,7 +13,10 @@ scope:
   path: crates/inference-core/src/model.rs
 - confidence: cited
   path: crates/inference-core/tests
-revision: 3
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T03:39:59Z", actor: "human:timo", revision: 4}
+- {from: "proposed", to: "active", at: "2026-10-19T03:39:59Z", actor: "human:timo", revision: 5}
 ---
 ## Context
 
