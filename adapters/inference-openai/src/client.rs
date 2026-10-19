@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use crate::audio::encode_pcm16_24k;
 use crate::config::{Endpoint, SessionConfig, WireFormat};
 use crate::credential::{CredentialError, CredentialSource};
-use crate::error::RealtimeError;
+use crate::error::{ConnectError, RealtimeError};
 use crate::event::ServerEvent;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -95,7 +95,7 @@ impl RealtimeClient {
         let (socket, _) =
             tokio_tungstenite::connect_async_tls_with_config(request, None, true, connector)
                 .await
-                .map_err(|error| RealtimeError::Connect(error.to_string()))?;
+                .map_err(|error| RealtimeError::Connect(handshake_error(&error)))?;
 
         let mut client = Self {
             socket,
@@ -390,8 +390,26 @@ fn tls_config() -> Result<Arc<rustls::ClientConfig>, RealtimeError> {
         rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()
-    .map_err(|error| RealtimeError::Connect(error.to_string()))?
+    .map_err(|error| {
+        RealtimeError::Connect(ConnectError {
+            status: None,
+            detail: error.to_string(),
+        })
+    })?
     .with_root_certificates(roots)
     .with_no_client_auth();
     Ok(Arc::new(config))
+}
+
+/// The handshake failure of `error`, with the HTTP status when the server answered the upgrade
+/// with one. The description is tungstenite's, which names the status and never the request.
+fn handshake_error(error: &tokio_tungstenite::tungstenite::Error) -> ConnectError {
+    let status = match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => Some(response.status().as_u16()),
+        _ => None,
+    };
+    ConnectError {
+        status,
+        detail: error.to_string(),
+    }
 }
