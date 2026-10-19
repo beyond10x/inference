@@ -18,8 +18,8 @@ use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPositio
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Eagerness, Endpoint,
     EnvironmentSource, FunctionTool, OPENAI_KEY_NAME, OutputModality, RealtimeClient,
-    RealtimeError, ResponseStatus, ServerEvent, SessionConfig, TurnDetection, WireFormat,
-    encode_pcm16_24k,
+    RealtimeError, ResponseStatus, ServerEvent, SessionConfig, TranscriptionUsage, TurnDetection,
+    WireFormat, encode_pcm16_24k,
 };
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
@@ -602,7 +602,12 @@ async fn barge_in_cancels_the_response_and_truncates_the_played_audio() {
             },
             ServerEvent::InputTranscript {
                 item_id: "msg_003".to_owned(),
-                transcript: "Hey, can you hear me?".to_owned()
+                transcript: "Hey, can you hear me?".to_owned(),
+                usage: Some(TranscriptionUsage::Tokens {
+                    total_tokens: 22,
+                    input_tokens: 13,
+                    output_tokens: 9
+                })
             },
         ]
     );

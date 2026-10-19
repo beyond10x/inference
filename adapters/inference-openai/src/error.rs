@@ -15,8 +15,8 @@ pub enum RealtimeError {
     /// The endpoint URL or the model id cannot form a request.
     InvalidEndpoint(String),
     /// The opening handshake failed: the server refused it (for example HTTP 401) or the
-    /// connection could not be made.
-    Connect(String),
+    /// connection could not be made. [`ConnectError::status`] tells the two apart.
+    Connect(ConnectError),
     /// Reading or writing the open connection failed.
     Transport(String),
     /// The server closed the connection, with its close code and reason when it gave one.
@@ -53,3 +53,24 @@ impl fmt::Display for RealtimeError {
 }
 
 impl std::error::Error for RealtimeError {}
+
+/// Why the opening handshake failed: the HTTP status when the server answered the upgrade with
+/// one (401 or 403 for a refused key), and a description that carries no part of the credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectError {
+    pub status: Option<u16>,
+    pub detail: String,
+}
+
+impl ConnectError {
+    /// Whether the server refused the credential: HTTP 401 or 403.
+    pub fn is_refusal(&self) -> bool {
+        matches!(self.status, Some(401 | 403))
+    }
+}
+
+impl fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.detail)
+    }
+}

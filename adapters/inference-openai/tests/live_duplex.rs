@@ -16,19 +16,20 @@
 //! sends `fixtures/during.wav` ("And what about Portugal?") while the answer to `speech.wav` plays
 //! and looks for "Portugal" in the same response. The hosted model is not expected to pass: a
 //! Realtime response is generated from the conversation as it stood when the response was
-//! created, and input that arrives later is answered by a later response. The test passes when
-//! the binding's claims agree with the outcome, and prints the outcome either way.
+//! created, and input that arrives later is answered by a later response. The test fails when the
+//! model was never put to the test (the session did not open, failed, or never answered), and
+//! otherwise passes when the binding's claims agree with the outcome. It prints the outcome either
+//! way.
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;
 
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
-use inference_core::model::Capability;
 use inference_duplex::conformance::{NativeDuplexProbe, native_duplex_evidence};
 use inference_duplex::{
     NativeSpeechModel, SessionConfig, SessionEvent, SpeechSessionHandle, TurnDetection, TurnTuning,
 };
-use inference_openai::duplex::{OpenAiRealtime, claims};
+use inference_openai::duplex::{OpenAiRealtime, native_duplex_verdict};
 use inference_openai::{
     CredentialSource, Endpoint, EnvironmentSource, KeychainSource, OPENAI_KEY_NAME,
     OPENAI_KEY_VARIABLE, encode_pcm16_24k,
@@ -208,8 +209,9 @@ fn native_duplex_evidence_of_the_hosted_model() {
     let outcome = native_duplex_evidence(&mut model(), &probe);
     println!("native_duplex evidence: {outcome:?}");
     assert_eq!(
-        claims().contains(&Capability::NativeDuplex),
-        outcome.is_ok(),
-        "the binding claims native_duplex exactly when the hosted model gives the evidence"
+        native_duplex_verdict(&outcome),
+        Ok(true),
+        "the binding claims native_duplex exactly when the hosted model gives the evidence, and \
+         only an outcome that put the model to the test decides it"
     );
 }
