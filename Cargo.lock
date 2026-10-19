@@ -288,6 +288,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-facade"
+version = "0.4.0"
+dependencies = [
+ "inference-audio",
+ "inference-core",
+ "inference-llm",
+ "inference-pipeline",
+ "inference-runtime",
+ "inference-testkit",
+ "inference-text",
+ "inference-tools",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "inference-llm"
 version = "0.4.0"
 dependencies = [
@@ -340,6 +356,7 @@ dependencies = [
  "ess-conformance",
  "ess-primitives",
  "inference-core",
+ "inference-facade",
  "inference-llm",
  "inference-pipeline",
  "inference-runtime",

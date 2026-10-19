@@ -5,8 +5,9 @@
 //! and the mock source and sink nodes the runtime's run controller drives, generic over the
 //! payload of the pipeline, and the run refusals of the stream store, which take
 //! `inference-runtime`; and behind
-//! the `stt`, `llm` and `tts` features, the mocks of the contract crates, with the mock model
-//! node of a text-only pipeline behind `llm` and `run` together. Its test tree carries the
+//! the `stt`, `llm` and `tts` features, the mocks of the contract crates, with the graph nodes over
+//! them behind each of those features and `run` together: the mock model node, the STT node and
+//! the fan-out of a voice pipeline, and the TTS node. Its test tree carries the
 //! conformance target that answers the synthesized suite of `ess/` (`tests/conform.rs`), which
 //! needs the `run` feature; the library itself pulls no ESS crate, so a crate depending on the
 //! stores or the mocks carries no test tooling, and one that leaves `run` off carries no runtime.
@@ -33,8 +34,8 @@ pub mod stream;
 /// their lifecycle, their views, and the scripted mock of the executor contract.
 pub mod tools;
 
-/// `inference.session`: the in-memory store of the sessions, each holding its current run, and its
-/// view.
+/// `inference.session`, behind the `run` feature: the in-memory store of the sessions, each holding
+/// its current run, and its view, over the session state machine of `inference-facade`.
 pub mod session;
 
 /// The scripted mock recogniser of the STT contract, in two capability configurations, and
@@ -51,3 +52,8 @@ pub mod llm;
 /// sink double that acknowledges playback.
 #[cfg(feature = "tts")]
 pub mod tts;
+
+/// The voice cascade on the mocks: topology B declared with exposed ends, its payload and the
+/// node implementations of one run, behind the `stt`, `llm`, `tts` and `run` features together.
+#[cfg(all(feature = "stt", feature = "llm", feature = "tts", feature = "run"))]
+pub mod cascade;
