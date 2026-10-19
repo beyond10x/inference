@@ -47,11 +47,14 @@ pub enum Capability {
     ResumableModelState,
     /// Reports temporal relationships between output audio and text.
     AudioTextAlignment,
+    /// A coordinator restarting ordinary calls gives an orchestrated duplex experience; it is
+    /// reported apart from [`Capability::NativeDuplex`] and never as it.
+    OrchestratedDuplex,
 }
 
 impl Capability {
     /// Every capability, in the order `ess/domains/model.yaml` lists them.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::OutputStreaming,
         Self::IncrementalInput,
         Self::ConcurrentInputOutput,
@@ -61,6 +64,7 @@ impl Capability {
         Self::Interruptible,
         Self::ResumableModelState,
         Self::AudioTextAlignment,
+        Self::OrchestratedDuplex,
     ];
 }
 
@@ -140,6 +144,8 @@ pub struct DeclareModel {
     pub checksum: String,
     pub input_modalities: Vec<Modality>,
     pub output_modalities: Vec<Modality>,
+    pub provenance: String,
+    pub source_revision: String,
 }
 
 /// `inference.model.ModelDeclared`: a model was declared.
@@ -151,7 +157,8 @@ pub struct ModelDeclared {
 }
 
 /// `inference.model.Model`: a trained inference artifact or hosted model endpoint, with its code
-/// and weight licences as separate entries and its artifact checksum.
+/// and weight licences as separate entries, its artifact checksum, its provenance and its source
+/// project revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Model {
     model_id: ModelId,
@@ -162,6 +169,8 @@ pub struct Model {
     checksum: String,
     input_modalities: Vec<Modality>,
     output_modalities: Vec<Modality>,
+    provenance: String,
+    source_revision: String,
 }
 
 impl Model {
@@ -184,6 +193,8 @@ impl Model {
             checksum: input.checksum,
             input_modalities: input.input_modalities,
             output_modalities: input.output_modalities,
+            provenance: input.provenance,
+            source_revision: input.source_revision,
         };
         (model, event)
     }
@@ -227,6 +238,16 @@ impl Model {
     pub fn output_modalities(&self) -> &[Modality] {
         &self.output_modalities
     }
+
+    #[must_use]
+    pub fn provenance(&self) -> &str {
+        &self.provenance
+    }
+
+    #[must_use]
+    pub fn source_revision(&self) -> &str {
+        &self.source_revision
+    }
 }
 
 /// `inference.model.DeclareAdapter`: the input that declares an [`Adapter`].
@@ -267,6 +288,23 @@ impl fmt::Display for NonPositiveConcurrency {
 }
 
 impl Error for NonPositiveConcurrency {}
+
+/// `inference.model.ModelNotFound`: no model carries the identity an adapter named; nothing was
+/// declared. `model_id` is the identity that was sent. It is the error of `DeclareAdapter`'s
+/// `unknown-model` outcome, which only a store holding the declared models can decide;
+/// [`Adapter::declare`] never returns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelNotFound {
+    pub model_id: ModelId,
+}
+
+impl fmt::Display for ModelNotFound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "no model carries the identity {}", self.model_id)
+    }
+}
+
+impl Error for ModelNotFound {}
 
 /// `inference.model.Adapter`: the concrete implementation that connects one model or backend to
 /// the contracts. It references its [`Model`] by `model_id`; dropping an adapter changes nothing

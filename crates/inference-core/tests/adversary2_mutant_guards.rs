@@ -48,6 +48,7 @@ fn adversary2_all_lists_the_variants_in_the_order_ess_lists_them() {
             "interruptible",
             "resumable_model_state",
             "audio_text_alignment",
+            "orchestrated_duplex",
         ])
     );
     assert_eq!(

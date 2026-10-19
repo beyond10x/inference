@@ -89,6 +89,8 @@ fn adversary_suite_declare_model_input_and_event_payload_match_ess() {
         "input_modalities": ["Text"],
         "output_modalities": ["Audio"],
         "weight_license": "weight_license",
+        "provenance": "provenance",
+        "source_revision": "source_revision",
     });
     let parsed: DeclareModel = serde_json::from_value(input).expect("suite input parses");
     let (model, event) = Model::declare(parsed);
@@ -111,10 +113,14 @@ fn adversary_suite_declare_model_input_and_event_payload_match_ess() {
             "checksum",
             "input_modalities",
             "output_modalities",
+            "provenance",
+            "source_revision",
         ])
     );
     assert_eq!(entity["input_modalities"], json!(["Text"]));
     assert_eq!(entity["output_modalities"], json!(["Audio"]));
+    assert_eq!(entity["provenance"], json!("provenance"));
+    assert_eq!(entity["source_revision"], json!("source_revision"));
 }
 
 fn integer_adapter_input(model_id: ModelId, max_concurrency: i64) -> DeclareAdapter {
