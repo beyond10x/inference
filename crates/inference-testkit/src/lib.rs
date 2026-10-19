@@ -2,8 +2,9 @@
 //!
 //! `inference-testkit` holds one in-memory store module per domain of `ess/system.yaml`; behind
 //! the `run` feature, the runs and node instances of the graph store, the recording mock node
-//! and the mock source and sink nodes of a text-only pipeline the runtime's run controller
-//! drives, and the run refusals of the stream store, which take `inference-runtime`; and behind
+//! and the mock source and sink nodes the runtime's run controller drives, generic over the
+//! payload of the pipeline, and the run refusals of the stream store, which take
+//! `inference-runtime`; and behind
 //! the `stt`, `llm` and `tts` features, the mocks of the contract crates, with the mock model
 //! node of a text-only pipeline behind `llm` and `run` together. Its test tree carries the
 //! conformance target that answers the synthesized suite of `ess/` (`tests/conform.rs`), which
@@ -29,7 +30,7 @@ pub mod graph;
 pub mod stream;
 
 /// `inference.tools`: the in-memory stores of the declared tools and of the tool calls through
-/// their lifecycle, and their views.
+/// their lifecycle, their views, and the scripted mock of the executor contract.
 pub mod tools;
 
 /// `inference.session`: empty until the session stores land.
