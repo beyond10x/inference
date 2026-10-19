@@ -16,14 +16,16 @@ naming:
 
 types:
   # How the samples of a frame are encoded. Two little-endian PCM sample layouts, signed 16-bit
-  # integer and 32-bit float; which layouts are listed is this specification's choice, not the
-  # design's.
+  # integer and 32-bit float, and G.711 mu-law and A-law, one companded byte per sample, which
+  # telephony carries at 8 kHz and a native speech model may take as it is; which layouts are
+  # listed is this specification's choice, not the design's. Silence is the zero sample: zero bytes
+  # in PCM, 0xFF in mu-law, 0xD5 in A-law.
   # read from: docs/design/inference.md:293
   # UNMAPPED: compressed frames and codec token streams (design 293) have no variant: the design
   # names neither a codec nor a token stream format. Open question for the owner.
   - name: inference.audio.AudioEncoding
     kind: enum
-    variants: [pcm_s16le, pcm_f32le]
+    variants: [pcm_s16le, pcm_f32le, pcm_mulaw, pcm_alaw]
 
   # The format of a frame: encoding, sample rate in hertz and number of channels. That the sample
   # rate and the channel count are at least one is this specification's rule, not the design's,

@@ -22,17 +22,39 @@ pub enum AudioEncoding {
     PcmS16le,
     /// Little-endian 32-bit float PCM.
     PcmF32le,
+    /// G.711 mu-law: one companded byte per sample, as telephony carries it.
+    PcmMulaw,
+    /// G.711 A-law: one companded byte per sample, as telephony carries it.
+    PcmAlaw,
 }
 
 impl AudioEncoding {
     /// Every encoding, in the order `ess/domains/audio.yaml` lists them.
-    pub const ALL: [Self; 2] = [Self::PcmS16le, Self::PcmF32le];
+    pub const ALL: [Self; 4] = [
+        Self::PcmS16le,
+        Self::PcmF32le,
+        Self::PcmMulaw,
+        Self::PcmAlaw,
+    ];
 
-    /// The bytes one sample of one channel takes: 2 for `pcm_s16le`, 4 for `pcm_f32le`.
+    /// The bytes one sample of one channel takes: 2 for `pcm_s16le`, 4 for `pcm_f32le`, 1 for
+    /// `pcm_mulaw` and `pcm_alaw`.
     pub const fn width(self) -> u64 {
         match self {
             Self::PcmS16le => 2,
             Self::PcmF32le => 4,
+            Self::PcmMulaw | Self::PcmAlaw => 1,
+        }
+    }
+
+    /// The byte every byte of a silent frame holds, the zero sample: 0 for the PCM layouts, 0xFF
+    /// for `pcm_mulaw`, 0xD5 for `pcm_alaw`. A frame of zero bytes is silent only in PCM; in
+    /// mu-law it is the loudest negative sample.
+    pub const fn silence(self) -> u8 {
+        match self {
+            Self::PcmS16le | Self::PcmF32le => 0,
+            Self::PcmMulaw => 0xFF,
+            Self::PcmAlaw => 0xD5,
         }
     }
 }
