@@ -25,7 +25,9 @@ fn request() -> GenerationRequest {
 }
 
 fn start(configuration: MockConfiguration) -> <MockGenerator as Generator>::Handle {
-    MockGenerator::new(configuration, ModelId::generate(), ["a", "b"]).start(request())
+    MockGenerator::new(configuration, ModelId::generate(), ["a", "b"])
+        .start(request())
+        .expect("a fresh generator runs nothing else")
 }
 
 #[test]

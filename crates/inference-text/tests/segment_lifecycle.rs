@@ -8,8 +8,8 @@ use inference_core::generation::{
 };
 use inference_core::id::{NodeId, RunId};
 use inference_text::{
-    AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentState,
-    SegmentStateConflict, SynthesisCompleted, TextDelta, TextSegmentCommitted,
+    AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentMoveRefused, SegmentQueued,
+    SegmentState, SegmentStateConflict, SynthesisCompleted, TextDelta, TextSegmentCommitted,
 };
 use serde_json::json;
 
@@ -48,7 +48,7 @@ fn target(transition: Move) -> SegmentState {
     }
 }
 
-fn apply(segment: &OutputSegment, transition: Move) -> Result<OutputSegment, SegmentStateConflict> {
+fn apply(segment: OutputSegment, transition: Move) -> Result<OutputSegment, SegmentMoveRefused> {
     match transition {
         Move::Commit => segment.commit().map(|(moved, _)| moved),
         Move::Queue => segment.queue().map(|(moved, _)| moved),
@@ -84,7 +84,7 @@ fn in_state(state: SegmentState) -> OutputSegment {
         SegmentState::Discarded => &[Move::Discard],
     };
     path.iter().fold(tentative(), |segment, transition| {
-        apply(&segment, *transition).expect("a declared path")
+        apply(segment, *transition).expect("a declared path")
     })
 }
 
@@ -144,56 +144,76 @@ fn every_state_and_transition_pair_moves_or_refuses_as_declared() {
         Move::Discard,
     ];
     let mut moved = 0;
-    let mut refused = 0;
+    let mut refused_count = 0;
     for state in SegmentState::ALL {
-        let segment = in_state(state);
-        assert_eq!(segment.state(), state);
         for transition in moves {
-            let answer = apply(&segment, transition);
+            let segment = in_state(state);
+            assert_eq!(segment.state(), state);
+            let before = segment.snapshot();
+            let answer = apply(segment, transition);
             if sources(transition).contains(&state) {
-                let after = answer.unwrap_or_else(|conflict| {
-                    panic!("{transition:?} from {state:?} is declared, got {conflict:?}")
+                let after = answer.unwrap_or_else(|refused| {
+                    panic!("{transition:?} from {state:?} is declared, got {refused:?}")
                 });
                 assert_eq!(
                     after.state(),
                     target(transition),
                     "{transition:?} from {state:?}"
                 );
-                assert_eq!(after.segment_id(), segment.segment_id());
-                assert_eq!(after.text(), segment.text());
+                assert_eq!(after.segment_id(), before.segment_id());
+                assert_eq!(after.text(), before.text());
                 moved += 1;
             } else {
+                let refused = answer.expect_err("not declared");
                 assert_eq!(
-                    answer,
-                    Err(SegmentStateConflict { current: state }),
+                    refused.conflict(),
+                    SegmentStateConflict { current: state },
                     "{transition:?} from {state:?} is not declared"
                 );
-                refused += 1;
+                assert_eq!(
+                    refused.into_segment().snapshot(),
+                    before,
+                    "a refused move hands the segment back unmoved"
+                );
+                refused_count += 1;
             }
-            assert_eq!(segment.state(), state, "a move leaves the segment it read");
         }
     }
-    assert_eq!((moved, refused), (8, 22));
+    assert_eq!((moved, refused_count), (8, 22));
+}
+
+/// The conflict a refused move carries.
+fn conflict(refused: SegmentMoveRefused) -> SegmentStateConflict {
+    refused.conflict()
 }
 
 #[test]
 fn the_named_refusals_of_the_design() {
     assert_eq!(
-        in_state(SegmentState::Queued).play(),
+        in_state(SegmentState::Queued)
+            .play()
+            .map(|_| ())
+            .map_err(conflict),
         Err(SegmentStateConflict {
             current: SegmentState::Queued
         }),
         "a queued segment is not played before its synthesis completes"
     );
     assert_eq!(
-        in_state(SegmentState::Played).discard(),
+        in_state(SegmentState::Played)
+            .discard()
+            .map(|_| ())
+            .map_err(conflict),
         Err(SegmentStateConflict {
             current: SegmentState::Played
         }),
         "speech already played cannot be unsaid"
     );
     assert_eq!(
-        in_state(SegmentState::Tentative).queue(),
+        in_state(SegmentState::Tentative)
+            .queue()
+            .map(|_| ())
+            .map_err(conflict),
         Err(SegmentStateConflict {
             current: SegmentState::Tentative
         }),
@@ -219,6 +239,8 @@ fn each_transition_emits_its_event() {
     assert_eq!(event, SynthesisCompleted { segment_id: id });
     let (_, event) = synthesized.play().expect("plays");
     assert_eq!(event, AudioPlayed { segment_id: id });
+    let synthesized = in_state(SegmentState::Synthesized);
+    let id = synthesized.segment_id();
     let (_, event) = synthesized.discard().expect("discards");
     assert_eq!(event, SegmentDiscarded { segment_id: id });
 }
