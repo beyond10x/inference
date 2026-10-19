@@ -140,12 +140,12 @@ impl Declaration {
     /// names, answering the planned form:
     ///
     /// ```
-    /// # use inference_core::policy::DeploymentProfile;
+    /// # use inference_core::policy::ProfileId;
     /// # use inference_pipeline::{Catalog, Declaration, InteractionMode, PipelineSpec};
-    /// # fn plan(catalog: &impl Catalog, profile: &DeploymentProfile) -> Result<(), Box<dyn std::error::Error>> {
+    /// # fn plan(catalog: &impl Catalog, profile_id: ProfileId) -> Result<(), Box<dyn std::error::Error>> {
     /// # let spec = PipelineSpec { name: "n".to_owned(), schema_revision: "1".to_owned(), mode: InteractionMode::Batch, required_capabilities: Vec::new() };
     /// let mut declaration = Declaration::new();
-    /// let (pipeline_id, ()) = declaration.build(profile, spec, |_| ());
+    /// let (pipeline_id, ()) = declaration.build(catalog, profile_id, spec, |_| ())?;
     /// let validated = declaration.validate(pipeline_id)?;
     /// declaration.plan(validated, catalog)?;
     /// # Ok(())
@@ -156,12 +156,12 @@ impl Declaration {
     /// here:
     ///
     /// ```compile_fail
-    /// # use inference_core::policy::DeploymentProfile;
+    /// # use inference_core::policy::ProfileId;
     /// # use inference_pipeline::{Catalog, Declaration, InteractionMode, PipelineSpec};
-    /// # fn plan(catalog: &impl Catalog, profile: &DeploymentProfile) -> Result<(), Box<dyn std::error::Error>> {
+    /// # fn plan(catalog: &impl Catalog, profile_id: ProfileId) -> Result<(), Box<dyn std::error::Error>> {
     /// # let spec = PipelineSpec { name: "n".to_owned(), schema_revision: "1".to_owned(), mode: InteractionMode::Batch, required_capabilities: Vec::new() };
     /// let mut declaration = Declaration::new();
-    /// let (pipeline_id, ()) = declaration.build(profile, spec, |_| ());
+    /// let (pipeline_id, ()) = declaration.build(catalog, profile_id, spec, |_| ())?;
     /// declaration.plan(pipeline_id, catalog)?;
     /// # Ok(())
     /// # }
