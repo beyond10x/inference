@@ -10,6 +10,7 @@ pub mod envelope;
 pub mod generation;
 pub mod id;
 pub mod model;
+pub mod policy;
 
 /// The crates [`uuid_newtype!`] expands to, so that a crate declaring an identifier with it needs
 /// neither as a dependency of its own. Not part of the API.
