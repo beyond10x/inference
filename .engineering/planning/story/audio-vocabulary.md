@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:audio-vocabulary
 kind: story
-status: draft
+status: active
 title: 'Audio frames, formats and sample clocks: declared in ess/ and carried by inference-audio'
 summary: inference.audio is declared in ess/domains/audio.yaml (spec first); crates/inference-audio carries frame, format and sample clock position in audio frame time; the STT and TTS stories depend on it and nothing else waits for it.
 relations:
@@ -20,7 +20,10 @@ scope:
   path: ess/ess-inputs.yaml
 - confidence: cited
   path: ess/system.yaml
-revision: 11
+revision: 13
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T03:57:29Z", actor: "human:timo", revision: 12, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "proposed", to: "active", at: "2026-10-19T03:57:29Z", actor: "human:timo", revision: 13, decided_on: {"recorded":{"review_outcome":2}}}
 ---
 ## Context
 

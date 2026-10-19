@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:testkit-conformance-target
 kind: story
-status: draft
+status: active
 title: Testkit conformance target answers the inference.model scenarios
 summary: inference-testkit holds in-memory stores and an in-process ConformanceTarget driven by ess-conformance from a test; the three inference.model scenarios pass and every unanswered scenario is named in ess/SKIPPED.md.
 relations:
@@ -56,7 +56,10 @@ scope:
   path: crates/inference-testkit/tests/target/tools.rs
 - confidence: cited
   path: ess/SKIPPED.md
-revision: 33
+revision: 35
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T03:57:30Z", actor: "human:timo", revision: 34, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "proposed", to: "active", at: "2026-10-19T03:57:31Z", actor: "human:timo", revision: 35, decided_on: {"recorded":{"review_outcome":1}}}
 ---
 ## Context
 
