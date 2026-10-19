@@ -15,6 +15,7 @@ tts = []
 
 [dependencies]
 inference-core = { path = "../inference-core" }
+inference-text = { path = "../inference-text" }
 uuid.workspace = true
 
 [dev-dependencies]
