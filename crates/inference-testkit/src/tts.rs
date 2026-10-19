@@ -9,8 +9,10 @@
 //! audio at every step and does not consult its own claims, so how it behaves follows from what
 //! its configuration claims:
 //!
-//! * claiming `incremental_input`, it takes each segment as it is offered and synthesises it
-//!   before the utterance is complete; otherwise it takes nothing until the utterance ends;
+//! * claiming `incremental_input`, it takes the segments offered so far at its next step that
+//!   has nothing left to deliver: an iteration of the handle hands out the events already
+//!   produced first, and only once none is left does it take input; it synthesises what it took
+//!   before the utterance is complete. Otherwise it takes nothing until the utterance ends;
 //! * claiming `output_streaming`, it emits each frame of a segment while the segment is Queued,
 //!   then completes its synthesis; otherwise it completes the synthesis with the whole audio of
 //!   the segment, delivered after `SynthesisCompleted`.
@@ -18,20 +20,61 @@
 //! A segment discarded through the handle is not synthesised, and its frames not yet delivered
 //! are dropped. [`MockSink`] is the media sink: it is given frames and acknowledges playback of a
 //! Synthesized segment once it has been given every frame of it, through
-//! [`SynthesisHandle::acknowledge_playback`].
+//! [`SynthesisHandle::acknowledge_playback`] with the [`PlaybackReceipt`] it makes by consuming
+//! them.
+//!
+//! It declares a maximum concurrency of one and holds to it: while one synthesis of a
+//! synthesiser, or of a clone of it, runs, a second start is refused with
+//! [`ConcurrencyLimitReached`]. A synthesis runs until its handle is dropped.
+//!
+//! An offered segment waits for the next step with nothing left to deliver:
+//!
+//! ```
+//! # use std::num::{NonZeroU16, NonZeroU32};
+//! # use inference_tts::{SynthesisHandle, Synthesiser};
+//! # use inference_tts::inference_audio::{AudioEncoding, AudioFormat};
+//! # use inference_tts::inference_core::generation::{Generation, StartGeneration};
+//! # use inference_tts::inference_core::id::{NodeId, RunId};
+//! # use inference_tts::inference_core::model::ModelId;
+//! # use inference_tts::inference_text::OutputSegment;
+//! # use inference_testkit::tts::{MockConfiguration, MockSynthesiser};
+//! # let format = AudioFormat {
+//! #     encoding: AudioEncoding::PcmS16le,
+//! #     sample_rate: NonZeroU32::new(16_000).unwrap(),
+//! #     channels: NonZeroU16::new(1).unwrap(),
+//! # };
+//! # let (generation, _) = Generation::start(StartGeneration {
+//! #     run_id: RunId::generate(),
+//! #     node_id: NodeId::generate(),
+//! #     epoch: 1,
+//! # });
+//! # let (tentative, _) = OutputSegment::emit(&generation, 1, "hello".to_owned()).unwrap();
+//! # let (segment, _) = tentative.commit().unwrap();
+//! let mut synthesiser =
+//!     MockSynthesiser::new(MockConfiguration::IncrementalStreaming, ModelId::generate(), format);
+//! let mut handle = synthesiser.start().unwrap();
+//! handle.offer_segment(segment).unwrap();
+//! assert_eq!(handle.output().segments_taken(), 0, "offering takes nothing");
+//! let frame = handle.next();
+//! assert_eq!(handle.output().segments_taken(), 1, "the next step takes it");
+//! assert!(frame.is_some());
+//! ```
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use inference_tts::inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
 use inference_tts::inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_tts::inference_text::{
-    AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentState,
-    SegmentStateConflict,
+    AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentSnapshot,
+    SegmentState, SegmentStateConflict,
 };
 use inference_tts::{
-    AudioRefused, CONTRACT_REVISION, DiscardRefused, OfferRefused, PlaybackRefused, SegmentAudio,
+    AudioRefused, CONTRACT_REVISION, ConcurrencyLimitReached, DiscardRefused,
+    FrameOfAnotherSegment, OfferRefused, PlaybackReceipt, PlaybackRefused, SegmentAudio,
     SegmentNotHeld, SynthesisEvent, SynthesisHandle, SynthesisOutput, Synthesiser, UtteranceEnded,
 };
 
@@ -74,12 +117,57 @@ impl MockConfiguration {
 /// The samples per channel of each frame the mock emits.
 pub const FRAME_SAMPLES: u32 = 160;
 
+/// The syntheses of one synthesiser that run, shared by its clones, which are the same adapter.
+#[derive(Debug, Clone, Default)]
+struct Running(Arc<AtomicUsize>);
+
+impl PartialEq for Running {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Running {}
+
+impl Running {
+    /// Counts one more running synthesis, if fewer than `max_concurrency` run.
+    fn admit(&self, max_concurrency: i64) -> Result<Slot, ConcurrencyLimitReached> {
+        let limit = usize::try_from(max_concurrency).unwrap_or(usize::MAX);
+        let slot = Slot(Arc::clone(&self.0));
+        if self.0.fetch_add(1, Ordering::AcqRel) < limit {
+            Ok(slot)
+        } else {
+            drop(slot);
+            Err(ConcurrencyLimitReached { max_concurrency })
+        }
+    }
+}
+
+/// The place of one running synthesis among [`Running`], given back when it is dropped.
+#[derive(Debug)]
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl PartialEq for Slot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Slot {}
+
 /// The scripted mock synthesiser: an in-process adapter of one model with a maximum concurrency of
-/// one, emitting frames in one format.
+/// one, which it holds to, emitting frames in one format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockSynthesiser {
     adapter: Adapter,
     format: AudioFormat,
+    running: Running,
 }
 
 impl MockSynthesiser {
@@ -97,7 +185,11 @@ impl MockSynthesiser {
             max_concurrency: 1,
         })
         .expect("a maximum concurrency of one is positive");
-        Self { adapter, format }
+        Self {
+            adapter,
+            format,
+            running: Running::default(),
+        }
     }
 }
 
@@ -108,14 +200,16 @@ impl Synthesiser for MockSynthesiser {
         &self.adapter
     }
 
-    fn start(&mut self) -> MockSynthesis {
-        MockSynthesis {
+    fn start(&mut self) -> Result<MockSynthesis, ConcurrencyLimitReached> {
+        let slot = self.running.admit(self.adapter.max_concurrency())?;
+        Ok(MockSynthesis {
             output: SynthesisOutput::start(&self.adapter),
             format: self.format,
             next_sample: 0,
             pending: VecDeque::new(),
             delivered: VecDeque::new(),
-        }
+            _slot: slot,
+        })
     }
 }
 
@@ -126,7 +220,7 @@ struct Job {
     frames_left: usize,
 }
 
-/// One synthesis of a [`MockSynthesiser`].
+/// One synthesis of a [`MockSynthesiser`]; it runs until it is dropped.
 #[derive(Debug, PartialEq, Eq)]
 pub struct MockSynthesis {
     output: SynthesisOutput,
@@ -134,6 +228,7 @@ pub struct MockSynthesis {
     next_sample: u64,
     pending: VecDeque<Job>,
     delivered: VecDeque<SynthesisEvent>,
+    _slot: Slot,
 }
 
 impl Iterator for MockSynthesis {
@@ -224,8 +319,9 @@ impl SynthesisHandle for MockSynthesis {
     fn acknowledge_playback(
         &mut self,
         segment_id: SegmentId,
+        receipt: PlaybackReceipt,
     ) -> Result<AudioPlayed, PlaybackRefused> {
-        self.output.acknowledge_playback(segment_id)
+        self.output.acknowledge_playback(segment_id, receipt)
     }
 
     fn discard(&mut self, segment_id: SegmentId) -> Result<SegmentDiscarded, DiscardRefused> {
@@ -244,10 +340,14 @@ pub enum SinkRefused {
     /// The `wrong-state` outcome of `inference.stream.AcknowledgePlayback`: the segment is not
     /// Synthesized, in the state carried.
     SegmentStateConflict(SegmentStateConflict),
-    /// The sink has been given no audio of the segment, so it played none.
+    /// The sink has been given no audio of a segment the synthesis emitted frames of, so it
+    /// played none.
     NothingGiven { segment_id: SegmentId },
-    /// The sink has been given `given` of the `emitted` frames of the segment, so it has not
-    /// played all of it.
+    /// The receipt's frames are of another segment.
+    FrameOfAnotherSegment(FrameOfAnotherSegment),
+    /// The sink has been given `given` frames of the segment, those the synthesis already counts
+    /// as played among them, where the synthesis emitted `emitted`, so it has not played exactly
+    /// its audio.
     FramesOutstanding {
         segment_id: SegmentId,
         given: usize,
@@ -260,6 +360,12 @@ impl From<PlaybackRefused> for SinkRefused {
         match error {
             PlaybackRefused::SegmentNotHeld(error) => Self::SegmentNotHeld(error),
             PlaybackRefused::SegmentStateConflict(error) => Self::SegmentStateConflict(error),
+            PlaybackRefused::FrameOfAnotherSegment(error) => Self::FrameOfAnotherSegment(error),
+            PlaybackRefused::PlayedFramesMismatch(error) => Self::FramesOutstanding {
+                segment_id: error.segment_id,
+                given: error.played,
+                emitted: error.emitted,
+            },
         }
     }
 }
@@ -283,31 +389,41 @@ impl MockSink {
         self.given.push(audio);
     }
 
-    /// How many frames of the segment `segment_id` the sink has been given.
+    /// How many frames of the segment `segment_id` the sink has been given and not yet
+    /// acknowledged.
     #[must_use]
     pub fn frames_given(&self, segment_id: SegmentId) -> usize {
         self.given
             .iter()
-            .filter(|audio| audio.segment_id == segment_id)
+            .filter(|audio| audio.segment_id() == segment_id)
             .count()
     }
 
     /// Runs `inference.stream.AcknowledgePlayback` on the segment `segment_id` of the synthesis
-    /// `handle` runs, through [`SynthesisHandle::acknowledge_playback`]: the synthesis's record
-    /// moves from Synthesized to Played. Returns the Played record and its `AudioPlayed`.
+    /// `handle` runs, through [`SynthesisHandle::acknowledge_playback`] with the
+    /// [`PlaybackReceipt`] it makes by consuming the frames of the segment it was given, none for
+    /// a segment synthesized without frames: the synthesis's record moves from Synthesized to
+    /// Played. Frames of the segment the synthesis already counts as played, from a receipt it
+    /// refused earlier, count as given. Returns a snapshot of the Played record and its
+    /// `AudioPlayed`.
     ///
     /// # Errors
     ///
     /// [`SinkRefused::SegmentNotHeld`] when the synthesis holds no such segment;
     /// [`SinkRefused::SegmentStateConflict`] carrying its state when it is not Synthesized, a
-    /// Queued or Played one among them; [`SinkRefused::NothingGiven`] when the sink has no audio
-    /// of it; and [`SinkRefused::FramesOutstanding`] when it has not been given every frame the
-    /// synthesis emitted of it. Nothing moves.
+    /// Queued or Played one among them; [`SinkRefused::NothingGiven`] when neither the sink nor
+    /// the synthesis's count has a frame of a segment the synthesis emitted frames of; and
+    /// [`SinkRefused::FramesOutstanding`] when the two together are not exactly the frames the
+    /// synthesis emitted of it. On each of these the sink refuses before it makes a receipt:
+    /// nothing moves and the sink keeps its frames. When the handle refuses the receipt the sink
+    /// made, the sink no longer holds those frames, since a receipt consumes them and is not
+    /// handed back; the synthesis counts them as played, so they are not lost, and the next
+    /// acknowledgement confirms them.
     pub fn acknowledge<H: SynthesisHandle>(
         &mut self,
         handle: &mut H,
         segment_id: SegmentId,
-    ) -> Result<(OutputSegment, AudioPlayed), SinkRefused> {
+    ) -> Result<(SegmentSnapshot, AudioPlayed), SinkRefused> {
         let current = handle
             .output()
             .segment(segment_id)
@@ -319,27 +435,38 @@ impl MockSink {
                 current,
             }));
         }
-        let given = self.frames_given(segment_id);
-        if given == 0 {
-            return Err(SinkRefused::NothingGiven { segment_id });
-        }
+        let counted = handle
+            .output()
+            .frames_played(segment_id)
+            .unwrap_or_default();
+        let given = self.frames_given(segment_id) + counted;
         let emitted = handle
             .output()
             .frames_emitted(segment_id)
             .unwrap_or_default();
-        if given < emitted {
+        if given == 0 && emitted > 0 {
+            return Err(SinkRefused::NothingGiven { segment_id });
+        }
+        if given != emitted {
             return Err(SinkRefused::FramesOutstanding {
                 segment_id,
                 given,
                 emitted,
             });
         }
-        let event = handle.acknowledge_playback(segment_id)?;
+        let (played, kept): (Vec<SegmentAudio>, Vec<SegmentAudio>) = self
+            .given
+            .drain(..)
+            .partition(|audio| audio.segment_id() == segment_id);
+        self.given = kept;
+        let receipt = PlaybackReceipt::from_frames(played)
+            .expect("the sink was given frames of the segment, and only of it");
+        let event = handle.acknowledge_playback(segment_id, receipt)?;
         let played = handle
             .output()
             .segment(segment_id)
             .expect("an acknowledged segment is held")
-            .clone();
+            .snapshot();
         Ok((played, event))
     }
 }

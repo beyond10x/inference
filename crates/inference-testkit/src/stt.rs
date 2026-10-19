@@ -8,18 +8,52 @@
 //! and does not consult its own claims, so how it behaves follows from what its configuration
 //! claims:
 //!
-//! * claiming `incremental_input` and `output_streaming`, it takes each frame as it is offered
-//!   and runs every cue whose frame count is reached, so hypotheses reach the caller before the
-//!   end of input;
+//! * claiming `incremental_input` and `output_streaming`, it takes the frames offered so far at
+//!   its next step that has nothing left to deliver: an iteration of the handle hands out the
+//!   events already produced first, and only once none is left does it take input and run every
+//!   cue whose frame count is reached, so hypotheses reach the caller before the end of input;
 //! * claiming neither, it takes no frame and emits nothing before the end of input, then takes
 //!   them all and runs the whole script.
 //!
 //! At the end of input every cue left runs, whatever its frame count. [`frames`] is a fixture of
 //! silent frames and [`script`] a script fitting six of them; [`stream_envelope`] carries an
 //! event of the mock into the [`EventLog`](crate::stream::EventLog) of the stream domain.
+//!
+//! It declares a maximum concurrency of one and holds to it: while one recognition of a
+//! recogniser, or of a clone of it, runs, a second start is refused with
+//! [`ConcurrencyLimitReached`]. A recognition runs until its handle is dropped.
+//!
+//! An offered frame waits for the next step with nothing left to deliver:
+//!
+//! ```
+//! # use inference_stt::{Recogniser, RecognitionHandle, RecognitionRequest};
+//! # use inference_stt::inference_core::id::{NodeId, RunId, StreamId};
+//! # use inference_stt::inference_core::model::ModelId;
+//! # use inference_stt::inference_text::TurnId;
+//! # use inference_testkit::stt::{MockConfiguration, MockRecogniser, frames, script};
+//! let mut recogniser =
+//!     MockRecogniser::new(MockConfiguration::Incremental, ModelId::generate(), script());
+//! let mut handle = recogniser
+//!     .start(RecognitionRequest::new(
+//!         RunId::generate(),
+//!         TurnId::generate(),
+//!         StreamId::generate(),
+//!         NodeId::generate(),
+//!         "text_out",
+//!     ))
+//!     .unwrap();
+//! let frame = frames(1).remove(0);
+//! handle.offer_frame(frame).unwrap();
+//! assert_eq!(handle.output().frames_taken(), 0, "offering takes nothing");
+//! let hypothesis = handle.next();
+//! assert_eq!(handle.output().frames_taken(), 1, "the next step takes it");
+//! assert!(hypothesis.is_some());
+//! ```
 
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroU32};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use inference_stt::inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 use inference_stt::inference_core::envelope::EventEnvelope;
@@ -28,8 +62,8 @@ use inference_stt::inference_core::model::{
 };
 use inference_stt::inference_text::{ReviseSpan, SpanId};
 use inference_stt::{
-    CONTRACT_REVISION, InputEnded, Recogniser, RecognitionHandle, RecognitionRequest,
-    RevisionRefused, TranscriptEvent, TranscriptOutput,
+    CONTRACT_REVISION, CommitRefused, ConcurrencyLimitReached, InputEnded, Recogniser,
+    RecognitionHandle, RecognitionRequest, RevisionRefused, TranscriptEvent, TranscriptOutput,
 };
 
 use crate::stream::StreamEvent;
@@ -177,12 +211,57 @@ impl From<TranscriptEvent> for StreamEvent {
     }
 }
 
+/// The recognitions of one recogniser that run, shared by its clones, which are the same adapter.
+#[derive(Debug, Clone, Default)]
+struct Running(Arc<AtomicUsize>);
+
+impl PartialEq for Running {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Running {}
+
+impl Running {
+    /// Counts one more running recognition, if fewer than `max_concurrency` run.
+    fn admit(&self, max_concurrency: i64) -> Result<Slot, ConcurrencyLimitReached> {
+        let limit = usize::try_from(max_concurrency).unwrap_or(usize::MAX);
+        let slot = Slot(Arc::clone(&self.0));
+        if self.0.fetch_add(1, Ordering::AcqRel) < limit {
+            Ok(slot)
+        } else {
+            drop(slot);
+            Err(ConcurrencyLimitReached { max_concurrency })
+        }
+    }
+}
+
+/// The place of one running recognition among [`Running`], given back when it is dropped.
+#[derive(Debug)]
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl PartialEq for Slot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Slot {}
+
 /// The scripted mock recogniser: an in-process adapter of one model with a maximum concurrency of
-/// one, replaying the same script for every request.
+/// one, which it holds to, replaying the same script for every request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockRecogniser {
     adapter: Adapter,
     script: Vec<Cue>,
+    running: Running,
 }
 
 impl MockRecogniser {
@@ -199,7 +278,11 @@ impl MockRecogniser {
             max_concurrency: 1,
         })
         .expect("a maximum concurrency of one is positive");
-        Self { adapter, script }
+        Self {
+            adapter,
+            script,
+            running: Running::default(),
+        }
     }
 }
 
@@ -210,23 +293,29 @@ impl Recogniser for MockRecogniser {
         &self.adapter
     }
 
-    fn start(&mut self, request: RecognitionRequest) -> MockRecognition {
-        MockRecognition {
+    fn start(
+        &mut self,
+        request: RecognitionRequest,
+    ) -> Result<MockRecognition, ConcurrencyLimitReached> {
+        let slot = self.running.admit(self.adapter.max_concurrency())?;
+        Ok(MockRecognition {
             output: TranscriptOutput::start(&self.adapter, request),
             pending: self.script.iter().cloned().collect(),
             emitted: Vec::new(),
             delivered: VecDeque::new(),
-        }
+            _slot: slot,
+        })
     }
 }
 
-/// One recognition of a [`MockRecogniser`].
+/// One recognition of a [`MockRecogniser`]; it runs until it is dropped.
 #[derive(Debug, PartialEq, Eq)]
 pub struct MockRecognition {
     output: TranscriptOutput,
     pending: VecDeque<Cue>,
     emitted: Vec<SpanId>,
     delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
+    _slot: Slot,
 }
 
 impl Iterator for MockRecognition {
@@ -242,7 +331,8 @@ impl Iterator for MockRecognition {
 
 impl MockRecognition {
     /// Takes the input the contract gives up and runs every cue that is due, stopping at the
-    /// first the contract refuses until more input is taken or input ends.
+    /// first the contract refuses until more input is taken or input ends. Once the stream has
+    /// issued its last sequence, no cue runs again.
     ///
     /// # Panics
     ///
@@ -263,17 +353,19 @@ impl MockRecognition {
                     }
                     Err(_) => return,
                 },
-                ScriptStep::Revise { span, text } => self
-                    .output
-                    .revise(ReviseSpan {
-                        span_id: self.script_span(*span),
-                        text: text.clone(),
-                    })
-                    .expect("the script revises a Hypothesis it emitted"),
-                ScriptStep::Commit { span } => self
-                    .output
-                    .commit(self.script_span(*span))
-                    .expect("the script commits a Hypothesis it emitted"),
+                ScriptStep::Revise { span, text } => match self.output.revise(ReviseSpan {
+                    span_id: self.script_span(*span),
+                    text: text.clone(),
+                }) {
+                    Ok(envelope) => envelope,
+                    Err(RevisionRefused::SequenceExhausted(_)) => return,
+                    Err(error) => panic!("the script revises a Hypothesis it emitted: {error}"),
+                },
+                ScriptStep::Commit { span } => match self.output.commit(self.script_span(*span)) {
+                    Ok(envelope) => envelope,
+                    Err(CommitRefused::SequenceExhausted(_)) => return,
+                    Err(error) => panic!("the script commits a Hypothesis it emitted: {error}"),
+                },
             };
             self.pending.pop_front();
             self.delivered.push_back(envelope);

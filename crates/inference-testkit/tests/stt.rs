@@ -14,7 +14,8 @@ use inference_core::envelope::{EventEnvelope, Timebase};
 use inference_core::id::{NodeId, RunId, StreamId};
 use inference_core::model::{Capability, ModelId};
 use inference_stt::{
-    Recogniser, RecognitionHandle, RecognitionRequest, RevisionRefused, TranscriptEvent,
+    ConcurrencyLimitReached, Recogniser, RecognitionHandle, RecognitionRequest, RevisionRefused,
+    TranscriptEvent,
 };
 use inference_testkit::stream::EventLog;
 use inference_testkit::stt::{
@@ -51,7 +52,9 @@ struct Recognition {
 /// Offers the fixture frames one at a time, draining what is delivered after each, then ends
 /// input and drains the rest.
 fn recognise(configuration: MockConfiguration) -> Recognition {
-    let mut handle = recogniser(configuration).start(request());
+    let mut handle = recogniser(configuration)
+        .start(request())
+        .expect("a fresh recogniser runs nothing else");
     let mut before_end = Vec::new();
     for frame in frames(FRAMES) {
         handle.offer_frame(frame).expect("input has not ended");
@@ -218,5 +221,115 @@ fn every_event_of_a_recognition_is_enveloped_in_sequence_on_audio_frame_time() {
                 .iter()
                 .all(|span| span.state() == SpanState::Committed)
         );
+    }
+}
+
+/// The most recognitions one recogniser was observed to run at once, starting them while every
+/// earlier one still runs, up to `bound`.
+fn observed_concurrency(recogniser: &mut MockRecogniser, bound: usize) -> usize {
+    let mut running = Vec::new();
+    while running.len() < bound {
+        match recogniser.start(request()) {
+            Ok(handle) => running.push(handle),
+            Err(_) => break,
+        }
+    }
+    running.len()
+}
+
+#[test]
+fn a_second_concurrent_recognition_is_refused_with_the_concurrency_limit() {
+    for configuration in MockConfiguration::ALL {
+        let mut recogniser = recogniser(configuration);
+        let first = recogniser
+            .start(request())
+            .expect("a fresh recogniser runs nothing else");
+        assert_eq!(
+            recogniser.start(request()).map(|_| ()),
+            Err(ConcurrencyLimitReached { max_concurrency: 1 }),
+            "{configuration:?}: a second recognition while the first runs is refused"
+        );
+        let mut clone = recogniser.clone();
+        assert_eq!(
+            clone.start(request()).map(|_| ()),
+            Err(ConcurrencyLimitReached { max_concurrency: 1 }),
+            "{configuration:?}: a clone is the same adapter and shares its limit"
+        );
+        drop(first);
+        assert!(
+            recogniser.start(request()).is_ok(),
+            "{configuration:?}: once the first recognition ends, another starts"
+        );
+    }
+}
+
+#[test]
+fn each_configuration_runs_at_most_the_concurrency_it_declares() {
+    for configuration in MockConfiguration::ALL {
+        let mut recogniser = recogniser(configuration);
+        let declared = usize::try_from(recogniser.adapter().max_concurrency())
+            .expect("a declared concurrency is positive");
+        assert_eq!(
+            observed_concurrency(&mut recogniser, declared + 3),
+            declared,
+            "{configuration:?}: the declared maximum concurrency is the observed one"
+        );
+    }
+}
+
+/// Runs the fixture through `handle` to its last event.
+fn run_to_end(handle: &mut MockRecognition) -> Vec<EventEnvelope<TranscriptEvent>> {
+    let mut events = Vec::new();
+    for frame in frames(FRAMES) {
+        handle.offer_frame(frame).expect("input has not ended");
+        events.extend(handle.by_ref());
+    }
+    handle.end_input().expect("input ends once");
+    events.extend(handle.by_ref());
+    events
+}
+
+#[test]
+fn a_stream_is_continued_by_reading_the_next_sequence_and_dropping_the_handle_first() {
+    for configuration in MockConfiguration::ALL {
+        let mut recogniser = recogniser(configuration);
+        let first_request = request();
+        let mut first = recogniser
+            .start(first_request.clone())
+            .expect("a fresh recogniser runs nothing else");
+        let mut log = EventLog::new();
+        for envelope in run_to_end(&mut first) {
+            log.record(stream_envelope(envelope))
+                .unwrap_or_else(|refusal| panic!("{configuration:?}: {refusal}"));
+        }
+
+        let next_sequence = first
+            .output()
+            .next_sequence()
+            .expect("the stream has sequences left");
+        drop(first);
+        let continuing = RecognitionRequest::continuing(
+            first_request.run_id,
+            TurnId::generate(),
+            first_request.stream_id,
+            next_sequence,
+            first_request.node_id,
+            first_request.port.clone(),
+        )
+        .expect("one past the last sequence issued is a sequence");
+        let mut second = recogniser
+            .start(continuing)
+            .expect("the previous handle was dropped, so the recogniser runs nothing else");
+        let events = run_to_end(&mut second);
+        assert_eq!(
+            events.first().map(|envelope| envelope.sequence),
+            Some(next_sequence),
+            "{configuration:?}: the second recognition continues the stream"
+        );
+        for envelope in events {
+            log.record(stream_envelope(envelope))
+                .unwrap_or_else(|refusal| panic!("{configuration:?}: {refusal}"));
+        }
+        assert_eq!(log.envelopes().len(), 12, "{configuration:?}");
     }
 }
