@@ -6,9 +6,10 @@ domain: inference.session
 summary: >-
   A Session is an optional application-level interaction lifetime that may span several graph
   runs and model requests. It is opened over one planned pipeline in that pipeline's interaction
-  mode, becomes ready, and is closed by draining. Transport persistence is not model persistence:
-  the session is stable while the runs below it come and go. History, logical identity and
-  interaction policy, which the design gives the session, are not declared yet.
+  mode, references its current run, zero or one, becomes ready once it has one, and is closed by
+  draining. Transport persistence is not model persistence: the session is stable while the runs
+  below it come and go. History, logical identity and interaction policy, which the design gives
+  the session, are not declared yet.
 
 naming:
   wire: session
@@ -35,6 +36,14 @@ entities:
         type: inference.graph.PipelineId
       - name: mode
         type: inference.graph.InteractionMode
+      # The session holds the link to its current run, absent until a run is attached. A run
+      # carries no session: the envelope's optional session_id stays the only run-side trace, so
+      # a run without a session stays valid. Over its lifetime a session references several runs,
+      # one at a time.
+      # read from: docs/design/inference.md:105
+      # read from: docs/design/inference.md:310
+      - name: run_id
+        type: Optional<inference.graph.RunId>
     # UNMAPPED: the design gives the session history, logical identity and interaction policy
     # (docs/design/inference.md:105) and makes conversation state (committed messages, tool results,
     # memory projections, turn history) distinct from inference and media state
@@ -47,21 +56,47 @@ entities:
         target: inference.graph.Pipeline
         cardinality: one
         via: pipeline_id
-      # UNMAPPED: a session "potentially spans multiple graph runs" (docs/design/inference.md:105)
-      # and the event envelope's session_id is optional (docs/design/inference.md:310), so a run
-      # may exist with no session. Whether a session owns its runs or only references them, and
-      # from which side the link is held, the design does not say. Open question for the owner;
-      # the session-facade epic settles it before its first story.
+      # Zero or one: the Optional field carries the zero, the cardinality the one.
+      # read from: docs/design/inference.md:105
+      # read from: docs/design/inference.md:310
+      - name: run
+        kind: references
+        target: inference.graph.Run
+        cardinality: one
+        via: run_id
       # UNMAPPED: the session holds one pipeline for its lifetime. The design wants a session to
       # switch among supported topologies without changing its event vocabulary
-      # (docs/design/inference.md:1148, docs/design/inference.md:1162); a switch needs the
-      # session-to-run link above settled first (does a switch drain the current run?). Stated
-      # deviation until the session-facade epic declares it.
+      # (docs/design/inference.md:1148, docs/design/inference.md:1162). Whether a switch drains the
+      # current run, and whether a session may replace a current run that is not terminal, is the
+      # topology-switch question; AttachRun below replaces the current run whatever its state.
+      # Stated deviation until the session-facade epic declares it.
+      # UNMAPPED: a run is current in at most one session, as an envelope carries one optional
+      # session_id (docs/design/inference.md:310); decided, not declared. An AttachRun refusal
+      # selecting the other sessions whose run_id is the input's validates, and synthesis then
+      # finds no arrangement deciding that row set (ESS-SYNTH-001) for the refusal, for attached,
+      # for the attach transition and for every scenario arranged through an attach, eight
+      # refusals in all. The synthesized attach transition attaches one run identity to two
+      # sessions, so an external refusal the store decides would fail it. The testkit store does
+      # not enforce the rule.
     lifecycle:
       initial: Opened
       states: [Opened, Ready, Draining, Closed]
       terminal: [Closed]
       transitions:
+        # Attaching a run leaves or brings the session Opened: readiness is asserted for the
+        # current run, so a Ready session that takes another run is ready again only once
+        # MarkSessionReady says so. A move rather than an update because ess 0.60.0 answers
+        # wrong_state only on a command that moves (ESS-COMMAND-012), and a held-state refusal
+        # beside an update leaves the unknown session unwitnessed (ESS-SYNTH-008).
+        # UNMAPPED: attaching the run the session already holds should change nothing, so that a
+        # retried attach keeps a Ready session Ready; here it moves the session to Opened and
+        # emits RunAttached again. An AttachRun branch selected by
+        # when_subject: {predicate: run_id == input.run_id} that preserves the session validates,
+        # and synthesis finds no session holding the input's run to witness it (ESS-SYNTH-003).
+        # read from: docs/design/inference.md:339
+        - name: attach
+          from: [Opened, Ready]
+          to: Opened
         - name: ready
           from: [Opened]
           to: Ready
@@ -96,6 +131,24 @@ errors:
     fields:
       - name: current
         type: inference.session.Session.State
+
+  # A session runs the pipeline it was opened over: a run of another pipeline is not its run.
+  # read from: docs/design/inference.md:713
+  # read from: docs/design/inference.md:105
+  - name: inference.session.PipelineMismatch
+    summary: The run executes another pipeline than the session's; nothing was attached.
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+      - name: run_id
+        type: inference.graph.RunId
+
+  # read from: docs/design/inference.md:339
+  - name: inference.session.NoCurrentRun
+    summary: The session references no run, so it does not become ready; nothing moved.
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
 
 commands:
   # A session selects a pipeline that can run: a pipeline is a declaration and becomes runnable
@@ -144,23 +197,104 @@ commands:
         sets:
           pipeline_id: input.pipeline_id
           mode: input.mode
+          run_id: {cleared: true}
         emits:
           - inference.session.SessionOpened
         payload:
           inference.session.SessionOpened:
             session_id: {generated: true}
             pipeline_id: input.pipeline_id
-        summary: The session exists over its pipeline and mode.
+        summary: The session exists over its pipeline and mode, with no current run.
 
-  # UNMAPPED: the design names SessionReady (docs/design/inference.md:339) and no condition for it:
-  # whether a session is ready when its first run is Active, when its adapters are warm, or when
-  # the application says so is not settled. Open question for the owner.
+  # Attaching a run makes it the session's current run. A session that drains or is closed admits
+  # no new run, and a run of another pipeline than the session's is refused.
+  # The pipeline comparison reads two rows, the run's pipeline_id and the session's. ess 0.60.0
+  # reads no subject field in a when_related predicate (ESS-COMMAND-003), and a row-set selector
+  # comparing a run's pipeline_id with the subject's is refused by synthesis as reading a subject
+  # field the steps leave undetermined (ESS-SYNTH-001). So the refusal is external: the store
+  # decides it from the run it holds, as inference.graph.PlanPipeline's locality-denied is decided.
+  # UNMAPPED: a run identity no run carries is not refused. A when_related guard on the run is
+  # refused beside unknown_instance and beside a wrong_state with no related predicate refusal
+  # (ESS-COMMAND-004); with a related predicate refusal beside it, synthesis arranges the session
+  # and the run over two different pipelines and finds no arrangement of a session holding a run
+  # (ESS-SYNTH-003, ESS-SYNTH-004), and an external refusal of an unknown run is taken by the
+  # store on the identity synthesis sends for the accepting branch, which no run carries. Settled
+  # when ess arranges a related row over the subject's pipeline.
+  # read from: docs/design/inference.md:105
+  # read from: docs/design/inference.md:310
+  # read from: docs/design/inference.md:713
+  # read from: docs/design/inference.md:719
+  - name: inference.session.AttachRun
+    input:
+      - name: session_id
+        type: inference.session.SessionId
+      - name: run_id
+        type: inference.graph.RunId
+    outcomes:
+      - name: no-such-session
+        unknown_instance: true
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was attached.
+      - name: pipeline-mismatch
+        external: the run executes another pipeline than the session's
+        error: inference.session.PipelineMismatch
+        payload:
+          inference.session.PipelineMismatch:
+            session_id: input.session_id
+            run_id: input.run_id
+        summary: The run executes another pipeline; nothing was attached.
+      - name: attached
+        moves: inference.session.Session.attach
+        instance: session_id
+        sets:
+          run_id: input.run_id
+        emits:
+          - inference.session.RunAttached
+        payload:
+          inference.session.RunAttached:
+            session_id: input.session_id
+            run_id: input.run_id
+        summary: The run is the session's current run, and the session is Opened until it is marked ready.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.session.SessionStateConflict
+        payload:
+          inference.session.SessionStateConflict:
+            current: {subject: state}
+        summary: The session drains or is closed and admits no new run; nothing was attached.
+
+  # A session becomes ready only with a current run. Whether that run is Active is the host's to
+  # assert, as ess reads a related row's fields and the session holds the run's identity only, so
+  # readiness stays an explicit command.
+  # UNMAPPED: the design names SessionReady (docs/design/inference.md:339) and no condition for it
+  # beyond the current run required here: whether a session is ready when its run is Active, when
+  # its adapters are warm, or when the application says so is not settled. Open question for the
+  # owner.
   # read from: docs/design/inference.md:339
   - name: inference.session.MarkSessionReady
     input:
       - name: session_id
         type: inference.session.SessionId
     outcomes:
+      - name: no-such-session
+        unknown_instance: true
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing moved.
+      - name: no-current-run
+        when_subject:
+          predicate:
+            all: [state == Opened, not defined(run_id)]
+        error: inference.session.NoCurrentRun
+        payload:
+          inference.session.NoCurrentRun:
+            session_id: input.session_id
+        summary: The session references no run; it stays Opened.
       - name: ready
         moves: inference.session.Session.ready
         instance: session_id
@@ -176,13 +310,6 @@ commands:
         payload:
           inference.session.SessionStateConflict:
             current: {subject: state}
-      - name: no-such-session
-        unknown_instance: true
-        error: inference.session.SessionNotFound
-        payload:
-          inference.session.SessionNotFound:
-            session_id: input.session_id
-        summary: No session carries this identity; nothing moved.
 
   # close drains or cancels processing and releases resources; closing starts the drain.
   # UNMAPPED: the cancel branch of close (docs/design/inference.md:719, "drain or cancel") is not
@@ -256,6 +383,14 @@ events:
       - name: pipeline_id
         type: inference.graph.PipelineId
 
+  # read from: docs/design/inference.md:105
+  - name: inference.session.RunAttached
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+      - name: run_id
+        type: inference.graph.RunId
+
   - name: inference.session.SessionReady
     fields:
       - name: session_id
@@ -282,5 +417,7 @@ views:
         type: inference.graph.PipelineId
       - name: mode
         type: inference.graph.InteractionMode
+      - name: run_id
+        type: Optional<inference.graph.RunId>
       - name: state
         type: inference.session.Session.State
