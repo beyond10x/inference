@@ -39,7 +39,7 @@ use std::error::Error;
 use std::fmt;
 use std::future;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context, Poll, Waker};
 
 use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
@@ -325,6 +325,16 @@ impl<P> EdgeQueue<P> {
         self.shared.overload
     }
 
+    /// A weak reference to the queue, which keeps nothing alive: it shows whether the queue was
+    /// dropped, once every side of it is gone.
+    #[must_use]
+    pub fn watch(&self) -> QueueWatch<P> {
+        QueueWatch {
+            edge_id: self.shared.edge_id,
+            shared: Arc::downgrade(&self.shared),
+        }
+    }
+
     /// The sender side, for the producing node, and the receiver side, for the consuming node.
     #[must_use]
     pub fn split(self) -> (QueueSender<P>, QueueReceiver<P>) {
@@ -336,6 +346,46 @@ impl<P> EdgeQueue<P> {
                 shared: self.shared,
             },
         )
+    }
+}
+
+/// A weak reference to an [`EdgeQueue`]: it keeps neither side alive and tells whether the queue
+/// was dropped, which it is once its senders and its receiver are gone (§23.3 test 7 of
+/// `docs/design/inference.md`: graph runs release their resources).
+pub struct QueueWatch<P> {
+    edge_id: EdgeId,
+    shared: Weak<Shared<P>>,
+}
+
+impl<P> QueueWatch<P> {
+    /// The edge the queue was built for.
+    #[must_use]
+    pub const fn edge_id(&self) -> EdgeId {
+        self.edge_id
+    }
+
+    /// Whether the queue was dropped: no sender and no receiver of it is left.
+    #[must_use]
+    pub fn is_dropped(&self) -> bool {
+        self.shared.strong_count() == 0
+    }
+}
+
+impl<P> Clone for QueueWatch<P> {
+    fn clone(&self) -> Self {
+        Self {
+            edge_id: self.edge_id,
+            shared: Weak::clone(&self.shared),
+        }
+    }
+}
+
+impl<P> fmt::Debug for QueueWatch<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueueWatch")
+            .field("edge_id", &self.edge_id)
+            .field("dropped", &self.is_dropped())
+            .finish()
     }
 }
 
