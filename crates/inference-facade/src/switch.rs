@@ -6,7 +6,9 @@
 //! that input sent meanwhile is refused by the Ready guard of `SendInput`; then it drains the run
 //! below rather than cancelling it: it sends `stop` into every ingress of the old run, receives
 //! what the old run's egresses still hold, delivered later in order among the session's own
-//! events, and waits until the old run has ended. Only once it Completed does the session create,
+//! events, and waits until the old run has ended; how it ended, `RunCompleted` or another, is
+//! delivered after what its egresses held. A user turn the application did not commit ends with
+//! the old run, unrecorded. Only once the old run Completed does the session create,
 //! attach (`RunAttached` announces the new run) and activate the new pipeline's run and mark
 //! itself ready, as [`crate::live::LiveSessions::open`] does. The session, its history and its
 //! one [`SessionEvent`] vocabulary carry over; the new run's model is not given the history.
@@ -98,6 +100,7 @@ impl<P: SessionPayload> LiveSession<P> {
                 },
             )
             .map_err(SwitchError::Refused)?;
+        self.end_turn(false);
         self.shared.leave();
         self.shared.record(SessionEvent::PipelineSwitched(switched));
         for ingress in &self.ingresses {
@@ -124,7 +127,6 @@ impl<P: SessionPayload> LiveSession<P> {
         self.requests = controller.requests();
         self.queues = controller.queues();
         self.exposure_queues = controller.exposure_queues();
-        lock(&self.turn).clear();
         Ok(SessionDriver::new(
             controller,
             std::sync::Arc::clone(&self.shared),
