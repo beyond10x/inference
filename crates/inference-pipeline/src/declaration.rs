@@ -1,5 +1,5 @@
-//! [`Declaration`]: the declared pipelines, nodes, ports, edges and bindings, and the five
-//! declaration commands of `ess/domains/graph.yaml` over them.
+//! [`Declaration`]: the declared pipelines, nodes, ports, edges and bindings, the five
+//! declaration commands of `ess/domains/graph.yaml` over them, and `ValidatePipeline`.
 
 use std::error::Error;
 use std::fmt;
@@ -12,10 +12,11 @@ use inference_core::policy::{DeploymentProfile, ProfileId, ProfileNotFound};
 
 use crate::{
     AdapterNotFound, AddNode, AddPort, BindNode, Binding, BindingId, ConnectPorts, DeclarePipeline,
-    Edge, EdgeDefect, EdgeId, IncompatibleEdge, Node, NodeAdded, NodeBound, NodeId, NodeNotFound,
-    OverloadPolicy, Pipeline, PipelineDeclared, PipelineId, PipelineNotFound, PipelineNotReady,
-    PipelineState, Port, PortAdded, PortDirection, PortId, PortNotFound, PortsConnected,
-    UnboundedEdge,
+    Edge, EdgeDefect, EdgeId, GraphFinding, IncompatibleEdge, IncompatibleGraph, Node, NodeAdded,
+    NodeBound, NodeId, NodeNotFound, OverloadPolicy, Pipeline, PipelineDeclared, PipelineId,
+    PipelineNotFound, PipelineNotReady, PipelineState, PipelineStateConflict, PipelineValidated,
+    Port, PortAdded, PortDirection, PortId, PortNotFound, PortsConnected, UnboundedEdge,
+    ValidatePipeline,
 };
 
 /// What a declaration references and does not hold: the declared deployment profiles of
@@ -125,6 +126,38 @@ impl Error for BindNodeError {
             Self::UnknownNode(error) => Some(error),
             Self::UnknownAdapter(error) => Some(error),
             Self::NotDeclared(error) => Some(error),
+        }
+    }
+}
+
+/// Why `inference.graph.ValidatePipeline` moved nothing. The refusals are decided in this order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidatePipelineError {
+    /// No pipeline carries the identity, so none is in the state the command acts from; the
+    /// `wrong-state` outcome, with no state to report.
+    UnknownPipeline(PipelineNotFound),
+    /// The `wrong-state` outcome: the pipeline is not Declared.
+    WrongState(PipelineStateConflict),
+    /// The `rejected` outcome: a check failed, and the pipeline stays Declared.
+    Rejected(IncompatibleGraph),
+}
+
+impl fmt::Display for ValidatePipelineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownPipeline(error) => fmt::Display::fmt(error, f),
+            Self::WrongState(error) => fmt::Display::fmt(error, f),
+            Self::Rejected(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for ValidatePipelineError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::UnknownPipeline(error) => Some(error),
+            Self::WrongState(error) => Some(error),
+            Self::Rejected(error) => Some(error),
         }
     }
 }
@@ -296,6 +329,54 @@ impl Declaration {
         }
         Self::declared(pipeline).map_err(BindNodeError::NotDeclared)?;
         Ok(self.insert_binding(input.pipeline_id, input.node_id, input.adapter_id))
+    }
+
+    /// Runs `inference.graph.ValidatePipeline`: checks 1, 2, 3, 5, 6 and 9 of §10.2 over the
+    /// pipeline's declaration ([`Declaration::findings`]), and the pipeline moves from Declared to
+    /// Validated only when none finds anything.
+    ///
+    /// # Errors
+    ///
+    /// In this order: [`ValidatePipelineError::UnknownPipeline`];
+    /// [`ValidatePipelineError::WrongState`] for a pipeline that is not Declared;
+    /// [`ValidatePipelineError::Rejected`] carrying every finding.
+    pub fn validate_pipeline(
+        &mut self,
+        input: ValidatePipeline,
+    ) -> Result<PipelineValidated, ValidatePipelineError> {
+        let pipeline_id = input.pipeline_id;
+        let pipeline = self
+            .pipeline(pipeline_id)
+            .ok_or(ValidatePipelineError::UnknownPipeline(PipelineNotFound {
+                pipeline_id,
+            }))?;
+        if pipeline.state != PipelineState::Declared {
+            return Err(ValidatePipelineError::WrongState(PipelineStateConflict {
+                current: pipeline.state,
+            }));
+        }
+        let findings = self.findings(pipeline_id);
+        if !findings.is_empty() {
+            return Err(ValidatePipelineError::Rejected(IncompatibleGraph {
+                findings,
+            }));
+        }
+        if let Some(pipeline) = self
+            .pipelines
+            .iter_mut()
+            .find(|pipeline| pipeline.pipeline_id == pipeline_id)
+        {
+            pipeline.state = PipelineState::Validated;
+        }
+        Ok(PipelineValidated { pipeline_id })
+    }
+
+    /// What checks 1, 2, 3 and 9, 5 and 6 find over the declaration of the pipeline carrying
+    /// `pipeline_id`, in that order and each in declaration order; empty when every check passes
+    /// or no pipeline carries it. A finding on an edge names the edge's source port and its node.
+    #[must_use]
+    pub fn findings(&self, pipeline_id: PipelineId) -> Vec<GraphFinding> {
+        crate::validation::findings(self, pipeline_id)
     }
 
     /// The pipeline carrying `pipeline_id`, if one was declared.
