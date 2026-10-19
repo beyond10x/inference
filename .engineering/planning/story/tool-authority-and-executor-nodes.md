@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:tool-authority-and-executor-nodes
 kind: story
-status: active
+status: implemented
 title: Authorize and execute a read-only call through the mock executor node
 summary: A tool authority node (schema validation, default policy, confirmation hook) and a tool executor node generic over the inference-tools executor contract, with the mock executor in inference-testkit.
 relations:
@@ -33,10 +33,11 @@ scope:
   path: crates/inference-testkit/src/lib.rs
 - confidence: cited
   path: crates/inference-testkit/src/mock_tool_executor.rs
-revision: 20
+revision: 21
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T17:35:22Z", actor: "human:timo", revision: 19, decided_on: {"recorded":{"review_outcome":1}}}
 - {from: "proposed", to: "active", at: "2026-10-19T17:35:22Z", actor: "human:timo", revision: 20, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "active", to: "implemented", at: "2026-10-19T18:14:35Z", actor: "human:timo", revision: 21, decided_on: {"recorded":{"test_result":1,"review_outcome":9,"verification":1}}}
 ---
 ## Context
 

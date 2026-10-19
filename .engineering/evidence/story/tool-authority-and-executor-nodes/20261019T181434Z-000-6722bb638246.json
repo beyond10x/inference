@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T18:14:34Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-authority-and-executor-nodes",
+  "kind": "story",
+  "revision": 20,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-pipeline -p inference-runtime -p inference-testkit --all-features (VERIFIED, new behaviour: baseline ddee2e7 has no tool nodes; with stub nodes the 6 tool_nodes cases fail 6 of 6, and passing confirmation_required false fails the confirmation case; treatment passes 798 across the three crates including the adversary's nine guards, tool_nodes and adversary1_tool_nodes 0 failures in 50 repeats each, conform 50 passed)"
+  }
+}

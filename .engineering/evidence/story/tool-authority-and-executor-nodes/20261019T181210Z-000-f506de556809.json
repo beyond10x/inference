@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T18:12:10Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-authority-and-executor-nodes",
+  "kind": "story",
+  "revision": 20,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-tool-authority-and-executor-nodes-pass-1",
+    "reference": "F7 testkit lib.rs doc edit was the coordinator applying the unit's scratch patch",
+    "review": "review-result:adversary-tool-authority-and-executor-nodes-pass-1",
+    "outcome": "no-op"
+  }
+}
