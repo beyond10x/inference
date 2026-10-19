@@ -19,6 +19,8 @@ mod output;
 mod session;
 
 pub use client::NovaSonic;
+#[cfg(feature = "duplex")]
+pub(crate) use client::SERVICE_ERROR;
 pub use config::{AudioRate, Endpointing, InferenceConfiguration, SessionConfig, ToolSpec};
 pub use error::{NovaSonicError, ServiceError, ServiceErrorKind, redact};
 pub use input::{InputContent, InputEvent};

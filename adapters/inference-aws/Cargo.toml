@@ -8,12 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-live = []
+duplex = ["dep:inference-duplex", "tokio/rt-multi-thread"]
+live = ["duplex"]
 
 [dependencies]
 aws-config = { version = "1.12", features = ["behavior-version-latest"] }
 aws-sdk-bedrockruntime = { version = "1.148", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 base64.workspace = true
+inference-duplex = { path = "../../crates/inference-duplex", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

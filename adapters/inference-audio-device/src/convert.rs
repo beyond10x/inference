@@ -55,7 +55,8 @@ pub(crate) fn to_pcm16(sample: f32) -> i16 {
 }
 
 /// The bytes of `samples`, mono at full scale 1, in `encoding`: `pcm_s16le` clamps to full scale
-/// and rounds to the nearest step, `pcm_f32le` keeps the value.
+/// and rounds to the nearest step, `pcm_f32le` keeps the value, `pcm_mulaw` and `pcm_alaw`
+/// compand the `pcm_s16le` step as G.711 does.
 #[must_use]
 pub fn encode(samples: &[f32], encoding: AudioEncoding) -> Vec<u8> {
     match encoding {
@@ -67,7 +68,74 @@ pub fn encode(samples: &[f32], encoding: AudioEncoding) -> Vec<u8> {
             .iter()
             .flat_map(|sample| sample.to_le_bytes())
             .collect(),
+        AudioEncoding::PcmMulaw => samples
+            .iter()
+            .map(|&sample| mulaw_of(to_pcm16(sample)))
+            .collect(),
+        AudioEncoding::PcmAlaw => samples
+            .iter()
+            .map(|&sample| alaw_of(to_pcm16(sample)))
+            .collect(),
     }
+}
+
+/// The G.711 mu-law byte of `sample`: bias 0x84, clip 32_635, the bits inverted.
+fn mulaw_of(sample: i16) -> u8 {
+    let magnitude = i32::from(sample).abs().min(32_635) + 0x84;
+    let exponent = (0..8)
+        .rev()
+        .find(|exponent| magnitude & (0x80 << exponent) != 0)
+        .unwrap_or(0);
+    let mantissa = (magnitude >> (exponent + 3)) & 0x0F;
+    let sign = if sample < 0 { 0x80 } else { 0 };
+    !u8::try_from(sign | (exponent << 4) | mantissa).unwrap_or(0x7F)
+}
+
+/// The G.711 A-law byte of `sample`: 13 bits, eight segments, the even bits inverted.
+fn alaw_of(sample: i16) -> u8 {
+    const SEGMENT_ENDS: [i32; 8] = [0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF];
+    let pcm = i32::from(sample) >> 3;
+    let (mask, pcm) = if pcm >= 0 {
+        (0xD5, pcm)
+    } else {
+        (0x55, -pcm - 1)
+    };
+    let value = match SEGMENT_ENDS.iter().position(|end| pcm <= *end) {
+        None => 0x7F,
+        Some(segment) => {
+            let segment = i32::try_from(segment).unwrap_or(7);
+            let shift = if segment < 2 { 1 } else { segment };
+            (segment << 4) | ((pcm >> shift) & 0x0F)
+        }
+    };
+    u8::try_from(value ^ mask).unwrap_or(0xD5)
+}
+
+/// The linear sample a G.711 mu-law byte encodes, within `-32_124..=32_124`.
+fn mulaw(byte: u8) -> i16 {
+    let byte = !byte;
+    let exponent = (byte >> 4) & 0x07;
+    let magnitude = ((i32::from(byte & 0x0F) << 3) + 0x84) << exponent;
+    let sample = i16::try_from(magnitude - 0x84).unwrap_or(i16::MAX);
+    if byte & 0x80 == 0 { sample } else { -sample }
+}
+
+/// The linear sample a G.711 A-law byte encodes, within `-32_256..=32_256`.
+fn alaw(byte: u8) -> i16 {
+    let byte = byte ^ 0x55;
+    let segment = (byte >> 4) & 0x07;
+    let step = i32::from(byte & 0x0F) << 4;
+    let magnitude = match segment {
+        0 => step + 8,
+        _ => (step + 0x108) << (segment - 1),
+    };
+    let sample = i16::try_from(magnitude).unwrap_or(i16::MAX);
+    if byte & 0x80 == 0 { -sample } else { sample }
+}
+
+/// A linear 16-bit step at full scale 1.
+fn from_pcm16(step: i16) -> f32 {
+    (f32::from(step) / PCM16_FULL_SCALE).clamp(-1.0, 1.0)
 }
 
 /// A frame whose data is not [`AudioFormat::data_len`](inference_audio::AudioFormat::data_len)
@@ -117,6 +185,16 @@ pub fn decode(frame: &AudioFrame) -> Result<Vec<f32>, MalformedFrame> {
             .0
             .iter()
             .map(|word| f32::from_le_bytes(*word))
+            .collect(),
+        AudioEncoding::PcmMulaw => frame
+            .data
+            .iter()
+            .map(|byte| from_pcm16(mulaw(*byte)))
+            .collect(),
+        AudioEncoding::PcmAlaw => frame
+            .data
+            .iter()
+            .map(|byte| from_pcm16(alaw(*byte)))
             .collect(),
     };
     let channels = usize::from(frame.format.channels.get());
@@ -197,5 +275,28 @@ impl LinearResampler {
     #[must_use]
     pub const fn produced(&self) -> u64 {
         self.produced
+    }
+}
+
+#[cfg(test)]
+mod g711 {
+    use super::{alaw, alaw_of, from_pcm16, mulaw, mulaw_of};
+
+    #[test]
+    fn silence_encodes_as_the_silent_byte_of_each_law() {
+        assert_eq!(mulaw_of(0), 0xFF);
+        assert_eq!(alaw_of(0), 0xD5);
+        assert_eq!(from_pcm16(mulaw(0xFF)), 0.0);
+    }
+
+    #[test]
+    fn every_byte_decodes_and_encodes_back_to_itself() {
+        for byte in 0..=u8::MAX {
+            let decoded = alaw(byte);
+            assert_eq!(alaw_of(decoded), byte, "A-law {byte:#04x}");
+            let decoded = mulaw(byte);
+            let back = mulaw_of(decoded);
+            assert_eq!(mulaw(back), decoded, "mu-law {byte:#04x}");
+        }
     }
 }
