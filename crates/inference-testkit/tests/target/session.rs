@@ -1,5 +1,7 @@
-//! `inference.session`: the five session commands, the view and the five events of
-//! `ess/domains/session.yaml`, answered by [`SessionDomain`].
+//! `inference.session`: the eleven session commands, the two views and the ten events of
+//! `ess/domains/session.yaml`, answered by [`SessionDomain`]. The store records the session's own
+//! events only; an event of the session vocabulary from another family is not the store's to
+//! record, and observing one is an error.
 //!
 //! Each request field is read on its own ([`Input`]); the outcome, the error and the event come
 //! from what the store returned. `OpenSession` reads the pipeline's existence, state and mode, and
@@ -29,12 +31,16 @@ use ess_conformance::target::{
 };
 use ess_primitives::node::Node;
 use inference_core::id::{RunId, SessionId};
+use inference_pipeline::{InteractionMode, PipelineId, PipelineState};
 use inference_testkit::session::{
-    AttachRun, AttachRunError, MarkSessionReadyError, OpenSession, OpenSessionError, SessionDomain,
-    SessionEvent, SessionMoveError, SessionNotFound, SessionStateConflict, SessionsRow,
+    AttachRun, AttachRunError, HistoryEntry, HistoryKind, MarkSessionReadyError, OpenSession,
+    OpenSessionError, RecordHistory, RecordHistoryError, SessionDomain, SessionEvent,
+    SessionMoveError, SessionNotFound, SessionStateConflict, SessionsRow, SwitchPipeline,
+    SwitchPipelineError,
 };
+use inference_tools::ToolCallId;
 
-use super::{Input, Stores, named_node, text_node, unreadable, unsupported};
+use super::{Input, Stores, integer_node, named_node, text_node, unreadable, unsupported};
 
 /// The prefix of every name this module answers.
 pub const DOMAIN: &str = "inference.session";
@@ -44,23 +50,45 @@ const ATTACH_RUN: &str = "inference.session.AttachRun";
 const MARK_SESSION_READY: &str = "inference.session.MarkSessionReady";
 const CLOSE_SESSION: &str = "inference.session.CloseSession";
 const COMPLETE_SESSION_CLOSE: &str = "inference.session.CompleteSessionClose";
+const SEND_INPUT: &str = "inference.session.SendInput";
+const COMMIT_INPUT: &str = "inference.session.CommitInput";
+const RECORD_HISTORY: &str = "inference.session.RecordHistory";
+const INTERRUPT: &str = "inference.session.Interrupt";
+const CANCEL_SESSION: &str = "inference.session.CancelSession";
+const SWITCH_PIPELINE: &str = "inference.session.SwitchPipeline";
 
 /// The outcome of `AttachRun` that `ess/domains/session.yaml` declares external.
 const PIPELINE_MISMATCH_OUTCOME: &str = "pipeline-mismatch";
+
+/// The outcomes of `SwitchPipeline` that `ess/domains/session.yaml` declares external, which
+/// `OpenSession` shares.
+const UNKNOWN_PIPELINE: &str = "unknown-pipeline";
+const NOT_PLANNED: &str = "not-planned";
+const MODE_MISMATCH_OUTCOME: &str = "mode-mismatch";
 
 const SESSION_OPENED: &str = "inference.session.SessionOpened";
 const RUN_ATTACHED: &str = "inference.session.RunAttached";
 const SESSION_READY: &str = "inference.session.SessionReady";
 const SESSION_DRAINING: &str = "inference.session.SessionDraining";
 const SESSION_CLOSED: &str = "inference.session.SessionClosed";
+const INPUT_SENT: &str = "inference.session.InputSent";
+const INPUT_COMMITTED: &str = "inference.session.InputCommitted";
+const HISTORY_RECORDED: &str = "inference.session.HistoryRecorded";
+const SESSION_INTERRUPTED: &str = "inference.session.SessionInterrupted";
+const PIPELINE_SWITCHED: &str = "inference.session.PipelineSwitched";
 
 /// Every event this module observes.
-const EVENTS: [&str; 5] = [
+const EVENTS: [&str; 10] = [
     SESSION_OPENED,
     RUN_ATTACHED,
     SESSION_READY,
     SESSION_DRAINING,
     SESSION_CLOSED,
+    INPUT_SENT,
+    INPUT_COMMITTED,
+    HISTORY_RECORDED,
+    SESSION_INTERRUPTED,
+    PIPELINE_SWITCHED,
 ];
 
 const PIPELINE_NOT_FOUND: &str = "inference.graph.PipelineNotFound";
@@ -72,6 +100,7 @@ const PIPELINE_MISMATCH: &str = "inference.session.PipelineMismatch";
 const NO_CURRENT_RUN: &str = "inference.session.NoCurrentRun";
 
 const SESSIONS: &str = "inference.session.Sessions";
+const HISTORY: &str = "inference.session.History";
 
 /// The session store of one scenario.
 pub type State = SessionDomain;
@@ -100,26 +129,59 @@ pub fn execute_command(
                     &SessionEvent::SessionOpened(event),
                     request,
                 )?,
-                Err(OpenSessionError::UnknownPipeline(error)) => refused(
-                    OPEN_SESSION,
-                    "unknown-pipeline",
-                    DeclaredErrorValue::new(parse::<ErrorRef>(PIPELINE_NOT_FOUND))
-                        .with("pipeline_id", named_node(&error.pipeline_id)?),
-                ),
-                Err(OpenSessionError::NotPlanned(error)) => refused(
-                    OPEN_SESSION,
-                    "not-planned",
-                    DeclaredErrorValue::new(parse::<ErrorRef>(PIPELINE_NOT_READY))
-                        .with("pipeline_id", named_node(&error.pipeline_id)?)
-                        .with("required", named_node(&error.required)?),
-                ),
-                Err(OpenSessionError::ModeMismatch(error)) => refused(
-                    OPEN_SESSION,
-                    "mode-mismatch",
-                    DeclaredErrorValue::new(parse::<ErrorRef>(MODE_MISMATCH))
-                        .with("pipeline_id", named_node(&error.pipeline_id)?)
-                        .with("mode", named_node(&error.mode)?),
-                ),
+                Err(OpenSessionError::UnknownPipeline(error)) => {
+                    unknown_pipeline(OPEN_SESSION, error.pipeline_id)?
+                }
+                Err(OpenSessionError::NotPlanned(error)) => {
+                    not_planned(OPEN_SESSION, error.pipeline_id)?
+                }
+                Err(OpenSessionError::ModeMismatch(error)) => {
+                    mode_mismatch(OPEN_SESSION, error.pipeline_id, error.mode)?
+                }
+            }
+        }
+        SWITCH_PIPELINE => {
+            let mut input = Input::of(request);
+            let switch = SwitchPipeline {
+                session_id: input.named("session_id")?,
+                pipeline_id: input.named("pipeline_id")?,
+                mode: input.named("mode")?,
+            };
+            input.finish()?;
+            let SwitchPipeline {
+                pipeline_id, mode, ..
+            } = switch;
+            match forced {
+                Some(force) if force == outcome(SWITCH_PIPELINE, UNKNOWN_PIPELINE) => {
+                    unknown_pipeline(SWITCH_PIPELINE, pipeline_id)?
+                }
+                Some(force) if force == outcome(SWITCH_PIPELINE, NOT_PLANNED) => {
+                    not_planned(SWITCH_PIPELINE, pipeline_id)?
+                }
+                Some(_) => mode_mismatch(SWITCH_PIPELINE, pipeline_id, mode)?,
+                None => match domain.switch_pipeline(graph, switch) {
+                    Ok(event) => accepted(
+                        SWITCH_PIPELINE,
+                        "switched",
+                        &SessionEvent::PipelineSwitched(event),
+                        request,
+                    )?,
+                    Err(SwitchPipelineError::NoSuchSession(error)) => {
+                        no_such_session(SWITCH_PIPELINE, error)?
+                    }
+                    Err(SwitchPipelineError::UnknownPipeline(error)) => {
+                        unknown_pipeline(SWITCH_PIPELINE, error.pipeline_id)?
+                    }
+                    Err(SwitchPipelineError::NotPlanned(error)) => {
+                        not_planned(SWITCH_PIPELINE, error.pipeline_id)?
+                    }
+                    Err(SwitchPipelineError::ModeMismatch(error)) => {
+                        mode_mismatch(SWITCH_PIPELINE, error.pipeline_id, error.mode)?
+                    }
+                    Err(SwitchPipelineError::WrongState(conflict)) => {
+                        wrong_state(SWITCH_PIPELINE, conflict)
+                    }
+                },
             }
         }
         ATTACH_RUN => {
@@ -186,6 +248,61 @@ pub fn execute_command(
                 .map(SessionEvent::SessionClosed);
             moved(COMPLETE_SESSION_CLOSE, "closed", answer, request)?
         }
+        RECORD_HISTORY => {
+            let mut input = Input::of(request);
+            let record = RecordHistory {
+                session_id: input.named("session_id")?,
+                run_id: input.named("run_id")?,
+                position: input.integer("position")?,
+                kind: history_kind(&mut input)?,
+                text: input.text("text")?,
+                call_id: optional_call(&mut input)?,
+            };
+            input.finish()?;
+            match domain.record_history(record) {
+                Ok(event) => accepted(
+                    RECORD_HISTORY,
+                    "recorded",
+                    &SessionEvent::HistoryRecorded(event),
+                    request,
+                )?,
+                Err(RecordHistoryError::NoSuchSession(error)) => {
+                    no_such_session(RECORD_HISTORY, error)?
+                }
+                Err(RecordHistoryError::Closed(conflict)) => refused(
+                    RECORD_HISTORY,
+                    "closed",
+                    DeclaredErrorValue::new(parse::<ErrorRef>(SESSION_STATE_CONFLICT))
+                        .with("current", text_node(conflict.current.as_str())),
+                ),
+            }
+        }
+        INTERRUPT => {
+            let session_id = session_id(request)?;
+            let answer = domain
+                .interrupt(session_id)
+                .map(SessionEvent::SessionInterrupted);
+            moved(INTERRUPT, "interrupted", answer, request)?
+        }
+        CANCEL_SESSION => {
+            let session_id = session_id(request)?;
+            let answer = domain
+                .cancel_session(session_id)
+                .map(SessionEvent::SessionClosed);
+            moved(CANCEL_SESSION, "cancelled", answer, request)?
+        }
+        SEND_INPUT => {
+            let session_id = session_id(request)?;
+            let answer = domain.send_input(session_id).map(SessionEvent::InputSent);
+            moved(SEND_INPUT, "sent", answer, request)?
+        }
+        COMMIT_INPUT => {
+            let session_id = session_id(request)?;
+            let answer = domain
+                .commit_input(session_id)
+                .map(SessionEvent::InputCommitted);
+            moved(COMMIT_INPUT, "committed", answer, request)?
+        }
         _ => return Err(unsupported(&name)),
     };
     stores.publish();
@@ -208,10 +325,16 @@ pub fn configure_external_outcome(
     request: &ExternalOutcomeControl,
 ) -> Result<(), TargetError> {
     let command = request.force.command.to_string();
-    if command != ATTACH_RUN {
+    if command != ATTACH_RUN && command != SWITCH_PIPELINE {
         return Err(unsupported(&request.force.to_string()));
     }
-    if request.force != outcome(ATTACH_RUN, PIPELINE_MISMATCH_OUTCOME) {
+    let external = [
+        outcome(ATTACH_RUN, PIPELINE_MISMATCH_OUTCOME),
+        outcome(SWITCH_PIPELINE, UNKNOWN_PIPELINE),
+        outcome(SWITCH_PIPELINE, NOT_PLANNED),
+        outcome(SWITCH_PIPELINE, MODE_MISMATCH_OUTCOME),
+    ];
+    if !external.contains(&request.force) {
         return Err(unreadable(
             format!("forcing `{}`", request.force),
             "it is not an outcome `ess/domains/session.yaml` declares external",
@@ -250,6 +373,48 @@ fn no_such_session(
     ))
 }
 
+/// The `unknown-pipeline` outcome of `command`: `PipelineNotFound`.
+fn unknown_pipeline(
+    command: &str,
+    pipeline_id: PipelineId,
+) -> Result<SemanticCommandResult, TargetError> {
+    Ok(refused(
+        command,
+        UNKNOWN_PIPELINE,
+        DeclaredErrorValue::new(parse::<ErrorRef>(PIPELINE_NOT_FOUND))
+            .with("pipeline_id", named_node(&pipeline_id)?),
+    ))
+}
+
+/// The `not-planned` outcome of `command`: `PipelineNotReady`, requiring Planned.
+fn not_planned(
+    command: &str,
+    pipeline_id: PipelineId,
+) -> Result<SemanticCommandResult, TargetError> {
+    Ok(refused(
+        command,
+        NOT_PLANNED,
+        DeclaredErrorValue::new(parse::<ErrorRef>(PIPELINE_NOT_READY))
+            .with("pipeline_id", named_node(&pipeline_id)?)
+            .with("required", named_node(&PipelineState::Planned)?),
+    ))
+}
+
+/// The `mode-mismatch` outcome of `command`: `ModeMismatch`.
+fn mode_mismatch(
+    command: &str,
+    pipeline_id: PipelineId,
+    mode: InteractionMode,
+) -> Result<SemanticCommandResult, TargetError> {
+    Ok(refused(
+        command,
+        MODE_MISMATCH_OUTCOME,
+        DeclaredErrorValue::new(parse::<ErrorRef>(MODE_MISMATCH))
+            .with("pipeline_id", named_node(&pipeline_id)?)
+            .with("mode", named_node(&mode)?),
+    ))
+}
+
 /// The `pipeline-mismatch` outcome of `AttachRun`: `PipelineMismatch`.
 fn pipeline_mismatch(
     session_id: SessionId,
@@ -275,8 +440,8 @@ fn wrong_state(command: &str, conflict: SessionStateConflict) -> SemanticCommand
     )
 }
 
-/// The answer of `CloseSession` or `CompleteSessionClose`: `branch` and its event,
-/// `no-such-session` or `wrong-state`.
+/// The answer of a command whose refusals are `no-such-session` and `wrong-state` alone: `branch`
+/// and its event, `no-such-session` or `wrong-state`.
 fn moved(
     command: &str,
     branch: &str,
@@ -295,17 +460,77 @@ pub fn query_view(
     request: &SemanticViewRequest,
 ) -> Result<SemanticViewResult, TargetError> {
     let name = request.view.to_string();
-    if name != SESSIONS {
+    if name != SESSIONS && name != HISTORY {
         return Err(unsupported(&name));
     }
     stores.require(&name, &request.consistency)?;
-    let rows = stores
-        .session
-        .sessions_view()
-        .iter()
-        .map(sessions_row)
-        .collect::<Result<Vec<_>, _>>()?;
+    let rows = if name == SESSIONS {
+        stores
+            .session
+            .sessions_view()
+            .iter()
+            .map(sessions_row)
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        stores
+            .session
+            .history_view()
+            .iter()
+            .map(history_row)
+            .collect::<Result<Vec<_>, _>>()?
+    };
     Ok(SemanticViewResult::of(rows))
+}
+
+fn history_row(entry: &HistoryEntry) -> Result<ViewRow, TargetError> {
+    Ok(BTreeMap::from([
+        ("entry_id".to_owned(), named_node(&entry.entry_id())?),
+        ("session_id".to_owned(), named_node(&entry.session_id())?),
+        ("run_id".to_owned(), named_node(&entry.run_id())?),
+        ("position".to_owned(), integer_node(entry.position())),
+        ("kind".to_owned(), text_node(entry.kind().as_str())),
+        ("text".to_owned(), text_node(entry.text())),
+        (
+            "call_id".to_owned(),
+            entry
+                .call_id()
+                .as_ref()
+                .map_or(Ok(Node::Null), named_node)?,
+        ),
+    ]))
+}
+
+/// An `inference.session.HistoryKind` read from its ESS variant.
+fn history_kind(input: &mut Input<'_>) -> Result<HistoryKind, TargetError> {
+    let kind = input.text("kind")?;
+    HistoryKind::ALL
+        .into_iter()
+        .find(|candidate| candidate.as_str() == kind)
+        .ok_or_else(|| {
+            unreadable(
+                format!("reading `{RECORD_HISTORY}`"),
+                format!("`kind` is not a history kind: {kind}"),
+            )
+        })
+}
+
+/// An `Optional<inference.tools.ToolCallId>`: absent when null.
+fn optional_call(input: &mut Input<'_>) -> Result<Option<ToolCallId>, TargetError> {
+    match input.node("call_id")? {
+        Node::Null => Ok(None),
+        Node::Text(text) => serde_json::from_value(serde_json::Value::String(text.clone()))
+            .map(Some)
+            .map_err(|error| {
+                unreadable(
+                    format!("reading `{RECORD_HISTORY}`"),
+                    format!("`call_id` is not a tool call identity: {error}"),
+                )
+            }),
+        other => Err(unreadable(
+            format!("reading `{RECORD_HISTORY}`"),
+            format!("`call_id` is not a tool call identity: {other:?}"),
+        )),
+    }
 }
 
 pub fn observe_events(
@@ -345,6 +570,22 @@ fn session_event(event: &SessionEvent) -> Result<ObservedEvent, TargetError> {
         SessionEvent::SessionReady(event) => session(SESSION_READY, event.session_id)?,
         SessionEvent::SessionDraining(event) => session(SESSION_DRAINING, event.session_id)?,
         SessionEvent::SessionClosed(event) => session(SESSION_CLOSED, event.session_id)?,
+        SessionEvent::InputSent(event) => session(INPUT_SENT, event.session_id)?,
+        SessionEvent::InputCommitted(event) => session(INPUT_COMMITTED, event.session_id)?,
+        SessionEvent::SessionInterrupted(event) => session(SESSION_INTERRUPTED, event.session_id)?,
+        SessionEvent::PipelineSwitched(event) => session(PIPELINE_SWITCHED, event.session_id)?
+            .with("pipeline_id", named_node(&event.pipeline_id)?),
+        SessionEvent::HistoryRecorded(event) => session(HISTORY_RECORDED, event.session_id)?
+            .with("entry_id", named_node(&event.entry_id)?)
+            .with("run_id", named_node(&event.run_id)?)
+            .with("position", integer_node(event.position))
+            .with("kind", text_node(event.kind.as_str())),
+        other => {
+            return Err(unreadable(
+                format!("the session event {other:?}"),
+                "the store records the session's own events only",
+            ));
+        }
     })
 }
 
