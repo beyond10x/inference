@@ -1,28 +1,30 @@
-//! The declaration and validation half of the `inference.graph` domain of
+//! The declaration, validation and planning half of the `inference.graph` domain of
 //! `ess/domains/graph.yaml`, held in memory.
 //!
 //! [`GraphDomain`] holds one [`Declaration`] of `inference-pipeline` with counted identities, so
 //! that two runs of the same commands report the same identities, and records every event its
-//! commands emit in order. The commands are the declaration's own, `ValidatePipeline` among them;
-//! what a declaration references and does not hold, the declared profiles and adapters, it reads
-//! through [`GraphCatalog`] over the [`PolicyDomain`] and [`ModelDomain`] stores. A refused
-//! command stores nothing, records no event and takes no identity. The views
-//! `inference.graph.Pipelines`, `Nodes`, `Ports`, `Edges` and `Bindings` are the declaration's
-//! entities ([`GraphDomain::declaration`]), read at the call. Planning and runs are not here yet.
+//! commands emit in order. The commands are the declaration's own, `ValidatePipeline` and
+//! `PlanPipeline` among them; what a declaration references and does not hold, the declared
+//! profiles and adapters, it reads through [`GraphCatalog`] over the [`PolicyDomain`] and
+//! [`ModelDomain`] stores. A refused command stores nothing, records no event and takes no
+//! identity. The views `inference.graph.Pipelines`, `Nodes`, `Ports`, `Edges` and `Bindings` are
+//! the declaration's entities ([`GraphDomain::declaration`]), read at the call. Runs are not here
+//! yet.
 
 use inference_core::model::{Adapter, AdapterId};
 use inference_core::policy::{DeploymentProfile, ProfileId, ProfileNotFound};
 use inference_pipeline::{
     AddNode, AddNodeError, AddPort, BindNode, BindNodeError, Catalog, ConnectPorts,
     ConnectPortsError, Declaration, DeclarePipeline, NodeAdded, NodeBound, NodeNotFound,
-    PipelineDeclared, PipelineValidated, PortAdded, PortsConnected, ValidatePipeline,
-    ValidatePipelineError,
+    PipelineDeclared, PipelinePlanned, PipelineValidated, PlanPipeline, PlanPipelineError,
+    PortAdded, PortsConnected, ValidatePipeline, ValidatePipelineError,
 };
 
 use crate::model::ModelDomain;
 use crate::policy::PolicyDomain;
 
-/// An event of the declaration half of `inference.graph`, as the domain emitted it.
+/// An event of the declaration, validation and planning half of `inference.graph`, as the domain
+/// emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphEvent {
     /// `inference.graph.PipelineDeclared`.
@@ -37,6 +39,8 @@ pub enum GraphEvent {
     NodeBound(NodeBound),
     /// `inference.graph.PipelineValidated`.
     PipelineValidated(PipelineValidated),
+    /// `inference.graph.PipelinePlanned`.
+    PipelinePlanned(PipelinePlanned),
 }
 
 /// The declared profiles and adapters a [`GraphDomain`] reads, from their own stores.
@@ -158,6 +162,21 @@ impl GraphDomain {
     ) -> Result<PipelineValidated, ValidatePipelineError> {
         let event = self.declaration.validate_pipeline(input)?;
         self.events.push(GraphEvent::PipelineValidated(event));
+        Ok(event)
+    }
+
+    /// Runs `inference.graph.PlanPipeline` and records its [`PipelinePlanned`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Declaration::plan_pipeline`].
+    pub fn plan_pipeline(
+        &mut self,
+        input: PlanPipeline,
+        catalog: &impl Catalog,
+    ) -> Result<PipelinePlanned, PlanPipelineError> {
+        let event = self.declaration.plan_pipeline(input, catalog)?;
+        self.events.push(GraphEvent::PipelinePlanned(event));
         Ok(event)
     }
 
@@ -331,6 +350,111 @@ mod tests {
             domain.events()[1],
             GraphEvent::PipelineValidated(PipelineValidated { pipeline_id })
         );
+    }
+
+    #[test]
+    fn a_plan_records_its_event_and_a_refused_one_records_nothing() {
+        use inference_pipeline::{
+            CapabilityMismatch, PipelinePlanned, PipelineState, PipelineStateConflict,
+            PlanPipeline, PlanPipelineError, ValidatePipeline,
+        };
+
+        let (policy, model) = stores();
+        let catalog = GraphCatalog {
+            policy: &policy,
+            model: &model,
+        };
+        let mut domain = GraphDomain::new();
+        let pipeline_id = domain
+            .declare_pipeline(
+                DeclarePipeline {
+                    required_capabilities: vec![Capability::OutputStreaming],
+                    ..declare_pipeline(&policy)
+                },
+                &catalog,
+            )
+            .expect("the profile is declared")
+            .pipeline_id;
+        let plan = PlanPipeline { pipeline_id };
+
+        assert_eq!(
+            domain.plan_pipeline(plan, &catalog),
+            Err(PlanPipelineError::WrongState(PipelineStateConflict {
+                current: PipelineState::Declared
+            }))
+        );
+        domain
+            .validate_pipeline(ValidatePipeline { pipeline_id })
+            .expect("an empty graph is valid");
+        assert_eq!(
+            domain.plan_pipeline(plan, &catalog),
+            Ok(PipelinePlanned { pipeline_id })
+        );
+        assert_eq!(
+            domain.events().last(),
+            Some(&GraphEvent::PipelinePlanned(PipelinePlanned {
+                pipeline_id
+            }))
+        );
+        assert_eq!(domain.events().len(), 3);
+        let pipeline = domain
+            .declaration()
+            .pipeline(pipeline_id)
+            .expect("declared");
+        assert_eq!(pipeline.state(), PipelineState::Planned);
+        assert_eq!(
+            pipeline.effective_capabilities(),
+            Some([].as_slice()),
+            "a pipeline with no node has no effective capability"
+        );
+
+        let short = domain
+            .declare_pipeline(
+                DeclarePipeline {
+                    required_capabilities: vec![Capability::ToolCalling],
+                    ..declare_pipeline(&policy)
+                },
+                &catalog,
+            )
+            .expect("the profile is declared")
+            .pipeline_id;
+        let source = domain
+            .add_node(AddNode {
+                pipeline_id: short,
+                name: "llm".to_owned(),
+                role: NodeRole::Model,
+                requires: vec![Capability::ToolCalling],
+            })
+            .expect("the pipeline is declared")
+            .node_id;
+        let adapter_id = model
+            .adapters()
+            .iter()
+            .next()
+            .expect("an adapter")
+            .adapter_id();
+        domain
+            .bind_node(
+                inference_pipeline::BindNode {
+                    pipeline_id: short,
+                    node_id: source,
+                    adapter_id,
+                },
+                &catalog,
+            )
+            .expect("the adapter is declared");
+        domain
+            .validate_pipeline(ValidatePipeline { pipeline_id: short })
+            .expect("a lone node with no port is valid");
+        let recorded = domain.events().len();
+        assert_eq!(
+            domain.plan_pipeline(PlanPipeline { pipeline_id: short }, &catalog),
+            Err(PlanPipelineError::Mismatch(CapabilityMismatch {
+                node_id: Some(source),
+                capability: Capability::ToolCalling,
+            }))
+        );
+        assert_eq!(domain.events().len(), recorded);
     }
 
     #[test]

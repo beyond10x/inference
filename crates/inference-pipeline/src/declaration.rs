@@ -436,6 +436,13 @@ impl Declaration {
         }
     }
 
+    /// The pipeline carrying `pipeline_id`, to move it.
+    pub(crate) fn pipeline_mut(&mut self, pipeline_id: PipelineId) -> Option<&mut Pipeline> {
+        self.pipelines
+            .iter_mut()
+            .find(|pipeline| pipeline.pipeline_id == pipeline_id)
+    }
+
     /// The next identity; only a command that creates takes one.
     fn issue(&mut self) -> Uuid {
         match &mut self.identities {
