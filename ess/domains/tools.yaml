@@ -5,10 +5,11 @@
 domain: inference.tools
 
 summary: >-
-  A Tool is an external capability with an identity, a schema revision and a side-effect class:
-  read-only, idempotent write or non-idempotent write. A ToolCall is a proposal a generation makes,
-  correlated to that generation and classified by the basis of the input that led to it. A
-  side-effecting call proposed on provisional input is refused before it exists.
+  A Tool is an external capability with an identity, a schema and its revision and a side-effect
+  class: read-only, idempotent write or non-idempotent write. A ToolCall is a proposal a
+  generation makes, correlated to that generation, classified by its tool's side-effect class and
+  resting on a named inbound span. A side-effecting call proposed while that span is still a
+  hypothesis is refused before it exists.
 
 naming:
   wire: tools
@@ -28,17 +29,10 @@ types:
     kind: enum
     variants: [read_only, idempotent_write, non_idempotent_write]
 
-  # Whether the input that led to a proposal was committed or still provisional.
-  # read from: docs/design/inference.md:625
-  # read from: docs/design/inference.md:866
-  - name: inference.tools.InputBasis
-    kind: enum
-    variants: [committed, provisional]
-
 entities:
   # An external capability invoked through a controlled request/result protocol; it owns
-  # permission-gated side effects or data retrieval. Structured identity, schema revision,
-  # side-effect classification and whether human confirmation is required.
+  # permission-gated side effects or data retrieval. Structured identity, schema and schema
+  # revision, side-effect classification and whether human confirmation is required.
   # read from: docs/design/inference.md:106
   # read from: docs/design/inference.md:848
   # read from: docs/design/inference.md:851
@@ -52,12 +46,24 @@ entities:
     fields:
       - name: name
         type: String
+      # The argument schema of the tool. Arguments are validated against it after the proposal
+      # and before authorization (the §15.1 diagram), so no proposal outcome reads it.
+      # read from: docs/design/inference.md:838
+      # read from: docs/design/inference.md:848
+      # UNMAPPED: the design names "schemas" without a schema language (JSON Schema or another);
+      # Json holds the document unread. Open question for the owner.
+      - name: schema
+        type: Json
       - name: schema_revision
         type: String
       - name: side_effect
         type: inference.tools.SideEffectClass
+      # UNMAPPED: no command reads requires_confirmation yet. The confirmation gate belongs to
+      # authorization (design 839, 853, 1054), which the ToolCall lifecycle does not declare yet.
       - name: requires_confirmation
         type: Boolean
+    # A single Declared state: ESS requires a lifecycle on every entity; the design gives a tool
+    # no states, and no transition is planned.
     lifecycle:
       initial: Declared
       states: [Declared]
@@ -68,6 +74,14 @@ entities:
   # is declared with its first state here and completed by the tools-and-turns stories.
   # read from: docs/design/inference.md:374
   # read from: docs/design/inference.md:849-850
+  # UNMAPPED: authorization, execution, result and failure (design 338, 835-843, 850) are not
+  # declared: no state beyond Proposed, no command moves a call, and the confirmation flag gates
+  # nothing. The states and their commands are the tools-and-turns stories' to declare.
+  # UNMAPPED: deadlines, cancellation, concurrency limits and status reconciliation (design 852,
+  # MUST), and the distinction between tool retries and generation retries (854, MUST), have no
+  # field or command. Whether a deadline is an instant or a duration, and whether a repeated
+  # proposal is answered by a request key, the design does not say (1129 speaks of execution on
+  # reconnect, not of proposals). Open question for the owner.
   - name: inference.tools.ToolCall
     naming:
       summary: A tool proposal a generation made, correlated to it.
@@ -79,10 +93,17 @@ entities:
         type: inference.tools.ToolId
       - name: generation_id
         type: inference.stream.GenerationId
+      # Copied from the tool at proposal, never from the caller.
+      # read from: docs/design/inference.md:851
       - name: side_effect
         type: inference.tools.SideEffectClass
-      - name: input_basis
-        type: inference.tools.InputBasis
+      # The inbound span the proposal rests on; its held state, not a caller's claim, decides
+      # whether the input was committed.
+      # read from: docs/design/inference.md:605
+      # read from: docs/design/inference.md:625
+      # read from: docs/design/inference.md:866
+      - name: basis_span_id
+        type: inference.stream.SpanId
       - name: arguments
         type: Json
     relations:
@@ -96,6 +117,17 @@ entities:
         target: inference.stream.Generation
         cardinality: one
         via: generation_id
+      # A committed span is transcript history and outlives the proposal resting on it.
+      # read from: docs/design/inference.md:605
+      # UNMAPPED: the design does not say whether a proposal rests on one span or several. One
+      # span is the cut ess 0.60.0 can check: a list of spans read together with the tool's class
+      # is refused at validate (ESS-COMMAND-009, one kind of related row per command) or left
+      # without scenarios (ESS-SYNTH-001, one row set per command). Open question for the owner.
+      - name: basis_span
+        kind: references
+        target: inference.stream.Span
+        cardinality: one
+        via: basis_span_id
     lifecycle:
       initial: Proposed
       states: [Proposed]
@@ -109,11 +141,21 @@ errors:
       - name: side_effect
         type: inference.tools.SideEffectClass
 
+  # read from: docs/design/inference.md:848
+  - name: inference.tools.ToolNotFound
+    summary: No tool carries the identity the proposal named; nothing was proposed.
+    fields:
+      - name: tool_id
+        type: inference.tools.ToolId
+
 commands:
   - name: inference.tools.DeclareTool
     input:
       - name: name
         type: String
+      # read from: docs/design/inference.md:848
+      - name: schema
+        type: Json
       - name: schema_revision
         type: String
       - name: side_effect
@@ -126,6 +168,7 @@ commands:
         instance: tool_id
         sets:
           name: input.name
+          schema: input.schema
           schema_revision: input.schema_revision
           side_effect: input.side_effect
           requires_confirmation: input.requires_confirmation
@@ -136,34 +179,73 @@ commands:
             tool_id: {generated: true}
             name: input.name
             side_effect: input.side_effect
-        summary: The tool is known with its schema revision and side-effect class.
+        summary: The tool is known with its schema, schema revision and side-effect class.
 
-  # Side-effecting tools require committed user input by default.
+  # The default path. A tool call needs committed user input: the barrier reads the held state of
+  # the span the proposal rests on, never a caller's claim, and the call takes the class of the
+  # tool it names, never the caller's. On this path a hypothesis basis is refused for every class;
+  # speculation on a hypothesis is the explicit path below. ess 0.60.0 cannot guard one branch on
+  # two related rows (the tool's class and the span's state), so the two paths split the rule.
   # read from: docs/design/inference.md:625
   # read from: docs/design/inference.md:866
+  # read from: docs/design/inference.md:1109
+  # read from: docs/design/inference.md:1144
   - name: inference.tools.ProposeToolCall
     input:
       - name: tool_id
         type: inference.tools.ToolId
       - name: generation_id
         type: inference.stream.GenerationId
-      - name: side_effect
-        type: inference.tools.SideEffectClass
-      - name: input_basis
-        type: inference.tools.InputBasis
+      - name: basis_span_id
+        type: inference.stream.SpanId
       - name: arguments
         type: Json
     outcomes:
+      # read from: docs/design/inference.md:848
+      - name: unknown-tool
+        when_related: {via: input.tool_id, exists: false}
+        error: inference.tools.ToolNotFound
+        payload:
+          inference.tools.ToolNotFound:
+            tool_id: input.tool_id
+        summary: No tool carries this identity; nothing was proposed.
+
+      # read from: docs/design/inference.md:849
+      - name: unknown-generation
+        when_related: {via: input.generation_id, exists: false}
+        error: inference.stream.GenerationNotFound
+        payload:
+          inference.stream.GenerationNotFound:
+            generation_id: input.generation_id
+        summary: No generation carries this identity; nothing was proposed.
+
+      # read from: docs/design/inference.md:625
+      - name: unknown-span
+        when_related: {via: input.basis_span_id, exists: false}
+        error: inference.stream.SpanNotFound
+        payload:
+          inference.stream.SpanNotFound:
+            span_id: input.basis_span_id
+        summary: No span carries the identity the proposal rests on; nothing was proposed.
+
+      # A superseded or cancelled generation proposes nothing: generation ids and cancellation
+      # status survive tool round trips, and stale results are rejected. The error's `current`
+      # carries no payload: ess 0.60.0 reads no related row's held state into a value.
+      # read from: docs/design/inference.md:376
+      # read from: docs/design/inference.md:637
+      - name: stale-generation
+        when_related: {via: input.generation_id, predicate: state != Active}
+        error: inference.stream.GenerationStateConflict
+        summary: The generation is not Active; nothing was proposed.
+
+      # read from: docs/design/inference.md:866
       - name: barred
-        when:
-          all:
-            - input_basis == provisional
-            - side_effect != read_only
+        when_related: {via: input.basis_span_id, predicate: state == Hypothesis}
         error: inference.tools.ProvisionalInputBarrier
         payload:
           inference.tools.ProvisionalInputBarrier:
-            side_effect: input.side_effect
-        summary: The proposal rested on provisional input and would have had a side effect; nothing was proposed.
+            side_effect: {related: {via: input.tool_id, field: side_effect}}
+        summary: The proposal rested on a span that is still a hypothesis; nothing was proposed.
 
       - name: proposed
         creates: inference.tools.ToolCall
@@ -171,8 +253,8 @@ commands:
         sets:
           tool_id: input.tool_id
           generation_id: input.generation_id
-          side_effect: input.side_effect
-          input_basis: input.input_basis
+          side_effect: {related: {via: input.tool_id, field: side_effect}}
+          basis_span_id: input.basis_span_id
           arguments: input.arguments
         emits:
           - inference.tools.ToolCallProposed
@@ -181,7 +263,85 @@ commands:
             call_id: {generated: true}
             tool_id: input.tool_id
             generation_id: input.generation_id
-        summary: The proposal exists and awaits authorization.
+        summary: The proposal rests on a committed span and carries its tool's class; it awaits authorization.
+
+  # The explicit speculative path: a side-effect-free tool may act on a hypothesis when a node is
+  # configured for it. The span's state is not read; the tool's class is, and anything but
+  # read-only is refused.
+  # read from: docs/design/inference.md:624
+  # read from: docs/design/inference.md:866
+  - name: inference.tools.ProposeSpeculativeToolCall
+    input:
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: basis_span_id
+        type: inference.stream.SpanId
+      - name: arguments
+        type: Json
+    outcomes:
+      # read from: docs/design/inference.md:848
+      - name: unknown-tool
+        when_related: {via: input.tool_id, exists: false}
+        error: inference.tools.ToolNotFound
+        payload:
+          inference.tools.ToolNotFound:
+            tool_id: input.tool_id
+        summary: No tool carries this identity; nothing was proposed.
+
+      # read from: docs/design/inference.md:849
+      - name: unknown-generation
+        when_related: {via: input.generation_id, exists: false}
+        error: inference.stream.GenerationNotFound
+        payload:
+          inference.stream.GenerationNotFound:
+            generation_id: input.generation_id
+        summary: No generation carries this identity; nothing was proposed.
+
+      # read from: docs/design/inference.md:625
+      - name: unknown-span
+        when_related: {via: input.basis_span_id, exists: false}
+        error: inference.stream.SpanNotFound
+        payload:
+          inference.stream.SpanNotFound:
+            span_id: input.basis_span_id
+        summary: No span carries the identity the proposal rests on; nothing was proposed.
+
+      # read from: docs/design/inference.md:376
+      # read from: docs/design/inference.md:637
+      - name: stale-generation
+        when_related: {via: input.generation_id, predicate: state != Active}
+        error: inference.stream.GenerationStateConflict
+        summary: The generation is not Active; nothing was proposed.
+
+      # read from: docs/design/inference.md:624
+      # read from: docs/design/inference.md:866
+      - name: side-effecting
+        when_related: {via: input.tool_id, predicate: side_effect != read_only}
+        error: inference.tools.ProvisionalInputBarrier
+        payload:
+          inference.tools.ProvisionalInputBarrier:
+            side_effect: {related: {via: input.tool_id, field: side_effect}}
+        summary: The tool has a side effect, so it may not act on speculative input; nothing was proposed.
+
+      - name: proposed
+        creates: inference.tools.ToolCall
+        instance: call_id
+        sets:
+          tool_id: input.tool_id
+          generation_id: input.generation_id
+          side_effect: read_only
+          basis_span_id: input.basis_span_id
+          arguments: input.arguments
+        emits:
+          - inference.tools.ToolCallProposed
+        payload:
+          inference.tools.ToolCallProposed:
+            call_id: {generated: true}
+            tool_id: input.tool_id
+            generation_id: input.generation_id
+        summary: The read-only proposal exists on speculative input and awaits authorization.
 
 events:
   - name: inference.tools.ToolDeclared
@@ -203,6 +363,7 @@ events:
         type: inference.stream.GenerationId
 
 views:
+  # read from: docs/design/inference.md:848
   - name: inference.tools.Tools
     source: inference.tools.Tool
     consistency: read_your_writes
@@ -211,11 +372,17 @@ views:
         type: inference.tools.ToolId
       - name: name
         type: String
+      - name: schema
+        type: Json
+      - name: schema_revision
+        type: String
       - name: side_effect
         type: inference.tools.SideEffectClass
       - name: requires_confirmation
         type: Boolean
 
+  # read from: docs/design/inference.md:848
+  # read from: docs/design/inference.md:1145
   - name: inference.tools.ToolCalls
     source: inference.tools.ToolCall
     consistency: read_your_writes
@@ -228,5 +395,7 @@ views:
         type: inference.stream.GenerationId
       - name: side_effect
         type: inference.tools.SideEffectClass
-      - name: input_basis
-        type: inference.tools.InputBasis
+      - name: basis_span_id
+        type: inference.stream.SpanId
+      - name: arguments
+        type: Json

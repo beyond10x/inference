@@ -1,13 +1,14 @@
 # The optional session facade of docs/design/inference.md §13: an application-level interaction
-# lifetime above graph runs, never the foundational unit of the library. Declared with its first
-# state; the session-facade stories complete the lifecycle (opened, ready, draining, closed).
+# lifetime above graph runs, never the foundational unit of the library. Its lifecycle follows the
+# design's session events: opened, ready, draining, closed.
 domain: inference.session
 
 summary: >-
   A Session is an optional application-level interaction lifetime that may span several graph
-  runs and model requests; it owns history, logical identity and interaction policy, and it is
-  configured over one pipeline in one interaction mode. Transport persistence is not model
-  persistence: the session is stable while the runs below it come and go.
+  runs and model requests. It is opened over one planned pipeline in that pipeline's interaction
+  mode, becomes ready, and is closed by draining. Transport persistence is not model persistence:
+  the session is stable while the runs below it come and go. History, logical identity and
+  interaction policy, which the design gives the session, are not declared yet.
 
 naming:
   wire: session
@@ -22,6 +23,7 @@ entities:
   # read from: docs/design/inference.md:105
   # read from: docs/design/inference.md:711-719
   # read from: docs/design/inference.md:731
+  # read from: docs/design/inference.md:339
   - name: inference.session.Session
     naming:
       summary: An optional application-level interaction lifetime above graph runs.
@@ -33,6 +35,12 @@ entities:
         type: inference.graph.PipelineId
       - name: mode
         type: inference.graph.InteractionMode
+    # UNMAPPED: the design gives the session history, logical identity and interaction policy
+    # (docs/design/inference.md:105) and makes conversation state (committed messages, tool results,
+    # memory projections, turn history) distinct from inference and media state
+    # (docs/design/inference.md:735-741). No field, relation or entity declares any of them here,
+    # and the design does not say whether history is a list of committed spans, of events or of
+    # messages. Open question for the owner; the session-facade epic settles it.
     relations:
       - name: pipeline
         kind: references
@@ -44,13 +52,62 @@ entities:
       # may exist with no session. Whether a session owns its runs or only references them, and
       # from which side the link is held, the design does not say. Open question for the owner;
       # the session-facade epic settles it before its first story.
+      # UNMAPPED: the session holds one pipeline for its lifetime. The design wants a session to
+      # switch among supported topologies without changing its event vocabulary
+      # (docs/design/inference.md:1148, docs/design/inference.md:1162); a switch needs the
+      # session-to-run link above settled first (does a switch drain the current run?). Stated
+      # deviation until the session-facade epic declares it.
     lifecycle:
       initial: Opened
-      states: [Opened]
-      terminal: [Opened]
+      states: [Opened, Ready, Draining, Closed]
+      terminal: [Closed]
+      transitions:
+        - name: ready
+          from: [Opened]
+          to: Ready
+        - name: drain
+          from: [Opened, Ready]
+          to: Draining
+        - name: close
+          from: [Draining]
+          to: Closed
+
+errors:
+  # The session's interaction mode is the pipeline's: a session asking for another mode than the
+  # pipeline declares is refused rather than stored beside a pipeline that runs differently.
+  # read from: docs/design/inference.md:713
+  # read from: docs/design/inference.md:515
+  - name: inference.session.ModeMismatch
+    summary: The requested interaction mode is not the mode the pipeline declares; no session was opened.
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: mode
+        type: inference.graph.InteractionMode
+
+  - name: inference.session.SessionNotFound
+    summary: No session carries the identity the command named; nothing moved.
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+
+  - name: inference.session.SessionStateConflict
+    summary: The session is not in a state this command acts from, so nothing moved.
+    fields:
+      - name: current
+        type: inference.session.Session.State
 
 commands:
+  # A session selects a pipeline that can run: a pipeline is a declaration and becomes runnable
+  # only after binding, validation and planning, so one that is not Planned is refused, as is an
+  # identity no pipeline holds. The refusal names the state required, not the one held: ess reads
+  # a related row's fields, not its held state, as a value.
+  # UNMAPPED: the design's session operations send, receive, commit_input, interrupt and describe
+  # (docs/design/inference.md:714-718) are not declared; the stream domain's commands cover
+  # commit and supersede below the session, and the session-facade epic declares the facade.
   # read from: docs/design/inference.md:713
+  # read from: docs/design/inference.md:519
+  # read from: docs/design/inference.md:1189
   - name: inference.session.OpenSession
     input:
       - name: pipeline_id
@@ -58,6 +115,29 @@ commands:
       - name: mode
         type: inference.graph.InteractionMode
     outcomes:
+      - name: unknown-pipeline
+        when_related: {via: input.pipeline_id, exists: false}
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.pipeline_id
+        summary: No pipeline carries this identity; no session was opened.
+      - name: not-planned
+        when_related: {via: input.pipeline_id, predicate: state != Planned}
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.pipeline_id
+            required: Planned
+        summary: The pipeline is not Planned; no session was opened.
+      - name: mode-mismatch
+        when_related: {via: input.pipeline_id, predicate: mode != input.mode}
+        error: inference.session.ModeMismatch
+        payload:
+          inference.session.ModeMismatch:
+            pipeline_id: input.pipeline_id
+            mode: input.mode
+        summary: The pipeline declares another interaction mode; no session was opened.
       - name: opened
         creates: inference.session.Session
         instance: session_id
@@ -72,6 +152,102 @@ commands:
             pipeline_id: input.pipeline_id
         summary: The session exists over its pipeline and mode.
 
+  # UNMAPPED: the design names SessionReady (docs/design/inference.md:339) and no condition for it:
+  # whether a session is ready when its first run is Active, when its adapters are warm, or when
+  # the application says so is not settled. Open question for the owner.
+  # read from: docs/design/inference.md:339
+  - name: inference.session.MarkSessionReady
+    input:
+      - name: session_id
+        type: inference.session.SessionId
+    outcomes:
+      - name: ready
+        moves: inference.session.Session.ready
+        instance: session_id
+        emits:
+          - inference.session.SessionReady
+        payload:
+          inference.session.SessionReady:
+            session_id: input.session_id
+        summary: The session accepts interaction.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.session.SessionStateConflict
+        payload:
+          inference.session.SessionStateConflict:
+            current: {subject: state}
+      - name: no-such-session
+        unknown_instance: true
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing moved.
+
+  # close drains or cancels processing and releases resources; closing starts the drain.
+  # UNMAPPED: the cancel branch of close (docs/design/inference.md:719, "drain or cancel") is not
+  # declared, and whether a session that never became ready may be closed is read here as yes.
+  # Open question for the owner.
+  # read from: docs/design/inference.md:719
+  # read from: docs/design/inference.md:339
+  - name: inference.session.CloseSession
+    input:
+      - name: session_id
+        type: inference.session.SessionId
+    outcomes:
+      - name: draining
+        moves: inference.session.Session.drain
+        instance: session_id
+        emits:
+          - inference.session.SessionDraining
+        payload:
+          inference.session.SessionDraining:
+            session_id: input.session_id
+        summary: The session admits no new interaction and drains what is in flight.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.session.SessionStateConflict
+        payload:
+          inference.session.SessionStateConflict:
+            current: {subject: state}
+      - name: no-such-session
+        unknown_instance: true
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing moved.
+
+  # read from: docs/design/inference.md:719
+  # read from: docs/design/inference.md:339
+  - name: inference.session.CompleteSessionClose
+    input:
+      - name: session_id
+        type: inference.session.SessionId
+    outcomes:
+      - name: closed
+        moves: inference.session.Session.close
+        instance: session_id
+        emits:
+          - inference.session.SessionClosed
+        payload:
+          inference.session.SessionClosed:
+            session_id: input.session_id
+        summary: The drain finished and the session's resources are released.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.session.SessionStateConflict
+        payload:
+          inference.session.SessionStateConflict:
+            current: {subject: state}
+      - name: no-such-session
+        unknown_instance: true
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing moved.
+
 events:
   - name: inference.session.SessionOpened
     fields:
@@ -79,6 +255,21 @@ events:
         type: inference.session.SessionId
       - name: pipeline_id
         type: inference.graph.PipelineId
+
+  - name: inference.session.SessionReady
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+
+  - name: inference.session.SessionDraining
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+
+  - name: inference.session.SessionClosed
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
 
 views:
   - name: inference.session.Sessions
@@ -91,3 +282,5 @@ views:
         type: inference.graph.PipelineId
       - name: mode
         type: inference.graph.InteractionMode
+      - name: state
+        type: inference.session.Session.State

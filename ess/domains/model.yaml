@@ -37,6 +37,12 @@ types:
       - interruptible
       - resumable_model_state
       - audio_text_alignment
+      # A coordinator restarting ordinary calls gives an orchestrated duplex experience; it is
+      # reported apart from native_duplex and never as it.
+      # read from: docs/design/inference.md:52
+      # read from: docs/design/inference.md:400
+      # read from: docs/design/inference.md:1143
+      - orchestrated_duplex
 
   # First-class media modalities; the initial runtime implements Text, Audio, Structured and
   # Control.
@@ -86,6 +92,15 @@ entities:
         type: List<inference.model.Modality>
       - name: output_modalities
         type: List<inference.model.Modality>
+      # read from: docs/design/inference.md:439
+      # read from: docs/design/inference.md:946
+      - name: provenance
+        type: String
+      # read from: docs/design/inference.md:946
+      - name: source_revision
+        type: String
+    # A single Declared state: ESS requires a lifecycle on every entity; the design gives a model
+    # no states, and no transition is planned.
     lifecycle:
       initial: Declared
       states: [Declared]
@@ -114,10 +129,19 @@ entities:
         type: inference.model.ExecutionForm
       - name: locality
         type: inference.model.Locality
+      # The capabilities the adapter claims. Every adapter must pass the tests for its claims.
+      # read from: docs/design/inference.md:899
+      # UNMAPPED: a claimed capability and a verified one look the same. The design asks for
+      # evidence, the adapter revision and conformance-suite results per integration (899, 950,
+      # 952) and the review names a CapabilityDescriptor noun; what that record holds, and whether
+      # binding a node requires a verified claim, is not settled. Open question for the owner.
       - name: capabilities
         type: List<inference.model.Capability>
       - name: max_concurrency
         type: Integer
+      # UNMAPPED: the resource plan (expected startup footprint, CPU and GPU memory needs,
+      # admission limits; design 435, 951) has no field: the design lists its parts without a
+      # shape or units. Open question for the owner.
     relations:
       # An adapter connects one model; the model artifact stands on its own.
       # read from: docs/design/inference.md:99
@@ -126,17 +150,29 @@ entities:
         target: inference.model.Model
         cardinality: one
         via: model_id
+    # A single Declared state: ESS requires a lifecycle on every entity; the design gives an
+    # adapter no states, and no transition is planned.
     lifecycle:
       initial: Declared
       states: [Declared]
       terminal: [Declared]
 
 errors:
+  # The design lists maximum concurrency among an adapter's descriptors; that it is at least
+  # one is this specification's rule, not the design's.
+  # read from: docs/design/inference.md:435
   - name: inference.model.NonPositiveConcurrency
     summary: An adapter's maximum concurrency must be at least one.
     fields:
       - name: submitted
         type: Integer
+
+  # read from: docs/design/inference.md:99
+  - name: inference.model.ModelNotFound
+    summary: No model carries the identity the adapter named; nothing was declared.
+    fields:
+      - name: model_id
+        type: inference.model.ModelId
 
 commands:
   - name: inference.model.DeclareModel
@@ -155,6 +191,17 @@ commands:
         type: List<inference.model.Modality>
       - name: output_modalities
         type: List<inference.model.Modality>
+      # read from: docs/design/inference.md:439
+      # read from: docs/design/inference.md:946
+      - name: provenance
+        type: String
+      # read from: docs/design/inference.md:946
+      - name: source_revision
+        type: String
+    # UNMAPPED: an empty checksum or licence is accepted. Integrity verification and a licence
+    # inventory are mandatory controls (design 1058, 1119), but a model may be a hosted endpoint
+    # (98) with no artifact to hash or weights to license; whether such a model declares an empty
+    # value, a marker or no field is not settled. Open question for the owner.
     outcomes:
       - name: declared
         creates: inference.model.Model
@@ -167,6 +214,8 @@ commands:
           checksum: input.checksum
           input_modalities: input.input_modalities
           output_modalities: input.output_modalities
+          provenance: input.provenance
+          source_revision: input.source_revision
         emits:
           - inference.model.ModelDeclared
         payload:
@@ -194,6 +243,15 @@ commands:
       - name: max_concurrency
         type: Integer
     outcomes:
+      # read from: docs/design/inference.md:99
+      - name: unknown-model
+        when_related: {via: input.model_id, exists: false}
+        error: inference.model.ModelNotFound
+        payload:
+          inference.model.ModelNotFound:
+            model_id: input.model_id
+        summary: No model carries this identity, and nothing was declared.
+
       - name: declared
         when: max_concurrency > 0
         creates: inference.model.Adapter
@@ -256,6 +314,18 @@ views:
         type: String
       - name: weight_license
         type: String
+      # read from: docs/design/inference.md:434
+      # read from: docs/design/inference.md:439
+      - name: checksum
+        type: String
+      - name: input_modalities
+        type: List<inference.model.Modality>
+      - name: output_modalities
+        type: List<inference.model.Modality>
+      - name: provenance
+        type: String
+      - name: source_revision
+        type: String
 
   - name: inference.model.Adapters
     source: inference.model.Adapter
@@ -265,8 +335,14 @@ views:
         type: inference.model.AdapterId
       - name: model_id
         type: inference.model.ModelId
+      # read from: docs/design/inference.md:433
+      - name: backend
+        type: String
       - name: contract_revision
         type: String
+      # read from: docs/design/inference.md:876-882
+      - name: execution_form
+        type: inference.model.ExecutionForm
       - name: locality
         type: inference.model.Locality
       - name: capabilities

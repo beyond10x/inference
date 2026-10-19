@@ -1,0 +1,184 @@
+type: ess-scenario/1
+domain: inference.stream
+scenario: cancel-generation-discards-unplayed-segments
+summary: Cancelling a generation discards its Tentative, Committed, Queued and Synthesized segments, leaves the Played one, and refuses a later delta.
+arrange:
+  - instance: profile
+    entity: inference.policy.DeploymentProfile
+  - instance: pipeline
+    entity: inference.graph.Pipeline
+  - instance: node-pipeline
+    entity: inference.graph.Pipeline
+  - instance: node
+    entity: inference.graph.Node
+  - instance: run
+    entity: inference.graph.Run
+  - instance: generation
+    entity: inference.stream.Generation
+  - instance: tentative
+    entity: inference.stream.OutputSegment
+  - instance: committed
+    entity: inference.stream.OutputSegment
+  - instance: queued
+    entity: inference.stream.OutputSegment
+  - instance: synthesized
+    entity: inference.stream.OutputSegment
+  - instance: played
+    entity: inference.stream.OutputSegment
+timeline:
+  - at: 2026-01-05T09:00:00Z
+    command: inference.policy.DeclareProfile
+    input: {kind: offline_strict, egress: denied, admitted: []}
+    outcome: declared
+    capture: {instance: profile, event: inference.policy.ProfileDeclared, field: profile_id}
+  - at: 2026-01-05T09:00:01Z
+    command: inference.graph.DeclarePipeline
+    input:
+      name: interruption
+      schema_revision: r1
+      mode: turn_based
+      profile_id: {$instance: profile}
+      required_capabilities: [output_streaming]
+    outcome: declared
+    capture: {instance: pipeline, event: inference.graph.PipelineDeclared, field: pipeline_id}
+  - at: 2026-01-05T09:00:02Z
+    command: inference.graph.ValidatePipeline
+    input: {pipeline_id: {$instance: pipeline}}
+    outcome: validated
+  - at: 2026-01-05T09:00:03Z
+    command: inference.graph.PlanPipeline
+    input: {pipeline_id: {$instance: pipeline}}
+    outcome: planned
+  - at: 2026-01-05T09:00:04Z
+    command: inference.graph.DeclarePipeline
+    input:
+      name: node-holder
+      schema_revision: r1
+      mode: turn_based
+      profile_id: {$instance: profile}
+      required_capabilities: [output_streaming]
+    outcome: declared
+    capture: {instance: node-pipeline, event: inference.graph.PipelineDeclared, field: pipeline_id}
+  - at: 2026-01-05T09:00:05Z
+    command: inference.graph.AddNode
+    input:
+      name: generator
+      pipeline_id: {$instance: node-pipeline}
+      requires: [output_streaming]
+      role: model
+    outcome: added
+    capture: {instance: node, event: inference.graph.NodeAdded, field: node_id}
+  - at: 2026-01-05T09:00:06Z
+    command: inference.graph.CreateRun
+    input: {pipeline_id: {$instance: pipeline}}
+    outcome: created
+    capture: {instance: run, event: inference.graph.RunCreated, field: run_id}
+  - at: 2026-01-05T09:00:07Z
+    command: inference.graph.ValidateRun
+    input: {run_id: {$instance: run}}
+    outcome: validating
+  - at: 2026-01-05T09:00:08Z
+    command: inference.graph.PrepareRun
+    input: {run_id: {$instance: run}}
+    outcome: preparing
+  - at: 2026-01-05T09:00:09Z
+    command: inference.graph.ActivateRun
+    input: {run_id: {$instance: run}}
+    outcome: active
+  - at: 2026-01-05T09:00:10Z
+    command: inference.stream.StartGeneration
+    input: {run_id: {$instance: run}, node_id: {$instance: node}, epoch: 1}
+    outcome: started
+    capture: {instance: generation, event: inference.stream.GenerationStarted, field: generation_id}
+  - at: 2026-01-05T09:00:11Z
+    command: inference.stream.EmitTextDelta
+    input: {generation_id: {$instance: generation}, sequence: 1, text: one}
+    outcome: emitted
+    capture: {instance: tentative, event: inference.stream.TextDelta, field: segment_id}
+  - at: 2026-01-05T09:00:12Z
+    command: inference.stream.EmitTextDelta
+    input: {generation_id: {$instance: generation}, sequence: 2, text: two}
+    outcome: emitted
+    capture: {instance: committed, event: inference.stream.TextDelta, field: segment_id}
+  - at: 2026-01-05T09:00:13Z
+    command: inference.stream.EmitTextDelta
+    input: {generation_id: {$instance: generation}, sequence: 3, text: three}
+    outcome: emitted
+    capture: {instance: queued, event: inference.stream.TextDelta, field: segment_id}
+  - at: 2026-01-05T09:00:14Z
+    command: inference.stream.EmitTextDelta
+    input: {generation_id: {$instance: generation}, sequence: 4, text: four}
+    outcome: emitted
+    capture: {instance: synthesized, event: inference.stream.TextDelta, field: segment_id}
+  - at: 2026-01-05T09:00:15Z
+    command: inference.stream.EmitTextDelta
+    input: {generation_id: {$instance: generation}, sequence: 5, text: five}
+    outcome: emitted
+    capture: {instance: played, event: inference.stream.TextDelta, field: segment_id}
+  - at: 2026-01-05T09:00:16Z
+    command: inference.stream.CommitSegment
+    input: {segment_id: {$instance: committed}}
+    outcome: committed
+  - at: 2026-01-05T09:00:17Z
+    command: inference.stream.CommitSegment
+    input: {segment_id: {$instance: queued}}
+    outcome: committed
+  - at: 2026-01-05T09:00:18Z
+    command: inference.stream.QueueForSynthesis
+    input: {segment_id: {$instance: queued}}
+    outcome: queued
+  - at: 2026-01-05T09:00:19Z
+    command: inference.stream.CommitSegment
+    input: {segment_id: {$instance: synthesized}}
+    outcome: committed
+  - at: 2026-01-05T09:00:20Z
+    command: inference.stream.QueueForSynthesis
+    input: {segment_id: {$instance: synthesized}}
+    outcome: queued
+  - at: 2026-01-05T09:00:21Z
+    command: inference.stream.CompleteSynthesis
+    input: {segment_id: {$instance: synthesized}}
+    outcome: synthesized
+  - at: 2026-01-05T09:00:22Z
+    command: inference.stream.CommitSegment
+    input: {segment_id: {$instance: played}}
+    outcome: committed
+  - at: 2026-01-05T09:00:23Z
+    command: inference.stream.QueueForSynthesis
+    input: {segment_id: {$instance: played}}
+    outcome: queued
+  - at: 2026-01-05T09:00:24Z
+    command: inference.stream.CompleteSynthesis
+    input: {segment_id: {$instance: played}}
+    outcome: synthesized
+  - at: 2026-01-05T09:00:25Z
+    command: inference.stream.AcknowledgePlayback
+    actor: inference.stream.MediaSink
+    input: {segment_id: {$instance: played}}
+    outcome: played
+  - at: 2026-01-05T09:00:26Z
+    command: inference.stream.CancelGeneration
+    input: {generation_id: {$instance: generation}}
+    outcome: cancelled
+  - at: 2026-01-05T09:00:27Z
+    command: inference.stream.EmitTextDelta
+    input: {generation_id: {$instance: generation}, sequence: 6, text: stale}
+    outcome: stale-generation
+  - at: 2026-01-05T09:00:28Z
+    command: inference.stream.AcknowledgePlayback
+    actor: inference.stream.MediaSink
+    input: {segment_id: {$instance: synthesized}}
+    outcome: wrong-state
+assert:
+  - view: inference.stream.Generations
+    contains: {generation_id: {$instance: generation}, state: Cancelled}
+  - view: inference.stream.Segments
+    contains: {segment_id: {$instance: tentative}, state: Discarded}
+  - view: inference.stream.Segments
+    contains: {segment_id: {$instance: committed}, state: Discarded}
+  - view: inference.stream.Segments
+    contains: {segment_id: {$instance: queued}, state: Discarded}
+  - view: inference.stream.Segments
+    contains: {segment_id: {$instance: synthesized}, state: Discarded}
+  - view: inference.stream.Segments
+    contains: {segment_id: {$instance: played}, state: Played}

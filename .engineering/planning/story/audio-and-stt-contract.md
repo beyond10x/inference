@@ -23,7 +23,7 @@ scope:
   path: crates/inference-testkit/tests/stt.rs
 - confidence: cited
   path: examples/stt-only
-revision: 10
+revision: 11
 ---
 ## Context
 
@@ -69,7 +69,7 @@ sibling creates.
 - **Files:** `crates/inference-testkit/Cargo.toml` — cited: step 2, two lines only: the optional dependency on `inference-stt` and `stt = ["dep:inference-stt"]` replacing the `stt = []` of `story:testkit-conformance-target`
 - **Files:** `examples/stt-only` (new workspace member, `publish = false`, holding the `cargo tree` test of step 3) — cited: step 3; `docs/design/inference.md:215`
 - **Files:** `Cargo.toml` (root: `[workspace] members` gains `"examples/*"`) — cited: step 3; `story:workspace-skeleton` step 1 names this story as the one adder
-- **Symbols:** `TranscriptHypothesis`, `TranscriptRevision`, `TranscriptCommitted` (`ess/domains/stream.yaml:595-618`), `CommittedSpanImmutable` (`:211`; `ReviseSpan` outcome `immutable`, `:334-336`), `incremental_input`, `output_streaming` (`ess/domains/model.yaml:31-32`), the `inference.model.Adapter` record (`model.yaml:100-120`), `StreamId`, `RunId`, `TurnId` — cited; all consumed from `inference-text` and `inference-core`, none declared by this story
+- **Symbols:** `TranscriptHypothesis`, `TranscriptRevision`, `TranscriptCommitted` (`ess/domains/stream.yaml:835-858`), `CommittedSpanImmutable` (`:243`; `ReviseSpan` outcome `immutable`, `:457-462`), `incremental_input`, `output_streaming` (`ess/domains/model.yaml:31-32`), the `inference.model.Adapter` record (`model.yaml:115-141`), `StreamId`, `RunId`, `TurnId` — cited; all consumed from `inference-text` and `inference-core`, none declared by this story
 - **Also likely:** `crates/inference-testkit/src/stt.rs` — inferred: the `stt` module behind `#[cfg(feature = "stt")]` is named by step 2 and pre-created empty by `story:testkit-conformance-target` step 1, but neither body names the file (`stt.rs` or `stt/mod.rs`)
 - **Also likely:** `crates/inference-testkit/tests/stt.rs` — inferred: the two mock-recogniser tests (§23.1 test 1; incremental vs batch) have no stated location; placed by analogy with `tests/envelope.rs` of `story:inbound-text-spans-and-envelope`; they may instead be `#[cfg(test)]` inside the module, in which case this file does not exist
 - **Not touched:** `crates/inference-testkit/src/lib.rs` (module pre-declared: step 2, testkit step 1), `Taskfile.yml` and `AGENTS.md` (`task check` already runs `--all-features`: Context), `ess/` and `ess/SKIPPED.md` (no new noun; no scenario in Acceptance; the extra STT descriptors are deferred to `epic:local-stt-adapter`: Out of scope) — cited
