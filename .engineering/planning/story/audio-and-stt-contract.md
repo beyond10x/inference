@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:audio-and-stt-contract
 kind: story
-status: draft
+status: implemented
 title: STT contract with a mock recogniser, usable alone
 summary: inference-stt is the recogniser contract with its capabilities declared apart; the testkit mock recogniser behind feature stt passes §23.1 test 1; an stt-only example depends on inference-stt and the mock only (A-01).
 relations:
@@ -23,7 +23,11 @@ scope:
   path: crates/inference-testkit/tests/stt.rs
 - confidence: cited
   path: examples/stt-only
-revision: 11
+revision: 14
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T06:21:13Z", actor: "human:timo", revision: 12, decided_on: {"recorded":{"review_outcome":3}}}
+- {from: "proposed", to: "active", at: "2026-10-19T06:21:13Z", actor: "human:timo", revision: 13, decided_on: {"recorded":{"review_outcome":3}}}
+- {from: "active", to: "implemented", at: "2026-10-19T06:43:32Z", actor: "human:timo", revision: 14, decided_on: {"recorded":{"test_result":1,"review_outcome":11,"verification":1}}}
 ---
 ## Context
 
