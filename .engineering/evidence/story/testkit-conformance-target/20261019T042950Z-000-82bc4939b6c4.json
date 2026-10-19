@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T04:29:50Z",
+  "actor": "human:timo",
+  "artifact": "story:testkit-conformance-target",
+  "kind": "story",
+  "revision": 35,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-testkit --all-features --test conform (VERIFIED, new behaviour: baseline edf8ca7 has no target; treatment cf36060 report/2 passed 4 of 229, failed 0, error 0, unsupported 225 equal to ess/SKIPPED.md)"
+  }
+}

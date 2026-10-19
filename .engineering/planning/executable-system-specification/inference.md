@@ -8,7 +8,7 @@ summary: Six domains, 17 entities, 36 commands; validates on ess 0.60.0; 153 syn
 relations:
 - specifies: product-requirements:inference
 - derived_from: architecture-design:inference
-revision: 3
+revision: 5
 transitions:
 - {from: "draft", to: "validated", at: "2026-10-18T21:12:53Z", actor: "human:timo", revision: 2}
 ---
@@ -16,7 +16,7 @@ transitions:
 
 | path | what |
 |---|---|
-| `ess/system.yaml` | `format: ess/25`, `system: inference`, `version: v1`, six domains |
+| `ess/system.yaml` | `format: ess/25`, `system: inference`, `version: v1`, seven domains |
 | `ess/ess-inputs.yaml` | `ess-inputs/2`, `requires: ess 0.60` |
 | `ess/domains/model.yaml` | `inference.model`: Model, Adapter; Capability, Modality, Locality, ExecutionForm |
 | `ess/domains/policy.yaml` | `inference.policy`: DeploymentProfile; ProfileKind, Egress |
@@ -24,9 +24,10 @@ transitions:
 | `ess/domains/stream.yaml` | `inference.stream`: Turn, Span, Generation, OutputSegment; the provisional/committed/irreversible state machine |
 | `ess/domains/tools.yaml` | `inference.tools`: Tool, ToolCall; the provisional-input barrier |
 | `ess/domains/session.yaml` | `inference.session`: Session |
+| `ess/domains/audio.yaml` | `inference.audio`: types only; AudioEncoding, AudioFormat, SampleClockPosition, AudioFrame |
 
 Every declaration carries a `read from: docs/design/inference.md:<line>` comment naming the design
-line it was read from (98 such lines across the six documents, `grep -c 'read from:'`).
+line it was read from (258 such lines across the seven documents, `grep -c 'read from:'`).
 
 ## What it declares
 
@@ -39,8 +40,10 @@ From `ess specify compile --path ess --format json`: 17 entities, 36 commands, 3
 |---|---|---|
 | `ess specify validate --path ess` | `inference v1 — 7 file(s), valid`, exit 0 | 2026-10-18 |
 | `ess verify conform synthesize --path ess --out .engineering/drafts/suite.json` | `153 scenario(s) (0 authored), 0 refusal(s)`, 0 notes | 2026-10-18 |
+| `ess specify validate --path ess`, after `inference.audio` (story:audio-vocabulary) | `inference v1 — 8 file(s), 4 scenario(s), valid`, exit 0 (before: `7 file(s), 4 scenario(s), valid`) | 2026-10-19 |
+| `ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json`, after `inference.audio` (story:audio-vocabulary) | `229 scenario(s) (4 authored), 3 refusal(s)`, exit 0; before the domain the same `229 scenario(s) (4 authored), 3 refusal(s)`, the 229 scenario ids identical and the three refusals the ESS-SYNTH-001 ones on `inference.graph.CancelRun/cancelled`, `inference.stream.CancelGeneration/cancelled` and `inference.stream.SupersedeGeneration/superseded`; the domain declares `types:` only | 2026-10-19 |
 
-Scenarios per domain: graph 85, stream 60, model 3, tools 3, policy 1, session 1.
+Scenarios per domain, 2026-10-19 (229 with `--scenarios ess/scenarios`): graph 104, stream 83, session 21, tools 13, model 4, policy 4. On 2026-10-18 (153, before the specification fixes): graph 85, stream 60, model 3, tools 3, policy 1, session 1.
 
 ## How the specification answers the design's open questions 1 to 3
 

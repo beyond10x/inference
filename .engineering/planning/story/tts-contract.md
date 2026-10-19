@@ -19,7 +19,7 @@ scope:
   path: crates/inference-testkit/tests/tts.rs
 - confidence: cited
   path: crates/inference-tts
-revision: 13
+revision: 14
 ---
 ## Context
 
@@ -66,3 +66,9 @@ read from this story's body or from the body of the story that pre-declares it, 
 - **Confidence:** high — the story names the crate, the manifest lines and the module; only the two filenames inside the testkit are read into it
 - **Would collide with:** any unit editing the `[dependencies]` or `[features]` table of `crates/inference-testkit/Cargo.toml`; any unit writing under `crates/inference-tts/`; any unit touching the testkit's `tts` feature module
 - **Safety fact:** the mock yields frames and segment transitions to its caller and records nothing in the testkit event log, so it shares no module with the stream, STT or LLM stories, and the three contract stories meet only in two lines each of one manifest — cited (Context, paragraph 3; `story:testkit-conformance-target` step 1), level 2, unproven: the pre-declared `stt = []`, `llm = []`, `tts = []` lines are adjacent and each story's optional-dependency line has no named insertion point, so a three-way merge can report a textual conflict on a semantically disjoint change
+
+## Frame length
+
+Added 2026-10-19 from wave 3 (`review-result:adversary-audio-vocabulary-pass-2`, judgement J-1).
+
+`inference-audio` does not tie `AudioFrame.data` length to `sample_count`, channels and the encoding width (`crates/inference-audio/src/lib.rs`, `AudioFrame`), and ESS `types:` cannot carry that invariant. The mock synthesiser of this story is the first producer of frames: it emits frames whose `data.len()` equals `sample_count * channels * width(encoding)`, and a case asserts it. Whether `inference-audio` itself refuses a mismatched frame is decided here, with the first producer, not in the vocabulary story.

@@ -1,0 +1,13 @@
+{
+  "at": "2023-11-14T22:14:06Z",
+  "actor": "human:timo",
+  "artifact": "story:testkit-conformance-target",
+  "kind": "story",
+  "revision": 35,
+  "change": {
+    "change": "evidence",
+    "kind": "ess_conformance_v2",
+    "source": "{\"completed_at\":\"1700000046100\",\"conformance_status\":\"failed\",\"counts\":{\"error\":0,\"failed\":0,\"passed\":4,\"skipped\":0,\"total\":229,\"unsupported\":225},\"coverage\":{\"knowledge\":\"unknown\"},\"execution_status\":\"failed\",\"format\":\"ess-conformance-report/2\",\"implementation\":\"inference-testkit\",\"policy\":\"complete-selection/1\",\"producer_profile\":\"external-scenario-status/1\",\"report_input\":\"target/tmp/conform-1792384171624-1422602/report.json\",\"report_input_digest\":\"sha256:72f9df783e57d90c799fd7e7c06c25964204e8b5afdafdde61cce3cc40cd3aa7\",\"spec_digest\":\"7812e0640e1ad94def116e169bf03ef6788806dea4fb23eeff7cafc976dca2f7\",\"specification\":\"inference/v1\",\"suite\":{\"digest\":\"sha256:4483e855e625501bf233b95a150941a9723e1cf69aa7c1b36d3df4d33bf739f4\",\"digest_profile\":\"sha256-json-bytes/1\",\"version\":\"ess-conformance/34\"},\"suite_input\":\"target/tmp/conform-1792384171624-1422602/suite.json\",\"suite_input_digest\":\"sha256:4483e855e625501bf233b95a150941a9723e1cf69aa7c1b36d3df4d33bf739f4\"}",
+    "reference": "target/tmp/conform-1792384171624-1422602/report.json@sha256:72f9df783e57d90c799fd7e7c06c25964204e8b5afdafdde61cce3cc40cd3aa7"
+  }
+}
