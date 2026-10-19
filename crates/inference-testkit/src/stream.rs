@@ -74,6 +74,7 @@ use inference_core::generation::{
     GenerationState, GenerationStateConflict, GenerationSuperseded, StartGeneration,
 };
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
+use inference_pipeline::nodes::vad::{SpeechEnded, SpeechStarted};
 #[cfg(feature = "run")]
 use inference_runtime::run::{RunNotFound, RunStateConflict};
 use inference_text::{
@@ -209,6 +210,10 @@ impl SegmentStore {
 /// An event of `inference.stream`, as the domain emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
+    /// `inference.stream.SpeechStarted`.
+    SpeechStarted(SpeechStarted),
+    /// `inference.stream.SpeechEnded`.
+    SpeechEnded(SpeechEnded),
     /// `inference.stream.TurnOpened`.
     TurnOpened(TurnOpened),
     /// `inference.stream.TurnCompleted`.
@@ -247,6 +252,8 @@ impl StreamEvent {
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
+            Self::SpeechStarted(_) => "inference.stream.SpeechStarted",
+            Self::SpeechEnded(_) => "inference.stream.SpeechEnded",
             Self::TurnOpened(_) => "inference.stream.TurnOpened",
             Self::TurnCompleted(_) => "inference.stream.TurnCompleted",
             Self::TranscriptHypothesis(_) => "inference.stream.TranscriptHypothesis",
@@ -275,7 +282,9 @@ impl StreamEvent {
             Self::GenerationSuperseded(event) => Some(event.generation_id),
             Self::GenerationCancelled(event) => Some(event.generation_id),
             Self::TextDelta(event) => Some(event.generation_id),
-            Self::TurnOpened(_)
+            Self::SpeechStarted(_)
+            | Self::SpeechEnded(_)
+            | Self::TurnOpened(_)
             | Self::TurnCompleted(_)
             | Self::TranscriptHypothesis(_)
             | Self::TranscriptRevision(_)

@@ -36,7 +36,8 @@ pub mod tools;
 /// `inference.session`: empty until the session stores land.
 pub mod session;
 
-/// The scripted mock recogniser of the STT contract, in two capability configurations.
+/// The scripted mock recogniser of the STT contract, in two capability configurations, and
+/// synthetic audio of tone and silence.
 #[cfg(feature = "stt")]
 pub mod stt;
 
