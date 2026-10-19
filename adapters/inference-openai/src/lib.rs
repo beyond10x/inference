@@ -18,13 +18,19 @@
 //! handshake, and is not kept, printed or logged.
 //!
 //! Audio goes in either as PCM16 at 24 kHz, resampled from `inference-audio` frames where needed
-//! ([`encode_pcm16_24k`]), or as G.711 mu-law at 8 kHz, passed through
-//! ([`RealtimeClient::append_encoded`]). The binding to the duplex contract is not here.
+//! ([`encode_pcm16_24k`]), or as G.711 mu-law or A-law at 8 kHz, passed through
+//! ([`RealtimeClient::append_encoded`]).
+//!
+//! With feature `duplex` ([`duplex`]), the client is an `inference-duplex` native speech model:
+//! [`duplex::OpenAiRealtime`] opens sessions through the contract and records every server
+//! event through its `SessionLedger`.
 
 mod audio;
 mod client;
 mod config;
 mod credential;
+#[cfg(feature = "duplex")]
+pub mod duplex;
 mod error;
 mod event;
 
