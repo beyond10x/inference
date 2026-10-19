@@ -1,6 +1,6 @@
 [package]
 name = "inference-pipeline"
-description = "Pipeline graphs of the inference framework: nodes with typed ports, bounded edges and adapter bindings, declared by command or through a typed builder."
+description = "Pipeline graphs of the inference framework: nodes with typed ports, bounded edges and adapter bindings, declared by command, through a typed builder or from a JSON definition checked against node descriptors."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,11 +13,11 @@ inference-core = { path = "../inference-core" }
 inference-text = { path = "../inference-text" }
 inference-tools = { path = "../inference-tools" }
 serde.workspace = true
+serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
-serde_json.workspace = true
 
 [lints]
 workspace = true

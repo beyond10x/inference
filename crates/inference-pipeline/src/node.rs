@@ -25,7 +25,7 @@ use std::pin::Pin;
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 
-use crate::{Node, PortId};
+use crate::{Node, NodeInstanceId, PortId};
 
 /// The future a lifecycle method returns: boxed, `Send`, and borrowing the node for `'a`.
 pub type NodeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -78,7 +78,9 @@ pub struct NodeOutput<P> {
 }
 
 /// What a node is handed when it starts: one endpoint per edge of the run that arrives at or
-/// leaves from one of its ports, in the declaration order of the edges.
+/// leaves from one of its ports, in the declaration order of the edges, then one per exposure of
+/// one of its ports, the inner end of an ingress or an egress, in the declaration order of the
+/// exposures.
 pub struct NodeEndpoints<P> {
     pub inputs: Vec<NodeInput<P>>,
     pub outputs: Vec<NodeOutput<P>>,
@@ -98,6 +100,14 @@ impl<P> Default for NodeEndpoints<P> {
 pub trait NodeImplementation<P>: Send {
     /// The node has an instance in the run: `node` is its declaration.
     fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()>;
+
+    /// The instance [`describe`](NodeImplementation::describe) announced was described under
+    /// `instance_id`, the identity of its `inference.graph.NodeInstance`; called once, right after
+    /// `describe`. A node that names its instance, such as a subgraph node whose child run records
+    /// it as its parent, keeps it; the default ignores it.
+    fn described(&mut self, instance_id: NodeInstanceId) {
+        let _ = instance_id;
+    }
 
     /// Acquires what the node needs to start.
     ///
