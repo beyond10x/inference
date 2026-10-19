@@ -1,0 +1,16 @@
+[package]
+name = "inference-tts"
+description = "TTS contract of the inference framework: synthesisers turning committed output segments into audio frames, with incremental input and output streaming declared apart."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+inference-audio = { path = "../inference-audio" }
+inference-core = { path = "../inference-core" }
+inference-text = { path = "../inference-text" }
+
+[lints]
+workspace = true
