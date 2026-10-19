@@ -12,16 +12,16 @@
 //!
 //! An observed event's position is the target's too: [`Stores::publish`] places every event a
 //! store recorded in the target's one publication order, and [`Stores::model_position`],
-//! [`Stores::policy_position`], [`Stores::graph_position`], [`Stores::stream_position`] and
-//! [`Stores::tools_position`] read its place there. Each store orders its own events only, as an
-//! envelope's `sequence` orders one stream only, so the merge order across domains is the
-//! target's, the recorder's, and the one thing a module reads that no store holds.
+//! [`Stores::policy_position`], [`Stores::graph_position`], [`Stores::stream_position`],
+//! [`Stores::tools_position`] and [`Stores::duplex_position`] read its place there. Each store
+//! orders its own events only, as an envelope's `sequence` orders one stream only, so the merge
+//! order across domains is the target's, the recorder's, and the one thing a module reads that no
+//! store holds.
 //!
 //! Identities are the stores' too, and no two stores issue the same one: each counts in its own
 //! space of the first eight hex digits, `inference.stream` in 0, `inference.model` in 1,
-//! `inference.policy` in 2, `inference.graph` in 3 and `inference.tools` in 4, so an identity of
-//! one domain sent where
-//! another's belongs names no row.
+//! `inference.policy` in 2, `inference.graph` in 3, `inference.tools` in 4 and `inference.duplex` in
+//! 6, so an identity of one domain sent where another's belongs names no row.
 //!
 //! A scenario forcing an `external` outcome ([`ConformanceTarget::configure_external_outcome`]) goes
 //! to the module of the command's domain, which accepts it only for an outcome it answers and its
@@ -32,6 +32,7 @@
 //! [`integer`] reads it back as an `i64` and refuses a fractional or out-of-range value as an
 //! error, never as a pass; no request is deserialized whole into an `inference-core` type.
 
+mod duplex;
 mod graph;
 mod model;
 mod policy;
@@ -67,6 +68,7 @@ pub struct Stores {
     pub stream: stream::State,
     pub tools: tools::State,
     pub session: session::State,
+    pub duplex: duplex::State,
     publication: Publication,
     forced: Option<OutcomeRef>,
 }
@@ -80,6 +82,7 @@ struct Publication {
     graph: Vec<u64>,
     stream: Vec<u64>,
     tools: Vec<u64>,
+    duplex: Vec<u64>,
 }
 
 impl Stores {
@@ -89,24 +92,27 @@ impl Stores {
     /// returns. Events recorded straight into the stores between two calls, as a test arranges a
     /// generation that no command can start yet, are placed at the next call, in the order
     /// `inference.model`, `inference.policy`, `inference.graph`, `inference.stream`,
-    /// `inference.tools`. A story that fills a module adds its events here.
+    /// `inference.tools`, `inference.duplex`. A story that fills a module adds its events here.
     pub fn publish(&mut self) {
         let mut placed = self.publication.model.len()
             + self.publication.policy.len()
             + self.publication.graph.len()
             + self.publication.stream.len()
-            + self.publication.tools.len();
+            + self.publication.tools.len()
+            + self.publication.duplex.len();
         let model = self.model.events().len();
         let policy = self.policy.events().len();
         let graph = self.graph.events().len();
         let stream = self.stream.events().len();
         let tools = self.tools.events().len();
+        let duplex = self.duplex.events().len();
         for (positions, recorded) in [
             (&mut self.publication.model, model),
             (&mut self.publication.policy, policy),
             (&mut self.publication.graph, graph),
             (&mut self.publication.stream, stream),
             (&mut self.publication.tools, tools),
+            (&mut self.publication.duplex, duplex),
         ] {
             while positions.len() < recorded {
                 placed += 1;
@@ -157,6 +163,12 @@ impl Stores {
         Self::placed(&self.publication.tools, "inference.tools", index)
     }
 
+    /// The position, from 1, of the `index`th event (from 0) the `inference.duplex` store
+    /// recorded, in the target's one publication order.
+    pub fn duplex_position(&self, index: usize) -> Result<u64, TargetError> {
+        Self::placed(&self.publication.duplex, "inference.duplex", index)
+    }
+
     /// The position [`Stores::publish`] gave the `index`th event of `domain`; an event it has not
     /// placed is an error, never a guessed position.
     fn placed(positions: &[u64], domain: &str, index: usize) -> Result<u64, TargetError> {
@@ -180,7 +192,8 @@ impl Stores {
             + self.policy.events().len()
             + self.graph.events().len()
             + self.stream.events().len()
-            + self.tools.events().len();
+            + self.tools.events().len()
+            + self.duplex.events().len();
         u64::try_from(events).unwrap_or(u64::MAX)
     }
 
@@ -261,6 +274,7 @@ impl ConformanceTarget for Target {
             stream::DOMAIN => stream::execute_command(stores, &request),
             tools::DOMAIN => tools::execute_command(stores, &request),
             session::DOMAIN => session::execute_command(stores, &request),
+            duplex::DOMAIN => duplex::execute_command(stores, &request),
             _ => Err(unsupported(&name)),
         }
     }
@@ -275,6 +289,7 @@ impl ConformanceTarget for Target {
             stream::DOMAIN => stream::query_view(stores, &request),
             tools::DOMAIN => tools::query_view(stores, &request),
             session::DOMAIN => session::query_view(stores, &request),
+            duplex::DOMAIN => duplex::query_view(stores, &request),
             _ => Err(unsupported(&name)),
         }
     }
@@ -292,6 +307,7 @@ impl ConformanceTarget for Target {
             stream::DOMAIN => stream::observe_events(stores, &request),
             tools::DOMAIN => tools::observe_events(stores, &request),
             session::DOMAIN => session::observe_events(stores, &request),
+            duplex::DOMAIN => duplex::observe_events(stores, &request),
             _ => Err(unsupported(&name)),
         }
     }
@@ -376,6 +392,14 @@ impl<'a> Input<'a> {
     /// caller to read field by field.
     pub fn node(&mut self, field: &str) -> Result<&'a Node, TargetError> {
         self.take(field)
+    }
+
+    /// The node of an ESS `Optional` field, `None` when the request leaves it out or sends null.
+    pub fn optional(&mut self, field: &str) -> Option<&'a Node> {
+        match self.fields.remove(field) {
+            None | Some(Node::Null) => None,
+            Some(node) => Some(node),
+        }
     }
 
     /// An ESS `String`.

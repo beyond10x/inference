@@ -1,0 +1,1236 @@
+# The native speech session of docs/design/inference.md: topology D (§14.4), one multiport node
+# that takes continuous audio and control in and gives audio, transcripts and tool proposals out
+# (§7.4, §7.5). It is the shape two hosted realtime speech models share: a session over one
+# adapter, audio input accepted and committed (or ended by the provider's own turn detection),
+# responses that stream audio and transcript, the input transcript, barge-in that cancels the
+# response in progress and truncates its audio at what the listener heard, and tool calls proposed
+# inside the session and answered on it. No provider appears here.
+domain: inference.duplex
+
+summary: >-
+  A SpeechSession is opened over one adapter from a configuration: voice, instructions, input and
+  output audio formats, turn detection (server-side voice activity, semantic, or off), whether a
+  detected turn end creates a response by itself, whether detected speech interrupts a response
+  by itself, the tools the session may propose, and a liveness bound. While it is Open it accepts
+  input audio, a commit of the input, the provider's speech-started and speech-stopped
+  observations and the input transcript. A Response is created on an open session, streams output
+  audio and output transcript while InProgress, and is completed, cancelled (barge-in) or failed;
+  its output audio may be truncated at the sample the listener heard. Input is accepted while a
+  response is in progress, which is what lets an adapter claim native duplex. A SpeechToolCall is
+  proposed by a response in progress, naming a declared tool, and answered on the session with
+  its result by call id. Usage per response and input transcription usage are recorded as events.
+  A session that stalls or whose transport closes fails with a typed failure.
+
+naming:
+  wire: duplex
+  display: Duplex
+
+types:
+  - name: inference.duplex.SpeechSessionId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.duplex.ResponseId
+    kind: newtype
+    of: Uuid
+
+  # The provider names a tool call; its identity is the provider's string, carried unread.
+  # read from: docs/design/inference.md:402
+  # read from: docs/design/inference.md:424
+  - name: inference.duplex.SpeechCallId
+    kind: newtype
+    of: String
+
+  # Who ends a user turn: the provider's voice activity detection, its semantic turn detection, or
+  # nobody, in which case the caller commits the input and creates each response itself.
+  # read from: docs/design/inference.md:398
+  # read from: docs/design/inference.md:466
+  - name: inference.duplex.TurnDetection
+    kind: enum
+    variants: [server_vad, semantic_vad, disabled]
+
+  # How readily the provider's turn detection ends a turn: low waits longer, high ends sooner. A
+  # small scale both hosted shapes offer (an eagerness or an endpointing sensitivity), not a
+  # provider's own threshold.
+  # read from: docs/design/inference.md:398
+  # read from: docs/design/inference.md:466
+  - name: inference.duplex.TurnSensitivity
+    kind: enum
+    variants: [low, medium, high]
+
+  # How a session failed: the provider sent nothing within the liveness bound, the transport
+  # closed, the provider refused a request, or the provider reported an error of its own.
+  # read from: docs/design/inference.md:399
+  # read from: docs/design/inference.md:1006
+  - name: inference.duplex.SessionFailureKind
+    kind: enum
+    variants: [stalled, transport_closed, rejected, provider_error]
+
+  # read from: docs/design/inference.md:1006
+  # UNMAPPED: the design names no failure codes for a session; `detail` is free text until the
+  # owner names them. Open question for the owner.
+  - name: inference.duplex.SessionFailure
+    kind: struct
+    fields:
+      - name: kind
+        type: inference.duplex.SessionFailureKind
+      - name: detail
+        type: String
+
+  # Tokens of one direction of one response, by kind; cached tokens are input tokens the provider
+  # served from its cache, counted inside text and audio.
+  # read from: docs/design/inference.md:367
+  # read from: docs/design/inference.md:373
+  - name: inference.duplex.TokenCounts
+    kind: struct
+    fields:
+      - name: text_tokens
+        type: Integer
+      - name: audio_tokens
+        type: Integer
+      - name: cached_tokens
+        type: Integer
+
+  # The usage of one response, input and output apart, for a meter to read. It is the running
+  # total of that response so far: a later record replaces an earlier one, and an adapter whose
+  # provider reports deltas sums them before it records.
+  # read from: docs/design/inference.md:367
+  # read from: docs/design/inference.md:373
+  - name: inference.duplex.ResponseUsage
+    kind: struct
+    fields:
+      - name: input
+        type: inference.duplex.TokenCounts
+      - name: output
+        type: inference.duplex.TokenCounts
+
+  # The usage of transcribing the input, which a provider may meter apart from responses.
+  # read from: docs/design/inference.md:373
+  - name: inference.duplex.TranscriptionUsage
+    kind: struct
+    fields:
+      - name: input_tokens
+        type: Integer
+      - name: output_tokens
+        type: Integer
+
+entities:
+  # One native speech session over one adapter: the single multiport node of topology D, never an
+  # STT, an LLM and a TTS node in disguise.
+  # read from: docs/design/inference.md:394
+  # read from: docs/design/inference.md:407
+  # read from: docs/design/inference.md:790-801
+  # read from: docs/design/inference.md:1142
+  # UNMAPPED: hosted adapters must be enabled explicitly (design 904); a session is opened over an
+  # adapter the caller already holds, and whether opening one should read a deployment profile is
+  # the graph binding's question, not settled here. Open question for the owner.
+  - name: inference.duplex.SpeechSession
+    naming:
+      summary: A native speech session over one adapter.
+    identity:
+      name: session_id
+      type: inference.duplex.SpeechSessionId
+    fields:
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: voice
+        type: String
+      - name: instructions
+        type: String
+      # Frames pass in these formats as they are, never resampled by the session.
+      # read from: docs/design/inference.md:293
+      # read from: docs/design/inference.md:324-326
+      - name: input_format
+        type: inference.audio.AudioFormat
+      - name: output_format
+        type: inference.audio.AudioFormat
+      # read from: docs/design/inference.md:398
+      - name: turn_detection
+        type: inference.duplex.TurnDetection
+      # Whether a detected turn end creates a response by itself; off, the caller creates each.
+      # read from: docs/design/inference.md:398
+      - name: auto_response
+        type: Boolean
+      # Tuning of the provider's turn detection, each absent for the provider's default: the
+      # silence that ends a turn, how readily a turn ends, and the audio kept before detected
+      # speech. A model honours only the tuning its capabilities name, and refuses the rest at
+      # open.
+      # read from: docs/design/inference.md:398
+      # read from: docs/design/inference.md:466
+      - name: turn_silence_ms
+        type: Optional<Integer>
+      - name: turn_sensitivity
+        type: Optional<inference.duplex.TurnSensitivity>
+      - name: turn_prefix_padding_ms
+        type: Optional<Integer>
+      # Whether detected speech cancels the response in progress by itself; off, barge-in is the
+      # caller's decision.
+      # read from: docs/design/inference.md:399
+      # read from: docs/design/inference.md:630-641
+      - name: auto_interrupt
+        type: Boolean
+      # read from: docs/design/inference.md:402
+      - name: tools
+        type: List<inference.tools.ToolId>
+      # The liveness bound: a session whose provider sends nothing for this many milliseconds
+      # fails as stalled instead of falling silent.
+      # read from: docs/design/inference.md:1006
+      - name: idle_limit_ms
+        type: Integer
+    relations:
+      - name: adapter
+        kind: references
+        target: inference.model.Adapter
+        cardinality: one
+        via: adapter_id
+      # read from: docs/design/inference.md:402
+      - name: tools
+        kind: references
+        target: inference.tools.Tool
+        cardinality: many
+        via: tools
+    lifecycle:
+      initial: Open
+      states: [Open, Closed, Failed]
+      terminal: [Closed, Failed]
+      transitions:
+        - name: close
+          from: [Open]
+          to: Closed
+        - name: fail
+          from: [Open]
+          to: Failed
+
+  # One response of a session: output audio and its transcript on one response id, from creation
+  # to completion, cancellation or failure. A cancelled response is never resumed: the next answer
+  # is a new response with a new id.
+  # read from: docs/design/inference.md:399
+  # read from: docs/design/inference.md:403
+  # read from: docs/design/inference.md:630-641
+  # The authored scenario input-during-output-continues-response states the shape of the
+  # `native_duplex` rule (design 1240, 422) against a store: input accepted while a response is in
+  # progress, further output on the same response before it completes, no second response id.
+  # Against a store it holds by construction, so it is not evidence about any adapter. The
+  # evidence an adapter must give is `inference_duplex::conformance::native_duplex_evidence`:
+  # input sent after its output began, output whose content derives from that input before the
+  # response completes, no second response id.
+  # read from: docs/design/inference.md:401
+  # read from: docs/design/inference.md:422
+  # read from: docs/design/inference.md:1143
+  # read from: docs/design/inference.md:1240
+  # UNMAPPED: no field says which input an output reflects (no provider reports it), so neither
+  # the dependency of content on input nor the claim of an adapter can be a scenario of this
+  # specification; both are the adapter-level procedure's. Open question for the owner.
+  # UNMAPPED: both providers keep at most one response in progress per session; ess 0.60.0 counts
+  # no related rows in a guard, so a second CreateResponse while one is InProgress is refused by
+  # the contract crate, not here. Open question for the owner.
+  - name: inference.duplex.Response
+    naming:
+      summary: One response of a native speech session.
+    identity:
+      name: response_id
+      type: inference.duplex.ResponseId
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+    relations:
+      - name: session
+        kind: references
+        target: inference.duplex.SpeechSession
+        cardinality: one
+        via: session_id
+    lifecycle:
+      initial: InProgress
+      states: [InProgress, Completed, Cancelled, Failed]
+      terminal: [Completed, Cancelled, Failed]
+      transitions:
+        - name: complete
+          from: [InProgress]
+          to: Completed
+        - name: cancel
+          from: [InProgress]
+          to: Cancelled
+        - name: fail
+          from: [InProgress]
+          to: Failed
+
+  # A tool call a response proposed inside the session, naming a declared tool, with JSON
+  # arguments, answered on the session by its call id. Authorizing and executing it is the
+  # caller's, through inference.tools; native tool calling is not a sidecar agent.
+  # read from: docs/design/inference.md:402
+  # read from: docs/design/inference.md:424
+  # read from: docs/design/inference.md:801
+  - name: inference.duplex.SpeechToolCall
+    naming:
+      summary: A tool call proposed inside a native speech session.
+    identity:
+      name: call_id
+      type: inference.duplex.SpeechCallId
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: arguments
+        type: Json
+    relations:
+      - name: response
+        kind: references
+        target: inference.duplex.Response
+        cardinality: one
+        via: response_id
+      - name: tool
+        kind: references
+        target: inference.tools.Tool
+        cardinality: one
+        via: tool_id
+    lifecycle:
+      initial: Proposed
+      states: [Proposed, Answered]
+      terminal: [Answered]
+      transitions:
+        - name: answer
+          from: [Proposed]
+          to: Answered
+
+errors:
+  # read from: docs/design/inference.md:99
+  - name: inference.duplex.AdapterNotFound
+    summary: No adapter carries the identity the session named; nothing was opened.
+    fields:
+      - name: adapter_id
+        type: inference.model.AdapterId
+
+  # That the liveness bound is positive is this specification's rule, not the design's.
+  # read from: docs/design/inference.md:1006
+  - name: inference.duplex.NonPositiveIdleLimit
+    summary: The liveness bound must be at least one millisecond; nothing was opened.
+    fields:
+      - name: submitted
+        type: Integer
+
+  # The narrowing `ess/domains/audio.yaml` declares in prose: a sample rate within 1 and
+  # 4294967295, a channel count within 1 and 65535, a sample count within 0 and 4294967295, a
+  # position at least 0. The audio domain declares no command that could refuse it; every duplex
+  # command taking a format or a frame does.
+  # read from: docs/design/inference.md:235
+  # read from: docs/design/inference.md:293
+  - name: inference.duplex.FormatOutOfRange
+    summary: A format or a frame lies outside the audio vocabulary's range; nothing changed.
+
+  - name: inference.duplex.SpeechSessionNotFound
+    summary: No session carries the identity; nothing changed.
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+
+  - name: inference.duplex.SpeechSessionStateConflict
+    summary: The session is not in a state this command acts in, so nothing changed.
+    fields:
+      - name: current
+        type: inference.duplex.SpeechSession.State
+
+  - name: inference.duplex.ResponseNotFound
+    summary: No response carries the identity; nothing changed.
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+
+  - name: inference.duplex.ResponseStateConflict
+    summary: The response is not in a state this command acts in, so nothing changed.
+    fields:
+      - name: current
+        type: inference.duplex.Response.State
+
+  - name: inference.duplex.SpeechToolCallStateConflict
+    summary: The call is not in a state this command moves it from, so nothing moved.
+    fields:
+      - name: current
+        type: inference.duplex.SpeechToolCall.State
+
+  # An adapter issues a response id per response its provider starts; one already used names an
+  # earlier response, whose record a second one would overwrite.
+  # read from: docs/design/inference.md:399
+  - name: inference.duplex.ResponseIdReused
+    summary: A response already carries the identity; nothing was created.
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+
+  # The provider names each call; a name already used would leave the result of one of the two
+  # calls unreachable by its call id.
+  # read from: docs/design/inference.md:402
+  - name: inference.duplex.SpeechCallIdReused
+    summary: A call already carries the identity; nothing was proposed.
+    fields:
+      - name: call_id
+        type: inference.duplex.SpeechCallId
+
+commands:
+  # read from: docs/design/inference.md:394
+  # read from: docs/design/inference.md:713
+  - name: inference.duplex.OpenSpeechSession
+    input:
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: voice
+        type: String
+      - name: instructions
+        type: String
+      - name: input_format
+        type: inference.audio.AudioFormat
+      - name: output_format
+        type: inference.audio.AudioFormat
+      - name: turn_detection
+        type: inference.duplex.TurnDetection
+      - name: auto_response
+        type: Boolean
+      - name: turn_silence_ms
+        type: Optional<Integer>
+      - name: turn_sensitivity
+        type: Optional<inference.duplex.TurnSensitivity>
+      - name: turn_prefix_padding_ms
+        type: Optional<Integer>
+      - name: auto_interrupt
+        type: Boolean
+      - name: tools
+        type: List<inference.tools.ToolId>
+      - name: idle_limit_ms
+        type: Integer
+    outcomes:
+      - name: unknown-adapter
+        when_related: {via: input.adapter_id, exists: false}
+        error: inference.duplex.AdapterNotFound
+        payload:
+          inference.duplex.AdapterNotFound:
+            adapter_id: input.adapter_id
+        summary: No adapter carries this identity; nothing was opened.
+
+      # read from: docs/design/inference.md:235
+      # read from: docs/design/inference.md:293
+      - name: format-out-of-range
+        when:
+          any:
+            - input_format.sample_rate < 1
+            - input_format.sample_rate > 4294967295
+            - input_format.channels < 1
+            - input_format.channels > 65535
+            - output_format.sample_rate < 1
+            - output_format.sample_rate > 4294967295
+            - output_format.channels < 1
+            - output_format.channels > 65535
+        error: inference.duplex.FormatOutOfRange
+        summary: A format lies outside the audio vocabulary's range; nothing was opened.
+
+      - name: opened
+        when: idle_limit_ms > 0
+        creates: inference.duplex.SpeechSession
+        instance: session_id
+        sets:
+          adapter_id: input.adapter_id
+          voice: input.voice
+          instructions: input.instructions
+          input_format: input.input_format
+          output_format: input.output_format
+          turn_detection: input.turn_detection
+          auto_response: input.auto_response
+          turn_silence_ms: input.turn_silence_ms
+          turn_sensitivity: input.turn_sensitivity
+          turn_prefix_padding_ms: input.turn_prefix_padding_ms
+          auto_interrupt: input.auto_interrupt
+          tools: input.tools
+          idle_limit_ms: input.idle_limit_ms
+        emits:
+          - inference.duplex.SpeechSessionOpened
+        payload:
+          inference.duplex.SpeechSessionOpened:
+            session_id: {generated: true}
+            adapter_id: input.adapter_id
+            turn_detection: input.turn_detection
+        summary: The session is open with its configuration.
+
+      - name: no-liveness-bound
+        error: inference.duplex.NonPositiveIdleLimit
+        payload:
+          inference.duplex.NonPositiveIdleLimit:
+            submitted: input.idle_limit_ms
+        summary: The liveness bound was not positive; nothing was opened.
+
+  # Input audio in the session's input format. It is accepted whether or not a response is in
+  # progress: input during output is the session's concurrency policy.
+  # read from: docs/design/inference.md:324
+  # read from: docs/design/inference.md:337
+  # read from: docs/design/inference.md:398
+  # read from: docs/design/inference.md:401
+  # UNMAPPED: ess 0.60.0 compares no input field with a related row's field, so a frame in another
+  # format than the session's input format is refused by the contract crate, not here.
+  - name: inference.duplex.AppendInputAudio
+    input:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: frame
+        type: inference.audio.AudioFrame
+    outcomes:
+      - name: unknown-session
+        when_related: {via: input.session_id, exists: false}
+        error: inference.duplex.SpeechSessionNotFound
+        payload:
+          inference.duplex.SpeechSessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was accepted.
+
+      - name: session-not-open
+        when_related: {via: input.session_id, predicate: state != Open}
+        error: inference.duplex.SpeechSessionStateConflict
+        summary: The session is closed or failed; nothing was accepted.
+
+      # read from: docs/design/inference.md:293
+      - name: format-out-of-range
+        when:
+          any:
+            - frame.format.sample_rate < 1
+            - frame.format.sample_rate > 4294967295
+            - frame.format.channels < 1
+            - frame.format.channels > 65535
+            - frame.sample_count < 0
+            - frame.sample_count > 4294967295
+            - frame.position < 0
+        error: inference.duplex.FormatOutOfRange
+        summary: The frame lies outside the audio vocabulary's range; nothing was accepted.
+
+      - name: accepted
+        emits:
+          - inference.duplex.InputAccepted
+        payload:
+          inference.duplex.InputAccepted:
+            session_id: input.session_id
+            frame: input.frame
+        summary: The frame is accepted as it is.
+
+  # The caller ends the user turn; with turn detection on, the provider ends it by itself. With
+  # `auto_response` on, every commit, the caller's or the provider's, is a request for a response:
+  # the provider owes one, and the contract's liveness bound runs from the commit.
+  # read from: docs/design/inference.md:398
+  # read from: docs/design/inference.md:715
+  - name: inference.duplex.CommitInput
+    input:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+    outcomes:
+      - name: unknown-session
+        when_related: {via: input.session_id, exists: false}
+        error: inference.duplex.SpeechSessionNotFound
+        payload:
+          inference.duplex.SpeechSessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was committed.
+
+      - name: session-not-open
+        when_related: {via: input.session_id, predicate: state != Open}
+        error: inference.duplex.SpeechSessionStateConflict
+        summary: The session is closed or failed; nothing was committed.
+
+      - name: committed
+        emits:
+          - inference.duplex.InputCommitted
+        payload:
+          inference.duplex.InputCommitted:
+            session_id: input.session_id
+        summary: The input accepted so far is one user turn.
+
+  # The provider detected the start of speech at a sample of the input; during a response this is
+  # the barge-in signal.
+  # read from: docs/design/inference.md:334
+  # read from: docs/design/inference.md:399
+  # read from: docs/design/inference.md:630
+  - name: inference.duplex.ObserveSpeechStarted
+    input:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: position
+        type: inference.audio.SampleClockPosition
+    outcomes:
+      - name: unknown-session
+        when_related: {via: input.session_id, exists: false}
+        error: inference.duplex.SpeechSessionNotFound
+        payload:
+          inference.duplex.SpeechSessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was observed.
+
+      - name: session-not-open
+        when_related: {via: input.session_id, predicate: state != Open}
+        error: inference.duplex.SpeechSessionStateConflict
+        summary: The session is closed or failed; nothing was observed.
+
+      - name: observed
+        emits:
+          - inference.duplex.SpeechStarted
+        payload:
+          inference.duplex.SpeechStarted:
+            session_id: input.session_id
+            position: input.position
+        summary: Speech started at this input sample.
+
+  # read from: docs/design/inference.md:334
+  - name: inference.duplex.ObserveSpeechStopped
+    input:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: position
+        type: inference.audio.SampleClockPosition
+    outcomes:
+      - name: unknown-session
+        when_related: {via: input.session_id, exists: false}
+        error: inference.duplex.SpeechSessionNotFound
+        payload:
+          inference.duplex.SpeechSessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was observed.
+
+      - name: session-not-open
+        when_related: {via: input.session_id, predicate: state != Open}
+        error: inference.duplex.SpeechSessionStateConflict
+        summary: The session is closed or failed; nothing was observed.
+
+      - name: observed
+        emits:
+          - inference.duplex.SpeechStopped
+        payload:
+          inference.duplex.SpeechStopped:
+            session_id: input.session_id
+            position: input.position
+        summary: Speech stopped at this input sample.
+
+  # The provider's transcript of the user's input: a sidecar output of the same node.
+  # read from: docs/design/inference.md:403
+  # read from: docs/design/inference.md:797
+  - name: inference.duplex.TranscribeInput
+    input:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: text
+        type: String
+    outcomes:
+      - name: unknown-session
+        when_related: {via: input.session_id, exists: false}
+        error: inference.duplex.SpeechSessionNotFound
+        payload:
+          inference.duplex.SpeechSessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was transcribed.
+
+      - name: session-not-open
+        when_related: {via: input.session_id, predicate: state != Open}
+        error: inference.duplex.SpeechSessionStateConflict
+        summary: The session is closed or failed; nothing was transcribed.
+
+      - name: transcribed
+        emits:
+          - inference.duplex.InputTranscribed
+        payload:
+          inference.duplex.InputTranscribed:
+            session_id: input.session_id
+            text: input.text
+        summary: The input transcript is published.
+
+  # read from: docs/design/inference.md:373
+  - name: inference.duplex.RecordTranscriptionUsage
+    input:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: usage
+        type: inference.duplex.TranscriptionUsage
+    outcomes:
+      - name: unknown-session
+        when_related: {via: input.session_id, exists: false}
+        error: inference.duplex.SpeechSessionNotFound
+        payload:
+          inference.duplex.SpeechSessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was recorded.
+
+      - name: recorded
+        emits:
+          - inference.duplex.TranscriptionUsageRecorded
+        payload:
+          inference.duplex.TranscriptionUsageRecorded:
+            session_id: input.session_id
+            usage: input.usage
+        summary: The transcription usage is published for a meter.
+
+  # A response is created by the caller, or by the provider when a detected turn end creates one.
+  # The adapter issues its id, one per response the provider starts, and an id is never reused.
+  # read from: docs/design/inference.md:398
+  # read from: docs/design/inference.md:399
+  # UNMAPPED: an id already used is refused with ResponseIdReused by the contract crate
+  # (SessionLedger::response_created). Here the identity is generated: an identity the caller
+  # supplies leaves ess 0.60.0 synthesis no value to keep the arranged rows apart
+  # (ESS-SYNTH-001), so no outcome can raise the error.
+  - name: inference.duplex.CreateResponse
+    input:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+    outcomes:
+      - name: unknown-session
+        when_related: {via: input.session_id, exists: false}
+        error: inference.duplex.SpeechSessionNotFound
+        payload:
+          inference.duplex.SpeechSessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was created.
+
+      - name: session-not-open
+        when_related: {via: input.session_id, predicate: state != Open}
+        error: inference.duplex.SpeechSessionStateConflict
+        summary: The session is closed or failed; nothing was created.
+
+      - name: created
+        creates: inference.duplex.Response
+        instance: response_id
+        sets:
+          session_id: input.session_id
+        emits:
+          - inference.duplex.ResponseCreated
+        payload:
+          inference.duplex.ResponseCreated:
+            response_id: {generated: true}
+            session_id: input.session_id
+        summary: The response is in progress under a new id.
+
+  # read from: docs/design/inference.md:324
+  # read from: docs/design/inference.md:403
+  - name: inference.duplex.EmitOutputAudio
+    input:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: frame
+        type: inference.audio.AudioFrame
+    outcomes:
+      - name: unknown-response
+        when_related: {via: input.response_id, exists: false}
+        error: inference.duplex.ResponseNotFound
+        payload:
+          inference.duplex.ResponseNotFound:
+            response_id: input.response_id
+        summary: No response carries this identity; nothing was emitted.
+
+      - name: not-in-progress
+        when_related: {via: input.response_id, predicate: state != InProgress}
+        error: inference.duplex.ResponseStateConflict
+        summary: The response is no longer in progress; its late audio is dropped.
+
+      # read from: docs/design/inference.md:293
+      - name: format-out-of-range
+        when:
+          any:
+            - frame.format.sample_rate < 1
+            - frame.format.sample_rate > 4294967295
+            - frame.format.channels < 1
+            - frame.format.channels > 65535
+            - frame.sample_count < 0
+            - frame.sample_count > 4294967295
+            - frame.position < 0
+        error: inference.duplex.FormatOutOfRange
+        summary: The frame lies outside the audio vocabulary's range; nothing was emitted.
+
+      - name: emitted
+        emits:
+          - inference.duplex.OutputAudio
+        payload:
+          inference.duplex.OutputAudio:
+            response_id: input.response_id
+            frame: input.frame
+        summary: The audio is the response's, in the session's output format.
+
+  # read from: docs/design/inference.md:403
+  - name: inference.duplex.EmitOutputTranscript
+    input:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: text
+        type: String
+    outcomes:
+      - name: unknown-response
+        when_related: {via: input.response_id, exists: false}
+        error: inference.duplex.ResponseNotFound
+        payload:
+          inference.duplex.ResponseNotFound:
+            response_id: input.response_id
+        summary: No response carries this identity; nothing was emitted.
+
+      - name: not-in-progress
+        when_related: {via: input.response_id, predicate: state != InProgress}
+        error: inference.duplex.ResponseStateConflict
+        summary: The response is no longer in progress; its late transcript is dropped.
+
+      - name: emitted
+        emits:
+          - inference.duplex.OutputTranscriptDelta
+        payload:
+          inference.duplex.OutputTranscriptDelta:
+            response_id: input.response_id
+            text: input.text
+        summary: The transcript delta is the response's.
+
+  - name: inference.duplex.CompleteResponse
+    input:
+      - name: response_id
+        type: inference.duplex.ResponseId
+    outcomes:
+      - name: completed
+        moves: inference.duplex.Response.complete
+        instance: response_id
+        emits:
+          - inference.duplex.ResponseCompleted
+        payload:
+          inference.duplex.ResponseCompleted:
+            response_id: input.response_id
+        summary: The response is done.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.duplex.ResponseStateConflict
+        payload:
+          inference.duplex.ResponseStateConflict:
+            current: {subject: state}
+
+  # Barge-in: the response in progress is cancelled, by the caller or by the provider's own
+  # interruption, and nothing more of it is delivered.
+  # read from: docs/design/inference.md:399
+  # read from: docs/design/inference.md:630-641
+  # read from: docs/design/inference.md:1146
+  - name: inference.duplex.CancelResponse
+    input:
+      - name: response_id
+        type: inference.duplex.ResponseId
+    outcomes:
+      - name: cancelled
+        moves: inference.duplex.Response.cancel
+        instance: response_id
+        emits:
+          - inference.duplex.ResponseCancelled
+        payload:
+          inference.duplex.ResponseCancelled:
+            response_id: input.response_id
+        summary: The response is cancelled; the next answer is a new response.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.duplex.ResponseStateConflict
+        payload:
+          inference.duplex.ResponseStateConflict:
+            current: {subject: state}
+
+  - name: inference.duplex.FailResponse
+    input:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: failure
+        type: inference.duplex.SessionFailure
+    outcomes:
+      - name: failed
+        moves: inference.duplex.Response.fail
+        instance: response_id
+        emits:
+          - inference.duplex.ResponseFailed
+        payload:
+          inference.duplex.ResponseFailed:
+            response_id: input.response_id
+            failure: input.failure
+        summary: The response failed with a typed failure.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.duplex.ResponseStateConflict
+        payload:
+          inference.duplex.ResponseStateConflict:
+            current: {subject: state}
+
+  # The output audio of a response is cut at the output sample the listener actually heard, so
+  # the provider's context holds nothing the listener did not hear. A cancelled or completed
+  # response is truncated too: playback runs behind the provider.
+  # read from: docs/design/inference.md:630-641
+  # read from: docs/design/inference.md:1023
+  # UNMAPPED: `heard` past the samples the response emitted is refused by the contract crate
+  # (BeyondOutput), not here: ess 0.60.0 sums no event fields into a bound a guard could read.
+  # Nor is truncation of a model without client truncation refused here; that is a capability
+  # of the adapter, not a fact of this specification.
+  - name: inference.duplex.TruncateOutput
+    input:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: heard
+        type: inference.audio.SampleClockPosition
+    outcomes:
+      - name: unknown-response
+        when_related: {via: input.response_id, exists: false}
+        error: inference.duplex.ResponseNotFound
+        payload:
+          inference.duplex.ResponseNotFound:
+            response_id: input.response_id
+        summary: No response carries this identity; nothing was truncated.
+
+      - name: truncated
+        emits:
+          - inference.duplex.OutputTruncated
+        payload:
+          inference.duplex.OutputTruncated:
+            response_id: input.response_id
+            heard: input.heard
+        summary: The response's audio ends at the heard sample.
+
+  # read from: docs/design/inference.md:367
+  # read from: docs/design/inference.md:373
+  - name: inference.duplex.RecordResponseUsage
+    input:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: usage
+        type: inference.duplex.ResponseUsage
+    outcomes:
+      - name: unknown-response
+        when_related: {via: input.response_id, exists: false}
+        error: inference.duplex.ResponseNotFound
+        payload:
+          inference.duplex.ResponseNotFound:
+            response_id: input.response_id
+        summary: No response carries this identity; nothing was recorded.
+
+      - name: recorded
+        emits:
+          - inference.duplex.ResponseUsageRecorded
+        payload:
+          inference.duplex.ResponseUsageRecorded:
+            response_id: input.response_id
+            usage: input.usage
+        summary: The response's usage is published for a meter.
+
+  # A response in progress proposes a call of a declared tool with JSON arguments.
+  # read from: docs/design/inference.md:402
+  # read from: docs/design/inference.md:424
+  # read from: docs/design/inference.md:848
+  # UNMAPPED: ess 0.60.0 reads no list of a related row in a guard, so a tool outside the
+  # session's `tools` is refused by the contract crate, not here.
+  # UNMAPPED: the provider names the call, and a name already used is refused with
+  # SpeechCallIdReused by the contract crate (SessionLedger::tool_call). Here the identity is
+  # generated: an identity the caller supplies leaves ess 0.60.0 synthesis no value to keep the
+  # arranged rows apart (ESS-SYNTH-001), so no outcome can raise the error.
+  - name: inference.duplex.ProposeSpeechToolCall
+    input:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: arguments
+        type: Json
+    outcomes:
+      - name: unknown-response
+        when_related: {via: input.response_id, exists: false}
+        error: inference.duplex.ResponseNotFound
+        payload:
+          inference.duplex.ResponseNotFound:
+            response_id: input.response_id
+        summary: No response carries this identity; nothing was proposed.
+
+      - name: unknown-tool
+        when_related: {via: input.tool_id, exists: false}
+        error: inference.tools.ToolNotFound
+        payload:
+          inference.tools.ToolNotFound:
+            tool_id: input.tool_id
+        summary: No tool carries this identity; nothing was proposed.
+
+      - name: not-in-progress
+        when_related: {via: input.response_id, predicate: state != InProgress}
+        error: inference.duplex.ResponseStateConflict
+        summary: The response is no longer in progress; nothing was proposed.
+
+      - name: proposed
+        creates: inference.duplex.SpeechToolCall
+        instance: call_id
+        sets:
+          response_id: input.response_id
+          tool_id: input.tool_id
+          arguments: input.arguments
+        emits:
+          - inference.duplex.SpeechToolCallProposed
+        payload:
+          inference.duplex.SpeechToolCallProposed:
+            call_id: {generated: true}
+            response_id: input.response_id
+            tool_id: input.tool_id
+            arguments: input.arguments
+        summary: The call awaits its result on the session.
+
+  # The caller answers a call by its id with the tool's result; a later response may use it.
+  # read from: docs/design/inference.md:402
+  # read from: docs/design/inference.md:841
+  - name: inference.duplex.AnswerSpeechToolCall
+    input:
+      - name: call_id
+        type: inference.duplex.SpeechCallId
+      - name: result
+        type: Json
+    outcomes:
+      - name: answered
+        moves: inference.duplex.SpeechToolCall.answer
+        instance: call_id
+        emits:
+          - inference.duplex.SpeechToolCallAnswered
+        payload:
+          inference.duplex.SpeechToolCallAnswered:
+            call_id: input.call_id
+            result: input.result
+        summary: The result is on the session.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.duplex.SpeechToolCallStateConflict
+        payload:
+          inference.duplex.SpeechToolCallStateConflict:
+            current: {subject: state}
+
+  # Closing ends every response in progress as cancelled, and failing ends each as failed, their
+  # events before the session's; no output of the session is recorded after.
+  # read from: docs/design/inference.md:719
+  # read from: docs/design/inference.md:630-641
+  # UNMAPPED: the cascade to the session's responses, and the refusal of output of a response
+  # whose session is closed or failed, are the contract crate's (SessionLedger::close and
+  # SessionLedger::fail; SessionError::NotOpen on output). An `affects:` here is refused by
+  # ess 0.60.0 synthesis (ESS-SYNTH-001: no witness), and a guard reads no row two relations away.
+  - name: inference.duplex.CloseSpeechSession
+    input:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+    outcomes:
+      - name: closed
+        moves: inference.duplex.SpeechSession.close
+        instance: session_id
+        emits:
+          - inference.duplex.SpeechSessionClosed
+        payload:
+          inference.duplex.SpeechSessionClosed:
+            session_id: input.session_id
+        summary: The session is closed with every response in progress cancelled, and takes nothing more.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.duplex.SpeechSessionStateConflict
+        payload:
+          inference.duplex.SpeechSessionStateConflict:
+            current: {subject: state}
+
+  # A stalled provider or a closed transport fails the session with a typed failure, never with
+  # silence.
+  # read from: docs/design/inference.md:1006
+  - name: inference.duplex.FailSpeechSession
+    input:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: failure
+        type: inference.duplex.SessionFailure
+    outcomes:
+      - name: failed
+        moves: inference.duplex.SpeechSession.fail
+        instance: session_id
+        emits:
+          - inference.duplex.SpeechSessionFailed
+        payload:
+          inference.duplex.SpeechSessionFailed:
+            session_id: input.session_id
+            failure: input.failure
+        summary: The session failed with a typed failure, every response in progress with it, and takes nothing more.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.duplex.SpeechSessionStateConflict
+        payload:
+          inference.duplex.SpeechSessionStateConflict:
+            current: {subject: state}
+
+events:
+  - name: inference.duplex.SpeechSessionOpened
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: turn_detection
+        type: inference.duplex.TurnDetection
+
+  # read from: docs/design/inference.md:337
+  - name: inference.duplex.InputAccepted
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: frame
+        type: inference.audio.AudioFrame
+
+  - name: inference.duplex.InputCommitted
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+
+  # read from: docs/design/inference.md:334
+  - name: inference.duplex.SpeechStarted
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: position
+        type: inference.audio.SampleClockPosition
+
+  # read from: docs/design/inference.md:334
+  - name: inference.duplex.SpeechStopped
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: position
+        type: inference.audio.SampleClockPosition
+
+  - name: inference.duplex.InputTranscribed
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: text
+        type: String
+
+  - name: inference.duplex.TranscriptionUsageRecorded
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: usage
+        type: inference.duplex.TranscriptionUsage
+
+  - name: inference.duplex.ResponseCreated
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+
+  - name: inference.duplex.OutputAudio
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: frame
+        type: inference.audio.AudioFrame
+
+  - name: inference.duplex.OutputTranscriptDelta
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: text
+        type: String
+
+  - name: inference.duplex.ResponseCompleted
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+
+  # read from: docs/design/inference.md:337
+  - name: inference.duplex.ResponseCancelled
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+
+  - name: inference.duplex.ResponseFailed
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: failure
+        type: inference.duplex.SessionFailure
+
+  - name: inference.duplex.OutputTruncated
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: heard
+        type: inference.audio.SampleClockPosition
+
+  - name: inference.duplex.ResponseUsageRecorded
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: usage
+        type: inference.duplex.ResponseUsage
+
+  - name: inference.duplex.SpeechToolCallProposed
+    fields:
+      - name: call_id
+        type: inference.duplex.SpeechCallId
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: arguments
+        type: Json
+
+  - name: inference.duplex.SpeechToolCallAnswered
+    fields:
+      - name: call_id
+        type: inference.duplex.SpeechCallId
+      - name: result
+        type: Json
+
+  - name: inference.duplex.SpeechSessionClosed
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+
+  - name: inference.duplex.SpeechSessionFailed
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: failure
+        type: inference.duplex.SessionFailure
+
+views:
+  - name: inference.duplex.SpeechSessions
+    source: inference.duplex.SpeechSession
+    consistency: read_your_writes
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: voice
+        type: String
+      - name: instructions
+        type: String
+      - name: input_format
+        type: inference.audio.AudioFormat
+      - name: output_format
+        type: inference.audio.AudioFormat
+      - name: turn_detection
+        type: inference.duplex.TurnDetection
+      - name: auto_response
+        type: Boolean
+      - name: auto_interrupt
+        type: Boolean
+      - name: tools
+        type: List<inference.tools.ToolId>
+      - name: idle_limit_ms
+        type: Integer
+      - name: state
+        type: inference.duplex.SpeechSession.State
+
+  - name: inference.duplex.Responses
+    source: inference.duplex.Response
+    consistency: read_your_writes
+    fields:
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: state
+        type: inference.duplex.Response.State
+
+  - name: inference.duplex.SpeechToolCalls
+    source: inference.duplex.SpeechToolCall
+    consistency: read_your_writes
+    fields:
+      - name: call_id
+        type: inference.duplex.SpeechCallId
+      - name: response_id
+        type: inference.duplex.ResponseId
+      - name: tool_id
+        type: inference.tools.ToolId
+      - name: arguments
+        type: Json
+      - name: state
+        type: inference.duplex.SpeechToolCall.State

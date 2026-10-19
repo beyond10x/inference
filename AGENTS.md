@@ -38,7 +38,7 @@ ess verify conform run --path ess --scenarios ess/scenarios --target interpreted
 aep plan artifact validate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features   # --all-features builds the inference-testkit mocks behind its features stt, llm and tts
+cargo test --workspace --all-features   # --all-features builds the inference-testkit mocks behind its features run, stt, llm, tts and duplex
 cargo test -p inference-testkit --test conform   # the testkit conformance target alone: synthesizes the suite, runs it in process, has `ess verify conform report` write the verdict; prints target/tmp/conform-<run>/, where suite.json, results.json and report.json stay, red or green
 git add <paths> && b10x-gates bot -- commit -F <file>   # staging is plain git; the route refuses add
 b10x-gates scan-text --policy <file> <path>...           # release and pull-request bodies before they are sent; no policy found is "not scanned", never "passed"
