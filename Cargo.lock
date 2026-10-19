@@ -337,6 +337,7 @@ dependencies = [
  "inference-runtime",
  "inference-stt",
  "inference-text",
+ "inference-tools",
  "inference-tts",
  "serde",
  "serde_json",
@@ -348,6 +349,16 @@ name = "inference-text"
 version = "0.3.0"
 dependencies = [
  "inference-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "inference-tools"
+version = "0.3.0"
+dependencies = [
+ "inference-core",
+ "inference-text",
  "serde",
  "serde_json",
 ]

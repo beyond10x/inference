@@ -255,6 +255,65 @@ const RUN_ROUTED_SCENARIOS: [&str; 71] = [
     "inference.stream.Turn/transition/complete/by/inference.stream.CompleteTurn/completed",
 ];
 
+/// Every `inference.tools` scenario the suite synthesizes, 53: the declaration, the two proposal
+/// paths with the provisional-input barrier, the ToolCall lifecycle's five commands, their
+/// transitions and every state refusal, and the confirmation hook's `unconfirmed`.
+const TOOLS_SCENARIOS: [&str; 53] = [
+    "inference.tools.AuthorizeToolCall/outcome/authorized",
+    "inference.tools.AuthorizeToolCall/outcome/unconfirmed",
+    "inference.tools.AuthorizeToolCall/outcome/wrong-state",
+    "inference.tools.CompleteToolCall/outcome/completed",
+    "inference.tools.CompleteToolCall/outcome/wrong-state",
+    "inference.tools.DeclareTool/outcome/declared",
+    "inference.tools.FailToolCall/outcome/failed",
+    "inference.tools.FailToolCall/outcome/wrong-state",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/proposed",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/side-effecting",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/stale-generation",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/unknown-generation",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/unknown-span",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/unknown-tool",
+    "inference.tools.ProposeToolCall/outcome/barred",
+    "inference.tools.ProposeToolCall/outcome/proposed",
+    "inference.tools.ProposeToolCall/outcome/stale-generation",
+    "inference.tools.ProposeToolCall/outcome/unknown-generation",
+    "inference.tools.ProposeToolCall/outcome/unknown-span",
+    "inference.tools.ProposeToolCall/outcome/unknown-tool",
+    "inference.tools.RejectToolCall/outcome/rejected",
+    "inference.tools.RejectToolCall/outcome/wrong-state",
+    "inference.tools.StartToolCall/outcome/started",
+    "inference.tools.StartToolCall/outcome/wrong-state",
+    "inference.tools.ToolCall/state/Authorized/refuses/inference.tools.AuthorizeToolCall",
+    "inference.tools.ToolCall/state/Authorized/refuses/inference.tools.CompleteToolCall",
+    "inference.tools.ToolCall/state/Authorized/refuses/inference.tools.FailToolCall",
+    "inference.tools.ToolCall/state/Completed/refuses/inference.tools.AuthorizeToolCall",
+    "inference.tools.ToolCall/state/Completed/refuses/inference.tools.CompleteToolCall",
+    "inference.tools.ToolCall/state/Completed/refuses/inference.tools.FailToolCall",
+    "inference.tools.ToolCall/state/Completed/refuses/inference.tools.RejectToolCall",
+    "inference.tools.ToolCall/state/Completed/refuses/inference.tools.StartToolCall",
+    "inference.tools.ToolCall/state/Failed/refuses/inference.tools.AuthorizeToolCall",
+    "inference.tools.ToolCall/state/Failed/refuses/inference.tools.CompleteToolCall",
+    "inference.tools.ToolCall/state/Failed/refuses/inference.tools.FailToolCall",
+    "inference.tools.ToolCall/state/Failed/refuses/inference.tools.RejectToolCall",
+    "inference.tools.ToolCall/state/Failed/refuses/inference.tools.StartToolCall",
+    "inference.tools.ToolCall/state/Proposed/refuses/inference.tools.CompleteToolCall",
+    "inference.tools.ToolCall/state/Proposed/refuses/inference.tools.FailToolCall",
+    "inference.tools.ToolCall/state/Proposed/refuses/inference.tools.StartToolCall",
+    "inference.tools.ToolCall/state/Rejected/refuses/inference.tools.AuthorizeToolCall",
+    "inference.tools.ToolCall/state/Rejected/refuses/inference.tools.CompleteToolCall",
+    "inference.tools.ToolCall/state/Rejected/refuses/inference.tools.FailToolCall",
+    "inference.tools.ToolCall/state/Rejected/refuses/inference.tools.RejectToolCall",
+    "inference.tools.ToolCall/state/Rejected/refuses/inference.tools.StartToolCall",
+    "inference.tools.ToolCall/state/Started/refuses/inference.tools.AuthorizeToolCall",
+    "inference.tools.ToolCall/state/Started/refuses/inference.tools.RejectToolCall",
+    "inference.tools.ToolCall/state/Started/refuses/inference.tools.StartToolCall",
+    "inference.tools.ToolCall/transition/authorize/by/inference.tools.AuthorizeToolCall/authorized",
+    "inference.tools.ToolCall/transition/complete/by/inference.tools.CompleteToolCall/completed",
+    "inference.tools.ToolCall/transition/fail/by/inference.tools.FailToolCall/failed",
+    "inference.tools.ToolCall/transition/reject/by/inference.tools.RejectToolCall/rejected",
+    "inference.tools.ToolCall/transition/start/by/inference.tools.StartToolCall/started",
+];
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -435,6 +494,7 @@ fn the_suite_runs_against_the_testkit_target() {
         .chain(GRAPH_PLANNING_SCENARIOS)
         .chain(RUN_SCENARIOS)
         .chain(RUN_ROUTED_SCENARIOS)
+        .chain(TOOLS_SCENARIOS)
     {
         assert!(
             passed.contains(id),
