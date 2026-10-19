@@ -32,7 +32,16 @@ use inference_testkit::graph::PipelinePayload;
 use inference_testkit::llm::MockGenerator;
 use inference_testkit::stream::StreamEvent;
 
-use text::{Application, block_on, generator, implement, planned, planned_with_egress};
+use inference_core::generation::GenerationStarted;
+use inference_facade::history::HistoryKind;
+use inference_text::{
+    AudioPlayed, SegmentId, SpanId, SynthesisCompleted, TextDelta, TextSegmentCommitted,
+    TranscriptCommitted,
+};
+
+use text::{
+    Application, block_on, echo_planned, generator, implement, planned, planned_with_egress,
+};
 
 /// The long reply the mock model streams for every input: one segment per piece.
 const PIECES: usize = 30;
@@ -418,5 +427,201 @@ fn cancelling_a_draining_session_cuts_a_drain_that_has_not_finished() {
             .count(),
         1,
         "closed once"
+    );
+}
+
+/// A node that, as it starts, sends `events` in order, every envelope naming no generation, then
+/// holds its output until it drains.
+struct Scripted {
+    run_id: RunId,
+    node_id: Option<NodeId>,
+    events: Vec<StreamEvent>,
+    endpoints: Option<NodeEndpoints<PipelinePayload>>,
+}
+
+impl NodeImplementation<PipelinePayload> for Scripted {
+    fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
+        self.node_id = Some(node.node_id());
+        Box::pin(future::ready(()))
+    }
+
+    fn prepare(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        Box::pin(future::ready(Ok(())))
+    }
+
+    fn start(
+        &mut self,
+        endpoints: NodeEndpoints<PipelinePayload>,
+    ) -> NodeFuture<'_, Result<(), NodeError>> {
+        let producer = self.node_id.expect("described");
+        let stream_id = StreamId::generate();
+        for (index, event) in std::mem::take(&mut self.events).into_iter().enumerate() {
+            let envelope = EventEnvelope {
+                schema_version: 1,
+                event_id: EventId::generate(),
+                run_id: self.run_id,
+                session_id: None,
+                stream_id,
+                sequence: i64::try_from(index).expect("small") + 1,
+                producer,
+                port: "out".to_owned(),
+                kind: event.name().to_owned(),
+                generation_id: None,
+                timestamp: 0,
+                timebase: Timebase::WallTime,
+                causation_id: None,
+                payload: PipelinePayload::Stream(event),
+            };
+            block_on(endpoints.outputs[0].endpoint.send(envelope)).expect("the egress has room");
+        }
+        self.endpoints = Some(endpoints);
+        Box::pin(future::ready(Ok(())))
+    }
+
+    fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        self.endpoints = None;
+        Box::pin(future::ready(Ok(())))
+    }
+
+    fn cancel(&mut self) -> NodeFuture<'_, ()> {
+        self.endpoints = None;
+        Box::pin(future::ready(()))
+    }
+
+    fn stop(&mut self) -> NodeFuture<'_, ()> {
+        self.endpoints = None;
+        Box::pin(future::ready(()))
+    }
+}
+
+/// The class of a segment event whose envelope names no generation: the committed segment, its
+/// synthesis and its playback each name only the segment, so the session reads its generation off
+/// the delta that named the segment. An interrupt cuts every one of them of the cut generation,
+/// and nothing unrelated: a transcript, a segment no delta named, another generation's segment.
+#[test]
+fn an_interrupt_cuts_every_event_of_a_segment_of_the_cut_generation_and_nothing_unrelated() {
+    let cut = GenerationId::generate();
+    let next = GenerationId::generate();
+    let (interrupted, unnamed, answered) = (
+        SegmentId::generate(),
+        SegmentId::generate(),
+        SegmentId::generate(),
+    );
+    let delta = |segment_id, generation_id, sequence, text: &str| {
+        StreamEvent::TextDelta(TextDelta {
+            segment_id,
+            generation_id,
+            sequence,
+            text: text.to_owned(),
+        })
+    };
+    let committed = |segment_id, text: &str| {
+        StreamEvent::TextSegmentCommitted(TextSegmentCommitted {
+            segment_id,
+            text: text.to_owned(),
+        })
+    };
+    let script = vec![
+        StreamEvent::GenerationStarted(GenerationStarted {
+            generation_id: cut,
+            run_id: RunId::generate(),
+            epoch: 1,
+        }),
+        delta(interrupted, cut, 1, "cut "),
+        delta(interrupted, cut, 2, "off"),
+        committed(interrupted, "cut off"),
+        StreamEvent::SynthesisCompleted(SynthesisCompleted {
+            segment_id: interrupted,
+        }),
+        StreamEvent::AudioPlayed(AudioPlayed {
+            segment_id: interrupted,
+        }),
+        StreamEvent::TranscriptCommitted(TranscriptCommitted {
+            span_id: SpanId::generate(),
+            text: "heard".to_owned(),
+        }),
+        committed(unnamed, "unnamed"),
+        StreamEvent::GenerationStarted(GenerationStarted {
+            generation_id: next,
+            run_id: RunId::generate(),
+            epoch: 2,
+        }),
+        delta(answered, next, 1, "answered"),
+        committed(answered, "answered"),
+    ];
+    let generator = generator(Vec::<String>::new());
+    let (declaration, planned) = echo_planned(&generator);
+    let sessions = LiveSessions::new();
+    let (mut session, driver) = block_on(sessions.open(
+        &declaration,
+        &planned,
+        InteractionMode::TurnBased,
+        move |run_id, _| {
+            Box::new(Scripted {
+                run_id,
+                node_id: None,
+                events: script.clone(),
+                endpoints: None,
+            }) as Box<dyn NodeImplementation<PipelinePayload>>
+        },
+    ))
+    .expect("opens");
+    let session_id = session.session_id();
+    let drive = thread::spawn(move || block_on(driver.drive()));
+    loop {
+        let event = block_on(session.receive()).expect("the script");
+        if matches!(event, SessionEvent::TextDelta(_)) {
+            break;
+        }
+    }
+    block_on(session.interrupt()).expect("a Ready session is interrupted");
+    block_on(session.close()).expect("drains");
+    let mut after = Vec::new();
+    while let Some(event) = block_on(session.receive()) {
+        after.push(event);
+    }
+    drive.join().expect("no panic").expect("the run ends");
+
+    let of_the_cut_segment = |event: &SessionEvent| match event {
+        SessionEvent::TextDelta(delta) => delta.segment_id == interrupted,
+        SessionEvent::TextSegmentCommitted(segment) => segment.segment_id == interrupted,
+        SessionEvent::SynthesisCompleted(event) => event.segment_id == interrupted,
+        SessionEvent::AudioPlayed(event) => event.segment_id == interrupted,
+        _ => false,
+    };
+    assert!(
+        !after.iter().any(of_the_cut_segment),
+        "an event of the cut generation's segment is delivered after the interrupt: {after:#?}"
+    );
+    let segments: Vec<SegmentId> = after
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::TextSegmentCommitted(segment) => Some(segment.segment_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        segments,
+        [unnamed, answered],
+        "a segment no delta named and another generation's segment are delivered: {after:#?}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TranscriptCommitted(_))),
+        "a transcript names no generation and is delivered: {after:#?}"
+    );
+    let history: Vec<(HistoryKind, String)> = sessions
+        .history(session_id)
+        .into_iter()
+        .map(|entry| (entry.kind(), entry.text().to_owned()))
+        .collect();
+    assert_eq!(
+        history,
+        [
+            (HistoryKind::UserTurn, "heard".to_owned()),
+            (HistoryKind::AssistantSegment, "unnamed".to_owned()),
+            (HistoryKind::AssistantSegment, "answered".to_owned()),
+        ]
     );
 }

@@ -11,7 +11,11 @@
 //! generation, which discards its unplayed segments, and sends nothing more; scripted to emit
 //! after the cancel, it emits once into the cancelled generation, which refuses it as stale.
 //! Every event it emits is recorded in the run's [`RunLog`] in its envelope, the
-//! `GenerationCancelled` that is not sent among them.
+//! `GenerationCancelled` that is not sent among them. Each envelope of a generation's event names
+//! the generation, a `TextSegmentCommitted`'s too, whose payload names only its segment, so that
+//! a reader of the envelope, such as a session cutting an interrupted generation, cuts the
+//! segment with it. The node runs one generation per run, and only that generation's events name
+//! it: its end of input names none.
 //!
 //! The node is generic over the payload of the run's edges ([`ModelPayload`]), the text
 //! pipeline's [`PipelinePayload`] by default. Given tools ([`ModelNode::with_tools`]), it has a

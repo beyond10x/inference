@@ -532,6 +532,45 @@ fn every_event_a_node_emits_is_logged_in_its_envelope_and_the_run_refuses_none_o
     );
 }
 
+/// A committed segment names no generation in its payload; its envelope names the generation of
+/// the deltas that named the segment, so a reader of the envelope cuts the segment with its
+/// generation. Every other envelope the model emits names the generation its payload names.
+#[test]
+fn the_model_names_on_a_committed_segments_envelope_the_generation_of_its_deltas() {
+    let generator = generator();
+    let (declaration, planned, nodes) = planned(&generator);
+    let run = start(&declaration, &planned, nodes, &generator, None);
+    assert!(run.source.release());
+    assert!(run.source.release_end());
+    let run = finished(run, nodes);
+
+    let envelopes = run.log.envelopes();
+    let mut deltas = HashMap::new();
+    let mut segments = 0;
+    for envelope in envelopes
+        .iter()
+        .filter(|envelope| envelope.producer == nodes.model)
+    {
+        match &envelope.payload {
+            StreamEvent::TextDelta(delta) => {
+                assert_eq!(envelope.generation_id, Some(delta.generation_id));
+                deltas.insert(delta.segment_id, delta.generation_id);
+            }
+            StreamEvent::TextSegmentCommitted(segment) => {
+                segments += 1;
+                assert_eq!(
+                    envelope.generation_id,
+                    deltas.get(&segment.segment_id).copied(),
+                    "the segment's envelope names the generation of its deltas"
+                );
+                assert!(envelope.generation_id.is_some());
+            }
+            event => assert_eq!(envelope.generation_id, event.generation_id()),
+        }
+    }
+    assert_eq!(segments, 1, "the one input is answered with one segment");
+}
+
 /// A model node that, when it starts, sends user content on its output edge at the sequences
 /// `sequences`, all on one stream, going on past a refused send, then drops its endpoints without
 /// reading its input.

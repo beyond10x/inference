@@ -25,15 +25,20 @@
 //! what it delivers still joins the history. The session delivers `RunCompleted` and then
 //! `SessionClosed` last; [`LiveSession::receive`] answers none once every egress has ended and
 //! every event of the session was delivered. An application that lets go of its handle lets go
-//! of what was in flight, and the session closes once the run has completed; let go before the
-//! run's output ended, the handle leaves the egresses without a consumer, which the runtime
-//! reports as a node whose exchange failed.
+//! of what was in flight and cancels the run, if it has not ended: the session closes once the
+//! run has ended, by `CompleteSessionClose` when the run completed while the session drains,
+//! otherwise by `CancelSession`.
 //!
 //! The session records its history ([`crate::history`]) from what it accepts and delivers: the
 //! committed input texts the application sent since its last commit as one user turn at
 //! [`LiveSession::commit_input`], joined by a space; a committed transcript it delivers, a voice
 //! turn's, as a user turn; a committed segment it delivers as an assistant segment; a tool result
-//! it delivers as a tool result with its call. A delta or a hypothesis records nothing.
+//! it delivers as a tool result with its call. A delta or a hypothesis records nothing. A user
+//! turn is open from its first [`LiveSession::send`] to its commit: a fact the session delivers
+//! meanwhile is recorded after the turn, at the commit, so that the turn precedes the reply that
+//! answers it, and the history's positions follow the order it was recorded in. A turn the
+//! application does not commit, because it closes, cancels, switches or lets go of its handle,
+//! is not recorded; the facts delivered while it was open are, then.
 //!
 //! The control events the session writes travel on a stream of its own, produced under an
 //! identity of its own, so that they never interleave with the sequence of the application's
@@ -58,6 +63,7 @@ use inference_runtime::run::{Run, RunCancelled, RunCompleted, RunFailed, RunStat
 use inference_runtime::{
     CreateControllerError, ExposureWatch, Ingress, QueueWatch, RunController, RunError, RunRequests,
 };
+use inference_text::SegmentId;
 use inference_tools::ToolCallId;
 
 use crate::events::{SessionEvent, SessionPayload};
@@ -106,31 +112,77 @@ struct Inbox {
     /// How the run ended and what that closed, delivered once every egress has ended.
     ending: VecDeque<SessionEvent>,
     waker: Option<Waker>,
-    /// The run ended: no egress sends anything more.
+    /// No run of the session sends anything more: its current run ended, or it has none and the
+    /// run it left at a switch ended.
     ended: bool,
-    /// The run ended Completed, so a draining session closes once what was in flight was
-    /// delivered.
+    /// The run ended Completed, or the session has no run in flight, so a draining session
+    /// closes once what was in flight was delivered.
     completed: bool,
     /// The application let go of its handle: nothing more is delivered.
     released: bool,
     /// The application cancelled the session: once the run has ended, `CancelSession` closes it.
     cancelling: bool,
-    /// `CompleteSessionClose` or `CancelSession` was run.
+    /// `CompleteSessionClose` or `CancelSession` closed the session.
     finished: bool,
     /// The session's current run, whose end the session ends with; none while it switches.
     run: Option<RunId>,
+    /// The run the session left at a switch has not ended yet.
+    leaving: bool,
     /// How the run the session left at a switch ended, once it has.
     left: Option<RunState>,
+    /// The events of the left run's end, held until its egresses have ended, so that they follow
+    /// what those egresses still held.
+    left_ending: VecDeque<SessionEvent>,
     /// How the session's current run ended, once it has.
     state: Option<RunState>,
 }
 
-/// The generations a live session delivered an event of, and those an interrupt cut: the session
-/// delivers nothing more of a cut generation.
+impl Inbox {
+    /// Whether no run of the session is in flight: it has no current run and the run it left, if
+    /// any, has ended.
+    const fn idle(&self) -> bool {
+        self.run.is_none() && !self.leaving
+    }
+
+    /// Queues the left run's end among the session's own events, after what its egresses held.
+    fn release_left(&mut self) {
+        let ending: Vec<SessionEvent> = self.left_ending.drain(..).collect();
+        self.events.extend(ending);
+    }
+
+    fn wake(&mut self) {
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+/// The generations a live session delivered an event of, those an interrupt cut, and the
+/// generation of each segment a delta named: the session delivers nothing more of a cut
+/// generation, a segment's events among it.
 #[derive(Debug, Default)]
 pub(crate) struct Generations {
     delivered: HashSet<GenerationId>,
     cut: HashSet<GenerationId>,
+    segments: HashMap<SegmentId, GenerationId>,
+}
+
+/// The user turn the application is sending: the committed input texts it sent since its last
+/// commit, and the facts the session delivered since the first of them, which join the history
+/// after the turn.
+#[derive(Debug, Default)]
+pub(crate) struct Turn {
+    texts: Vec<String>,
+    held: Vec<Fact>,
+}
+
+/// A committed fact the session delivered while a user turn was open, under the run it came from.
+#[derive(Debug)]
+struct Fact {
+    run_id: RunId,
+    kind: HistoryKind,
+    text: String,
+    call_id: Option<ToolCallId>,
 }
 
 /// What a live session shares with its driver: the session state machine and the session's
@@ -152,23 +204,31 @@ impl Shared {
     }
 
     /// The session leaves its current run at a switch: the run's end, when it comes, is
-    /// delivered among the session's own events and ends nothing of the session.
+    /// delivered among the session's own events once the run's egresses have ended, after what
+    /// they held. While the session has no current run, the left run's end counts as its run's.
     pub(crate) fn leave(&self) {
         let mut inbox = lock(&self.inbox);
         inbox.run = None;
         inbox.left = None;
         if let Some(state) = inbox.state.take() {
             let ending: Vec<SessionEvent> = inbox.ending.drain(..).collect();
-            inbox.events.extend(ending);
+            inbox.left_ending.extend(ending);
             inbox.left = Some(state);
+            inbox.leaving = false;
+        } else {
+            inbox.leaving = true;
         }
     }
 
-    /// How the run the session left ended, once it has; pending, with `cx` woken, until then.
+    /// Once the left run's egresses have ended: how the left run ended, its end queued among the
+    /// session's own events; pending, with `cx` woken, until the run has ended.
     pub(crate) fn poll_left(&self, cx: &Context<'_>) -> Poll<RunState> {
         let mut inbox = lock(&self.inbox);
         match inbox.left.take() {
-            Some(state) => Poll::Ready(state),
+            Some(state) => {
+                inbox.release_left();
+                Poll::Ready(state)
+            }
             None => {
                 inbox.waker = Some(cx.waker().clone());
                 Poll::Pending
@@ -177,22 +237,46 @@ impl Shared {
     }
 
     /// The run `run_id` ended in `state`, `ending` its events: the end of the session's current
-    /// run ([`Shared::end`]), or of a run it left, whose `ending` is delivered in order among the
-    /// session's own events.
+    /// run ([`Shared::end`]), or of a run it left, whose `ending` is held until that run's
+    /// egresses have ended. A left run's end, while the session has no current run, is the end
+    /// the session's close waits for.
     fn run_ended(&self, run_id: RunId, state: RunState, ending: Vec<SessionEvent>) {
-        {
-            let mut inbox = lock(&self.inbox);
-            if inbox.run != Some(run_id) {
-                inbox.events.extend(ending);
-                inbox.left = Some(state);
-                if let Some(waker) = inbox.waker.take() {
-                    waker.wake();
-                }
-                return;
-            }
+        let mut inbox = lock(&self.inbox);
+        if inbox.run == Some(run_id) {
             inbox.state = Some(state);
+            drop(inbox);
+            self.end(ending, state == RunState::Completed);
+            return;
         }
-        self.end(ending, state == RunState::Completed);
+        inbox.left_ending.extend(ending);
+        inbox.left = Some(state);
+        inbox.leaving = false;
+        let now = inbox.run.is_none() && {
+            inbox.ended = true;
+            inbox.completed = state == RunState::Completed;
+            inbox.released || inbox.cancelling
+        };
+        inbox.wake();
+        drop(inbox);
+        if now {
+            self.finish();
+        }
+    }
+
+    /// Runs `RecordHistory` for `fact` at the session's next position. The `HistoryRecorded` the
+    /// state machine records is not delivered: history is read through the view. A Closed
+    /// session records nothing.
+    fn remember(&self, fact: Fact) {
+        let mut sessions = lock(&self.sessions);
+        let position = sessions.next_position(self.session_id);
+        let _ = sessions.record_history(RecordHistory {
+            session_id: self.session_id,
+            run_id: fact.run_id,
+            position,
+            kind: fact.kind,
+            text: fact.text,
+            call_id: fact.call_id,
+        });
     }
 
     /// Queues `event` for the application and wakes a waiting receive.
@@ -224,67 +308,89 @@ impl Shared {
         }
     }
 
-    /// The application cancelled the session; a run that ended already finishes the close.
+    /// The application cancelled the session; a run that ended already, or no run in flight,
+    /// finishes the close.
     fn cancel(&self) {
-        let ended = {
-            let mut inbox = lock(&self.inbox);
-            inbox.cancelling = true;
-            inbox.ended
-        };
-        if ended {
+        if self.mark(|inbox| inbox.cancelling = true) {
             self.finish();
         }
     }
 
-    /// The application let go of its handle; a run that ended already finishes the close.
+    /// The application let go of its handle; a run that ended already, or no run in flight,
+    /// finishes the close.
     fn release(&self) {
-        let ended = {
-            let mut inbox = lock(&self.inbox);
-            inbox.released = true;
-            inbox.ended
-        };
-        if ended {
+        if self.mark(|inbox| inbox.released = true) {
             self.finish();
         }
+    }
+
+    /// The application closes the session by draining: with no run in flight, nothing is, and
+    /// the close completes at once.
+    fn closing(&self) {
+        let idle = {
+            let mut inbox = lock(&self.inbox);
+            let idle = inbox.idle();
+            if idle {
+                inbox.ended = true;
+                inbox.completed = true;
+            }
+            idle
+        };
+        if idle {
+            self.finish();
+        }
+    }
+
+    /// Applies `how` to the inbox; whether the session's run has ended, which a session with no
+    /// run in flight has.
+    fn mark(&self, how: impl FnOnce(&mut Inbox)) -> bool {
+        let mut inbox = lock(&self.inbox);
+        how(&mut inbox);
+        if inbox.idle() {
+            inbox.ended = true;
+        }
+        inbox.ended
     }
 
     /// Closes the session, once, after its run ended: `CancelSession` for a session being
     /// cancelled, whatever its run's end, otherwise `CompleteSessionClose` for a run that completed
     /// while the session drains, so that the drain completed what was in flight before the
-    /// session closes. The `SessionClosed` is the last event delivered.
+    /// session closes. A session whose application let go of its handle is closed by
+    /// `CancelSession` when `CompleteSessionClose` does not close it. The `SessionClosed` is the
+    /// last event delivered. The inbox stays locked from the check to the `SessionClosed` queued,
+    /// so that a receive finishing the close as the driver does reads the `SessionClosed` the
+    /// driver queued, and the lock order is the inbox's, then the state machine's.
     fn finish(&self) {
-        let cancelling = {
-            let mut inbox = lock(&self.inbox);
-            if inbox.finished || !(inbox.cancelling || inbox.completed) {
-                return;
-            }
-            inbox.finished = true;
-            inbox.cancelling
-        };
+        let mut inbox = lock(&self.inbox);
+        if inbox.finished || !(inbox.cancelling || inbox.released || inbox.completed) {
+            return;
+        }
         let closed = {
             let mut sessions = lock(&self.sessions);
-            if cancelling {
+            if inbox.cancelling {
                 sessions.cancel_session(self.session_id)
             } else {
-                sessions.complete_session_close(self.session_id)
+                match sessions.complete_session_close(self.session_id) {
+                    Err(_) if inbox.released => sessions.cancel_session(self.session_id),
+                    closed => closed,
+                }
             }
         };
         if let Ok(event) = closed {
-            let mut inbox = lock(&self.inbox);
+            inbox.finished = true;
             inbox.ending.push_back(SessionEvent::SessionClosed(event));
-            if let Some(waker) = inbox.waker.take() {
-                waker.wake();
-            }
+            inbox.wake();
         }
     }
 
     /// Once every egress has ended and what it held was delivered: the session's own next
-    /// event, then the next event of the run's ending, closing the session first, or none once
-    /// it was all received; pending, with the waker [`Shared::next`] registered, until the run
-    /// has ended.
+    /// event, the end of a run it left among them, then the next event of the run's ending,
+    /// closing the session first, or none once it was all received; pending, with the waker
+    /// [`Shared::next`] registered, until the run has ended.
     fn after_egress(&self) -> Poll<Option<SessionEvent>> {
         {
             let mut inbox = lock(&self.inbox);
+            inbox.release_left();
             if let Some(event) = inbox.events.pop_front() {
                 return Poll::Ready(Some(event));
             }
@@ -499,7 +605,7 @@ impl LiveSessions {
             producer: NodeId::generate(),
             stream_id: StreamId::generate(),
             sequence: AtomicI64::new(0),
-            turn: Mutex::new(Vec::new()),
+            turn: Mutex::new(Turn::default()),
             generations: Mutex::new(Generations::default()),
             cancelled: AtomicBool::new(false),
             requests: controller.requests(),
@@ -603,9 +709,9 @@ pub struct LiveSession<P> {
     pub(crate) producer: NodeId,
     pub(crate) stream_id: StreamId,
     pub(crate) sequence: AtomicI64,
-    /// The committed input texts the application sent since its last commit: the user turn the
-    /// next commit records.
-    pub(crate) turn: Mutex<Vec<String>>,
+    /// The committed input texts the application sent since its last commit and the position
+    /// they took: the user turn the next commit records.
+    pub(crate) turn: Mutex<Turn>,
     /// The generations the session delivered, and those it cut at an interrupt.
     pub(crate) generations: Mutex<Generations>,
     /// The application cancelled the session: nothing more is delivered.
@@ -677,7 +783,7 @@ impl<P: SessionPayload> LiveSession<P> {
             .await
             .map_err(|error| InputError::Forward(Box::new(error)))?;
         if let Some(text) = input {
-            lock(&self.turn).push(text);
+            lock(&self.turn).texts.push(text);
         }
         Ok(())
     }
@@ -694,10 +800,7 @@ impl<P: SessionPayload> LiveSession<P> {
             .commit_input(self.shared.session_id)
             .map_err(InputError::Refused)?;
         self.shared.record(SessionEvent::InputCommitted(committed));
-        let turn = std::mem::take(&mut *lock(&self.turn));
-        if !turn.is_empty() {
-            self.remember(HistoryKind::UserTurn, turn.join(" "), None);
-        }
+        self.end_turn(true);
         for ingress in &self.ingresses {
             ingress
                 .endpoint
@@ -710,7 +813,10 @@ impl<P: SessionPayload> LiveSession<P> {
 
     /// `close` by draining: runs `CloseSession`, then sends the end of input, a control event of
     /// kind `stop`, into every ingress and lets go of the ingresses. The run drains; once it has
-    /// completed, the driver runs `CompleteSessionClose`.
+    /// completed, the driver runs `CompleteSessionClose`. A session with no run in flight, one
+    /// whose switch did not drain or was let go of once the run it left ended, has nothing to
+    /// drain: `CompleteSessionClose` runs at once. While the run it left is still in flight, that
+    /// run's end is the one the close waits for.
     ///
     /// # Errors
     ///
@@ -722,6 +828,7 @@ impl<P: SessionPayload> LiveSession<P> {
             .close_session(self.shared.session_id)
             .map_err(CloseError::Refused)?;
         self.shared.record(SessionEvent::SessionDraining(draining));
+        self.end_turn(false);
         let mut refused = None;
         for ingress in &self.ingresses {
             let stop = self.control(&ingress.name, ControlKind::Stop);
@@ -730,6 +837,7 @@ impl<P: SessionPayload> LiveSession<P> {
             }
         }
         self.ingresses.clear();
+        self.shared.closing();
         refused.map_or(Ok(()), |error| Err(CloseError::Forward(Box::new(error))))
     }
 
@@ -768,7 +876,9 @@ impl<P: SessionPayload> LiveSession<P> {
     /// ([`RunRequests::cancel`]) and delivers nothing more of what the run sends. Once the run
     /// has ended, the session runs `CancelSession`, which delivers `SessionClosed` after how the
     /// run ended; no `SessionDraining` is delivered for a session that was not draining. A
-    /// draining session whose drain does not finish is cut the same way.
+    /// draining session whose drain does not finish is cut the same way. A session with no
+    /// current run, after a switch that did not drain or was let go of, cancels the run it left:
+    /// once that run has ended, or at once when it already has, `CancelSession` closes it.
     ///
     /// # Errors
     ///
@@ -788,6 +898,7 @@ impl<P: SessionPayload> LiveSession<P> {
             }
             Some(SessionState::Opened | SessionState::Ready | SessionState::Draining) => {}
         }
+        self.end_turn(false);
         self.cancelled.store(true, Ordering::Release);
         self.requests.cancel();
         self.shared.cancel();
@@ -839,18 +950,33 @@ impl<P: SessionPayload> LiveSession<P> {
     /// committed segment as an assistant segment, a tool result with its call.
     ///
     /// Nothing is delivered once the session was cancelled, nor an event of a generation an
-    /// interrupt cut: its generation is the envelope's, or the one the event names.
+    /// interrupt cut: its generation is the envelope's, or the one the event names, or, for an
+    /// event naming only its segment, a committed segment, its synthesis or its playback, the
+    /// generation a delta of that segment named. An event that names neither a generation nor a
+    /// segment a delta named belongs to no generation and no interrupt cuts it.
     pub(crate) fn deliver(&self, envelope: &EventEnvelope<P>) -> Option<SessionEvent> {
         if self.cancelled.load(Ordering::Acquire) {
             return None;
         }
         let event = envelope.payload.session_event()?;
-        if let Some(generation_id) = envelope.generation_id.or_else(|| generation_of(&event)) {
+        {
             let mut generations = lock(&self.generations);
-            if generations.cut.contains(&generation_id) {
-                return None;
+            let generation = envelope
+                .generation_id
+                .or_else(|| generation_of(&event))
+                .or_else(|| {
+                    segment_of(&event)
+                        .and_then(|segment_id| generations.segments.get(&segment_id).copied())
+                });
+            if let Some(generation_id) = generation {
+                if let SessionEvent::TextDelta(delta) = &event {
+                    generations.segments.insert(delta.segment_id, generation_id);
+                }
+                if generations.cut.contains(&generation_id) {
+                    return None;
+                }
+                generations.delivered.insert(generation_id);
             }
-            generations.delivered.insert(generation_id);
         }
         match &event {
             SessionEvent::TranscriptCommitted(committed) => {
@@ -871,20 +997,22 @@ impl<P: SessionPayload> LiveSession<P> {
         Some(event)
     }
 
-    /// Runs `RecordHistory` for the fact `kind` of `text`, at the session's next position, naming
-    /// its current run. The `HistoryRecorded` the state machine records is not delivered: history
-    /// is read through the view. A Closed session records nothing.
+    /// Records the fact `kind` of `text`, naming the session's current run ([`Shared::remember`]);
+    /// while a user turn is open, once the turn was recorded ([`LiveSession::end_turn`]), so that
+    /// the turn precedes the reply that answers it.
     fn remember(&self, kind: HistoryKind, text: String, call_id: Option<ToolCallId>) {
-        let mut sessions = lock(&self.shared.sessions);
-        let position = sessions.next_position(self.shared.session_id);
-        let _ = sessions.record_history(RecordHistory {
-            session_id: self.shared.session_id,
+        let fact = Fact {
             run_id: self.run_id,
-            position,
             kind,
             text,
             call_id,
-        });
+        };
+        let mut turn = lock(&self.turn);
+        if turn.texts.is_empty() {
+            self.shared.remember(fact);
+        } else {
+            turn.held.push(fact);
+        }
     }
 
     /// A control event of `kind` on the session's own stream, for the ingress `port`.
@@ -908,8 +1036,33 @@ impl<P: SessionPayload> LiveSession<P> {
     }
 }
 
+impl<P> LiveSession<P> {
+    /// Ends the open user turn: records it, joined by a space, when it is `committed` and the
+    /// application sent text in it, then the facts delivered while it was open, in order.
+    pub(crate) fn end_turn(&self, committed: bool) {
+        let mut turn = lock(&self.turn);
+        let Turn { texts, held } = std::mem::take(&mut *turn);
+        if committed && !texts.is_empty() {
+            self.shared.remember(Fact {
+                run_id: self.run_id,
+                kind: HistoryKind::UserTurn,
+                text: texts.join(" "),
+                call_id: None,
+            });
+        }
+        for fact in held {
+            self.shared.remember(fact);
+        }
+    }
+}
+
+/// Letting go of the handle ends the open user turn uncommitted and cancels the session's run,
+/// which then ends, so that the session closes: by `CompleteSessionClose` when its run completed
+/// while it drains, otherwise by `CancelSession`.
 impl<P> Drop for LiveSession<P> {
     fn drop(&mut self) {
+        self.end_turn(false);
+        self.requests.cancel();
         self.shared.release();
     }
 }
@@ -940,6 +1093,17 @@ const fn generation_of(event: &SessionEvent) -> Option<GenerationId> {
         SessionEvent::GenerationSuperseded(event) => Some(event.generation_id),
         SessionEvent::GenerationCancelled(event) => Some(event.generation_id),
         SessionEvent::TextDelta(event) => Some(event.generation_id),
+        _ => None,
+    }
+}
+
+/// The segment an event names when it names no generation: a committed segment, its synthesis,
+/// its playback.
+const fn segment_of(event: &SessionEvent) -> Option<SegmentId> {
+    match event {
+        SessionEvent::TextSegmentCommitted(event) => Some(event.segment_id),
+        SessionEvent::SynthesisCompleted(event) => Some(event.segment_id),
+        SessionEvent::AudioPlayed(event) => Some(event.segment_id),
         _ => None,
     }
 }
