@@ -45,6 +45,107 @@ types:
     kind: newtype
     of: Uuid
 
+  # The stable identity of one routable event, for deduplication and tracing.
+  # read from: docs/design/inference.md:308
+  - name: inference.stream.EventId
+    kind: newtype
+    of: Uuid
+
+  # The clock an event timestamp is read on. Audio frame time, inference execution time, wall time
+  # and playback time are distinct clocks, and an envelope names its timebase explicitly so that
+  # spans, tool events and spoken output align without assuming the source clocks are identical.
+  # read from: docs/design/inference.md:316
+  # read from: docs/design/inference.md:643-645
+  - name: inference.stream.Timebase
+    kind: enum
+    variants: [audio_frame_time, inference_execution_time, wall_time, playback_time]
+
+  # The canonical envelope of every routable event. There is no single global order across
+  # independently produced streams: sequence orders the events of one stream only, and a recorder
+  # may assign a merge order of its own beside it. A control event (start, stop, commit, revise,
+  # cancel, error) is told from user content by its kind, the declared name of the event the
+  # payload is; no separate control type is declared.
+  # read from: docs/design/inference.md:303-320
+  # read from: docs/design/inference.md:297
+  - name: inference.stream.EventEnvelope
+    kind: struct
+    fields:
+      # A version is a MUST only across process or network boundaries; the envelope carries one
+      # always, so that a reader never guesses it. That it is an Integer is this specification's
+      # choice, not the design's.
+      # read from: docs/design/inference.md:278
+      # read from: docs/design/inference.md:307
+      - name: schema_version
+        type: Integer
+      # read from: docs/design/inference.md:308
+      - name: event_id
+        type: inference.stream.EventId
+      # read from: docs/design/inference.md:309
+      - name: run_id
+        type: inference.graph.RunId
+      # read from: docs/design/inference.md:310
+      - name: session_id
+        type: Optional<inference.session.SessionId>
+      # read from: docs/design/inference.md:311
+      - name: stream_id
+        type: inference.stream.StreamId
+      # Increasing per stream: an event whose sequence is not greater than the last one recorded
+      # on its stream is refused.
+      # read from: docs/design/inference.md:312
+      # read from: docs/design/inference.md:1110
+      # UNMAPPED: the design says "per-producer/per-stream" (docs/design/inference.md:312);
+      # whether the order is per stream alone or per producer and stream is not settled. Open
+      # question for the owner.
+      - name: sequence
+        type: Integer
+      # The source node.
+      # read from: docs/design/inference.md:313
+      - name: producer
+        type: inference.graph.NodeId
+      # The source port.
+      # read from: docs/design/inference.md:313
+      # UNMAPPED: whether `port` is a port id (inference.graph.PortId) or a port name is not
+      # settled (docs/design/inference.md:313); it is an opaque String until the graph settles it.
+      # Open question for the owner.
+      - name: port
+        type: String
+      # The typed event discriminator: the declared name of the payload's event, such as
+      # inference.stream.TranscriptHypothesis.
+      # read from: docs/design/inference.md:314
+      # read from: docs/design/inference.md:297
+      - name: kind
+        type: String
+      # The generation the payload belongs to, if any. A payload that carries a generation_id
+      # carries the envelope's.
+      # read from: docs/design/inference.md:315
+      # read from: docs/design/inference.md:1110
+      - name: generation_id
+        type: Optional<inference.stream.GenerationId>
+      # read from: docs/design/inference.md:316
+      # UNMAPPED: the design names neither the unit nor the origin of a timestamp
+      # (docs/design/inference.md:316); it is an Integer count on the clock `timebase` names, and
+      # whether audio frame time is read as an inference.audio.SampleClockPosition is open.
+      # Open question for the owner.
+      - name: timestamp
+        type: Integer
+      # The clock `timestamp` is read on, named explicitly.
+      # read from: docs/design/inference.md:645
+      - name: timebase
+        type: inference.stream.Timebase
+      # The triggering event, if known.
+      # read from: docs/design/inference.md:317
+      # UNMAPPED: the design's cause is an event "or operation" (docs/design/inference.md:317);
+      # an operation has no identity type here, so a cause is an event id only. Open question for
+      # the owner.
+      - name: causation_id
+        type: Optional<inference.stream.EventId>
+      # The typed value of the event, held unread by the envelope.
+      # read from: docs/design/inference.md:318
+      # UNMAPPED: a "reference to associated binary data" (docs/design/inference.md:318) has no
+      # declared form; the payload is a Json value. Open question for the owner.
+      - name: payload
+        type: Json
+
 entities:
   # Turn completion is a control boundary declaring a whole input turn complete, distinct from
   # the commit of individual spans.
@@ -812,10 +913,9 @@ commands:
             current: {subject: state}
 
 events:
-  # UNMAPPED: no event declares the envelope (schema_version, event_id, run_id, session_id,
-  # stream_id, sequence, producer and port, timestamp, causation_id; docs/design/inference.md:303-318).
-  # The fields are a SHOULD, and a version is a MUST only across process or network boundaries
-  # (docs/design/inference.md:278); the inbound-text story declares them.
+  # The envelope every routable event travels in is the type inference.stream.EventEnvelope above;
+  # each event below is the payload of one, named by the envelope's kind.
+  # read from: docs/design/inference.md:303-318
   # UNMAPPED: design event names not declared here (names are not frozen,
   # docs/design/inference.md:342): SpeechStarted, SpeechEnded (STT), StructuredOutput (LLM),
   # SynthesisStarted, AudioChunk and alignment updates (TTS), and the duplex family

@@ -18,8 +18,8 @@ pub mod policy;
 /// `inference.graph`: empty until the pipeline and run stores land.
 pub mod graph;
 
-/// `inference.stream`: the in-memory stores of the generations and output segments, and their
-/// views; the span and turn stores are still to land.
+/// `inference.stream`: the in-memory stores of the turns, spans, generations and output segments,
+/// their views, and the log that records their events in envelopes.
 pub mod stream;
 
 /// `inference.tools`: empty until the tool-call stores land.

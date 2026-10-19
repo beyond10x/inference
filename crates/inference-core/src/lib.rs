@@ -6,6 +6,7 @@
 //! run ([`generation`]), and the identifiers shared across the graph, stream and session layers
 //! ([`id`]). It carries no concrete model, backend or provider implementation.
 
+pub mod envelope;
 pub mod generation;
 pub mod id;
 pub mod model;

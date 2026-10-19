@@ -10,6 +10,12 @@
 //! events every store has recorded, so a view of one domain read at the token of another domain's
 //! command is answered.
 //!
+//! An observed event's position is the target's too: [`Stores::publish`] places every event a
+//! store recorded in the target's one publication order, and [`Stores::model_position`] and
+//! [`Stores::stream_position`] read its place there. Each store orders its own events only, as an
+//! envelope's `sequence` orders one stream only, so the merge order across domains is the
+//! target's, the recorder's, and the one thing a module reads that no store holds.
+//!
 //! The suite writes every number of a request as a float, so an ESS `Integer` arrives as `1.0`.
 //! [`integer`] reads it back as an `i64` and refuses a fractional or out-of-range value as an
 //! error, never as a pass; no request is deserialized whole into an `inference-core` type.
@@ -48,9 +54,62 @@ pub struct Stores {
     pub stream: stream::State,
     pub tools: tools::State,
     pub session: session::State,
+    publication: Publication,
+}
+
+/// The target's one publication order: for each domain whose store records events, the position
+/// of each of its events, in the order its store recorded them.
+#[derive(Default)]
+struct Publication {
+    model: Vec<u64>,
+    stream: Vec<u64>,
 }
 
 impl Stores {
+    /// Places every event a store recorded since the last call after the events placed before,
+    /// in the order the store recorded them. Each module calls it before and after it runs a
+    /// command and before it reads events, so an event a command emits is placed when the command
+    /// returns. Events recorded straight into the stores between two calls, as a test arranges a
+    /// generation that no command can start yet, are placed at the next call, the `inference.model`
+    /// ones before the `inference.stream` ones. A story that fills a module adds its events here.
+    pub fn publish(&mut self) {
+        let mut placed = self.publication.model.len() + self.publication.stream.len();
+        let model = self.model.events().len();
+        let stream = self.stream.events().len();
+        for (positions, recorded) in [
+            (&mut self.publication.model, model),
+            (&mut self.publication.stream, stream),
+        ] {
+            while positions.len() < recorded {
+                placed += 1;
+                positions.push(u64::try_from(placed).unwrap_or(u64::MAX));
+            }
+        }
+    }
+
+    /// The position, from 1, of the `index`th event (from 0) the `inference.model` store recorded,
+    /// in the target's one publication order.
+    pub fn model_position(&self, index: usize) -> Result<u64, TargetError> {
+        Self::placed(&self.publication.model, "inference.model", index)
+    }
+
+    /// The position, from 1, of the `index`th event (from 0) the `inference.stream` store
+    /// recorded, in the target's one publication order.
+    pub fn stream_position(&self, index: usize) -> Result<u64, TargetError> {
+        Self::placed(&self.publication.stream, "inference.stream", index)
+    }
+
+    /// The position [`Stores::publish`] gave the `index`th event of `domain`; an event it has not
+    /// placed is an error, never a guessed position.
+    fn placed(positions: &[u64], domain: &str, index: usize) -> Result<u64, TargetError> {
+        positions.get(index).copied().ok_or_else(|| {
+            unreadable(
+                format!("placing event {index} of `{domain}`"),
+                "the publication order has not placed it",
+            )
+        })
+    }
+
     /// The target's one sequence: the number of events every store has recorded, whatever its
     /// domain. Each accepted command that emits an event advances it, and a refusal does not.
     ///
