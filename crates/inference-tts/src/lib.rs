@@ -26,10 +26,7 @@
 //!
 //! A segment offered to one synthesis cannot be offered to another: it is moved into the first,
 //! since `QueueForSynthesis` on a Queued segment is wrong-state, and [`OutputSegment`] is not
-//! `Clone`. A transition of [`OutputSegment`] reads the segment and returns the moved one, so a
-//! caller still holding an earlier value can move it again into a second value of the same
-//! identity; one synthesis refuses that second value as wrong-state, but two syntheses do not
-//! see each other.
+//! `Clone`.
 //!
 //! ```compile_fail,E0382
 //! # use inference_tts::SynthesisOutput;
@@ -42,6 +39,26 @@
 //!     let _ = second.offer(segment);
 //! }
 //! ```
+//!
+//! Nor can a second Committed value of the segment's identity be made to offer to the other: a
+//! transition of [`OutputSegment`] consumes the segment it moves, so a Tentative segment commits
+//! once.
+//!
+//! ```compile_fail,E0382
+//! # use inference_tts::SynthesisOutput;
+//! # use inference_tts::inference_core::model::Adapter;
+//! # use inference_tts::inference_text::OutputSegment;
+//! fn commit_twice_and_offer_both(adapter: &Adapter, tentative: OutputSegment) {
+//!     let (segment, _) = tentative.commit().unwrap();
+//!     let (again, _) = tentative.commit().unwrap();
+//!     let _ = SynthesisOutput::start(adapter).offer(segment);
+//!     let _ = SynthesisOutput::start(adapter).offer(again);
+//! }
+//! ```
+//!
+//! [`OutputSegment::emit_as`] takes the identity it is given, so a caller that names one identity
+//! twice holds two segments of it, and a synthesis still refuses the second value as wrong-state;
+//! two syntheses do not see each other.
 //!
 //! Incremental input and output streaming are distinct capabilities
 //! (`inference.model.Capability`), read from the adapter record and never implied by the shape of
@@ -138,8 +155,8 @@ pub use inference_text;
 use inference_audio::AudioFrame;
 use inference_core::model::{Adapter, Capability};
 use inference_text::{
-    AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentSnapshot,
-    SegmentState, SegmentStateConflict, SynthesisCompleted,
+    AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentMoveRefused, SegmentQueued,
+    SegmentSnapshot, SegmentState, SegmentStateConflict, SynthesisCompleted,
 };
 
 /// The revision of this contract, for the `contract_revision` an adapter implementing it
@@ -580,7 +597,7 @@ impl SynthesisOutput {
             }
             .into());
         }
-        let (queued, event) = segment.queue()?;
+        let (queued, event) = segment.queue().map_err(SegmentStateConflict::from)?;
         self.segments.push(queued);
         self.frames.push(0);
         self.played.push(0);
@@ -673,11 +690,11 @@ impl SynthesisOutput {
         frames: Vec<AudioFrame>,
     ) -> Result<Vec<SynthesisEvent>, CompletionRefused> {
         let index = self.taken_index(segment_id)?;
-        let (synthesized, event) = self.segments[index].synthesize()?;
+        self.require(index, SegmentState::Queued)?;
         for frame in &frames {
             check_length(frame)?;
         }
-        self.segments[index] = synthesized;
+        let event = self.move_segment(index, OutputSegment::synthesize)?;
         self.frames[index] += frames.len();
         let mut events = Vec::with_capacity(frames.len() + 1);
         events.push(SynthesisEvent::Completed(event));
@@ -735,7 +752,7 @@ impl SynthesisOutput {
             self.played[index] = self.played[index].saturating_add(receipt.frames);
         }
         let index = self.held_index(segment_id)?;
-        let (played, event) = self.segments[index].play()?;
+        self.require(index, SegmentState::Synthesized)?;
         if let Some(other) = receipt.segment_id
             && other != segment_id
         {
@@ -749,8 +766,7 @@ impl SynthesisOutput {
             }
             .into());
         }
-        self.segments[index] = played;
-        Ok(event)
+        Ok(self.move_segment(index, OutputSegment::play)?)
     }
 
     /// Runs the `discarded` outcome of `inference.stream.DiscardSegment` on the segment
@@ -763,9 +779,7 @@ impl SynthesisOutput {
     /// Discarded. Nothing moves.
     pub fn discard(&mut self, segment_id: SegmentId) -> Result<SegmentDiscarded, DiscardRefused> {
         let index = self.held_index(segment_id)?;
-        let (discarded, event) = self.segments[index].discard()?;
-        self.segments[index] = discarded;
-        Ok(event)
+        Ok(self.move_segment(index, OutputSegment::discard)?)
     }
 
     /// The capabilities the producing adapter claimed when the synthesis started.
@@ -824,6 +838,36 @@ impl SynthesisOutput {
             .iter()
             .position(|segment| segment.segment_id() == segment_id)
             .ok_or(SegmentNotHeld { segment_id })
+    }
+
+    /// Passes when the segment at `index` holds `state`, the one state the transition about to
+    /// run moves from; it is read first so that a later check refuses before anything moves.
+    fn require(&self, index: usize, state: SegmentState) -> Result<(), SegmentStateConflict> {
+        let current = self.segments[index].state();
+        if current == state {
+            Ok(())
+        } else {
+            Err(SegmentStateConflict { current })
+        }
+    }
+
+    /// Moves the segment at `index` by `transition`, which consumes it, and keeps the moved
+    /// segment in its place, or the segment as it was when the transition is refused.
+    fn move_segment<E>(
+        &mut self,
+        index: usize,
+        transition: fn(OutputSegment) -> Result<(OutputSegment, E), SegmentMoveRefused>,
+    ) -> Result<E, SegmentStateConflict> {
+        let segment = self.segments.remove(index);
+        let (kept, answer) = match transition(segment) {
+            Ok((moved, event)) => (moved, Ok(event)),
+            Err(refused) => {
+                let conflict = refused.conflict();
+                (refused.into_segment(), Err(conflict))
+            }
+        };
+        self.segments.insert(index, kept);
+        answer
     }
 
     /// The index of the segment `segment_id` among those the implementation has taken.
