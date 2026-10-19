@@ -32,7 +32,7 @@ scope:
   path: crates/inference-testkit/src/graph.rs
 - confidence: inferred
   path: crates/inference-testkit/src/llm.rs
-revision: 17
+revision: 18
 ---
 # Story: text-pipeline-end-to-end
 
@@ -116,3 +116,9 @@ Derived 2026-10-19 by `story-scoper`. Every line is **cited** (read from the sto
 - **Confidence:** medium — the three crates and `crates/inference-runtime/tests` are read from the body, but every file-level entry is inferred because neither this body nor the upstream bodies it extends name a file (the recording mock of `story:node-instance-lifecycle`, the Run module of `story:run-lifecycle`), and the tree holds no code to grep (no commits, `crates/` absent)
 - **Would collide with:** any unit touching `crates/inference-runtime` (its `src/lib.rs` module list, its `Cargo.toml` dev-dependencies, a file in `tests/` beside this one); any unit editing the testkit's `src/graph.rs` or `src/llm.rs`; any unit adding to `inference-core`'s envelope or control-event family (`src/envelope.rs`) if the end-of-input event lands here; and, without sharing a file, any unit that changes the synthesized scenario set or `ess/SKIPPED.md`, because Step 5 re-runs the whole `inference.graph` suite and the `unsupported == ess/SKIPPED.md` equality in `crates/inference-testkit/tests/conform.rs`
 - **Safety fact:** the story adds no `ess/` declaration and removes no `ess/SKIPPED.md` line (Steps 1 and 5), so the suite `ess verify conform synthesize --path ess` emits is unchanged and the `unsupported == ess/SKIPPED.md` assertion of `tests/conform.rs` (`story:testkit-conformance-target` step 2) cannot go red from this story; every code change is additive (a new test file, extensions to existing mocks, a loop over existing Run commands that issues nothing the state machine refuses) — step 1 (read from the body), unproven. Where the symbol search stops: the end-of-input control event; the envelope `kind` is declared in `ess/domains/stream.yaml` as a `types:` entry by the inbound story and mirrored in `crates/inference-core/src/envelope.rs`; if `kind` is a closed enum there, adding an end-of-input kind is an `ess/` edit Step 1 excludes (a `types:` entry synthesizes no scenario per the inbound story, so the equality holds either way) — step 1, unproven
+
+## Envelopes on emitted events
+
+Added 2026-10-19 from wave 5 (`review-result:adversary-inbound-text-spans-and-envelope-pass-1`, finding F2).
+
+`story:inbound-text-spans-and-envelope` declared the event envelope (`inference.stream.EventEnvelope`, `crates/inference-core/src/envelope.rs`) and the testkit `EventLog` that refuses a duplicate event id, a non-increasing sequence per stream, a payload generation other than the envelope's and a kind other than the payload's declared name (`crates/inference-testkit/src/stream.rs`). The domain stores record bare events, because they do not know the producer node, port or stream. This story's runtime does: every event a node instance emits on a run is wrapped in an envelope (producer, port, stream, sequence per stream, timebase) and passes through the event log, so the rules of design §23.1 test 6 apply to every emitted event; a case asserts that a repeated `(stream_id, sequence)` from a node is refused.
