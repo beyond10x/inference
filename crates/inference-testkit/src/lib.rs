@@ -28,7 +28,7 @@ pub mod tools;
 /// `inference.session`: empty until the session stores land.
 pub mod session;
 
-/// The mock recogniser of the STT contract; empty until that contract lands.
+/// The scripted mock recogniser of the STT contract, in two capability configurations.
 #[cfg(feature = "stt")]
 pub mod stt;
 
