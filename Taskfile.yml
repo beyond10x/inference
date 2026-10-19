@@ -11,5 +11,5 @@ tasks:
       - ess specify validate --path ess
       - aep plan artifact validate
       - cargo fmt --all --check
-      - cargo clippy --workspace --all-targets -- -D warnings
-      - cargo test --workspace
+      - cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - cargo test --workspace --all-features

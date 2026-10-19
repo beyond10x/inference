@@ -1,0 +1,27 @@
+[package]
+name = "inference-testkit"
+description = "Test utilities of the inference framework: in-memory stores per domain and, behind features, the mocks of the contracts."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+stt = []
+llm = []
+tts = []
+
+[dependencies]
+inference-core = { path = "../inference-core" }
+uuid.workspace = true
+
+[dev-dependencies]
+ess-conformance = { git = "https://github.com/beyond10x/ess", tag = "0.60.0" }
+ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.60.0" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
