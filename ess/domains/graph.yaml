@@ -32,6 +32,10 @@ types:
     kind: newtype
     of: Uuid
 
+  - name: inference.graph.ExposureId
+    kind: newtype
+    of: Uuid
+
   - name: inference.graph.BindingId
     kind: newtype
     of: Uuid
@@ -47,6 +51,13 @@ types:
   - name: inference.graph.NodeInstanceId
     kind: newtype
     of: Uuid
+
+  # The name a node implementation publishes its descriptor under, such as `vad`; a declarative
+  # graph names the kind of each of its nodes.
+  # read from: docs/design/inference.md:491
+  - name: inference.graph.NodeKind
+    kind: newtype
+    of: String
 
   # The node types the design admits: a node is not necessarily a model.
   # read from: docs/design/inference.md:461-469
@@ -91,8 +102,10 @@ types:
     variants: [source_not_output]
 
   # What the graph planner found wrong with a graph: the checks of §10.2 that ValidatePipeline
-  # makes over the whole graph.
+  # makes over the whole graph, and two exposures of a pipeline under one name, which leave the
+  # application unable to tell its interfaces apart.
   # read from: docs/design/inference.md:525-532
+  # read from: docs/design/inference.md:511
   - name: inference.graph.GraphDefect
     kind: enum
     variants:
@@ -101,6 +114,7 @@ types:
       - unbounded_cycle
       - unreachable_mandatory_output
       - disallowed_data_flow
+      - duplicate_exposure_name
 
   # The outcomes runtime admission must permit.
   # read from: docs/design/inference.md:693
@@ -134,6 +148,33 @@ types:
       - name: port_id
         type: Optional<inference.graph.PortId>
 
+  # One named input or output port a node implementation offers, with the traits every node
+  # descriptor MUST declare of it and that inference.graph.Port carries: direction, modality,
+  # essentiality, delivery, whether frames arrive incrementally and need an end marker, and
+  # whether provisional data may arrive.
+  # read from: docs/design/inference.md:473-482
+  # UNMAPPED: accepted encodings and timing assumptions (477), and cardinality and concurrency
+  # constraints (480), as on inference.graph.Port.
+  - name: inference.graph.PortDescriptor
+    kind: struct
+    fields:
+      - name: name
+        type: String
+      - name: direction
+        type: inference.graph.PortDirection
+      - name: modality
+        type: inference.model.Modality
+      - name: essentiality
+        type: inference.graph.Essentiality
+      - name: delivery
+        type: inference.graph.Delivery
+      - name: incremental
+        type: Boolean
+      - name: end_marker_required
+        type: Boolean
+      - name: provisional_allowed
+        type: Boolean
+
 entities:
   # A validated graph of nodes and edges with declared inputs and outputs; it owns composition
   # and requested behaviour. Its declaration carries identity and schema revision, the interaction
@@ -165,9 +206,9 @@ entities:
       # read from: docs/design/inference.md:453
       - name: downgrades
         type: Optional<List<inference.model.Capability>>
-    # UNMAPPED: named source and sink interfaces exposed to the application (design 511), tool
-    # permissions and resource budgets (design 516), and optional preferences (design 513). The
-    # design lists them in the declaration without saying their shape; no field carries them yet.
+    # UNMAPPED: tool permissions and resource budgets (design 516), and optional preferences
+    # (design 513). The design lists them in the declaration without saying their shape; no field
+    # carries them yet.
     relations:
       - name: nodes
         kind: owns
@@ -177,6 +218,14 @@ entities:
       - name: edges
         kind: owns
         target: inference.graph.Edge
+        cardinality: many
+        via: pipeline_id
+      # The named source and sink interfaces exposed to the application, plural; an exposure
+      # exists only within its declaration, as an edge does.
+      # read from: docs/design/inference.md:511
+      - name: exposures
+        kind: owns
+        target: inference.graph.Exposure
         cardinality: many
         via: pipeline_id
       - name: bindings
@@ -225,12 +274,27 @@ entities:
         type: inference.graph.NodeRole
       - name: requires
         type: List<inference.model.Capability>
+      # The pipeline a subgraph node stands for, none for any other node: a complete pipeline
+      # exposed as a reusable node of another, preserving its declared ingress and egress
+      # contracts, its exposures. A subgraph node keeps the role its declarer names and is told a
+      # subgraph by this reference; its ports are declared with AddPort as any node's.
+      # read from: docs/design/inference.md:544
+      # read from: docs/design/inference.md:1188
+      - name: subgraph_id
+        type: Optional<inference.graph.PipelineId>
     relations:
       - name: ports
         kind: owns
         target: inference.graph.Port
         cardinality: many
         via: node_id
+      # Reusable: many nodes may stand for one pipeline.
+      # read from: docs/design/inference.md:544
+      - name: subgraph
+        kind: references
+        target: inference.graph.Pipeline
+        cardinality: one
+        via: subgraph_id
     lifecycle:
       initial: Declared
       states: [Declared]
@@ -324,6 +388,46 @@ entities:
       states: [Declared]
       terminal: [Declared]
 
+  # A named source or sink interface of a pipeline, exposed to the application: one port of the
+  # pipeline and a bounded channel whose far end is outside it, with the finite buffering and
+  # overload behaviour every edge specifies. Its direction is its port's: an exposed input port is
+  # an ingress, which the application feeds, and an exposed output port an egress, which the
+  # application consumes. The ingress and egress contracts a subgraph preserves are these.
+  # read from: docs/design/inference.md:511
+  # read from: docs/design/inference.md:544
+  # read from: docs/design/inference.md:679
+  # UNMAPPED: whether one port may carry more than one exposure. The design does not say, so
+  # ExposePort does not refuse a second exposure of a port. Open question for the owner.
+  - name: inference.graph.Exposure
+    naming:
+      summary: A named ingress or egress of a pipeline; one of its ports, with the far end outside it.
+    identity:
+      name: exposure_id
+      type: inference.graph.ExposureId
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: port_id
+        type: inference.graph.PortId
+      - name: name
+        type: String
+      - name: capacity
+        type: Integer
+      - name: overload
+        type: inference.graph.OverloadPolicy
+    invariants:
+      - capacity > 0
+    relations:
+      - name: port
+        kind: references
+        target: inference.graph.Port
+        cardinality: one
+        via: port_id
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
   # A feedback loop declaration with its bounded control rule: the edge it names is the feedback
   # edge, and `max_iterations` is its iteration rule, how many times one generation may go round
   # the loop along that edge before the loop terminates; the edge's capacity is its queue bound.
@@ -397,6 +501,33 @@ entities:
       states: [Bound]
       terminal: [Bound]
 
+  # What a node implementation offers, published under its kind: the role and required
+  # capabilities of a node of that kind and the named ports it has. A declarative graph is checked
+  # against the descriptors of the kinds it names before anything is declared, because codec,
+  # sample rate and provider capabilities are often known only from configuration. The descriptor
+  # owns its port descriptors, which exist only within it, as a list.
+  # A declared Node keeps no reference to the descriptor it was checked against: the check runs
+  # before the node is declared.
+  # read from: docs/design/inference.md:473-474
+  # read from: docs/design/inference.md:486-493
+  - name: inference.graph.NodeDescriptor
+    naming:
+      summary: The role, required capabilities and named typed ports a node implementation offers, under its kind.
+    identity:
+      name: kind
+      type: inference.graph.NodeKind
+    fields:
+      - name: role
+        type: inference.graph.NodeRole
+      - name: requires
+        type: List<inference.model.Capability>
+      - name: ports
+        type: List<inference.graph.PortDescriptor>
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
   # One invocation or long-lived run of a pipeline; the runtime owns its scheduling, health and
   # cancellation. Its states are the design's, with failure and cancellation explicit.
   # read from: docs/design/inference.md:104
@@ -413,12 +544,24 @@ entities:
       # read from: docs/design/inference.md:1006
       - name: failure
         type: Optional<inference.graph.FailureReason>
+      # The instance of a subgraph node a child run was created for, none for a run created on
+      # its own: one child run per subgraph node instance per parent run, driven by that
+      # instance's lifecycle, so the run boundary is the cancellation and tracing boundary.
+      # read from: docs/design/inference.md:1150
+      - name: parent
+        type: Optional<inference.graph.NodeInstanceId>
     relations:
       - name: pipeline
         kind: references
         target: inference.graph.Pipeline
         cardinality: one
         via: pipeline_id
+      # read from: docs/design/inference.md:1150
+      - name: parent_instance
+        kind: references
+        target: inference.graph.NodeInstance
+        cardinality: one
+        via: parent
       - name: instances
         kind: owns
         target: inference.graph.NodeInstance
@@ -540,7 +683,7 @@ errors:
   # read from: docs/design/inference.md:453
   # read from: docs/design/inference.md:521-534
   - name: inference.graph.IncompatibleGraph
-    summary: The graph planner found a missing node or port, an incompatible edge, an unbounded cycle, an unreachable mandatory output or a disallowed data flow; each finding is named.
+    summary: The graph planner found a missing node or port, an incompatible edge, an unbounded cycle, an unreachable mandatory output, a disallowed data flow or two exposures of one name; each finding is named.
     fields:
       - name: findings
         type: List<inference.graph.GraphFinding>
@@ -664,6 +807,37 @@ errors:
       - name: pipeline_id
         type: inference.graph.PipelineId
 
+  # A kind names one descriptor: a second declaration under it would leave a definition naming the
+  # kind unsure which ports it has.
+  # read from: docs/design/inference.md:491
+  - name: inference.graph.NodeDescriptorExists
+    summary: A descriptor is already declared under the kind, so nothing was declared.
+    fields:
+      - name: kind
+        type: inference.graph.NodeKind
+
+  # read from: docs/design/inference.md:655
+  - name: inference.graph.NodeInstanceNotFound
+    summary: No node instance carries the identity the command named.
+    fields:
+      - name: instance_id
+        type: inference.graph.NodeInstanceId
+
+  # A subgraph node's ports and its child pipeline's exposures match one to one by name,
+  # direction and modality. The finding names the node and the port that has no matching
+  # exposure, or the exposure that has no matching port.
+  # read from: docs/design/inference.md:544
+  # read from: docs/design/inference.md:1188
+  - name: inference.graph.SubgraphInterfaceMismatch
+    summary: A subgraph node's ports do not match its child pipeline's exposures; the node and the port or exposure are named.
+    fields:
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: port_id
+        type: Optional<inference.graph.PortId>
+      - name: exposure_id
+        type: Optional<inference.graph.ExposureId>
+
   - name: inference.graph.RunStateConflict
     summary: The run is not in a state this command acts from, so nothing moved.
     fields:
@@ -763,6 +937,7 @@ commands:
           name: input.name
           role: input.role
           requires: input.requires
+          subgraph_id: {cleared: true}
         emits:
           - inference.graph.NodeAdded
         payload:
@@ -771,6 +946,84 @@ commands:
             pipeline_id: input.pipeline_id
             name: input.name
         summary: The node is part of the pipeline's declaration.
+
+  # A subgraph node stands for a complete pipeline as a node of another, preserving its declared
+  # ingress and egress contracts (its exposures), which planning holds the node's ports to. The
+  # node takes the role its declarer names and requires nothing of a binding: the bindings are its
+  # child's. The child must be Planned, as a session's pipeline must be, so only a runnable
+  # pipeline is embedded. The parent gains the node only while it is Declared, and a Declared
+  # pipeline is not Planned, so no pipeline can contain itself, directly or through another, and
+  # no cycle check is needed.
+  # read from: docs/design/inference.md:544
+  # read from: docs/design/inference.md:1150
+  # read from: docs/design/inference.md:1188
+  # read from: docs/design/inference.md:519
+  - name: inference.graph.AddSubgraphNode
+    input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: name
+        type: String
+      - name: role
+        type: inference.graph.NodeRole
+      - name: subgraph_id
+        type: inference.graph.PipelineId
+    outcomes:
+      - name: unknown-pipeline
+        when_related: {via: input.pipeline_id, exists: false}
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.pipeline_id
+        summary: No pipeline carries the parent's identity, and no node was added.
+
+      - name: unknown-subgraph
+        when_related: {via: input.subgraph_id, exists: false}
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.subgraph_id
+        summary: No pipeline carries the child's identity, and no node was added.
+
+      - name: not-declared
+        when_related: {via: input.pipeline_id, predicate: state != Declared}
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.pipeline_id
+            required: Declared
+        summary: The parent was already validated, and no node was added.
+
+      - name: subgraph-not-planned
+        when_related: {via: input.subgraph_id, predicate: state != Planned}
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.subgraph_id
+            required: Planned
+        summary: The child has no execution plan yet, and no node was added.
+
+      # `requires` is not set: a subgraph node requires nothing of a binding, and ess 0.60.0 sets
+      # a List field only from a value (`[]` is refused as a list read, `{cleared: true}` as
+      # emptying a field that is not Optional), so the node holds the empty list the target
+      # gives a field no outcome sets.
+      - name: added
+        creates: inference.graph.Node
+        instance: node_id
+        sets:
+          pipeline_id: input.pipeline_id
+          name: input.name
+          role: input.role
+          subgraph_id: input.subgraph_id
+        emits:
+          - inference.graph.SubgraphNodeAdded
+        payload:
+          inference.graph.SubgraphNodeAdded:
+            node_id: {generated: true}
+            pipeline_id: input.pipeline_id
+            subgraph_id: input.subgraph_id
+            name: input.name
+        summary: The node stands for the child pipeline in the parent's declaration.
 
   # A port is declared on a node that exists, and only while its pipeline is Declared, as the
   # other mutators are (design 519, 523). The pipeline's state is two references away from the
@@ -940,6 +1193,124 @@ commands:
             to_port: input.to_port
         summary: The edge exists with finite buffering and an overload behaviour.
 
+  # A pipeline exposes one of its ports to the application under a name, with the finite
+  # buffering and overload behaviour every edge specifies, while it is Declared, as the other
+  # parts of its declaration. It refuses what ConnectPorts refuses of its source: an unknown
+  # pipeline, an unknown port and an unbounded capacity.
+  # Not refused here: a port of another pipeline. That guard compares the port's `pipeline_id`
+  # with the input (`when_related: {via: input.port_id, predicate: pipeline_id !=
+  # input.pipeline_id}`), which validates, but ess 0.60.0 synthesis then finds no arrangement
+  # for `exposed` (ESS-SYNTH-003), as for ConnectPorts; validation finds such an exposure's port
+  # missing from the pipeline (check 1, `missing_node_or_port`).
+  # Not refused here: a second exposure of one name in one pipeline. Two of one name are a
+  # validation finding (`duplicate_exposure_name`), as node names are not refused by AddNode.
+  # read from: docs/design/inference.md:511
+  # read from: docs/design/inference.md:519
+  # read from: docs/design/inference.md:523-525
+  # read from: docs/design/inference.md:679
+  - name: inference.graph.ExposePort
+    input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: port_id
+        type: inference.graph.PortId
+      - name: name
+        type: String
+      - name: capacity
+        type: Integer
+      - name: overload
+        type: inference.graph.OverloadPolicy
+    outcomes:
+      - name: unknown-pipeline
+        when_related: {via: input.pipeline_id, exists: false}
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.pipeline_id
+        summary: No pipeline carries the identity, and nothing was exposed.
+
+      - name: unknown-port
+        when_related: {via: input.port_id, exists: false}
+        error: inference.graph.PortNotFound
+        payload:
+          inference.graph.PortNotFound:
+            port_id: input.port_id
+        summary: No port carries the identity, and nothing was exposed.
+
+      - name: unbounded
+        when: capacity <= 0
+        error: inference.graph.UnboundedEdge
+        payload:
+          inference.graph.UnboundedEdge:
+            submitted: input.capacity
+        summary: The capacity was not positive, and nothing was exposed.
+
+      - name: not-declared
+        when_related: {via: input.pipeline_id, predicate: state != Declared}
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.pipeline_id
+            required: Declared
+        summary: The pipeline was already validated, and nothing was exposed.
+
+      - name: exposed
+        creates: inference.graph.Exposure
+        instance: exposure_id
+        sets:
+          pipeline_id: input.pipeline_id
+          port_id: input.port_id
+          name: input.name
+          capacity: input.capacity
+          overload: input.overload
+        emits:
+          - inference.graph.PortExposed
+        payload:
+          inference.graph.PortExposed:
+            exposure_id: {generated: true}
+            pipeline_id: input.pipeline_id
+            port_id: input.port_id
+            name: input.name
+        summary: The port is exposed to the application under the name, with finite buffering and an overload behaviour.
+
+  # A node implementation publishes its descriptor under its kind, once; a declarative graph is
+  # checked against the descriptors before a graph runs.
+  # read from: docs/design/inference.md:473-482
+  # read from: docs/design/inference.md:491
+  - name: inference.graph.DeclareNodeDescriptor
+    input:
+      - name: kind
+        type: inference.graph.NodeKind
+      - name: role
+        type: inference.graph.NodeRole
+      - name: requires
+        type: List<inference.model.Capability>
+      - name: ports
+        type: List<inference.graph.PortDescriptor>
+    outcomes:
+      - name: declared
+        creates: inference.graph.NodeDescriptor
+        instance: kind
+        sets:
+          role: input.role
+          requires: input.requires
+          ports: input.ports
+        emits:
+          - inference.graph.NodeDescriptorDeclared
+        payload:
+          inference.graph.NodeDescriptorDeclared:
+            kind: input.kind
+            role: input.role
+        summary: The descriptor is published under its kind.
+
+      - name: already-declared
+        existing_instance: true
+        error: inference.graph.NodeDescriptorExists
+        payload:
+          inference.graph.NodeDescriptorExists:
+            kind: input.kind
+        summary: A descriptor is already declared under the kind, and nothing was declared.
+
   # Applications select concrete adapters at composition time; binding is one of the steps that
   # make a pipeline runnable, so it happens while the pipeline is Declared.
   # read from: docs/design/inference.md:248
@@ -1092,8 +1463,11 @@ commands:
   # every mandatory output is reachable and every data flow is allowed. Their outcome is the
   # planner's to decide, so it is external; the diagnostics name each finding. A cycle is bounded
   # when it runs through an edge of the pipeline that a FeedbackLoop of the pipeline names; a
-  # cycle through no such edge is an unbounded cycle.
+  # cycle through no such edge is an unbounded cycle. An exposed input port counts as fed and an
+  # exposed output port as consumed when the source and sink paths are checked, and every
+  # exposure of the pipeline carries a name no other exposure of it carries.
   # read from: docs/design/inference.md:453
+  # read from: docs/design/inference.md:511
   # read from: docs/design/inference.md:521-534
   # read from: docs/design/inference.md:546
   - name: inference.graph.ValidatePipeline
@@ -1102,7 +1476,7 @@ commands:
         type: inference.graph.PipelineId
     outcomes:
       - name: rejected
-        external: the graph planner finds a missing node or port, an incompatible edge, an unbounded cycle, an unreachable mandatory output or a disallowed data flow
+        external: the graph planner finds a missing node or port, an incompatible edge, an unbounded cycle, an unreachable mandatory output, a disallowed data flow or two exposures of one name
         error: inference.graph.IncompatibleGraph
         payload:
           inference.graph.IncompatibleGraph:
@@ -1173,6 +1547,25 @@ commands:
       # UNMAPPED: which node roles need an adapter. The design says a node can be deterministic
       # (100) and lists roles (461-469) without saying which need a binding; the planning story
       # reads "a node with a non-empty `requires`". Open question for the owner.
+      # A subgraph node preserves its child's declared ingress and egress contracts: its ports
+      # and the child's exposures match one to one by name, direction and modality. The rule
+      # compares the node's Port rows with the child's Exposure rows and their Port rows, sets of
+      # rows two references away, which no guard in ess 0.60.0 compares, so the refusal is the
+      # planner's to decide and names what it found, as locality-denied is.
+      # read from: docs/design/inference.md:544
+      # read from: docs/design/inference.md:1188
+      - name: interface-mismatch
+        external: a subgraph node of the pipeline has a port no exposure of its child pipeline matches by name, direction and modality, or the child has an exposure no port of the node matches
+        error: inference.graph.SubgraphInterfaceMismatch
+        payload:
+          inference.graph.SubgraphInterfaceMismatch:
+            node_id: {generated: true}
+            port_id: {generated: true}
+            exposure_id: {generated: true}
+        summary: Planning fails naming the subgraph node and the port or exposure that does not match, and the pipeline stays Validated.
+
+      # A subgraph node needs no binding: the bindings are its child's, and planning takes the
+      # child's effective capabilities as the node's under the weakest-node rule (444).
       - name: unbound
         external: a node whose role needs an adapter has no Binding
         error: inference.graph.NodeUnbound
@@ -1242,6 +1635,7 @@ commands:
         sets:
           pipeline_id: input.pipeline_id
           failure: {cleared: true}
+          parent: {cleared: true}
         emits:
           - inference.graph.RunCreated
         payload:
@@ -1249,6 +1643,50 @@ commands:
             run_id: {generated: true}
             pipeline_id: input.pipeline_id
         summary: The run exists and has not started validating.
+
+  # A subgraph node instance runs its child pipeline as a run of its own: the run is created by
+  # CreateRun and then nested under the instance, its parent; one child run per subgraph node
+  # instance per parent run. The parent is set by a command of its own rather than by an input
+  # of CreateRun, so CreateRun and its scenarios stay as they were, and a run no NestRun names
+  # records no parent.
+  # Not refused here: a parent instance that is not one of a subgraph node, or whose node stands
+  # for another pipeline than the run's; each compares rows two references away (instance, node,
+  # its `subgraph_id`) with the run's, which ess 0.60.0 synthesis cannot witness
+  # (ESS-SYNTH-003). The runtime nests a run only under the instance of the subgraph node that
+  # created it.
+  # UNMAPPED: whether a run may be nested once it left Created, and whether its parent may be
+  # replaced. A guard on the run's state beside the guard on the parent is refused in one command
+  # (when_subject_state beside when_related). Open question for the owner.
+  # read from: docs/design/inference.md:544
+  # read from: docs/design/inference.md:655
+  # read from: docs/design/inference.md:1150
+  - name: inference.graph.NestRun
+    input:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: parent
+        type: inference.graph.NodeInstanceId
+    outcomes:
+      - name: unknown-parent
+        when_related: {via: input.parent, exists: false}
+        error: inference.graph.NodeInstanceNotFound
+        payload:
+          inference.graph.NodeInstanceNotFound:
+            instance_id: input.parent
+        summary: No node instance carries the parent's identity, and the run was not nested.
+
+      - name: nested
+        updates: inference.graph.Run
+        instance: run_id
+        sets:
+          parent: input.parent
+        emits:
+          - inference.graph.RunNested
+        payload:
+          inference.graph.RunNested:
+            run_id: input.run_id
+            parent: input.parent
+        summary: The run is the child run of the subgraph node instance it names.
 
   - name: inference.graph.ValidateRun
     input:
@@ -1650,6 +2088,17 @@ events:
       - name: name
         type: String
 
+  - name: inference.graph.SubgraphNodeAdded
+    fields:
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: subgraph_id
+        type: inference.graph.PipelineId
+      - name: name
+        type: String
+
   - name: inference.graph.PortAdded
     fields:
       - name: port_id
@@ -1667,6 +2116,24 @@ events:
         type: inference.graph.PortId
       - name: to_port
         type: inference.graph.PortId
+
+  - name: inference.graph.PortExposed
+    fields:
+      - name: exposure_id
+        type: inference.graph.ExposureId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: port_id
+        type: inference.graph.PortId
+      - name: name
+        type: String
+
+  - name: inference.graph.NodeDescriptorDeclared
+    fields:
+      - name: kind
+        type: inference.graph.NodeKind
+      - name: role
+        type: inference.graph.NodeRole
 
   - name: inference.graph.NodeBound
     fields:
@@ -1702,6 +2169,13 @@ events:
         type: inference.graph.RunId
       - name: pipeline_id
         type: inference.graph.PipelineId
+
+  - name: inference.graph.RunNested
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+      - name: parent
+        type: inference.graph.NodeInstanceId
 
   - name: inference.graph.RunValidating
     fields:
@@ -1862,6 +2336,36 @@ views:
       - name: overload
         type: inference.graph.OverloadPolicy
 
+  - name: inference.graph.Exposures
+    source: inference.graph.Exposure
+    consistency: read_your_writes
+    fields:
+      - name: exposure_id
+        type: inference.graph.ExposureId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: port_id
+        type: inference.graph.PortId
+      - name: name
+        type: String
+      - name: capacity
+        type: Integer
+      - name: overload
+        type: inference.graph.OverloadPolicy
+
+  - name: inference.graph.NodeDescriptors
+    source: inference.graph.NodeDescriptor
+    consistency: read_your_writes
+    fields:
+      - name: kind
+        type: inference.graph.NodeKind
+      - name: role
+        type: inference.graph.NodeRole
+      - name: requires
+        type: List<inference.model.Capability>
+      - name: ports
+        type: List<inference.graph.PortDescriptor>
+
   - name: inference.graph.Bindings
     source: inference.graph.Binding
     consistency: read_your_writes
@@ -1896,6 +2400,8 @@ views:
         type: inference.graph.PipelineId
       - name: failure
         type: Optional<inference.graph.FailureReason>
+      - name: parent
+        type: Optional<inference.graph.NodeInstanceId>
       - name: state
         type: inference.graph.Run.State
 

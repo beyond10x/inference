@@ -1,5 +1,6 @@
-//! [`Declaration`]: the declared pipelines, nodes, ports, edges, feedback loops and bindings, the
-//! six declaration commands of `ess/domains/graph.yaml` over them, and `ValidatePipeline`.
+//! [`Declaration`]: the declared pipelines, nodes, ports, edges, exposures, feedback loops and
+//! bindings, the seven declaration commands of `ess/domains/graph.yaml` over them, and
+//! `ValidatePipeline`.
 
 use std::error::Error;
 use std::fmt;
@@ -11,13 +12,14 @@ use inference_core::model::{Adapter, AdapterId};
 use inference_core::policy::{DeploymentProfile, ProfileId, ProfileNotFound};
 
 use crate::{
-    AdapterNotFound, AddNode, AddPort, BindNode, Binding, BindingId, ConnectPorts,
-    DeclareFeedbackLoop, DeclarePipeline, Edge, EdgeDefect, EdgeId, EdgeNotFound, FeedbackLoop,
-    FeedbackLoopDeclared, FeedbackLoopId, GraphFinding, IncompatibleEdge, IncompatibleGraph, Node,
-    NodeAdded, NodeBound, NodeId, NodeNotFound, OverloadPolicy, Pipeline, PipelineDeclared,
-    PipelineId, PipelineNotFound, PipelineNotReady, PipelineState, PipelineStateConflict,
-    PipelineValidated, Port, PortAdded, PortDirection, PortId, PortNotFound, PortsConnected,
-    UnboundedEdge, UnboundedFeedback, ValidatePipeline,
+    AdapterNotFound, AddNode, AddPort, AddSubgraphNode, BindNode, Binding, BindingId, ConnectPorts,
+    DeclareFeedbackLoop, DeclarePipeline, Edge, EdgeDefect, EdgeId, EdgeNotFound, ExposePort,
+    Exposure, ExposureId, FeedbackLoop, FeedbackLoopDeclared, FeedbackLoopId, GraphFinding,
+    IncompatibleEdge, IncompatibleGraph, Node, NodeAdded, NodeBound, NodeId, NodeNotFound,
+    OverloadPolicy, Pipeline, PipelineDeclared, PipelineId, PipelineNotFound, PipelineNotReady,
+    PipelineState, PipelineStateConflict, PipelineValidated, Port, PortAdded, PortDirection,
+    PortExposed, PortId, PortNotFound, PortsConnected, SubgraphNodeAdded, UnboundedEdge,
+    UnboundedFeedback, ValidatePipeline,
 };
 
 /// What a declaration references and does not hold: the declared deployment profiles of
@@ -53,6 +55,57 @@ impl Error for AddNodeError {
         match self {
             Self::UnknownPipeline(error) => Some(error),
             Self::NotDeclared(error) => Some(error),
+        }
+    }
+}
+
+/// Why `inference.graph.AddSubgraphNode` added nothing. The refusals are decided in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddSubgraphNodeError {
+    /// The `unknown-pipeline` outcome: no pipeline carries the parent's identity.
+    UnknownPipeline(PipelineNotFound),
+    /// The `unknown-subgraph` outcome: no pipeline carries the child's identity.
+    UnknownSubgraph(PipelineNotFound),
+    /// The `not-declared` outcome: the parent was already validated.
+    NotDeclared(PipelineNotReady),
+    /// The `subgraph-not-planned` outcome: the child has no execution plan yet.
+    SubgraphNotPlanned(PipelineNotReady),
+}
+
+impl fmt::Display for AddSubgraphNodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownPipeline(error) | Self::UnknownSubgraph(error) => {
+                fmt::Display::fmt(error, f)
+            }
+            Self::NotDeclared(error) | Self::SubgraphNotPlanned(error) => {
+                fmt::Display::fmt(error, f)
+            }
+        }
+    }
+}
+
+impl Error for AddSubgraphNodeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::UnknownPipeline(error) | Self::UnknownSubgraph(error) => Some(error),
+            Self::NotDeclared(error) | Self::SubgraphNotPlanned(error) => Some(error),
+        }
+    }
+}
+
+/// Why a pipeline cannot be a subgraph node's child.
+#[derive(Clone, Copy)]
+pub(crate) enum SubgraphRefusal {
+    Unknown(PipelineNotFound),
+    NotPlanned(PipelineNotReady),
+}
+
+impl SubgraphRefusal {
+    pub(crate) const fn into_add_error(self) -> AddSubgraphNodeError {
+        match self {
+            Self::Unknown(error) => AddSubgraphNodeError::UnknownSubgraph(error),
+            Self::NotPlanned(error) => AddSubgraphNodeError::SubgraphNotPlanned(error),
         }
     }
 }
@@ -123,6 +176,41 @@ impl Error for ConnectPortsError {
             Self::Unbounded(error) => Some(error),
             Self::NotDeclared(error) => Some(error),
             Self::SourceNotOutput(error) => Some(error),
+        }
+    }
+}
+
+/// Why `inference.graph.ExposePort` exposed nothing. The refusals are decided in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExposePortError {
+    /// The `unknown-pipeline` outcome.
+    UnknownPipeline(PipelineNotFound),
+    /// The `unknown-port` outcome: no port carries `port_id`.
+    UnknownPort(PortNotFound),
+    /// The `unbounded` outcome: the capacity was below one.
+    Unbounded(UnboundedEdge),
+    /// The `not-declared` outcome: the pipeline was already validated.
+    NotDeclared(PipelineNotReady),
+}
+
+impl fmt::Display for ExposePortError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownPipeline(error) => fmt::Display::fmt(error, f),
+            Self::UnknownPort(error) => fmt::Display::fmt(error, f),
+            Self::Unbounded(error) => fmt::Display::fmt(error, f),
+            Self::NotDeclared(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for ExposePortError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::UnknownPipeline(error) => Some(error),
+            Self::UnknownPort(error) => Some(error),
+            Self::Unbounded(error) => Some(error),
+            Self::NotDeclared(error) => Some(error),
         }
     }
 }
@@ -254,6 +342,7 @@ pub struct Declaration {
     nodes: Vec<Node>,
     ports: Vec<Port>,
     edges: Vec<Edge>,
+    exposures: Vec<Exposure>,
     feedback_loops: Vec<FeedbackLoop>,
     bindings: Vec<Binding>,
     identities: Identities,
@@ -319,6 +408,53 @@ impl Declaration {
         Ok(self.insert_node(input))
     }
 
+    /// Runs `inference.graph.AddSubgraphNode`: a node of the role the input names, requiring
+    /// nothing of a binding, stands for the child pipeline in the parent's declaration. Its ports
+    /// are added with [`Declaration::add_port`]; planning holds them to the child's exposures.
+    ///
+    /// # Errors
+    ///
+    /// In this order: [`AddSubgraphNodeError::UnknownPipeline`];
+    /// [`AddSubgraphNodeError::UnknownSubgraph`]; [`AddSubgraphNodeError::NotDeclared`];
+    /// [`AddSubgraphNodeError::SubgraphNotPlanned`].
+    pub fn add_subgraph_node(
+        &mut self,
+        input: AddSubgraphNode,
+    ) -> Result<SubgraphNodeAdded, AddSubgraphNodeError> {
+        let parent =
+            self.pipeline(input.pipeline_id)
+                .ok_or(AddSubgraphNodeError::UnknownPipeline(PipelineNotFound {
+                    pipeline_id: input.pipeline_id,
+                }))?;
+        let child = self.subgraph_of(input.subgraph_id);
+        if let Err(SubgraphRefusal::Unknown(error)) = child {
+            return Err(AddSubgraphNodeError::UnknownSubgraph(error));
+        }
+        Self::declared(parent).map_err(AddSubgraphNodeError::NotDeclared)?;
+        let child = child.map_err(SubgraphRefusal::into_add_error)?;
+        Ok(self.insert_subgraph_node(input.pipeline_id, input.name, input.role, child))
+    }
+
+    /// The child a subgraph node may stand for: a pipeline that exists and is Planned.
+    pub(crate) fn subgraph_of(
+        &self,
+        subgraph_id: PipelineId,
+    ) -> Result<PipelineId, SubgraphRefusal> {
+        let child =
+            self.pipeline(subgraph_id)
+                .ok_or(SubgraphRefusal::Unknown(PipelineNotFound {
+                    pipeline_id: subgraph_id,
+                }))?;
+        if child.state == PipelineState::Planned {
+            Ok(subgraph_id)
+        } else {
+            Err(SubgraphRefusal::NotPlanned(PipelineNotReady {
+                pipeline_id: subgraph_id,
+                required: PipelineState::Planned,
+            }))
+        }
+    }
+
     /// Runs `inference.graph.AddPort`: the port is declared on its node under the pipeline the
     /// input names, which must still be Declared. A node of another pipeline is not refused here;
     /// the port then belongs to the pipeline it names, not to its node's, and validation of that
@@ -382,6 +518,41 @@ impl Declaration {
             input.pipeline_id,
             input.from_port,
             input.to_port,
+            capacity,
+            input.overload,
+        ))
+    }
+
+    /// Runs `inference.graph.ExposePort`: the port is exposed to the application under the name
+    /// the input carries, with finite buffering and an overload behaviour. A port of another
+    /// pipeline is not refused here; validation of the pipeline finds it missing (check 1). Nor is
+    /// a second exposure of one name; validation finds it (`duplicate_exposure_name`).
+    ///
+    /// # Errors
+    ///
+    /// In this order: [`ExposePortError::UnknownPipeline`]; [`ExposePortError::UnknownPort`] when
+    /// no port carries `port_id`; [`ExposePortError::Unbounded`] carrying the capacity sent when
+    /// it is below one; [`ExposePortError::NotDeclared`].
+    pub fn expose_port(&mut self, input: ExposePort) -> Result<PortExposed, ExposePortError> {
+        let pipeline = self
+            .pipeline(input.pipeline_id)
+            .ok_or(ExposePortError::UnknownPipeline(PipelineNotFound {
+                pipeline_id: input.pipeline_id,
+            }))?;
+        if self.port(input.port_id).is_none() {
+            return Err(ExposePortError::UnknownPort(PortNotFound {
+                port_id: input.port_id,
+            }));
+        }
+        let capacity =
+            bounded(input.capacity).ok_or(ExposePortError::Unbounded(UnboundedEdge {
+                submitted: input.capacity,
+            }))?;
+        Self::declared(pipeline).map_err(ExposePortError::NotDeclared)?;
+        Ok(self.insert_exposure(
+            input.pipeline_id,
+            input.port_id,
+            input.name,
             capacity,
             input.overload,
         ))
@@ -541,6 +712,19 @@ impl Declaration {
         self.edges.iter()
     }
 
+    /// Every exposure, in declaration order.
+    pub fn exposures(&self) -> impl Iterator<Item = &Exposure> {
+        self.exposures.iter()
+    }
+
+    /// The exposure carrying `exposure_id`, if one was declared.
+    #[must_use]
+    pub fn exposure(&self, exposure_id: ExposureId) -> Option<&Exposure> {
+        self.exposures
+            .iter()
+            .find(|exposure| exposure.exposure_id == exposure_id)
+    }
+
     /// Every feedback loop, in declaration order.
     pub fn feedback_loops(&self) -> impl Iterator<Item = &FeedbackLoop> {
         self.feedback_loops.iter()
@@ -612,11 +796,36 @@ impl Declaration {
             name: input.name.clone(),
             role: input.role,
             requires: input.requires,
+            subgraph_id: None,
         });
         NodeAdded {
             node_id,
             pipeline_id: input.pipeline_id,
             name: input.name,
+        }
+    }
+
+    pub(crate) fn insert_subgraph_node(
+        &mut self,
+        pipeline_id: PipelineId,
+        name: String,
+        role: crate::NodeRole,
+        subgraph_id: PipelineId,
+    ) -> SubgraphNodeAdded {
+        let node_id = NodeId::from(self.issue());
+        self.nodes.push(Node {
+            node_id,
+            pipeline_id,
+            name: name.clone(),
+            role,
+            requires: Vec::new(),
+            subgraph_id: Some(subgraph_id),
+        });
+        SubgraphNodeAdded {
+            node_id,
+            pipeline_id,
+            subgraph_id,
+            name,
         }
     }
 
@@ -663,6 +872,31 @@ impl Declaration {
             edge_id,
             from_port,
             to_port,
+        }
+    }
+
+    pub(crate) fn insert_exposure(
+        &mut self,
+        pipeline_id: PipelineId,
+        port_id: PortId,
+        name: String,
+        capacity: NonZeroUsize,
+        overload: OverloadPolicy,
+    ) -> PortExposed {
+        let exposure_id = ExposureId::from(self.issue());
+        self.exposures.push(Exposure {
+            exposure_id,
+            pipeline_id,
+            port_id,
+            name: name.clone(),
+            capacity,
+            overload,
+        });
+        PortExposed {
+            exposure_id,
+            pipeline_id,
+            port_id,
+            name,
         }
     }
 

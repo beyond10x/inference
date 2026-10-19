@@ -2,15 +2,18 @@
 //!
 //! `inference-pipeline` holds the declaration half of `ess/domains/graph.yaml`: a [`Pipeline`] of
 //! named [`Node`]s with typed [`Port`]s, [`Edge`]s that connect an output port to an input port
-//! with finite buffering, [`FeedbackLoop`]s that bound the cycles a feedback edge closes, and
-//! [`Binding`]s of nodes to adapters. A pipeline definition is not an execution; this crate stops
-//! at the declaration, its validation and its plan.
+//! with finite buffering, [`Exposure`]s that expose a port to the application under a name, an
+//! ingress or an egress whose far end is outside the pipeline, [`FeedbackLoop`]s that bound the
+//! cycles a feedback edge closes, and [`Binding`]s of nodes to adapters. A pipeline definition is
+//! not an execution; this crate stops at the declaration, its validation and its plan.
 //!
-//! A [`Declaration`] holds the declared entities and runs the six declaration commands
+//! A [`Declaration`] holds the declared entities and runs the seven declaration commands
 //! ([`Declaration::declare_pipeline`], [`Declaration::add_node`], [`Declaration::add_port`],
-//! [`Declaration::connect_ports`], [`Declaration::declare_feedback_loop`],
-//! [`Declaration::bind_node`]), each refusing what graph.yaml refuses and creating nothing then. The profiles and adapters a declaration references and does
-//! not hold are read through a [`Catalog`]. The typed builder ([`Declaration::build`]) declares the
+//! [`Declaration::connect_ports`], [`Declaration::expose_port`],
+//! [`Declaration::declare_feedback_loop`], [`Declaration::bind_node`]), each refusing what
+//! graph.yaml refuses and creating nothing then. The profiles and adapters a declaration
+//! references and does not hold are read through a [`Catalog`]. The typed builder
+//! ([`Declaration::build`]) declares the
 //! same entities, reading its profile and adapters by identity through the same catalog and
 //! refusing what the commands refuse, with compile-time help: a port handle carries its direction
 //! and modality as types, an edge capacity is a [`NonZeroUsize`], and a handle cannot leave the
@@ -33,6 +36,17 @@
 //! and refuse a node left without the adapter its requirements need ([`NodeUnbound`]) or an unmet
 //! mandatory capability ([`CapabilityMismatch`]); the planned form is a [`PlannedPipeline`].
 //!
+//! A Planned pipeline may stand as a node of another ([`Declaration::add_subgraph_node`],
+//! [`PipelineBuilder::subgraph`]): its exposures are the ingress and egress contracts the node's
+//! ports are held to when the parent is planned.
+//!
+//! A pipeline may also be written declaratively, as JSON ([`PipelineDefinition`]), naming each
+//! node by the kind of a [`NodeDescriptor`] its implementation publishes
+//! (`inference.graph.DeclareNodeDescriptor`, held by [`NodeDescriptors`]);
+//! [`Declaration::declare_definition`] checks it against the descriptors before anything is
+//! declared and then declares it as the builder would, so validation and planning are shared. The
+//! descriptors of the node implementations of this crate are in [`nodes::descriptors`].
+//!
 //! A node implementation writes one trait, [`NodeImplementation`] ([`node`]): describe, prepare,
 //! start with its edge endpoints, drain or cancel, stop, which the runtime drives for each node
 //! instance of a run. The node implementations that carry no model, the tool authority and the
@@ -51,18 +65,24 @@ use inference_core::policy::ProfileId;
 
 mod builder;
 mod declaration;
+mod definition;
 pub mod node;
 pub mod nodes;
 mod planning;
 mod validation;
 
 pub use builder::{
-    NodeHandle, PipelineBuilder, PipelineSpec, PortDirectionType, PortHandle, PortModality,
-    PortTraits, direction, modality,
+    Exposed, NodeHandle, PipelineBuilder, PipelineSpec, PortDirectionType, PortHandle,
+    PortModality, PortTraits, direction, modality,
 };
 pub use declaration::{
-    AddNodeError, AddPortError, BindNodeError, Catalog, ConnectPortsError, Declaration,
-    DeclareFeedbackLoopError, ValidatePipelineError,
+    AddNodeError, AddPortError, AddSubgraphNodeError, BindNodeError, Catalog, ConnectPortsError,
+    Declaration, DeclareFeedbackLoopError, ExposePortError, ValidatePipelineError,
+};
+pub use definition::{
+    BindingDefinition, DeclaredDefinition, DefinitionDefect, DefinitionError, DefinitionFinding,
+    DefinitionNotRead, EdgeDefinition, ExposureDefinition, FeedbackLoopDefinition, NodeDefinition,
+    NodeDescriptors, PipelineDefinition, PortReference,
 };
 pub use inference_core::id::NodeId;
 pub use node::{NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInput, NodeOutput};
@@ -81,8 +101,18 @@ inference_core::uuid_newtype!(
     EdgeId
 );
 inference_core::uuid_newtype!(
+    /// `inference.graph.ExposureId`: identifies an [`Exposure`].
+    ExposureId
+);
+inference_core::uuid_newtype!(
     /// `inference.graph.BindingId`: identifies a [`Binding`].
     BindingId
+);
+inference_core::uuid_newtype!(
+    /// `inference.graph.NodeInstanceId`: identifies an `inference.graph.NodeInstance`, a node as it
+    /// participates in one run; the runtime describes it and hands it to the node implementation
+    /// ([`NodeImplementation::described`]).
+    NodeInstanceId
 );
 inference_core::uuid_newtype!(
     /// `inference.graph.FeedbackLoopId`: identifies a [`FeedbackLoop`].
@@ -210,31 +240,36 @@ pub enum EdgeDefect {
 }
 
 /// `inference.graph.GraphDefect`: what validation found wrong with a graph, one variant per check
-/// of §10.2 that it makes over the whole graph.
+/// of §10.2 that it makes over the whole graph, and two exposures of one name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphDefect {
-    /// Check 1: an edge or a binding names a node or port that is not part of the pipeline.
+    /// Check 1: an edge, an exposure or a binding names a node or port that is not part of the
+    /// pipeline.
     MissingNodeOrPort,
     /// Checks 2 and 3: an edge's ports differ in direction, modality or commitment semantics.
     IncompatibleEdge,
     /// Check 5: a cycle that runs through no edge a [`FeedbackLoop`] of the pipeline bounds.
     UnboundedCycle,
-    /// Check 6: an essential output port that is the source of no edge, or a sink no source
-    /// reaches.
+    /// Check 6: an essential output port that is the source of no edge and no egress, or a sink
+    /// no source or ingress reaches.
     UnreachableMandatoryOutput,
     /// Check 9: provisional data flows into a tool that requires committed input.
     DisallowedDataFlow,
+    /// An exposure carries a name another exposure of the pipeline declared before it carries,
+    /// so the application cannot tell the two apart.
+    DuplicateExposureName,
 }
 
 impl GraphDefect {
     /// Every defect, in the order `ess/domains/graph.yaml` lists them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::MissingNodeOrPort,
         Self::IncompatibleEdge,
         Self::UnboundedCycle,
         Self::UnreachableMandatoryOutput,
         Self::DisallowedDataFlow,
+        Self::DuplicateExposureName,
     ];
 }
 
@@ -382,6 +417,49 @@ pub struct AddNode {
     pub requires: Vec<Capability>,
 }
 
+/// `inference.graph.AddSubgraphNode`: the input that adds to the pipeline `pipeline_id` a [`Node`]
+/// of role `role` standing for the Planned pipeline `subgraph_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddSubgraphNode {
+    pub pipeline_id: PipelineId,
+    pub name: String,
+    pub role: NodeRole,
+    pub subgraph_id: PipelineId,
+}
+
+/// `inference.graph.SubgraphNodeAdded`: a node stands for its child pipeline in its parent's
+/// declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubgraphNodeAdded {
+    pub node_id: NodeId,
+    pub pipeline_id: PipelineId,
+    pub subgraph_id: PipelineId,
+    pub name: String,
+}
+
+/// `inference.graph.SubgraphInterfaceMismatch`: the ports of the subgraph node `node_id` do not
+/// match its child pipeline's exposures one to one by name, direction and modality. `port_id`
+/// names a port no exposure matches, `exposure_id` an exposure no port matches; both, a port and
+/// the exposure of its name that differs from it in direction or modality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubgraphInterfaceMismatch {
+    pub node_id: NodeId,
+    pub port_id: Option<PortId>,
+    pub exposure_id: Option<ExposureId>,
+}
+
+impl fmt::Display for SubgraphInterfaceMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the subgraph node {} does not match its child's exposures: port {:?}, exposure {:?}",
+            self.node_id, self.port_id, self.exposure_id
+        )
+    }
+}
+
+impl Error for SubgraphInterfaceMismatch {}
+
 /// `inference.graph.AddPort`: the input that declares a [`Port`] on a node, under the pipeline it
 /// names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,6 +483,18 @@ pub struct ConnectPorts {
     pub pipeline_id: PipelineId,
     pub from_port: PortId,
     pub to_port: PortId,
+    pub capacity: i64,
+    pub overload: OverloadPolicy,
+}
+
+/// `inference.graph.ExposePort`: the input that exposes the port `port_id` of a pipeline to the
+/// application under `name`, as an [`Exposure`]. The capacity is the ESS `Integer` sent; the
+/// command refuses one below one, as `ConnectPorts` does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExposePort {
+    pub pipeline_id: PipelineId,
+    pub port_id: PortId,
+    pub name: String,
     pub capacity: i64,
     pub overload: OverloadPolicy,
 }
@@ -456,6 +546,16 @@ pub struct PortsConnected {
     pub edge_id: EdgeId,
     pub from_port: PortId,
     pub to_port: PortId,
+}
+
+/// `inference.graph.PortExposed`: a port of a pipeline is exposed to the application under a
+/// name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortExposed {
+    pub exposure_id: ExposureId,
+    pub pipeline_id: PipelineId,
+    pub port_id: PortId,
+    pub name: String,
 }
 
 /// `inference.graph.FeedbackLoopDeclared`: the edge is a feedback edge of its pipeline, bounded by
@@ -698,6 +798,7 @@ pub struct Node {
     name: String,
     role: NodeRole,
     requires: Vec<Capability>,
+    subgraph_id: Option<PipelineId>,
 }
 
 impl Node {
@@ -724,6 +825,12 @@ impl Node {
     #[must_use]
     pub fn requires(&self) -> &[Capability] {
         &self.requires
+    }
+
+    /// The pipeline the node stands for when it is a subgraph node; none for any other node.
+    #[must_use]
+    pub const fn subgraph_id(&self) -> Option<PipelineId> {
+        self.subgraph_id
     }
 }
 
@@ -847,6 +954,200 @@ impl Edge {
     #[must_use]
     pub const fn overload(&self) -> OverloadPolicy {
         self.overload
+    }
+}
+
+/// `inference.graph.Exposure`: a named source or sink interface of a pipeline, exposed to the
+/// application: one port of the pipeline and a bounded channel whose far end is outside it. Its
+/// direction is its port's: an exposed input port is an ingress, which the application feeds, and
+/// an exposed output port an egress, which the application consumes. Its capacity is at least one
+/// by type, the invariant `capacity > 0` of graph.yaml.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Exposure {
+    exposure_id: ExposureId,
+    pipeline_id: PipelineId,
+    port_id: PortId,
+    name: String,
+    capacity: NonZeroUsize,
+    overload: OverloadPolicy,
+}
+
+impl Exposure {
+    #[must_use]
+    pub const fn exposure_id(&self) -> ExposureId {
+        self.exposure_id
+    }
+
+    #[must_use]
+    pub const fn pipeline_id(&self) -> PipelineId {
+        self.pipeline_id
+    }
+
+    /// The exposed port; it may have been declared under another pipeline, which validation finds
+    /// (check 1).
+    #[must_use]
+    pub const fn port_id(&self) -> PortId {
+        self.port_id
+    }
+
+    /// The name the application knows the interface by.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn capacity(&self) -> NonZeroUsize {
+        self.capacity
+    }
+
+    #[must_use]
+    pub const fn overload(&self) -> OverloadPolicy {
+        self.overload
+    }
+}
+
+/// `inference.graph.NodeKind`: the name a node implementation publishes its [`NodeDescriptor`]
+/// under, such as `vad`; a declarative graph names the kind of each of its nodes. Serialized as
+/// the plain string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NodeKind(String);
+
+impl NodeKind {
+    /// The kind named `kind`.
+    #[must_use]
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self(kind.into())
+    }
+
+    /// The kind's name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for NodeKind {
+    fn from(kind: &str) -> Self {
+        Self::new(kind)
+    }
+}
+
+impl fmt::Display for NodeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// `inference.graph.PortDescriptor`: one named input or output port a node implementation offers,
+/// with the traits of §9.2 an [`AddPort`] declares of a [`Port`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortDescriptor {
+    pub name: String,
+    pub direction: PortDirection,
+    pub modality: Modality,
+    pub essentiality: Essentiality,
+    pub delivery: Delivery,
+    pub incremental: bool,
+    pub end_marker_required: bool,
+    pub provisional_allowed: bool,
+}
+
+impl PortDescriptor {
+    /// The port named `name` of `direction` and `modality`, with the traits `traits`.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        direction: PortDirection,
+        modality: Modality,
+        traits: PortTraits,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            direction,
+            modality,
+            essentiality: traits.essentiality,
+            delivery: traits.delivery,
+            incremental: traits.incremental,
+            end_marker_required: traits.end_marker_required,
+            provisional_allowed: traits.provisional_allowed,
+        }
+    }
+}
+
+/// `inference.graph.DeclareNodeDescriptor`: the input that publishes a [`NodeDescriptor`] under
+/// its kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclareNodeDescriptor {
+    pub kind: NodeKind,
+    pub role: NodeRole,
+    pub requires: Vec<Capability>,
+    pub ports: Vec<PortDescriptor>,
+}
+
+/// `inference.graph.NodeDescriptorDeclared`: a descriptor is published under its kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeDescriptorDeclared {
+    pub kind: NodeKind,
+    pub role: NodeRole,
+}
+
+/// `inference.graph.NodeDescriptorExists`: a descriptor is already declared under the kind, so
+/// nothing was declared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeDescriptorExists {
+    pub kind: NodeKind,
+}
+
+impl fmt::Display for NodeDescriptorExists {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a descriptor is already declared under the kind {}",
+            self.kind
+        )
+    }
+}
+
+impl Error for NodeDescriptorExists {}
+
+/// `inference.graph.NodeDescriptor`: the role, required capabilities and named typed ports a node
+/// implementation offers, under its kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodeDescriptor {
+    kind: NodeKind,
+    role: NodeRole,
+    requires: Vec<Capability>,
+    ports: Vec<PortDescriptor>,
+}
+
+impl NodeDescriptor {
+    #[must_use]
+    pub const fn kind(&self) -> &NodeKind {
+        &self.kind
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> NodeRole {
+        self.role
+    }
+
+    #[must_use]
+    pub fn requires(&self) -> &[Capability] {
+        &self.requires
+    }
+
+    /// The ports, in the order the descriptor declares them.
+    #[must_use]
+    pub fn ports(&self) -> &[PortDescriptor] {
+        &self.ports
+    }
+
+    /// The port named `name`, if the descriptor declares one.
+    #[must_use]
+    pub fn port(&self, name: &str) -> Option<&PortDescriptor> {
+        self.ports.iter().find(|port| port.name == name)
     }
 }
 
