@@ -267,7 +267,7 @@ mod tests {
         )
         .expect("answered");
         let profile_id = declared.direct_events[0].payload["profile_id"].clone();
-        assert_eq!(profile_id, text("00000000-0000-4000-8000-000000000001"));
+        assert_eq!(profile_id, text("00000002-0000-4000-8000-000000000001"));
 
         let unknown = declare(
             &mut stores,

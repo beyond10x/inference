@@ -3,13 +3,13 @@
 //! [`ModelDomain`] holds one store per entity, [`ModelStore`] and [`AdapterStore`], and records
 //! every event it emits in order. Its commands run the constructors of `inference-core`,
 //! [`Model::declare_as`] and [`Adapter::declare_as`], under identities the domain issues from a
-//! counter rendered as a Uuid, so that two runs of the same commands report the same
-//! identities. What only a store can decide is decided here:
-//! `DeclareAdapter` refuses a `model_id` no declared model carries ([`ModelNotFound`], the
-//! `unknown-model` outcome) before anything else. The views `inference.model.Models` and
-//! `inference.model.Adapters` are [`ModelDomain::models_view`] and [`ModelDomain::adapters_view`];
-//! both are `read_your_writes`, and since every row is read from the stores at the call, a write
-//! is visible to the next read.
+//! counter rendered as a Uuid in its own [`IDENTITY_SPACE`], so that two runs of the same
+//! commands report the same identities and no other domain issues one of them. What only a store
+//! can decide is decided here: `DeclareAdapter` refuses a `model_id` no declared model carries
+//! ([`ModelNotFound`], the `unknown-model` outcome) before anything else. The views
+//! `inference.model.Models` and `inference.model.Adapters` are [`ModelDomain::models_view`] and
+//! [`ModelDomain::adapters_view`]; both are `read_your_writes`, and since every row is read from
+//! the stores at the call, a write is visible to the next read.
 
 use std::error::Error;
 use std::fmt;
@@ -147,6 +147,10 @@ pub struct AdaptersRow {
     pub max_concurrency: i64,
 }
 
+/// The first eight hex digits of every identity the domain issues, which no other domain of the
+/// testkit issues under (see [`crate::policy::IDENTITY_SPACE`]).
+pub const IDENTITY_SPACE: u32 = 1;
+
 /// The `inference.model` domain in memory: its two entity stores and the events it emitted.
 #[derive(Debug, Clone, Default)]
 pub struct ModelDomain {
@@ -205,10 +209,13 @@ impl ModelDomain {
         Self::identity(self.issued)
     }
 
-    /// The `count`th identity: a version 4, RFC 4122 variant Uuid whose low bits are `count`,
-    /// `00000000-0000-4000-8000-000000000001` first.
-    const fn identity(count: u128) -> Uuid {
-        Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0000 | count)
+    /// The `count`th identity: a version 4, RFC 4122 variant Uuid whose low bits are `count` and
+    /// whose first eight hex digits are [`IDENTITY_SPACE`], `00000001-0000-4000-8000-000000000001`
+    /// first.
+    fn identity(count: u128) -> Uuid {
+        Uuid::from_u128(
+            (u128::from(IDENTITY_SPACE) << 96) | 0x0000_0000_0000_4000_8000_0000_0000_0000 | count,
+        )
     }
 
     /// The declared models.
@@ -320,11 +327,11 @@ mod tests {
             (model.model_id, refused.is_err(), adapter.adapter_id)
         };
         let (model_id, refused, adapter_id) = run();
-        assert_eq!(model_id.to_string(), "00000000-0000-4000-8000-000000000001");
+        assert_eq!(model_id.to_string(), "00000001-0000-4000-8000-000000000001");
         assert!(refused);
         assert_eq!(
             adapter_id.to_string(),
-            "00000000-0000-4000-8000-000000000002"
+            "00000001-0000-4000-8000-000000000002"
         );
         assert_eq!(run(), (model_id, refused, adapter_id));
     }

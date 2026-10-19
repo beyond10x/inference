@@ -11,11 +11,12 @@ use inference_core::policy::{
     DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind, ProfileNotFound,
 };
 use inference_pipeline::{
-    AdapterNotFound, AddNode, AddNodeError, AddPort, BindNode, BindNodeError, Catalog,
-    ConnectPorts, ConnectPortsError, Declaration, DeclarePipeline, Delivery, EdgeDefect,
-    Essentiality, IncompatibleEdge, InteractionMode, NodeId, NodeNotFound, NodeRole,
-    OverloadPolicy, PipelineId, PipelineNotFound, PipelineSpec, PipelineState, PortDirection,
-    PortId, PortNotFound, PortTraits, UnboundedEdge, modality,
+    AdapterNotFound, AddNode, AddNodeError, AddPort, AddPortError, BindNode, BindNodeError,
+    Catalog, ConnectPorts, ConnectPortsError, Declaration, DeclarePipeline, Delivery, EdgeDefect,
+    Essentiality, GraphDefect, GraphFinding, IncompatibleEdge, InteractionMode, NodeId,
+    NodeNotFound, NodeRole, OverloadPolicy, Pipeline, PipelineId, PipelineNotFound,
+    PipelineNotReady, PipelineSpec, PipelineState, PortDirection, PortId, PortNotFound, PortTraits,
+    UnboundedEdge, ValidatePipeline, modality,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -70,8 +71,14 @@ fn declare_pipeline(known: &Known) -> DeclarePipeline {
     }
 }
 
-fn add_port(node_id: NodeId, name: &str, direction: PortDirection) -> AddPort {
+fn add_port(
+    pipeline_id: PipelineId,
+    node_id: NodeId,
+    name: &str,
+    direction: PortDirection,
+) -> AddPort {
     AddPort {
+        pipeline_id,
         node_id,
         name: name.to_owned(),
         direction,
@@ -111,7 +118,7 @@ fn through_the_commands(known: &Known) -> (Declaration, PipelineId, PortId, Port
         .expect("the pipeline is declared")
         .node_id;
     let reply = declaration
-        .add_port(add_port(llm, "reply", PortDirection::Output))
+        .add_port(add_port(pipeline_id, llm, "reply", PortDirection::Output))
         .expect("the node exists")
         .port_id;
     let sink = declaration
@@ -124,7 +131,7 @@ fn through_the_commands(known: &Known) -> (Declaration, PipelineId, PortId, Port
         .expect("the pipeline is declared")
         .node_id;
     let text = declaration
-        .add_port(add_port(sink, "text", PortDirection::Input))
+        .add_port(add_port(pipeline_id, sink, "text", PortDirection::Input))
         .expect("the node exists")
         .port_id;
     declaration
@@ -155,29 +162,34 @@ fn the_builder_and_the_commands_yield_the_same_declaration() {
     let (commands, pipeline_id, reply, text) = through_the_commands(&known);
 
     let mut built = Declaration::counted();
-    let (built_id, (built_reply, built_text)) = built.build(
-        &known.profile,
-        PipelineSpec {
-            name: "voice".to_owned(),
-            schema_revision: "1".to_owned(),
-            mode: InteractionMode::TurnBased,
-            required_capabilities: vec![Capability::OutputStreaming],
-        },
-        |pipeline| {
-            let llm = pipeline.node("llm", NodeRole::Model, vec![Capability::OutputStreaming]);
-            let reply = pipeline.output::<modality::Text>(&llm, "reply", traits());
-            let sink = pipeline.node("subtitles", NodeRole::Sink, Vec::new());
-            let text = pipeline.input::<modality::Text>(&sink, "text", traits());
-            pipeline.connect(
-                &reply,
-                &text,
-                NonZeroUsize::new(8).expect("non-zero"),
-                OverloadPolicy::Pause,
-            );
-            pipeline.bind(&llm, &known.adapter);
-            (reply.id(), text.id())
-        },
-    );
+    let (built_id, (built_reply, built_text)) = built
+        .build(
+            &known,
+            known.profile.profile_id(),
+            PipelineSpec {
+                name: "voice".to_owned(),
+                schema_revision: "1".to_owned(),
+                mode: InteractionMode::TurnBased,
+                required_capabilities: vec![Capability::OutputStreaming],
+            },
+            |pipeline| {
+                let llm = pipeline.node("llm", NodeRole::Model, vec![Capability::OutputStreaming]);
+                let reply = pipeline.output::<modality::Text>(&llm, "reply", traits());
+                let sink = pipeline.node("subtitles", NodeRole::Sink, Vec::new());
+                let text = pipeline.input::<modality::Text>(&sink, "text", traits());
+                pipeline.connect(
+                    &reply,
+                    &text,
+                    NonZeroUsize::new(8).expect("non-zero"),
+                    OverloadPolicy::Pause,
+                );
+                pipeline
+                    .bind(&llm, known.adapter.adapter_id())
+                    .expect("the adapter is declared");
+                (reply.id(), text.id())
+            },
+        )
+        .expect("the profile is declared");
 
     assert_eq!(built, commands);
     assert_eq!(
@@ -278,7 +290,7 @@ fn an_unknown_profile_declares_no_pipeline_and_takes_no_identity() {
 #[test]
 fn add_node_and_add_port_refuse_an_unknown_identity_and_create_nothing() {
     let known = known();
-    let (mut declaration, ..) = through_the_commands(&known);
+    let (mut declaration, declared, ..) = through_the_commands(&known);
     let before = declaration.clone();
     let pipeline_id = unknown::<PipelineId>();
     let node_id = unknown::<NodeId>();
@@ -295,8 +307,8 @@ fn add_node_and_add_port_refuse_an_unknown_identity_and_create_nothing() {
         }))
     );
     assert_eq!(
-        declaration.add_port(add_port(node_id, "p", PortDirection::Input)),
-        Err(NodeNotFound { node_id })
+        declaration.add_port(add_port(declared, node_id, "p", PortDirection::Input)),
+        Err(AddPortError::UnknownNode(NodeNotFound { node_id }))
     );
     assert_eq!(declaration, before);
 }
@@ -387,6 +399,227 @@ fn bind_node_decides_its_refusals_in_the_order_graph_yaml_lists_them() {
         }))
     );
     assert_eq!(declaration, before);
+}
+
+/// A pipeline holding one node and no port, declared and validated through the commands.
+fn validated_with_a_node(known: &Known, declaration: &mut Declaration) -> (PipelineId, NodeId) {
+    let pipeline_id = declaration
+        .declare_pipeline(declare_pipeline(known), known)
+        .expect("the profile is declared")
+        .pipeline_id;
+    let node_id = declaration
+        .add_node(AddNode {
+            pipeline_id,
+            name: "llm".to_owned(),
+            role: NodeRole::Model,
+            requires: Vec::new(),
+        })
+        .expect("the pipeline is declared")
+        .node_id;
+    declaration
+        .validate_pipeline(ValidatePipeline { pipeline_id })
+        .expect("a lone node with no port is valid");
+    (pipeline_id, node_id)
+}
+
+#[test]
+fn add_port_decides_its_refusals_in_the_order_graph_yaml_lists_them() {
+    let known = known();
+    let mut declaration = Declaration::counted();
+    let (validated, node_id) = validated_with_a_node(&known, &mut declaration);
+    let before = declaration.clone();
+    let nowhere = unknown::<PipelineId>();
+    let no_node = unknown::<NodeId>();
+
+    assert_eq!(
+        declaration.add_port(add_port(nowhere, no_node, "p", PortDirection::Input)),
+        Err(AddPortError::UnknownPipeline(PipelineNotFound {
+            pipeline_id: nowhere
+        }))
+    );
+    assert_eq!(
+        declaration.add_port(add_port(validated, no_node, "p", PortDirection::Input)),
+        Err(AddPortError::UnknownNode(NodeNotFound { node_id: no_node }))
+    );
+    assert_eq!(
+        declaration.add_port(add_port(validated, node_id, "p", PortDirection::Input)),
+        Err(AddPortError::NotDeclared(PipelineNotReady {
+            pipeline_id: validated,
+            required: PipelineState::Declared,
+        })),
+        "a port is not added to a pipeline that is no longer Declared"
+    );
+    assert_eq!(declaration, before, "a refused AddPort creates nothing");
+    assert_eq!(
+        declaration.pipeline(validated).map(Pipeline::state),
+        Some(PipelineState::Validated)
+    );
+}
+
+#[test]
+fn a_port_named_under_another_pipeline_belongs_to_that_one_and_not_to_its_nodes() {
+    let known = known();
+    let mut declaration = Declaration::counted();
+    let (validated, node_id) = validated_with_a_node(&known, &mut declaration);
+    let declared = declaration
+        .declare_pipeline(declare_pipeline(&known), &known)
+        .expect("the profile is declared")
+        .pipeline_id;
+
+    let port_id = declaration
+        .add_port(add_port(declared, node_id, "p", PortDirection::Output))
+        .expect("graph.yaml does not refuse a node of another pipeline")
+        .port_id;
+    let port = declaration.port(port_id).expect("the port is stored");
+    assert_eq!(port.pipeline_id(), declared);
+    assert_eq!(port.node_id(), node_id);
+    assert_eq!(
+        declaration.findings(validated),
+        [],
+        "the Validated pipeline gained no port"
+    );
+    assert_eq!(
+        declaration.findings(declared),
+        [GraphFinding {
+            defect: GraphDefect::MissingNodeOrPort,
+            node_id: Some(node_id),
+            port_id: Some(port_id),
+        }],
+        "check 1 finds the port's node missing from the pipeline it was named under"
+    );
+}
+
+/// A catalog holding the profile of `known` and no adapter.
+struct ProfileOnly<'k>(&'k Known);
+
+impl Catalog for ProfileOnly<'_> {
+    fn profile(&self, profile_id: ProfileId) -> Option<&DeploymentProfile> {
+        self.0.profile(profile_id)
+    }
+
+    fn adapter(&self, _: AdapterId) -> Option<&Adapter> {
+        None
+    }
+}
+
+#[test]
+fn the_builder_refuses_a_profile_or_an_adapter_its_catalog_does_not_hold() {
+    let known = known();
+    let spec = || PipelineSpec {
+        name: "voice".to_owned(),
+        schema_revision: "1".to_owned(),
+        mode: InteractionMode::TurnBased,
+        required_capabilities: Vec::new(),
+    };
+    let mut declaration = Declaration::counted();
+    let profile_id = unknown::<ProfileId>();
+    let mut ran = false;
+
+    assert_eq!(
+        declaration
+            .build(&known, profile_id, spec(), |_| ran = true)
+            .map(|(pipeline_id, ())| pipeline_id),
+        Err(ProfileNotFound { profile_id }),
+        "the builder declares no pipeline under a profile DeclarePipeline refuses"
+    );
+    assert!(!ran, "the definition does not run");
+    assert_eq!(declaration, Declaration::counted(), "no identity is taken");
+
+    let catalog = ProfileOnly(&known);
+    let adapter_id = known.adapter.adapter_id();
+    let (pipeline_id, refused) = declaration
+        .build(&catalog, known.profile.profile_id(), spec(), |pipeline| {
+            let llm = pipeline.node("llm", NodeRole::Model, Vec::new());
+            pipeline.bind(&llm, adapter_id)
+        })
+        .expect("the profile is declared");
+    assert_eq!(
+        refused,
+        Err(AdapterNotFound { adapter_id }),
+        "the builder binds no adapter BindNode refuses"
+    );
+    assert_eq!(declaration.bindings().count(), 0);
+    let mut commands = Declaration::counted();
+    let through_commands = commands
+        .declare_pipeline(
+            DeclarePipeline {
+                required_capabilities: Vec::new(),
+                ..declare_pipeline(&known)
+            },
+            &known,
+        )
+        .expect("the profile is declared")
+        .pipeline_id;
+    commands
+        .add_node(AddNode {
+            pipeline_id: through_commands,
+            name: "llm".to_owned(),
+            role: NodeRole::Model,
+            requires: Vec::new(),
+        })
+        .expect("the pipeline is declared");
+    assert_eq!(
+        declaration, commands,
+        "the refused binding took no identity: the declaration equals the commands' without it"
+    );
+    assert_eq!(pipeline_id, through_commands);
+}
+
+#[test]
+fn the_builder_holds_a_capacity_beyond_what_connect_ports_carries_as_the_largest_it_carries() {
+    let known = known();
+    let largest =
+        NonZeroUsize::new(usize::try_from(i64::MAX).expect("a 64-bit target")).expect("non-zero");
+    let beyond = largest.checked_add(1).expect("a 64-bit target");
+    let mut declaration = Declaration::counted();
+    let (_, ()) = declaration
+        .build(
+            &known,
+            known.profile.profile_id(),
+            PipelineSpec {
+                name: "wide".to_owned(),
+                schema_revision: "1".to_owned(),
+                mode: InteractionMode::Batch,
+                required_capabilities: Vec::new(),
+            },
+            |pipeline| {
+                let source = pipeline.node("source", NodeRole::Source, Vec::new());
+                let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+                let out = pipeline.output::<modality::Text>(&source, "out", traits());
+                let into = pipeline.input::<modality::Text>(&sink, "in", traits());
+                pipeline.connect(&out, &into, largest, OverloadPolicy::Pause);
+                pipeline.connect(&out, &into, beyond, OverloadPolicy::Pause);
+                pipeline.connect(&out, &into, NonZeroUsize::MAX, OverloadPolicy::Pause);
+            },
+        )
+        .expect("the profile is declared");
+    let edges: Vec<_> = declaration.edges().map(|edge| edge.capacity()).collect();
+    assert_eq!(
+        edges, [largest; 3],
+        "i64::MAX is held as sent, and anything larger as i64::MAX"
+    );
+}
+
+#[test]
+fn the_pipeline_state_documentation_names_every_state() {
+    let source = include_str!("../src/lib.rs");
+    let at = source
+        .find("pub enum PipelineState")
+        .expect("lib.rs declares PipelineState");
+    let doc: Vec<&str> = source[..at]
+        .lines()
+        .rev()
+        .skip_while(|line| !line.starts_with("///"))
+        .take_while(|line| line.starts_with("///"))
+        .collect();
+    let doc = doc.into_iter().rev().collect::<Vec<_>>().join(" ");
+    for state in PipelineState::ALL {
+        let name = format!("{state:?}");
+        assert!(
+            doc.contains(&name),
+            "the PipelineState doc does not name `{name}`: {doc}"
+        );
+    }
 }
 
 #[test]

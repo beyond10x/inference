@@ -87,6 +87,7 @@ fn through_the_commands(known: &Known, traits: PortTraits) -> Port {
         .node_id;
     let port_id = declaration
         .add_port(AddPort {
+            pipeline_id,
             node_id,
             name: "audio".to_owned(),
             direction: PortDirection::Input,
@@ -105,12 +106,14 @@ fn through_the_commands(known: &Known, traits: PortTraits) -> Port {
 /// The one port declared through the builder with `traits`.
 fn through_the_builder(known: &Known, traits: PortTraits) -> Port {
     let mut declaration = Declaration::counted();
-    let (_, port_id) = declaration.build(&known.profile, spec(), |pipeline| {
-        let node = pipeline.node("asr", NodeRole::Model, Vec::new());
-        pipeline
-            .input::<modality::Audio>(&node, "audio", traits)
-            .id()
-    });
+    let (_, port_id) = declaration
+        .build(known, known.profile.profile_id(), spec(), |pipeline| {
+            let node = pipeline.node("asr", NodeRole::Model, Vec::new());
+            pipeline
+                .input::<modality::Audio>(&node, "audio", traits)
+                .id()
+        })
+        .expect("the profile is declared");
     declaration.port(port_id).expect("the port").clone()
 }
 

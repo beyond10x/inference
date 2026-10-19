@@ -2,12 +2,13 @@
 //! pipeline's declaration: 1 (existence), 2 (direction and modality), 3 (commitment semantics),
 //! 5 (cycles), 6 (reachability) and 9 (tool gating).
 //!
-//! The pipeline's graph is its nodes, the ports of those nodes, and the edges and bindings that
-//! name the pipeline. An edge joins two nodes of the graph only when check 1 finds both of its
-//! ports there, and checks 2, 3 and 9 read only such an edge; check 3 and check 9 read it only
-//! when check 2 passes it, since commitment semantics are compared between an output port and an
-//! input port of one modality. Checks 5 and 6 follow every edge that joins two nodes, compatible or
-//! not, from its source port's node to its sink port's node.
+//! The pipeline's graph is its nodes, the ports declared under it on those nodes, and the edges
+//! and bindings that name the pipeline. A port declared under the pipeline on a node of another
+//! is missing from it, as a bound node of another is. An edge joins two nodes of the graph only
+//! when check 1 finds both of its ports there, and checks 2, 3 and 9 read only such an edge; check
+//! 3 and check 9 read it only when check 2 passes it, since commitment semantics are compared
+//! between an output port and an input port of one modality. Checks 5 and 6 follow every edge
+//! that joins two nodes, compatible or not, from its source port's node to its sink port's node.
 //!
 //! Media encoding and timebase (the rest of check 3) arrive with `inference-audio`; a bounded
 //! feedback declaration, which would admit a cycle, has no noun in `ess/domains/graph.yaml` yet,
@@ -32,12 +33,14 @@ pub(crate) fn findings(declaration: &Declaration, pipeline_id: PipelineId) -> Ve
     findings
 }
 
-/// One pipeline's nodes, the ports of those nodes, and the edges and bindings naming it.
+/// One pipeline's nodes, the ports declared under it on those nodes, the ports declared under it
+/// on a node of another (`strays`), and the edges and bindings naming it.
 struct Graph<'d> {
     declaration: &'d Declaration,
     pipeline_id: PipelineId,
     nodes: Vec<&'d Node>,
     ports: Vec<&'d Port>,
+    strays: Vec<&'d Port>,
     edges: Vec<&'d Edge>,
 }
 
@@ -53,10 +56,10 @@ impl<'d> Graph<'d> {
             .nodes()
             .filter(|node| node.pipeline_id() == pipeline_id)
             .collect();
-        let ports = declaration
+        let (ports, strays) = declaration
             .ports()
-            .filter(|port| nodes.iter().any(|node| node.node_id() == port.node_id()))
-            .collect();
+            .filter(|port| port.pipeline_id() == pipeline_id)
+            .partition(|port| nodes.iter().any(|node| node.node_id() == port.node_id()));
         let edges = declaration
             .edges()
             .filter(|edge| edge.pipeline_id() == pipeline_id)
@@ -66,6 +69,7 @@ impl<'d> Graph<'d> {
             pipeline_id,
             nodes,
             ports,
+            strays,
             edges,
         }
     }
@@ -91,8 +95,10 @@ impl<'d> Graph<'d> {
         })
     }
 
-    /// Check 1: every port an edge names is a port of a node of the pipeline, and every bound node
-    /// is a node of it. A missing port is named by its identity, a missing node by its own.
+    /// Check 1: every port an edge names is a port of the pipeline, the node of every port declared
+    /// under it is a node of it, and every bound node is a node of it. A missing port is named by
+    /// its identity, a port whose node is missing by both identities, a missing bound node by its
+    /// own.
     fn existence(&self, findings: &mut Vec<GraphFinding>) {
         for edge in &self.edges {
             for port_id in [edge.from_port(), edge.to_port()] {
@@ -104,6 +110,13 @@ impl<'d> Graph<'d> {
                     });
                 }
             }
+        }
+        for port in &self.strays {
+            findings.push(GraphFinding {
+                defect: GraphDefect::MissingNodeOrPort,
+                node_id: Some(port.node_id()),
+                port_id: Some(port.port_id()),
+            });
         }
         for binding in self
             .declaration
@@ -209,15 +222,20 @@ impl<'d> Graph<'d> {
         }
     }
 
-    /// Check 6: every essential port is connected by at least one edge, and every sink is reached
-    /// from a source; optional and control-only ports may stay unconnected.
+    /// Check 6, reachable source and sink paths with no unresolved mandatory output (design 530):
+    /// every essential output port is the source of at least one edge, and every sink is reached
+    /// from a source. An output that is only an edge's sink feeds nothing and stays unresolved.
+    /// Optional and control-only outputs may stay unconnected, and so may any input port, which
+    /// leaves no output unresolved.
     fn reachability(&self, findings: &mut Vec<GraphFinding>) {
         for port in &self.ports {
+            let mandatory = port.direction() == PortDirection::Output
+                && port.essentiality() == Essentiality::Essential;
             let connected = self
                 .edges
                 .iter()
-                .any(|edge| edge.from_port() == port.port_id() || edge.to_port() == port.port_id());
-            if port.essentiality() == Essentiality::Essential && !connected {
+                .any(|edge| edge.from_port() == port.port_id());
+            if mandatory && !connected {
                 findings.push(GraphFinding {
                     defect: GraphDefect::UnreachableMandatoryOutput,
                     node_id: Some(port.node_id()),
