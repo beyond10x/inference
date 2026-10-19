@@ -1,13 +1,21 @@
 # Deployment profiles of docs/design/inference.md §21.1: which compute a pipeline may admit and
-# what its default egress is. Hosted adapters are explicit opt-in; an unavailable local model never
-# triggers implicit remote fallback.
+# what its default egress is. Hosted adapters are explicit opt-in: only a hybrid_opt_in profile
+# admits an external provider (DeclareProfile `remote-not-opted-in`), and planning refuses an
+# adapter whose locality the profile does not admit (inference.graph.PlanPipeline
+# `locality-denied`). No command selects another adapter for a node once its pipeline is
+# validated (BindNode refuses a pipeline that is not Declared), so no command performs an
+# implicit remote fallback.
+# read from: docs/design/inference.md:904
+# read from: docs/design/inference.md:906
+# read from: docs/design/inference.md:1065
 domain: inference.policy
 
 summary: >-
   A DeploymentProfile names the compute a pipeline admits and its default egress. The four
   profiles of the design are offline_strict, self_hosted_lan, self_hosted_cluster and
-  hybrid_opt_in; a pipeline references one, and the planner refuses an adapter whose locality the
-  profile does not admit.
+  hybrid_opt_in; a profile's default egress is the one the design's table gives its kind, and only
+  hybrid_opt_in admits an external provider. A pipeline references one profile, and planning
+  refuses an adapter whose locality the profile does not admit.
 
 naming:
   wire: policy
@@ -30,6 +38,12 @@ types:
     variants: [denied, internal_allowlist, authenticated_internal, per_provider_allowlist]
 
 entities:
+  # The table fixes one default egress per kind, and only hybrid_opt_in names remote services.
+  # UNMAPPED: the admitted-compute column is prose ("Local machine and approved internal
+  # services", "Approved owned infrastructure") and does not say which Locality members
+  # self_hosted_lan and self_hosted_cluster admit beyond excluding an external provider, nor whether
+  # hybrid_opt_in must admit every local locality. Only the rows the table settles are refused;
+  # the rest is an open question for the owner.
   # read from: docs/design/inference.md:1042-1049
   # read from: docs/design/inference.md:905-907
   - name: inference.policy.DeploymentProfile
@@ -50,7 +64,27 @@ entities:
       states: [Active]
       terminal: [Active]
 
+errors:
+  # A profile row the design's table does not contain.
+  # read from: docs/design/inference.md:1044-1049
+  - name: inference.policy.ProfileOutsideTable
+    summary: The kind, default egress and admitted compute do not form a row of the deployment-profile table, so no profile was declared.
+    fields:
+      - name: kind
+        type: inference.policy.ProfileKind
+      - name: egress
+        type: inference.policy.Egress
+      - name: admitted
+        type: List<inference.model.Locality>
+
+  - name: inference.policy.ProfileNotFound
+    summary: No deployment profile carries the identity the command named.
+    fields:
+      - name: profile_id
+        type: inference.policy.ProfileId
+
 commands:
+  # read from: docs/design/inference.md:1044-1049
   - name: inference.policy.DeclareProfile
     input:
       - name: kind
@@ -60,6 +94,54 @@ commands:
       - name: admitted
         type: List<inference.model.Locality>
     outcomes:
+      # The default egress is the table's for the kind.
+      # read from: docs/design/inference.md:1046-1049
+      - name: wrong-egress
+        when:
+          any:
+            - all: [kind == offline_strict, egress != denied]
+            - all: [kind == self_hosted_lan, egress != internal_allowlist]
+            - all: [kind == self_hosted_cluster, egress != authenticated_internal]
+            - all: [kind == hybrid_opt_in, egress != per_provider_allowlist]
+        error: inference.policy.ProfileOutsideTable
+        payload:
+          inference.policy.ProfileOutsideTable:
+            kind: input.kind
+            egress: input.egress
+            admitted: input.admitted
+        summary: The egress is not the table's default for the kind, and nothing was declared.
+
+      # Hosted adapters MUST be explicitly enabled; only hybrid_opt_in names remote services.
+      # read from: docs/design/inference.md:904
+      # read from: docs/design/inference.md:1046-1049
+      - name: remote-not-opted-in
+        when:
+          all:
+            - kind != hybrid_opt_in
+            - exists: {in: admitted, as: l, that: l == external_provider}
+        error: inference.policy.ProfileOutsideTable
+        payload:
+          inference.policy.ProfileOutsideTable:
+            kind: input.kind
+            egress: input.egress
+            admitted: input.admitted
+        summary: A profile other than hybrid_opt_in admits an external provider, and nothing was declared.
+
+      # offline_strict admits in-process or local workers only.
+      # read from: docs/design/inference.md:1046
+      - name: offline-admits-cluster
+        when:
+          all:
+            - kind == offline_strict
+            - exists: {in: admitted, as: l, that: l == self_hosted_cluster}
+        error: inference.policy.ProfileOutsideTable
+        payload:
+          inference.policy.ProfileOutsideTable:
+            kind: input.kind
+            egress: input.egress
+            admitted: input.admitted
+        summary: An offline_strict profile admits a self-hosted cluster, and nothing was declared.
+
       - name: declared
         creates: inference.policy.DeploymentProfile
         instance: profile_id
@@ -73,15 +155,22 @@ commands:
           inference.policy.ProfileDeclared:
             profile_id: {generated: true}
             kind: input.kind
+            egress: input.egress
+            admitted: input.admitted
         summary: The profile exists and can be referenced by a pipeline.
 
 events:
+  # read from: docs/design/inference.md:1044-1049
   - name: inference.policy.ProfileDeclared
     fields:
       - name: profile_id
         type: inference.policy.ProfileId
       - name: kind
         type: inference.policy.ProfileKind
+      - name: egress
+        type: inference.policy.Egress
+      - name: admitted
+        type: List<inference.model.Locality>
 
 views:
   - name: inference.policy.Profiles
@@ -96,3 +185,5 @@ views:
         type: inference.policy.Egress
       - name: admitted
         type: List<inference.model.Locality>
+      - name: state
+        type: inference.policy.DeploymentProfile.State

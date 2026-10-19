@@ -19,7 +19,7 @@ scope:
   path: crates/inference-runtime/tests/cascade_read_only_tool.rs
 - confidence: inferred
   path: crates/inference-testkit/src/llm.rs
-revision: 9
+revision: 13
 ---
 ## Context
 
@@ -28,8 +28,10 @@ The exit condition of P3: a local voice agent executes a read-only tool correctl
 the LLM with tool call and result through the tool executor, committed text, TTS, playback;
 demonstrator step 5 (1175). The run stays offline (A-04, local-voice-cascade; `DeploymentProfile`
 `offline_strict`, 1046). Side-effecting tools require committed user input by default (625) and
-the LLM in this cascade receives committed spans only, so every call it proposes has `input_basis`
-committed; the barrier (866) guards the case where a speculating node proposes.
+the LLM in this cascade receives committed spans only, so every call it proposes names a Committed
+span as its `basis_span_id`; the barrier (866) refuses a `ProposeToolCall` whose basis span is
+still a Hypothesis, and a speculating node proposes through `ProposeSpeculativeToolCall`, which
+admits read-only tools only.
 
 It runs after `story:tool-feedback-loop`, `story:endpoint-controller` and
 `story:tool-call-interruption`; the `depends_on` edges record it. The third is an ordering, not a
@@ -82,7 +84,7 @@ and the result (date, pass or fail, transcript on failure) written after it.
 | sampling | greedy decoding (temperature 0, no nucleus or top-k sampling) and a fixed seed where the adapter exposes one |
 | prompt | the system instruction, the question's wording and the tool description, fixed by the test and quoted here |
 | audio | a recorded utterance of the question, the replay-fixture kind the testkit holds (244), added by the demonstration, not by the acceptance |
-| pass rule | one run with the settings above shows the observables of the acceptance: one Completed read-only call with `input_basis` committed and the generation_id of the played segments, no call for the idempotent-write tool, played text containing the result |
+| pass rule | one run with the settings above shows the observables of the acceptance: one Completed read-only call whose `basis_span_id` names the question's Committed span and the generation_id of the played segments, no call for the idempotent-write tool, played text containing the result |
 | failure | a run in which the model proposes no call fails the demonstration and is recorded with the transcript and the settings; it is not evidence against the framework, the deterministic run is |
 
 ## Domain relations
@@ -103,7 +105,7 @@ and the result (date, pass or fail, transcript on failure) written after it.
 
 In the cascade declaration run on the testkit mocks with network denied, the played segments'
 committed text contains the tool result, the `inference.tools.ToolCalls` view shows one Completed
-call with `input_basis` committed and the generation_id of those segments and no call for the
+call whose `basis_span_id` names the question's Committed span and the generation_id of those segments and no call for the
 idempotent-write tool, and the run passes `inference.tools.ProposeToolCall/outcome/proposed`,
 `inference.tools.CompleteToolCall/outcome/completed`,
 `inference.stream.Turn/transition/complete/by/inference.stream.CompleteTurn/completed` and
@@ -132,7 +134,7 @@ is one a body names, not one on disk.
 - **Files:** the LLM node, which this story edits in two places: its start trigger (generation for a turn starts at `TurnCompleted` by default, Scope bullet 2, `docs/design/inference.md:778`, `:606`) and the tool set it offers its adapter (Scope bullet 2, Check 1) — the surface is cited (Context paragraph 2: "this story and `story:tool-call-interruption` both edit the LLM node (the model node of `story:text-pipeline-end-to-end`, given its tool ports by `story:tool-feedback-loop`)"); no body names its file, and `review-result:tools-parallel-round-1` and `-round-2` both record that
 - **Files:** `crates/inference-testkit/src/llm.rs` — inferred: the file the `story:text-pipeline-end-to-end` scope places "the model node wrapping the scripted mock LLM adapter" in, and the file the recorded scope of `story:llm-contract` gives the mock LLM adapter; Check 1 has that mock "record the tool set the LLM node offered it", which no earlier body scripts (`story:tool-feedback-loop` scripts a proposal and a continuation only), so the mock is extended here too; `crates/inference-testkit/src/graph.rs` and a file under `crates/inference-pipeline/src/nodes` are the other readings of where the node sits
 - **Also likely:** `crates/inference-runtime/Cargo.toml` — inferred: the test binds the mock synthesiser and the sink double behind testkit feature `tts` (Context paragraph 3) and the mock recogniser and synthetic fixture behind `stt`, and no earlier runtime test names `tts`; the dev-dependency on `inference-testkit` (feature `llm` since the A-02 story's own scope) gains the feature, plus `inference-tts`, `inference-audio` or `inference-tools` dev-dependencies if the test names their types; no body names this edit
-- **Symbols:** `inference.graph.Pipeline` relation `profile` to `inference.policy.DeploymentProfile` and relations `nodes`, `edges` (`ess/domains/graph.yaml:88,107-130`); `offline_strict` and egress `denied` (`ess/domains/policy.yaml:24,30`); `inference.tools.ToolCall` fields `generation_id`, `input_basis` and relations `tool`, `generation` (`ess/domains/tools.yaml:71-98`), `DeclareTool` (`:113`), `ProposeToolCall` (`:144`), `ToolCalls` view with `input_basis` (`:219-231`); `inference.tools.CompleteToolCall` and the state Completed, absent today (`tools.yaml:3`) and declared by `story:tool-call-lifecycle`; `inference.stream.Generation` relation `segments` (`ess/domains/stream.yaml:121,148-150`), `OutputSegment` transition `play` (`:196-198`), `CompleteTurn` outcome `completed` emitting `TurnCompleted` (`:255-268`, `:590`), `AcknowledgePlayback` outcome `played` (`:536-549`); design lines 244, 606, 625, 759-778, 866, 1002, 1046, 1054, 1141, 1161, 1175 read as the body says — cited; all consumed, none declared or changed here
+- **Symbols:** `inference.graph.Pipeline` relation `profile` to `inference.policy.DeploymentProfile` and relations `nodes`, `edges` (`ess/domains/graph.yaml:140,167-190`); `offline_strict` and egress `denied` (`ess/domains/policy.yaml:32,38`); `inference.tools.ToolCall` fields `generation_id`, `basis_span_id` and relations `tool`, `generation` (`ess/domains/tools.yaml:85-119`), `DeclareTool` (`:152`), `ProposeToolCall` (`:193`), `ToolCalls` view with `basis_span_id` (`:386-398`); `inference.tools.CompleteToolCall` and the state Completed, absent today (`tools.yaml:3`) and declared by `story:tool-call-lifecycle`; `inference.stream.Generation` relation `segments` (`ess/domains/stream.yaml:129,160-162`), `OutputSegment` transition `play` (`:228-230`), `CompleteTurn` outcome `completed` emitting `TurnCompleted` (`:340-353`, `:830`), `AcknowledgePlayback` outcome `played` (`:768-781`); design lines 244, 606, 625, 759-778, 866, 1002, 1046, 1054, 1141, 1161, 1175 read as the body says — cited; all consumed, none declared or changed here
 - **Read, not changed:** `ess/domains/graph.yaml`, `ess/domains/tools.yaml`, `ess/domains/stream.yaml`, `ess/domains/policy.yaml` (the four Domain relations; the `UNMAPPED` Pipeline-to-Tool relation is deferred by the body to a later allowlist); `crates/inference-pipeline/src/nodes/vad.rs`, `crates/inference-pipeline/src/nodes/turn_policy.rs` (`story:endpoint-controller`), `crates/inference-pipeline/src/nodes/tool_authority.rs`, `crates/inference-pipeline/src/nodes/tool_executor.rs` (`story:tool-authority-and-executor-nodes`) and the feedback bound of `story:tool-feedback-loop`, all composed by the declaration; `crates/inference-testkit/src/mock_tool_executor.rs` (the two tools are its constructor table, authority story Scope bullet 3, not an edit); `crates/inference-testkit/src/stt.rs`, `crates/inference-testkit/src/stt/synthetic_audio.rs`, `crates/inference-testkit/src/tts.rs` (scripted and replayed, Scope bullet 5) — cited, each named by the body only as another story's surface
 - **Not touched:** root `Cargo.toml`, `Taskfile.yml`, `AGENTS.md`, `README.md`, `ess/SKIPPED.md`, `crates/inference-runtime/src`, `crates/inference-tools`; the commit-gate node, the acknowledging audio sink, the local adapters and the A-04 test, which the body assigns to `epic:local-voice-cascade` — cited (the body names no change to any of them)
 - **Documents:** none in the tree — cited; the story's own body takes the demonstration table before the real-adapter run and the result after it (Demonstration section, through `aep plan artifact body`), and the four scenario ids the Acceptance names are already claimed by `story:tool-call-lifecycle` (`ProposeToolCall/outcome/proposed`, `CompleteToolCall/outcome/completed`), `story:endpoint-controller` (`Turn/transition/complete/...`) and `story:outbound-text-generations-and-segments` (`OutputSegment/transition/play/...`, its id list line 98), so no `ess/SKIPPED.md` line leaves here

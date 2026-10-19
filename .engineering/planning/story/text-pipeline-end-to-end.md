@@ -32,7 +32,7 @@ scope:
   path: crates/inference-testkit/src/graph.rs
 - confidence: inferred
   path: crates/inference-testkit/src/llm.rs
-revision: 13
+revision: 17
 ---
 # Story: text-pipeline-end-to-end
 
@@ -49,7 +49,7 @@ The pipeline: a node with role `source` whose output port is `Text`, `essential`
 Three runs on the same planned pipeline (`Run → Pipeline` is many-to-one):
 
 1. to completion: the test releases inputs 1 to 4 and the end; the model completes its generation on the end-of-input event; the runtime loop issues `DrainRun` once the source has ended and `CompleteRun` once every instance has drained; the sink holds `s1, s2, s3, s4` in order;
-2. cancelled: the test releases inputs 1 and 2, waits until the sink holds `s1, s2`, then issues `CancelRun` while the run is Active; the mock LLM is scripted for this run to emit one further committed segment after its generation is cancelled (computation may outlive cancellation of delivery, line 641), and the sink never receives it (stale output is rejected at sinks, `CancelRun` summary in graph.yaml; `docs/design/inference.md:637`); the run ends Cancelled, the instances Stopped, the sink holds exactly `s1, s2`;
+2. cancelled: the test releases inputs 1 and 2, waits until the sink holds `s1, s2`, then issues `CancelRun` while the run is Active; the mock LLM is scripted for this run to emit one further segment after the cancel (computation may outlive cancellation of delivery, line 641); `CancelRun` cancels the run's Active generation and discards its unplayed segments, so that `EmitTextDelta` is refused `stale-generation`, no segment is created, and the sink never receives it (stale output is rejected at sinks, `CancelRun` summary in graph.yaml; `docs/design/inference.md:637`); the run ends Cancelled, the instances Stopped, the sink holds exactly `s1, s2`;
 3. drained: the test releases inputs 1, 2 and 3 and issues `DrainRun` as soon as input 3 has been emitted, before the end and before input 4; no new input is admitted (a release after the drain emits nothing), `s3` is the in-flight segment and reaches the sink, the model commits what it has received and completes its generation on `drain`, the run ends Completed and the sink holds exactly `s1, s2, s3`.
 
 §23.3 test 7 (graph runs drain and release worker resources, line 1130): after each run every node instance is Stopped, every edge queue is dropped and no task of the run is still alive, observed through weak references the test holds.
@@ -60,7 +60,7 @@ Three runs on the same planned pipeline (`Run → Pipeline` is many-to-one):
 2. The mock source and sink nodes in `inference-testkit` (the recording mock of `story:node-instance-lifecycle` extended with a released payload list and a collector); the model node wrapping the mock LLM adapter, scripted as above. If `inference-core` carries no end-of-input control event when this story starts (the contracts epic lists control events in its Scope and no story of it names this one), this story adds it to the control event family of `inference-core` (`docs/design/inference.md:297`).
 3. The runtime loop that issues `DrainRun` once the source has ended and `CompleteRun` once every instance has drained, through the commands of `story:run-lifecycle`; when the test issues `CancelRun` (run 2) or `DrainRun` (run 3) itself, the loop only finishes the run from there and issues no command the state machine would refuse.
 4. The three runs as one integration test; the resource check.
-5. Closing check of the epic: the complete `inference.graph` suite, as re-synthesized by `story:node-instance-lifecycle`, and `inference.policy.DeclareProfile/outcome/declared` pass against the testkit runner (every earlier story claims its own scenarios; this is the re-run, not a new claim), and `ess/SKIPPED.md` names no `inference.graph` or `inference.policy` id (each earlier story removed its own; nothing is removed here).
+5. Closing check of the epic: the complete `inference.graph` suite, as re-synthesized by `story:node-instance-lifecycle` (`ess verify conform synthesize --path ess --scenarios ess/scenarios`), and every `inference.policy` scenario pass against the testkit runner (every earlier story claims its own scenarios; this is the re-run, not a new claim), and `ess/SKIPPED.md` names no `inference.graph` or `inference.policy` id (each earlier story removed its own; nothing is removed here).
 
 ## Domain relations
 
@@ -77,10 +77,10 @@ The integration test in `inference-runtime` passes with the sink contents, end s
 ## Checks
 
 1. Completed run: the sink holds exactly `s1, s2, s3, s4` in order and the run is Completed.
-2. Cancelled run: the sink holds exactly `s1, s2`, the segment the mock emits after cancellation is not among them, and the run is Cancelled.
+2. Cancelled run: the sink holds exactly `s1, s2`, the delta the mock emits after cancellation is refused `stale-generation` and creates no segment, the generation is Cancelled, and the run is Cancelled.
 3. Drained run: the sink holds exactly `s1, s2, s3`, input 4 was never admitted, and the run is Completed.
 4. After each run every node instance is Stopped and no run task or edge queue survives, observed through the weak references the test holds.
-5. The complete `inference.graph` suite and `inference.policy.DeclareProfile/outcome/declared` pass against the testkit runner, with `ess/SKIPPED.md` naming none of their ids.
+5. The complete `inference.graph` suite and every `inference.policy` scenario pass against the testkit runner, with `ess/SKIPPED.md` naming none of their ids.
 
 ## Out of Scope
 
@@ -107,7 +107,7 @@ Derived 2026-10-19 by `story-scoper`. Every line is **cited** (read from the sto
 - **Files:** `crates/inference-runtime/Cargo.toml` — inferred: the test drives the testkit's mock LLM, which sits behind the testkit feature `llm` (`story:llm-contract` step 2), so the runtime's dev-dependency on `inference-testkit` gains that feature; no body names this edit
 - **Files:** `crates/inference-testkit/src/graph.rs`, the mock source and sink nodes extending the recording mock of `story:node-instance-lifecycle` — inferred: Step 2 names `inference-testkit` and no file; `graph.rs` is the graph domain's module by the testkit layout (`story:testkit-conformance-target` step 1) and the recording mock's own file is not recorded anywhere
 - **Files:** `crates/inference-testkit/src/llm.rs`, the model node wrapping the scripted mock LLM adapter — inferred: the mock generator lives there behind feature `llm` (`story:llm-contract` recorded scope); whether the node sits beside it or in `graph.rs` is this story's choice
-- **Symbols:** `inference.graph.Run` relation `pipeline` (`ess/domains/graph.yaml:284,294`); `DrainRun`, `CompleteRun`, `CancelRun` (`graph.yaml:702,723,772`; `CancelRun` summary line 785); `NodeRole` variants `source`, `model`, `sink` (`graph.yaml:49-51`); port fields `role`, `essentiality`, `delivery`, `incremental`, `end_marker_required`, `provisional_allowed` and edge `overload` (`graph.yaml:159,194,197,198,200,202,228`); `inference.stream.Generation` relations `run`, `producer`, `segments` (`ess/domains/stream.yaml:121,135,140,148`); `EmitTextDelta`, `CommitSegment` (`stream.yaml:459,486`), events `TextDelta`, `TextSegmentCommitted` (`stream.yaml:644,655`); `inference.policy.DeclareProfile/outcome/declared` (`ess/domains/policy.yaml:54,63`); the `UNMAPPED` `Run → Session` relation (`ess/domains/session.yaml:42`) — cited
+- **Symbols:** `inference.graph.Run` relation `pipeline` (`ess/domains/graph.yaml:349,362`); `DrainRun`, `CompleteRun`, `CancelRun` (`graph.yaml:1139,1159,1224`; `CancelRun` summary line 1244); `NodeRole` variants `source`, `model`, `sink` (`graph.yaml:49-51`); port fields `role`, `essentiality`, `delivery`, `incremental`, `end_marker_required`, `provisional_allowed` and edge `overload` (`graph.yaml:220,259,262,263,265,267,293`); `inference.stream.Generation` relations `run`, `producer`, `segments` (`ess/domains/stream.yaml:129,143,152,160`); `EmitTextDelta`, `CommitSegment` (`stream.yaml:643,689`), events `TextDelta`, `TextSegmentCommitted` (`stream.yaml:884,895`); `inference.policy.DeclareProfile/outcome/declared` (`ess/domains/policy.yaml:88,145`); the `UNMAPPED` `Run → Session` relation (`ess/domains/session.yaml:50`) — cited
 - **Also likely:** `crates/inference-core`, the end-of-input control event in the control family of `docs/design/inference.md:297` — cited (Step 2, conditional on `inference-core` not carrying one; the condition holds: `epic:contracts-and-testkit` Scope says "no separate control-event type is declared in `ess/` and none is built in this epic", and `story:inbound-text-spans-and-envelope` "declares no separate control-event type")
 - **Also likely:** `crates/inference-core/src/envelope.rs` — inferred: the envelope's `kind` (`docs/design/inference.md:314`) is what tells control from content, and that module is where the inbound story's recorded scope puts the envelope
 - **Not touched:** `ess/domains/*.yaml` and `ess/SKIPPED.md` — cited (Step 1 "nothing to add"; Step 5 "nothing is removed here", the suite is re-run, not re-claimed)

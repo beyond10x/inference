@@ -19,7 +19,7 @@ on this repository. `README.md` is for people.
 |---|---|
 | `Cargo.toml`, `crates/` | the Cargo workspace; one crate per directory under `crates/`, `inference-core` first |
 | `docs/design/` | design documents and their reviews |
-| `ess/` | the ESS specification: `system.yaml`, `ess-inputs.yaml` and one domain document per layer of the design under `domains/` (model, policy, graph, stream, tools, session); every declaration carries a `read from:` line naming the design line it was read from |
+| `ess/` | the ESS specification: `system.yaml`, `ess-inputs.yaml` and one domain document per layer of the design under `domains/` (model, policy, graph, stream, tools, session); every declaration carries a `read from:` line naming the design line it was read from; `scenarios/` holds authored scenarios for what synthesis cannot witness |
 | `.engineering/planning` | the AEP planning store; change it only through `aep plan artifact` verbs |
 | `.engineering/drafts` | scratch bodies for `aep plan artifact … --from`; git-ignored |
 | `.github/workflows/` | `check.yml` runs `task check` with pinned `ess` and `aep` releases; `shared-gates.yml` calls the common source gates of `beyond10x/gates` at an exact commit |
@@ -30,7 +30,8 @@ on this repository. `README.md` is for people.
 ```
 task check                      # specification and planning store validation, then format, lint and tests
 ess specify validate --path ess
-ess verify conform synthesize --path ess --out .engineering/drafts/suite.json   # the scenarios the specification obliges; 0 refusals is the bar
+ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json   # the obliged scenarios plus the authored ones; the only refusals allowed are the three affects cascades, each executed by an authored scenario
+ess verify conform run --path ess --scenarios ess/scenarios --target interpreted --report-format 2 --report-out .engineering/drafts/report.json   # every scenario against the specification itself
 aep plan artifact validate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
