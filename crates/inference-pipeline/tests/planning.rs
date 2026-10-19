@@ -112,16 +112,25 @@ fn source_model_sink(
     bound: Option<usize>,
 ) -> (Declaration, PipelineId, NodeId) {
     let mut declaration = Declaration::counted();
-    let (pipeline_id, model) = declaration.build(&known.profile, spec(required), |pipeline| {
-        let source = pipeline.node("source", NodeRole::Source, Vec::new());
-        let model = pipeline.node("llm", NodeRole::Model, requires);
-        let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
-        chain(pipeline, &[&source, &model, &sink], PortTraits::default());
-        if let Some(index) = bound {
-            pipeline.bind(&model, &known.adapters[index]);
-        }
-        model.id()
-    });
+    let (pipeline_id, model) = declaration
+        .build(
+            known,
+            known.profile.profile_id(),
+            spec(required),
+            |pipeline| {
+                let source = pipeline.node("source", NodeRole::Source, Vec::new());
+                let model = pipeline.node("llm", NodeRole::Model, requires);
+                let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+                chain(pipeline, &[&source, &model, &sink], PortTraits::default());
+                if let Some(index) = bound {
+                    pipeline
+                        .bind(&model, known.adapters[index].adapter_id())
+                        .expect("the adapter is declared");
+                }
+                model.id()
+            },
+        )
+        .expect("the profile is declared");
     assert_eq!(
         declaration.findings(pipeline_id),
         [],
@@ -195,19 +204,28 @@ fn a_node_requiring_tool_calling_with_no_binding_is_refused_as_unbound_naming_it
 fn an_unbound_node_is_refused_before_a_mismatch_of_another() {
     let known = Known::new(vec![adapter(vec![OutputStreaming])]);
     let mut declaration = Declaration::counted();
-    let (pipeline_id, unbound) = declaration.build(&known.profile, spec(Vec::new()), |pipeline| {
-        let source = pipeline.node("source", NodeRole::Source, Vec::new());
-        let short = pipeline.node("short", NodeRole::Model, vec![ToolCalling]);
-        let unbound = pipeline.node("unbound", NodeRole::Model, vec![RevisableInput]);
-        let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
-        chain(
-            pipeline,
-            &[&source, &short, &unbound, &sink],
-            PortTraits::default(),
-        );
-        pipeline.bind(&short, &known.adapters[0]);
-        unbound.id()
-    });
+    let (pipeline_id, unbound) = declaration
+        .build(
+            &known,
+            known.profile.profile_id(),
+            spec(Vec::new()),
+            |pipeline| {
+                let source = pipeline.node("source", NodeRole::Source, Vec::new());
+                let short = pipeline.node("short", NodeRole::Model, vec![ToolCalling]);
+                let unbound = pipeline.node("unbound", NodeRole::Model, vec![RevisableInput]);
+                let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+                chain(
+                    pipeline,
+                    &[&source, &short, &unbound, &sink],
+                    PortTraits::default(),
+                );
+                pipeline
+                    .bind(&short, known.adapters[0].adapter_id())
+                    .expect("the adapter is declared");
+                unbound.id()
+            },
+        )
+        .expect("the profile is declared");
     let validated = declaration
         .validate(pipeline_id)
         .expect("the graph is valid");
@@ -246,15 +264,25 @@ fn a_planned_pipeline_carries_the_intersection_and_no_downgrade() {
         adapter(vec![Interruptible, OutputStreaming, NativeDuplex]),
     ]);
     let mut declaration = Declaration::counted();
-    let (pipeline_id, ()) =
-        declaration.build(&known.profile, spec(vec![OutputStreaming]), |pipeline| {
-            let source = pipeline.node("source", NodeRole::Source, Vec::new());
-            let model = pipeline.node("llm", NodeRole::Model, vec![ToolCalling]);
-            let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
-            chain(pipeline, &[&source, &model, &sink], PortTraits::default());
-            pipeline.bind(&model, &known.adapters[0]);
-            pipeline.bind(&sink, &known.adapters[1]);
-        });
+    let (pipeline_id, ()) = declaration
+        .build(
+            &known,
+            known.profile.profile_id(),
+            spec(vec![OutputStreaming]),
+            |pipeline| {
+                let source = pipeline.node("source", NodeRole::Source, Vec::new());
+                let model = pipeline.node("llm", NodeRole::Model, vec![ToolCalling]);
+                let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+                chain(pipeline, &[&source, &model, &sink], PortTraits::default());
+                pipeline
+                    .bind(&model, known.adapters[0].adapter_id())
+                    .expect("the adapter is declared");
+                pipeline
+                    .bind(&sink, known.adapters[1].adapter_id())
+                    .expect("the adapter is declared");
+            },
+        )
+        .expect("the profile is declared");
     let validated = declaration
         .validate(pipeline_id)
         .expect("the graph is valid");
@@ -284,29 +312,40 @@ fn an_unbound_transform_between_two_bound_nodes_leaves_the_intersection_unchange
     ]);
     let plan = |with_transform: bool| {
         let mut declaration = Declaration::counted();
-        let (pipeline_id, ()) = declaration.build(&known.profile, spec(Vec::new()), |pipeline| {
-            let source = pipeline.node("source", NodeRole::Source, Vec::new());
-            let first = pipeline.node("stt", NodeRole::Model, Vec::new());
-            let transform = pipeline.node("transform", NodeRole::Transform, Vec::new());
-            let second = pipeline.node("llm", NodeRole::Model, Vec::new());
-            let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
-            if with_transform {
-                chain(
-                    pipeline,
-                    &[&source, &first, &transform, &second, &sink],
-                    PortTraits::default(),
-                );
-            } else {
-                chain(
-                    pipeline,
-                    &[&source, &first, &second, &sink],
-                    PortTraits::default(),
-                );
-                chain(pipeline, &[&source, &transform, &sink], optional());
-            }
-            pipeline.bind(&first, &known.adapters[0]);
-            pipeline.bind(&second, &known.adapters[1]);
-        });
+        let (pipeline_id, ()) = declaration
+            .build(
+                &known,
+                known.profile.profile_id(),
+                spec(Vec::new()),
+                |pipeline| {
+                    let source = pipeline.node("source", NodeRole::Source, Vec::new());
+                    let first = pipeline.node("stt", NodeRole::Model, Vec::new());
+                    let transform = pipeline.node("transform", NodeRole::Transform, Vec::new());
+                    let second = pipeline.node("llm", NodeRole::Model, Vec::new());
+                    let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+                    if with_transform {
+                        chain(
+                            pipeline,
+                            &[&source, &first, &transform, &second, &sink],
+                            PortTraits::default(),
+                        );
+                    } else {
+                        chain(
+                            pipeline,
+                            &[&source, &first, &second, &sink],
+                            PortTraits::default(),
+                        );
+                        chain(pipeline, &[&source, &transform, &sink], optional());
+                    }
+                    pipeline
+                        .bind(&first, known.adapters[0].adapter_id())
+                        .expect("the adapter is declared");
+                    pipeline
+                        .bind(&second, known.adapters[1].adapter_id())
+                        .expect("the adapter is declared");
+                },
+            )
+            .expect("the profile is declared");
         let validated = declaration
             .validate(pipeline_id)
             .expect("the graph is valid");
@@ -325,14 +364,23 @@ fn an_unbound_transform_between_two_bound_nodes_leaves_the_intersection_unchange
 fn a_node_off_every_required_path_contributes_nothing() {
     let known = Known::new(vec![adapter(Vec::new())]);
     let mut declaration = Declaration::counted();
-    let (pipeline_id, ()) = declaration.build(&known.profile, spec(Vec::new()), |pipeline| {
-        let source = pipeline.node("source", NodeRole::Source, Vec::new());
-        let side = pipeline.node("side", NodeRole::Model, Vec::new());
-        let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
-        chain(pipeline, &[&source, &sink], PortTraits::default());
-        chain(pipeline, &[&source, &side, &sink], optional());
-        pipeline.bind(&side, &known.adapters[0]);
-    });
+    let (pipeline_id, ()) = declaration
+        .build(
+            &known,
+            known.profile.profile_id(),
+            spec(Vec::new()),
+            |pipeline| {
+                let source = pipeline.node("source", NodeRole::Source, Vec::new());
+                let side = pipeline.node("side", NodeRole::Model, Vec::new());
+                let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+                chain(pipeline, &[&source, &sink], PortTraits::default());
+                chain(pipeline, &[&source, &side, &sink], optional());
+                pipeline
+                    .bind(&side, known.adapters[0].adapter_id())
+                    .expect("the adapter is declared");
+            },
+        )
+        .expect("the profile is declared");
     let validated = declaration
         .validate(pipeline_id)
         .expect("the graph is valid");
@@ -349,14 +397,27 @@ fn a_node_off_every_required_path_contributes_nothing() {
 fn an_adapter_the_catalog_does_not_hold_implements_nothing() {
     let known = Known::new(Vec::new());
     let elsewhere = adapter(Capability::ALL.to_vec());
+    let binding_time = Known {
+        profile: known.profile.clone(),
+        adapters: vec![elsewhere.clone()],
+    };
     let mut declaration = Declaration::counted();
-    let (pipeline_id, ()) = declaration.build(&known.profile, spec(Vec::new()), |pipeline| {
-        let source = pipeline.node("source", NodeRole::Source, Vec::new());
-        let model = pipeline.node("llm", NodeRole::Model, Vec::new());
-        let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
-        chain(pipeline, &[&source, &model, &sink], PortTraits::default());
-        pipeline.bind(&model, &elsewhere);
-    });
+    let (pipeline_id, ()) = declaration
+        .build(
+            &binding_time,
+            known.profile.profile_id(),
+            spec(Vec::new()),
+            |pipeline| {
+                let source = pipeline.node("source", NodeRole::Source, Vec::new());
+                let model = pipeline.node("llm", NodeRole::Model, Vec::new());
+                let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+                chain(pipeline, &[&source, &model, &sink], PortTraits::default());
+                pipeline
+                    .bind(&model, elsewhere.adapter_id())
+                    .expect("the adapter is declared");
+            },
+        )
+        .expect("the profile is declared");
     assert_eq!(declaration.plan_of(pipeline_id, &known), Ok(Vec::new()));
 }
 
@@ -364,7 +425,14 @@ fn an_adapter_the_catalog_does_not_hold_implements_nothing() {
 fn an_empty_pipeline_plans_with_no_effective_capability() {
     let known = Known::new(Vec::new());
     let mut declaration = Declaration::counted();
-    let (pipeline_id, ()) = declaration.build(&known.profile, spec(vec![OutputStreaming]), |_| ());
+    let (pipeline_id, ()) = declaration
+        .build(
+            &known,
+            known.profile.profile_id(),
+            spec(vec![OutputStreaming]),
+            |_| (),
+        )
+        .expect("the profile is declared");
     declaration
         .validate_pipeline(ValidatePipeline { pipeline_id })
         .expect("an empty graph is valid");
@@ -387,18 +455,29 @@ fn with_no_required_path_every_bound_node_contributes() {
         adapter(vec![Interruptible, OutputStreaming]),
     ]);
     let mut declaration = Declaration::counted();
-    let (pipeline_id, ()) = declaration.build(&known.profile, spec(Vec::new()), |pipeline| {
-        let first = pipeline.node("stt", NodeRole::Model, Vec::new());
-        let unbound = pipeline.node("transform", NodeRole::Transform, Vec::new());
-        let second = pipeline.node("llm", NodeRole::Model, Vec::new());
-        chain(
-            pipeline,
-            &[&first, &unbound, &second],
-            PortTraits::default(),
-        );
-        pipeline.bind(&first, &known.adapters[0]);
-        pipeline.bind(&second, &known.adapters[1]);
-    });
+    let (pipeline_id, ()) = declaration
+        .build(
+            &known,
+            known.profile.profile_id(),
+            spec(Vec::new()),
+            |pipeline| {
+                let first = pipeline.node("stt", NodeRole::Model, Vec::new());
+                let unbound = pipeline.node("transform", NodeRole::Transform, Vec::new());
+                let second = pipeline.node("llm", NodeRole::Model, Vec::new());
+                chain(
+                    pipeline,
+                    &[&first, &unbound, &second],
+                    PortTraits::default(),
+                );
+                pipeline
+                    .bind(&first, known.adapters[0].adapter_id())
+                    .expect("the adapter is declared");
+                pipeline
+                    .bind(&second, known.adapters[1].adapter_id())
+                    .expect("the adapter is declared");
+            },
+        )
+        .expect("the profile is declared");
     let validated = declaration
         .validate(pipeline_id)
         .expect("the graph is valid");
@@ -411,13 +490,23 @@ fn with_no_required_path_every_bound_node_contributes() {
     );
 
     let mut declaration = Declaration::counted();
-    let (pipeline_id, ()) =
-        declaration.build(&known.profile, spec(vec![ToolCalling]), |pipeline| {
-            let first = pipeline.node("stt", NodeRole::Model, Vec::new());
-            let second = pipeline.node("llm", NodeRole::Model, Vec::new());
-            pipeline.bind(&first, &known.adapters[0]);
-            pipeline.bind(&second, &known.adapters[1]);
-        });
+    let (pipeline_id, ()) = declaration
+        .build(
+            &known,
+            known.profile.profile_id(),
+            spec(vec![ToolCalling]),
+            |pipeline| {
+                let first = pipeline.node("stt", NodeRole::Model, Vec::new());
+                let second = pipeline.node("llm", NodeRole::Model, Vec::new());
+                pipeline
+                    .bind(&first, known.adapters[0].adapter_id())
+                    .expect("the adapter is declared");
+                pipeline
+                    .bind(&second, known.adapters[1].adapter_id())
+                    .expect("the adapter is declared");
+            },
+        )
+        .expect("the profile is declared");
     assert_eq!(
         declaration.plan_of(pipeline_id, &known),
         Err(PlanPipelineError::Mismatch(CapabilityMismatch {
@@ -432,7 +521,9 @@ fn with_no_required_path_every_bound_node_contributes() {
 fn only_a_validated_pipeline_is_planned_and_only_once() {
     let known = Known::new(Vec::new());
     let mut declaration = Declaration::counted();
-    let (pipeline_id, ()) = declaration.build(&known.profile, spec(Vec::new()), |_| ());
+    let (pipeline_id, ()) = declaration
+        .build(&known, known.profile.profile_id(), spec(Vec::new()), |_| ())
+        .expect("the profile is declared");
     let plan = PlanPipeline { pipeline_id };
 
     assert_eq!(
@@ -601,8 +692,12 @@ proptest! {
                 .map(|(adapter, _)| adapter.clone())
                 .collect(),
         );
+        let binding_time = Known {
+            profile: known.profile.clone(),
+            adapters: adapters.clone(),
+        };
         let mut declaration = Declaration::counted();
-        let (pipeline_id, ()) = declaration.build(&known.profile, spec(Vec::new()), |pipeline| {
+        let (pipeline_id, ()) = declaration.build(&binding_time, known.profile.profile_id(), spec(Vec::new()), |pipeline| {
             let nodes: Vec<_> = arrangement
                 .roles
                 .iter()
@@ -616,10 +711,12 @@ proptest! {
             }
             for (node, binding) in nodes.iter().zip(&arrangement.bindings) {
                 if let Some(index) = binding {
-                    pipeline.bind(node, &adapters[*index]);
+                    pipeline.bind(node, adapters[*index].adapter_id())
+.expect("the adapter is declared");
                 }
             }
-        });
+        })
+.expect("the profile is declared");
         let validated = declaration.validate(pipeline_id);
         prop_assert!(validated.is_ok(), "{validated:?}");
         let planned = declaration

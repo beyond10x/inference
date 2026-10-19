@@ -131,8 +131,14 @@ impl Graph {
         modality: Modality,
         traits: Traits,
     ) -> PortId {
+        let pipeline_id = self
+            .declaration
+            .node(node_id)
+            .expect("the node exists")
+            .pipeline_id();
         self.declaration
             .add_port(AddPort {
+                pipeline_id,
                 node_id,
                 name: format!("{direction:?}"),
                 direction,
@@ -209,27 +215,32 @@ fn a_chain_from_a_source_through_a_transform_to_a_sink_validates_through_the_bui
         ..PortTraits::default()
     };
     let mut declaration = Declaration::counted();
-    let (pipeline_id, ()) = declaration.build(
-        &known.profile,
-        PipelineSpec {
-            name: "chain".to_owned(),
-            schema_revision: "1".to_owned(),
-            mode: InteractionMode::Batch,
-            required_capabilities: Vec::new(),
-        },
-        |pipeline| {
-            let source = pipeline.node("source", NodeRole::Source, Vec::new());
-            let transform = pipeline.node("transform", NodeRole::Transform, Vec::new());
-            let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
-            let read = pipeline.output::<modality::Text>(&source, "out", traits);
-            let into = pipeline.input::<modality::Text>(&transform, "in", traits);
-            let out = pipeline.output::<modality::Text>(&transform, "out", traits);
-            let write = pipeline.input::<modality::Text>(&sink, "in", traits);
-            pipeline.connect(&read, &into, NonZeroUsize::MIN, OverloadPolicy::Pause);
-            pipeline.connect(&out, &write, NonZeroUsize::MIN, OverloadPolicy::Pause);
-            pipeline.bind(&transform, &known.adapter);
-        },
-    );
+    let (pipeline_id, ()) = declaration
+        .build(
+            &known,
+            known.profile.profile_id(),
+            PipelineSpec {
+                name: "chain".to_owned(),
+                schema_revision: "1".to_owned(),
+                mode: InteractionMode::Batch,
+                required_capabilities: Vec::new(),
+            },
+            |pipeline| {
+                let source = pipeline.node("source", NodeRole::Source, Vec::new());
+                let transform = pipeline.node("transform", NodeRole::Transform, Vec::new());
+                let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+                let read = pipeline.output::<modality::Text>(&source, "out", traits);
+                let into = pipeline.input::<modality::Text>(&transform, "in", traits);
+                let out = pipeline.output::<modality::Text>(&transform, "out", traits);
+                let write = pipeline.input::<modality::Text>(&sink, "in", traits);
+                pipeline.connect(&read, &into, NonZeroUsize::MIN, OverloadPolicy::Pause);
+                pipeline.connect(&out, &write, NonZeroUsize::MIN, OverloadPolicy::Pause);
+                pipeline
+                    .bind(&transform, known.adapter.adapter_id())
+                    .expect("the adapter is declared");
+            },
+        )
+        .expect("the profile is declared");
     assert!(declaration.findings(pipeline_id).is_empty());
     assert_eq!(
         declaration.validate_pipeline(ValidatePipeline { pipeline_id }),
@@ -314,11 +325,14 @@ fn check_2_an_edge_into_an_output_port_is_incompatible_and_names_its_source_port
     let transform = graph.node(NodeRole::Transform);
     let also_out = graph.output(transform, COMMITTED);
     graph.edge(out, also_out);
-    graph.refuses_with(&[finding(
-        GraphDefect::IncompatibleEdge,
-        Some(source),
-        Some(out),
-    )]);
+    graph.refuses_with(&[
+        finding(GraphDefect::IncompatibleEdge, Some(source), Some(out)),
+        finding(
+            GraphDefect::UnreachableMandatoryOutput,
+            Some(transform),
+            Some(also_out),
+        ),
+    ]);
 }
 
 #[test]
@@ -403,7 +417,17 @@ fn check_5_a_node_feeding_itself_is_a_cycle() {
 }
 
 #[test]
-fn check_6_an_unconnected_essential_port_is_unreachable_and_optional_ones_may_be() {
+fn check_6_an_unconnected_essential_input_is_not_a_finding() {
+    let mut graph = Graph::new();
+    let transform = graph.node(NodeRole::Transform);
+    graph.input(transform, COMMITTED);
+    let pipeline_id = graph.pipeline_id;
+    assert_eq!(graph.declaration.findings(pipeline_id), []);
+    assert_eq!(graph.validate(), Ok(PipelineValidated { pipeline_id }));
+}
+
+#[test]
+fn check_6_an_unconnected_essential_output_is_unreachable_and_optional_ones_may_be() {
     let mut graph = Graph::new();
     let source = graph.node(NodeRole::Source);
     let essential = graph.output(source, COMMITTED);
@@ -453,23 +477,27 @@ fn check_9_provisional_text_into_a_tool_is_a_disallowed_data_flow() {
         ..PortTraits::default()
     };
     let mut declaration = Declaration::counted();
-    let (pipeline_id, (llm, proposal)) = declaration.build(
-        &known.profile,
-        PipelineSpec {
-            name: "agent".to_owned(),
-            schema_revision: "1".to_owned(),
-            mode: InteractionMode::TurnBased,
-            required_capabilities: Vec::new(),
-        },
-        |pipeline| {
-            let llm = pipeline.node("llm", NodeRole::Model, Vec::new());
-            let tool = pipeline.node("tool", NodeRole::Tool, Vec::new());
-            let proposal = pipeline.output::<modality::Structured>(&llm, "call", provisional);
-            let call = pipeline.input::<modality::Structured>(&tool, "call", PortTraits::default());
-            pipeline.connect(&proposal, &call, NonZeroUsize::MIN, OverloadPolicy::Pause);
-            (llm.id(), proposal.id())
-        },
-    );
+    let (pipeline_id, (llm, proposal)) = declaration
+        .build(
+            &known,
+            known.profile.profile_id(),
+            PipelineSpec {
+                name: "agent".to_owned(),
+                schema_revision: "1".to_owned(),
+                mode: InteractionMode::TurnBased,
+                required_capabilities: Vec::new(),
+            },
+            |pipeline| {
+                let llm = pipeline.node("llm", NodeRole::Model, Vec::new());
+                let tool = pipeline.node("tool", NodeRole::Tool, Vec::new());
+                let proposal = pipeline.output::<modality::Structured>(&llm, "call", provisional);
+                let call =
+                    pipeline.input::<modality::Structured>(&tool, "call", PortTraits::default());
+                pipeline.connect(&proposal, &call, NonZeroUsize::MIN, OverloadPolicy::Pause);
+                (llm.id(), proposal.id())
+            },
+        )
+        .expect("the profile is declared");
     let rejected = Err(ValidatePipelineError::Rejected(IncompatibleGraph {
         findings: vec![finding(
             GraphDefect::DisallowedDataFlow,

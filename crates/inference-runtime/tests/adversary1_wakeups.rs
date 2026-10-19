@@ -14,13 +14,26 @@ use std::task::{Context, Poll, Wake, Waker};
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
-use inference_core::model::Capability;
-use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileKind};
+use inference_core::model::{Adapter, AdapterId, Capability};
+use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
-    Declaration, Delivery, Edge, Essentiality, InteractionMode, NodeRole, OverloadPolicy,
+    Catalog, Declaration, Delivery, Edge, Essentiality, InteractionMode, NodeRole, OverloadPolicy,
     PipelineSpec, PortTraits, modality,
 };
 use inference_runtime::{EdgeQueue, QueueReceiver, QueueSender};
+
+/// The one profile the case declares, and no adapter: what `Declaration::build` reads.
+struct Profiles(DeploymentProfile);
+
+impl Catalog for Profiles {
+    fn profile(&self, profile_id: ProfileId) -> Option<&DeploymentProfile> {
+        (self.0.profile_id() == profile_id).then_some(&self.0)
+    }
+
+    fn adapter(&self, _: AdapterId) -> Option<&Adapter> {
+        None
+    }
+}
 
 fn edge(capacity: usize, overload: OverloadPolicy) -> Edge {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
@@ -44,13 +57,17 @@ fn edge(capacity: usize, overload: OverloadPolicy) -> Edge {
     };
     let capacity = NonZeroUsize::new(capacity).expect("a positive capacity");
     let mut declaration = Declaration::new();
-    declaration.build(&profile, spec, |pipeline| {
-        let source = pipeline.node("source", NodeRole::Source, Vec::new());
-        let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
-        let out = pipeline.output::<modality::Text>(&source, "out", traits);
-        let into = pipeline.input::<modality::Text>(&sink, "in", traits);
-        pipeline.connect(&out, &into, capacity, overload);
-    });
+    let profile_id = profile.profile_id();
+    let catalog = Profiles(profile);
+    declaration
+        .build(&catalog, profile_id, spec, |pipeline| {
+            let source = pipeline.node("source", NodeRole::Source, Vec::new());
+            let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+            let out = pipeline.output::<modality::Text>(&source, "out", traits);
+            let into = pipeline.input::<modality::Text>(&sink, "in", traits);
+            pipeline.connect(&out, &into, capacity, overload);
+        })
+        .expect("the profile is declared");
     declaration.edges().next().expect("one edge").clone()
 }
 

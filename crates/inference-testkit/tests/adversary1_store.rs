@@ -50,7 +50,7 @@ fn an_unknown_model_refusal_takes_no_identity() {
         .expect("declared");
     assert_eq!(
         adapter.adapter_id.to_string(),
-        "00000000-0000-4000-8000-000000000002",
+        "00000001-0000-4000-8000-000000000002",
         "the unknown-model refusal consumed an identity"
     );
     assert_eq!(domain.events().len(), 2);
@@ -122,9 +122,9 @@ fn two_runs_of_the_same_commands_issue_the_same_identities() {
         issued
     };
     let expected = [
-        "00000000-0000-4000-8000-000000000001",
-        "00000000-0000-4000-8000-000000000002",
-        "00000000-0000-4000-8000-000000000003",
+        "00000001-0000-4000-8000-000000000001",
+        "00000001-0000-4000-8000-000000000002",
+        "00000001-0000-4000-8000-000000000003",
     ];
     assert_eq!(run(), expected);
     assert_eq!(run(), expected);
