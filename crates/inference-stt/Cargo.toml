@@ -1,0 +1,16 @@
+[package]
+name = "inference-stt"
+description = "STT contract of the inference framework: recognisers turning audio frames into hypotheses, revisions and committed spans, with incremental input and output streaming declared apart."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+inference-audio = { path = "../inference-audio" }
+inference-core = { path = "../inference-core" }
+inference-text = { path = "../inference-text" }
+
+[lints]
+workspace = true

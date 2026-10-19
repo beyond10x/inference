@@ -272,6 +272,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-stt"
+version = "0.2.0"
+dependencies = [
+ "inference-audio",
+ "inference-core",
+ "inference-text",
+]
+
+[[package]]
 name = "inference-testkit"
 version = "0.2.0"
 dependencies = [
@@ -279,6 +288,7 @@ dependencies = [
  "ess-primitives",
  "inference-core",
  "inference-llm",
+ "inference-stt",
  "inference-text",
  "serde",
  "serde_json",
@@ -496,6 +506,14 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "stt-only"
+version = "0.2.0"
+dependencies = [
+ "inference-stt",
+ "inference-testkit",
+]
 
 [[package]]
 name = "syn"
