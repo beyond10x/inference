@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.4.0] — 2026-10-19
+
+### Added
+
+- `inference-stt`: the STT contract with no concrete model, the scripted mock recogniser and the
+  `stt-only` example, whose dependency tree carries no runtime.
+- `inference-tts`: the TTS contract, the mock synthesiser and a sink double; playback is
+  acknowledged with a `PlaybackReceipt` built from the synthesized audio.
+- `inference-pipeline`: pipelines declared through commands or the typed builder, checked against
+  a catalog of declared models and adapters, validated with the structural checks of design 10.2
+  and planned from the weakest node's capabilities; the node-instance trait; the tool authority
+  node, which validates arguments against the tool's schema, binds the tool's
+  `requires_confirmation` through a confirmation hook that confirms or denies, and decides each
+  call once; the tool executor node, generic over the executor contract, which runs each call
+  once under its deadline.
+- `inference-runtime`: bounded edges with backpressure and the overload policies; the `Run`
+  state machine and its nine commands; the run controller, which drives node instances through
+  prepare, start, drain and stop; `RunController::drive`, which ends a run when every source has
+  sent end of input or on a drain or cancel request, draining nodes upstream first; a guard that
+  refuses a repeated or decreasing sequence among the content events a node emits on a stream.
+- `inference-tools`: the `ToolCall` lifecycle (propose, authorize, reject, start, complete, fail),
+  the executor contract and the provisional-input barrier.
+- `inference-core`: the control event kinds (`ControlKind`; end of input is `stop`) and
+  `SendError::SequenceNotIncreasing`.
+- `inference-testkit`: the run stores behind an optional `run` feature; mock source, sink and
+  model nodes of a pipeline; the scripted mock tool executor with its invocation log. The
+  conformance target answers 296 of 317 scenarios, every `inference.graph`, `inference.stream`,
+  `inference.policy` and `inference.tools` scenario among them.
+
+### Changed
+
+- `OutputSegment` transitions take the segment by value, so a segment cannot be committed twice;
+  `Generator::start` returns a `Result`, and the LLM mock refuses a second concurrent generation.
+- The specification adds the node-instance and tool-call lifecycles, their events and errors, and
+  `AddPort.pipeline_id` (`ess verify diff` against 0.3.0: 67 changes; 12 breaking, all new state
+  variants for readers and the new required `AddPort` input for callers; 27 unknown, 28
+  compatible). The synthesized suite grows from 229 to 317 scenarios.
+
+### Fixed
+
+- The defects of the 0.3.0 review in the runtime queue (every discard counted, coalesce keeps the
+  newest, stale-epoch sends wake), the pipeline (forced outcomes, ports under their pipeline) and
+  the STT and TTS contracts.
+
+### Known issues
+
+- The 21 `inference.session` scenarios are unsupported until the session facade lands; they are
+  named in `ess/SKIPPED.md`.
+- A run waits for a cancel when a node that consumes events fails, and a cancel arriving between a
+  tool node's check and its send can let one event through; both are recorded on the tool-call
+  interruption story.
+- `ess verify conform synthesize` still refuses the three `affects` cascades (ESS-SYNTH-001); the
+  authored scenarios execute them.
+
 ## [0.3.0] — 2026-10-19
 
 ### Added
