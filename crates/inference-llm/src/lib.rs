@@ -30,8 +30,10 @@
 //! [`GenerationOutput`] is the bookkeeping every implementation shares: the generation and the
 //! segments it owns, moved only through the transitions of `inference-core` and
 //! `inference-text`. The crate carries no concrete model, backend or provider; the scripted mock
-//! generator is `inference-testkit`'s, behind its `llm` feature. Tool proposals, context
-//! semantics and token accounting are not part of the contract yet.
+//! generator is `inference-testkit`'s, behind its `llm` feature. Behind the `tools` feature, which
+//! takes the optional dependency on `inference-tools`, [`tools`] adds structured tool proposals
+//! and the integration of their outcomes into the generation that proposed. Context semantics and
+//! token accounting are not part of the contract yet.
 
 use std::error::Error;
 use std::fmt;
@@ -46,6 +48,10 @@ use inference_text::{
     OutputSegment, SegmentDiscarded, SegmentState, SegmentStateConflict, TextDelta,
     TextSegmentCommitted,
 };
+
+/// Structured tool proposals and their outcomes, behind the `tools` feature.
+#[cfg(feature = "tools")]
+pub mod tools;
 
 /// The revision of this contract, for the `contract_revision` an adapter implementing it
 /// declares.

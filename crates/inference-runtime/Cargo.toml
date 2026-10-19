@@ -13,7 +13,7 @@ inference-pipeline = { path = "../inference-pipeline" }
 serde.workspace = true
 
 [dev-dependencies]
-inference-llm = { path = "../inference-llm" }
+inference-llm = { path = "../inference-llm", features = ["tools"] }
 inference-testkit = { path = "../inference-testkit", features = ["llm", "run", "stt"] }
 inference-text = { path = "../inference-text" }
 inference-tools = { path = "../inference-tools" }

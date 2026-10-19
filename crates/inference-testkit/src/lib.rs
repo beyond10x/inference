@@ -41,7 +41,8 @@ pub mod session;
 #[cfg(feature = "stt")]
 pub mod stt;
 
-/// The scripted mock generator of the LLM contract, in three capability configurations.
+/// The scripted mock generator of the LLM contract, in three capability configurations, which
+/// may also be scripted to propose tool calls.
 #[cfg(feature = "llm")]
 pub mod llm;
 

@@ -8,8 +8,8 @@
 //! them; what a declaration references and does not hold, the declared profiles and adapters, it
 //! reads through [`GraphCatalog`] over the [`PolicyDomain`] and [`ModelDomain`] stores. A refused
 //! command stores nothing, records no event and takes no identity. The views
-//! `inference.graph.Pipelines`, `Nodes`, `Ports`, `Edges` and `Bindings` are the declaration's
-//! entities ([`GraphDomain::declaration`]), read at the call.
+//! `inference.graph.Pipelines`, `Nodes`, `Ports`, `Edges`, `FeedbackLoops` and `Bindings` are the
+//! declaration's entities ([`GraphDomain::declaration`]), read at the call.
 //!
 //! A validation keeps the validated form of the pipeline ([`ValidatedPipeline`]) and a plan takes
 //! it and keeps the Planned form ([`PlannedPipeline`]), so that `CreateRun` builds a [`Run`] of
@@ -64,8 +64,9 @@ use inference_core::policy::{DeploymentProfile, ProfileId, ProfileNotFound};
 use inference_pipeline::PlannedPipeline;
 use inference_pipeline::{
     AddNode, AddNodeError, AddPort, AddPortError, BindNode, BindNodeError, Catalog, ConnectPorts,
-    ConnectPortsError, Declaration, DeclarePipeline, NodeAdded, NodeBound, PipelineDeclared,
-    PipelinePlanned, PipelineValidated, PlanPipeline, PlanPipelineError, PortAdded, PortsConnected,
+    ConnectPortsError, Declaration, DeclareFeedbackLoop, DeclareFeedbackLoopError, DeclarePipeline,
+    FeedbackLoopDeclared, NodeAdded, NodeBound, PipelineDeclared, PipelinePlanned,
+    PipelineValidated, PlanPipeline, PlanPipelineError, PortAdded, PortsConnected,
     ValidatePipeline, ValidatePipelineError, ValidatedPipeline,
 };
 #[cfg(feature = "run")]
@@ -92,6 +93,8 @@ pub enum GraphEvent {
     PortsConnected(PortsConnected),
     /// `inference.graph.NodeBound`.
     NodeBound(NodeBound),
+    /// `inference.graph.FeedbackLoopDeclared`.
+    FeedbackLoopDeclared(FeedbackLoopDeclared),
     /// `inference.graph.PipelineValidated`.
     PipelineValidated(PipelineValidated),
     /// `inference.graph.PipelinePlanned`.
@@ -255,6 +258,20 @@ impl GraphDomain {
     ) -> Result<PortsConnected, ConnectPortsError> {
         let event = self.declaration.connect_ports(input)?;
         self.events.push(GraphEvent::PortsConnected(event));
+        Ok(event)
+    }
+
+    /// Runs `inference.graph.DeclareFeedbackLoop` and records its [`FeedbackLoopDeclared`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Declaration::declare_feedback_loop`].
+    pub fn declare_feedback_loop(
+        &mut self,
+        input: DeclareFeedbackLoop,
+    ) -> Result<FeedbackLoopDeclared, DeclareFeedbackLoopError> {
+        let event = self.declaration.declare_feedback_loop(input)?;
+        self.events.push(GraphEvent::FeedbackLoopDeclared(event));
         Ok(event)
     }
 
