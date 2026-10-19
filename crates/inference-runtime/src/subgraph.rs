@@ -10,7 +10,7 @@
 //! |---|---|
 //! | `describe`, `described` | nothing yet; the node keeps its declaration and its instance |
 //! | `prepare` | created under the node's instance as its parent (`NestRun`), validated, prepared |
-//! | `start` | activated; each edge endpoint of the node is bridged to the child exposure of its port's name, and the child's run loop runs |
+//! | `start` | activated; the parent edges arriving at each input port are merged into the child ingress of its name, and the child egress of each output port's name is fanned out to every parent edge leaving it; the child's run loop runs. A refused start cancels and stops the child |
 //! | `drain` | `stop` is sent into each ingress still open and a drain is asked for; the step returns once the child run is terminal |
 //! | `cancel` | cancelled |
 //! | `stop` | returns once the child run is terminal and its queues are dropped |
@@ -18,7 +18,12 @@
 //! A child run that failed fails the subgraph node's drain, or its prepare or start, with a
 //! [`NodeError`] carrying the child's reason, which names the child node; the parent run then fails
 //! with a reason naming the subgraph node. A child run that did not complete when drained fails
-//! the drain too.
+//! the drain too. A refused prepare or start leaves the child run terminal, every instance of it
+//! terminal and every queue of it dropped, and records it in the [`SubgraphHandle`], since the
+//! parent calls a failed node no further.
+//!
+//! A bridge's every wait gives way to a cancel. A full `fail` queue at a bridge is back-pressure,
+//! not loss: the bridge holds the envelope until the queue has room (see its private `send`).
 //!
 //! Tracing needs no library: every envelope inside the child carries the child run's identity, as
 //! its nodes stamp it. An envelope crossing the boundary, in either direction, is sent on the other
@@ -39,7 +44,6 @@ use std::pin::{Pin, pin};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};
-use std::time::Duration;
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
@@ -49,9 +53,9 @@ use inference_pipeline::{
     PlannedPipeline, PortId,
 };
 
-use crate::controller::{RunController, RunError};
+use crate::controller::{Ingress, RunController, RunError};
 use crate::drive::RunRequests;
-use crate::queue::EpochLookup;
+use crate::queue::{EpochLookup, Room};
 use crate::run::{NodeInstanceState, RunState};
 
 /// The node implementations of a child run: called once per node of the child, with the child
@@ -94,7 +98,8 @@ impl SubgraphHandle {
         self.seen().child_run_id
     }
 
-    /// The child run as the subgraph node left it when its stop returned; none before.
+    /// The child run as the subgraph node left it: when its stop returned, or when a refused
+    /// prepare or start wound it down, after which the node is called no further; none before.
     #[must_use]
     pub fn at_stop(&self) -> Option<ChildAtStop> {
         self.seen().at_stop.clone()
@@ -133,7 +138,7 @@ impl Bridges {
     fn read<T>(&self, cx: &Context<'_>, read: impl FnOnce(&BridgeState) -> Option<T>) -> Option<T> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let answer = read(&state.0);
-        if answer.is_none() {
+        if answer.is_none() && !state.1.iter().any(|known| known.will_wake(cx.waker())) {
             state.1.push(cx.waker().clone());
         }
         answer
@@ -188,7 +193,7 @@ impl<P> fmt::Debug for SubgraphNode<P> {
     }
 }
 
-impl<P: From<ControlKind> + Send + 'static> SubgraphNode<P> {
+impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
     /// The subgraph node of the parent run `run_id`, running the planned pipeline `child`, which
     /// `declaration` declares together with the parent's ports; the child's queues read epochs
     /// through `epochs`, and `implement` makes the implementation of each node of the child.
@@ -283,7 +288,7 @@ impl<P: From<ControlKind> + Send + 'static> SubgraphNode<P> {
         let prepared = child.prepare().await;
         if let Err(error) = prepared {
             let refused = Self::refused(&child, &error);
-            self.state = Child::Ended(child);
+            self.wound_down(child);
             return Err(refused);
         }
         self.state = Child::Prepared(child);
@@ -296,30 +301,87 @@ impl<P: From<ControlKind> + Send + 'static> SubgraphNode<P> {
                 "the subgraph node was started without a prepared child run",
             ));
         };
+        match self.bridges(&mut child, endpoints) {
+            Ok(tasks) => {
+                if let Err(error) = child.activate().await {
+                    let refused = Self::refused(&child, &error);
+                    drop(tasks);
+                    let _already_failed_or_cancelled = child.cancel().await;
+                    self.wound_down(child);
+                    return Err(refused);
+                }
+                let requests = child.requests();
+                let bridges = Arc::clone(&tasks.bridges);
+                let thread = thread::spawn(move || {
+                    let result = block_on(run_child(&mut child, tasks.tasks, &tasks.bridges));
+                    tasks.bridges.update(|state| state.done = true);
+                    (child, result)
+                });
+                self.state = Child::Running {
+                    requests,
+                    bridges,
+                    thread,
+                };
+                Ok(())
+            }
+            Err(refused) => {
+                let _cancelled = child.cancel().await;
+                self.wound_down(child);
+                Err(refused)
+            }
+        }
+    }
+
+    /// The bridges between the node's edge endpoints and the child's exposures: one per exposure
+    /// the node's ports name, an ingress merging every parent edge into its input port of that
+    /// name, an egress fanned out to every parent edge leaving its output port of that name.
+    ///
+    /// # Errors
+    ///
+    /// The error naming a port whose name no exposure of the child carries, or the node when it
+    /// was not described; the child is then to be wound down.
+    fn bridges(
+        &self,
+        child: &mut RunController<P>,
+        endpoints: NodeEndpoints<P>,
+    ) -> Result<Tasks, NodeError> {
         let node_id = self.node.as_ref().map(Node::node_id).ok_or_else(|| {
             NodeError::new("the subgraph node was started before it was described")
         })?;
-        let mut ends = child.exposed();
         let name = |port_id: PortId| {
             self.declaration
                 .port(port_id)
                 .map(|port| port.name().to_owned())
                 .unwrap_or_default()
         };
+        let mut inputs: Grouped<Box<dyn InputEndpoint<P>>> = Vec::new();
+        for input in endpoints.inputs {
+            group(&mut inputs, name(input.port_id), input.endpoint);
+        }
+        let mut outputs: Grouped<Box<dyn OutputEndpoint<P>>> = Vec::new();
+        for output in endpoints.outputs {
+            group(&mut outputs, name(output.port_id), output.endpoint);
+        }
+        let mut ends = child.exposed();
         let child_run = child.run().run_id();
         let bridges = Arc::new(Bridges::default());
         let mut tasks: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = Vec::new();
-        for input in endpoints.inputs {
-            let exposure = name(input.port_id);
-            let Some(ingress) = ends.ingress(&exposure) else {
+        for (exposure, parents) in inputs {
+            let Some(Ingress {
+                endpoint: ingress,
+                room,
+                ..
+            }) = ends.take_ingress(&exposure)
+            else {
                 return Err(NodeError::new(format!(
-                    "the child has no ingress named `{exposure}` for the port {}",
-                    input.port_id
+                    "the child has no ingress named `{exposure}` for the node's input port of \
+                     that name"
                 )));
             };
             tasks.push(Box::pin(ingress_bridge(
-                input.endpoint,
+                parents,
                 ingress,
+                room,
                 Arc::clone(&bridges),
                 Crossing {
                     run_id: child_run,
@@ -328,17 +390,16 @@ impl<P: From<ControlKind> + Send + 'static> SubgraphNode<P> {
                 },
             )));
         }
-        for output in endpoints.outputs {
-            let port = name(output.port_id);
+        for (port, parents) in outputs {
             let Some(egress) = ends.egress(&port) else {
                 return Err(NodeError::new(format!(
-                    "the child has no egress named `{port}` for the port {}",
-                    output.port_id
+                    "the child has no egress named `{port}` for the node's output port of that \
+                     name"
                 )));
             };
             tasks.push(Box::pin(egress_bridge(
                 egress,
-                output.endpoint,
+                parents,
                 Arc::clone(&bridges),
                 Crossing {
                     run_id: self.run_id,
@@ -347,25 +408,34 @@ impl<P: From<ControlKind> + Send + 'static> SubgraphNode<P> {
                 },
             )));
         }
-        drop(ends);
-        if let Err(error) = child.activate().await {
-            let refused = Self::refused(&child, &error);
-            self.state = Child::Ended(child);
-            return Err(refused);
-        }
-        let requests = child.requests();
-        let thread_bridges = Arc::clone(&bridges);
-        let thread = thread::spawn(move || {
-            let result = block_on(run_child(&mut child, tasks, &thread_bridges));
-            thread_bridges.update(|state| state.done = true);
-            (child, result)
-        });
-        self.state = Child::Running {
-            requests,
-            bridges,
-            thread,
+        Ok(Tasks { bridges, tasks })
+    }
+
+    /// Keeps `child`, terminal or refused, and records it as the node leaves it: a step that
+    /// refused fails the node's instance, which the parent calls no further, so this is the last
+    /// the node does with its child.
+    fn wound_down(&mut self, child: RunController<P>) {
+        self.record(&child);
+        self.state = Child::Ended(child);
+    }
+
+    /// Records what `child` has become in the node's handle.
+    fn record(&self, child: &RunController<P>) {
+        let at_stop = ChildAtStop {
+            run_id: child.run().run_id(),
+            parent: child.parent(),
+            state: child.run().state(),
+            instances: child
+                .instances()
+                .map(crate::run::NodeInstance::state)
+                .collect(),
+            queues_dropped: child.queues().iter().all(|queue| queue.is_dropped())
+                && child
+                    .exposure_queues()
+                    .iter()
+                    .all(|queue| queue.is_dropped()),
         };
-        Ok(())
+        self.handle.seen().at_stop = Some(at_stop);
     }
 
     /// Waits for the running child's thread to return and keeps what it returned.
@@ -421,29 +491,30 @@ impl<P: From<ControlKind> + Send + 'static> SubgraphNode<P> {
         if let Child::Prepared(child) = &mut self.state {
             let _cancelled_or_already_terminal = child.cancel().await;
         }
-        let controller = match &self.state {
-            Child::Prepared(child) | Child::Ended(child) => child,
-            Child::None | Child::Running { .. } => return,
-        };
-        let at_stop = ChildAtStop {
-            run_id: controller.run().run_id(),
-            parent: controller.parent(),
-            state: controller.run().state(),
-            instances: controller
-                .instances()
-                .map(crate::run::NodeInstance::state)
-                .collect(),
-            queues_dropped: controller.queues().iter().all(|queue| queue.is_dropped())
-                && controller
-                    .exposure_queues()
-                    .iter()
-                    .all(|queue| queue.is_dropped()),
-        };
-        self.handle.seen().at_stop = Some(at_stop);
+        if let Child::Prepared(child) | Child::Ended(child) = &self.state {
+            self.record(child);
+        }
     }
 }
 
-impl<P: From<ControlKind> + Send + 'static> NodeImplementation<P> for SubgraphNode<P> {
+/// The bridges of a child about to run: what they are told, and their tasks.
+struct Tasks {
+    bridges: Arc<Bridges>,
+    tasks: Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
+}
+
+/// Endpoints grouped by the name of the port they belong to, in the order the names first appear.
+type Grouped<E> = Vec<(String, Vec<E>)>;
+
+/// Adds `endpoint` to the group of `name` in `groups`, in the order the names first appear.
+fn group<E>(groups: &mut Grouped<E>, name: String, endpoint: E) {
+    match groups.iter_mut().find(|(known, _)| *known == name) {
+        Some((_, endpoints)) => endpoints.push(endpoint),
+        None => groups.push((name, vec![endpoint])),
+    }
+}
+
+impl<P: From<ControlKind> + Clone + Send + 'static> NodeImplementation<P> for SubgraphNode<P> {
     fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
         self.node = Some(node.clone());
         Box::pin(future::ready(()))
@@ -516,123 +587,226 @@ impl Crossing {
     }
 }
 
-/// What a bridge waits on next.
-enum Next<P> {
-    Received(Option<EventEnvelope<P>>),
-    Drain,
-    End,
+/// How a bridge's send ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sent {
+    /// The queue took the envelope, or discarded it under its overload policy.
+    Taken,
+    /// The queue refused it otherwise: closed, or the sequence did not increase.
+    Refused,
+    /// The subgraph node was cancelled before the queue took it; it is dropped.
+    Cancelled,
 }
 
-/// The next envelope of `input`: `first` answers from the bridges' state before anything is
-/// received, then what `input` holds is taken, and `then` answers only while it holds nothing.
-async fn next<P>(
+/// Sends `envelope` on `output` as a bridge does, racing every wait against the node's cancel, so
+/// that a cancel ends a bridge whose queue holds a send waiting for room (`pause`).
+///
+/// A `fail` queue that is full answers [`SendError::Full`]. At a bridge that answer is
+/// back-pressure, not loss: the envelope was already taken from the other side's queue, whose
+/// producer saw its send succeed, so failing here would lose it with nobody told, and failing the
+/// subgraph node would fail the parent for the size of a queue the parent does not see. The bridge
+/// therefore holds the envelope and sends it again once the queue has room: woken by the
+/// receiver's next take where the bridge holds the queue's `room` (a child ingress), otherwise by
+/// yielding once to the other tasks of its thread (a parent edge, which hands the node only its
+/// sending end). Either way it gives way to the child's run loop and the other bridges instead of
+/// blocking their thread, and the other side's queue stays full meanwhile, which holds its
+/// producer under that queue's own policy.
+async fn send<P>(
+    output: &dyn OutputEndpoint<P>,
+    envelope: EventEnvelope<P>,
+    room: Option<&Room<P>>,
+    bridges: &Bridges,
+) -> Sent {
+    let cancelled = |cx: &Context<'_>| {
+        bridges
+            .read(cx, |state| state.cancel.then_some(()))
+            .is_some()
+    };
+    let mut envelope = envelope;
+    loop {
+        let answer = {
+            let mut sending = output.send(envelope);
+            future::poll_fn(|cx| {
+                if cancelled(cx) {
+                    return Poll::Ready(None);
+                }
+                sending.as_mut().poll(cx).map(Some)
+            })
+            .await
+        };
+        match answer {
+            None => return Sent::Cancelled,
+            Some(Ok(())) => return Sent::Taken,
+            Some(Err(SendError::Full(refused))) => {
+                envelope = refused;
+                let mut yielded = false;
+                let gave_way = future::poll_fn(|cx| {
+                    if cancelled(cx) {
+                        return Poll::Ready(false);
+                    }
+                    match room {
+                        Some(room) => room.poll_room(cx).map(|()| true),
+                        None if yielded => Poll::Ready(true),
+                        None => {
+                            yielded = true;
+                            cx.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    }
+                })
+                .await;
+                if !gave_way {
+                    return Sent::Cancelled;
+                }
+            }
+            Some(Err(_)) => return Sent::Refused,
+        }
+    }
+}
+
+/// The next envelope of `input`, none once the edge is empty and closed, or `Err` once the node is
+/// cancelled, which answers first.
+async fn until_cancelled<P>(
     input: &mut dyn InputEndpoint<P>,
     bridges: &Bridges,
-    first: impl Fn(&BridgeState) -> Option<Next<P>>,
-    then: impl Fn(&BridgeState) -> Option<Next<P>>,
-) -> Next<P> {
+) -> Result<Option<EventEnvelope<P>>, ()> {
     let mut recv = input.recv();
     future::poll_fn(|cx| {
-        if let Some(next) = bridges.read(cx, &first) {
-            return Poll::Ready(next);
+        if bridges
+            .read(cx, |state| state.cancel.then_some(()))
+            .is_some()
+        {
+            return Poll::Ready(Err(()));
         }
-        if let Poll::Ready(received) = recv.as_mut().poll(cx) {
-            return Poll::Ready(Next::Received(received));
-        }
-        bridges.read(cx, &then).map_or(Poll::Pending, Poll::Ready)
+        recv.as_mut().poll(cx).map(Ok)
     })
     .await
 }
 
-/// Sends `envelope` on `output`, again while the queue is full, until it takes it, refuses it
-/// otherwise, or the bridges are cancelled.
-async fn send<P>(
-    output: &dyn OutputEndpoint<P>,
-    envelope: EventEnvelope<P>,
-    bridges: &Bridges,
-) -> bool {
-    let mut envelope = envelope;
-    loop {
-        match output.send(envelope).await {
-            Ok(()) => return true,
-            Err(SendError::Full(refused)) => {
-                let cancelled = future::poll_fn(|cx| {
-                    Poll::Ready(
-                        bridges
-                            .read(cx, |state| state.cancel.then_some(()))
-                            .is_some(),
-                    )
-                })
-                .await;
-                if cancelled {
-                    return false;
-                }
-                envelope = refused;
-                thread::sleep(Duration::from_millis(1));
-            }
-            Err(_) => return false,
-        }
-    }
+/// One parent edge's next envelope, with the edge's receiving end handed back.
+type Receiving<P> =
+    Pin<Box<dyn Future<Output = (Box<dyn InputEndpoint<P>>, Option<EventEnvelope<P>>)> + Send>>;
+
+fn receiving<P: Send + 'static>(mut input: Box<dyn InputEndpoint<P>>) -> Receiving<P> {
+    Box::pin(async move {
+        let received = input.recv().await;
+        (input, received)
+    })
 }
 
-/// Forwards what the parent sends into the subgraph node's input port into the child's ingress of
-/// its name, until `stop` crossed, the node drains with nothing left to take (then `stop` is
-/// sent), the parent's edge closed without `stop` (which ends no input, as on the run loop's
-/// edges), the node is cancelled or the child ended.
-async fn ingress_bridge<P: From<ControlKind> + Send>(
-    mut parent: Box<dyn InputEndpoint<P>>,
+/// What the parent edges of an ingress have next.
+enum Merged<P> {
+    Received(Box<dyn InputEndpoint<P>>, Option<Box<EventEnvelope<P>>>),
+    Drain,
+    End,
+}
+
+/// Forwards what the parent sends into the subgraph node's input port, along every parent edge
+/// arriving at it, into the child's ingress of its name. An edge ends at its `stop` or when it
+/// closes; once every edge ended, `stop` crosses if every one of them ended with `stop`, and none
+/// does if one closed without it (which ends no input, as on the run loop's own edges). It also
+/// ends when the node drains with nothing left to take on any edge (then `stop` is sent), is
+/// cancelled, or its child ended.
+async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
+    parents: Vec<Box<dyn InputEndpoint<P>>>,
     ingress: Box<dyn OutputEndpoint<P>>,
+    room: Option<Room<P>>,
     bridges: Arc<Bridges>,
     crossing: Crossing,
 ) {
+    let mut pending: Vec<Receiving<P>> = parents.into_iter().map(receiving).collect();
+    let mut closed = false;
     loop {
-        let next = next(
-            parent.as_mut(),
-            &bridges,
-            |state| (state.cancel || state.child_ended).then_some(Next::End),
-            |state| state.drain.then_some(Next::Drain),
-        )
-        .await;
-        match next {
-            Next::Received(Some(envelope)) => {
-                let end = envelope.kind == ControlKind::Stop.as_str();
-                if !send(ingress.as_ref(), crossing.cross(envelope), &bridges).await || end {
-                    return;
+        if pending.is_empty() {
+            if !closed {
+                let _taken_or_child_gone =
+                    send(ingress.as_ref(), crossing.stop(), room.as_ref(), &bridges).await;
+            }
+            return;
+        }
+        let next = future::poll_fn(|cx| {
+            if bridges
+                .read(cx, |state| {
+                    (state.cancel || state.child_ended).then_some(())
+                })
+                .is_some()
+            {
+                return Poll::Ready(Merged::End);
+            }
+            for index in 0..pending.len() {
+                if let Poll::Ready((input, received)) = pending[index].as_mut().poll(cx) {
+                    drop(pending.swap_remove(index));
+                    return Poll::Ready(Merged::Received(input, received.map(Box::new)));
                 }
             }
-            Next::Drain => {
-                let _taken_or_child_gone = send(ingress.as_ref(), crossing.stop(), &bridges).await;
+            bridges
+                .read(cx, |state| state.drain.then_some(()))
+                .map_or(Poll::Pending, |()| Poll::Ready(Merged::Drain))
+        })
+        .await;
+        match next {
+            Merged::Received(input, Some(envelope)) => {
+                if envelope.kind == ControlKind::Stop.as_str() {
+                    continue;
+                }
+                match send(
+                    ingress.as_ref(),
+                    crossing.cross(*envelope),
+                    room.as_ref(),
+                    &bridges,
+                )
+                .await
+                {
+                    Sent::Taken => pending.push(receiving(input)),
+                    Sent::Refused | Sent::Cancelled => return,
+                }
+            }
+            Merged::Received(_, None) => closed = true,
+            Merged::Drain => {
+                let _taken_or_child_gone =
+                    send(ingress.as_ref(), crossing.stop(), room.as_ref(), &bridges).await;
                 return;
             }
-            Next::Received(None) | Next::End => return,
+            Merged::End => return,
         }
     }
 }
 
-/// Forwards what the child sends out of its egress into the subgraph node's output port of its
-/// name, until the child's end of the egress is gone or the node is cancelled.
-async fn egress_bridge<P: Send>(
+/// Forwards what the child sends out of its egress into every parent edge leaving the subgraph
+/// node's output port of its name, each copy a crossing of its own, until the child's end of the
+/// egress is gone, every parent edge refused, or the node is cancelled. An edge that refuses is
+/// sent nothing more; the others go on.
+async fn egress_bridge<P: Clone + Send>(
     mut egress: Box<dyn InputEndpoint<P>>,
-    parent: Box<dyn OutputEndpoint<P>>,
+    parents: Vec<Box<dyn OutputEndpoint<P>>>,
     bridges: Arc<Bridges>,
     crossing: Crossing,
 ) {
+    let mut parents = parents;
     loop {
-        let next = next(
-            egress.as_mut(),
-            &bridges,
-            |state| state.cancel.then_some(Next::End),
-            |_| None,
-        )
-        .await;
-        match next {
-            Next::Received(Some(envelope)) => {
-                if !send(parent.as_ref(), crossing.cross(envelope), &bridges).await {
-                    return;
-                }
+        let next = until_cancelled(egress.as_mut(), &bridges).await;
+        let Ok(Some(envelope)) = next else {
+            return;
+        };
+        let mut kept = Vec::with_capacity(parents.len());
+        for parent in parents {
+            match send(
+                parent.as_ref(),
+                crossing.cross(envelope.clone()),
+                None,
+                &bridges,
+            )
+            .await
+            {
+                Sent::Taken => kept.push(parent),
+                Sent::Refused => {}
+                Sent::Cancelled => return,
             }
-            Next::Received(None) | Next::Drain | Next::End => return,
         }
+        if kept.is_empty() {
+            return;
+        }
+        parents = kept;
     }
 }
 

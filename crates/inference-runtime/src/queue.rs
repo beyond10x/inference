@@ -132,6 +132,30 @@ pub(crate) struct ExposureQueue<P> {
     pub(crate) sender: QueueSender<P>,
     pub(crate) receiver: QueueReceiver<P>,
     pub(crate) watch: ExposureWatch<P>,
+    pub(crate) room: Room<P>,
+}
+
+/// A weak handle on a queue's room, for the holder of a sender whose full queue answered
+/// [`SendError::Full`] under `fail`: it waits for the receiver to take an envelope, without
+/// holding the queue alive.
+pub(crate) struct Room<P> {
+    shared: Weak<Shared<P>>,
+}
+
+impl<P> Room<P> {
+    /// Ready once the queue has room, or once it is gone or closed, when a send answers at once;
+    /// otherwise the task of `cx` is woken when the receiver next takes an envelope.
+    pub(crate) fn poll_room(&self, cx: &Context<'_>) -> Poll<()> {
+        let Some(shared) = self.shared.upgrade() else {
+            return Poll::Ready(());
+        };
+        let mut state = shared.state();
+        if !state.receiver || state.items.len() < shared.capacity.get() {
+            return Poll::Ready(());
+        }
+        register(&mut state.waiting_senders, cx.waker());
+        Poll::Pending
+    }
 }
 
 /// The queue of `exposure` in one run, as [`EdgeQueue::new`] builds an edge's.
@@ -152,6 +176,9 @@ pub(crate) fn exposure_queue<P>(
     Ok(ExposureQueue {
         sender: QueueSender {
             shared: Arc::clone(&shared),
+        },
+        room: Room {
+            shared: Arc::downgrade(&shared),
         },
         receiver: QueueReceiver { shared },
         watch,

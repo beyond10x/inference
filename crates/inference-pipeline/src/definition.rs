@@ -13,9 +13,13 @@
 //! [`DefinitionFinding`] when a node names an unknown kind or another node's name, an edge,
 //! exposure, feedback loop or binding names a node the definition lacks or a port its descriptor
 //! lacks, an edge leaves an input port or enters an output port, an edge joins two modalities, or a
-//! feedback loop names no edge of the definition. It then refuses an unknown profile or adapter,
-//! as `DeclarePipeline` and `BindNode` do. Only then does it declare, so a refused definition leaves
-//! the declaration holding nothing it did not hold before. What the check leaves to the graph,
+//! feedback loop names no edge of the definition. A port is named by its name, and an edge or a
+//! feedback loop leaves an output and enters an input, so a descriptor may give an input and an
+//! output one name; an exposure, which says no direction, naming such a name is refused
+//! (`ambiguous_port`). It then refuses an unknown profile or adapter, as `DeclarePipeline` and
+//! `BindNode` do. Only then does it declare, as the builder does, holding a capacity beyond
+//! `i64::MAX` as `i64::MAX`, so a refused definition leaves the declaration holding nothing it did
+//! not hold before. What the check leaves to the graph,
 //! such as commitment semantics, cycles and reachability, is §10.2 validation's, one code path
 //! for definitions, the builder and the commands (open question 4, 1229).
 //!
@@ -31,10 +35,12 @@ use serde::{Deserialize, Serialize};
 use inference_core::model::{AdapterId, Capability};
 use inference_core::policy::{ProfileId, ProfileNotFound};
 
+use crate::builder::carried;
 use crate::{
     AdapterNotFound, AddNode, AddPort, Catalog, Declaration, DeclareNodeDescriptor,
     DeclarePipeline, EdgeId, InteractionMode, NodeDescriptor, NodeDescriptorDeclared,
-    NodeDescriptorExists, NodeId, NodeKind, OverloadPolicy, PipelineId, PortDirection, PortId,
+    NodeDescriptorExists, NodeId, NodeKind, OverloadPolicy, PipelineId, PortDescriptor,
+    PortDirection, PortId,
 };
 
 /// The node descriptors published so far, one per kind, in declaration order.
@@ -196,6 +202,9 @@ pub enum DefinitionDefect {
     UnknownNode,
     /// An edge, exposure or feedback loop names a port the node's descriptor lacks.
     UnknownPort,
+    /// An exposure names a port by a name an input and an output of the node's descriptor share,
+    /// so which one it exposes is not said; an edge or a feedback loop is told by its direction.
+    AmbiguousPort,
     /// An edge leaves an input port.
     EdgeFromInput,
     /// An edge enters an output port.
@@ -349,7 +358,7 @@ impl Declaration {
             })
             .pipeline_id;
         let mut nodes = Vec::new();
-        let mut ports: Vec<(&str, &str, PortId)> = Vec::new();
+        let mut ports: Vec<(&str, &PortDescriptor, PortId)> = Vec::new();
         for (node, descriptor) in &checked.nodes {
             let node_id = self
                 .insert_node(AddNode {
@@ -374,32 +383,41 @@ impl Declaration {
                         provisional_allowed: port.provisional_allowed,
                     })
                     .port_id;
-                ports.push((node.name.as_str(), port.name.as_str(), port_id));
+                ports.push((node.name.as_str(), port, port_id));
             }
             nodes.push((node.name.clone(), node_id));
         }
-        let port_id = |reference: &PortReference| {
+        let port_id = |reference: &PortReference, direction: Option<PortDirection>| {
+            let of_node: Vec<&PortDescriptor> = ports
+                .iter()
+                .filter(|(node, _, _)| *node == reference.node)
+                .map(|(_, port, _)| *port)
+                .collect();
+            let chosen = named(&of_node, &reference.port, direction)?;
             ports
                 .iter()
-                .find(|(node, port, _)| *node == reference.node && *port == reference.port)
+                .find(|(node, port, _)| *node == reference.node && std::ptr::eq(*port, chosen))
                 .map(|(_, _, port_id)| *port_id)
         };
         let mut edges: Vec<(&EdgeDefinition, EdgeId)> = Vec::new();
         for edge in &definition.edges {
-            if let (Some(from), Some(to)) = (port_id(&edge.from), port_id(&edge.to)) {
+            if let (Some(from), Some(to)) = (
+                port_id(&edge.from, Some(PortDirection::Output)),
+                port_id(&edge.to, Some(PortDirection::Input)),
+            ) {
                 let edge_id = self
-                    .insert_edge(pipeline_id, from, to, edge.capacity, edge.overload)
+                    .insert_edge(pipeline_id, from, to, carried(edge.capacity), edge.overload)
                     .edge_id;
                 edges.push((edge, edge_id));
             }
         }
         for exposure in &definition.exposures {
-            if let Some(port) = port_id(&exposure.port) {
+            if let Some(port) = port_id(&exposure.port, None) {
                 self.insert_exposure(
                     pipeline_id,
                     port,
                     exposure.name.clone(),
-                    exposure.capacity,
+                    carried(exposure.capacity),
                     exposure.overload,
                 );
             }
@@ -462,8 +480,8 @@ impl<'d> Checked<'d> {
             }
         }
         for edge in &definition.edges {
-            let from = checked.resolve(&edge.from, &unknown_kinds);
-            let to = checked.resolve(&edge.to, &unknown_kinds);
+            let from = checked.resolve(&edge.from, Some(PortDirection::Output), &unknown_kinds);
+            let to = checked.resolve(&edge.to, Some(PortDirection::Input), &unknown_kinds);
             if let Resolved::Port(source) = from
                 && source.direction != PortDirection::Output
             {
@@ -481,11 +499,11 @@ impl<'d> Checked<'d> {
             }
         }
         for exposure in &definition.exposures {
-            checked.resolve(&exposure.port, &unknown_kinds);
+            checked.resolve(&exposure.port, None, &unknown_kinds);
         }
         for feedback in &definition.feedback_loops {
-            let from = checked.resolve(&feedback.from, &unknown_kinds);
-            let to = checked.resolve(&feedback.to, &unknown_kinds);
+            let from = checked.resolve(&feedback.from, Some(PortDirection::Output), &unknown_kinds);
+            let to = checked.resolve(&feedback.to, Some(PortDirection::Input), &unknown_kinds);
             let edge = definition
                 .edges
                 .iter()
@@ -514,11 +532,13 @@ impl<'d> Checked<'d> {
         self.find(defect, &reference.node, Some(&reference.port));
     }
 
-    /// The port `reference` names, recording `unknown_node` or `unknown_port` when it names none;
+    /// The port `reference` names, of `direction` when one carries the name in it (see
+    /// [`named`]), recording `unknown_node`, `unknown_port` or `ambiguous_port` when it names none;
     /// a node of unknown kind was named already, and its ports are not judged again.
     fn resolve(
         &mut self,
         reference: &PortReference,
+        direction: Option<PortDirection>,
         unknown_kinds: &BTreeSet<&str>,
     ) -> Resolved<'d> {
         if unknown_kinds.contains(reference.node.as_str()) {
@@ -532,12 +552,39 @@ impl<'d> Checked<'d> {
             self.find_at(DefinitionDefect::UnknownNode, reference);
             return Resolved::Missing;
         };
-        match descriptor.port(&reference.port) {
-            Some(port) => Resolved::Port(port),
-            None => {
-                self.find_at(DefinitionDefect::UnknownPort, reference);
-                Resolved::Missing
-            }
+        let ports: Vec<&'d PortDescriptor> = descriptor.ports().iter().collect();
+        if let Some(port) = named(&ports, &reference.port, direction) {
+            return Resolved::Port(port);
+        }
+        let defect = if ports.iter().any(|port| port.name == reference.port) {
+            DefinitionDefect::AmbiguousPort
+        } else {
+            DefinitionDefect::UnknownPort
+        };
+        self.find_at(defect, reference);
+        Resolved::Missing
+    }
+}
+
+/// The port of `ports` named `name`: with a `direction`, the one of that direction, else the
+/// first of the name, so that a reference to the wrong direction is judged as such; with none, the
+/// one port of the name, none when an input and an output share it. A descriptor may name an
+/// input and an output alike, as the typed builder may.
+fn named<'p>(
+    ports: &[&'p PortDescriptor],
+    name: &str,
+    direction: Option<PortDirection>,
+) -> Option<&'p PortDescriptor> {
+    let mut of_name = ports.iter().copied().filter(|port| port.name == name);
+    match direction {
+        Some(direction) => ports
+            .iter()
+            .copied()
+            .find(|port| port.name == name && port.direction == direction)
+            .or_else(|| of_name.next()),
+        None => {
+            let first = of_name.next()?;
+            of_name.next().is_none().then_some(first)
         }
     }
 }
