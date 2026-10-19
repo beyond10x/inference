@@ -23,8 +23,20 @@
 //! nothing. [`Run::fail`] records the [`FailureReason`] on the run.
 //!
 //! A [`NodeInstance`] is described ([`NodeInstance::describe`]) for a run that is Preparing or
-//! Active, and is refused with [`RunNotRunning`] otherwise; Described is its one state until the
-//! node instance lifecycle lands.
+//! Active, and is refused with [`RunNotRunning`] otherwise. It then moves by command through the
+//! lifecycle describe, prepare, start, drain or cancel, stop (line 673), with Failed explicit:
+//!
+//! | transition | from | to |
+//! |---|---|---|
+//! | [`NodeInstance::prepare`] | Described | Prepared |
+//! | [`NodeInstance::start`] | Prepared | Started |
+//! | [`NodeInstance::drain`] | Started | Draining |
+//! | [`NodeInstance::cancel`] | Described, Prepared, Started, Draining | Cancelling |
+//! | [`NodeInstance::stop`] | Prepared, Draining, Cancelling | Stopped |
+//! | [`NodeInstance::fail`] | Described, Prepared, Started, Draining | Failed |
+//!
+//! A refused move returns [`NodeInstanceStateConflict`] and changes nothing. Which run transition
+//! moves which instance is the run controller's ([`crate::controller`]).
 //!
 //! What only a store holding the runs, the pipelines and the nodes can decide is not here: a run,
 //! a pipeline or a node no record carries ([`RunNotFound`]), a pipeline that is not Planned,
@@ -86,12 +98,43 @@ impl RunState {
     }
 }
 
-/// `inference.graph.NodeInstance.State`: where a node instance stands. Described is its one state
-/// so far. Serialized as written in ESS (`Described`).
+/// `inference.graph.NodeInstance.State`: where a node instance stands. Serialized as written in
+/// ESS (`Described`, `Cancelling`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeInstanceState {
     /// The node has an instance in the run.
     Described,
+    /// The instance holds the resources it needs to start.
+    Prepared,
+    /// The instance exchanges events along its edges.
+    Started,
+    /// The instance admits no new input and completes its in-flight events.
+    Draining,
+    /// The instance abandons its in-flight events and is to stop.
+    Cancelling,
+    /// The instance stopped and released what it held.
+    Stopped,
+    /// The instance failed with the error it returned.
+    Failed,
+}
+
+impl NodeInstanceState {
+    /// Every state, in the order `ess/domains/graph.yaml` lists them.
+    pub const ALL: [Self; 7] = [
+        Self::Described,
+        Self::Prepared,
+        Self::Started,
+        Self::Draining,
+        Self::Cancelling,
+        Self::Stopped,
+        Self::Failed,
+    ];
+
+    /// Whether no transition leaves the state: Stopped and Failed.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Stopped | Self::Failed)
+    }
 }
 
 /// `inference.graph.AdmissionRefusal`: the outcomes runtime admission must permit. Serialized as
@@ -181,6 +224,62 @@ pub struct NodeInstanceDescribed {
     pub run_id: RunId,
     pub node_id: NodeId,
 }
+
+/// `inference.graph.NodeInstancePrepared`: the instance is prepared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInstancePrepared {
+    pub instance_id: NodeInstanceId,
+}
+
+/// `inference.graph.NodeInstanceStarted`: the instance exchanges events along its edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInstanceStarted {
+    pub instance_id: NodeInstanceId,
+}
+
+/// `inference.graph.NodeInstanceDraining`: the instance admits no new input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInstanceDraining {
+    pub instance_id: NodeInstanceId,
+}
+
+/// `inference.graph.NodeInstanceCancelling`: the instance abandons its in-flight events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInstanceCancelling {
+    pub instance_id: NodeInstanceId,
+}
+
+/// `inference.graph.NodeInstanceStopped`: the instance stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInstanceStopped {
+    pub instance_id: NodeInstanceId,
+}
+
+/// `inference.graph.NodeInstanceFailed`: the instance failed; `reason` is the error it returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInstanceFailed {
+    pub instance_id: NodeInstanceId,
+    pub reason: String,
+}
+
+/// `inference.graph.NodeInstanceStateConflict`: the node instance is not in a state the command
+/// acts from, so nothing moved. `current` is the state it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInstanceStateConflict {
+    pub current: NodeInstanceState,
+}
+
+impl fmt::Display for NodeInstanceStateConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the node instance is {:?}, a state this command does not act from, so nothing moved",
+            self.current
+        )
+    }
+}
+
+impl Error for NodeInstanceStateConflict {}
 
 /// `inference.graph.RunStateConflict`: the run is not in a state the command acts from, so
 /// nothing moved. `current` is the state it holds.
@@ -505,6 +604,144 @@ impl NodeInstance {
             node_id,
         };
         Ok((instance, event))
+    }
+
+    /// The instance moved to `to`, if it is in one of `from`; otherwise the state it holds.
+    fn moved(
+        &self,
+        from: &[NodeInstanceState],
+        to: NodeInstanceState,
+    ) -> Result<Self, NodeInstanceStateConflict> {
+        if !from.contains(&self.state) {
+            return Err(NodeInstanceStateConflict {
+                current: self.state,
+            });
+        }
+        Ok(Self { state: to, ..*self })
+    }
+
+    /// Runs the `prepared` outcome of `inference.graph.PrepareNodeInstance`: Described to
+    /// Prepared.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeInstanceStateConflict`] carrying the held state when the instance is not Described.
+    pub fn prepare(&self) -> Result<(Self, NodeInstancePrepared), NodeInstanceStateConflict> {
+        let instance = self.moved(&[NodeInstanceState::Described], NodeInstanceState::Prepared)?;
+        Ok((
+            instance,
+            NodeInstancePrepared {
+                instance_id: self.instance_id,
+            },
+        ))
+    }
+
+    /// Runs the `started` outcome of `inference.graph.StartNodeInstance`: Prepared to Started.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeInstanceStateConflict`] carrying the held state when the instance is not Prepared.
+    pub fn start(&self) -> Result<(Self, NodeInstanceStarted), NodeInstanceStateConflict> {
+        let instance = self.moved(&[NodeInstanceState::Prepared], NodeInstanceState::Started)?;
+        Ok((
+            instance,
+            NodeInstanceStarted {
+                instance_id: self.instance_id,
+            },
+        ))
+    }
+
+    /// Runs the `draining` outcome of `inference.graph.DrainNodeInstance`: Started to Draining.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeInstanceStateConflict`] carrying the held state when the instance is not Started.
+    pub fn drain(&self) -> Result<(Self, NodeInstanceDraining), NodeInstanceStateConflict> {
+        let instance = self.moved(&[NodeInstanceState::Started], NodeInstanceState::Draining)?;
+        Ok((
+            instance,
+            NodeInstanceDraining {
+                instance_id: self.instance_id,
+            },
+        ))
+    }
+
+    /// Runs the `cancelling` outcome of `inference.graph.CancelNodeInstance`: Described,
+    /// Prepared, Started or Draining to Cancelling.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeInstanceStateConflict`] carrying the held state when the instance is Cancelling or
+    /// terminal.
+    pub fn cancel(&self) -> Result<(Self, NodeInstanceCancelling), NodeInstanceStateConflict> {
+        let instance = self.moved(
+            &[
+                NodeInstanceState::Described,
+                NodeInstanceState::Prepared,
+                NodeInstanceState::Started,
+                NodeInstanceState::Draining,
+            ],
+            NodeInstanceState::Cancelling,
+        )?;
+        Ok((
+            instance,
+            NodeInstanceCancelling {
+                instance_id: self.instance_id,
+            },
+        ))
+    }
+
+    /// Runs the `stopped` outcome of `inference.graph.StopNodeInstance`: Prepared, Draining or
+    /// Cancelling to Stopped.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeInstanceStateConflict`] carrying the held state when the instance is Described,
+    /// Started or terminal.
+    pub fn stop(&self) -> Result<(Self, NodeInstanceStopped), NodeInstanceStateConflict> {
+        let instance = self.moved(
+            &[
+                NodeInstanceState::Prepared,
+                NodeInstanceState::Draining,
+                NodeInstanceState::Cancelling,
+            ],
+            NodeInstanceState::Stopped,
+        )?;
+        Ok((
+            instance,
+            NodeInstanceStopped {
+                instance_id: self.instance_id,
+            },
+        ))
+    }
+
+    /// Runs the `failed` outcome of `inference.graph.FailNodeInstance`: Described, Prepared,
+    /// Started or Draining to Failed, with `reason` the error the node returned.
+    ///
+    /// # Errors
+    ///
+    /// [`NodeInstanceStateConflict`] carrying the held state when the instance is Cancelling or
+    /// terminal.
+    pub fn fail(
+        &self,
+        reason: impl Into<String>,
+    ) -> Result<(Self, NodeInstanceFailed), NodeInstanceStateConflict> {
+        let instance = self.moved(
+            &[
+                NodeInstanceState::Described,
+                NodeInstanceState::Prepared,
+                NodeInstanceState::Started,
+                NodeInstanceState::Draining,
+            ],
+            NodeInstanceState::Failed,
+        )?;
+        Ok((
+            instance,
+            NodeInstanceFailed {
+                instance_id: self.instance_id,
+                reason: reason.into(),
+            },
+        ))
     }
 
     #[must_use]

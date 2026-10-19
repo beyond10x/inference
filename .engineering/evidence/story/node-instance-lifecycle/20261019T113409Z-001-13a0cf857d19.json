@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T11:34:09Z",
+  "actor": "human:timo",
+  "artifact": "story:node-instance-lifecycle",
+  "kind": "story",
+  "revision": 23,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-node-instance-lifecycle-pass-1",
+    "reference": "F2 controller.rs:296 complete refuses unless every instance is Draining or Stopped; stop returns its conflict",
+    "review": "review-result:adversary-node-instance-lifecycle-pass-1",
+    "outcome": "fixed"
+  }
+}

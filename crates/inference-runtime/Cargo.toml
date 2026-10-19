@@ -1,6 +1,6 @@
 [package]
 name = "inference-runtime"
-description = "Graph execution of the inference framework: the bounded queue of one edge, with the overload policy its declaration carries, and the run state machine of a planned pipeline."
+description = "Graph execution of the inference framework: the bounded queue of one edge, with the overload policy its declaration carries, the run and node instance state machines of a planned pipeline, and the controller that drives its nodes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,7 @@ inference-pipeline = { path = "../inference-pipeline" }
 serde.workspace = true
 
 [dev-dependencies]
+inference-testkit = { path = "../inference-testkit", features = ["run"] }
 serde_json.workspace = true
 
 [lints]

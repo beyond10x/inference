@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T11:22:33Z",
+  "actor": "human:timo",
+  "artifact": "story:segment-linear-transitions",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-segment-linear-transitions-pass-1",
+    "reference": "F2 tts lib.rs:693 :755 refusal order guarded by adversary1_linear_transitions",
+    "review": "review-result:adversary-segment-linear-transitions-pass-1",
+    "outcome": "fixed"
+  }
+}

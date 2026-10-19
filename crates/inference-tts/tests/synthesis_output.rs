@@ -214,10 +214,13 @@ fn a_segment_is_queued_once_and_not_after_the_utterance_ends() {
     });
     let (tentative, _) =
         OutputSegment::emit(&generation, 1, "hello".to_owned()).expect("the generation is Active");
+    let (twin, _) =
+        OutputSegment::emit_as(tentative.segment_id(), &generation, 1, "hello".to_owned())
+            .expect("the generation is Active");
     let (segment, _) = tentative.commit().expect("a Tentative segment commits");
-    let (again, _) = tentative
+    let (again, _) = twin
         .commit()
-        .expect("the Tentative segment commits again into a second value of one identity");
+        .expect("a second segment emitted under one identity commits into a second value of it");
     let id = segment.segment_id();
     let mut output = SynthesisOutput::start(&adapter(Vec::new()));
     let queued = output.offer(segment).expect("queued");

@@ -9,6 +9,9 @@
 //! `CommitSegment` for each segment, then `CompleteGeneration`. `CancelGeneration` and
 //! `SupersedeGeneration` are control, called on the handle.
 //!
+//! [`Generator::start`] refuses a start past the maximum concurrency the adapter record declares
+//! with [`ConcurrencyLimitReached`]; a generation runs until its handle is dropped.
+//!
 //! Output streaming, incremental input and input during output are distinct capabilities
 //! (`inference.model.Capability`), and a persistent connection proves none of them. What the
 //! contract can observe, it decides here:
@@ -154,6 +157,25 @@ impl fmt::Display for AdmittedByAnotherGeneration {
 
 impl Error for AdmittedByAnotherGeneration {}
 
+/// The generator already runs `max_concurrency` generations, the maximum concurrency its adapter
+/// declares, so a further start is refused and nothing started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConcurrencyLimitReached {
+    pub max_concurrency: i64,
+}
+
+impl fmt::Display for ConcurrencyLimitReached {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the generator already runs {} generation(s), its declared maximum concurrency",
+            self.max_concurrency
+        )
+    }
+}
+
+impl Error for ConcurrencyLimitReached {}
+
 impl From<AdmittedByAnotherGeneration> for InputRefused {
     fn from(error: AdmittedByAnotherGeneration) -> Self {
         Self::AdmittedByAnotherGeneration(error)
@@ -211,8 +233,9 @@ impl AdmittedInput {
 
 /// One generation and the segments it owns, with the capabilities of the adapter producing it.
 /// Every move runs a transition of [`Generation`] or [`OutputSegment`], so a refused move changes
-/// nothing. Superseding or cancelling the generation discards every segment it owns in the same
-/// call, as the store of both does.
+/// nothing; a segment's transition consumes it and the moved segment takes its place.
+/// Superseding or cancelling the generation discards every segment it owns in the same call, as
+/// the store of both does.
 ///
 /// It is not `Clone`: a copy taken while the generation is Active would keep that state after
 /// the generation moved on, and release input to a generation that is stale.
@@ -265,21 +288,29 @@ impl GenerationOutput {
     /// # Errors
     ///
     /// [`SegmentStateConflict`], the only refusal of `CommitSegment`, carrying the state of a
-    /// segment that is not Tentative. Only Tentative segments are selected, so it is not reached;
-    /// a refusal would leave every segment as it was.
+    /// segment that is not Tentative. Only Tentative segments are selected, so it is not reached.
     pub fn commit_tentative(&mut self) -> Result<Vec<TextSegmentCommitted>, SegmentStateConflict> {
-        let mut moved = Vec::new();
-        for (index, segment) in self.segments.iter().enumerate() {
-            if segment.state() == SegmentState::Tentative {
-                moved.push((index, segment.commit()?));
-            }
-        }
-        let mut events = Vec::with_capacity(moved.len());
-        for (index, (committed, event)) in moved {
-            self.segments[index] = committed;
-            events.push(event);
-        }
-        Ok(events)
+        let mut events = Vec::new();
+        let mut refusal = None;
+        self.segments = std::mem::take(&mut self.segments)
+            .into_iter()
+            .map(|segment| {
+                if refusal.is_some() || segment.state() != SegmentState::Tentative {
+                    return segment;
+                }
+                match segment.commit() {
+                    Ok((committed, event)) => {
+                        events.push(event);
+                        committed
+                    }
+                    Err(refused) => {
+                        refusal = Some(refused.conflict());
+                        refused.into_segment()
+                    }
+                }
+            })
+            .collect();
+        refusal.map_or(Ok(events), Err)
     }
 
     /// Runs `inference.stream.CompleteGeneration`.
@@ -396,12 +427,16 @@ impl GenerationOutput {
 
     fn discard_segments(&mut self) -> Vec<SegmentDiscarded> {
         let mut events = Vec::new();
-        for segment in &mut self.segments {
-            if let Ok((discarded, event)) = segment.discard() {
-                *segment = discarded;
-                events.push(event);
-            }
-        }
+        self.segments = std::mem::take(&mut self.segments)
+            .into_iter()
+            .map(|segment| match segment.discard() {
+                Ok((discarded, event)) => {
+                    events.push(event);
+                    discarded
+                }
+                Err(refused) => refused.into_segment(),
+            })
+            .collect();
         events
     }
 }
@@ -415,8 +450,16 @@ pub trait Generator {
     fn adapter(&self) -> &Adapter;
 
     /// Starts one generation for `request`; the handle yields its events, the first
-    /// [`GenerationEvent::Started`].
-    fn start(&mut self, request: GenerationRequest) -> Self::Handle;
+    /// [`GenerationEvent::Started`]. A generation runs until its handle is dropped.
+    ///
+    /// # Errors
+    ///
+    /// [`ConcurrencyLimitReached`] carrying the adapter's `max_concurrency` when that many
+    /// generations of this generator already run; nothing starts.
+    fn start(
+        &mut self,
+        request: GenerationRequest,
+    ) -> Result<Self::Handle, ConcurrencyLimitReached>;
 }
 
 /// One running generation. Iterating it yields the generation's events as the implementation

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:node-instance-lifecycle
 kind: story
-status: draft
+status: implemented
 title: 'Node-instance lifecycle: describe, prepare, start, drain or cancel, stop, declared in the specification first'
 summary: Extends inference.graph.NodeInstance in ess/domains/graph.yaml, the node-instance trait, the recording mock, the run drives its instances
 relations:
@@ -33,7 +33,11 @@ scope:
   path: crates/inference-testkit/tests/target/graph.rs
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 21
+revision: 24
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T10:59:23Z", actor: "human:timo", revision: 22, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "proposed", to: "active", at: "2026-10-19T10:59:23Z", actor: "human:timo", revision: 23, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "active", to: "implemented", at: "2026-10-19T11:39:31Z", actor: "human:timo", revision: 24, decided_on: {"recorded":{"test_result":1,"review_outcome":4,"verification":1}}}
 ---
 # Story: node-instance-lifecycle
 

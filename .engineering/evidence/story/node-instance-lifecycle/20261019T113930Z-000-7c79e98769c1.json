@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T11:39:30Z",
+  "actor": "human:timo",
+  "artifact": "story:node-instance-lifecycle",
+  "kind": "story",
+  "revision": 23,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime -p inference-testkit -p inference-pipeline --all-features (VERIFIED, new behaviour: baseline wave/12 010843f declares one NodeInstance state and no controller (the three Checks fail, conform 197 of 231); treatment passes 649, conform 243 of 277 with failed 0, error 0; the adversary's abandoned-future cases pass on the coordinator's own run)"
+  }
+}

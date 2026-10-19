@@ -33,7 +33,7 @@ scope:
   path: crates/inference-testkit/src/lib.rs
 - confidence: cited
   path: crates/inference-testkit/src/mock_tool_executor.rs
-revision: 17
+revision: 18
 ---
 ## Context
 
@@ -150,3 +150,16 @@ the plan names, not one on disk.
 - **Confidence:** high — Where it lands names all six files by path, `story:endpoint-controller` confirms the two shared ones from its side with a `depends_on` edge, and the inferred lines are two module lists, one dev-dependency line and the lock file, each additive — cited
 - **Would collide with:** any unit creating or adding a `mod` line to `crates/inference-pipeline/src/nodes/mod.rs` or a dependency line to `crates/inference-pipeline/Cargo.toml` (the later node stories do, each ordered behind this one); any unit adding a module line to `crates/inference-pipeline/src/lib.rs` or `crates/inference-testkit/src/lib.rs`; any unit writing `crates/inference-testkit/src/mock_tool_executor.rs`; any unit adding a dev-dependency to `crates/inference-runtime/Cargo.toml` or regenerating `Cargo.lock`; and, without a shared file, any unit changing the executor trait or the ToolCall command types in `inference-tools`, the node-instance or endpoint traits, or the constructors of the testkit's mock source and collector sink — an API break, not a textual conflict — cited
 - **Safety fact:** every existing file this story edits gains lines and loses none (two module lists, one or two manifests), and the one new dependency edge, `inference-pipeline` on `inference-tools`, runs the way the dependency table allows: `inference-tools` depends on `core` only, so no cycle forms and no existing caller changes; the conformance target and `ess/SKIPPED.md` are untouched, so `tests/conform.rs` cannot go red from this story — step 2 (`docs/design/inference.md:240-241`; `story:tool-call-lifecycle`: "Depends on `inference-core` only"), unproven: no manifest exists to point at. Where the symbol search stops: the schema dialect of `Tool.schema: Json` that `arguments` is validated against is named nowhere, and the acceptance's six scenario ids are satisfied by the testkit target of `story:tool-call-lifecycle`, not by these nodes, so a green `conform.rs` says nothing about them — cited
+
+## The tool's confirmation flag
+
+From wave 12 (`review-result:adversary-tool-call-lifecycle-pass-1`, findings 1 and 4):
+
+- `ToolCall::authorize` (`crates/inference-tools/src/call.rs`) never sees the `Tool`; the
+  authority passes `confirmation_required` and `confirmed`, and the conform suite requires a
+  `requires_confirmation` tool to be authorized with (false, false). So nothing binds the tool's
+  flag yet. This story's authority node is where it binds: it reads `requires_confirmation` from
+  the declared tool and passes it, and a case shows a tool that requires confirmation is never
+  authorized without the hook confirming.
+- No reader of `Tool::requires_confirmation` exists before this story; the case above is also its
+  first reader.

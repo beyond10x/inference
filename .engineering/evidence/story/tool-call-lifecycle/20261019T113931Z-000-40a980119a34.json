@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T11:39:31Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-call-lifecycle",
+  "kind": "story",
+  "revision": 19,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-tools -p inference-testkit --all-features (VERIFIED, new behaviour: baseline wave/12 010843f has no inference-tools crate and answers every inference.tools command unsupported; treatment passes 625 with all 53 inference.tools scenarios in conform's passed set, failed 0, error 0)"
+  }
+}

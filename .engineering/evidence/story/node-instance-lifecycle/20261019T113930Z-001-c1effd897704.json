@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T11:39:30Z",
+  "actor": "human:timo",
+  "artifact": "story:node-instance-lifecycle",
+  "kind": "story",
+  "revision": 23,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check (5 steps, each exit 0; cargo test 919 passed, 0 failed) (wave/12 beb1b8b)"
+  }
+}

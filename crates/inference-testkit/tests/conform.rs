@@ -255,6 +255,117 @@ const RUN_ROUTED_SCENARIOS: [&str; 71] = [
     "inference.stream.Turn/transition/complete/by/inference.stream.CompleteTurn/completed",
 ];
 
+/// The 46 `inference.graph` scenarios of the node-instance lifecycle this target answers: the
+/// moving and `wrong-state` outcomes of the six instance commands, each transition, and each
+/// command a state does not leave by.
+const NODE_INSTANCE_SCENARIOS: [&str; 46] = [
+    "inference.graph.CancelNodeInstance/outcome/cancelling",
+    "inference.graph.CancelNodeInstance/outcome/wrong-state",
+    "inference.graph.DrainNodeInstance/outcome/draining",
+    "inference.graph.DrainNodeInstance/outcome/wrong-state",
+    "inference.graph.FailNodeInstance/outcome/failed",
+    "inference.graph.FailNodeInstance/outcome/wrong-state",
+    "inference.graph.NodeInstance/state/Cancelling/refuses/inference.graph.CancelNodeInstance",
+    "inference.graph.NodeInstance/state/Cancelling/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Cancelling/refuses/inference.graph.FailNodeInstance",
+    "inference.graph.NodeInstance/state/Cancelling/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Cancelling/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Described/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Described/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Described/refuses/inference.graph.StopNodeInstance",
+    "inference.graph.NodeInstance/state/Draining/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Draining/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Draining/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.CancelNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.FailNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Failed/refuses/inference.graph.StopNodeInstance",
+    "inference.graph.NodeInstance/state/Prepared/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Prepared/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Started/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Started/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Started/refuses/inference.graph.StopNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.CancelNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.DrainNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.FailNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.PrepareNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.StartNodeInstance",
+    "inference.graph.NodeInstance/state/Stopped/refuses/inference.graph.StopNodeInstance",
+    "inference.graph.NodeInstance/transition/cancel/by/inference.graph.CancelNodeInstance/cancelling",
+    "inference.graph.NodeInstance/transition/drain/by/inference.graph.DrainNodeInstance/draining",
+    "inference.graph.NodeInstance/transition/fail/by/inference.graph.FailNodeInstance/failed",
+    "inference.graph.NodeInstance/transition/prepare/by/inference.graph.PrepareNodeInstance/prepared",
+    "inference.graph.NodeInstance/transition/start/by/inference.graph.StartNodeInstance/started",
+    "inference.graph.NodeInstance/transition/stop/by/inference.graph.StopNodeInstance/stopped",
+    "inference.graph.PrepareNodeInstance/outcome/prepared",
+    "inference.graph.PrepareNodeInstance/outcome/wrong-state",
+    "inference.graph.StartNodeInstance/outcome/started",
+    "inference.graph.StartNodeInstance/outcome/wrong-state",
+    "inference.graph.StopNodeInstance/outcome/stopped",
+    "inference.graph.StopNodeInstance/outcome/wrong-state",
+];
+
+/// Every `inference.tools` scenario the suite synthesizes, 53: the declaration, the two proposal
+/// paths with the provisional-input barrier, the ToolCall lifecycle's five commands, their
+/// transitions and every state refusal, and the confirmation hook's `unconfirmed`.
+const TOOLS_SCENARIOS: [&str; 53] = [
+    "inference.tools.AuthorizeToolCall/outcome/authorized",
+    "inference.tools.AuthorizeToolCall/outcome/unconfirmed",
+    "inference.tools.AuthorizeToolCall/outcome/wrong-state",
+    "inference.tools.CompleteToolCall/outcome/completed",
+    "inference.tools.CompleteToolCall/outcome/wrong-state",
+    "inference.tools.DeclareTool/outcome/declared",
+    "inference.tools.FailToolCall/outcome/failed",
+    "inference.tools.FailToolCall/outcome/wrong-state",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/proposed",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/side-effecting",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/stale-generation",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/unknown-generation",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/unknown-span",
+    "inference.tools.ProposeSpeculativeToolCall/outcome/unknown-tool",
+    "inference.tools.ProposeToolCall/outcome/barred",
+    "inference.tools.ProposeToolCall/outcome/proposed",
+    "inference.tools.ProposeToolCall/outcome/stale-generation",
+    "inference.tools.ProposeToolCall/outcome/unknown-generation",
+    "inference.tools.ProposeToolCall/outcome/unknown-span",
+    "inference.tools.ProposeToolCall/outcome/unknown-tool",
+    "inference.tools.RejectToolCall/outcome/rejected",
+    "inference.tools.RejectToolCall/outcome/wrong-state",
+    "inference.tools.StartToolCall/outcome/started",
+    "inference.tools.StartToolCall/outcome/wrong-state",
+    "inference.tools.ToolCall/state/Authorized/refuses/inference.tools.AuthorizeToolCall",
+    "inference.tools.ToolCall/state/Authorized/refuses/inference.tools.CompleteToolCall",
+    "inference.tools.ToolCall/state/Authorized/refuses/inference.tools.FailToolCall",
+    "inference.tools.ToolCall/state/Completed/refuses/inference.tools.AuthorizeToolCall",
+    "inference.tools.ToolCall/state/Completed/refuses/inference.tools.CompleteToolCall",
+    "inference.tools.ToolCall/state/Completed/refuses/inference.tools.FailToolCall",
+    "inference.tools.ToolCall/state/Completed/refuses/inference.tools.RejectToolCall",
+    "inference.tools.ToolCall/state/Completed/refuses/inference.tools.StartToolCall",
+    "inference.tools.ToolCall/state/Failed/refuses/inference.tools.AuthorizeToolCall",
+    "inference.tools.ToolCall/state/Failed/refuses/inference.tools.CompleteToolCall",
+    "inference.tools.ToolCall/state/Failed/refuses/inference.tools.FailToolCall",
+    "inference.tools.ToolCall/state/Failed/refuses/inference.tools.RejectToolCall",
+    "inference.tools.ToolCall/state/Failed/refuses/inference.tools.StartToolCall",
+    "inference.tools.ToolCall/state/Proposed/refuses/inference.tools.CompleteToolCall",
+    "inference.tools.ToolCall/state/Proposed/refuses/inference.tools.FailToolCall",
+    "inference.tools.ToolCall/state/Proposed/refuses/inference.tools.StartToolCall",
+    "inference.tools.ToolCall/state/Rejected/refuses/inference.tools.AuthorizeToolCall",
+    "inference.tools.ToolCall/state/Rejected/refuses/inference.tools.CompleteToolCall",
+    "inference.tools.ToolCall/state/Rejected/refuses/inference.tools.FailToolCall",
+    "inference.tools.ToolCall/state/Rejected/refuses/inference.tools.RejectToolCall",
+    "inference.tools.ToolCall/state/Rejected/refuses/inference.tools.StartToolCall",
+    "inference.tools.ToolCall/state/Started/refuses/inference.tools.AuthorizeToolCall",
+    "inference.tools.ToolCall/state/Started/refuses/inference.tools.RejectToolCall",
+    "inference.tools.ToolCall/state/Started/refuses/inference.tools.StartToolCall",
+    "inference.tools.ToolCall/transition/authorize/by/inference.tools.AuthorizeToolCall/authorized",
+    "inference.tools.ToolCall/transition/complete/by/inference.tools.CompleteToolCall/completed",
+    "inference.tools.ToolCall/transition/fail/by/inference.tools.FailToolCall/failed",
+    "inference.tools.ToolCall/transition/reject/by/inference.tools.RejectToolCall/rejected",
+    "inference.tools.ToolCall/transition/start/by/inference.tools.StartToolCall/started",
+];
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -435,6 +546,8 @@ fn the_suite_runs_against_the_testkit_target() {
         .chain(GRAPH_PLANNING_SCENARIOS)
         .chain(RUN_SCENARIOS)
         .chain(RUN_ROUTED_SCENARIOS)
+        .chain(NODE_INSTANCE_SCENARIOS)
+        .chain(TOOLS_SCENARIOS)
     {
         assert!(
             passed.contains(id),
