@@ -3,7 +3,7 @@
 //! `inference-pipeline` holds the declaration half of `ess/domains/graph.yaml`: a [`Pipeline`] of
 //! named [`Node`]s with typed [`Port`]s, [`Edge`]s that connect an output port to an input port
 //! with finite buffering, and [`Binding`]s of nodes to adapters. A pipeline definition is not an
-//! execution; this crate stops at the declaration.
+//! execution; this crate stops at the declaration and its validation.
 //!
 //! A [`Declaration`] holds the declared entities and runs the five declaration commands
 //! ([`Declaration::declare_pipeline`], [`Declaration::add_node`], [`Declaration::add_port`],
@@ -16,7 +16,11 @@
 //! through it.
 //!
 //! The sink port's existence and direction, the modality of the two ports of an edge and pipeline
-//! membership are not refused by a command; they are checks of validation. The crate depends on
+//! membership are not refused by a command; they are checks of validation.
+//! [`Declaration::validate_pipeline`] runs checks 1, 2, 3, 5, 6 and 9 of §10.2 over a Declared
+//! pipeline and moves it to Validated only when none finds anything; otherwise it answers
+//! [`IncompatibleGraph`] naming each [`GraphFinding`]. A pipeline built through the typed builder
+//! is validated the same way, by the identity [`Declaration::build`] returns. The crate depends on
 //! `inference-core` only and carries no concrete model, backend or provider. Serialized names are
 //! the ESS names.
 
@@ -31,12 +35,15 @@ use inference_core::policy::ProfileId;
 
 mod builder;
 mod declaration;
+mod validation;
 
 pub use builder::{
     NodeHandle, PipelineBuilder, PipelineSpec, PortDirectionType, PortHandle, PortModality,
     PortTraits, direction, modality,
 };
-pub use declaration::{AddNodeError, BindNodeError, Catalog, ConnectPortsError, Declaration};
+pub use declaration::{
+    AddNodeError, BindNodeError, Catalog, ConnectPortsError, Declaration, ValidatePipelineError,
+};
 pub use inference_core::id::NodeId;
 
 inference_core::uuid_newtype!(
@@ -175,6 +182,86 @@ pub enum EdgeDefect {
     /// An edge runs from an output port, and the source was an input port.
     SourceNotOutput,
 }
+
+/// `inference.graph.GraphDefect`: what validation found wrong with a graph, one variant per check
+/// of §10.2 that it makes over the whole graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphDefect {
+    /// Check 1: an edge or a binding names a node or port that is not part of the pipeline.
+    MissingNodeOrPort,
+    /// Checks 2 and 3: an edge's ports differ in direction, modality or commitment semantics.
+    IncompatibleEdge,
+    /// Check 5: a cycle, which no bounded feedback declaration admits yet.
+    UnboundedCycle,
+    /// Check 6: an essential port no edge connects, or a sink no source reaches.
+    UnreachableMandatoryOutput,
+    /// Check 9: provisional data flows into a tool that requires committed input.
+    DisallowedDataFlow,
+}
+
+impl GraphDefect {
+    /// Every defect, in the order `ess/domains/graph.yaml` lists them.
+    pub const ALL: [Self; 5] = [
+        Self::MissingNodeOrPort,
+        Self::IncompatibleEdge,
+        Self::UnboundedCycle,
+        Self::UnreachableMandatoryOutput,
+        Self::DisallowedDataFlow,
+    ];
+}
+
+/// `inference.graph.GraphFinding`: one finding of validation, naming the node or port where it
+/// is. A finding on an edge names the edge's source port and that port's node, since a finding
+/// carries no edge identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphFinding {
+    pub defect: GraphDefect,
+    pub node_id: Option<NodeId>,
+    pub port_id: Option<PortId>,
+}
+
+/// `inference.graph.ValidatePipeline`: the input that validates a [`Pipeline`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatePipeline {
+    pub pipeline_id: PipelineId,
+}
+
+/// `inference.graph.PipelineValidated`: the pipeline passed validation and is Validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineValidated {
+    pub pipeline_id: PipelineId,
+}
+
+/// `inference.graph.IncompatibleGraph`: validation found the graph invalid; each finding is named
+/// and the pipeline stays Declared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncompatibleGraph {
+    pub findings: Vec<GraphFinding>,
+}
+
+impl fmt::Display for IncompatibleGraph {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the graph is not valid: {:?}", self.findings)
+    }
+}
+
+impl Error for IncompatibleGraph {}
+
+/// `inference.graph.PipelineStateConflict`: the pipeline is not in a state the command acts from,
+/// so nothing moved. `current` is the state it is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineStateConflict {
+    pub current: PipelineState,
+}
+
+impl fmt::Display for PipelineStateConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the pipeline is {:?}, so nothing moved", self.current)
+    }
+}
+
+impl Error for PipelineStateConflict {}
 
 /// `inference.graph.Pipeline.State`: a pipeline is Declared until validated, then Planned.
 /// Serialized as written in ESS (`Declared`).
