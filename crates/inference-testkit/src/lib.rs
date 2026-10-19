@@ -32,7 +32,7 @@ pub mod session;
 #[cfg(feature = "stt")]
 pub mod stt;
 
-/// The mock generator of the LLM contract; empty until that contract lands.
+/// The scripted mock generator of the LLM contract, in three capability configurations.
 #[cfg(feature = "llm")]
 pub mod llm;
 
