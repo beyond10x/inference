@@ -11,8 +11,9 @@
 //! command is answered.
 //!
 //! An observed event's position is the target's too: [`Stores::publish`] places every event a
-//! store recorded in the target's one publication order, and [`Stores::model_position`] and
-//! [`Stores::stream_position`] read its place there. Each store orders its own events only, as an
+//! store recorded in the target's one publication order, and [`Stores::model_position`],
+//! [`Stores::policy_position`], [`Stores::graph_position`] and [`Stores::stream_position`] read its
+//! place there. Each store orders its own events only, as an
 //! envelope's `sequence` orders one stream only, so the merge order across domains is the
 //! target's, the recorder's, and the one thing a module reads that no store holds.
 //!
@@ -62,6 +63,8 @@ pub struct Stores {
 #[derive(Default)]
 struct Publication {
     model: Vec<u64>,
+    policy: Vec<u64>,
+    graph: Vec<u64>,
     stream: Vec<u64>,
 }
 
@@ -70,14 +73,22 @@ impl Stores {
     /// in the order the store recorded them. Each module calls it before and after it runs a
     /// command and before it reads events, so an event a command emits is placed when the command
     /// returns. Events recorded straight into the stores between two calls, as a test arranges a
-    /// generation that no command can start yet, are placed at the next call, the `inference.model`
-    /// ones before the `inference.stream` ones. A story that fills a module adds its events here.
+    /// generation that no command can start yet, are placed at the next call, in the order
+    /// `inference.model`, `inference.policy`, `inference.graph`, `inference.stream`. A story that
+    /// fills a module adds its events here.
     pub fn publish(&mut self) {
-        let mut placed = self.publication.model.len() + self.publication.stream.len();
+        let mut placed = self.publication.model.len()
+            + self.publication.policy.len()
+            + self.publication.graph.len()
+            + self.publication.stream.len();
         let model = self.model.events().len();
+        let policy = self.policy.events().len();
+        let graph = self.graph.events().len();
         let stream = self.stream.events().len();
         for (positions, recorded) in [
             (&mut self.publication.model, model),
+            (&mut self.publication.policy, policy),
+            (&mut self.publication.graph, graph),
             (&mut self.publication.stream, stream),
         ] {
             while positions.len() < recorded {
@@ -91,6 +102,18 @@ impl Stores {
     /// in the target's one publication order.
     pub fn model_position(&self, index: usize) -> Result<u64, TargetError> {
         Self::placed(&self.publication.model, "inference.model", index)
+    }
+
+    /// The position, from 1, of the `index`th event (from 0) the `inference.policy` store
+    /// recorded, in the target's one publication order.
+    pub fn policy_position(&self, index: usize) -> Result<u64, TargetError> {
+        Self::placed(&self.publication.policy, "inference.policy", index)
+    }
+
+    /// The position, from 1, of the `index`th event (from 0) the `inference.graph` store recorded,
+    /// in the target's one publication order.
+    pub fn graph_position(&self, index: usize) -> Result<u64, TargetError> {
+        Self::placed(&self.publication.graph, "inference.graph", index)
     }
 
     /// The position, from 1, of the `index`th event (from 0) the `inference.stream` store
@@ -118,7 +141,10 @@ impl Stores {
     /// than kept beside them, so nothing can advance it that no store recorded. A story that fills
     /// a module adds that module's events here.
     pub fn sequence(&self) -> u64 {
-        let events = self.model.events().len() + self.stream.events().len();
+        let events = self.model.events().len()
+            + self.policy.events().len()
+            + self.graph.events().len()
+            + self.stream.events().len();
         u64::try_from(events).unwrap_or(u64::MAX)
     }
 
@@ -313,6 +339,14 @@ impl<'a> Input<'a> {
         }
     }
 
+    /// An ESS `Boolean`.
+    pub fn boolean(&mut self, field: &str) -> Result<bool, TargetError> {
+        match self.take(field)? {
+            Node::Bool(value) => Ok(*value),
+            other => Err(self.refuse(field, "a boolean", other)),
+        }
+    }
+
     /// An ESS `Integer`, from an integral number within `i64`.
     pub fn integer(&mut self, field: &str) -> Result<i64, TargetError> {
         let node = self.take(field)?;
@@ -371,6 +405,11 @@ fn named<T: DeserializeOwned>(node: &Node) -> Option<T> {
 /// The node of an ESS `String`.
 pub fn text_node(text: &str) -> Node {
     Node::Text(text.to_owned())
+}
+
+/// The node of an ESS `Boolean`.
+pub fn boolean_node(value: bool) -> Node {
+    Node::Bool(value)
 }
 
 /// The node of an ESS `Integer`, built from the `i64` itself.

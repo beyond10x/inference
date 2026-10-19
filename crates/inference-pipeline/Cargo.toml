@@ -1,0 +1,19 @@
+[package]
+name = "inference-pipeline"
+description = "Pipeline graphs of the inference framework: nodes with typed ports, bounded edges and adapter bindings, declared by command or through a typed builder."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+inference-core = { path = "../inference-core" }
+serde.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

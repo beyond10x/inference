@@ -332,7 +332,7 @@ fn names_the_model_module_does_not_declare_are_unsupported() {
     );
 
     let other_domain =
-        target.execute_command(command("inference.graph.DeclarePipeline", Vec::new()));
+        target.execute_command(command("inference.graph.ValidatePipeline", Vec::new()));
     assert!(
         matches!(&other_domain, Err(error) if error.is_unsupported()),
         "{other_domain:?}"

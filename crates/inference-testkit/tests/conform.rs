@@ -42,6 +42,29 @@ const STREAM_SCENARIOS: [&str; 11] = [
     "inference.stream.SupersedeGeneration/outcome/wrong-state",
 ];
 
+/// The four `inference.policy` scenarios this target answers.
+const POLICY_SCENARIOS: [&str; 4] = [
+    "inference.policy.DeclareProfile/outcome/declared",
+    "inference.policy.DeclareProfile/outcome/offline-admits-cluster",
+    "inference.policy.DeclareProfile/outcome/remote-not-opted-in",
+    "inference.policy.DeclareProfile/outcome/wrong-egress",
+];
+
+/// The ten `inference.graph` declaration scenarios this target answers without validating a
+/// pipeline.
+const GRAPH_SCENARIOS: [&str; 10] = [
+    "inference.graph.AddNode/outcome/unknown-pipeline",
+    "inference.graph.AddPort/outcome/added",
+    "inference.graph.AddPort/outcome/unknown-node",
+    "inference.graph.BindNode/outcome/unknown-pipeline",
+    "inference.graph.ConnectPorts/outcome/source-not-output",
+    "inference.graph.ConnectPorts/outcome/unbounded",
+    "inference.graph.ConnectPorts/outcome/unknown-pipeline",
+    "inference.graph.ConnectPorts/outcome/unknown-source",
+    "inference.graph.DeclarePipeline/outcome/declared",
+    "inference.graph.DeclarePipeline/outcome/unknown-profile",
+];
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -213,7 +236,12 @@ fn the_suite_runs_against_the_testkit_target() {
     assert!(errored.is_empty(), "error: {:#?}", messages(&errored));
 
     let passed = ids(&report, "passed");
-    for id in MODEL_SCENARIOS.into_iter().chain(STREAM_SCENARIOS) {
+    for id in MODEL_SCENARIOS
+        .into_iter()
+        .chain(STREAM_SCENARIOS)
+        .chain(POLICY_SCENARIOS)
+        .chain(GRAPH_SCENARIOS)
+    {
         assert!(
             passed.contains(id),
             "`{id}` did not pass: {:#?}",
