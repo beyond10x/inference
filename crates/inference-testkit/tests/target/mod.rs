@@ -17,6 +17,11 @@
 //! envelope's `sequence` orders one stream only, so the merge order across domains is the
 //! target's, the recorder's, and the one thing a module reads that no store holds.
 //!
+//! Identities are the stores' too, and no two stores issue the same one: each counts in its own
+//! space of the first eight hex digits, `inference.stream` in 0, `inference.model` in 1,
+//! `inference.policy` in 2 and `inference.graph` in 3, so an identity of one domain sent where
+//! another's belongs names no row.
+//!
 //! A scenario forcing an `external` outcome ([`ConformanceTarget::configure_external_outcome`]) goes
 //! to the module of the command's domain, which accepts it only for an outcome it answers and its
 //! specification declares external; [`Stores::force`] holds it until the next invocation of that
@@ -484,6 +489,169 @@ mod wire_integers {
         assert_eq!(integer(&number(9.3e18)), None);
         assert_eq!(integer(&number(-9.3e18)), None);
         assert_eq!(integer(&Node::Text("1".to_owned())), None);
+    }
+}
+
+mod distinct_identities {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use ess_conformance::scenario::CommandRef;
+    use ess_conformance::target::{ConformanceTarget, SemanticCommandRequest};
+    use ess_primitives::ids::CorrelationId;
+    use ess_primitives::node::Node;
+    use inference_core::generation::StartGeneration;
+    use inference_core::id::{NodeId, RunId};
+    use inference_core::model::{DeclareModel, Locality, Modality};
+    use inference_core::policy::{DeclareProfile, Egress, ProfileKind};
+    use inference_pipeline::{DeclarePipeline, InteractionMode};
+    use inference_testkit::graph::GraphCatalog;
+    use uuid::Uuid;
+
+    use super::{Stores, Target};
+
+    fn run(
+        target: &Target,
+        name: &str,
+        input: &[(&str, Node)],
+    ) -> (String, BTreeMap<String, Node>) {
+        let result = target
+            .execute_command(SemanticCommandRequest {
+                command: name.parse::<CommandRef>().expect("a command name"),
+                actor: None,
+                caller: None,
+                input: input
+                    .iter()
+                    .map(|(field, value)| ((*field).to_owned(), value.clone()))
+                    .collect(),
+                correlation: CorrelationId::new("distinct-identities").expect("a correlation id"),
+            })
+            .unwrap_or_else(|error| panic!("`{name}` answers: {error}"));
+        let payload = result
+            .direct_events
+            .first()
+            .map(|event| event.payload.clone().into_iter().collect())
+            .unwrap_or_default();
+        (
+            result
+                .outcome
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            payload,
+        )
+    }
+
+    fn text(value: &str) -> Node {
+        Node::Text(value.to_owned())
+    }
+
+    #[test]
+    fn a_profile_identity_sent_where_a_pipeline_identity_belongs_names_no_pipeline() {
+        let target = Target::default();
+        let (_, profile) = run(
+            &target,
+            "inference.policy.DeclareProfile",
+            &[
+                ("kind", text("offline_strict")),
+                ("egress", text("denied")),
+                ("admitted", Node::Seq(Vec::new())),
+            ],
+        );
+        let profile_id = profile["profile_id"].clone();
+        let (declared, _) = run(
+            &target,
+            "inference.graph.DeclarePipeline",
+            &[
+                ("name", text("voice")),
+                ("schema_revision", text("1")),
+                ("mode", text("batch")),
+                ("profile_id", profile_id.clone()),
+                ("required_capabilities", Node::Seq(Vec::new())),
+            ],
+        );
+        assert_eq!(declared, "inference.graph.DeclarePipeline/declared");
+
+        let (answered, _) = run(
+            &target,
+            "inference.graph.AddNode",
+            &[
+                ("pipeline_id", profile_id),
+                ("name", text("llm")),
+                ("role", text("model")),
+                ("requires", Node::Seq(Vec::new())),
+            ],
+        );
+        assert_eq!(
+            answered, "inference.graph.AddNode/unknown-pipeline",
+            "a profile's identity is no pipeline's"
+        );
+    }
+
+    #[test]
+    fn no_two_domains_issue_the_same_identity() {
+        let mut stores = Stores::default();
+        let model = stores
+            .model
+            .declare_model(DeclareModel {
+                family: "f".to_owned(),
+                checkpoint: "c".to_owned(),
+                code_license: "l".to_owned(),
+                weight_license: "w".to_owned(),
+                checksum: "s".to_owned(),
+                input_modalities: vec![Modality::Text],
+                output_modalities: vec![Modality::Text],
+                provenance: "p".to_owned(),
+                source_revision: "r".to_owned(),
+            })
+            .model_id;
+        let profile = stores
+            .policy
+            .declare_profile(DeclareProfile {
+                kind: ProfileKind::OfflineStrict,
+                egress: Egress::Denied,
+                admitted: vec![Locality::SameProcess],
+            })
+            .expect("a row of the table")
+            .profile_id;
+        let catalog = GraphCatalog {
+            policy: &stores.policy,
+            model: &stores.model,
+        };
+        let pipeline = stores
+            .graph
+            .declare_pipeline(
+                DeclarePipeline {
+                    name: "voice".to_owned(),
+                    schema_revision: "1".to_owned(),
+                    mode: InteractionMode::Batch,
+                    profile_id: profile,
+                    required_capabilities: Vec::new(),
+                },
+                &catalog,
+            )
+            .expect("the profile is declared")
+            .pipeline_id;
+        let generation = stores
+            .stream
+            .start_generation(StartGeneration {
+                run_id: RunId::from(Uuid::from_u128(1)),
+                node_id: NodeId::from(Uuid::from_u128(2)),
+                epoch: 1,
+            })
+            .generation_id;
+
+        let first = [
+            ("inference.model", model.to_string()),
+            ("inference.policy", profile.to_string()),
+            ("inference.graph", pipeline.to_string()),
+            ("inference.stream", generation.to_string()),
+        ];
+        let distinct: BTreeSet<&str> = first.iter().map(|(_, id)| id.as_str()).collect();
+        assert_eq!(
+            distinct.len(),
+            first.len(),
+            "each domain's first identity is its own: {first:#?}"
+        );
     }
 }
 

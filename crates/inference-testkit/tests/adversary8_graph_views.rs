@@ -5,10 +5,9 @@
 //! `AddPort/added` and `ConnectPorts/unbounded` read a graph view (`Pipelines`, `Ports`), and none
 //! reads `Nodes`, `Edges` or `Bindings` or the payload of `NodeAdded`, `PortsConnected` or
 //! `NodeBound`: the scenarios that do arrange a validation and stay skipped. The suite sends the
-//! three port flags all `true`, and every domain counts its identities from
-//! `00000000-0000-4000-8000-000000000001`, so in an arrangement like the module tests' the first
-//! adapter and the first node carry the same identity, and a row that writes one where the other
-//! belongs reads the same. Each case here arranges identities that differ and flags that differ,
+//! three port flags all `true`. Each domain counts its identities in its own space, so no node
+//! carries an adapter's identity, and a row that writes one where the other belongs reads
+//! otherwise. Each case here arranges identities that differ and flags that differ,
 //! and reads every field.
 
 mod target;
@@ -153,12 +152,20 @@ fn node(target: &Target, pipeline_id: Node, name: &str, role: &str, requires: &[
     )
 }
 
-fn port(target: &Target, node_id: Node, name: &str, direction: &str, flags: [bool; 3]) -> Node {
+fn port(
+    target: &Target,
+    pipeline_id: Node,
+    node_id: Node,
+    name: &str,
+    direction: &str,
+    flags: [bool; 3],
+) -> Node {
     emitted(
         &run(
             target,
             "inference.graph.AddPort",
             vec![
+                ("pipeline_id", pipeline_id),
                 ("node_id", node_id),
                 ("name", text(name)),
                 ("direction", text(direction)),
@@ -216,7 +223,7 @@ fn each_port_flag_set_alone_is_the_one_the_ports_view_reports() {
     let target = begun();
     let profile_id = profile(&target, "offline_strict", "denied");
     let pipeline_id = pipeline(&target, profile_id, "flags");
-    let node_id = node(&target, pipeline_id, "asr", "model", &[]);
+    let node_id = node(&target, pipeline_id.clone(), "asr", "model", &[]);
     let one_hot = [
         [true, false, false],
         [false, true, false],
@@ -228,6 +235,7 @@ fn each_port_flag_set_alone_is_the_one_the_ports_view_reports() {
         .map(|(index, flags)| {
             port(
                 &target,
+                pipeline_id.clone(),
                 node_id.clone(),
                 &format!("p{index}"),
                 "input",
@@ -320,12 +328,20 @@ fn an_edge_row_and_ports_connected_run_from_the_source_to_the_sink() {
     let node_id = node(&target, pipeline_id.clone(), "vad", "transform", &[]);
     let source = port(
         &target,
+        pipeline_id.clone(),
         node_id.clone(),
         "out",
         "output",
         [true, true, true],
     );
-    let sink = port(&target, node_id, "in", "input", [true, true, true]);
+    let sink = port(
+        &target,
+        pipeline_id.clone(),
+        node_id,
+        "in",
+        "input",
+        [true, true, true],
+    );
     let connected = run(
         &target,
         "inference.graph.ConnectPorts",
@@ -365,8 +381,11 @@ fn a_binding_row_and_node_bound_name_the_node_and_the_adapter_apart() {
     let pipeline_id = pipeline(&target, profile_id, "bound");
     let unbound = node(&target, pipeline_id.clone(), "mic", "source", &[]);
     let bound = node(&target, pipeline_id.clone(), "llm", "model", &[]);
-    assert_eq!(unbound, adapter_id, "the per-domain counters meet here");
-    assert_ne!(bound, adapter_id, "and not here, which is the node bound");
+    assert_ne!(
+        unbound, adapter_id,
+        "no two domains issue the same identity"
+    );
+    assert_ne!(bound, adapter_id, "and the node bound is no adapter either");
 
     let result = run(
         &target,

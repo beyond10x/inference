@@ -56,6 +56,37 @@ impl Error for AddNodeError {
     }
 }
 
+/// Why `inference.graph.AddPort` added nothing. The refusals are decided in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddPortError {
+    /// The `unknown-pipeline` outcome.
+    UnknownPipeline(PipelineNotFound),
+    /// The `unknown-node` outcome.
+    UnknownNode(NodeNotFound),
+    /// The `not-declared` outcome: the pipeline was already validated.
+    NotDeclared(PipelineNotReady),
+}
+
+impl fmt::Display for AddPortError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownPipeline(error) => fmt::Display::fmt(error, f),
+            Self::UnknownNode(error) => fmt::Display::fmt(error, f),
+            Self::NotDeclared(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for AddPortError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::UnknownPipeline(error) => Some(error),
+            Self::UnknownNode(error) => Some(error),
+            Self::NotDeclared(error) => Some(error),
+        }
+    }
+}
+
 /// Why `inference.graph.ConnectPorts` created no edge. The refusals are decided in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectPortsError {
@@ -168,9 +199,9 @@ enum Identities {
     /// A random (version 4) identity each time.
     #[default]
     Generated,
-    /// The next value of a counter, `00000000-0000-4000-8000-000000000001` first; the field is
-    /// the count issued so far.
-    Counted(u128),
+    /// The next value of a counter in the first eight hex digits' `space`,
+    /// `{space:08x}-0000-4000-8000-000000000001` first; `issued` is the count issued so far.
+    Counted { space: u32, issued: u128 },
 }
 
 /// The declared pipelines and what they own, in declaration order.
@@ -197,11 +228,20 @@ impl Declaration {
         Self::default()
     }
 
-    /// An empty declaration giving counted identities.
+    /// An empty declaration giving counted identities, `00000000-0000-4000-8000-000000000001`
+    /// first.
     #[must_use]
     pub fn counted() -> Self {
+        Self::counted_in(0)
+    }
+
+    /// An empty declaration giving counted identities whose first eight hex digits are `space`,
+    /// `{space:08x}-0000-4000-8000-000000000001` first, so that stores counting in different
+    /// spaces never issue the same identity.
+    #[must_use]
+    pub fn counted_in(space: u32) -> Self {
         Self {
-            identities: Identities::Counted(0),
+            identities: Identities::Counted { space, issued: 0 },
             ..Self::default()
         }
     }
@@ -241,18 +281,27 @@ impl Declaration {
         Ok(self.insert_node(input))
     }
 
-    /// Runs `inference.graph.AddPort`. A port is added to a node of a pipeline in any state:
-    /// graph.yaml declares no state guard on it.
+    /// Runs `inference.graph.AddPort`: the port is declared on its node under the pipeline the
+    /// input names, which must still be Declared. A node of another pipeline is not refused here;
+    /// the port then belongs to the pipeline it names, not to its node's, and validation of that
+    /// pipeline finds its node missing (check 1).
     ///
     /// # Errors
     ///
-    /// [`NodeNotFound`] when no node carries `node_id`.
-    pub fn add_port(&mut self, input: AddPort) -> Result<PortAdded, NodeNotFound> {
+    /// In this order: [`AddPortError::UnknownPipeline`]; [`AddPortError::UnknownNode`] when no
+    /// node carries `node_id`; [`AddPortError::NotDeclared`].
+    pub fn add_port(&mut self, input: AddPort) -> Result<PortAdded, AddPortError> {
+        let pipeline = self
+            .pipeline(input.pipeline_id)
+            .ok_or(AddPortError::UnknownPipeline(PipelineNotFound {
+                pipeline_id: input.pipeline_id,
+            }))?;
         if self.node(input.node_id).is_none() {
-            return Err(NodeNotFound {
+            return Err(AddPortError::UnknownNode(NodeNotFound {
                 node_id: input.node_id,
-            });
+            }));
         }
+        Self::declared(pipeline).map_err(AddPortError::NotDeclared)?;
         Ok(self.insert_port(input))
     }
 
@@ -447,9 +496,13 @@ impl Declaration {
     fn issue(&mut self) -> Uuid {
         match &mut self.identities {
             Identities::Generated => Uuid::new_v4(),
-            Identities::Counted(count) => {
-                *count += 1;
-                Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0000 | *count)
+            Identities::Counted { space, issued } => {
+                *issued += 1;
+                Uuid::from_u128(
+                    (u128::from(*space) << 96)
+                        | 0x0000_0000_0000_4000_8000_0000_0000_0000
+                        | *issued,
+                )
             }
         }
     }
@@ -493,6 +546,7 @@ impl Declaration {
         let port_id = PortId::from(self.issue());
         self.ports.push(Port {
             port_id,
+            pipeline_id: input.pipeline_id,
             node_id: input.node_id,
             name: input.name.clone(),
             direction: input.direction,

@@ -50,12 +50,13 @@ const POLICY_SCENARIOS: [&str; 4] = [
     "inference.policy.DeclareProfile/outcome/wrong-egress",
 ];
 
-/// The ten `inference.graph` declaration scenarios this target answers without validating a
+/// The eleven `inference.graph` declaration scenarios this target answers without validating a
 /// pipeline.
-const GRAPH_SCENARIOS: [&str; 10] = [
+const GRAPH_SCENARIOS: [&str; 11] = [
     "inference.graph.AddNode/outcome/unknown-pipeline",
     "inference.graph.AddPort/outcome/added",
     "inference.graph.AddPort/outcome/unknown-node",
+    "inference.graph.AddPort/outcome/unknown-pipeline",
     "inference.graph.BindNode/outcome/unknown-pipeline",
     "inference.graph.ConnectPorts/outcome/source-not-output",
     "inference.graph.ConnectPorts/outcome/unbounded",
@@ -65,9 +66,9 @@ const GRAPH_SCENARIOS: [&str; 10] = [
     "inference.graph.DeclarePipeline/outcome/unknown-profile",
 ];
 
-/// The fourteen `inference.graph` scenarios this target answers by validating a pipeline: the
-/// five of `ValidatePipeline` and the nine declaration scenarios whose arrangement validates one.
-const GRAPH_VALIDATION_SCENARIOS: [&str; 14] = [
+/// The fifteen `inference.graph` scenarios this target answers by validating a pipeline: the
+/// five of `ValidatePipeline` and the ten declaration scenarios whose arrangement validates one.
+const GRAPH_VALIDATION_SCENARIOS: [&str; 15] = [
     "inference.graph.Pipeline/state/Validated/refuses/inference.graph.ValidatePipeline",
     "inference.graph.Pipeline/transition/validate/by/inference.graph.ValidatePipeline/validated",
     "inference.graph.ValidatePipeline/outcome/rejected",
@@ -75,6 +76,7 @@ const GRAPH_VALIDATION_SCENARIOS: [&str; 14] = [
     "inference.graph.ValidatePipeline/outcome/wrong-state",
     "inference.graph.AddNode/outcome/added",
     "inference.graph.AddNode/outcome/not-declared",
+    "inference.graph.AddPort/outcome/not-declared",
     "inference.graph.BindNode/outcome/bound",
     "inference.graph.BindNode/outcome/not-declared",
     "inference.graph.BindNode/outcome/unknown-adapter",

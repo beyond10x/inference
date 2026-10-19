@@ -2,8 +2,9 @@
 //!
 //! [`PolicyDomain`] holds the declared deployment profiles and records every event it emits in
 //! order. `DeclareProfile` runs [`DeploymentProfile::declare_as`] of `inference-core` under an
-//! identity the domain issues from a counter rendered as a Uuid, so that two runs of the same
-//! commands report the same identities; a refused row takes none. The view
+//! identity the domain issues from a counter rendered as a Uuid in its own [`IDENTITY_SPACE`], so
+//! that two runs of the same commands report the same identities and no other domain issues one
+//! of them; a refused row takes none. The view
 //! `inference.policy.Profiles` is [`PolicyDomain::profiles`], read at the call, so a write is
 //! visible to the next read.
 
@@ -75,10 +76,17 @@ impl PolicyDomain {
     }
 }
 
-/// The `count`th identity: a version 4, RFC 4122 variant Uuid whose low bits are `count`,
-/// `00000000-0000-4000-8000-000000000001` first.
-const fn identity(count: u128) -> Uuid {
-    Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0000 | count)
+/// The first eight hex digits of every identity the domain issues, which no other domain of the
+/// testkit issues under: `inference.stream` counts in 0, `inference.model` in 1,
+/// `inference.policy` in 2 and `inference.graph` in 3.
+pub const IDENTITY_SPACE: u32 = 2;
+
+/// The `count`th identity: a version 4, RFC 4122 variant Uuid whose low bits are `count` and whose
+/// first eight hex digits are [`IDENTITY_SPACE`], `00000002-0000-4000-8000-000000000001` first.
+fn identity(count: u128) -> Uuid {
+    Uuid::from_u128(
+        (u128::from(IDENTITY_SPACE) << 96) | 0x0000_0000_0000_4000_8000_0000_0000_0000 | count,
+    )
 }
 
 #[cfg(test)]
@@ -112,7 +120,7 @@ mod tests {
 
         assert_eq!(
             first.profile_id.to_string(),
-            "00000000-0000-4000-8000-000000000001"
+            "00000002-0000-4000-8000-000000000001"
         );
         assert_eq!(
             refused.map(|_| ()).map_err(|error| error.rule),
@@ -120,7 +128,7 @@ mod tests {
         );
         assert_eq!(
             declared.profile_id.to_string(),
-            "00000000-0000-4000-8000-000000000002"
+            "00000002-0000-4000-8000-000000000002"
         );
         assert_eq!(domain.profiles().count(), 2);
         assert_eq!(domain.events().len(), 2);

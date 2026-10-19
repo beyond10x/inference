@@ -257,7 +257,7 @@ fn a_refusal_echoes_the_submitted_value_it_refused() {
 fn the_adapters_view_publishes_the_stored_values_under_counter_identities() {
     let target = begun();
     let model_id = declared_model(&target);
-    assert_eq!(model_id, text("00000000-0000-4000-8000-000000000001"));
+    assert_eq!(model_id, text("00000001-0000-4000-8000-000000000001"));
 
     let result = target
         .execute_command(command(
@@ -275,7 +275,7 @@ fn the_adapters_view_publishes_the_stored_values_under_counter_identities() {
     let row = &rows[0];
     assert_eq!(
         row["adapter_id"],
-        text("00000000-0000-4000-8000-000000000002")
+        text("00000001-0000-4000-8000-000000000002")
     );
     assert_eq!(row["model_id"], model_id);
     assert_eq!(row["max_concurrency"], Node::Number(Number::from(7_i64)));
@@ -375,7 +375,7 @@ fn observed_events_are_the_store_events_in_emission_order() {
     assert_eq!(adapters[0].sequence, Some(2));
     assert_eq!(
         adapters[0].payload["adapter_id"],
-        text("00000000-0000-4000-8000-000000000002")
+        text("00000001-0000-4000-8000-000000000002")
     );
     assert_eq!(adapters[0].payload["model_id"], model_id);
 }
@@ -397,7 +397,7 @@ fn a_new_scenario_starts_from_empty_stores_and_the_first_identity() {
     assert!(rows(&target, "inference.model.Models").rows.is_empty());
     assert_eq!(
         declared_model(&target),
-        text("00000000-0000-4000-8000-000000000001")
+        text("00000001-0000-4000-8000-000000000001")
     );
 }
 

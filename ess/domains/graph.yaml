@@ -248,6 +248,10 @@ entities:
       name: port_id
       type: inference.graph.PortId
     fields:
+      # The pipeline the port was declared under (AddPort).
+      # read from: docs/design/inference.md:519
+      - name: pipeline_id
+        type: inference.graph.PipelineId
       - name: node_id
         type: inference.graph.NodeId
       - name: name
@@ -266,6 +270,12 @@ entities:
         type: Boolean
       - name: provisional_allowed
         type: Boolean
+    relations:
+      - name: pipeline
+        kind: references
+        target: inference.graph.Pipeline
+        cardinality: one
+        via: pipeline_id
     lifecycle:
       initial: Declared
       states: [Declared]
@@ -672,17 +682,23 @@ commands:
             name: input.name
         summary: The node is part of the pipeline's declaration.
 
-  # A port is declared on a node that exists.
-  # UNMAPPED: the pipeline-state guard the other mutators carry (design 519, 523). AddPort names
-  # only the node, and the pipeline's state is two references away (port, node, pipeline); a guard
-  # in ess 0.60.0 reads one row per input reference. Taking `pipeline_id` as an input would need a
-  # guard that the node belongs to that pipeline, and synthesis witnesses no comparison with the
-  # `via` of `Pipeline owns Node` (ESS-SYNTH-003), so the input would be a caller assertion
-  # nothing checks. Until then a port can be added to a node of a validated pipeline.
+  # A port is declared on a node that exists, and only while its pipeline is Declared, as the
+  # other mutators are (design 519, 523). The pipeline's state is two references away from the
+  # node (port, node, pipeline) and a guard in ess 0.60.0 reads one row per input reference, so
+  # the command names the pipeline, as AddNode, ConnectPorts and BindNode do, and the port records
+  # it.
+  # Not refused here: a node of another pipeline. That guard compares the node's `pipeline_id`
+  # (the `via` of `Pipeline owns Node`) with the input, which ess 0.60.0 synthesis cannot witness
+  # (ESS-SYNTH-003), so no guard here checks it; such a port belongs to the pipeline it names, not
+  # to its node's, and validation finds its node missing from that pipeline (check 1).
   # read from: docs/design/inference.md:473-482
+  # read from: docs/design/inference.md:519
+  # read from: docs/design/inference.md:523
   # read from: docs/design/inference.md:525
   - name: inference.graph.AddPort
     input:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
       - name: node_id
         type: inference.graph.NodeId
       - name: name
@@ -702,6 +718,14 @@ commands:
       - name: provisional_allowed
         type: Boolean
     outcomes:
+      - name: unknown-pipeline
+        when_related: {via: input.pipeline_id, exists: false}
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.pipeline_id
+        summary: No pipeline carries the identity, and no port was added.
+
       - name: unknown-node
         when_related: {via: input.node_id, exists: false}
         error: inference.graph.NodeNotFound
@@ -710,10 +734,20 @@ commands:
             node_id: input.node_id
         summary: No node carries the identity, and no port was added.
 
+      - name: not-declared
+        when_related: {via: input.pipeline_id, predicate: state != Declared}
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.pipeline_id
+            required: Declared
+        summary: The pipeline was already validated, and no port was added.
+
       - name: added
         creates: inference.graph.Port
         instance: port_id
         sets:
+          pipeline_id: input.pipeline_id
           node_id: input.node_id
           name: input.name
           direction: input.direction
@@ -1456,6 +1490,8 @@ views:
     fields:
       - name: port_id
         type: inference.graph.PortId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
       - name: node_id
         type: inference.graph.NodeId
       - name: name
