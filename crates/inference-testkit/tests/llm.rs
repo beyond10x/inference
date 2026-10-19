@@ -13,8 +13,8 @@ use inference_core::generation::GenerationState;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Capability, ModelId};
 use inference_llm::{
-    CapabilityNotClaimed, GenerationEvent, GenerationHandle, GenerationRequest, Generator,
-    InputRefused, OfferInput,
+    CapabilityNotClaimed, ConcurrencyLimitReached, GenerationEvent, GenerationHandle,
+    GenerationRequest, Generator, InputRefused, OfferInput,
 };
 use inference_testkit::llm::{MockConfiguration, MockGenerator};
 
@@ -38,7 +38,9 @@ fn request() -> GenerationRequest {
 /// received it.
 fn deliveries(configuration: MockConfiguration) -> Vec<(GenerationEvent, GenerationState)> {
     let request = request();
-    let mut handle = generator(configuration).start(request.clone());
+    let mut handle = generator(configuration)
+        .start(request.clone())
+        .expect("a fresh generator runs nothing else");
     assert_eq!(handle.output().generation().run_id(), request.run_id);
     assert_eq!(handle.output().generation().node_id(), request.node_id);
     let mut seen = Vec::new();
@@ -70,7 +72,9 @@ struct Offer {
 }
 
 fn offer_input(configuration: MockConfiguration) -> Offer {
-    let mut handle = generator(configuration).start(request());
+    let mut handle = generator(configuration)
+        .start(request())
+        .expect("a fresh generator runs nothing else");
     let started = handle.next();
     assert!(
         matches!(started, Some(GenerationEvent::Started(_))),
@@ -190,6 +194,59 @@ fn each_configuration_claims_exactly_what_it_was_observed_to_do() {
         assert_eq!(
             claimed, observed,
             "{configuration:?} claims what it was observed to do"
+        );
+    }
+}
+
+/// How many generations of `generator` run at once, starting until a start is refused or `bound`
+/// run.
+fn observed_concurrency(generator: &mut MockGenerator, bound: usize) -> usize {
+    let mut running = Vec::new();
+    while running.len() < bound {
+        match generator.start(request()) {
+            Ok(handle) => running.push(handle),
+            Err(_) => break,
+        }
+    }
+    running.len()
+}
+
+#[test]
+fn a_second_concurrent_generation_is_refused_with_the_concurrency_limit() {
+    for configuration in MockConfiguration::ALL {
+        let mut generator = generator(configuration);
+        let first = generator
+            .start(request())
+            .expect("a fresh generator runs nothing else");
+        assert_eq!(
+            generator.start(request()).map(|_| ()),
+            Err(ConcurrencyLimitReached { max_concurrency: 1 }),
+            "{configuration:?}: a second generation while the first runs is refused"
+        );
+        let mut clone = generator.clone();
+        assert_eq!(
+            clone.start(request()).map(|_| ()),
+            Err(ConcurrencyLimitReached { max_concurrency: 1 }),
+            "{configuration:?}: a clone is the same adapter and shares its limit"
+        );
+        drop(first);
+        assert!(
+            generator.start(request()).is_ok(),
+            "{configuration:?}: once the first generation ends, another starts"
+        );
+    }
+}
+
+#[test]
+fn each_configuration_runs_at_most_the_concurrency_it_declares() {
+    for configuration in MockConfiguration::ALL {
+        let mut generator = generator(configuration);
+        let declared = usize::try_from(generator.adapter().max_concurrency())
+            .expect("a declared concurrency is positive");
+        assert_eq!(
+            observed_concurrency(&mut generator, declared + 3),
+            declared,
+            "{configuration:?}: the declared maximum concurrency is the observed one"
         );
     }
 }

@@ -258,10 +258,11 @@ fn a_receipt_with_a_foreign_frame_last_is_refused() {
     );
 }
 
-/// Guard: two syntheses each hold a value of one segment identity (a transition reads the
-/// segment, so a Tentative one commits twice; the crate docs say two syntheses do not see each
-/// other). A receipt of more frames than this synthesis emitted of the segment is refused, as one
-/// of fewer is.
+/// Guard: two syntheses each hold a value of one segment identity (a transition consumes the
+/// segment, so a Tentative one commits once, but `OutputSegment::emit_as` takes the identity it
+/// is given, so a caller naming one identity twice holds two segments of it; the crate docs say
+/// two syntheses do not see each other). A receipt of more frames than this synthesis emitted of
+/// the segment is refused, as one of fewer is.
 #[test]
 fn a_receipt_of_more_frames_than_emitted_is_refused() {
     let (generation, _) = Generation::start(StartGeneration {
@@ -271,10 +272,13 @@ fn a_receipt_of_more_frames_than_emitted_is_refused() {
     });
     let (tentative, _) =
         OutputSegment::emit(&generation, 1, "twice".to_owned()).expect("the generation is Active");
+    let (twin, _) =
+        OutputSegment::emit_as(tentative.segment_id(), &generation, 1, "twice".to_owned())
+            .expect("the generation is Active");
     let (first, _) = tentative.commit().expect("commits");
-    let (second, _) = tentative
+    let (second, _) = twin
         .commit()
-        .expect("commits again into a second value");
+        .expect("a second value of one identity commits");
     let id = first.segment_id();
     let mut x = taken(Vec::new(), vec![first]);
     let mut y = taken(Vec::new(), vec![second]);

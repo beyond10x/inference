@@ -11,8 +11,14 @@
 //!   delivering anything after `GenerationStarted`;
 //! * claiming `output_streaming` and `concurrent_input_output`, it streams, and input offered
 //!   while the generation is Active is emitted as a later segment of its own.
+//!
+//! It declares a maximum concurrency of one and holds to it: while one generation of a generator,
+//! or of a clone of it, runs, a second start is refused with [`ConcurrencyLimitReached`]. A
+//! generation runs until its handle is dropped.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use inference_core::generation::{
     GenerationCancelled, GenerationState, GenerationStateConflict, GenerationSuperseded,
@@ -21,8 +27,8 @@ use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_llm::{
-    AdmittedInput, CONTRACT_REVISION, GenerationEvent, GenerationHandle, GenerationOutput,
-    GenerationRequest, Generator, InputRefused,
+    AdmittedInput, CONTRACT_REVISION, ConcurrencyLimitReached, GenerationEvent, GenerationHandle,
+    GenerationOutput, GenerationRequest, Generator, InputRefused,
 };
 
 /// What a [`MockGenerator`] claims, and so how it behaves.
@@ -58,12 +64,57 @@ impl MockConfiguration {
     }
 }
 
+/// The generations of one generator that run, shared by its clones, which are the same adapter.
+#[derive(Debug, Clone, Default)]
+struct Running(Arc<AtomicUsize>);
+
+impl PartialEq for Running {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Running {}
+
+impl Running {
+    /// Counts one more running generation, if fewer than `max_concurrency` run.
+    fn admit(&self, max_concurrency: i64) -> Result<Slot, ConcurrencyLimitReached> {
+        let limit = usize::try_from(max_concurrency).unwrap_or(usize::MAX);
+        let slot = Slot(Arc::clone(&self.0));
+        if self.0.fetch_add(1, Ordering::AcqRel) < limit {
+            Ok(slot)
+        } else {
+            drop(slot);
+            Err(ConcurrencyLimitReached { max_concurrency })
+        }
+    }
+}
+
+/// The place of one running generation among [`Running`], given back when it is dropped.
+#[derive(Debug)]
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl PartialEq for Slot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Slot {}
+
 /// The scripted mock generator: an in-process adapter of one model with a maximum concurrency of
-/// one, generating the same script for every request.
+/// one, which it holds to, generating the same script for every request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockGenerator {
     adapter: Adapter,
     script: Vec<String>,
+    running: Running,
 }
 
 impl MockGenerator {
@@ -88,6 +139,7 @@ impl MockGenerator {
         Self {
             adapter,
             script: script.into_iter().map(Into::into).collect(),
+            running: Running::default(),
         }
     }
 }
@@ -99,20 +151,25 @@ impl Generator for MockGenerator {
         &self.adapter
     }
 
-    fn start(&mut self, request: GenerationRequest) -> MockGeneration {
+    fn start(
+        &mut self,
+        request: GenerationRequest,
+    ) -> Result<MockGeneration, ConcurrencyLimitReached> {
+        let slot = self.running.admit(self.adapter.max_concurrency())?;
         let (output, started) = GenerationOutput::start(&self.adapter, &request);
-        MockGeneration {
+        Ok(MockGeneration {
             streams: output.capabilities().contains(&Capability::OutputStreaming),
             output,
             pending: self.script.iter().cloned().collect(),
             delivered: VecDeque::from([GenerationEvent::Started(started)]),
-        }
+            _slot: slot,
+        })
     }
 }
 
-/// One generation of a [`MockGenerator`]. It is not `Clone`, as the `GenerationOutput` it holds
-/// is not: a copy taken while the generation is Active would deliver output for it after it was
-/// superseded or cancelled.
+/// One generation of a [`MockGenerator`]; it runs until it is dropped. It is not `Clone`, as the
+/// `GenerationOutput` it holds is not: a copy taken while the generation is Active would deliver
+/// output for it after it was superseded or cancelled.
 ///
 /// ```compile_fail
 /// fn cloneable<T: Clone>() {}
@@ -124,6 +181,7 @@ pub struct MockGeneration {
     output: GenerationOutput,
     pending: VecDeque<String>,
     delivered: VecDeque<GenerationEvent>,
+    _slot: Slot,
 }
 
 impl Iterator for MockGeneration {

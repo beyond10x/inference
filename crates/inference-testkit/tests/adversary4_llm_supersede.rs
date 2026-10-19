@@ -24,7 +24,8 @@ fn interrupted(supersede: bool) {
         node_id: NodeId::generate(),
         epoch: 1,
         prompt: "prompt".to_owned(),
-    });
+    })
+    .expect("a fresh generator runs nothing else");
     assert!(matches!(handle.next(), Some(GenerationEvent::Started(_))));
     assert!(matches!(handle.next(), Some(GenerationEvent::TextDelta(_))));
     let generation_id = handle.output().generation().generation_id();
