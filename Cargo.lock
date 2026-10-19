@@ -270,9 +270,19 @@ dependencies = [
  "ess-conformance",
  "ess-primitives",
  "inference-core",
+ "inference-text",
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "inference-text"
+version = "0.2.0"
+dependencies = [
+ "inference-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

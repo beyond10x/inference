@@ -27,6 +27,18 @@ const MODEL_SCENARIOS: [&str; 4] = [
     "inference.model.DeclareAdapter/outcome/unknown-model",
 ];
 
+/// The eight `inference.stream` scenarios this target answers without a run.
+const STREAM_SCENARIOS: [&str; 8] = [
+    "inference.stream.AcknowledgePlayback/outcome/wrong-state",
+    "inference.stream.CancelGeneration/outcome/wrong-state",
+    "inference.stream.CommitSegment/outcome/wrong-state",
+    "inference.stream.CompleteGeneration/outcome/wrong-state",
+    "inference.stream.CompleteSynthesis/outcome/wrong-state",
+    "inference.stream.DiscardSegment/outcome/wrong-state",
+    "inference.stream.QueueForSynthesis/outcome/wrong-state",
+    "inference.stream.SupersedeGeneration/outcome/wrong-state",
+];
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -198,7 +210,7 @@ fn the_suite_runs_against_the_testkit_target() {
     assert!(errored.is_empty(), "error: {:#?}", messages(&errored));
 
     let passed = ids(&report, "passed");
-    for id in MODEL_SCENARIOS {
+    for id in MODEL_SCENARIOS.into_iter().chain(STREAM_SCENARIOS) {
         assert!(
             passed.contains(id),
             "`{id}` did not pass: {:#?}",
