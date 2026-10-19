@@ -17,19 +17,21 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 use std::time::Duration;
 
-use inference_core::envelope::is_control_kind;
-use inference_core::id::{GenerationId, NodeId, RunId};
+use inference_core::endpoint::SendError;
+use inference_core::envelope::{EventEnvelope, EventId, Timebase, is_control_kind};
+use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::model::{Adapter, AdapterId, Capability, ModelId};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_llm::Generator;
 use inference_pipeline::{
-    Catalog, Declaration, Delivery, Essentiality, InteractionMode, Node, NodeError,
-    NodeImplementation, NodeRole, OverloadPolicy, PipelineSpec, PlannedPipeline, PortTraits,
-    modality,
+    Catalog, Declaration, Delivery, Essentiality, InteractionMode, Node, NodeEndpoints, NodeError,
+    NodeFuture, NodeImplementation, NodeRole, OverloadPolicy, PipelineSpec, PlannedPipeline,
+    PortTraits, modality,
 };
 use inference_runtime::run::{NodeInstanceState, RunState};
 use inference_runtime::{RunController, RunError, SubgraphHandle, SubgraphNode};
@@ -38,6 +40,8 @@ use inference_testkit::graph::{
     TextSource,
 };
 use inference_testkit::llm::{MockConfiguration, MockGenerator, ModelNode};
+use inference_testkit::stream::StreamEvent;
+use inference_text::{SegmentId, TextSegmentCommitted};
 
 const PATIENCE: Duration = Duration::from_secs(10);
 const INPUTS: [&str; 2] = ["1", "2"];
@@ -433,4 +437,181 @@ fn a_child_node_that_fails_fails_the_parent_naming_the_subgraph_node_and_the_chi
         "carries the child's reason, naming the child node: {}",
         failure.detail
     );
+}
+
+/// A child node that, once started, sends text on its one output without end, on a thread of its
+/// own, until it is cancelled or its output refuses; its input is held and never read.
+#[derive(Default)]
+struct Endless {
+    run_id: Option<RunId>,
+    node_id: Option<NodeId>,
+    cancelled: Arc<AtomicBool>,
+    sent: Arc<AtomicUsize>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl NodeImplementation<PipelinePayload> for Endless {
+    fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
+        self.node_id = Some(node.node_id());
+        Box::pin(std::future::ready(()))
+    }
+
+    fn prepare(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn start(
+        &mut self,
+        mut endpoints: NodeEndpoints<PipelinePayload>,
+    ) -> NodeFuture<'_, Result<(), NodeError>> {
+        let output = endpoints.outputs.remove(0).endpoint;
+        let held = endpoints.inputs;
+        let (run_id, producer) = (
+            self.run_id.expect("made for its run"),
+            self.node_id.expect("described"),
+        );
+        let (cancelled, sent) = (Arc::clone(&self.cancelled), Arc::clone(&self.sent));
+        self.thread = Some(thread::spawn(move || {
+            let _held = held;
+            let stream_id = StreamId::generate();
+            let mut sequence = 0;
+            while !cancelled.load(Ordering::Acquire) {
+                sequence += 1;
+                let event = StreamEvent::TextSegmentCommitted(TextSegmentCommitted {
+                    segment_id: SegmentId::generate(),
+                    text: format!("chunk {sequence}"),
+                });
+                let envelope = EventEnvelope {
+                    schema_version: 1,
+                    event_id: EventId::generate(),
+                    run_id,
+                    session_id: None,
+                    stream_id,
+                    sequence,
+                    producer,
+                    port: "answer".to_owned(),
+                    kind: event.name().to_owned(),
+                    generation_id: None,
+                    timestamp: 0,
+                    timebase: Timebase::WallTime,
+                    causation_id: None,
+                    payload: PipelinePayload::Stream(event),
+                };
+                let mut envelope = envelope;
+                loop {
+                    match block_on(output.send(envelope)) {
+                        Ok(()) => break,
+                        Err(SendError::Full(refused)) if !cancelled.load(Ordering::Acquire) => {
+                            envelope = refused;
+                            thread::yield_now();
+                        }
+                        Err(_) => return,
+                    }
+                }
+                sent.fetch_add(1, Ordering::AcqRel);
+            }
+        }));
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn cancel(&mut self) -> NodeFuture<'_, ()> {
+        self.cancelled.store(true, Ordering::Release);
+        Box::pin(std::future::ready(()))
+    }
+
+    fn stop(&mut self) -> NodeFuture<'_, ()> {
+        if let Some(thread) = self.thread.take() {
+            let _ended = thread.join();
+        }
+        Box::pin(std::future::ready(()))
+    }
+}
+
+#[test]
+fn cancelling_the_parent_while_the_child_is_still_streaming_ends_the_child_first() {
+    let generator = generator();
+    let planned = planned(&generator);
+    let sent = Arc::new(AtomicUsize::new(0));
+    let child_sent = Arc::clone(&sent);
+    let mut parent = parent(&planned, move |run_id, _: &Node| {
+        Box::new(Endless {
+            run_id: Some(run_id),
+            sent: Arc::clone(&child_sent),
+            ..Endless::default()
+        })
+    })
+    .expect("prepares");
+    block_on(parent.controller.activate()).expect("every node starts");
+    let requests = parent.controller.requests();
+    let sink = parent.sink.clone();
+    let mut controller = parent.controller;
+    let drive = thread::spawn(move || {
+        let result = block_on(controller.drive());
+        (controller, result)
+    });
+    assert!(
+        sink.wait_received(3, PATIENCE),
+        "the child streams into the parent's sink"
+    );
+    let before = sent.load(Ordering::Acquire);
+    assert!(
+        sink.wait_received(before + 2, PATIENCE),
+        "and keeps streaming while the parent is Active"
+    );
+    requests.cancel();
+    let (controller, result) = drive.join().expect("no panic");
+    result.expect("the loop cancels the run");
+
+    assert_eq!(controller.run().state(), RunState::Cancelled);
+    let at_stop = parent
+        .subgraph
+        .at_stop()
+        .expect("the subgraph node stopped before the parent was Cancelled");
+    assert_eq!(at_stop.state, RunState::Cancelled, "the child run");
+    assert_eq!(
+        at_stop.instances,
+        [NodeInstanceState::Stopped],
+        "the streaming child node"
+    );
+    assert!(at_stop.queues_dropped, "every child queue is dropped");
+    assert!(controller.queues().iter().all(|queue| queue.is_dropped()));
+    assert!(
+        sink.received().len() <= sent.load(Ordering::Acquire),
+        "nothing reached the parent that the child did not send"
+    );
+}
+
+#[test]
+fn a_refused_start_leaves_the_child_run_wound_down_and_recorded() {
+    let generator = generator();
+    let planned = planned(&generator);
+    let mut parent = parent(&planned, |_, _: &Node| {
+        Box::new(RecordingNode::failing_at(
+            FallibleStep::Start,
+            NodeError::new("the model cannot start"),
+        ))
+    })
+    .expect("prepares");
+    let started = block_on(parent.controller.activate());
+    let Err(RunError::NodeFailed(failure)) = started else {
+        panic!("the parent's start is refused: {started:?}");
+    };
+    assert_eq!(failure.node_id, Some(planned.subgraph));
+    assert!(failure.detail.contains("the model cannot start"));
+    assert_eq!(parent.controller.run().state(), RunState::Failed);
+    let at_stop = parent
+        .subgraph
+        .at_stop()
+        .expect("the refused start recorded its child run");
+    assert_eq!(at_stop.state, RunState::Failed, "the child run");
+    assert!(
+        at_stop.instances.iter().all(|state| state.is_terminal()),
+        "no child instance is left running: {:?}",
+        at_stop.instances
+    );
+    assert!(at_stop.queues_dropped, "every child queue is dropped");
 }

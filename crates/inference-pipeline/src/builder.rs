@@ -421,7 +421,7 @@ impl<'b> PipelineBuilder<'_, 'b> {
 
 /// The value a `ConnectPorts` or `DeclareFeedbackLoop` input can carry: `value`, or `i64::MAX`
 /// when it is larger.
-fn carried(value: NonZeroUsize) -> NonZeroUsize {
+pub(crate) fn carried(value: NonZeroUsize) -> NonZeroUsize {
     let largest = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
     if value.get() <= largest {
         value
