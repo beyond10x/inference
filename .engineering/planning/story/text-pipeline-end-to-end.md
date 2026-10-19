@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:text-pipeline-end-to-end
 kind: story
-status: draft
+status: active
 title: A text-only pipeline of mock nodes runs to completion, cancels and drains (A-02)
 summary: Source, mock LLM, sink on mocks; three runs; §23.3 test 7; the complete inference.graph suite
 relations:
@@ -32,7 +32,10 @@ scope:
   path: crates/inference-testkit/src/graph.rs
 - confidence: inferred
   path: crates/inference-testkit/src/llm.rs
-revision: 18
+revision: 20
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T11:45:47Z", actor: "human:timo", revision: 19, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "proposed", to: "active", at: "2026-10-19T11:45:47Z", actor: "human:timo", revision: 20, decided_on: {"recorded":{"review_outcome":1}}}
 ---
 # Story: text-pipeline-end-to-end
 
