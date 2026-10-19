@@ -1,0 +1,34 @@
+[package]
+name = "inference-audio-device"
+description = "Microphone capture and speaker playout for the inference framework: audio devices as frame sources and sinks, over cpal."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["device"]
+device = ["dep:cpal"]
+pipeline = ["dep:inference-core", "dep:inference-pipeline"]
+
+[dependencies]
+cpal = { version = "0.18.2", optional = true }
+inference-audio = { path = "../../crates/inference-audio" }
+inference-core = { path = "../../crates/inference-core", optional = true }
+inference-pipeline = { path = "../../crates/inference-pipeline", optional = true }
+
+[[test]]
+name = "nodes"
+required-features = ["pipeline"]
+
+[[test]]
+name = "hardware"
+required-features = ["device"]
+
+[[example]]
+name = "mic-loopback"
+required-features = ["device"]
+
+[lints]
+workspace = true
