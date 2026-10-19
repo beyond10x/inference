@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] — 2026-10-19
 
 ### Added
 
@@ -23,6 +23,12 @@
   state; refusals carry typed diagnostics. Breaking against 0.1.0 (`ess verify diff`, exit 4):
   new enum members, `FailRun.failure: FailureReason` replacing `reason`, new required inputs on
   `DeclareModel`, `DeclareTool` and `ProposeToolCall`, the new `DeclareProfile` refusal.
+
+### Known issues
+
+- `ess verify conform synthesize` yields 229 scenarios with 3 ESS-SYNTH-001 refusals, the
+  `affects` cascades of `CancelRun`, `CancelGeneration` and `SupersedeGeneration`; the authored
+  scenarios execute them and the interpreted run passes 229 of 229.
 
 ## [0.1.0] — 2026-10-19
 
