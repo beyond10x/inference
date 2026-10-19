@@ -13,18 +13,28 @@
 //! Described, Prepared, Started, Draining or Cancelling, Stopped, with Failed explicit. A
 //! [`RunController`] builds one queue per edge of the run, drives each node's
 //! [`NodeImplementation`](inference_pipeline::NodeImplementation) through its instance as the run
-//! moves, and fails the run with a reason naming a node that returned an error. No public
-//! signature commits a caller to one asynchronous executor.
+//! moves, and fails the run with a reason naming a node that returned an error. Its run loop,
+//! [`RunController::drive`], issues `DrainRun` once every source node has sent its end of input,
+//! a control event of kind `stop`, and `CompleteRun` once every instance has drained, and takes
+//! the cancel or drain its caller asks for through [`RunRequests`]; a [`QueueWatch`] shows that a
+//! run's edge queues are gone once it ended. Every sender a node is handed refuses user content
+//! whose sequence does not increase on its stream, and the run records the refusal
+//! ([`SequenceNotIncreasing`]). No public signature commits a caller to one asynchronous
+//! executor.
 
 pub mod controller;
+mod drive;
 pub mod queue;
 pub mod run;
 
 pub use controller::{
     CreateControllerError, FailNodeError, InstanceConflict, RunController, RunError,
 };
+pub use drive::{RunRequests, SequenceNotIncreasing};
 pub use inference_core::id::{NodeId, RunId};
-pub use queue::{EdgeQueue, EpochLookup, QueueReceiver, QueueSender, UnsupportedOverload};
+pub use queue::{
+    EdgeQueue, EpochLookup, QueueReceiver, QueueSender, QueueWatch, UnsupportedOverload,
+};
 pub use run::{
     NodeInstance, NodeInstanceId, NodeInstanceState, NodeInstanceStateConflict, Run, RunState,
     RunStateConflict,

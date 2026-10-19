@@ -9,7 +9,7 @@
 //! |---|---|
 //! | [`RunController::prepare`] | described, then prepared |
 //! | [`RunController::activate`] | started with its edge endpoints |
-//! | [`RunController::drain`] | drained |
+//! | [`RunController::drain`] | drained, upstream before downstream, nodes no edge orders together |
 //! | [`RunController::complete`] | stopped |
 //! | [`RunController::cancel`], [`RunController::fail`] | cancelled, then stopped, unless terminal |
 //!
@@ -35,18 +35,23 @@
 
 use std::error::Error;
 use std::fmt;
+use std::future;
+use std::pin::pin;
 use std::sync::Arc;
+use std::task::Poll;
 
-use inference_core::id::NodeId;
+use inference_core::endpoint::OutputEndpoint;
+use inference_core::id::{NodeId, RunId};
 use inference_pipeline::{
-    Declaration, Node, NodeEndpoints, NodeError, NodeImplementation, NodeInput, NodeNotFound,
-    NodeOutput, PipelineNotFound, PlannedPipeline,
+    Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInput,
+    NodeNotFound, NodeOutput, NodeRole, PipelineNotFound, PlannedPipeline,
 };
 
-use crate::queue::{EdgeQueue, EpochLookup, UnsupportedOverload};
+use crate::drive::{GuardedSender, Next, RunRequests, SequenceNotIncreasing, Signals};
+use crate::queue::{EdgeQueue, EpochLookup, QueueWatch, UnsupportedOverload};
 use crate::run::{
     FailureReason, NodeInstance, NodeInstanceId, NodeInstanceState, NodeInstanceStateConflict, Run,
-    RunStateConflict,
+    RunState, RunStateConflict,
 };
 
 /// An instance of the run is not in a state the step acts from, so nothing moved. `current` is
@@ -253,6 +258,9 @@ impl<P> Driven<P> {
 pub struct RunController<P> {
     run: Run,
     nodes: Vec<Driven<P>>,
+    layers: Vec<Vec<usize>>,
+    signals: Arc<Signals>,
+    watches: Vec<QueueWatch<P>>,
 }
 
 impl<P: Send + 'static> RunController<P> {
@@ -267,6 +275,23 @@ impl<P: Send + 'static> RunController<P> {
     /// the planned identity, [`CreateControllerError::UnsupportedOverload`] when an edge's policy
     /// is `cancel` or `supersede`. No run is created.
     pub fn create(
+        planned: &PlannedPipeline,
+        declaration: &Declaration,
+        epochs: impl EpochLookup + 'static,
+        implement: impl FnMut(&Node) -> Box<dyn NodeImplementation<P>>,
+    ) -> Result<Self, CreateControllerError> {
+        Self::create_as(RunId::generate(), planned, declaration, epochs, implement)
+    }
+
+    /// As [`RunController::create`], with the run created under `run_id` instead of a generated
+    /// identity ([`Run::create_as`]), so that the node implementations `implement` returns can
+    /// know the run they take part in before it exists.
+    ///
+    /// # Errors
+    ///
+    /// As [`RunController::create`].
+    pub fn create_as(
+        run_id: RunId,
         planned: &PlannedPipeline,
         declaration: &Declaration,
         epochs: impl EpochLookup + 'static,
@@ -302,12 +327,34 @@ impl<P: Send + 'static> RunController<P> {
                 endpoints: Some(NodeEndpoints::default()),
             })
             .collect();
+        let signals = Arc::new(Signals::default());
+        let layers = Self::layers(
+            &nodes,
+            queues.iter().map(|(_, from, _, to, _)| (*from, *to)),
+        );
+        let mut watches = Vec::new();
         for (from_port, from, to_port, to, queue) in queues {
+            watches.push(queue.watch());
+            let edge_id = queue.edge_id();
             let (sender, receiver) = queue.split();
+            let source = from.filter(|node_id| {
+                nodes.iter().any(|driven| {
+                    driven.node.node_id() == *node_id && driven.node.role() == NodeRole::Source
+                })
+            });
+            if let Some(node_id) = source {
+                signals.source_edge(node_id);
+            }
+            let endpoint: Box<dyn OutputEndpoint<P>> = Box::new(GuardedSender::new(
+                sender,
+                edge_id,
+                source,
+                Arc::clone(&signals),
+            ));
             if let Some(endpoints) = Self::endpoints_of(&mut nodes, from) {
                 endpoints.outputs.push(NodeOutput {
                     port_id: from_port,
-                    endpoint: Box::new(sender),
+                    endpoint,
                 });
             }
             if let Some(endpoints) = Self::endpoints_of(&mut nodes, to) {
@@ -317,8 +364,69 @@ impl<P: Send + 'static> RunController<P> {
                 });
             }
         }
-        let (run, _) = Run::create(planned);
-        Ok(Self { run, nodes })
+        let (run, _) = Run::create_as(run_id, planned);
+        Ok(Self {
+            run,
+            nodes,
+            layers,
+            signals,
+            watches,
+        })
+    }
+
+    /// The nodes in drain order: layers of indices into `nodes`, each layer fed only by edges
+    /// from earlier layers, so upstream drains first. Nodes on a cycle, which no layer can hold
+    /// before the others, make up the last layer together.
+    fn layers(
+        nodes: &[Driven<P>],
+        edges: impl Iterator<Item = (Option<NodeId>, Option<NodeId>)>,
+    ) -> Vec<Vec<usize>> {
+        let index = |node_id: Option<NodeId>| {
+            node_id.and_then(|node_id| {
+                nodes
+                    .iter()
+                    .position(|driven| driven.node.node_id() == node_id)
+            })
+        };
+        let edges: Vec<(usize, usize)> = edges
+            .filter_map(|(from, to)| Some((index(from)?, index(to)?)))
+            .filter(|(from, to)| from != to)
+            .collect();
+        let mut placed = vec![false; nodes.len()];
+        let mut layers = Vec::new();
+        loop {
+            let layer: Vec<usize> = (0..nodes.len())
+                .filter(|&node| {
+                    !placed[node] && edges.iter().all(|&(from, to)| to != node || placed[from])
+                })
+                .collect();
+            if layer.is_empty() {
+                break;
+            }
+            for &node in &layer {
+                placed[node] = true;
+            }
+            layers.push(layer);
+        }
+        let rest: Vec<usize> = (0..nodes.len()).filter(|&node| !placed[node]).collect();
+        if !rest.is_empty() {
+            layers.push(rest);
+        }
+        layers
+    }
+
+    /// Moves the run to `run`. A request the run no longer admits is dropped, and once the run is
+    /// terminal no node holds endpoints it was never handed, so every edge queue nobody took is
+    /// dropped with the run's end.
+    fn set_run(&mut self, run: Run) {
+        let state = run.state();
+        self.run = run;
+        self.signals.run_moved(state);
+        if state.is_terminal() {
+            for driven in &mut self.nodes {
+                driven.endpoints = None;
+            }
+        }
     }
 
     /// Runs `inference.graph.ValidateRun`: Created to Validating. No instance exists yet.
@@ -327,7 +435,7 @@ impl<P: Send + 'static> RunController<P> {
     ///
     /// [`RunStateConflict`] when the run is not Created; nothing moves.
     pub fn validate(&mut self) -> Result<(), RunStateConflict> {
-        self.run = self.run.validate()?.0;
+        self.set_run(self.run.validate()?.0);
         Ok(())
     }
 
@@ -345,7 +453,7 @@ impl<P: Send + 'static> RunController<P> {
         if let Some(described) = self.nodes.iter().find(|driven| driven.instance.is_some()) {
             return Err(RunError::Instance(described.conflict()));
         }
-        self.run = preparing;
+        self.set_run(preparing);
         for index in 0..self.nodes.len() {
             let driven = &mut self.nodes[index];
             driven.implementation.describe(&driven.node).await;
@@ -385,12 +493,14 @@ impl<P: Send + 'static> RunController<P> {
             let answer = driven.implementation.start(endpoints).await;
             self.answered(index, answer, NodeInstance::start).await?;
         }
-        self.run = active;
+        self.set_run(active);
         Ok(())
     }
 
-    /// Runs `inference.graph.DrainRun`: Active to Draining, then drains each instance. The run
-    /// moves first; see [`RunController`] on an abandoned drain.
+    /// Runs `inference.graph.DrainRun`: Active to Draining, then drains the instances, upstream
+    /// before downstream: each layer of nodes fed only by earlier layers drains together, and the
+    /// next starts once every node of it has answered. The run moves first; see
+    /// [`RunController`] on an abandoned drain.
     ///
     /// # Errors
     ///
@@ -400,12 +510,47 @@ impl<P: Send + 'static> RunController<P> {
     pub async fn drain(&mut self) -> Result<(), RunError> {
         let draining = self.run.drain().map_err(RunError::Conflict)?.0;
         self.require(&[NodeInstanceState::Started])?;
-        self.run = draining;
-        for index in 0..self.nodes.len() {
-            let answer = self.nodes[index].implementation.drain().await;
-            self.answered(index, answer, NodeInstance::drain).await?;
+        self.set_run(draining);
+        for layer in self.layers.clone() {
+            for (index, answer) in self.drain_layer(&layer).await {
+                self.answered(index, answer, NodeInstance::drain).await?;
+            }
         }
         Ok(())
+    }
+
+    /// Drains the nodes of `layer` together and answers each one's answer, in the order of
+    /// `layer`, once every one of them has answered.
+    async fn drain_layer(&mut self, layer: &[usize]) -> Vec<(usize, Result<(), NodeError>)> {
+        let mut draining: Vec<(usize, NodeFuture<'_, Result<(), NodeError>>)> = Vec::new();
+        for (index, driven) in self.nodes.iter_mut().enumerate() {
+            if layer.contains(&index) {
+                draining.push((index, driven.implementation.drain()));
+            }
+        }
+        let mut answers: Vec<(usize, Option<Result<(), NodeError>>)> =
+            draining.iter().map(|(index, _)| (*index, None)).collect();
+        future::poll_fn(|cx| {
+            let mut pending = false;
+            for ((_, drain), (_, answer)) in draining.iter_mut().zip(answers.iter_mut()) {
+                if answer.is_none() {
+                    match drain.as_mut().poll(cx) {
+                        Poll::Ready(answered) => *answer = Some(answered),
+                        Poll::Pending => pending = true,
+                    }
+                }
+            }
+            if pending {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        })
+        .await;
+        answers
+            .into_iter()
+            .filter_map(|(index, answer)| Some((index, answer?)))
+            .collect()
     }
 
     /// Runs `inference.graph.CompleteRun`: stops each Draining instance, then moves the run from
@@ -423,7 +568,7 @@ impl<P: Send + 'static> RunController<P> {
                 self.stop(index).await.map_err(RunError::Instance)?;
             }
         }
-        self.run = completed;
+        self.set_run(completed);
         Ok(())
     }
 
@@ -437,7 +582,7 @@ impl<P: Send + 'static> RunController<P> {
     pub async fn cancel(&mut self) -> Result<(), RunError> {
         let cancelled = self.run.cancel().map_err(RunError::Conflict)?.0;
         self.wind_down().await.map_err(RunError::Instance)?;
-        self.run = cancelled;
+        self.set_run(cancelled);
         Ok(())
     }
 
@@ -451,7 +596,7 @@ impl<P: Send + 'static> RunController<P> {
     pub async fn fail(&mut self, failure: FailureReason) -> Result<(), RunError> {
         let failed = self.run.fail(failure).map_err(RunError::Conflict)?.0;
         self.wind_down().await.map_err(RunError::Instance)?;
-        self.run = failed;
+        self.set_run(failed);
         Ok(())
     }
 
@@ -481,8 +626,92 @@ impl<P: Send + 'static> RunController<P> {
         let failed = self.run.fail(failure).map_err(FailNodeError::Run)?.0;
         self.nodes[index].instance = Some(instance);
         self.wind_down().await.map_err(FailNodeError::Instance)?;
-        self.run = failed;
+        self.set_run(failed);
         Ok(())
+    }
+
+    /// The handle through which a caller asks [`RunController::drive`] to cancel or drain the run
+    /// while the loop holds the controller.
+    #[must_use]
+    pub fn requests(&self) -> RunRequests {
+        RunRequests {
+            signals: Arc::clone(&self.signals),
+        }
+    }
+
+    /// A weak reference to the queue of each edge of the run, in the declaration order of the
+    /// edges; none keeps a queue alive.
+    #[must_use]
+    pub fn queues(&self) -> Vec<QueueWatch<P>> {
+        self.watches.clone()
+    }
+
+    /// The run loop: drives an Active run to its end and returns once it is terminal.
+    ///
+    /// From Active it waits until a request arrives through [`RunController::requests`] or every
+    /// node of role `source` has sent its end of input, a control event of kind `stop`, on every
+    /// edge it feeds. A cancel request issues `inference.graph.CancelRun`
+    /// ([`RunController::cancel`]); a drain request or the end of input issues `DrainRun`
+    /// ([`RunController::drain`]), which returns once every instance has drained, and then
+    /// `CompleteRun` ([`RunController::complete`]). A cancel asked for while the nodes drain
+    /// abandons the drain, as the "Abandoned steps" table says, and issues `CancelRun`, which a
+    /// Draining run takes. A request the run's state does not admit is dropped, so the loop
+    /// issues no command the state machine would refuse; a run already Draining is completed,
+    /// and a terminal run is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`RunError::Conflict`] when the run is Created, Validating or Preparing: the loop drives
+    /// nothing before the run is Active. Otherwise the error of the step that did not end where
+    /// it was asked to; a node failure leaves the run Failed.
+    pub async fn drive(&mut self) -> Result<(), RunError> {
+        loop {
+            match self.run.state() {
+                RunState::Active => match self.signals.next_from_active().await {
+                    Next::Cancel => self.cancel().await?,
+                    Next::Drain => {
+                        if let Some(drained) = self.drain_unless_cancelled().await {
+                            drained?;
+                        } else {
+                            self.cancel().await?;
+                        }
+                    }
+                },
+                RunState::Draining => {
+                    if self.signals.take_cancel() {
+                        self.cancel().await?;
+                    } else {
+                        self.complete().await?;
+                    }
+                }
+                RunState::Completed | RunState::Failed | RunState::Cancelled => return Ok(()),
+                current @ (RunState::Created | RunState::Validating | RunState::Preparing) => {
+                    return Err(RunError::Conflict(RunStateConflict { current }));
+                }
+            }
+        }
+    }
+
+    /// [`RunController::drain`], abandoned as soon as a cancel is asked for: none then, and the
+    /// run is left as the "Abandoned steps" table of [`RunController`] says, for
+    /// [`RunController::cancel`] to wind down.
+    async fn drain_unless_cancelled(&mut self) -> Option<Result<(), RunError>> {
+        let signals = Arc::clone(&self.signals);
+        let mut drain = pin!(self.drain());
+        future::poll_fn(|cx| {
+            if signals.poll_cancel(cx) {
+                return Poll::Ready(None);
+            }
+            drain.as_mut().poll(cx).map(Some)
+        })
+        .await
+    }
+
+    /// Every envelope of user content the run refused because its sequence did not increase on
+    /// its stream, in the order the run refused them; none of them reached an edge.
+    #[must_use]
+    pub fn refusals(&self) -> Vec<SequenceNotIncreasing> {
+        self.signals.refusals()
     }
 
     /// The run.
@@ -549,7 +778,7 @@ impl<P: Send + 'static> RunController<P> {
                     .0;
                 self.nodes[index].instance = Some(instance);
                 self.wind_down().await.map_err(RunError::Instance)?;
-                self.run = failed;
+                self.set_run(failed);
                 Err(RunError::NodeFailed(failure))
             }
         }

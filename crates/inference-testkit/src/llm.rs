@@ -14,7 +14,11 @@
 //!
 //! It declares a maximum concurrency of one and holds to it: while one generation of a generator,
 //! or of a clone of it, runs, a second start is refused with [`ConcurrencyLimitReached`]. A
-//! generation runs until its handle is dropped.
+//! generation runs until its handle is dropped. [`MockGeneration::emit`] emits a delta outside
+//! the script, which a generation no longer Active refuses as stale.
+//!
+//! Behind the `run` feature, [`ModelNode`] is the model node of a text-only pipeline the
+//! runtime's run controller drives: one generation per run, one committed segment per input.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -30,6 +34,15 @@ use inference_llm::{
     AdmittedInput, CONTRACT_REVISION, ConcurrencyLimitReached, GenerationEvent, GenerationHandle,
     GenerationOutput, GenerationRequest, Generator, InputRefused,
 };
+use inference_text::TextDelta;
+
+/// The mock model node of a text-only pipeline, behind the `run` feature: a [`ModelNode`] answers
+/// each input on one generation of a [`MockGenerator`] per run.
+#[cfg(feature = "run")]
+mod node;
+
+#[cfg(feature = "run")]
+pub use node::{ModelHandle, ModelNode};
 
 /// What a [`MockGenerator`] claims, and so how it behaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -209,6 +222,23 @@ impl Iterator for MockGeneration {
 }
 
 impl MockGeneration {
+    /// Runs `inference.stream.EmitTextDelta` for `text` now, outside the script, and queues the
+    /// `TextDelta` for delivery; the segment stays Tentative. Computation may outlive the
+    /// cancellation of delivery (`docs/design/inference.md:641`), so a caller may call it on a
+    /// generation that is no longer Active, as a model still computing does.
+    ///
+    /// # Errors
+    ///
+    /// [`GenerationStateConflict`] carrying the generation's state when it is not Active, the
+    /// `stale-generation` outcome of `EmitTextDelta`: no segment is created and nothing is
+    /// delivered.
+    pub fn emit(&mut self, text: impl Into<String>) -> Result<TextDelta, GenerationStateConflict> {
+        let delta = self.output.emit(text.into())?;
+        self.delivered
+            .push_back(GenerationEvent::TextDelta(delta.clone()));
+        Ok(delta)
+    }
+
     /// Emits `text` as one segment and commits it, queueing both events for delivery.
     fn deliver_segment(&mut self, text: String) {
         let delta = self
