@@ -16,7 +16,8 @@ pub mod model;
 pub mod policy;
 
 /// `inference.graph`: the in-memory pipeline declaration, its nodes, ports, edges and bindings,
-/// their validation, their planning and their views; empty of runs until the run stores land.
+/// their validation, their planning, the runs of planned pipelines with their node instances, and
+/// their views.
 pub mod graph;
 
 /// `inference.stream`: the in-memory stores of the turns, spans, generations and output segments,
