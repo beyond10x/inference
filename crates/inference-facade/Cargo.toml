@@ -1,0 +1,25 @@
+[package]
+name = "inference-facade"
+description = "The optional session API of the inference framework: an application-level interaction lifetime above graph runs, opened over a planned pipeline, driving its run through the pipeline's exposures and delivering one session event vocabulary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+inference-audio = { path = "../inference-audio" }
+inference-core = { path = "../inference-core" }
+inference-pipeline = { path = "../inference-pipeline" }
+inference-runtime = { path = "../inference-runtime" }
+inference-text = { path = "../inference-text" }
+inference-tools = { path = "../inference-tools" }
+uuid.workspace = true
+
+[dev-dependencies]
+inference-llm = { path = "../inference-llm" }
+inference-testkit = { path = "../inference-testkit", features = ["llm", "run", "stt", "tts"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true

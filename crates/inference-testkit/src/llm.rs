@@ -25,13 +25,18 @@
 //! the round, taken one by one in the round's order. The text of a request that integrates an
 //! outcome contains it: the result's JSON, the failure's detail or the rejection's reason.
 //!
+//! The contract's request carries no tool set, so a caller offers one to the mock directly
+//! ([`MockGenerator::start_offering`]); the generator records every set it was offered
+//! ([`MockGenerator::offered`]).
+//!
 //! Behind the `run` feature, [`ModelNode`] is the model node of a text-only pipeline the
-//! runtime's run controller drives: one generation per run, one committed segment per input, and,
-//! given tools, the tool loop of that generation.
+//! runtime's run controller drives: one generation per run, one committed segment per input,
+//! given tools, the tool loop of that generation and, given a turns input, a generation started at
+//! the completion of the first turn.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use inference_core::generation::{
     GenerationCancelled, GenerationState, GenerationStateConflict, GenerationSuperseded,
@@ -45,7 +50,7 @@ use inference_llm::{
     GenerationOutput, GenerationRequest, Generator, InputRefused,
 };
 use inference_text::TextDelta;
-use inference_tools::{Json, ToolId};
+use inference_tools::{Json, Tool, ToolId};
 
 /// The mock model node of a text-only pipeline, behind the `run` feature: a [`ModelNode`] answers
 /// each input on one generation of a [`MockGenerator`] per run.
@@ -140,6 +145,7 @@ pub struct MockGenerator {
     script: Vec<String>,
     tools: Option<ToolScript>,
     running: Running,
+    offered: Offered,
 }
 
 /// What a generator scripted for tools proposes: every proposal of `round`, at the end of each
@@ -174,6 +180,7 @@ impl MockGenerator {
             script: script.into_iter().map(Into::into).collect(),
             tools: None,
             running: Running::default(),
+            offered: Offered::default(),
         }
     }
 
@@ -217,6 +224,62 @@ impl MockGenerator {
             }),
             ..self
         }
+    }
+}
+
+impl MockGenerator {
+    /// Starts a generation for `request` as [`Generator::start`] does, offering the model
+    /// `tools`, the tool set a caller such as an LLM node declares to it. The contract's
+    /// [`GenerationRequest`] carries no tool set, so the mock takes it here and records it once
+    /// the generation started ([`MockGenerator::offered`]); what its script proposes does not
+    /// depend on it.
+    ///
+    /// # Errors
+    ///
+    /// The [`ConcurrencyLimitReached`] of [`Generator::start`]; nothing is recorded.
+    pub fn start_offering(
+        &mut self,
+        request: GenerationRequest,
+        tools: &[Tool],
+    ) -> Result<MockGeneration, ConcurrencyLimitReached> {
+        let generation = self.start(request)?;
+        self.offered.record(tools.to_vec());
+        Ok(generation)
+    }
+
+    /// Every tool set offered to a generation of the generator, or of a clone of it, in the order
+    /// the generations started, each in the order it was offered.
+    #[must_use]
+    pub fn offered(&self) -> Vec<Vec<Tool>> {
+        self.offered.read()
+    }
+}
+
+/// The tool sets offered to the generations of one generator, shared by its clones.
+#[derive(Debug, Clone, Default)]
+struct Offered(Arc<Mutex<Vec<Vec<Tool>>>>);
+
+impl PartialEq for Offered {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Offered {}
+
+impl Offered {
+    fn record(&self, tools: Vec<Tool>) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(tools);
+    }
+
+    fn read(&self) -> Vec<Vec<Tool>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 

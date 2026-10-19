@@ -396,17 +396,25 @@ const TOOLS_SCENARIOS: [&str; 53] = [
     "inference.tools.ToolCall/transition/start/by/inference.tools.StartToolCall/started",
 ];
 
-/// Every `inference.session` scenario the suite synthesizes, 28: opening a session over a planned
+/// Every `inference.session` scenario the suite synthesizes, 62: opening a session over a planned
 /// pipeline, attaching a run with the forced pipeline mismatch, readiness with and without a
-/// current run, the drain and the close, their transitions and every state refusal.
-const SESSION_SCENARIOS: [&str; 28] = [
+/// current run, sending and committing input to a Ready session, interrupting it, recording
+/// history, switching its pipeline with the forced refusals, the drain, the close and the cancel,
+/// their transitions and every state refusal.
+const SESSION_SCENARIOS: [&str; 62] = [
     "inference.session.AttachRun/outcome/attached",
     "inference.session.AttachRun/outcome/no-such-session",
     "inference.session.AttachRun/outcome/pipeline-mismatch",
+    "inference.session.CancelSession/outcome/cancelled",
+    "inference.session.CancelSession/outcome/no-such-session",
     "inference.session.CloseSession/outcome/draining",
     "inference.session.CloseSession/outcome/no-such-session",
+    "inference.session.CommitInput/outcome/committed",
+    "inference.session.CommitInput/outcome/no-such-session",
     "inference.session.CompleteSessionClose/outcome/closed",
     "inference.session.CompleteSessionClose/outcome/no-such-session",
+    "inference.session.Interrupt/outcome/interrupted",
+    "inference.session.Interrupt/outcome/no-such-session",
     "inference.session.MarkSessionReady/outcome/no-current-run",
     "inference.session.MarkSessionReady/outcome/no-such-session",
     "inference.session.MarkSessionReady/outcome/ready",
@@ -414,20 +422,48 @@ const SESSION_SCENARIOS: [&str; 28] = [
     "inference.session.OpenSession/outcome/not-planned",
     "inference.session.OpenSession/outcome/opened",
     "inference.session.OpenSession/outcome/unknown-pipeline",
+    "inference.session.RecordHistory/outcome/closed",
+    "inference.session.RecordHistory/outcome/no-such-session",
+    "inference.session.RecordHistory/outcome/recorded",
+    "inference.session.SendInput/outcome/no-such-session",
+    "inference.session.SendInput/outcome/sent",
     "inference.session.Session/state/Closed/refuses/inference.session.AttachRun",
+    "inference.session.Session/state/Closed/refuses/inference.session.CancelSession",
     "inference.session.Session/state/Closed/refuses/inference.session.CloseSession",
+    "inference.session.Session/state/Closed/refuses/inference.session.CommitInput",
     "inference.session.Session/state/Closed/refuses/inference.session.CompleteSessionClose",
+    "inference.session.Session/state/Closed/refuses/inference.session.Interrupt",
     "inference.session.Session/state/Closed/refuses/inference.session.MarkSessionReady",
+    "inference.session.Session/state/Closed/refuses/inference.session.SendInput",
+    "inference.session.Session/state/Closed/refuses/inference.session.SwitchPipeline",
     "inference.session.Session/state/Draining/refuses/inference.session.AttachRun",
     "inference.session.Session/state/Draining/refuses/inference.session.CloseSession",
+    "inference.session.Session/state/Draining/refuses/inference.session.CommitInput",
+    "inference.session.Session/state/Draining/refuses/inference.session.Interrupt",
     "inference.session.Session/state/Draining/refuses/inference.session.MarkSessionReady",
+    "inference.session.Session/state/Draining/refuses/inference.session.SendInput",
+    "inference.session.Session/state/Draining/refuses/inference.session.SwitchPipeline",
+    "inference.session.Session/state/Opened/refuses/inference.session.CommitInput",
     "inference.session.Session/state/Opened/refuses/inference.session.CompleteSessionClose",
+    "inference.session.Session/state/Opened/refuses/inference.session.Interrupt",
+    "inference.session.Session/state/Opened/refuses/inference.session.SendInput",
+    "inference.session.Session/state/Opened/refuses/inference.session.SwitchPipeline",
     "inference.session.Session/state/Ready/refuses/inference.session.CompleteSessionClose",
     "inference.session.Session/state/Ready/refuses/inference.session.MarkSessionReady",
     "inference.session.Session/transition/attach/by/inference.session.AttachRun/attached",
+    "inference.session.Session/transition/cancel/by/inference.session.CancelSession/cancelled",
     "inference.session.Session/transition/close/by/inference.session.CompleteSessionClose/closed",
+    "inference.session.Session/transition/commit/by/inference.session.CommitInput/committed",
     "inference.session.Session/transition/drain/by/inference.session.CloseSession/draining",
+    "inference.session.Session/transition/interrupt/by/inference.session.Interrupt/interrupted",
     "inference.session.Session/transition/ready/by/inference.session.MarkSessionReady/ready",
+    "inference.session.Session/transition/send/by/inference.session.SendInput/sent",
+    "inference.session.Session/transition/switch/by/inference.session.SwitchPipeline/switched",
+    "inference.session.SwitchPipeline/outcome/mode-mismatch",
+    "inference.session.SwitchPipeline/outcome/no-such-session",
+    "inference.session.SwitchPipeline/outcome/not-planned",
+    "inference.session.SwitchPipeline/outcome/switched",
+    "inference.session.SwitchPipeline/outcome/unknown-pipeline",
 ];
 
 fn repository_root() -> PathBuf {
