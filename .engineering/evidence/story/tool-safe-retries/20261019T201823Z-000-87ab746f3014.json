@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T20:18:23Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-safe-retries",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --all-features --test tool_retries (VERIFIED, new behaviour: on base cf6bc47 with stubs the 6 cases fail 6 of 6, a redelivered call failing the node; treatment passes 6, the adversary's 7 guards in adversary1_tool_retries pass and each kills one of 5 mutants the unit's suite let through; tool_nodes and adversary1_tool_nodes stay green; conform 296 of 317, 21 unsupported, unchanged)"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T20:15:46Z",
+  "actor": "human:timo",
+  "artifact": "story:endpoint-controller",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-endpoint-controller-pass-1",
+    "reference": "F3 ess stream.yaml declares SpeechStarted and SpeechEnded; vad.rs envelope kinds are the declared names, guarded by a vad unit case reading stream.yaml; supersedes the no-op recorded earlier in this pass",
+    "review": "review-result:adversary-endpoint-controller-pass-1",
+    "outcome": "fixed"
+  }
+}

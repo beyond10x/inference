@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:tool-safe-retries
 kind: story
-status: active
+status: implemented
 title: Safe tool retries and at-most-once start
 summary: Executor retries by side-effect class with an unchanged call_id as the idempotency key, no automatic retry of a non-idempotent write, and one execution when an authorized call is delivered twice.
 relations:
@@ -20,10 +20,11 @@ scope:
   path: crates/inference-tools
 - confidence: inferred
   path: ess/domains/tools.yaml
-revision: 12
+revision: 13
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T19:33:34Z", actor: "human:timo", revision: 11}
 - {from: "proposed", to: "active", at: "2026-10-19T19:33:34Z", actor: "human:timo", revision: 12}
+- {from: "active", to: "implemented", at: "2026-10-19T20:18:23Z", actor: "human:timo", revision: 13, decided_on: {"recorded":{"test_result":1,"review_outcome":5,"verification":1}}}
 ---
 ## Context
 

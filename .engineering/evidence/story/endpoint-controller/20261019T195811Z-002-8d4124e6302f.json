@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T19:58:11Z",
+  "actor": "human:timo",
+  "artifact": "story:endpoint-controller",
+  "kind": "story",
+  "revision": 20,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-endpoint-controller-pass-1",
+    "reference": "F5c pipeline vad.rs attack samples round up; guarded by adversary1_endpoint_controller rounding case",
+    "review": "review-result:adversary-endpoint-controller-pass-1",
+    "outcome": "fixed"
+  }
+}
