@@ -1,0 +1,16 @@
+[package]
+name = "stt-only"
+description = "Example: speech recognition alone, against the STT contract and the mock recogniser."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+inference-stt = { path = "../../crates/inference-stt" }
+inference-testkit = { path = "../../crates/inference-testkit", features = ["stt"] }
+
+[lints]
+workspace = true
