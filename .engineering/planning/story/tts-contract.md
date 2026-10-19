@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:tts-contract
 kind: story
-status: draft
+status: implemented
 title: 'TTS contract with a mock synthesiser: input completion and audio emission declared apart'
 summary: inference-tts is the synthesis contract consuming committed OutputSegments and emitting audio frames; the testkit mock synthesiser keeps synthesised, queued and played apart and §23.1 test 3 reflects its declared semantics.
 relations:
@@ -19,7 +19,11 @@ scope:
   path: crates/inference-testkit/tests/tts.rs
 - confidence: cited
   path: crates/inference-tts
-revision: 14
+revision: 18
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T07:24:42Z", actor: "human:timo", revision: 15, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "proposed", to: "active", at: "2026-10-19T07:24:42Z", actor: "human:timo", revision: 16, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "active", to: "implemented", at: "2026-10-19T07:52:28Z", actor: "human:timo", revision: 18, decided_on: {"recorded":{"test_result":1,"review_outcome":6,"verification":1}}}
 ---
 ## Context
 
@@ -69,6 +73,4 @@ read from this story's body or from the body of the story that pre-declares it, 
 
 ## Frame length
 
-Added 2026-10-19 from wave 3 (`review-result:adversary-audio-vocabulary-pass-2`, judgement J-1).
-
-`inference-audio` does not tie `AudioFrame.data` length to `sample_count`, channels and the encoding width (`crates/inference-audio/src/lib.rs`, `AudioFrame`), and ESS `types:` cannot carry that invariant. The mock synthesiser of this story is the first producer of frames: it emits frames whose `data.len()` equals `sample_count * channels * width(encoding)`, and a case asserts it. Whether `inference-audio` itself refuses a mismatched frame is decided here, with the first producer, not in the vocabulary story.
+Decided in wave 8 by the implementor of this story: `inference-audio` does not refuse a frame whose `data` length disagrees with `sample_count * channels * width(encoding)`. `ess/domains/audio.yaml` cannot state the invariant, so the serde wire keeps admitting what the specification admits (existing pinned cases deserialize such frames, e.g. `crates/inference-audio/tests/adversary2_bytes_and_narrowing.rs`, two samples with one byte of data). `inference-audio` gains `AudioEncoding::width` and `AudioFormat::data_len(sample_count)`. The producing contract refuses instead: `inference_tts::SynthesisOutput::audio` refuses a mismatched frame with `FrameLengthMismatch`, so every synthesiser, not only the mock, emits well-formed frames. Cases: `crates/inference-testkit/tests/tts.rs` `every_frame_carries_sample_count_times_channels_times_encoding_width_bytes` (both encodings, one and two channels, four configurations) and `crates/inference-tts/tests/synthesis_output.rs` `a_frame_whose_data_length_disagrees_with_its_samples_is_refused`.

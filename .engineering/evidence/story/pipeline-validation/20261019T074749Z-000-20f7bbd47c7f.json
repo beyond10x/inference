@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T07:47:49Z",
+  "actor": "human:timo",
+  "artifact": "story:pipeline-validation",
+  "kind": "story",
+  "revision": 18,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-pipeline-validation-pass-1",
+    "reference": "M validation.rs:148 guard",
+    "review": "review-result:adversary-pipeline-validation-pass-1",
+    "outcome": "fixed"
+  }
+}

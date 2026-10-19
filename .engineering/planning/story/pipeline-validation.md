@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:pipeline-validation
 kind: story
-status: draft
+status: implemented
 title: 'Validate a pipeline: the structural checks of §10.2 refuse an incompatible graph before it runs'
 summary: ValidatePipeline with checks 1, 2, 3, 5, 6 and 9 and IncompatibleGraph findings; §23.3 tests 1 and 2
 relations:
@@ -22,7 +22,11 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 16
+revision: 19
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T07:24:42Z", actor: "human:timo", revision: 17}
+- {from: "proposed", to: "active", at: "2026-10-19T07:24:42Z", actor: "human:timo", revision: 18}
+- {from: "active", to: "implemented", at: "2026-10-19T07:52:28Z", actor: "human:timo", revision: 19, decided_on: {"recorded":{"test_result":1,"review_outcome":8,"verification":1}}}
 ---
 # Story: pipeline-validation
 

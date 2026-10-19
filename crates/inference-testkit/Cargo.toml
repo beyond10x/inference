@@ -11,7 +11,7 @@ publish = false
 [features]
 stt = ["dep:inference-stt"]
 llm = ["dep:inference-llm"]
-tts = []
+tts = ["dep:inference-tts"]
 
 [dependencies]
 inference-core = { path = "../inference-core" }
@@ -19,6 +19,7 @@ inference-llm = { path = "../inference-llm", optional = true }
 inference-pipeline = { path = "../inference-pipeline" }
 inference-stt = { path = "../inference-stt", optional = true }
 inference-text = { path = "../inference-text" }
+inference-tts = { path = "../inference-tts", optional = true }
 uuid.workspace = true
 
 [dev-dependencies]

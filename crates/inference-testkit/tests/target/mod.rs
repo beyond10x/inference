@@ -17,6 +17,11 @@
 //! envelope's `sequence` orders one stream only, so the merge order across domains is the
 //! target's, the recorder's, and the one thing a module reads that no store holds.
 //!
+//! A scenario forcing an `external` outcome ([`ConformanceTarget::configure_external_outcome`]) goes
+//! to the module of the command's domain, which accepts it only for an outcome it answers and its
+//! specification declares external; [`Stores::force`] holds it until the next invocation of that
+//! command ([`Stores::forced`]).
+//!
 //! The suite writes every number of a request as a float, so an ESS `Integer` arrives as `1.0`.
 //! [`integer`] reads it back as an `i64` and refuses a fractional or out-of-range value as an
 //! error, never as a pass; no request is deserialized whole into an `inference-core` type.
@@ -31,6 +36,7 @@ mod tools;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use ess_conformance::scenario::{CommandRef, OutcomeRef};
 use ess_conformance::target::{
     ConformanceTarget, EventObservationRequest, ExternalOutcomeControl, ImplementationIdentity,
     ObservedEvent, RedeliveryRequest, ScenarioContext, SemanticCommandRequest,
@@ -56,6 +62,7 @@ pub struct Stores {
     pub tools: tools::State,
     pub session: session::State,
     publication: Publication,
+    forced: Option<OutcomeRef>,
 }
 
 /// The target's one publication order: for each domain whose store records events, the position
@@ -96,6 +103,18 @@ impl Stores {
                 positions.push(u64::try_from(placed).unwrap_or(u64::MAX));
             }
         }
+    }
+
+    /// Forces `outcome` on the next invocation of its command: a test adapter control, which a
+    /// module accepts only for an outcome its specification declares `external`.
+    pub fn force(&mut self, outcome: OutcomeRef) {
+        self.forced = Some(outcome);
+    }
+
+    /// The outcome forced on `command`, which lapses with this invocation; none when no outcome or
+    /// one of another command is forced, and an invocation of another command leaves it in place.
+    pub fn forced(&mut self, command: &CommandRef) -> Option<OutcomeRef> {
+        self.forced.take_if(|outcome| &outcome.command == command)
     }
 
     /// The position, from 1, of the `index`th event (from 0) the `inference.model` store recorded,
@@ -264,10 +283,15 @@ impl ConformanceTarget for Target {
         &self,
         request: ExternalOutcomeControl,
     ) -> Result<(), TargetError> {
-        Err(TargetError::unsupported(
-            format!("forcing `{}`", request.force),
-            "no outcome of the stores is declared external",
-        ))
+        let stores = &mut *self.stores.borrow_mut();
+        let name = request.force.command.to_string();
+        match domain(&name) {
+            graph::DOMAIN => graph::configure_external_outcome(stores, &request),
+            _ => Err(TargetError::unsupported(
+                format!("forcing `{}`", request.force),
+                "no answered outcome of this domain is declared external",
+            )),
+        }
     }
 
     fn redeliver_event(&self, request: RedeliveryRequest) -> Result<(), TargetError> {

@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T07:52:28Z",
+  "actor": "human:timo",
+  "artifact": "story:tts-contract",
+  "kind": "story",
+  "revision": 17,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-tts -p inference-testkit --all-features (VERIFIED, new behaviour: baseline wave/8 4a96264 has no inference-tts crate and an empty tts feature; treatment passes 8 + 246: design 23.1 test 3, each configuration accepts input and emits audio exactly as it claims, Played only on the sink acknowledgement and then refusing discard)"
+  }
+}

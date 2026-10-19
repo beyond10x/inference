@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T07:50:38Z",
+  "actor": "human:timo",
+  "artifact": "story:tts-contract",
+  "kind": "story",
+  "revision": 17,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-tts-contract-pass-1",
+    "reference": "F2 inference-tts/src/lib.rs:332 offer by value",
+    "review": "review-result:adversary-tts-contract-pass-1",
+    "outcome": "fixed"
+  }
+}
