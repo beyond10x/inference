@@ -1,0 +1,9 @@
+during-16k.wav: "And what about Portugal?", 16000 Hz, mono, 16-bit signed PCM, 29631 samples.
+
+The input the live native duplex probe sends during the answer to question-16k.wav; its marker, "portugal", is said by neither the question nor its answer.
+
+Generated with eSpeak NG 1.52.0 and SoX 14.8.0.1:
+
+espeak-ng -v en-us -s 150 --stdout "And what about Portugal?" | sox -D -t wav - -r 16000 -c 1 -b 16 -e signed-integer during-16k.wav
+
+sha256 37f37504d7dedc05987fdc607389e097272d621f62be5dd1564252fd9cf398df

@@ -12,6 +12,8 @@
 //! assistant text, the assistant audio, the final assistant text ending `END_TURN`, usage events
 //! between. Speech while the assistant's audio plays is barge-in: the replay sends the
 //! interruption notice, one late audio output of the interrupted block and its `INTERRUPTED` end.
+//! Speech after the assistant finished sending audio for the turn, which the caller may still be
+//! playing, is answered with the notice alone.
 //!
 //! Output is paced: one event per `pace`, so a test can speak during a response. [`Faults`] stop
 //! the output after a number of events, close it, or send a service error.
@@ -153,6 +155,7 @@ struct Provider {
     speaking: bool,
     spoken: Vec<u8>,
     playing: Option<String>,
+    answered: bool,
     after_result: Option<String>,
     totals: [u64; 4],
 }
@@ -175,6 +178,7 @@ impl Provider {
             speaking: false,
             spoken: Vec::new(),
             playing: None,
+            answered: false,
             after_result: None,
             totals: [0; 4],
         }
@@ -224,6 +228,7 @@ impl Provider {
             && start["type"] == "AUDIO"
         {
             self.playing = start["contentId"].as_str().map(str::to_owned);
+            self.answered = true;
         }
         if let Some(end) = event["event"].get("contentEnd")
             && end["type"] == "AUDIO"
@@ -259,7 +264,15 @@ impl Provider {
                     self.speaking = true;
                     if let Some(audio) = self.playing.take() {
                         self.barge_in(audio);
+                    } else if self.answered {
+                        self.text_block(
+                            "ASSISTANT",
+                            "SPECULATIVE",
+                            "{ \"interrupted\" : true }",
+                            "INTERRUPTED",
+                        );
                     }
+                    self.answered = false;
                 }
                 if !speech.is_empty() {
                     self.spoken.extend(speech);

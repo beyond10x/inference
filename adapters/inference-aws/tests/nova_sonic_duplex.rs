@@ -173,6 +173,63 @@ fn position(events: &[SessionEvent], what: impl Fn(&SessionEvent) -> bool) -> Op
     events.iter().position(what)
 }
 
+/// The indices of the `SpeechStarted` events.
+fn speech_started(events: &[SessionEvent]) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, SessionEvent::SpeechStarted(_)))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Nova Sonic's interruption notice over an answer it finished generating, which the caller may
+/// still be playing: the response stays completed, and the notice is reported as speech so the
+/// caller can stop playout.
+#[test]
+fn the_notice_over_a_finished_answer_is_reported_as_speech() {
+    let replay = Replay::new(vec![
+        turn("tell me a story", "Once upon a time"),
+        turn("stop", "Sure"),
+    ]);
+    let mut session = model(&replay).open(config()).expect("opens");
+    speak(&mut session, 0, 2);
+    let first_turn = drain(&mut session);
+    let first = created(&first_turn)[0];
+    assert_eq!(
+        session.ledger().response(first).map(|r| r.state()),
+        Some(ResponseState::Completed)
+    );
+
+    for index in 0..2 {
+        session
+            .append_audio(frame(pcm(16_000), 960 + index * 320, 9))
+            .expect("speech");
+    }
+    let spoken = until(&mut session, |event| {
+        matches!(event, SessionEvent::SpeechStarted(_))
+    });
+    assert!(
+        !spoken
+            .iter()
+            .any(|event| matches!(event, SessionEvent::ResponseCancelled(_))),
+        "a completed response is not cancelled: {spoken:#?}"
+    );
+    session
+        .append_audio(frame(pcm(16_000), 1_600, 0))
+        .expect("silence");
+    let rest = drain(&mut session);
+    assert!(
+        speech_started(&rest).is_empty(),
+        "the turn's transcript adds no second report: {rest:#?}"
+    );
+    assert_eq!(transcript(&rest, created(&rest)[0]), "Sure");
+    assert_eq!(
+        session.ledger().response(first).map(|r| r.state()),
+        Some(ResponseState::Completed)
+    );
+}
+
 /// The replay's input events named `name`, waiting up to a second for `count` of them.
 fn wire(replay: &Replay, name: &str, count: usize) -> Vec<Value> {
     let started = Instant::now();
@@ -270,6 +327,17 @@ fn audio_in_gives_audio_and_transcript_out_on_one_response_id() {
     })
     .expect("a response");
     assert!(committed < heard && heard < began, "{events:#?}");
+    assert_eq!(
+        speech_started(&events),
+        vec![committed - 1],
+        "the first user transcript of the turn is reported as speech, once, before the commit"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SpeechStopped(_))),
+        "Nova Sonic reports no end of speech"
+    );
 
     let audio: Vec<&AudioFrame> = events
         .iter()
@@ -335,6 +403,12 @@ fn speech_during_a_response_cancels_it_and_the_next_response_has_a_new_id() {
         |event| matches!(event, SessionEvent::ResponseCancelled(c) if c.response_id == first),
     )
     .expect("the provider's interruption cancels the first response");
+    assert_eq!(
+        speech_started(&rest),
+        vec![cancelled - 1],
+        "the notice is reported as speech just before the cancellation, and the barge-in turn's \
+         transcript adds no second report: {rest:#?}"
+    );
     assert!(
         output_of(&rest[cancelled..]).iter().all(|id| *id != first),
         "nothing of the cancelled response is delivered after it, its late audio neither: {rest:#?}"
@@ -914,6 +988,31 @@ fn a_provider_that_refuses_or_cannot_be_reached_opens_nothing() {
         matches!(&failed, Some(OpenError::Failed(failure)) if failure.kind == SessionFailureKind::TransportClosed),
         "{failed:?}"
     );
+}
+
+/// The live probe's clips: 16 kHz mono PCM16, the follow-up saying a marker the question does not.
+#[test]
+fn the_live_probe_clips_are_lpcm_and_only_the_follow_up_says_the_marker() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for clip in ["question-16k.wav", "during-16k.wav"] {
+        let wav = std::fs::read(fixtures.join(clip)).expect("the clip is committed");
+        assert_eq!(&wav[0..4], b"RIFF", "{clip}");
+        assert_eq!(&wav[8..12], b"WAVE", "{clip}");
+        let channels = u16::from_le_bytes([wav[22], wav[23]]);
+        let rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
+        let bits = u16::from_le_bytes([wav[34], wav[35]]);
+        assert_eq!((channels, rate, bits), (1, 16_000, 16), "{clip}");
+    }
+    let said = |notes: &str| {
+        std::fs::read_to_string(fixtures.join(notes))
+            .expect("the clip's notes are committed")
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_lowercase()
+    };
+    assert!(said("during-16k.txt").contains("portugal"));
+    assert!(!said("question-16k.txt").contains("portugal"));
 }
 
 /// The probe of `native_duplex_evidence`: a question, then during the answer a place the

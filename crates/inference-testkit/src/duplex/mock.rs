@@ -3,7 +3,9 @@
 //! The mock hears speech in any frame holding a byte other than its encoding's silence
 //! ([`AudioEncoding::silence`]) and silence in any other. A frame of speech after silence is the
 //! start of speech; a frame of silence after speech is its end, and with turn detection on it
-//! ends the user turn, as a commit does with turn detection off.
+//! ends the user turn, as a commit does with turn detection off. Where the session reports that
+//! speech is [`SpeechReports`]: where it hears it, or, for [`MockSpeechModel::server_turns`],
+//! where the Nova Sonic binding records it.
 //!
 //! Its recogniser reads the speech bytes of a turn, its silence bytes left out, as text: when
 //! they read as words, that is what it heard; otherwise it heard the `heard` text of the next
@@ -20,7 +22,8 @@
 //! A response streams one step per [`SpeechSessionHandle::next_event`]: its transcript, then
 //! [`AUDIO_FRAMES`] frames of 20 ms silence in the output format, then its usage and its
 //! completion. A [`Reply::Call`] proposes its tool call instead and completes; once the call is
-//! answered, the next response says the reply's `then` with `{result}` replaced by the result.
+//! answered, the next response says the reply's `then` with `{result}` replaced by the result;
+//! a model that creates every response starts it by itself.
 //!
 //! Time is the mock's own: it starts when the session opens, and a `next_event` with nothing to
 //! deliver advances it by `wait`, so the liveness bound is reached by waiting, deterministically.
@@ -94,6 +97,21 @@ pub struct Faults {
     pub close_after: Option<usize>,
 }
 
+/// Where a session reports the user's speech.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechReports {
+    /// Where the mock hears it: speech started at the first frame of speech after silence,
+    /// stopped at the first frame of silence after speech, as a provider that reports its voice
+    /// activity detection does.
+    Heard,
+    /// Where a provider without voice activity events gives the first sign of it, as the Nova
+    /// Sonic binding records it: speech started once per user turn, at the provider's
+    /// interruption notice when a response was created since the turn before (also one already
+    /// completed, whose audio the caller may still be playing), or else just before the
+    /// provider commits the turn; never its end.
+    ProviderNotice,
+}
+
 /// The scripted mock native speech model, in three configurations.
 #[derive(Debug, Clone)]
 pub struct MockSpeechModel {
@@ -102,6 +120,7 @@ pub struct MockSpeechModel {
     script: Vec<ScriptedTurn>,
     faults: Faults,
     restarts: bool,
+    speech: SpeechReports,
 }
 
 /// `pcm_s16le` mono at `sample_rate`.
@@ -187,12 +206,13 @@ impl MockSpeechModel {
         model
     }
 
-    /// A model whose turns are its own: server voice activity detection only with a sensitivity
-    /// to tune, responses created and interrupted by the provider, no cancellation or truncation
-    /// by the caller, PCM at 16 kHz in, tools.
+    /// A model whose turns are its own, as Nova Sonic's: server voice activity detection only
+    /// with a sensitivity to tune, responses created and interrupted by the provider, a tool
+    /// result answered in a new response by itself, no cancellation or truncation by the caller,
+    /// PCM at 16 kHz in, tools. It reports speech as [`SpeechReports::ProviderNotice`].
     #[must_use]
     pub fn server_turns(script: Vec<ScriptedTurn>) -> Self {
-        Self::with(
+        let model = Self::with(
             SpeechCapabilities {
                 input_formats: vec![pcm(16_000)],
                 output_formats: vec![pcm(16_000), pcm(24_000)],
@@ -216,7 +236,15 @@ impl MockSpeechModel {
                 Capability::Interruptible,
             ],
             script,
-        )
+        );
+        model.with_speech_reports(SpeechReports::ProviderNotice)
+    }
+
+    /// The same model reporting the user's speech as `speech` says.
+    #[must_use]
+    pub const fn with_speech_reports(mut self, speech: SpeechReports) -> Self {
+        self.speech = speech;
+        self
     }
 
     /// The same model with `faults` injected into every session it opens.
@@ -252,6 +280,7 @@ impl MockSpeechModel {
             script,
             faults: Faults::default(),
             restarts: false,
+            speech: SpeechReports::Heard,
         }
     }
 }
@@ -290,6 +319,9 @@ impl NativeSpeechModel for MockSpeechModel {
             sent: 0,
             emitted: 0,
             calls: 0,
+            speech: self.speech,
+            answered: false,
+            reported: false,
         })
     }
 }
@@ -320,15 +352,38 @@ pub struct MockSpeechSession {
     sent: usize,
     emitted: u64,
     calls: u32,
+    speech: SpeechReports,
+    /// A response was created since the user's last turn began.
+    answered: bool,
+    /// The user's speech of the current turn was reported.
+    reported: bool,
 }
 
 impl MockSpeechSession {
+    /// Reports that the user started speaking at `position`, once per user turn when the
+    /// provider's notice is what reports it.
+    fn report_speech(&mut self, position: SampleClockPosition) -> Result<(), SessionError> {
+        if self.speech == SpeechReports::ProviderNotice && self.reported {
+            return Ok(());
+        }
+        self.ledger.speech_started(position, self.now)?;
+        self.reported = true;
+        self.sent += 1;
+        Ok(())
+    }
+
+    /// Whether the model creates every response, and so answers a tool result by itself.
+    fn creates_responses(&self) -> bool {
+        !self.ledger.capabilities().manual_response
+    }
+
     /// Starts a response saying what is pending.
     fn start_response(&mut self) -> Result<(), SessionError> {
         let response_id = ResponseId::generate();
         self.ledger.response_created(response_id, self.now)?;
         self.sent += 1;
         self.emitted = 0;
+        self.answered = true;
         self.plan = match self.pending.take() {
             Some(Reply::Say(text)) => Self::spoken(text),
             Some(Reply::Call {
@@ -454,7 +509,12 @@ impl MockSpeechSession {
                 },
                 now,
             )?,
-            Step::Complete => self.ledger.response_completed(response_id, now)?,
+            Step::Complete => {
+                self.ledger.response_completed(response_id, now)?;
+                if self.creates_responses() && self.pending.is_some() {
+                    self.start_response()?;
+                }
+            }
         }
         self.sent += 1;
         Ok(())
@@ -479,10 +539,13 @@ impl SpeechSessionHandle for MockSpeechSession {
         if !speech.is_empty() {
             self.spoken.extend(&speech);
         }
+        let heard = self.speech == SpeechReports::Heard;
         if !speech.is_empty() && !self.speaking {
             self.speaking = true;
-            self.ledger.speech_started(position, self.now)?;
-            self.sent += 1;
+            if heard || self.answered {
+                self.report_speech(position)?;
+            }
+            self.answered = false;
             if let Some(response_id) = self.ledger.in_progress()
                 && self.ledger.session().config().auto_interrupt
             {
@@ -491,10 +554,16 @@ impl SpeechSessionHandle for MockSpeechSession {
             }
         } else if speech.is_empty() && self.speaking {
             self.speaking = false;
-            self.ledger.speech_stopped(position, self.now)?;
-            self.sent += 1;
+            if heard {
+                self.ledger.speech_stopped(position, self.now)?;
+                self.sent += 1;
+            }
             if self.ledger.session().turn_detection() != TurnDetection::Disabled {
+                if !heard {
+                    self.report_speech(position)?;
+                }
                 self.ledger.input_committed(self.now)?;
+                self.reported = false;
                 self.end_turn()?;
             }
         }
@@ -534,6 +603,9 @@ impl SpeechSessionHandle for MockSpeechSession {
         self.ledger.answer(call_id, result)?;
         if let Some(then) = self.after_result.take() {
             self.pending = Some(Reply::Say(then.replace("{result}", &rendered)));
+            if self.creates_responses() && self.ledger.in_progress().is_none() {
+                self.start_response()?;
+            }
         }
         Ok(())
     }
@@ -1054,6 +1126,128 @@ mod tests {
             Err(inference_duplex::SessionError::Unsupported(
                 Unsupported::ClientCancel
             ))
+        );
+    }
+
+    fn speech_started(events: &[SessionEvent]) -> Vec<usize> {
+        events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| matches!(event, SessionEvent::SpeechStarted(_)))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// The Nova Sonic binding reports speech once per user turn, at the provider's interruption
+    /// notice (also over an answer already completed) or else at the turn's first transcript,
+    /// and never its end; the mock that stands in for it reports it at the same points.
+    #[test]
+    fn the_server_turns_mock_reports_speech_where_the_nova_binding_does() {
+        let mut model = MockSpeechModel::server_turns(vec![
+            turn("tell me a story", "Once upon a time"),
+            turn("stop", "Sure"),
+        ]);
+        let mut session = model
+            .open(config(TurnDetection::ServerVad, true))
+            .expect("the model takes the configuration");
+        speak(&mut session, 0, 2);
+        let first_turn = drain(&mut session);
+        let committed = first_turn
+            .iter()
+            .position(|event| matches!(event, SessionEvent::InputCommitted(_)))
+            .expect("the provider commits the turn");
+        assert_eq!(
+            speech_started(&first_turn),
+            vec![committed - 1],
+            "{first_turn:#?}"
+        );
+        assert!(
+            !first_turn
+                .iter()
+                .any(|event| matches!(event, SessionEvent::SpeechStopped(_)))
+        );
+        let first = created(&first_turn)[0];
+
+        for index in 0..2 {
+            session
+                .append_audio(frame(pcm(16_000), 960 + index * 320, 9))
+                .expect("speech over the finished answer");
+        }
+        let spoken = drain(&mut session);
+        assert_eq!(
+            speech_started(&spoken),
+            vec![1],
+            "the notice, after the frame that carried it: {spoken:#?}"
+        );
+        assert!(
+            !spoken
+                .iter()
+                .any(|event| matches!(event, SessionEvent::ResponseCancelled(_))),
+            "a completed response is not cancelled: {spoken:#?}"
+        );
+        session
+            .append_audio(frame(pcm(16_000), 1_600, 0))
+            .expect("silence");
+        let rest = drain(&mut session);
+        assert!(speech_started(&rest).is_empty(), "{rest:#?}");
+        assert!(
+            rest.iter()
+                .any(|event| matches!(event, SessionEvent::InputCommitted(_)))
+        );
+        assert_ne!(created(&rest)[0], first);
+
+        let mut native = MockSpeechModel::native(vec![turn("hi", "Hello")]);
+        let mut session = native
+            .open(config(TurnDetection::ServerVad, true))
+            .expect("the model takes the configuration");
+        speak(&mut session, 0, 2);
+        let events = drain(&mut session);
+        assert_eq!(
+            speech_started(&events),
+            vec![1],
+            "the native mock reports what it hears: {events:#?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::SpeechStopped(_)))
+        );
+    }
+
+    /// A model that creates every response answers a tool result in a new response by itself.
+    #[test]
+    fn the_server_turns_mock_answers_a_tool_result_by_itself() {
+        let mut model = MockSpeechModel::server_turns(vec![ScriptedTurn {
+            heard: "how warm is it".to_owned(),
+            reply: Reply::Call {
+                tool: "weather".to_owned(),
+                arguments: json!({"city": "Berlin"}),
+                then: "It is {result} degrees".to_owned(),
+            },
+        }]);
+        let mut session = model
+            .open(config(TurnDetection::ServerVad, true))
+            .expect("the model takes the configuration");
+        speak(&mut session, 0, 2);
+        let events = drain(&mut session);
+        let call_id = events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::SpeechToolCallProposed(proposed) => Some(proposed.call_id.clone()),
+                _ => None,
+            })
+            .expect("a proposed call");
+        session
+            .submit_tool_result(&call_id, json!(21))
+            .expect("the call awaits its result");
+        let answer = drain(&mut session);
+        let second = created(&answer);
+        assert_eq!(second.len(), 1, "{answer:#?}");
+        assert_eq!(transcript(&answer, second[0]), "It is 21 degrees");
+        assert_eq!(
+            session.ledger().session().state(),
+            SpeechSessionState::Open,
+            "not stalled"
         );
     }
 }
