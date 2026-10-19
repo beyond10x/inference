@@ -12,16 +12,20 @@
 //!   silently.
 //! - `drop`: the arriving envelope is discarded and the producer is not held.
 //! - `coalesce`: the arriving envelope replaces, in place, the newest queued envelope of the same
-//!   `stream_id`, or is discarded if no queued envelope carries that stream.
+//!   `stream_id`; if no queued envelope carries that stream, the oldest queued envelope is
+//!   discarded and the arriving one is queued. The order within each stream is kept.
 //! - `drop_stale_epochs`: the queue remembers the highest epoch it has seen per producing node.
 //!   An arriving envelope of a lower epoch is discarded whether the queue is full or not; one of
-//!   a higher epoch first discards the queued envelopes of lower epochs from the same producer.
-//!   When the queue is still full the send waits, as under `pause`.
+//!   a higher epoch first discards the queued envelopes of lower epochs from the same producer
+//!   and wakes the waiting sends, so that a send of that producer's older epoch completes as
+//!   discarded without waiting for the consumer. When the queue is still full the send waits, as
+//!   under `pause`.
 //!
 //! The envelope carries no epoch of its own, so the queue reads the epoch of an envelope's
 //! `generation_id` through the [`EpochLookup`] it is built with. An envelope without a
 //! generation, such as a control event, or with a generation the lookup does not know, is never
-//! stale. Every discarded or replaced envelope adds one to [`QueueReceiver::discarded`].
+//! stale. Every discarded or replaced envelope adds one to [`QueueReceiver::discarded`], and so
+//! does every envelope still queued when the receiver is dropped.
 //!
 //! `cancel` and `supersede` are refused when the queue is built, with [`UnsupportedOverload`]:
 //! the design names them without saying what a full queue does under them.
@@ -163,7 +167,7 @@ impl<P> Shared<P> {
         if !state.receiver {
             return Poll::Ready(Err(SendError::Closed(envelope)));
         }
-        let mut freed = false;
+        let mut raised = false;
         if let Some(epoch) = epoch {
             let newest = *state
                 .newest_epochs
@@ -183,23 +187,25 @@ impl<P> Shared<P> {
                 });
                 let stale = before - state.items.len();
                 state.discarded += stale as u64;
-                freed = stale > 0;
+                raised = true;
             }
         }
+        // A raised epoch may have made a waiting send stale, or freed room for one: every
+        // waiting sender polls again, and a stale one completes as discarded.
+        let senders = if raised {
+            std::mem::take(&mut state.waiting_senders)
+        } else {
+            Vec::new()
+        };
         if state.items.len() < self.capacity.get() {
             state.items.push_back(Queued { envelope, epoch });
             let receiver = state.waiting_receiver.take();
-            let senders = if freed {
-                std::mem::take(&mut state.waiting_senders)
-            } else {
-                Vec::new()
-            };
             drop(state);
             wake(receiver);
             wake(senders);
             return Poll::Ready(Ok(()));
         }
-        match self.policy {
+        let outcome = match self.policy {
             Policy::Pause | Policy::DropStaleEpochs => {
                 register(&mut state.waiting_senders, cx.waker());
                 *slot = Some(envelope);
@@ -212,18 +218,25 @@ impl<P> Shared<P> {
             }
             Policy::Coalesce => {
                 let stream_id = envelope.stream_id;
+                let arrival = Queued { envelope, epoch };
                 if let Some(newest) = state
                     .items
                     .iter_mut()
                     .rev()
                     .find(|queued| queued.envelope.stream_id == stream_id)
                 {
-                    *newest = Queued { envelope, epoch };
+                    *newest = arrival;
+                } else {
+                    state.items.pop_front();
+                    state.items.push_back(arrival);
                 }
                 state.discarded += 1;
                 Poll::Ready(Ok(()))
             }
-        }
+        };
+        drop(state);
+        wake(senders);
+        outcome
     }
 
     /// One attempt to take the oldest queued envelope.
@@ -345,7 +358,8 @@ impl<P> QueueSender<P> {
         self.len() == 0
     }
 
-    /// The number of envelopes the overload policy discarded or replaced so far.
+    /// The number of envelopes discarded so far: those the overload policy discarded or replaced,
+    /// and those still queued when the receiver was dropped.
     #[must_use]
     pub fn discarded(&self) -> u64 {
         self.shared.discarded()
@@ -384,8 +398,8 @@ impl<P: Send> OutputEndpoint<P> for QueueSender<P> {
     }
 }
 
-/// The receiving side of an [`EdgeQueue`]. Dropping it closes the edge: every later send returns
-/// [`SendError::Closed`].
+/// The receiving side of an [`EdgeQueue`]. Dropping it closes the edge: the envelopes still
+/// queued are discarded and counted, and every later send returns [`SendError::Closed`].
 pub struct QueueReceiver<P> {
     shared: Arc<Shared<P>>,
 }
@@ -403,7 +417,8 @@ impl<P> QueueReceiver<P> {
         self.len() == 0
     }
 
-    /// The number of envelopes the overload policy discarded or replaced so far.
+    /// The number of envelopes discarded so far: those the overload policy discarded or replaced,
+    /// and those still queued when the receiver was dropped.
     #[must_use]
     pub fn discarded(&self) -> u64 {
         self.shared.discarded()
@@ -414,6 +429,7 @@ impl<P> Drop for QueueReceiver<P> {
     fn drop(&mut self) {
         let mut state = self.shared.state();
         state.receiver = false;
+        state.discarded += state.items.len() as u64;
         state.items.clear();
         let senders = std::mem::take(&mut state.waiting_senders);
         drop(state);

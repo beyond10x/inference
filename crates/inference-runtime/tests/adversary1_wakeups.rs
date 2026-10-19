@@ -216,6 +216,36 @@ fn drop_stale_epochs_waits_when_full_and_a_newer_epoch_wakes_the_stale_waiter() 
 }
 
 #[test]
+fn a_newer_epoch_completes_a_stale_pending_send_as_discarded_without_a_consumer_pop() {
+    let (old, new) = (GenerationId::generate(), GenerationId::generate());
+    let (sender, receiver) = queue(
+        2,
+        OverloadPolicy::DropStaleEpochs,
+        HashMap::from([(old, 1), (new, 2)]),
+    );
+    let (a, b) = (NodeId::generate(), NodeId::generate());
+    now(sender.send(item(b, None, 1))).expect("room for it");
+    now(sender.send(item(b, None, 2))).expect("room for it");
+    let stale = Task::new();
+    let mut waiting = sender.send(item(a, Some(old), 3));
+    assert!(stale.poll(waiting.as_mut()).is_pending());
+    let newer = Task::new();
+    let other = sender.clone();
+    let mut arriving = other.send(item(a, Some(new), 4));
+    assert!(
+        newer.poll(arriving.as_mut()).is_pending(),
+        "nothing of a's older epoch is queued, so the purge frees no room"
+    );
+    assert_eq!((receiver.len(), receiver.discarded()), (2, 0));
+    assert!(
+        stale.woken() > 0,
+        "a's newer epoch did not wake a's pending send of the older one"
+    );
+    assert!(matches!(stale.poll(waiting.as_mut()), Poll::Ready(Ok(()))));
+    assert_eq!((receiver.len(), receiver.discarded()), (2, 1));
+}
+
+#[test]
 fn drop_stale_epochs_compares_epochs_per_producer() {
     let (a5, a6, b1) = (
         GenerationId::generate(),
