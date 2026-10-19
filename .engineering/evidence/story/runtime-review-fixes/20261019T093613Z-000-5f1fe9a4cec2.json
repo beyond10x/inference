@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T09:36:13Z",
+  "actor": "human:timo",
+  "artifact": "story:runtime-review-fixes",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --all-features (VERIFIED, new behaviour: baseline wave/10 5f40904 fails 4 cases: receiver drop counts 0 of 3, coalesce keeps [1,2,3] over the arrival, a newer epoch does not wake a stale pending send; treatment passes 26 including the adversary's five guards)"
+  }
+}

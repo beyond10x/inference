@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T09:31:16Z",
+  "actor": "human:timo",
+  "artifact": "story:pipeline-review-fixes",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-pipeline-review-fixes-pass-1",
+    "reference": "F1 graph.yaml:1487 Ports view publishes pipeline_id",
+    "review": "review-result:adversary-pipeline-review-fixes-pass-1",
+    "outcome": "fixed"
+  }
+}

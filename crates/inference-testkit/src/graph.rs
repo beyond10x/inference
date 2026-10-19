@@ -1,9 +1,9 @@
 //! The declaration, validation and planning half of the `inference.graph` domain of
 //! `ess/domains/graph.yaml`, held in memory.
 //!
-//! [`GraphDomain`] holds one [`Declaration`] of `inference-pipeline` with counted identities, so
-//! that two runs of the same commands report the same identities, and records every event its
-//! commands emit in order. The commands are the declaration's own, `ValidatePipeline` and
+//! [`GraphDomain`] holds one [`Declaration`] of `inference-pipeline` with identities counted in its
+//! own [`IDENTITY_SPACE`], so that two runs of the same commands report the same identities and no
+//! other domain issues one of them, and records every event its commands emit in order. The commands are the declaration's own, `ValidatePipeline` and
 //! `PlanPipeline` among them; what a declaration references and does not hold, the declared
 //! profiles and adapters, it reads through [`GraphCatalog`] over the [`PolicyDomain`] and
 //! [`ModelDomain`] stores. A refused command stores nothing, records no event and takes no
@@ -14,10 +14,10 @@
 use inference_core::model::{Adapter, AdapterId};
 use inference_core::policy::{DeploymentProfile, ProfileId, ProfileNotFound};
 use inference_pipeline::{
-    AddNode, AddNodeError, AddPort, BindNode, BindNodeError, Catalog, ConnectPorts,
-    ConnectPortsError, Declaration, DeclarePipeline, NodeAdded, NodeBound, NodeNotFound,
-    PipelineDeclared, PipelinePlanned, PipelineValidated, PlanPipeline, PlanPipelineError,
-    PortAdded, PortsConnected, ValidatePipeline, ValidatePipelineError,
+    AddNode, AddNodeError, AddPort, AddPortError, BindNode, BindNodeError, Catalog, ConnectPorts,
+    ConnectPortsError, Declaration, DeclarePipeline, NodeAdded, NodeBound, PipelineDeclared,
+    PipelinePlanned, PipelineValidated, PlanPipeline, PlanPipelineError, PortAdded, PortsConnected,
+    ValidatePipeline, ValidatePipelineError,
 };
 
 use crate::model::ModelDomain;
@@ -60,6 +60,10 @@ impl Catalog for GraphCatalog<'_> {
     }
 }
 
+/// The first eight hex digits of every identity the domain issues, which no other domain of the
+/// testkit issues under (see [`crate::policy::IDENTITY_SPACE`]).
+pub const IDENTITY_SPACE: u32 = 3;
+
 /// The declaration half of `inference.graph` in memory: the declared entities and the events
 /// their commands emitted.
 #[derive(Debug, Clone)]
@@ -71,7 +75,7 @@ pub struct GraphDomain {
 impl Default for GraphDomain {
     fn default() -> Self {
         Self {
-            declaration: Declaration::counted(),
+            declaration: Declaration::counted_in(IDENTITY_SPACE),
             events: Vec::new(),
         }
     }
@@ -116,7 +120,7 @@ impl GraphDomain {
     /// # Errors
     ///
     /// As [`Declaration::add_port`].
-    pub fn add_port(&mut self, input: AddPort) -> Result<PortAdded, NodeNotFound> {
+    pub fn add_port(&mut self, input: AddPort) -> Result<PortAdded, AddPortError> {
         let event = self.declaration.add_port(input)?;
         self.events.push(GraphEvent::PortAdded(event.clone()));
         Ok(event)
@@ -301,11 +305,11 @@ mod tests {
             .expect("the pipeline is declared");
         assert_eq!(
             declared.pipeline_id.to_string(),
-            "00000000-0000-4000-8000-000000000001"
+            "00000003-0000-4000-8000-000000000001"
         );
         assert_eq!(
             added.node_id.to_string(),
-            "00000000-0000-4000-8000-000000000002"
+            "00000003-0000-4000-8000-000000000002"
         );
         assert_eq!(
             domain.events(),

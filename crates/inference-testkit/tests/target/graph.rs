@@ -14,7 +14,12 @@
 //! outcome is declared `external`: the store takes it when a check finds something, and a scenario
 //! may force it ([`configure_external_outcome`]) on the next invocation, which then answers with
 //! the findings the checks make over that pipeline, none for a valid or unknown one, and moves
-//! nothing.
+//! nothing. A forced outcome answers in every state and for an unknown pipeline, as the
+//! specification orders it: neither command declares an `unknown_instance` outcome, and an
+//! external refusal moves nothing, so `wrong_state` never answers before it (the ESS precedence
+//! order, step 4 against step 6). The synthesized `ValidatePipeline/outcome/rejected` and the three
+//! forced `PlanPipeline` scenarios send an identity no pipeline carries and expect the forced
+//! outcome.
 //!
 //! `PlanPipeline` naming a pipeline no record carries takes `wrong-state` the same way. Its
 //! outcomes `unbound`, `mismatch` and `locality-denied` are declared `external`: the store takes
@@ -41,11 +46,11 @@ use ess_primitives::node::Node;
 use inference_core::model::{AdapterId, Capability, Locality};
 use inference_core::policy::ProfileId;
 use inference_pipeline::{
-    AddNode, AddNodeError, AddPort, BindNode, BindNodeError, Binding, CapabilityMismatch, Catalog,
-    ConnectPorts, ConnectPortsError, Declaration, DeclarePipeline, Edge, GraphFinding, NodeAdded,
-    NodeBound, NodeId, NodeUnbound, PipelineDeclared, PipelineId, PipelineNotFound,
-    PipelineNotReady, PipelinePlanned, PipelineValidated, PlanPipeline, PlanPipelineError, Port,
-    PortAdded, PortsConnected, ValidatePipeline, ValidatePipelineError,
+    AddNode, AddNodeError, AddPort, AddPortError, BindNode, BindNodeError, Binding,
+    CapabilityMismatch, Catalog, ConnectPorts, ConnectPortsError, Declaration, DeclarePipeline,
+    Edge, GraphFinding, NodeAdded, NodeBound, NodeId, NodeUnbound, PipelineDeclared, PipelineId,
+    PipelineNotFound, PipelineNotReady, PipelinePlanned, PipelineValidated, PlanPipeline,
+    PlanPipelineError, Port, PortAdded, PortsConnected, ValidatePipeline, ValidatePipelineError,
 };
 use inference_testkit::graph::{GraphCatalog, GraphDomain, GraphEvent};
 use uuid::Uuid;
@@ -214,6 +219,7 @@ fn add_port(
 ) -> Result<SemanticCommandResult, TargetError> {
     let mut input = Input::of(request);
     let add = AddPort {
+        pipeline_id: input.named("pipeline_id")?,
         node_id: input.named("node_id")?,
         name: input.text("name")?,
         direction: input.named("direction")?,
@@ -228,10 +234,20 @@ fn add_port(
     Ok(match domain.add_port(add) {
         Ok(event) => SemanticCommandResult::took(outcome(ADD_PORT, "added"))
             .emitting(port_added(&event)?.in_activity(request.correlation.clone())),
-        Err(error) => SemanticCommandResult::took(outcome(ADD_PORT, "unknown-node")).with_error(
-            DeclaredErrorValue::new(parse::<ErrorRef>(NODE_NOT_FOUND))
-                .with("node_id", named_node(&error.node_id)?),
-        ),
+        Err(AddPortError::UnknownPipeline(error)) => {
+            SemanticCommandResult::took(outcome(ADD_PORT, "unknown-pipeline"))
+                .with_error(pipeline_not_found(error)?)
+        }
+        Err(AddPortError::UnknownNode(error)) => {
+            SemanticCommandResult::took(outcome(ADD_PORT, "unknown-node")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(NODE_NOT_FOUND))
+                    .with("node_id", named_node(&error.node_id)?),
+            )
+        }
+        Err(AddPortError::NotDeclared(error)) => {
+            SemanticCommandResult::took(outcome(ADD_PORT, "not-declared"))
+                .with_error(pipeline_not_ready(error)?)
+        }
     })
 }
 
@@ -673,6 +689,7 @@ fn pipeline_planned(event: &PipelinePlanned) -> Result<ObservedEvent, TargetErro
 fn ports_row(port: &Port) -> Result<ViewRow, TargetError> {
     Ok(BTreeMap::from([
         ("port_id".to_owned(), named_node(&port.port_id())?),
+        ("pipeline_id".to_owned(), named_node(&port.pipeline_id())?),
         ("node_id".to_owned(), named_node(&port.node_id())?),
         ("name".to_owned(), text_node(port.name())),
         ("direction".to_owned(), named_node(&port.direction())?),
@@ -882,8 +899,14 @@ mod tests {
         emitted(&result, "node_id")
     }
 
-    fn port_input(node_id: Node, direction: &str, incremental: Node) -> Vec<(&'static str, Node)> {
+    fn port_input(
+        pipeline_id: Node,
+        node_id: Node,
+        direction: &str,
+        incremental: Node,
+    ) -> Vec<(&'static str, Node)> {
         vec![
+            ("pipeline_id", pipeline_id),
             ("node_id", node_id),
             ("name", text(direction)),
             ("direction", text(direction)),
@@ -896,11 +919,11 @@ mod tests {
         ]
     }
 
-    fn port(stores: &mut Stores, node_id: Node, direction: &str) -> Node {
+    fn port(stores: &mut Stores, pipeline_id: Node, node_id: Node, direction: &str) -> Node {
         let result = run(
             stores,
             "inference.graph.AddPort",
-            &port_input(node_id, direction, Node::Bool(true)),
+            &port_input(pipeline_id, node_id, direction, Node::Bool(true)),
         );
         emitted(&result, "port_id")
     }
@@ -948,8 +971,8 @@ mod tests {
         let profile_id = profile(&mut stores);
         let pipeline_id = pipeline(&mut stores, profile_id.clone());
         let node_id = node(&mut stores, pipeline_id.clone());
-        let output = port(&mut stores, node_id.clone(), "output");
-        let input = port(&mut stores, node_id.clone(), "input");
+        let output = port(&mut stores, pipeline_id.clone(), node_id.clone(), "output");
+        let input = port(&mut stores, pipeline_id.clone(), node_id.clone(), "input");
         let connected = run(
             &mut stores,
             "inference.graph.ConnectPorts",
@@ -995,7 +1018,8 @@ mod tests {
         assert_eq!(ports[0]["incremental"], Node::Bool(true));
         assert_eq!(ports[0]["end_marker_required"], Node::Bool(false));
         assert_eq!(ports[0]["provisional_allowed"], Node::Bool(true));
-        assert_eq!(ports[0].len(), 10);
+        assert_eq!(ports[0]["pipeline_id"], pipeline_id);
+        assert_eq!(ports[0].len(), 11);
 
         let edges = rows(&mut stores, "inference.graph.Edges");
         assert_eq!(edges.len(), 1);
@@ -1054,7 +1078,7 @@ mod tests {
         let profile_id = profile(&mut stores);
         let pipeline_id = pipeline(&mut stores, profile_id);
         let node_id = node(&mut stores, pipeline_id.clone());
-        let input = port(&mut stores, node_id, "input");
+        let input = port(&mut stores, pipeline_id.clone(), node_id, "input");
 
         let refused = run(
             &mut stores,
@@ -1094,15 +1118,15 @@ mod tests {
             &mut stores,
             &command(
                 "inference.graph.AddPort",
-                &port_input(node_id.clone(), "input", text("true")),
+                &port_input(pipeline_id.clone(), node_id.clone(), "input", text("true")),
             ),
         );
         assert!(
             matches!(&textual, Err(TargetError::Unavailable { .. })),
             "{textual:?}"
         );
-        let mut extra = port_input(node_id, "input", Node::Bool(true));
-        extra.push(("pipeline_id", pipeline_id.clone()));
+        let mut extra = port_input(pipeline_id.clone(), node_id, "input", Node::Bool(true));
+        extra.push(("profile_id", pipeline_id.clone()));
         let extra = execute_command(&mut stores, &command("inference.graph.AddPort", &extra));
         assert!(
             matches!(&extra, Err(TargetError::Unavailable { .. })),
@@ -1208,7 +1232,7 @@ mod tests {
         let profile_id = profile(&mut stores);
         let pipeline_id = pipeline(&mut stores, profile_id);
         let node_id = node(&mut stores, pipeline_id.clone());
-        let output = port(&mut stores, node_id.clone(), "output");
+        let output = port(&mut stores, pipeline_id.clone(), node_id.clone(), "output");
 
         let rejected = validate(&mut stores, pipeline_id);
         assert_eq!(
@@ -1234,6 +1258,103 @@ mod tests {
             text("Declared")
         );
         assert!(observed(&mut stores, "inference.graph.PipelineValidated").is_empty());
+    }
+
+    #[test]
+    fn a_port_is_added_only_under_a_known_pipeline_that_is_still_declared() {
+        let mut stores = Stores::default();
+        let profile_id = profile(&mut stores);
+        let pipeline_id = pipeline(&mut stores, profile_id);
+        let node_id = node(&mut stores, pipeline_id.clone());
+
+        let unknown = run(
+            &mut stores,
+            "inference.graph.AddPort",
+            &port_input(text(UNKNOWN), node_id.clone(), "input", Node::Bool(true)),
+        );
+        assert_eq!(branch(&unknown), "inference.graph.AddPort/unknown-pipeline");
+        let error = unknown.error.as_ref().expect("a declared error");
+        assert_eq!(error.error.to_string(), "inference.graph.PipelineNotFound");
+        assert_eq!(
+            error.fields,
+            BTreeMap::from([("pipeline_id".to_owned(), text(UNKNOWN))])
+        );
+
+        let validated = validate(&mut stores, pipeline_id.clone());
+        assert_eq!(
+            branch(&validated),
+            "inference.graph.ValidatePipeline/validated"
+        );
+        let events = stores.graph.events().len();
+        let refused = run(
+            &mut stores,
+            "inference.graph.AddPort",
+            &port_input(pipeline_id.clone(), node_id, "input", Node::Bool(true)),
+        );
+        assert_eq!(branch(&refused), "inference.graph.AddPort/not-declared");
+        let error = refused.error.as_ref().expect("a declared error");
+        assert_eq!(error.error.to_string(), "inference.graph.PipelineNotReady");
+        assert_eq!(
+            error.fields,
+            BTreeMap::from([
+                ("pipeline_id".to_owned(), pipeline_id),
+                ("required".to_owned(), text("Declared")),
+            ])
+        );
+        assert!(refused.direct_events.is_empty());
+        assert_eq!(stores.graph.events().len(), events);
+        assert!(rows(&mut stores, "inference.graph.Ports").is_empty());
+        assert_eq!(state_of(&mut stores), text("Validated"));
+    }
+
+    #[test]
+    fn a_forced_rejection_of_a_declared_pipeline_carries_the_stores_findings() {
+        let mut stores = Stores::default();
+        let profile_id = profile(&mut stores);
+        let pipeline_id = pipeline(&mut stores, profile_id);
+        let node_id = node(&mut stores, pipeline_id.clone());
+        let output = port(&mut stores, pipeline_id.clone(), node_id.clone(), "output");
+
+        force(&mut stores, "inference.graph.ValidatePipeline/rejected")
+            .expect("rejected is external");
+        let forced = validate(&mut stores, pipeline_id);
+        assert_eq!(branch(&forced), "inference.graph.ValidatePipeline/rejected");
+        assert_eq!(
+            forced.error.as_ref().expect("a declared error").fields["findings"],
+            Node::Seq(vec![Node::Map(BTreeMap::from([
+                ("defect".to_owned(), text("unreachable_mandatory_output")),
+                ("node_id".to_owned(), node_id),
+                ("port_id".to_owned(), output),
+            ]))])
+        );
+        assert_eq!(state_of(&mut stores), text("Declared"));
+    }
+
+    #[test]
+    fn a_forced_rejection_answers_in_every_state_as_the_specification_orders_it() {
+        let mut stores = Stores::default();
+        let profile_id = profile(&mut stores);
+        let pipeline_id = pipeline(&mut stores, profile_id);
+        let validated = validate(&mut stores, pipeline_id.clone());
+        assert_eq!(
+            branch(&validated),
+            "inference.graph.ValidatePipeline/validated"
+        );
+
+        force(&mut stores, "inference.graph.ValidatePipeline/rejected")
+            .expect("rejected is external");
+        let forced = validate(&mut stores, pipeline_id);
+        assert_eq!(
+            branch(&forced),
+            "inference.graph.ValidatePipeline/rejected",
+            "`rejected` moves nothing, so `wrong_state` never answers before it (ESS precedence, \
+             step 4 against step 6), and the interpreter answers it on a Validated pipeline"
+        );
+        assert_eq!(
+            forced.error.as_ref().expect("a declared error").fields["findings"],
+            Node::Seq(Vec::new())
+        );
+        assert_eq!(state_of(&mut stores), text("Validated"));
     }
 
     #[test]

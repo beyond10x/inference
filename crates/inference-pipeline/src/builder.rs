@@ -5,31 +5,36 @@
 //! node is a [`NodeHandle`]; a port is a [`PortHandle`] whose direction ([`direction`]) and
 //! modality ([`modality`]) are type parameters, so [`PipelineBuilder::connect`] accepts an output
 //! port and an input port of one modality and nothing else, and its capacity is a
-//! [`NonZeroUsize`]. A node is bound to an [`Adapter`] value, not an identity. Every handle is
-//! branded with the closure's own lifetime, which no other builder shares and which cannot leave
-//! the closure, so a handle names an entity of the pipeline being built or does not compile.
+//! [`NonZeroUsize`]. Every handle is branded with the closure's own lifetime, which no other
+//! builder shares and which cannot leave the closure, so a handle names an entity of the pipeline
+//! being built or does not compile.
 //!
-//! What the commands refuse cannot be written here, so the builder creates through the same
-//! inserts the commands reach after their checks, in the order it is called, and a declaration
-//! built this way equals one written by the commands with the same input in the same order.
+//! The profile and the adapters are named by identity and read through the same [`Catalog`] the
+//! commands read, and the builder refuses one the catalog does not hold as the commands do
+//! (`unknown-profile`, `unknown-adapter`). What else the commands refuse cannot be written here,
+//! so the builder creates through the same inserts the commands reach after their checks, in the
+//! order it is called, and a declaration built this way equals one written by the commands with
+//! the same input in the same order.
 
+use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 
-use inference_core::model::{Adapter, Capability, Modality};
-use inference_core::policy::DeploymentProfile;
+use inference_core::model::{AdapterId, Capability, Modality};
+use inference_core::policy::{ProfileId, ProfileNotFound};
 
 use crate::{
-    AddNode, AddPort, BindingId, Declaration, DeclarePipeline, Delivery, EdgeId, Essentiality,
-    InteractionMode, NodeId, NodeRole, OverloadPolicy, PipelineId, PortDirection, PortId,
+    AdapterNotFound, AddNode, AddPort, BindingId, Catalog, Declaration, DeclarePipeline, Delivery,
+    EdgeId, Essentiality, InteractionMode, NodeId, NodeRole, OverloadPolicy, PipelineId,
+    PortDirection, PortId,
 };
 
 /// The lifetime that brands every handle of one builder; invariant, so no other lifetime stands
 /// in for it.
 type Brand<'b> = PhantomData<fn(&'b ()) -> &'b ()>;
 
-/// The fields of `inference.graph.DeclarePipeline` other than the profile, which the builder takes
-/// as a [`DeploymentProfile`] value.
+/// The fields of `inference.graph.DeclarePipeline` other than the profile, which
+/// [`Declaration::build`] takes by identity and reads through its catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineSpec {
     pub name: String,
@@ -166,11 +171,20 @@ impl<D: PortDirectionType, M: PortModality> PortHandle<'_, D, M> {
 
 /// Declares the nodes, ports, edges and bindings of one Declared pipeline; see the module
 /// documentation.
-#[derive(Debug)]
 pub struct PipelineBuilder<'d, 'b> {
     declaration: &'d mut Declaration,
+    catalog: &'d dyn Catalog,
     pipeline_id: PipelineId,
     brand: Brand<'b>,
+}
+
+impl fmt::Debug for PipelineBuilder<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PipelineBuilder")
+            .field("declaration", &self.declaration)
+            .field("pipeline_id", &self.pipeline_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'b> PipelineBuilder<'_, 'b> {
@@ -226,6 +240,7 @@ impl<'b> PipelineBuilder<'_, 'b> {
         traits: PortTraits,
     ) -> PortHandle<'b, D, M> {
         let added = self.declaration.insert_port(AddPort {
+            pipeline_id: self.pipeline_id,
             node_id: node.node_id,
             name,
             direction: D::DIRECTION,
@@ -245,6 +260,11 @@ impl<'b> PipelineBuilder<'_, 'b> {
 
     /// Connects an output port to an input port of the same modality with finite buffering, as
     /// `inference.graph.ConnectPorts`.
+    ///
+    /// `ConnectPorts` carries its capacity as an ESS `Integer`, so no command writes an edge
+    /// holding more than `i64::MAX`; a larger capacity is held as `i64::MAX`, as `ConnectPorts`
+    /// holds a capacity beyond `usize::MAX` as `usize::MAX`, so the builder writes only what a
+    /// command can write.
     pub fn connect<M: PortModality>(
         &mut self,
         from: &PortHandle<'b, direction::Output, M>,
@@ -257,40 +277,81 @@ impl<'b> PipelineBuilder<'_, 'b> {
                 self.pipeline_id,
                 from.port_id,
                 to.port_id,
-                capacity,
+                carried(capacity),
                 overload,
             )
             .edge_id
     }
 
-    /// Binds `node` to `adapter`, as `inference.graph.BindNode`.
-    pub fn bind(&mut self, node: &NodeHandle<'b>, adapter: &Adapter) -> BindingId {
-        self.declaration
-            .insert_binding(self.pipeline_id, node.node_id, adapter.adapter_id())
-            .binding_id
+    /// Binds `node` to the adapter carrying `adapter_id`, as `inference.graph.BindNode`.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterNotFound`] when the builder's catalog holds no adapter carrying `adapter_id`;
+    /// nothing is bound and no identity is taken.
+    pub fn bind(
+        &mut self,
+        node: &NodeHandle<'b>,
+        adapter_id: AdapterId,
+    ) -> Result<BindingId, AdapterNotFound> {
+        if self.catalog.adapter(adapter_id).is_none() {
+            return Err(AdapterNotFound { adapter_id });
+        }
+        Ok(self
+            .declaration
+            .insert_binding(self.pipeline_id, node.node_id, adapter_id)
+            .binding_id)
+    }
+}
+
+/// The capacity a `ConnectPorts` input can carry: `capacity`, or `i64::MAX` when it is larger.
+fn carried(capacity: NonZeroUsize) -> NonZeroUsize {
+    let largest = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+    if capacity.get() <= largest {
+        capacity
+    } else {
+        NonZeroUsize::new(largest).unwrap_or(NonZeroUsize::MAX)
     }
 }
 
 impl Declaration {
-    /// Declares a pipeline under `profile`, as `inference.graph.DeclarePipeline`, and runs
-    /// `define` with its builder. Returns the pipeline's identity and what `define` returned,
+    /// Declares a pipeline under the profile carrying `profile_id`, as
+    /// `inference.graph.DeclarePipeline`, and runs `define` with its builder, which binds nodes to
+    /// the adapters `catalog` holds. Returns the pipeline's identity and what `define` returned,
     /// which cannot carry a handle.
     ///
     /// ```
     /// use std::num::NonZeroUsize;
     ///
-    /// use inference_core::model::Capability;
-    /// use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileKind};
+    /// use inference_core::model::{Adapter, AdapterId, Capability};
+    /// use inference_core::policy::{
+    ///     DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind,
+    /// };
     /// use inference_pipeline::{
-    ///     Declaration, Delivery, Essentiality, InteractionMode, NodeRole, OverloadPolicy,
+    ///     Catalog, Declaration, Delivery, Essentiality, InteractionMode, NodeRole, OverloadPolicy,
     ///     PipelineSpec, PortTraits, modality,
     /// };
+    ///
+    /// /// The one profile of this example, and no adapter.
+    /// struct Profiles(DeploymentProfile);
+    ///
+    /// impl Catalog for Profiles {
+    ///     fn profile(&self, profile_id: ProfileId) -> Option<&DeploymentProfile> {
+    ///         (self.0.profile_id() == profile_id).then_some(&self.0)
+    ///     }
+    ///
+    ///     fn adapter(&self, _: AdapterId) -> Option<&Adapter> {
+    ///         None
+    ///     }
+    /// }
     ///
     /// let (profile, _) = DeploymentProfile::declare(DeclareProfile {
     ///     kind: ProfileKind::OfflineStrict,
     ///     egress: Egress::Denied,
     ///     admitted: Vec::new(),
     /// })?;
+    /// let profile_id = profile.profile_id();
+    /// let catalog = Profiles(profile);
     /// let traits = PortTraits {
     ///     essentiality: Essentiality::Essential,
     ///     delivery: Delivery::Reliable,
@@ -305,29 +366,36 @@ impl Declaration {
     ///     required_capabilities: vec![Capability::OutputStreaming],
     /// };
     /// let mut declaration = Declaration::new();
-    /// declaration.build(&profile, spec, |pipeline| {
+    /// declaration.build(&catalog, profile_id, spec, |pipeline| {
     ///     let source = pipeline.node("source", NodeRole::Source, Vec::new());
     ///     let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
     ///     let out = pipeline.output::<modality::Text>(&source, "out", traits);
     ///     let into = pipeline.input::<modality::Text>(&sink, "in", traits);
     ///     pipeline.connect(&out, &into, NonZeroUsize::MIN, OverloadPolicy::Pause);
-    /// });
+    /// })?;
     /// assert_eq!(declaration.edges().count(), 1);
-    /// # Ok::<(), inference_core::policy::DeclareProfileError>(())
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
     /// An edge from an input port, or between two modalities, does not compile:
     ///
     /// ```compile_fail
     /// # use std::num::NonZeroUsize;
-    /// # use inference_core::model::Capability;
-    /// # use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileKind};
-    /// # use inference_pipeline::{Declaration, Delivery, Essentiality, InteractionMode, NodeRole, OverloadPolicy, PipelineSpec, PortTraits, modality};
+    /// # use inference_core::model::{Adapter, AdapterId};
+    /// # use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
+    /// # use inference_pipeline::{Catalog, Declaration, Delivery, Essentiality, InteractionMode, NodeRole, OverloadPolicy, PipelineSpec, PortTraits, modality};
+    /// # struct Profiles(DeploymentProfile);
+    /// # impl Catalog for Profiles {
+    /// #     fn profile(&self, profile_id: ProfileId) -> Option<&DeploymentProfile> { (self.0.profile_id() == profile_id).then_some(&self.0) }
+    /// #     fn adapter(&self, _: AdapterId) -> Option<&Adapter> { None }
+    /// # }
     /// # let (profile, _) = DeploymentProfile::declare(DeclareProfile { kind: ProfileKind::OfflineStrict, egress: Egress::Denied, admitted: Vec::new() }).unwrap();
+    /// # let profile_id = profile.profile_id();
+    /// # let catalog = Profiles(profile);
     /// # let traits = PortTraits { essentiality: Essentiality::Essential, delivery: Delivery::Reliable, incremental: true, end_marker_required: true, provisional_allowed: false };
     /// # let spec = PipelineSpec { name: "n".to_owned(), schema_revision: "1".to_owned(), mode: InteractionMode::Batch, required_capabilities: Vec::new() };
     /// let mut declaration = Declaration::new();
-    /// declaration.build(&profile, spec, |pipeline| {
+    /// declaration.build(&catalog, profile_id, spec, |pipeline| {
     ///     let node = pipeline.node("node", NodeRole::Transform, Vec::new());
     ///     let text = pipeline.input::<modality::Text>(&node, "text", traits);
     ///     let audio = pipeline.output::<modality::Audio>(&node, "audio", traits);
@@ -339,41 +407,59 @@ impl Declaration {
     ///
     /// ```compile_fail
     /// # use std::num::NonZeroUsize;
-    /// # use inference_core::model::Capability;
-    /// # use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileKind};
-    /// # use inference_pipeline::{Declaration, Delivery, Essentiality, InteractionMode, NodeRole, OverloadPolicy, PipelineSpec, PortTraits, modality};
+    /// # use inference_core::model::{Adapter, AdapterId};
+    /// # use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
+    /// # use inference_pipeline::{Catalog, Declaration, Delivery, Essentiality, InteractionMode, NodeRole, OverloadPolicy, PipelineSpec, PortTraits, modality};
+    /// # struct Profiles(DeploymentProfile);
+    /// # impl Catalog for Profiles {
+    /// #     fn profile(&self, profile_id: ProfileId) -> Option<&DeploymentProfile> { (self.0.profile_id() == profile_id).then_some(&self.0) }
+    /// #     fn adapter(&self, _: AdapterId) -> Option<&Adapter> { None }
+    /// # }
     /// # let (profile, _) = DeploymentProfile::declare(DeclareProfile { kind: ProfileKind::OfflineStrict, egress: Egress::Denied, admitted: Vec::new() }).unwrap();
+    /// # let profile_id = profile.profile_id();
+    /// # let catalog = Profiles(profile);
     /// # let traits = PortTraits { essentiality: Essentiality::Essential, delivery: Delivery::Reliable, incremental: true, end_marker_required: true, provisional_allowed: false };
     /// # let spec = || PipelineSpec { name: "n".to_owned(), schema_revision: "1".to_owned(), mode: InteractionMode::Batch, required_capabilities: Vec::new() };
     /// let mut first = Declaration::new();
     /// let mut second = Declaration::new();
-    /// first.build(&profile, spec(), |outer| {
+    /// first.build(&catalog, profile_id, spec(), |outer| {
     ///     let node = outer.node("node", NodeRole::Source, Vec::new());
-    ///     second.build(&profile, spec(), |inner| {
+    ///     second.build(&catalog, profile_id, spec(), |inner| {
     ///         inner.output::<modality::Text>(&node, "out", traits);
     ///     });
     /// });
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`ProfileNotFound`] when `catalog` holds no profile carrying `profile_id`, as
+    /// `DeclarePipeline` refuses it; nothing is declared, `define` does not run and no identity
+    /// is taken.
     pub fn build<R>(
         &mut self,
-        profile: &DeploymentProfile,
+        catalog: &dyn Catalog,
+        profile_id: ProfileId,
         pipeline: PipelineSpec,
         define: impl for<'b> FnOnce(&mut PipelineBuilder<'_, 'b>) -> R,
-    ) -> (PipelineId, R) {
+    ) -> Result<(PipelineId, R), ProfileNotFound> {
+        if catalog.profile(profile_id).is_none() {
+            return Err(ProfileNotFound { profile_id });
+        }
         let pipeline_id = self
             .insert_pipeline(DeclarePipeline {
                 name: pipeline.name,
                 schema_revision: pipeline.schema_revision,
                 mode: pipeline.mode,
-                profile_id: profile.profile_id(),
+                profile_id,
                 required_capabilities: pipeline.required_capabilities,
             })
             .pipeline_id;
         let mut builder = PipelineBuilder {
             declaration: self,
+            catalog,
             pipeline_id,
             brand: PhantomData,
         };
-        (pipeline_id, define(&mut builder))
+        Ok((pipeline_id, define(&mut builder)))
     }
 }

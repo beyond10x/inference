@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T09:36:13Z",
+  "actor": "human:timo",
+  "artifact": "story:contracts-review-fixes",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-text -p inference-stt -p inference-tts -p inference-testkit -p inference-llm -p stt-only --all-features (VERIFIED, new behaviour: baseline wave/10 5f40904 fails 14 cases of the story's decisions (sequence overflow panics at inference-stt lib.rs:600, mocks run two starts at once, a segment is played by id alone); treatment passes 453 including both adversary passes' cases)"
+  }
+}

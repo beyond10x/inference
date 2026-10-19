@@ -113,8 +113,14 @@ impl Graph {
         modality: Modality,
         traits: Traits,
     ) -> PortId {
+        let pipeline_id = self
+            .declaration
+            .node(node_id)
+            .expect("the node exists")
+            .pipeline_id();
         self.declaration
             .add_port(AddPort {
+                pipeline_id,
                 node_id,
                 name: format!("{direction:?}"),
                 direction,

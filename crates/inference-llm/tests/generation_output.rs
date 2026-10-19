@@ -14,7 +14,7 @@ use inference_llm::{
     AdmittedByAnotherGeneration, CONTRACT_REVISION, CapabilityNotClaimed, GenerationOutput,
     GenerationRequest, InputRefused,
 };
-use inference_text::{OutputSegment, SegmentState};
+use inference_text::{OutputSegment, SegmentSnapshot, SegmentState};
 
 fn adapter(capabilities: Vec<Capability>) -> Adapter {
     Adapter::declare(DeclareAdapter {
@@ -41,10 +41,14 @@ fn request() -> GenerationRequest {
 
 /// Everything a `GenerationOutput` holds, for comparing it before and after a move; the output
 /// itself is not `Clone`.
-fn snapshot(output: &GenerationOutput) -> (Generation, Vec<OutputSegment>, Vec<Capability>) {
+fn snapshot(output: &GenerationOutput) -> (Generation, Vec<SegmentSnapshot>, Vec<Capability>) {
     (
         output.generation().clone(),
-        output.segments().to_vec(),
+        output
+            .segments()
+            .iter()
+            .map(OutputSegment::snapshot)
+            .collect(),
         output.capabilities().to_vec(),
     )
 }

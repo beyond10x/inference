@@ -1,7 +1,8 @@
 //! Adversary, pass 1: what the mock recogniser's module documentation promises about its cues and
 //! its handle, asserted on the events themselves. Claiming `incremental_input` and
-//! `output_streaming`, it "takes each frame as it is offered and runs every cue whose frame count
-//! is reached"; "at the end of input every cue left runs, whatever its frame count"; and a
+//! `output_streaming`, it "takes the frames offered so far at its next step, when the handle is
+//! next iterated, and runs every cue whose frame count is reached"; "at the end of input every
+//! cue left runs, whatever its frame count"; and a
 //! revision issued through the handle "is delivered in sequence with the other events".
 
 #![cfg(feature = "stt")]
@@ -41,7 +42,8 @@ fn incremental_runs_each_cue_on_the_frame_that_reaches_its_count() {
         ModelId::generate(),
         script(),
     )
-    .start(request());
+    .start(request())
+    .expect("a fresh recogniser runs nothing else");
     let expected = [
         "hypothesis",
         "revision",
@@ -86,8 +88,9 @@ fn a_cue_past_the_offered_frames_runs_at_the_end_of_input() {
                 step: ScriptStep::Commit { span: 0 },
             },
         ];
-        let mut handle =
-            MockRecogniser::new(configuration, ModelId::generate(), cues).start(request());
+        let mut handle = MockRecogniser::new(configuration, ModelId::generate(), cues)
+            .start(request())
+            .expect("a fresh recogniser runs nothing else");
         let mut events = Vec::new();
         for frame in frames(2) {
             handle.offer_frame(frame).expect("input has not ended");
@@ -113,7 +116,8 @@ fn a_revision_through_the_handle_is_delivered_in_sequence() {
         ModelId::generate(),
         script(),
     )
-    .start(request.clone());
+    .start(request.clone())
+    .expect("a fresh recogniser runs nothing else");
     let mut frames = frames(6).into_iter();
     handle
         .offer_frame(frames.next().expect("six"))
