@@ -11,7 +11,7 @@ publish = false
 [features]
 run = ["dep:inference-runtime"]
 stt = ["dep:inference-stt"]
-llm = ["dep:inference-llm"]
+llm = ["dep:inference-llm", "inference-llm/tools"]
 tts = ["dep:inference-tts"]
 
 [dependencies]
