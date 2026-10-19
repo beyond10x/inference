@@ -2,12 +2,14 @@
 format: aep.planning-md/3
 id: decision-blocker:native-duplex-evidence
 kind: decision-blocker
-status: open
+status: cleared
 title: Nobody has decided what evidence lets an adapter claim native_duplex (Q15)
 relations:
 - blocks: epic:native-voice
 - blocks: epic:duplex-research
-revision: 1
+revision: 3
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-19T20:55:48Z", actor: "human:timo", revision: 3}
 ---
 ## Question
 
@@ -35,3 +37,9 @@ duplex domain before the first adapter claims it.
 
 The owner states the required evidence, or accepts the default, and it is written into this body
 and into the specification.
+
+## Cleared
+
+Cleared 2026-10-19 with the default on silence above: the operator asked for tests against two
+hosted realtime speech-to-speech models (OpenAI Realtime, Amazon Nova Sonic), which need the rule.
+`story:native-speech-contract` declares the one conformance scenario in `ess/domains/duplex.yaml`.
