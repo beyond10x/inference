@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:capability-planning
 kind: story
-status: draft
+status: active
 title: 'Plan a pipeline: effective capabilities from the weakest node and the capability-mismatch refusal'
 summary: PlanPipeline, §8.3 intersection as a property test, A-13 refusal naming node and capability
 relations:
@@ -24,7 +24,10 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 17
+revision: 19
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T07:56:59Z", actor: "human:timo", revision: 18}
+- {from: "proposed", to: "active", at: "2026-10-19T07:56:59Z", actor: "human:timo", revision: 19}
 ---
 # Story: capability-planning
 
