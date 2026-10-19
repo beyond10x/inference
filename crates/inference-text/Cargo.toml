@@ -1,6 +1,6 @@
 [package]
 name = "inference-text"
-description = "Text vocabulary of the inference framework: outbound output segments from tentative delta to played audio."
+description = "Text vocabulary of the inference framework: inbound turns and spans from hypothesis to committed text, and outbound output segments from tentative delta to played audio."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

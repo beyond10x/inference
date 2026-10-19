@@ -1,20 +1,22 @@
-//! `inference.stream`: the generation and segment commands, views and events of
+//! `inference.stream`: the turn, span, generation and segment commands, views and events of
 //! `ess/domains/stream.yaml`, answered by [`StreamDomain`].
 //!
 //! Each request field is read on its own ([`Input`]); the outcome, the error and the event come
-//! from what the store returned. A command naming a generation or segment no record carries takes
-//! its `wrong-state` outcome, whose error then carries no `current`, since no record holds a
-//! state to report; `EmitTextDelta` is the one command that declares `unknown-generation` for it.
-//! `SupersedeGeneration` and `CancelGeneration` publish their generation event only: the discard
-//! of the generation's unplayed segments, which the store makes in the same outcome, emits none.
+//! from what the store returned. A command naming a turn, span, generation or segment no record
+//! carries takes its `wrong-state` outcome, whose error then carries no `current`, since no record
+//! holds a state to report; `ReviseSpan` declares `no-such-span` for it and `EmitTextDelta`
+//! `unknown-generation`, and those carry the identity sent. `SupersedeGeneration` and
+//! `CancelGeneration` publish their generation event only: the discard of the generation's
+//! unplayed segments, which the store makes in the same outcome, emits none.
 //!
-//! `StartGeneration` is [`TargetError::Unsupported`]: its refusals read the run and node stores of
-//! `inference.graph`, which do not exist yet, and a run is not faked. The span and turn commands
-//! and views are unsupported until their stores land. `ess/SKIPPED.md` names the story for each.
+//! `OpenTurn`, `EmitHypothesis` and `StartGeneration` are [`TargetError::Unsupported`]: their
+//! refusals read the run stores of `inference.graph`, and `StartGeneration`'s its node store too,
+//! which do not exist yet, and a run is not faked. `ess/SKIPPED.md` names the story for each.
 //!
 //! A command's consistency token is the target's
 //! ([`Stores::token`]), and a read demanding a token the stores have not reached is an error
-//! ([`Stores::require`]).
+//! ([`Stores::require`]). An observed event's position is its place in the target's one
+//! publication order ([`Stores::stream_position`]).
 
 use std::collections::BTreeMap;
 
@@ -26,16 +28,24 @@ use ess_conformance::target::{
 use inference_core::generation::{GenerationStarted, GenerationStateConflict};
 use inference_core::id::GenerationId;
 use inference_testkit::stream::{
-    EmitTextDeltaError, GenerationMoveError, GenerationsRow, SegmentMoveError, SegmentsRow,
-    StreamDomain, StreamEvent,
+    EmitTextDeltaError, GenerationMoveError, GenerationsRow, ReviseSpanError, SegmentMoveError,
+    SegmentsRow, SpanMoveError, SpansRow, StreamDomain, StreamEvent, TurnMoveError, TurnsRow,
 };
-use inference_text::{EmitTextDelta, SegmentId, SegmentStateConflict};
+use inference_text::{
+    EmitTextDelta, ReviseSpan, SegmentId, SegmentStateConflict, SpanId, SpanStateConflict, TurnId,
+    TurnStateConflict,
+};
 
 use super::{Input, Stores, integer_node, named_node, text_node, unsupported};
 
 /// The prefix of every name this module answers.
 pub const DOMAIN: &str = "inference.stream";
 
+const OPEN_TURN: &str = "inference.stream.OpenTurn";
+const COMPLETE_TURN: &str = "inference.stream.CompleteTurn";
+const EMIT_HYPOTHESIS: &str = "inference.stream.EmitHypothesis";
+const REVISE_SPAN: &str = "inference.stream.ReviseSpan";
+const COMMIT_SPAN: &str = "inference.stream.CommitSpan";
 const START_GENERATION: &str = "inference.stream.StartGeneration";
 const COMPLETE_GENERATION: &str = "inference.stream.CompleteGeneration";
 const SUPERSEDE_GENERATION: &str = "inference.stream.SupersedeGeneration";
@@ -47,6 +57,11 @@ const COMPLETE_SYNTHESIS: &str = "inference.stream.CompleteSynthesis";
 const ACKNOWLEDGE_PLAYBACK: &str = "inference.stream.AcknowledgePlayback";
 const DISCARD_SEGMENT: &str = "inference.stream.DiscardSegment";
 
+const TURN_OPENED: &str = "inference.stream.TurnOpened";
+const TURN_COMPLETED: &str = "inference.stream.TurnCompleted";
+const TRANSCRIPT_HYPOTHESIS: &str = "inference.stream.TranscriptHypothesis";
+const TRANSCRIPT_REVISION: &str = "inference.stream.TranscriptRevision";
+const TRANSCRIPT_COMMITTED: &str = "inference.stream.TranscriptCommitted";
 const GENERATION_STARTED: &str = "inference.stream.GenerationStarted";
 const GENERATION_COMPLETED: &str = "inference.stream.GenerationCompleted";
 const GENERATION_SUPERSEDED: &str = "inference.stream.GenerationSuperseded";
@@ -59,7 +74,12 @@ const AUDIO_PLAYED: &str = "inference.stream.AudioPlayed";
 const SEGMENT_DISCARDED: &str = "inference.stream.SegmentDiscarded";
 
 /// Every event this module observes.
-const EVENTS: [&str; 10] = [
+const EVENTS: [&str; 15] = [
+    TURN_OPENED,
+    TURN_COMPLETED,
+    TRANSCRIPT_HYPOTHESIS,
+    TRANSCRIPT_REVISION,
+    TRANSCRIPT_COMMITTED,
     GENERATION_STARTED,
     GENERATION_COMPLETED,
     GENERATION_SUPERSEDED,
@@ -72,23 +92,46 @@ const EVENTS: [&str; 10] = [
     SEGMENT_DISCARDED,
 ];
 
+const TURN_STATE_CONFLICT: &str = "inference.stream.TurnStateConflict";
+const SPAN_STATE_CONFLICT: &str = "inference.stream.SpanStateConflict";
+const SPAN_NOT_FOUND: &str = "inference.stream.SpanNotFound";
+const COMMITTED_SPAN_IMMUTABLE: &str = "inference.stream.CommittedSpanImmutable";
 const GENERATION_STATE_CONFLICT: &str = "inference.stream.GenerationStateConflict";
 const SEGMENT_STATE_CONFLICT: &str = "inference.stream.SegmentStateConflict";
 const GENERATION_NOT_FOUND: &str = "inference.stream.GenerationNotFound";
 
+const TURNS: &str = "inference.stream.Turns";
+const SPANS: &str = "inference.stream.Spans";
 const GENERATIONS: &str = "inference.stream.Generations";
 const SEGMENTS: &str = "inference.stream.Segments";
 
-/// The generation and segment stores of one scenario.
+/// The turn, span, generation and segment stores of one scenario.
 pub type State = StreamDomain;
 
 pub fn execute_command(
     stores: &mut Stores,
     request: &SemanticCommandRequest,
 ) -> Result<SemanticCommandResult, TargetError> {
+    stores.publish();
     let domain = &mut stores.stream;
     let name = request.command.to_string();
     let result = match name.as_str() {
+        OPEN_TURN | EMIT_HYPOTHESIS => {
+            return Err(TargetError::unsupported(
+                format!("`{name}`"),
+                "its run refusals read the inference.graph run store, which does not exist yet; \
+                 ess/SKIPPED.md names the story that adds it",
+            ));
+        }
+        COMPLETE_TURN => {
+            let answer = domain.complete_turn(turn_id(request)?);
+            turn_moved(answer.map(StreamEvent::TurnCompleted), request)?
+        }
+        REVISE_SPAN => revise_span(domain, request)?,
+        COMMIT_SPAN => {
+            let answer = domain.commit_span(span_id(request)?);
+            span_moved(answer.map(StreamEvent::TranscriptCommitted), request)?
+        }
         START_GENERATION => {
             return Err(TargetError::unsupported(
                 format!("`{name}`"),
@@ -139,7 +182,108 @@ pub fn execute_command(
         }
         _ => return Err(unsupported(&name)),
     };
+    stores.publish();
     Ok(result.with_consistency(stores.token()?))
+}
+
+/// The one field of `CompleteTurn`.
+fn turn_id(request: &SemanticCommandRequest) -> Result<TurnId, TargetError> {
+    let mut input = Input::of(request);
+    let turn_id = input.named("turn_id")?;
+    input.finish()?;
+    Ok(turn_id)
+}
+
+/// The one field of `CommitSpan`.
+fn span_id(request: &SemanticCommandRequest) -> Result<SpanId, TargetError> {
+    let mut input = Input::of(request);
+    let span_id = input.named("span_id")?;
+    input.finish()?;
+    Ok(span_id)
+}
+
+/// The answer of `CompleteTurn`: `completed` and its event, or `wrong-state`.
+fn turn_moved(
+    answer: Result<StreamEvent, TurnMoveError>,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    Ok(match answer {
+        Ok(event) => SemanticCommandResult::took(outcome(COMPLETE_TURN, "completed"))
+            .emitting(stream_event(&event)?.in_activity(request.correlation.clone())),
+        Err(TurnMoveError::Unknown(_)) => {
+            SemanticCommandResult::took(outcome(COMPLETE_TURN, "wrong-state")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(TURN_STATE_CONFLICT)),
+            )
+        }
+        Err(TurnMoveError::Conflict(conflict)) => {
+            SemanticCommandResult::took(outcome(COMPLETE_TURN, "wrong-state"))
+                .with_error(turn_conflict(conflict)?)
+        }
+    })
+}
+
+/// The answer of `CommitSpan`: `committed` and its event, or `wrong-state`.
+fn span_moved(
+    answer: Result<StreamEvent, SpanMoveError>,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    Ok(match answer {
+        Ok(event) => SemanticCommandResult::took(outcome(COMMIT_SPAN, "committed"))
+            .emitting(stream_event(&event)?.in_activity(request.correlation.clone())),
+        Err(SpanMoveError::Unknown(_)) => {
+            SemanticCommandResult::took(outcome(COMMIT_SPAN, "wrong-state")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(SPAN_STATE_CONFLICT)),
+            )
+        }
+        Err(SpanMoveError::Conflict(conflict)) => {
+            SemanticCommandResult::took(outcome(COMMIT_SPAN, "wrong-state"))
+                .with_error(span_conflict(conflict)?)
+        }
+    })
+}
+
+fn revise_span(
+    domain: &mut StreamDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let revise = ReviseSpan {
+        span_id: input.named("span_id")?,
+        text: input.text("text")?,
+    };
+    input.finish()?;
+    Ok(match domain.revise_span(revise) {
+        Ok(event) => SemanticCommandResult::took(outcome(REVISE_SPAN, "revised")).emitting(
+            stream_event(&StreamEvent::TranscriptRevision(event))?
+                .in_activity(request.correlation.clone()),
+        ),
+        Err(ReviseSpanError::Immutable(error)) => {
+            SemanticCommandResult::took(outcome(REVISE_SPAN, "immutable")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(COMMITTED_SPAN_IMMUTABLE))
+                    .with("span_id", named_node(&error.span_id)?),
+            )
+        }
+        Err(ReviseSpanError::NoSuchSpan(error)) => {
+            SemanticCommandResult::took(outcome(REVISE_SPAN, "no-such-span")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(SPAN_NOT_FOUND))
+                    .with("span_id", named_node(&error.span_id)?),
+            )
+        }
+    })
+}
+
+fn turn_conflict(conflict: TurnStateConflict) -> Result<DeclaredErrorValue, TargetError> {
+    Ok(
+        DeclaredErrorValue::new(parse::<ErrorRef>(TURN_STATE_CONFLICT))
+            .with("current", named_node(&conflict.current)?),
+    )
+}
+
+fn span_conflict(conflict: SpanStateConflict) -> Result<DeclaredErrorValue, TargetError> {
+    Ok(
+        DeclaredErrorValue::new(parse::<ErrorRef>(SPAN_STATE_CONFLICT))
+            .with("current", named_node(&conflict.current)?),
+    )
 }
 
 /// The one field of a generation command.
@@ -257,22 +401,31 @@ pub fn query_view(
 ) -> Result<SemanticViewResult, TargetError> {
     let domain = &stores.stream;
     let name = request.view.to_string();
-    if name != GENERATIONS && name != SEGMENTS {
+    if ![TURNS, SPANS, GENERATIONS, SEGMENTS].contains(&name.as_str()) {
         return Err(unsupported(&name));
     }
     stores.require(&name, &request.consistency)?;
-    let rows = if name == GENERATIONS {
-        domain
+    let rows = match name.as_str() {
+        TURNS => domain
+            .turns_view()
+            .iter()
+            .map(turns_row)
+            .collect::<Result<Vec<_>, _>>()?,
+        SPANS => domain
+            .spans_view()
+            .iter()
+            .map(spans_row)
+            .collect::<Result<Vec<_>, _>>()?,
+        GENERATIONS => domain
             .generations_view()
             .iter()
             .map(generations_row)
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        domain
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => domain
             .segments_view()
             .iter()
             .map(segments_row)
-            .collect::<Result<Vec<_>, _>>()?
+            .collect::<Result<Vec<_>, _>>()?,
     };
     Ok(SemanticViewResult::of(rows))
 }
@@ -285,12 +438,13 @@ pub fn observe_events(
     if !EVENTS.contains(&wanted.as_str()) {
         return Err(unsupported(&wanted));
     }
+    stores.publish();
     let mut observed = Vec::new();
-    for (position, event) in stores.stream.events().iter().enumerate() {
+    for (index, event) in stores.stream.events().iter().enumerate() {
         let event = stream_event(event)?;
         if event.event == request.event {
-            let sequence = u64::try_from(position + 1).unwrap_or(u64::MAX);
-            observed.push(event.in_activity(request.correlation.clone()).at(sequence));
+            let position = stores.stream_position(index)?;
+            observed.push(event.in_activity(request.correlation.clone()).at(position));
         }
     }
     Ok(observed)
@@ -305,6 +459,28 @@ fn stream_event(event: &StreamEvent) -> Result<ObservedEvent, TargetError> {
         )
     };
     Ok(match event {
+        StreamEvent::TurnOpened(event) => ObservedEvent::new(parse::<EventRef>(TURN_OPENED))
+            .with("turn_id", named_node(&event.turn_id)?)
+            .with("run_id", named_node(&event.run_id)?),
+        StreamEvent::TurnCompleted(event) => ObservedEvent::new(parse::<EventRef>(TURN_COMPLETED))
+            .with("turn_id", named_node(&event.turn_id)?),
+        StreamEvent::TranscriptHypothesis(event) => {
+            ObservedEvent::new(parse::<EventRef>(TRANSCRIPT_HYPOTHESIS))
+                .with("span_id", named_node(&event.span_id)?)
+                .with("turn_id", named_node(&event.turn_id)?)
+                .with("sequence", integer_node(event.sequence))
+                .with("text", text_node(&event.text))
+        }
+        StreamEvent::TranscriptRevision(event) => {
+            ObservedEvent::new(parse::<EventRef>(TRANSCRIPT_REVISION))
+                .with("span_id", named_node(&event.span_id)?)
+                .with("text", text_node(&event.text))
+        }
+        StreamEvent::TranscriptCommitted(event) => {
+            ObservedEvent::new(parse::<EventRef>(TRANSCRIPT_COMMITTED))
+                .with("span_id", named_node(&event.span_id)?)
+                .with("text", text_node(&event.text))
+        }
         StreamEvent::GenerationStarted(event) => generation_started(event)?,
         StreamEvent::GenerationCompleted(event) => {
             generation(GENERATION_COMPLETED, event.generation_id)?
@@ -339,6 +515,26 @@ fn generation_started(event: &GenerationStarted) -> Result<ObservedEvent, Target
         .with("generation_id", named_node(&event.generation_id)?)
         .with("run_id", named_node(&event.run_id)?)
         .with("epoch", integer_node(event.epoch)))
+}
+
+fn turns_row(row: &TurnsRow) -> Result<ViewRow, TargetError> {
+    Ok(BTreeMap::from([
+        ("turn_id".to_owned(), named_node(&row.turn_id)?),
+        ("run_id".to_owned(), named_node(&row.run_id)?),
+        ("state".to_owned(), named_node(&row.state)?),
+    ]))
+}
+
+fn spans_row(row: &SpansRow) -> Result<ViewRow, TargetError> {
+    Ok(BTreeMap::from([
+        ("span_id".to_owned(), named_node(&row.span_id)?),
+        ("run_id".to_owned(), named_node(&row.run_id)?),
+        ("turn_id".to_owned(), named_node(&row.turn_id)?),
+        ("stream_id".to_owned(), named_node(&row.stream_id)?),
+        ("sequence".to_owned(), integer_node(row.sequence)),
+        ("text".to_owned(), text_node(&row.text)),
+        ("state".to_owned(), named_node(&row.state)?),
+    ]))
 }
 
 fn generations_row(row: &GenerationsRow) -> Result<ViewRow, TargetError> {
@@ -396,7 +592,8 @@ mod tests {
     use ess_primitives::node::Node;
     use ess_primitives::time::Timestamp;
     use inference_core::generation::StartGeneration;
-    use inference_core::id::{NodeId, RunId};
+    use inference_core::id::{NodeId, RunId, StreamId};
+    use inference_text::{EmitHypothesis, OpenTurn};
     use uuid::Uuid;
 
     use super::super::Stores;
@@ -756,5 +953,271 @@ mod tests {
         assert_eq!(deltas[0].payload["text"], text("hello"));
 
         assert!(observe(&mut stores, "inference.stream.AudioPlayed").is_empty());
+    }
+
+    fn observed(stores: &mut Stores, name: &str) -> Vec<ess_conformance::target::ObservedEvent> {
+        observe_events(
+            stores,
+            &EventObservationRequest {
+                event: name.parse::<EventRef>().expect("an event name"),
+                correlation: correlation(),
+                deadline: Deadline::at(Timestamp::from_epoch_millis(u64::MAX)),
+            },
+        )
+        .unwrap_or_else(|error| panic!("`{name}` is observed: {error}"))
+    }
+
+    /// An Open turn in the store, opened as `story:run-lifecycle`'s `OpenTurn` will open one once
+    /// a run store decides its refusals; returns its identity as the runner captures it.
+    fn turn(stores: &mut Stores) -> Node {
+        let event = stores.stream.open_turn(OpenTurn {
+            run_id: RunId::from(Uuid::from_u128(0x0a1b_2c3d_4e5f_4a6b_8c7d_9e0f_1a2b_3c4d)),
+        });
+        text(&event.turn_id.to_string())
+    }
+
+    /// A Hypothesis span of `turn`, emitted as `EmitHypothesis` will emit one once a run store
+    /// decides its run refusals.
+    fn span(stores: &mut Stores, turn: &Node, sequence: i64) -> Node {
+        let Node::Text(turn_id) = turn else {
+            panic!("a turn identity is a string: {turn:?}")
+        };
+        let event = stores
+            .stream
+            .emit_hypothesis(EmitHypothesis {
+                run_id: RunId::from(Uuid::from_u128(0x0a1b_2c3d_4e5f_4a6b_8c7d_9e0f_1a2b_3c4d)),
+                turn_id: turn_id.parse::<Uuid>().expect("a Uuid").into(),
+                stream_id: StreamId::from(Uuid::from_u128(
+                    0x2a1b_2c3d_4e5f_4a6b_8c7d_9e0f_1a2b_3c4d,
+                )),
+                sequence,
+                text: "hello wor".to_owned(),
+            })
+            .expect("an Open turn admits a span");
+        text(&event.span_id.to_string())
+    }
+
+    #[test]
+    fn complete_turn_and_commit_span_answer_an_unknown_identity_with_no_current() {
+        for (name, field, error) in [
+            (
+                "inference.stream.CompleteTurn",
+                "turn_id",
+                "inference.stream.TurnStateConflict",
+            ),
+            (
+                "inference.stream.CommitSpan",
+                "span_id",
+                "inference.stream.SpanStateConflict",
+            ),
+        ] {
+            let mut stores = Stores::default();
+            let result = run(&mut stores, name, &[(field, text(UNKNOWN))]);
+            assert_eq!(branch(&result), format!("{name}/wrong-state"));
+            let carried = result.error.expect("a declared error");
+            assert_eq!(carried.error.to_string(), error);
+            assert!(
+                carried.fields.is_empty(),
+                "{name}: no record holds a state to report: {:?}",
+                carried.fields
+            );
+            assert!(result.direct_events.is_empty(), "{name} published an event");
+        }
+    }
+
+    #[test]
+    fn revise_span_answers_an_unknown_span_with_its_identity() {
+        let mut stores = Stores::default();
+        let result = run(
+            &mut stores,
+            "inference.stream.ReviseSpan",
+            &[("span_id", text(UNKNOWN)), ("text", text("lost"))],
+        );
+        assert_eq!(branch(&result), "inference.stream.ReviseSpan/no-such-span");
+        let carried = result.error.expect("a declared error");
+        assert_eq!(carried.error.to_string(), "inference.stream.SpanNotFound");
+        assert_eq!(carried.fields["span_id"], text(UNKNOWN));
+        assert!(result.direct_events.is_empty());
+    }
+
+    #[test]
+    fn open_turn_and_emit_hypothesis_are_unsupported_until_a_run_store_decides_their_refusals() {
+        let mut stores = Stores::default();
+        let opened = execute_command(
+            &mut stores,
+            &command("inference.stream.OpenTurn", &[("run_id", text(UNKNOWN))]),
+        );
+        assert!(
+            matches!(&opened, Err(error) if error.is_unsupported()),
+            "{opened:?}"
+        );
+        let emitted = execute_command(
+            &mut stores,
+            &command(
+                "inference.stream.EmitHypothesis",
+                &[
+                    ("run_id", text(UNKNOWN)),
+                    ("turn_id", text(UNKNOWN)),
+                    ("stream_id", text(UNKNOWN)),
+                    ("sequence", Node::Number(Number::from(1_i64))),
+                    ("text", text("hello")),
+                ],
+            ),
+        );
+        assert!(
+            matches!(&emitted, Err(error) if error.is_unsupported()),
+            "{emitted:?}"
+        );
+        assert!(stores.stream.turns().is_empty());
+        assert!(stores.stream.spans().is_empty());
+    }
+
+    #[test]
+    fn a_committed_span_refuses_a_revision_through_the_target_and_its_text_is_unchanged() {
+        let mut stores = Stores::default();
+        let turn = turn(&mut stores);
+        let span = span(&mut stores, &turn, 3);
+
+        let revised = run(
+            &mut stores,
+            "inference.stream.ReviseSpan",
+            &[("span_id", span.clone()), ("text", text("hello world"))],
+        );
+        assert_eq!(branch(&revised), "inference.stream.ReviseSpan/revised");
+        assert_eq!(
+            revised.direct_events[0].event.to_string(),
+            "inference.stream.TranscriptRevision"
+        );
+        assert_eq!(revised.direct_events[0].payload["span_id"], span);
+        assert_eq!(
+            revised.direct_events[0].payload["text"],
+            text("hello world")
+        );
+
+        let committed = run(
+            &mut stores,
+            "inference.stream.CommitSpan",
+            &[("span_id", span.clone())],
+        );
+        assert_eq!(branch(&committed), "inference.stream.CommitSpan/committed");
+        assert_eq!(
+            committed.direct_events[0].payload["text"],
+            text("hello world")
+        );
+
+        let refused = run(
+            &mut stores,
+            "inference.stream.ReviseSpan",
+            &[("span_id", span.clone()), ("text", text("goodbye"))],
+        );
+        assert_eq!(branch(&refused), "inference.stream.ReviseSpan/immutable");
+        let carried = refused.error.expect("a declared error");
+        assert_eq!(
+            carried.error.to_string(),
+            "inference.stream.CommittedSpanImmutable"
+        );
+        assert_eq!(carried.fields["span_id"], span);
+        assert!(refused.direct_events.is_empty());
+
+        let again = run(
+            &mut stores,
+            "inference.stream.CommitSpan",
+            &[("span_id", span.clone())],
+        );
+        assert_eq!(branch(&again), "inference.stream.CommitSpan/wrong-state");
+        assert_eq!(
+            again.error.expect("a declared error").fields["current"],
+            text("Committed")
+        );
+
+        let spans = rows(&mut stores, "inference.stream.Spans");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0]["span_id"], span);
+        assert_eq!(spans[0]["turn_id"], turn);
+        assert_eq!(
+            spans[0]["text"],
+            text("hello world"),
+            "the text is unchanged"
+        );
+        assert_eq!(spans[0]["state"], text("Committed"));
+        assert_eq!(spans[0]["sequence"], Node::Number(Number::from(3_i64)));
+    }
+
+    #[test]
+    fn complete_turn_completes_once_and_leaves_its_spans_as_they_are() {
+        let mut stores = Stores::default();
+        let turn = turn(&mut stores);
+        let span = span(&mut stores, &turn, 1);
+
+        let completed = run(
+            &mut stores,
+            "inference.stream.CompleteTurn",
+            &[("turn_id", turn.clone())],
+        );
+        assert_eq!(
+            branch(&completed),
+            "inference.stream.CompleteTurn/completed"
+        );
+        assert_eq!(
+            completed.direct_events[0].event.to_string(),
+            "inference.stream.TurnCompleted"
+        );
+        assert_eq!(completed.direct_events[0].payload["turn_id"], turn);
+
+        let again = run(
+            &mut stores,
+            "inference.stream.CompleteTurn",
+            &[("turn_id", turn.clone())],
+        );
+        assert_eq!(branch(&again), "inference.stream.CompleteTurn/wrong-state");
+        assert_eq!(
+            again.error.expect("a declared error").fields["current"],
+            text("Completed")
+        );
+
+        let turns = rows(&mut stores, "inference.stream.Turns");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["turn_id"], turn);
+        assert_eq!(turns[0]["state"], text("Completed"));
+        let spans = rows(&mut stores, "inference.stream.Spans");
+        assert_eq!(spans[0]["span_id"], span);
+        assert_eq!(spans[0]["state"], text("Hypothesis"));
+    }
+
+    #[test]
+    fn the_turn_and_span_events_are_observed_with_every_declared_field() {
+        let mut stores = Stores::default();
+        let turn = turn(&mut stores);
+        let span = span(&mut stores, &turn, 2);
+        run(
+            &mut stores,
+            "inference.stream.CommitSpan",
+            &[("span_id", span.clone())],
+        );
+
+        let opened = observed(&mut stores, "inference.stream.TurnOpened");
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].sequence, Some(1));
+        assert_eq!(opened[0].payload["turn_id"], turn);
+        assert!(opened[0].payload.contains_key("run_id"));
+
+        let hypotheses = observed(&mut stores, "inference.stream.TranscriptHypothesis");
+        assert_eq!(hypotheses.len(), 1);
+        assert_eq!(hypotheses[0].sequence, Some(2));
+        assert_eq!(hypotheses[0].payload["span_id"], span);
+        assert_eq!(hypotheses[0].payload["turn_id"], turn);
+        assert_eq!(
+            hypotheses[0].payload["sequence"],
+            Node::Number(Number::from(2_i64))
+        );
+        assert_eq!(hypotheses[0].payload["text"], text("hello wor"));
+
+        let committed = observed(&mut stores, "inference.stream.TranscriptCommitted");
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].sequence, Some(3));
+        assert_eq!(committed[0].payload["text"], text("hello wor"));
+
+        assert!(observed(&mut stores, "inference.stream.TranscriptRevision").is_empty());
+        assert!(observed(&mut stores, "inference.stream.TurnCompleted").is_empty());
     }
 }
