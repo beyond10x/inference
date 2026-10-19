@@ -1,6 +1,6 @@
 [package]
 name = "inference-runtime"
-description = "Graph execution of the inference framework: one bounded queue per edge per run, with the overload policy its declaration carries."
+description = "Graph execution of the inference framework: the bounded queue of one edge, with the overload policy its declaration carries."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
