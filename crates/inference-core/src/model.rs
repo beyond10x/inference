@@ -178,7 +178,16 @@ impl Model {
     /// input's fields and the [`ModelDeclared`] event.
     #[must_use]
     pub fn declare(input: DeclareModel) -> (Self, ModelDeclared) {
-        let model_id = ModelId::generate();
+        Self::declare_as(ModelId::generate(), input)
+    }
+
+    /// Runs `inference.model.DeclareModel` under `model_id` instead of a generated one, and
+    /// otherwise as [`Model::declare`]: returns the model with the input's fields and the
+    /// [`ModelDeclared`] event, both carrying `model_id`. It is for a store that assigns the
+    /// identities itself, such as the counter of `inference-testkit`, whose runs must report the
+    /// same identities each time.
+    #[must_use]
+    pub fn declare_as(model_id: ModelId, input: DeclareModel) -> (Self, ModelDeclared) {
         let event = ModelDeclared {
             model_id,
             family: input.family.clone(),
@@ -331,12 +340,27 @@ impl Adapter {
     pub fn declare(
         input: DeclareAdapter,
     ) -> Result<(Self, AdapterDeclared), NonPositiveConcurrency> {
+        Self::declare_as(AdapterId::generate(), input)
+    }
+
+    /// Runs `inference.model.DeclareAdapter` under `adapter_id` instead of a generated one, and
+    /// otherwise as [`Adapter::declare`]. It is for a store that assigns the identities itself,
+    /// such as the counter of `inference-testkit`, whose runs must report the same identities
+    /// each time.
+    ///
+    /// # Errors
+    ///
+    /// [`NonPositiveConcurrency`] carrying the submitted value when `max_concurrency` is not
+    /// greater than zero; nothing is declared and `adapter_id` is not used.
+    pub fn declare_as(
+        adapter_id: AdapterId,
+        input: DeclareAdapter,
+    ) -> Result<(Self, AdapterDeclared), NonPositiveConcurrency> {
         if input.max_concurrency <= 0 {
             return Err(NonPositiveConcurrency {
                 submitted: input.max_concurrency,
             });
         }
-        let adapter_id = AdapterId::generate();
         let event = AdapterDeclared {
             adapter_id,
             model_id: input.model_id,
