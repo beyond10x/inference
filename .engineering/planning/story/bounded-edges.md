@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:bounded-edges
 kind: story
-status: draft
+status: active
 title: 'Bounded edges: finite buffering, backpressure and the five overload policies'
 summary: One bounded queue per edge per run; pause, fail, drop, coalesce, drop_stale_epochs; §23.3 test 4
 relations:
@@ -28,7 +28,10 @@ scope:
   path: crates/inference-runtime/src/lib.rs
 - confidence: inferred
   path: crates/inference-runtime/src/queue.rs
-revision: 18
+revision: 20
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T07:24:41Z", actor: "human:timo", revision: 19, decided_on: {"recorded":{"review_outcome":3}}}
+- {from: "proposed", to: "active", at: "2026-10-19T07:24:42Z", actor: "human:timo", revision: 20, decided_on: {"recorded":{"review_outcome":3}}}
 ---
 # Story: bounded-edges
 

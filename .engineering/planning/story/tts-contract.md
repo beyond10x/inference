@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:tts-contract
 kind: story
-status: draft
+status: active
 title: 'TTS contract with a mock synthesiser: input completion and audio emission declared apart'
 summary: inference-tts is the synthesis contract consuming committed OutputSegments and emitting audio frames; the testkit mock synthesiser keeps synthesised, queued and played apart and §23.1 test 3 reflects its declared semantics.
 relations:
@@ -19,7 +19,10 @@ scope:
   path: crates/inference-testkit/tests/tts.rs
 - confidence: cited
   path: crates/inference-tts
-revision: 14
+revision: 16
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T07:24:42Z", actor: "human:timo", revision: 15, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "proposed", to: "active", at: "2026-10-19T07:24:42Z", actor: "human:timo", revision: 16, decided_on: {"recorded":{"review_outcome":1}}}
 ---
 ## Context
 
