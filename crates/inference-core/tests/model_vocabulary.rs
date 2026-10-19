@@ -22,6 +22,8 @@ fn declare_model_input() -> DeclareModel {
         checksum: "sha256:0f1e2d3c".to_owned(),
         input_modalities: vec![Modality::Audio, Modality::Control],
         output_modalities: vec![Modality::Text, Modality::Structured],
+        provenance: "upstream release".to_owned(),
+        source_revision: "rev-2026-10".to_owned(),
     }
 }
 
@@ -53,6 +55,8 @@ fn check_1_declare_model_returns_the_model_and_model_declared() {
         model.output_modalities(),
         input.output_modalities.as_slice()
     );
+    assert_eq!(model.provenance(), input.provenance);
+    assert_eq!(model.source_revision(), input.source_revision);
 
     assert_eq!(
         event,
@@ -118,6 +122,7 @@ fn capability_ess_name(capability: Capability) -> &'static str {
         Capability::Interruptible => "interruptible",
         Capability::ResumableModelState => "resumable_model_state",
         Capability::AudioTextAlignment => "audio_text_alignment",
+        Capability::OrchestratedDuplex => "orchestrated_duplex",
     }
 }
 
@@ -187,7 +192,7 @@ where
 
 #[test]
 fn check_3_vocabulary_serializes_to_ess_names_and_round_trips() {
-    assert_enum_matches_ess(&Capability::ALL, 9, capability_ess_name);
+    assert_enum_matches_ess(&Capability::ALL, 10, capability_ess_name);
     assert_enum_matches_ess(&Modality::ALL, 6, modality_ess_name);
     assert_enum_matches_ess(&Locality::ALL, 4, locality_ess_name);
     assert_enum_matches_ess(&ExecutionForm::ALL, 5, execution_form_ess_name);
