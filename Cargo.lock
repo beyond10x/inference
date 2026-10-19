@@ -311,8 +311,10 @@ name = "inference-runtime"
 version = "0.3.0"
 dependencies = [
  "inference-core",
+ "inference-llm",
  "inference-pipeline",
  "inference-testkit",
+ "inference-text",
  "serde",
  "serde_json",
 ]

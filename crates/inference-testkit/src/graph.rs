@@ -23,7 +23,9 @@
 //! through `FailNodeInstance`, move an instance by its own transitions and move no run, and a Run
 //! command moves no instance: which run transition drives which instance is the run controller's
 //! in `inference-runtime`. Behind the same feature, [`RecordingNode`] is the recording mock of the
-//! node contract that controller drives. Runs and node instances take their identities
+//! node contract that controller drives, and [`TextSource`] and [`TextSink`] are the mock source
+//! and sink nodes of a text-only pipeline, which exchange [`PipelinePayload`] envelopes and record
+//! what they emit in a [`RunLog`]. Runs and node instances take their identities
 //! from a counter of their own in the same space, `{IDENTITY_SPACE:08x}-0001-4000-8000-000000000001`
 //! first, so that no run or instance carries the identity of a declared entity. The views
 //! `inference.graph.Runs` and `NodeInstances` are [`GraphDomain::runs`] and
@@ -38,6 +40,10 @@
 //! [`GraphDomain::node_instances`]: crate::graph::GraphDomain::node_instances
 //! [`GraphCatalog`]: crate::graph::GraphCatalog
 //! [`RecordingNode`]: crate::graph::RecordingNode
+//! [`TextSource`]: crate::graph::TextSource
+//! [`TextSink`]: crate::graph::TextSink
+//! [`PipelinePayload`]: crate::graph::PipelinePayload
+//! [`RunLog`]: crate::graph::RunLog
 //! [`IDENTITY_SPACE`]: crate::graph::IDENTITY_SPACE
 //! [`PolicyDomain`]: crate::policy::PolicyDomain
 //! [`ModelDomain`]: crate::model::ModelDomain
@@ -993,6 +999,14 @@ mod recording {
 
 #[cfg(feature = "run")]
 pub use recording::{FallibleStep, LifecycleStep, NodeCall, NodeCalls, RecordingNode};
+
+/// The mock source and sink nodes of a text-only pipeline, behind the `run` feature, and what
+/// they share with the mock model node of [`crate::llm`].
+#[cfg(feature = "run")]
+pub(crate) mod nodes;
+
+#[cfg(feature = "run")]
+pub use nodes::{PipelinePayload, RunLog, SinkHandle, SourceHandle, TextSink, TextSource};
 
 #[cfg(test)]
 mod tests {
