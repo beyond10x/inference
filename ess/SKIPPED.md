@@ -14,25 +14,3 @@ this file with it.
 
 
 ## inference.session
-
-- inference.session.CloseSession/outcome/draining: answered by epic:session-facade
-- inference.session.CloseSession/outcome/no-such-session: answered by epic:session-facade
-- inference.session.CompleteSessionClose/outcome/closed: answered by epic:session-facade
-- inference.session.CompleteSessionClose/outcome/no-such-session: answered by epic:session-facade
-- inference.session.MarkSessionReady/outcome/no-such-session: answered by epic:session-facade
-- inference.session.MarkSessionReady/outcome/ready: answered by epic:session-facade
-- inference.session.OpenSession/outcome/mode-mismatch: answered by epic:session-facade
-- inference.session.OpenSession/outcome/not-planned: answered by epic:session-facade
-- inference.session.OpenSession/outcome/opened: answered by epic:session-facade
-- inference.session.OpenSession/outcome/unknown-pipeline: answered by epic:session-facade
-- inference.session.Session/state/Closed/refuses/inference.session.CloseSession: answered by epic:session-facade
-- inference.session.Session/state/Closed/refuses/inference.session.CompleteSessionClose: answered by epic:session-facade
-- inference.session.Session/state/Closed/refuses/inference.session.MarkSessionReady: answered by epic:session-facade
-- inference.session.Session/state/Draining/refuses/inference.session.CloseSession: answered by epic:session-facade
-- inference.session.Session/state/Draining/refuses/inference.session.MarkSessionReady: answered by epic:session-facade
-- inference.session.Session/state/Opened/refuses/inference.session.CompleteSessionClose: answered by epic:session-facade
-- inference.session.Session/state/Ready/refuses/inference.session.CompleteSessionClose: answered by epic:session-facade
-- inference.session.Session/state/Ready/refuses/inference.session.MarkSessionReady: answered by epic:session-facade
-- inference.session.Session/transition/close/by/inference.session.CompleteSessionClose/closed: answered by epic:session-facade
-- inference.session.Session/transition/drain/by/inference.session.CloseSession/draining: answered by epic:session-facade
-- inference.session.Session/transition/ready/by/inference.session.MarkSessionReady/ready: answered by epic:session-facade
