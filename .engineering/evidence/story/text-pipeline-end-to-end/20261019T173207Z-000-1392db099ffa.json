@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T17:32:07Z",
+  "actor": "human:timo",
+  "artifact": "story:text-pipeline-end-to-end",
+  "kind": "story",
+  "revision": 20,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-core -p inference-runtime --all-features (VERIFIED, new behaviour: baseline a66156b has no run loop and inference-runtime passes 52; with drive() stubbed the text_pipeline cases fail 5 of 5; treatment passes 119 across both crates including the adversary's eleven guards, text_pipeline and adversary1_text_pipeline 0 failures in 100 repeats each, conform 296 passed of 317 with 21 inference.session unsupported)"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T17:27:47Z",
+  "actor": "human:timo",
+  "artifact": "story:text-pipeline-end-to-end",
+  "kind": "story",
+  "revision": 20,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-text-pipeline-end-to-end-pass-1",
+    "reference": "F1 runtime controller.rs drain() drains upstream first in layers from the edges; guarded by adversary1_text_pipeline",
+    "review": "review-result:adversary-text-pipeline-end-to-end-pass-1",
+    "outcome": "fixed"
+  }
+}

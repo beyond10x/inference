@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T17:32:07Z",
+  "actor": "human:timo",
+  "artifact": "story:text-pipeline-end-to-end",
+  "kind": "story",
+  "revision": 20,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check (5 steps, each exit 0; cargo test 939 passed, 0 failed) (wave/13 3b71daf)"
+  }
+}

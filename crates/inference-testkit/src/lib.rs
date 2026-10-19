@@ -2,12 +2,13 @@
 //!
 //! `inference-testkit` holds one in-memory store module per domain of `ess/system.yaml`; behind
 //! the `run` feature, the runs and node instances of the graph store, the recording mock node
-//! the runtime's run controller drives, and the run refusals of the stream store, which take
-//! `inference-runtime`; and behind the `stt`, `llm` and `tts` features,
-//! the mocks of the contract crates. Its test tree carries the conformance target that answers
-//! the synthesized suite of `ess/` (`tests/conform.rs`), which needs the `run` feature; the
-//! library itself pulls no ESS crate, so a crate depending on the stores or the mocks carries no
-//! test tooling, and one that leaves `run` off carries no runtime.
+//! and the mock source and sink nodes of a text-only pipeline the runtime's run controller
+//! drives, and the run refusals of the stream store, which take `inference-runtime`; and behind
+//! the `stt`, `llm` and `tts` features, the mocks of the contract crates, with the mock model
+//! node of a text-only pipeline behind `llm` and `run` together. Its test tree carries the
+//! conformance target that answers the synthesized suite of `ess/` (`tests/conform.rs`), which
+//! needs the `run` feature; the library itself pulls no ESS crate, so a crate depending on the
+//! stores or the mocks carries no test tooling, and one that leaves `run` off carries no runtime.
 //!
 //! Every module exists from the start, empty until the story that declares its domain fills it, so
 //! that no later story adds a line here.
