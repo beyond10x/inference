@@ -101,6 +101,36 @@ const GRAPH_PLANNING_SCENARIOS: [&str; 9] = [
     "inference.graph.Pipeline/state/Planned/refuses/inference.graph.ValidatePipeline",
 ];
 
+/// The eight `inference.graph` scenarios of subgraph nodes this target answers: `AddSubgraphNode`,
+/// `NestRun` and the `interface-mismatch` refusal of `PlanPipeline`.
+const GRAPH_SUBGRAPH_SCENARIOS: [&str; 8] = [
+    "inference.graph.AddSubgraphNode/outcome/added",
+    "inference.graph.AddSubgraphNode/outcome/not-declared",
+    "inference.graph.AddSubgraphNode/outcome/subgraph-not-planned",
+    "inference.graph.AddSubgraphNode/outcome/unknown-pipeline",
+    "inference.graph.AddSubgraphNode/outcome/unknown-subgraph",
+    "inference.graph.NestRun/outcome/nested",
+    "inference.graph.NestRun/outcome/unknown-parent",
+    "inference.graph.PlanPipeline/outcome/interface-mismatch",
+];
+
+/// The two `inference.graph` scenarios of `DeclareNodeDescriptor` this target answers.
+const GRAPH_DESCRIPTOR_SCENARIOS: [&str; 2] = [
+    "inference.graph.DeclareNodeDescriptor/outcome/already-declared",
+    "inference.graph.DeclareNodeDescriptor/outcome/declared",
+];
+
+/// The six `inference.graph` scenarios of `ExposePort` this target answers: its outcome, its four
+/// refusals and the capacity invariant of the exposure it creates.
+const GRAPH_EXPOSURE_SCENARIOS: [&str; 6] = [
+    "inference.graph.ExposePort/outcome/exposed",
+    "inference.graph.ExposePort/outcome/not-declared",
+    "inference.graph.ExposePort/outcome/unbounded",
+    "inference.graph.ExposePort/outcome/unknown-pipeline",
+    "inference.graph.ExposePort/outcome/unknown-port",
+    "inference.graph.Exposure/invariant/after/inference.graph.ExposePort/exposed",
+];
+
 /// The 72 scenarios this target answers by running a pipeline: the 70 synthesized `inference.graph`
 /// scenarios of the eight Run commands and `DescribeNodeInstance`, the authored Draining-to-Failed
 /// one, and the authored `CancelRun` cascade over a run's generation and segments.
@@ -578,6 +608,9 @@ fn the_suite_runs_against_the_testkit_target() {
         .chain(GRAPH_SCENARIOS)
         .chain(GRAPH_VALIDATION_SCENARIOS)
         .chain(GRAPH_PLANNING_SCENARIOS)
+        .chain(GRAPH_EXPOSURE_SCENARIOS)
+        .chain(GRAPH_DESCRIPTOR_SCENARIOS)
+        .chain(GRAPH_SUBGRAPH_SCENARIOS)
         .chain(RUN_SCENARIOS)
         .chain(RUN_ROUTED_SCENARIOS)
         .chain(NODE_INSTANCE_SCENARIOS)

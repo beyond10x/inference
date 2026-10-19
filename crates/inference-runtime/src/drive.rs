@@ -5,11 +5,13 @@
 //! through [`RunRequests`]. A source node's end of input is the control event of kind `stop`
 //! ([`ControlKind::Stop`]) it sends on each of its output edges: the source has ended once every
 //! edge it feeds has taken that event, and the run's input has ended once every source that feeds
-//! an edge has ended. Two gaps follow from reading the end of input off the edges and nothing
-//! else:
+//! an edge has ended. The caller of a run whose pipeline exposes an input port is the source of
+//! that ingress (`inference.graph.Exposure`): its end of input is the `stop` it sends on the
+//! ingress, which counts as a source edge's. Two gaps follow from reading the end of input off the
+//! edges and nothing else:
 //!
-//! - a source that drops its senders without sending `stop` has not ended its input, so the loop
-//!   never drains its run on its own; only a request ends it;
+//! - a source or caller that drops its senders without sending `stop` has not ended its input, so
+//!   the loop never drains its run on its own; only a request ends it;
 //! - a `stop` the edge took counts as sent even when the edge's overload policy then discarded
 //!   it (`drop`, `coalesce`, `drop_stale_epochs`), so the loop may drain a run whose consumer
 //!   never sees the end of input.
@@ -21,7 +23,8 @@
 //! takes the node's drain at once and, when it answers an error, fails the node and with it the
 //! run ([`RunController::fail_node`](crate::RunController::fail_node)).
 //!
-//! Every sender the run controller hands a node is a [`GuardedSender`]: it refuses an envelope
+//! Every sender the run controller hands a node, and the sender of every ingress it hands its
+//! caller, is a [`GuardedSender`]: it refuses an envelope
 //! of user content whose `sequence` is not greater than the last one that edge took on the same
 //! `stream_id` (`docs/design/inference.md:312` and §23.1 test 6), so a repeated or decreasing
 //! sequence never reaches the edge, and the run records the refusal
@@ -42,9 +45,18 @@ use std::task::{Context, Poll, Waker};
 use inference_core::endpoint::{EndpointFuture, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, is_control_kind};
 use inference_core::id::{NodeId, StreamId};
-use inference_pipeline::EdgeId;
+use inference_pipeline::ExposureId;
 
+use crate::queue::Channel;
 use crate::run::RunState;
+
+/// What feeds the run's input: a source node, over each of its output edges, or the caller, over
+/// an ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Feed {
+    Node(NodeId),
+    Ingress(ExposureId),
+}
 
 /// What the run loop acts on next while the run is Active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,11 +69,12 @@ pub(crate) enum Next {
     ConsumerGone(NodeId),
 }
 
-/// A node sent an envelope of user content whose `sequence` is not greater than `last`, the
-/// last one the edge `edge_id` took on `stream_id`; the envelope did not reach the edge.
+/// A node, or the caller on an ingress, sent an envelope of user content whose `sequence` is not
+/// greater than `last`, the last one the edge or exposure `channel` took on `stream_id`; the
+/// envelope did not reach its queue. `producer` is the envelope's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceNotIncreasing {
-    pub edge_id: EdgeId,
+    pub channel: Channel,
     pub producer: NodeId,
     pub stream_id: StreamId,
     pub last: i64,
@@ -72,8 +85,8 @@ impl fmt::Display for SequenceNotIncreasing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "node {} sent sequence {} on the stream {} along edge {}, not greater than its last, {}",
-            self.producer, self.sequence, self.stream_id, self.edge_id, self.last
+            "node {} sent sequence {} on the stream {} along {}, not greater than its last, {}",
+            self.producer, self.sequence, self.stream_id, self.channel, self.last
         )
     }
 }
@@ -82,9 +95,10 @@ impl Error for SequenceNotIncreasing {}
 
 struct State {
     run: RunState,
-    /// The output edges of each source node that have not yet taken its end of input.
-    open_sources: HashMap<NodeId, usize>,
-    /// Whether any source node feeds an edge.
+    /// The output edges of each source node, and each ingress, that have not yet taken its end of
+    /// input.
+    open_sources: HashMap<Feed, usize>,
+    /// Whether any source node feeds an edge, or the caller an ingress.
     has_sources: bool,
     cancel: bool,
     drain: bool,
@@ -149,17 +163,17 @@ impl Signals {
         }
     }
 
-    /// Counts one more output edge of the source node `node_id`.
-    pub(crate) fn source_edge(&self, node_id: NodeId) {
+    /// Counts one more output edge of a source node, or one more ingress.
+    pub(crate) fn source_edge(&self, feed: Feed) {
         let mut state = self.state();
         state.has_sources = true;
-        *state.open_sources.entry(node_id).or_default() += 1;
+        *state.open_sources.entry(feed).or_default() += 1;
     }
 
-    /// One output edge of the source node `node_id` took its end of input.
-    fn source_edge_ended(&self, node_id: NodeId) {
+    /// One output edge of a source node, or an ingress, took its end of input.
+    fn source_edge_ended(&self, feed: Feed) {
         let mut state = self.state();
-        if let Some(open) = state.open_sources.get_mut(&node_id) {
+        if let Some(open) = state.open_sources.get_mut(&feed) {
             *open = open.saturating_sub(1);
         }
         if state.input_ended() {
@@ -262,34 +276,35 @@ impl fmt::Debug for RunRequests {
     }
 }
 
-/// The sender of one output edge as the run controller hands it to a node: it refuses user
-/// content whose sequence does not increase on its stream, tells the run's [`Signals`] when the
-/// edge refuses an envelope as closed, naming the node it arrives at, and, on an edge of a source
-/// node, once the edge took the node's end of input.
+/// The sender of one output edge as the run controller hands it to a node, or of one exposure as
+/// it hands it to a node (an egress) or to its caller (an ingress): it refuses user content whose
+/// sequence does not increase on its stream, tells the run's [`Signals`] when the queue refuses an
+/// envelope as closed, naming the node it arrives at, and, on an edge of a source node or an
+/// ingress, once the queue took the end of input.
 pub(crate) struct GuardedSender<E> {
     pub(crate) inner: E,
-    pub(crate) edge_id: EdgeId,
-    /// The source node the edge leaves from, if it leaves from one.
-    pub(crate) source: Option<NodeId>,
-    /// The node the edge arrives at, if it arrives at one.
+    pub(crate) channel: Channel,
+    /// What the queue feeds the run's input from, if it is a source node's edge or an ingress.
+    pub(crate) source: Option<Feed>,
+    /// The node the queue arrives at, if it arrives at one.
     pub(crate) consumer: Option<NodeId>,
     pub(crate) signals: Arc<Signals>,
     pub(crate) ended: AtomicBool,
-    /// The last sequence the edge took on each stream.
+    /// The last sequence the queue took on each stream.
     pub(crate) sequences: Mutex<HashMap<StreamId, i64>>,
 }
 
 impl<E> GuardedSender<E> {
     pub(crate) fn new(
         inner: E,
-        edge_id: EdgeId,
-        source: Option<NodeId>,
+        channel: Channel,
+        source: Option<Feed>,
         consumer: Option<NodeId>,
         signals: Arc<Signals>,
     ) -> Self {
         Self {
             inner,
-            edge_id,
+            channel,
             source,
             consumer,
             signals,
@@ -345,7 +360,7 @@ impl<P: Send + 'static, E: OutputEndpoint<P>> OutputEndpoint<P> for GuardedSende
                     Ok(previous) => taken = Some((stream_id, sequence, previous)),
                     Err(last) => {
                         self.signals.refused(SequenceNotIncreasing {
-                            edge_id: self.edge_id,
+                            channel: self.channel,
                             producer,
                             stream_id,
                             last,
@@ -366,9 +381,9 @@ impl<P: Send + 'static, E: OutputEndpoint<P>> OutputEndpoint<P> for GuardedSende
             }
             if end
                 && !self.ended.swap(true, Ordering::AcqRel)
-                && let Some(node_id) = self.source
+                && let Some(feed) = self.source
             {
-                self.signals.source_edge_ended(node_id);
+                self.signals.source_edge_ended(feed);
             }
             Ok(())
         })
