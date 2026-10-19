@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T09:21:42Z",
+  "actor": "human:timo",
+  "artifact": "story:contracts-review-fixes",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-contracts-review-fixes-pass-2",
+    "reference": "F2 receipt tied to segment id: story:segment-linear-transitions",
+    "review": "review-result:adversary-contracts-review-fixes-pass-2",
+    "outcome": "no-op"
+  }
+}

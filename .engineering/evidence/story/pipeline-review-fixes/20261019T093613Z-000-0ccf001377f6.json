@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T09:36:13Z",
+  "actor": "human:timo",
+  "artifact": "story:pipeline-review-fixes",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-pipeline -p inference-testkit -p inference-runtime --all-features (VERIFIED, new behaviour: baseline wave/10 5f40904 fails 32 cases of the story's decisions (builder accepts an unknown profile, a profile id is accepted as a pipeline id, AddPort on a Validated pipeline succeeds, check 6 flags inputs); treatment passes 490 and conform 54 of 231 with failed 0, error 0)"
+  }
+}

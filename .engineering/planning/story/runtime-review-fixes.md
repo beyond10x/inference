@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:runtime-review-fixes
 kind: story
-status: active
+status: implemented
 title: 'Bounded edges: the four defects of the 0.3.0 review'
 relations:
 - decomposes: epic:graph-minimum
@@ -17,10 +17,11 @@ scope:
   path: crates/inference-runtime/src/queue.rs
 - confidence: cited
   path: crates/inference-runtime/tests
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T08:33:18Z", actor: "human:timo", revision: 6}
 - {from: "proposed", to: "active", at: "2026-10-19T08:33:18Z", actor: "human:timo", revision: 7}
+- {from: "active", to: "implemented", at: "2026-10-19T09:36:13Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 

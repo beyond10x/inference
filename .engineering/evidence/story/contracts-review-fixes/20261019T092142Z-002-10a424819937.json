@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T09:21:42Z",
+  "actor": "human:timo",
+  "artifact": "story:contracts-review-fixes",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-contracts-review-fixes-pass-2",
+    "reference": "F4 mutants guarded by adversary2 cases :266 :246 testkit :115",
+    "review": "review-result:adversary-contracts-review-fixes-pass-2",
+    "outcome": "fixed"
+  }
+}

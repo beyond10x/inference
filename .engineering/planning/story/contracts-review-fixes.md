@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:contracts-review-fixes
 kind: story
-status: active
+status: implemented
 title: 'STT and TTS contracts: the six problems of the 0.3.0 review'
 relations:
 - decomposes: epic:contracts-and-testkit
@@ -24,10 +24,11 @@ scope:
   path: crates/inference-text/src/lib.rs
 - confidence: cited
   path: crates/inference-tts
-revision: 10
+revision: 13
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T08:33:20Z", actor: "human:timo", revision: 9}
 - {from: "proposed", to: "active", at: "2026-10-19T08:33:20Z", actor: "human:timo", revision: 10}
+- {from: "active", to: "implemented", at: "2026-10-19T09:36:13Z", actor: "human:timo", revision: 13, decided_on: {"recorded":{"test_result":1,"review_outcome":9,"verification":1}}}
 ---
 ## Context
 
@@ -68,3 +69,19 @@ passes with one case per decision, each red before the fix.
 ## Out of scope
 
 Voices, alignment, speculative TTS.
+
+## Playback receipt
+
+Decided in wave 10 after adversary pass 1:
+
+- Decision 4 is narrowed: a `PlaybackReceipt` is made by consuming the delivered `SegmentAudio`
+  values, so a synthesiser that handed its frames to a sink can no longer confirm their playback.
+  A synthesiser that withholds every frame from every sink is outside what a type can prevent in
+  one process.
+- A segment that emitted no frame is acknowledged with an empty receipt; an empty receipt for a
+  segment that emitted frames is refused.
+- `PlayedFramesMismatch` is a Rust-side precondition of the contract, like
+  `CapabilityNotClaimed`; `ess/domains/stream.yaml` keeps `played` and `wrong-state`.
+- A continuing recognition starts after the previous handle is dropped: read `next_sequence`,
+  drop the handle, start the next.
+- A refused acknowledgement loses no playback: the synthesis counts the frames of every receipt it is given toward the segment they belong to, whatever the outcome, and the segment is Played once the frames counted equal the frames emitted. A retry after a refusal carries only the frames played since, or none. (Adversary pass 2.)

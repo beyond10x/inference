@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:pipeline-review-fixes
 kind: story
-status: active
+status: implemented
 title: 'Pipeline declaration and validation: the six problems of the 0.3.0 review'
 relations:
 - decomposes: epic:graph-minimum
@@ -25,10 +25,11 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 11
+revision: 13
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T08:33:19Z", actor: "human:timo", revision: 10}
 - {from: "proposed", to: "active", at: "2026-10-19T08:33:19Z", actor: "human:timo", revision: 11}
+- {from: "active", to: "implemented", at: "2026-10-19T09:36:13Z", actor: "human:timo", revision: 13, decided_on: {"recorded":{"test_result":1,"review_outcome":3,"verification":1}}}
 ---
 ## Context
 
@@ -76,3 +77,18 @@ case per decision, each red before the fix, and the conform test passes with `fa
 ## Out of scope
 
 Checks 4, 7, 8 and 10.
+
+## Forced outcomes and ports
+
+Decided in wave 10 from the unit's measurement:
+
+- Decision 1 is superseded by ESS. The ESS interpreter (ess 0.60) answers a forced external outcome
+  in every state and for an unknown pipeline: a refusal moves nothing, so `wrong-state` never comes
+  first. Checking state and existence before a forced `rejected` made conform fail
+  (`ValidatePipeline/outcome/rejected` expected `rejected`, got `wrong-state`). The target keeps the
+  ESS order for `ValidatePipeline` and `PlanPipeline`, documented there and pinned by two cases.
+- `AddPort` takes `pipeline_id`; a port belongs to the pipeline it names, and validation check 1
+  finds a port whose node is in another pipeline. A guard on `AddPort` that the node belongs to the
+  named pipeline breaks suite synthesis (ESS-SYNTH-003, -004), so it is a validation finding.
+- Testkit identifiers count in per-domain spaces (first 8 hex digits: stream 0, model 1, policy 2,
+  graph 3).
