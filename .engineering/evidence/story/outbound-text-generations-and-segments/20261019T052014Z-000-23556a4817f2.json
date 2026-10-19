@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T05:20:14Z",
+  "actor": "human:timo",
+  "artifact": "story:outbound-text-generations-and-segments",
+  "kind": "story",
+  "revision": 23,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-testkit --all-features --test conform (VERIFIED: baseline wave/4 18f4624 passes 4 of 229, the 8 stream wrong-state ids unsupported; treatment impl/outbound-text-generations-and-segments passes 12, the 8 among them, failed 0, error 0)"
+  }
+}

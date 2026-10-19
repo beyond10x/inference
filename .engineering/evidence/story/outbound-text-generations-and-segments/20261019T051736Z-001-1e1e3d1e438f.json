@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T05:17:36Z",
+  "actor": "human:timo",
+  "artifact": "story:outbound-text-generations-and-segments",
+  "kind": "story",
+  "revision": 23,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-outbound-text-generations-and-segments-pass-2",
+    "reference": "F2 tests/target/mod.rs:62 guard",
+    "review": "review-result:adversary-outbound-text-generations-and-segments-pass-2",
+    "outcome": "fixed"
+  }
+}
