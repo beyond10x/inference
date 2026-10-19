@@ -16,7 +16,7 @@ use inference_core::model::ModelId;
 use inference_testkit::tts::{MockConfiguration, MockSink, MockSynthesiser};
 use inference_text::{OutputSegment, SegmentState, SegmentStateConflict};
 use inference_tts::inference_audio::{AudioEncoding, AudioFormat};
-use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
+use inference_tts::{DiscardRefused, SynthesisEvent, SynthesisHandle, Synthesiser};
 
 fn committed(text: &str) -> OutputSegment {
     let (generation, _) = Generation::start(StartGeneration {
@@ -58,14 +58,18 @@ fn once_the_sink_acknowledges_playback_the_synthesis_record_refuses_discard() {
             .unwrap_or_else(|error| panic!("{configuration:?}: acknowledged ({error:?})"));
         assert_eq!(played.state(), SegmentState::Played, "{configuration:?}");
 
-        let record = handle.output().segment(id).expect("held");
+        let held = handle.output().segment(id).expect("held").state();
         assert_eq!(
-            record.discard().map(|(discarded, _)| discarded.state()),
-            Err(SegmentStateConflict {
+            handle.discard(id),
+            Err(DiscardRefused::SegmentStateConflict(SegmentStateConflict {
                 current: SegmentState::Played,
-            }),
-            "{configuration:?}: after AcknowledgePlayback the synthesis still holds the segment as {:?} and lets cancellation discard audio the user heard",
-            record.state()
+            })),
+            "{configuration:?}: after AcknowledgePlayback the synthesis still holds the segment as {held:?} and lets cancellation discard audio the user heard"
+        );
+        assert_eq!(
+            handle.output().segment(id).map(OutputSegment::state),
+            Some(SegmentState::Played),
+            "{configuration:?}: the refused discard leaves the record Played"
         );
     }
 }

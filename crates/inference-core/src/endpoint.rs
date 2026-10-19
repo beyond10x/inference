@@ -4,8 +4,8 @@
 //!
 //! An edge of a pipeline is a bounded channel (`inference.graph.Edge`); the runtime's edge queue
 //! implements both traits, its sender side for the producing node and its receiver side for the
-//! consuming node. Nothing builds the queues of a run and hands them to nodes yet; the story
-//! `node-instance-lifecycle` wires one queue per edge per run. The traits are declared here,
+//! consuming node. The runtime's run controller builds one queue per edge of a run and hands
+//! each node its endpoints when it starts. The traits are declared here,
 //! beside the envelope they carry, so that a node implementation names an endpoint without
 //! depending on the runtime that implements it.
 //! Both are dyn-compatible, so a node receives them as trait objects, and both return a boxed

@@ -78,10 +78,11 @@ use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_runtime::run::{RunNotFound, RunStateConflict};
 use inference_text::{
     AudioPlayed, CommittedSpanImmutable, EmitHypothesis, EmitTextDelta, OpenTurn, OutputSegment,
-    ReviseSpan, SegmentDiscarded, SegmentId, SegmentQueued, SegmentState, SegmentStateConflict,
-    Span, SpanId, SpanNotFound, SpanState, SpanStateConflict, SynthesisCompleted, TextDelta,
-    TextSegmentCommitted, TranscriptCommitted, TranscriptHypothesis, TranscriptRevision, Turn,
-    TurnCompleted, TurnId, TurnNotFound, TurnOpened, TurnState, TurnStateConflict,
+    ReviseSpan, SegmentDiscarded, SegmentId, SegmentMoveRefused, SegmentQueued, SegmentState,
+    SegmentStateConflict, Span, SpanId, SpanNotFound, SpanState, SpanStateConflict,
+    SynthesisCompleted, TextDelta, TextSegmentCommitted, TranscriptCommitted, TranscriptHypothesis,
+    TranscriptRevision, Turn, TurnCompleted, TurnId, TurnNotFound, TurnOpened, TurnState,
+    TurnStateConflict,
 };
 
 /// The store of `inference.stream.Turn`, in the order the turns were opened.
@@ -1007,13 +1008,7 @@ impl StreamDomain {
                 *generation = cancelled;
             }
         }
-        for segment in &mut self.segments.segments {
-            if segment.run_id() == run_id
-                && let Ok((discarded, _)) = segment.discard()
-            {
-                *segment = discarded;
-            }
-        }
+        self.discard_where(|segment| segment.run_id() == run_id);
     }
 
     /// Moves the generation carrying `generation_id` by `transition`, stores it and records its
@@ -1042,30 +1037,54 @@ impl StreamDomain {
     /// one is outside the transition's source states and is skipped. No event is recorded: the
     /// outcome that discards them emits its generation event only.
     fn discard_unplayed(&mut self, generation_id: GenerationId) {
-        for segment in &mut self.segments.segments {
-            if segment.generation_id() == generation_id
-                && let Ok((discarded, _)) = segment.discard()
-            {
-                *segment = discarded;
-            }
-        }
+        self.discard_where(|segment| segment.generation_id() == generation_id);
     }
 
-    /// Moves the segment carrying `segment_id` by `transition`, stores it and records its event.
+    /// Moves every segment `selected` picks through `discard`, each in its place; a Played or
+    /// already Discarded one is refused and kept as it was.
+    fn discard_where(&mut self, selected: impl Fn(&OutputSegment) -> bool) {
+        self.segments.segments = std::mem::take(&mut self.segments.segments)
+            .into_iter()
+            .map(|segment| {
+                if !selected(&segment) {
+                    return segment;
+                }
+                match segment.discard() {
+                    Ok((discarded, _)) => discarded,
+                    Err(refused) => refused.into_segment(),
+                }
+            })
+            .collect();
+    }
+
+    /// Moves the segment carrying `segment_id` by `transition`, which consumes it, stores the
+    /// moved segment in its place, or the segment as it was when the transition is refused, and
+    /// records its event.
     fn move_segment<E: Clone>(
         &mut self,
         segment_id: SegmentId,
-        transition: fn(&OutputSegment) -> Result<(OutputSegment, E), SegmentStateConflict>,
+        transition: fn(OutputSegment) -> Result<(OutputSegment, E), SegmentMoveRefused>,
         record: fn(E) -> StreamEvent,
     ) -> Result<E, SegmentMoveError> {
-        let slot = self
+        let index = self
             .segments
             .segments
-            .iter_mut()
-            .find(|segment| segment.segment_id() == segment_id)
+            .iter()
+            .position(|segment| segment.segment_id() == segment_id)
             .ok_or(SegmentMoveError::Unknown { segment_id })?;
-        let (moved, event) = transition(slot).map_err(SegmentMoveError::Conflict)?;
-        *slot = moved;
+        let segment = self.segments.segments.remove(index);
+        let (kept, answer) = match transition(segment) {
+            Ok((moved, event)) => (moved, Ok(event)),
+            Err(refused) => {
+                let conflict = refused.conflict();
+                (
+                    refused.into_segment(),
+                    Err(SegmentMoveError::Conflict(conflict)),
+                )
+            }
+        };
+        self.segments.segments.insert(index, kept);
+        let event = answer?;
         self.events.push(record(event.clone()));
         Ok(event)
     }

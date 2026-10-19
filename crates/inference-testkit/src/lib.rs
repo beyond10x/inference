@@ -1,8 +1,9 @@
 //! Test utilities of the inference framework.
 //!
 //! `inference-testkit` holds one in-memory store module per domain of `ess/system.yaml`; behind
-//! the `run` feature, the runs and node instances of the graph store and the run refusals of the
-//! stream store, which take `inference-runtime`; and behind the `stt`, `llm` and `tts` features,
+//! the `run` feature, the runs and node instances of the graph store, the recording mock node
+//! the runtime's run controller drives, and the run refusals of the stream store, which take
+//! `inference-runtime`; and behind the `stt`, `llm` and `tts` features,
 //! the mocks of the contract crates. Its test tree carries the conformance target that answers
 //! the synthesized suite of `ess/` (`tests/conform.rs`), which needs the `run` feature; the
 //! library itself pulls no ESS crate, so a crate depending on the stores or the mocks carries no
@@ -19,14 +20,15 @@ pub mod policy;
 
 /// `inference.graph`: the in-memory pipeline declaration, its nodes, ports, edges and bindings,
 /// their validation, their planning, behind the `run` feature the runs of planned pipelines with
-/// their node instances, and their views.
+/// their node instances and the recording mock node, and their views.
 pub mod graph;
 
 /// `inference.stream`: the in-memory stores of the turns, spans, generations and output segments,
 /// their views, and the log that records their events in envelopes.
 pub mod stream;
 
-/// `inference.tools`: empty until the tool-call stores land.
+/// `inference.tools`: the in-memory stores of the declared tools and of the tool calls through
+/// their lifecycle, and their views.
 pub mod tools;
 
 /// `inference.session`: empty until the session stores land.

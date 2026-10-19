@@ -29,6 +29,7 @@ fn start() -> <MockGenerator as Generator>::Handle {
         epoch: 1,
         prompt: "prompt".to_owned(),
     })
+    .expect("a fresh generator runs nothing else")
 }
 
 #[test]

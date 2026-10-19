@@ -12,19 +12,6 @@ this file with it.
 
 ## inference.tools
 
-- inference.tools.DeclareTool/outcome/declared: answered by epic:tools-and-turns
-- inference.tools.ProposeSpeculativeToolCall/outcome/proposed: answered by epic:tools-and-turns
-- inference.tools.ProposeSpeculativeToolCall/outcome/side-effecting: answered by epic:tools-and-turns
-- inference.tools.ProposeSpeculativeToolCall/outcome/stale-generation: answered by epic:tools-and-turns
-- inference.tools.ProposeSpeculativeToolCall/outcome/unknown-generation: answered by epic:tools-and-turns
-- inference.tools.ProposeSpeculativeToolCall/outcome/unknown-span: answered by epic:tools-and-turns
-- inference.tools.ProposeSpeculativeToolCall/outcome/unknown-tool: answered by epic:tools-and-turns
-- inference.tools.ProposeToolCall/outcome/barred: answered by epic:tools-and-turns
-- inference.tools.ProposeToolCall/outcome/proposed: answered by epic:tools-and-turns
-- inference.tools.ProposeToolCall/outcome/stale-generation: answered by epic:tools-and-turns
-- inference.tools.ProposeToolCall/outcome/unknown-generation: answered by epic:tools-and-turns
-- inference.tools.ProposeToolCall/outcome/unknown-span: answered by epic:tools-and-turns
-- inference.tools.ProposeToolCall/outcome/unknown-tool: answered by epic:tools-and-turns
 
 ## inference.session
 
