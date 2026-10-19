@@ -138,7 +138,15 @@ impl Error for SegmentStateConflict {}
 /// `inference.stream.OutputSegment`: a unit of outbound text from tentative delta to played audio.
 /// It belongs to the generation `generation_id` names and carries that generation's `run_id`,
 /// copied when the segment was emitted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// It is not `Clone`: a copy could be offered to a second synthesis and played twice. A reader
+/// that keeps what a segment held, to compare it later, keeps its [`SegmentSnapshot`].
+///
+/// ```compile_fail
+/// fn cloneable<T: Clone>() {}
+/// cloneable::<inference_text::OutputSegment>();
+/// ```
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct OutputSegment {
     segment_id: SegmentId,
     generation_id: GenerationId,
@@ -209,9 +217,46 @@ impl OutputSegment {
             });
         }
         Ok(Self {
+            segment_id: self.segment_id,
+            generation_id: self.generation_id,
+            run_id: self.run_id,
+            sequence: self.sequence,
+            text: self.text.clone(),
             state: to,
-            ..self.clone()
         })
+    }
+
+    /// What the segment holds now, as a value to read and compare. No transition runs on a
+    /// snapshot, so it cannot be queued, synthesised or played.
+    ///
+    /// ```
+    /// # use inference_core::generation::{Generation, StartGeneration};
+    /// # use inference_core::id::{NodeId, RunId};
+    /// # use inference_text::{OutputSegment, SegmentState};
+    /// let (generation, _) = Generation::start(StartGeneration {
+    ///     run_id: RunId::generate(),
+    ///     node_id: NodeId::generate(),
+    ///     epoch: 1,
+    /// });
+    /// let (tentative, _) = OutputSegment::emit(&generation, 1, "hello".to_owned()).unwrap();
+    /// let before = tentative.snapshot();
+    /// let (committed, _) = tentative.commit().unwrap();
+    /// assert_eq!(before.state(), SegmentState::Tentative);
+    /// assert_eq!(committed.snapshot().state(), SegmentState::Committed);
+    /// assert_eq!(before.segment_id(), committed.segment_id());
+    /// assert_eq!(before.text(), committed.text());
+    /// assert_ne!(before, committed.snapshot());
+    /// ```
+    #[must_use]
+    pub fn snapshot(&self) -> SegmentSnapshot {
+        SegmentSnapshot {
+            segment_id: self.segment_id,
+            generation_id: self.generation_id,
+            run_id: self.run_id,
+            sequence: self.sequence,
+            text: self.text.clone(),
+            state: self.state,
+        }
     }
 
     /// Runs the `committed` outcome of `inference.stream.CommitSegment`: Tentative to Committed.
@@ -297,6 +342,50 @@ impl OutputSegment {
         Ok((segment, event))
     }
 
+    #[must_use]
+    pub const fn segment_id(&self) -> SegmentId {
+        self.segment_id
+    }
+
+    #[must_use]
+    pub const fn generation_id(&self) -> GenerationId {
+        self.generation_id
+    }
+
+    #[must_use]
+    pub const fn run_id(&self) -> RunId {
+        self.run_id
+    }
+
+    #[must_use]
+    pub const fn sequence(&self) -> i64 {
+        self.sequence
+    }
+
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> SegmentState {
+        self.state
+    }
+}
+
+/// What an [`OutputSegment`] held at one moment, made by [`OutputSegment::snapshot`]. It is a
+/// value to read and compare, not a segment: no transition runs on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentSnapshot {
+    segment_id: SegmentId,
+    generation_id: GenerationId,
+    run_id: RunId,
+    sequence: i64,
+    text: String,
+    state: SegmentState,
+}
+
+impl SegmentSnapshot {
     #[must_use]
     pub const fn segment_id(&self) -> SegmentId {
         self.segment_id

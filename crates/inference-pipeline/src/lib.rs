@@ -10,10 +10,11 @@
 //! [`Declaration::connect_ports`], [`Declaration::bind_node`]), each refusing what graph.yaml
 //! refuses and creating nothing then. The profiles and adapters a declaration references and does
 //! not hold are read through a [`Catalog`]. The typed builder ([`Declaration::build`]) declares the
-//! same entities with compile-time help: a port handle carries its direction and modality as
-//! types, an edge capacity is a [`NonZeroUsize`], and a handle cannot leave the builder that made
-//! it, so an unbounded edge, an edge from an input port or a dangling identity cannot be written
-//! through it.
+//! same entities, reading its profile and adapters by identity through the same catalog and
+//! refusing what the commands refuse, with compile-time help: a port handle carries its direction
+//! and modality as types, an edge capacity is a [`NonZeroUsize`], and a handle cannot leave the
+//! builder that made it, so an unbounded edge, an edge from an input port or a dangling identity
+//! cannot be written through it.
 //!
 //! The sink port's existence and direction, the modality of the two ports of an edge and pipeline
 //! membership are not refused by a command; they are checks of validation.
@@ -51,7 +52,8 @@ pub use builder::{
     PortTraits, direction, modality,
 };
 pub use declaration::{
-    AddNodeError, BindNodeError, Catalog, ConnectPortsError, Declaration, ValidatePipelineError,
+    AddNodeError, AddPortError, BindNodeError, Catalog, ConnectPortsError, Declaration,
+    ValidatePipelineError,
 };
 pub use inference_core::id::NodeId;
 pub use planning::{PlanPipelineError, PlannedPipeline, ValidatedPipeline};
@@ -204,7 +206,8 @@ pub enum GraphDefect {
     IncompatibleEdge,
     /// Check 5: a cycle, which no bounded feedback declaration admits yet.
     UnboundedCycle,
-    /// Check 6: an essential port no edge connects, or a sink no source reaches.
+    /// Check 6: an essential output port that is the source of no edge, or a sink no source
+    /// reaches.
     UnreachableMandatoryOutput,
     /// Check 9: provisional data flows into a tool that requires committed input.
     DisallowedDataFlow,
@@ -329,8 +332,8 @@ impl fmt::Display for PipelineStateConflict {
 
 impl Error for PipelineStateConflict {}
 
-/// `inference.graph.Pipeline.State`: a pipeline is Declared until validated, then Planned.
-/// Serialized as written in ESS (`Declared`).
+/// `inference.graph.Pipeline.State`: a pipeline is Declared until validation passes, then
+/// Validated until planning succeeds, then Planned. Serialized as written in ESS (`Declared`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PipelineState {
     /// The declaration can still change.
@@ -365,9 +368,11 @@ pub struct AddNode {
     pub requires: Vec<Capability>,
 }
 
-/// `inference.graph.AddPort`: the input that declares a [`Port`] on a node.
+/// `inference.graph.AddPort`: the input that declares a [`Port`] on a node, under the pipeline it
+/// names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddPort {
+    pub pipeline_id: PipelineId,
     pub node_id: NodeId,
     pub name: String,
     pub direction: PortDirection,
@@ -656,10 +661,12 @@ impl Node {
     }
 }
 
-/// `inference.graph.Port`: a named, typed input or output endpoint of a node.
+/// `inference.graph.Port`: a named, typed input or output endpoint of a node, declared under a
+/// pipeline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Port {
     port_id: PortId,
+    pipeline_id: PipelineId,
     node_id: NodeId,
     name: String,
     direction: PortDirection,
@@ -675,6 +682,13 @@ impl Port {
     #[must_use]
     pub const fn port_id(&self) -> PortId {
         self.port_id
+    }
+
+    /// The pipeline the port was declared under; its node may belong to another, which
+    /// validation finds (check 1).
+    #[must_use]
+    pub const fn pipeline_id(&self) -> PipelineId {
+        self.pipeline_id
     }
 
     #[must_use]

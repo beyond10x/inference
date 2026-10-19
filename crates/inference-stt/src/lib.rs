@@ -10,7 +10,13 @@
 //! `TranscriptCommitted`, each in the `inference.stream.EventEnvelope` that places it on the
 //! request's stream with a per-stream sequence from the request's `first_sequence`, read on
 //! [`Timebase::AudioFrameTime`]. The contract does not remember streams: the stream's owner
-//! tracks the next sequence of each and hands it to the recognition that continues it.
+//! tracks the next sequence of each and hands it to the recognition that continues it. A
+//! sequence is 1 or more, so a request continuing a stream below 1 is refused with
+//! [`NonPositiveSequence`], and a recognition that has issued sequence `i64::MAX` refuses every
+//! further event with [`SequenceExhausted`].
+//!
+//! [`Recogniser::start`] refuses a start past the maximum concurrency the adapter record declares
+//! with [`ConcurrencyLimitReached`]; a recognition runs until its handle is dropped.
 //!
 //! Incremental input and output streaming are distinct capabilities
 //! (`inference.model.Capability`), read from the adapter record and never implied by the shape of
@@ -73,15 +79,36 @@ pub const ENVELOPE_SCHEMA_VERSION: i64 = 1;
 ///
 /// The contract does not remember streams. Several recognitions may share one stream, one turn
 /// after another on one output port; the stream's owner, the graph runtime, tracks its next
-/// sequence and starts each recognition after the previous one ended, at
-/// [`TranscriptOutput::next_sequence`] of the previous one, with
-/// [`RecognitionRequest::continuing`]. [`RecognitionRequest::new`] starts a fresh stream at 1.
+/// sequence. Once the previous recognition has delivered its last event, the owner reads
+/// [`TranscriptOutput::next_sequence`] from its handle's output, drops that handle, which ends
+/// the recognition and frees its place under the adapter's maximum concurrency, and then starts
+/// the next recognition with [`RecognitionRequest::continuing`] at that sequence. A recogniser
+/// running at its maximum concurrency refuses the next start while the previous handle is still
+/// held. `None` from `next_sequence` means the stream has no sequence left, and no recognition
+/// continues it. [`RecognitionRequest::new`] starts a fresh stream at 1.
+///
+/// `first_sequence` is read through [`RecognitionRequest::first_sequence`] and set only by those
+/// two constructors, so it is never below 1:
+///
+/// ```compile_fail,E0451
+/// # use inference_stt::RecognitionRequest;
+/// # use inference_stt::inference_core::id::{NodeId, RunId, StreamId};
+/// # use inference_stt::inference_text::TurnId;
+/// let request = RecognitionRequest {
+///     run_id: RunId::generate(),
+///     turn_id: TurnId::generate(),
+///     stream_id: StreamId::generate(),
+///     first_sequence: 0,
+///     node_id: NodeId::generate(),
+///     port: "text_out".to_owned(),
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecognitionRequest {
     pub run_id: RunId,
     pub turn_id: TurnId,
     pub stream_id: StreamId,
-    pub first_sequence: i64,
+    first_sequence: i64,
     pub node_id: NodeId,
     pub port: String,
 }
@@ -96,12 +123,23 @@ impl RecognitionRequest {
         node_id: NodeId,
         port: impl Into<String>,
     ) -> Self {
-        Self::continuing(run_id, turn_id, stream_id, 1, node_id, port)
+        Self {
+            run_id,
+            turn_id,
+            stream_id,
+            first_sequence: 1,
+            node_id,
+            port: port.into(),
+        }
     }
 
     /// A recognition continuing the stream `stream_id`, whose first event takes `next_sequence`,
     /// one past the last sequence the stream's owner issued on it.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`NonPositiveSequence`] carrying `next_sequence` when it is below 1, the first sequence of
+    /// a stream; no request is made.
     pub fn continuing(
         run_id: RunId,
         turn_id: TurnId,
@@ -109,17 +147,85 @@ impl RecognitionRequest {
         next_sequence: i64,
         node_id: NodeId,
         port: impl Into<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, NonPositiveSequence> {
+        if next_sequence < 1 {
+            return Err(NonPositiveSequence {
+                submitted: next_sequence,
+            });
+        }
+        Ok(Self {
             run_id,
             turn_id,
             stream_id,
             first_sequence: next_sequence,
             node_id,
             port: port.into(),
-        }
+        })
+    }
+
+    /// The sequence the recognition's first event takes on the stream, 1 or more.
+    #[must_use]
+    pub const fn first_sequence(&self) -> i64 {
+        self.first_sequence
     }
 }
+
+/// A stream's sequences start at 1, so a recognition continuing it at `submitted`, below 1, is
+/// refused and no request is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NonPositiveSequence {
+    pub submitted: i64,
+}
+
+impl fmt::Display for NonPositiveSequence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a stream's sequences start at 1, so a recognition cannot continue it at {}",
+            self.submitted
+        )
+    }
+}
+
+impl Error for NonPositiveSequence {}
+
+/// The recognition has issued sequence `i64::MAX` on the stream `stream_id`, so no further event
+/// has a sequence; the move is refused and nothing changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SequenceExhausted {
+    pub stream_id: StreamId,
+}
+
+impl fmt::Display for SequenceExhausted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "stream {} has issued its last sequence, so no further event is enveloped",
+            self.stream_id
+        )
+    }
+}
+
+impl Error for SequenceExhausted {}
+
+/// The recogniser already runs `max_concurrency` recognitions, the maximum concurrency its
+/// adapter declares, so a further start is refused and nothing started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConcurrencyLimitReached {
+    pub max_concurrency: i64,
+}
+
+impl fmt::Display for ConcurrencyLimitReached {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the recogniser already runs {} recognition(s), its declared maximum concurrency",
+            self.max_concurrency
+        )
+    }
+}
+
+impl Error for ConcurrencyLimitReached {}
 
 /// An event of one recognition, the payload of the envelope a [`RecognitionHandle`] yields.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,81 +292,78 @@ impl fmt::Display for InputEnded {
 
 impl Error for InputEnded {}
 
-/// Why a revision was refused; nothing changed either way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RevisionRefused {
-    /// No span of the recognition carries the identity the revision named.
-    SpanNotFound(SpanNotFound),
-    /// The span is Committed, so its text is not rewritten.
-    CommittedSpanImmutable(CommittedSpanImmutable),
-}
-
-impl fmt::Display for RevisionRefused {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SpanNotFound(error) => fmt::Display::fmt(error, f),
-            Self::CommittedSpanImmutable(error) => fmt::Display::fmt(error, f),
+/// Declares a refusal enum whose variants each wrap one error type of the same name, with its
+/// `Display`, `Error::source` and a `From` for each variant.
+macro_rules! refusal {
+    (
+        $(#[$meta:meta])*
+        pub enum $name:ident {
+            $( $(#[$variant_meta:meta])* $variant:ident, )+
         }
-    }
-}
-
-impl Error for RevisionRefused {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::SpanNotFound(error) => Some(error),
-            Self::CommittedSpanImmutable(error) => Some(error),
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name {
+            $( $(#[$variant_meta])* $variant($variant), )+
         }
-    }
-}
 
-impl From<SpanNotFound> for RevisionRefused {
-    fn from(error: SpanNotFound) -> Self {
-        Self::SpanNotFound(error)
-    }
-}
-
-impl From<CommittedSpanImmutable> for RevisionRefused {
-    fn from(error: CommittedSpanImmutable) -> Self {
-        Self::CommittedSpanImmutable(error)
-    }
-}
-
-/// Why a commit was refused; nothing changed either way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommitRefused {
-    /// No span of the recognition carries the identity the commit named.
-    SpanNotFound(SpanNotFound),
-    /// The span is not a Hypothesis.
-    SpanStateConflict(SpanStateConflict),
-}
-
-impl fmt::Display for CommitRefused {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SpanNotFound(error) => fmt::Display::fmt(error, f),
-            Self::SpanStateConflict(error) => fmt::Display::fmt(error, f),
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self {
+                    $( Self::$variant(error) => fmt::Display::fmt(error, f), )+
+                }
+            }
         }
-    }
-}
 
-impl Error for CommitRefused {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::SpanNotFound(error) => Some(error),
-            Self::SpanStateConflict(error) => Some(error),
+        impl Error for $name {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                match self {
+                    $( Self::$variant(error) => Some(error), )+
+                }
+            }
         }
+
+        $(
+            impl From<$variant> for $name {
+                fn from(error: $variant) -> Self {
+                    Self::$variant(error)
+                }
+            }
+        )+
+    };
+}
+
+refusal! {
+    /// Why a hypothesis was refused; nothing changed either way.
+    pub enum HypothesisRefused {
+        /// Input has not ended and the adapter does not claim [`Capability::OutputStreaming`].
+        CapabilityNotClaimed,
+        /// The stream has issued its last sequence.
+        SequenceExhausted,
     }
 }
 
-impl From<SpanNotFound> for CommitRefused {
-    fn from(error: SpanNotFound) -> Self {
-        Self::SpanNotFound(error)
+refusal! {
+    /// Why a revision was refused; nothing changed either way.
+    pub enum RevisionRefused {
+        /// No span of the recognition carries the identity the revision named.
+        SpanNotFound,
+        /// The span is Committed, so its text is not rewritten.
+        CommittedSpanImmutable,
+        /// The stream has issued its last sequence.
+        SequenceExhausted,
     }
 }
 
-impl From<SpanStateConflict> for CommitRefused {
-    fn from(error: SpanStateConflict) -> Self {
-        Self::SpanStateConflict(error)
+refusal! {
+    /// Why a commit was refused; nothing changed either way.
+    pub enum CommitRefused {
+        /// No span of the recognition carries the identity the commit named.
+        SpanNotFound,
+        /// The span is not a Hypothesis.
+        SpanStateConflict,
+        /// The stream has issued its last sequence.
+        SequenceExhausted,
     }
 }
 
@@ -290,7 +393,7 @@ pub struct TranscriptOutput {
     taken: usize,
     taken_through: i64,
     input_ended: bool,
-    next_sequence: i64,
+    next_sequence: Option<i64>,
     spans: Vec<Span>,
 }
 
@@ -306,7 +409,7 @@ impl TranscriptOutput {
         );
         Self {
             capabilities: adapter.capabilities().to_vec(),
-            next_sequence: request.first_sequence,
+            next_sequence: Some(request.first_sequence),
             request,
             turn,
             offered: VecDeque::new(),
@@ -371,14 +474,16 @@ impl TranscriptOutput {
     ///
     /// # Errors
     ///
-    /// [`CapabilityNotClaimed`] naming [`Capability::OutputStreaming`] when input has not ended
-    /// and the adapter does not claim it; no span is added and no sequence is used.
+    /// [`HypothesisRefused::CapabilityNotClaimed`] naming [`Capability::OutputStreaming`] when
+    /// input has not ended and the adapter does not claim it, and
+    /// [`HypothesisRefused::SequenceExhausted`] when the stream has issued its last sequence; no
+    /// span is added and no sequence is used.
     pub fn hypothesis(
         &mut self,
         text: String,
-    ) -> Result<EventEnvelope<TranscriptEvent>, CapabilityNotClaimed> {
+    ) -> Result<EventEnvelope<TranscriptEvent>, HypothesisRefused> {
         self.require_before_end(Capability::OutputStreaming)?;
-        let sequence = self.next_sequence;
+        let sequence = self.sequence()?;
         let (span, event) = Span::emit(
             &self.turn,
             self.request.run_id,
@@ -396,7 +501,8 @@ impl TranscriptOutput {
     ///
     /// # Errors
     ///
-    /// [`RevisionRefused::SpanNotFound`] when no span of the recognition carries `span_id`, and
+    /// [`RevisionRefused::SpanNotFound`] when no span of the recognition carries `span_id`,
+    /// [`RevisionRefused::SequenceExhausted`] when the stream has issued its last sequence, and
     /// [`RevisionRefused::CommittedSpanImmutable`] when the span is Committed; its text is
     /// unchanged and no sequence is used.
     pub fn revise(
@@ -404,6 +510,7 @@ impl TranscriptOutput {
         input: ReviseSpan,
     ) -> Result<EventEnvelope<TranscriptEvent>, RevisionRefused> {
         let index = self.index_of(input.span_id)?;
+        self.sequence()?;
         let (span, event) = self.spans[index].revise(input.text)?;
         self.spans[index] = span;
         Ok(self.envelope(TranscriptEvent::Revision(event)))
@@ -414,7 +521,8 @@ impl TranscriptOutput {
     ///
     /// # Errors
     ///
-    /// [`CommitRefused::SpanNotFound`] when no span of the recognition carries `span_id`, and
+    /// [`CommitRefused::SpanNotFound`] when no span of the recognition carries `span_id`,
+    /// [`CommitRefused::SequenceExhausted`] when the stream has issued its last sequence, and
     /// [`CommitRefused::SpanStateConflict`] when the span is not a Hypothesis; nothing moves and
     /// no sequence is used.
     pub fn commit(
@@ -422,6 +530,7 @@ impl TranscriptOutput {
         span_id: SpanId,
     ) -> Result<EventEnvelope<TranscriptEvent>, CommitRefused> {
         let index = self.index_of(span_id)?;
+        self.sequence()?;
         let (span, event) = self.spans[index].commit()?;
         self.spans[index] = span;
         Ok(self.envelope(TranscriptEvent::Committed(event)))
@@ -434,9 +543,10 @@ impl TranscriptOutput {
     }
 
     /// The sequence the next event of the recognition takes on the request's stream: where a
-    /// recognition continuing the stream after this one starts.
+    /// recognition continuing the stream after this one starts. `None` once the recognition has
+    /// issued sequence `i64::MAX`, the last a stream has.
     #[must_use]
-    pub const fn next_sequence(&self) -> i64 {
+    pub const fn next_sequence(&self) -> Option<i64> {
         self.next_sequence
     }
 
@@ -486,10 +596,23 @@ impl TranscriptOutput {
         }
     }
 
-    /// Envelopes `payload` at the next sequence of the request's stream.
+    /// The next sequence of the request's stream, if it has one left.
+    const fn sequence(&self) -> Result<i64, SequenceExhausted> {
+        match self.next_sequence {
+            Some(sequence) => Ok(sequence),
+            None => Err(SequenceExhausted {
+                stream_id: self.request.stream_id,
+            }),
+        }
+    }
+
+    /// Envelopes `payload` at the next sequence of the request's stream. Every caller has
+    /// checked that one is left.
     fn envelope(&mut self, payload: TranscriptEvent) -> EventEnvelope<TranscriptEvent> {
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
+        let sequence = self
+            .next_sequence
+            .expect("the caller checked that a sequence is left");
+        self.next_sequence = sequence.checked_add(1);
         EventEnvelope {
             schema_version: ENVELOPE_SCHEMA_VERSION,
             event_id: EventId::generate(),
@@ -517,8 +640,16 @@ pub trait Recogniser {
     /// The adapter record this recogniser was declared with, the capabilities it claims among it.
     fn adapter(&self) -> &Adapter;
 
-    /// Starts one recognition for `request`.
-    fn start(&mut self, request: RecognitionRequest) -> Self::Handle;
+    /// Starts one recognition for `request`. A recognition runs until its handle is dropped.
+    ///
+    /// # Errors
+    ///
+    /// [`ConcurrencyLimitReached`] carrying the adapter's `max_concurrency` when that many
+    /// recognitions of this recogniser already run; nothing starts.
+    fn start(
+        &mut self,
+        request: RecognitionRequest,
+    ) -> Result<Self::Handle, ConcurrencyLimitReached>;
 }
 
 /// One running recognition. A caller offers frames with [`RecognitionHandle::offer_frame`] and

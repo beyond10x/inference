@@ -19,9 +19,12 @@ use inference_core::model::{Capability, ModelId};
 use inference_testkit::tts::{
     MockConfiguration, MockSink, MockSynthesis, MockSynthesiser, SinkRefused,
 };
-use inference_text::{AudioPlayed, OutputSegment, SegmentState, SegmentStateConflict};
+use inference_text::{AudioPlayed, OutputSegment, SegmentId, SegmentState, SegmentStateConflict};
 use inference_tts::inference_audio::{AudioEncoding, AudioFormat};
-use inference_tts::{DiscardRefused, OfferRefused, SynthesisEvent, SynthesisHandle, Synthesiser};
+use inference_tts::{
+    ConcurrencyLimitReached, DiscardRefused, OfferRefused, SynthesisEvent, SynthesisHandle,
+    Synthesiser,
+};
 
 const TEXTS: [&str; 2] = ["Hello there.", "How are you today?"];
 
@@ -86,7 +89,7 @@ fn drain(handle: &mut MockSynthesis) -> Vec<(SynthesisEvent, SegmentState)> {
 /// What one synthesis of [`TEXTS`] delivered before and after the end of the utterance.
 struct Synthesis {
     handle: MockSynthesis,
-    segments: Vec<OutputSegment>,
+    segments: Vec<SegmentId>,
     before_end: Vec<(SynthesisEvent, SegmentState)>,
     taken_before_end: usize,
     after_end: Vec<(SynthesisEvent, SegmentState)>,
@@ -105,19 +108,20 @@ fn synthesise(configuration: MockConfiguration) -> Synthesis {
 }
 
 fn synthesise_with(mut synthesiser: MockSynthesiser) -> Synthesis {
-    let segments = committed(&TEXTS);
-    let mut handle = synthesiser.start();
+    let mut handle = synthesiser
+        .start()
+        .expect("a fresh synthesiser runs nothing else");
+    let mut segments = Vec::new();
     let mut before_end = Vec::new();
-    for segment in &segments {
+    for segment in committed(&TEXTS) {
+        let id = segment.segment_id();
+        segments.push(id);
         let queued = handle
-            .offer_segment(segment.clone())
+            .offer_segment(segment)
             .expect("a Committed segment is queued");
-        assert_eq!(queued.segment_id, segment.segment_id());
+        assert_eq!(queued.segment_id, id);
         assert_eq!(
-            handle
-                .output()
-                .segment(segment.segment_id())
-                .map(OutputSegment::state),
+            handle.output().segment(id).map(OutputSegment::state),
             Some(SegmentState::Queued),
             "an offered segment is Queued before synthesis"
         );
@@ -152,7 +156,7 @@ fn takes_input_incrementally(synthesis: &Synthesis) -> bool {
 fn streams_audio(synthesis: &Synthesis) -> bool {
     synthesis.segments.iter().all(|segment| {
         synthesis.all().any(|(event, state)| {
-            matches!(event, SynthesisEvent::Audio(audio) if audio.segment_id == segment.segment_id())
+            matches!(event, SynthesisEvent::Audio(audio) if audio.segment_id() == *segment)
                 && *state == SegmentState::Queued
         })
     })
@@ -196,8 +200,7 @@ fn input_is_accepted_before_the_utterance_is_complete_exactly_when_incremental_i
 fn audio_is_emitted_before_synthesis_completes_exactly_when_output_streaming_is_claimed() {
     for configuration in MockConfiguration::ALL {
         let synthesis = synthesise(configuration);
-        for segment in &synthesis.segments {
-            let id = segment.segment_id();
+        for &id in &synthesis.segments {
             let events: Vec<&(SynthesisEvent, SegmentState)> = synthesis
                 .all()
                 .filter(|(event, _)| event.segment_id() == id)
@@ -282,10 +285,12 @@ fn a_tentative_segment_is_refused_with_segment_state_conflict_and_nothing_is_que
         let generation = generation();
         let (tentative, _) = OutputSegment::emit(&generation, 1, "not yet safe".to_owned())
             .expect("the generation is Active");
-        let mut handle = synthesiser(configuration).start();
+        let mut handle = synthesiser(configuration)
+            .start()
+            .expect("a fresh synthesiser runs nothing else");
 
         assert_eq!(
-            handle.offer_segment(tentative.clone()),
+            handle.offer_segment(tentative),
             Err(OfferRefused::SegmentStateConflict(SegmentStateConflict {
                 current: SegmentState::Tentative,
             })),
@@ -304,7 +309,9 @@ fn a_tentative_segment_is_refused_with_segment_state_conflict_and_nothing_is_que
 #[test]
 fn a_segment_is_played_only_on_the_sink_acknowledgement_after_synthesis_and_then_refuses_discard() {
     for configuration in MockConfiguration::ALL {
-        let mut handle = synthesiser(configuration).start();
+        let mut handle = synthesiser(configuration)
+            .start()
+            .expect("a fresh synthesiser runs nothing else");
         let mut segments = committed(&TEXTS);
         let second = segments.pop().expect("two segments");
         let second_id = second.segment_id();
@@ -330,7 +337,7 @@ fn a_segment_is_played_only_on_the_sink_acknowledgement_after_synthesis_and_then
         handle.end_utterance().expect("the utterance ends once");
         while let Some(event) = handle.next() {
             if let SynthesisEvent::Audio(audio) = event {
-                let segment_id = audio.segment_id;
+                let segment_id = audio.segment_id();
                 sink.give(audio);
                 if handle
                     .output()
@@ -397,7 +404,9 @@ fn a_segment_is_played_only_on_the_sink_acknowledgement_after_synthesis_and_then
 
 #[test]
 fn the_sink_refuses_to_acknowledge_audio_it_was_never_given() {
-    let mut handle = synthesiser(MockConfiguration::Neither).start();
+    let mut handle = synthesiser(MockConfiguration::Neither)
+        .start()
+        .expect("a fresh synthesiser runs nothing else");
     let segment = committed(&TEXTS[..1]).remove(0);
     let id = segment.segment_id();
     handle.offer_segment(segment).expect("queued");
@@ -421,7 +430,9 @@ fn without_output_streaming_a_segment_is_played_only_once_all_its_frames_are_giv
         if claims(configuration, Capability::OutputStreaming) {
             continue;
         }
-        let mut handle = synthesiser(configuration).start();
+        let mut handle = synthesiser(configuration)
+            .start()
+            .expect("a fresh synthesiser runs nothing else");
         let segment = committed(&TEXTS[1..]).remove(0);
         let id = segment.segment_id();
         handle.offer_segment(segment).expect("queued");
@@ -486,7 +497,7 @@ fn every_frame_carries_sample_count_times_channels_times_encoding_width_bytes() 
                 let mut frames = 0;
                 for (event, _) in synthesis.all() {
                     if let SynthesisEvent::Audio(audio) = event {
-                        let frame = &audio.frame;
+                        let frame = audio.frame();
                         assert_eq!(frame.format, format(encoding, channels));
                         assert!(frame.sample_count > 0);
                         assert_eq!(
@@ -506,4 +517,152 @@ fn every_frame_carries_sample_count_times_channels_times_encoding_width_bytes() 
             }
         }
     }
+}
+
+/// The most syntheses one synthesiser was observed to run at once, starting them while every
+/// earlier one still runs, up to `bound`.
+fn observed_concurrency(synthesiser: &mut MockSynthesiser, bound: usize) -> usize {
+    let mut running = Vec::new();
+    while running.len() < bound {
+        match synthesiser.start() {
+            Ok(handle) => running.push(handle),
+            Err(_) => break,
+        }
+    }
+    running.len()
+}
+
+#[test]
+fn a_second_concurrent_synthesis_is_refused_with_the_concurrency_limit() {
+    for configuration in MockConfiguration::ALL {
+        let mut synthesiser = synthesiser(configuration);
+        let first = synthesiser
+            .start()
+            .expect("a fresh synthesiser runs nothing else");
+        assert_eq!(
+            synthesiser.start().map(|_| ()),
+            Err(ConcurrencyLimitReached { max_concurrency: 1 }),
+            "{configuration:?}: a second synthesis while the first runs is refused"
+        );
+        let mut clone = synthesiser.clone();
+        assert_eq!(
+            clone.start().map(|_| ()),
+            Err(ConcurrencyLimitReached { max_concurrency: 1 }),
+            "{configuration:?}: a clone is the same adapter and shares its limit"
+        );
+        drop(first);
+        assert!(
+            synthesiser.start().is_ok(),
+            "{configuration:?}: once the first synthesis ends, another starts"
+        );
+    }
+}
+
+#[test]
+fn each_configuration_runs_at_most_the_concurrency_it_declares() {
+    for configuration in MockConfiguration::ALL {
+        let mut synthesiser = synthesiser(configuration);
+        let declared = usize::try_from(synthesiser.adapter().max_concurrency())
+            .expect("a declared concurrency is positive");
+        assert_eq!(
+            observed_concurrency(&mut synthesiser, declared + 3),
+            declared,
+            "{configuration:?}: the declared maximum concurrency is the observed one"
+        );
+    }
+}
+
+/// A handle over a mock synthesis that, once, passes a receipt on under the identity of
+/// `misnamed` instead of the segment acknowledged, so the synthesis refuses it.
+struct MisnamesOnce {
+    inner: MockSynthesis,
+    misnamed: Option<SegmentId>,
+}
+
+impl Iterator for MisnamesOnce {
+    type Item = SynthesisEvent;
+
+    fn next(&mut self) -> Option<SynthesisEvent> {
+        self.inner.next()
+    }
+}
+
+impl SynthesisHandle for MisnamesOnce {
+    fn output(&self) -> &inference_tts::SynthesisOutput {
+        self.inner.output()
+    }
+
+    fn offer_segment(
+        &mut self,
+        segment: OutputSegment,
+    ) -> Result<inference_text::SegmentQueued, OfferRefused> {
+        self.inner.offer_segment(segment)
+    }
+
+    fn end_utterance(&mut self) -> Result<(), inference_tts::UtteranceEnded> {
+        self.inner.end_utterance()
+    }
+
+    fn acknowledge_playback(
+        &mut self,
+        segment_id: SegmentId,
+        receipt: inference_tts::PlaybackReceipt,
+    ) -> Result<AudioPlayed, inference_tts::PlaybackRefused> {
+        let named = self.misnamed.take().unwrap_or(segment_id);
+        self.inner.acknowledge_playback(named, receipt)
+    }
+
+    fn discard(
+        &mut self,
+        segment_id: SegmentId,
+    ) -> Result<inference_text::SegmentDiscarded, DiscardRefused> {
+        self.inner.discard(segment_id)
+    }
+}
+
+#[test]
+fn a_sink_whose_receipt_the_synthesis_refused_acknowledges_again_without_its_frames() {
+    let mut segments = committed(&TEXTS);
+    let second = segments.pop().expect("two segments");
+    let first = segments.pop().expect("two segments");
+    let (id, other) = (first.segment_id(), second.segment_id());
+    let mut handle = MisnamesOnce {
+        inner: synthesiser(MockConfiguration::Neither)
+            .start()
+            .expect("a fresh synthesiser runs nothing else"),
+        misnamed: Some(other),
+    };
+    handle.offer_segment(first).expect("queued");
+    handle.offer_segment(second).expect("queued");
+    handle.end_utterance().expect("the utterance ends once");
+    let mut sink = MockSink::new();
+    for event in handle.by_ref() {
+        if let SynthesisEvent::Audio(audio) = event {
+            sink.give(audio);
+        }
+    }
+    let emitted = handle.output().frames_emitted(id).expect("held");
+
+    assert!(
+        matches!(
+            sink.acknowledge(&mut handle, id),
+            Err(SinkRefused::FrameOfAnotherSegment(_))
+        ),
+        "the handle passed the receipt on under another segment"
+    );
+    assert_eq!(sink.frames_given(id), 0, "the receipt consumed the frames");
+    assert_eq!(
+        handle.output().frames_played(id),
+        Some(emitted),
+        "the synthesis counts them as played"
+    );
+
+    let (played, _) = sink
+        .acknowledge(&mut handle, id)
+        .unwrap_or_else(|error| panic!("the retry confirms the counted frames ({error:?})"));
+    assert_eq!(played.state(), SegmentState::Played);
+    assert!(
+        sink.acknowledge(&mut handle, other).is_ok(),
+        "the other segment's frames stayed with the sink"
+    );
 }

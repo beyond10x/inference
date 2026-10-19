@@ -14,13 +14,26 @@ use std::task::{Context, Poll, Wake, Waker};
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
-use inference_core::model::Capability;
-use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileKind};
+use inference_core::model::{Adapter, AdapterId, Capability};
+use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
-    Declaration, Delivery, Edge, Essentiality, InteractionMode, NodeRole, OverloadPolicy,
+    Catalog, Declaration, Delivery, Edge, Essentiality, InteractionMode, NodeRole, OverloadPolicy,
     PipelineSpec, PortTraits, modality,
 };
 use inference_runtime::{EdgeQueue, QueueReceiver, QueueSender};
+
+/// The one profile the case declares, and no adapter: what `Declaration::build` reads.
+struct Profiles(DeploymentProfile);
+
+impl Catalog for Profiles {
+    fn profile(&self, profile_id: ProfileId) -> Option<&DeploymentProfile> {
+        (self.0.profile_id() == profile_id).then_some(&self.0)
+    }
+
+    fn adapter(&self, _: AdapterId) -> Option<&Adapter> {
+        None
+    }
+}
 
 fn edge(capacity: usize, overload: OverloadPolicy) -> Edge {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
@@ -44,13 +57,17 @@ fn edge(capacity: usize, overload: OverloadPolicy) -> Edge {
     };
     let capacity = NonZeroUsize::new(capacity).expect("a positive capacity");
     let mut declaration = Declaration::new();
-    declaration.build(&profile, spec, |pipeline| {
-        let source = pipeline.node("source", NodeRole::Source, Vec::new());
-        let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
-        let out = pipeline.output::<modality::Text>(&source, "out", traits);
-        let into = pipeline.input::<modality::Text>(&sink, "in", traits);
-        pipeline.connect(&out, &into, capacity, overload);
-    });
+    let profile_id = profile.profile_id();
+    let catalog = Profiles(profile);
+    declaration
+        .build(&catalog, profile_id, spec, |pipeline| {
+            let source = pipeline.node("source", NodeRole::Source, Vec::new());
+            let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+            let out = pipeline.output::<modality::Text>(&source, "out", traits);
+            let into = pipeline.input::<modality::Text>(&sink, "in", traits);
+            pipeline.connect(&out, &into, capacity, overload);
+        })
+        .expect("the profile is declared");
     declaration.edges().next().expect("one edge").clone()
 }
 
@@ -213,6 +230,36 @@ fn drop_stale_epochs_waits_when_full_and_a_newer_epoch_wakes_the_stale_waiter() 
         delivered.push(envelope.payload);
     }
     assert_eq!(delivered, vec![4]);
+}
+
+#[test]
+fn a_newer_epoch_completes_a_stale_pending_send_as_discarded_without_a_consumer_pop() {
+    let (old, new) = (GenerationId::generate(), GenerationId::generate());
+    let (sender, receiver) = queue(
+        2,
+        OverloadPolicy::DropStaleEpochs,
+        HashMap::from([(old, 1), (new, 2)]),
+    );
+    let (a, b) = (NodeId::generate(), NodeId::generate());
+    now(sender.send(item(b, None, 1))).expect("room for it");
+    now(sender.send(item(b, None, 2))).expect("room for it");
+    let stale = Task::new();
+    let mut waiting = sender.send(item(a, Some(old), 3));
+    assert!(stale.poll(waiting.as_mut()).is_pending());
+    let newer = Task::new();
+    let other = sender.clone();
+    let mut arriving = other.send(item(a, Some(new), 4));
+    assert!(
+        newer.poll(arriving.as_mut()).is_pending(),
+        "nothing of a's older epoch is queued, so the purge frees no room"
+    );
+    assert_eq!((receiver.len(), receiver.discarded()), (2, 0));
+    assert!(
+        stale.woken() > 0,
+        "a's newer epoch did not wake a's pending send of the older one"
+    );
+    assert!(matches!(stale.poll(waiting.as_mut()), Poll::Ready(Ok(()))));
+    assert_eq!((receiver.len(), receiver.discarded()), (2, 1));
 }
 
 #[test]

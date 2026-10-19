@@ -12,13 +12,26 @@ use std::task::{Context, Poll, Waker};
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
-use inference_core::model::Capability;
-use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileKind};
+use inference_core::model::{Adapter, AdapterId, Capability};
+use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
-    Declaration, Delivery, Edge, Essentiality, InteractionMode, NodeRole, OverloadPolicy,
+    Catalog, Declaration, Delivery, Edge, Essentiality, InteractionMode, NodeRole, OverloadPolicy,
     PipelineSpec, PortTraits, modality,
 };
 use inference_runtime::{EdgeQueue, QueueReceiver, UnsupportedOverload};
+
+/// The one profile the case declares, and no adapter: what `Declaration::build` reads.
+struct Profiles(DeploymentProfile);
+
+impl Catalog for Profiles {
+    fn profile(&self, profile_id: ProfileId) -> Option<&DeploymentProfile> {
+        (self.0.profile_id() == profile_id).then_some(&self.0)
+    }
+
+    fn adapter(&self, _: AdapterId) -> Option<&Adapter> {
+        None
+    }
+}
 
 /// One declared edge of a two-node text pipeline, with `capacity` and `overload`.
 fn edge(capacity: usize, overload: OverloadPolicy) -> Edge {
@@ -43,13 +56,17 @@ fn edge(capacity: usize, overload: OverloadPolicy) -> Edge {
     };
     let capacity = NonZeroUsize::new(capacity).expect("a positive capacity");
     let mut declaration = Declaration::new();
-    declaration.build(&profile, spec, |pipeline| {
-        let source = pipeline.node("source", NodeRole::Source, Vec::new());
-        let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
-        let out = pipeline.output::<modality::Text>(&source, "out", traits);
-        let into = pipeline.input::<modality::Text>(&sink, "in", traits);
-        pipeline.connect(&out, &into, capacity, overload);
-    });
+    let profile_id = profile.profile_id();
+    let catalog = Profiles(profile);
+    declaration
+        .build(&catalog, profile_id, spec, |pipeline| {
+            let source = pipeline.node("source", NodeRole::Source, Vec::new());
+            let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+            let out = pipeline.output::<modality::Text>(&source, "out", traits);
+            let into = pipeline.input::<modality::Text>(&sink, "in", traits);
+            pipeline.connect(&out, &into, capacity, overload);
+        })
+        .expect("the profile is declared");
     let edge = declaration.edges().next().expect("one edge").clone();
     assert_eq!((edge.capacity(), edge.overload()), (capacity, overload));
     edge
@@ -193,9 +210,44 @@ fn coalesce_replaces_the_newest_item_of_the_same_stream() {
     now(sender.send(item(producer, other, None, 2 * c + 1))).expect("coalesce never refuses");
     assert_eq!(receiver.discarded(), u64::from(c + 1));
     drop(sender);
-    let mut expected: Vec<u32> = (1..c).collect();
-    expected.push(2 * c);
+    let mut expected: Vec<u32> = (2..c).collect();
+    expected.extend([2 * c, 2 * c + 1]);
     assert_eq!(drain(&mut receiver), expected);
+}
+
+#[test]
+fn coalesce_with_a_full_queue_of_other_streams_keeps_the_arrival_and_discards_the_oldest() {
+    let (sender, mut receiver) = queue(&edge(3, OverloadPolicy::Coalesce), HashMap::new());
+    let producer = NodeId::generate();
+    let [a, b, c, d] = [(); 4].map(|()| StreamId::generate());
+    now(sender.send(item(producer, a, None, 1))).expect("room for it");
+    now(sender.send(item(producer, b, None, 2))).expect("room for it");
+    now(sender.send(item(producer, a, None, 3))).expect("room for it");
+    now(sender.send(item(producer, c, None, 4))).expect("coalesce never refuses");
+    assert_eq!((receiver.len(), receiver.discarded()), (3, 1));
+    now(sender.send(item(producer, d, None, 5))).expect("coalesce never refuses");
+    assert_eq!((receiver.len(), receiver.discarded()), (3, 2));
+    drop(sender);
+    assert_eq!(
+        drain(&mut receiver),
+        vec![3, 4, 5],
+        "the oldest queued envelopes made room, the arrivals were kept"
+    );
+}
+
+#[test]
+fn dropping_the_receiver_counts_the_envelopes_it_clears() {
+    let (sender, receiver) = EdgeQueue::new(&edge(4, OverloadPolicy::Pause), HashMap::new())
+        .expect("a supported policy")
+        .split();
+    let (producer, stream) = (NodeId::generate(), StreamId::generate());
+    for n in 1..=3 {
+        now(sender.send(item(producer, stream, None, n))).expect("room for it");
+    }
+    assert_eq!((sender.len(), sender.discarded()), (3, 0));
+    drop(receiver);
+    assert_eq!(sender.len(), 0);
+    assert_eq!(sender.discarded(), 3, "every cleared envelope is counted");
 }
 
 #[test]
