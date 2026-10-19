@@ -20,9 +20,10 @@
 //! A generator scripted for tools ([`MockGenerator::proposing`]) also claims `tool_calling` and
 //! implements [`ToolCalling`]: each input offered and each outcome integrated is a model request
 //! of its own, whose text is one segment, and each of its first `proposals` model requests ends
-//! with the same [`ToolProposal`], taken once that request's segment is delivered. The text of a
-//! request that integrates an outcome contains it: the result's JSON, the failure's detail or the
-//! rejection's reason.
+//! with the same [`ToolProposal`], taken once that request's segment is delivered. Scripted with a
+//! round ([`MockGenerator::proposing_round`]), each of those requests ends with every proposal of
+//! the round, taken one by one in the round's order. The text of a request that integrates an
+//! outcome contains it: the result's JSON, the failure's detail or the rejection's reason.
 //!
 //! Behind the `run` feature, [`ModelNode`] is the model node of a text-only pipeline the
 //! runtime's run controller drives: one generation per run, one committed segment per input, and,
@@ -141,11 +142,11 @@ pub struct MockGenerator {
     running: Running,
 }
 
-/// What a generator scripted for tools proposes: `proposal`, at the end of each of its first
-/// `proposals` model requests.
+/// What a generator scripted for tools proposes: every proposal of `round`, at the end of each
+/// of its first `proposals` model requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolScript {
-    proposal: ToolProposal,
+    round: Vec<ToolProposal>,
     proposals: usize,
 }
 
@@ -182,6 +183,18 @@ impl MockGenerator {
     /// a new identity.
     #[must_use]
     pub fn proposing(self, tool_id: ToolId, arguments: Json, proposals: usize) -> Self {
+        self.proposing_round([ToolProposal { tool_id, arguments }], proposals)
+    }
+
+    /// As [`MockGenerator::proposing`], each of the first `proposals` model requests of a
+    /// generation ending with every proposal of `round`, in its order: the calls of one tool
+    /// round.
+    #[must_use]
+    pub fn proposing_round(
+        self,
+        round: impl IntoIterator<Item = ToolProposal>,
+        proposals: usize,
+    ) -> Self {
         let mut capabilities = self.adapter.capabilities().to_vec();
         if !capabilities.contains(&Capability::ToolCalling) {
             capabilities.push(Capability::ToolCalling);
@@ -199,7 +212,7 @@ impl MockGenerator {
         Self {
             adapter,
             tools: Some(ToolScript {
-                proposal: ToolProposal { tool_id, arguments },
+                round: round.into_iter().collect(),
                 proposals,
             }),
             ..self
@@ -226,7 +239,7 @@ impl Generator for MockGenerator {
             pending: self.script.iter().cloned().collect(),
             delivered: VecDeque::from([GenerationEvent::Started(started)]),
             tools: self.tools.clone(),
-            staged: None,
+            staged: VecDeque::new(),
             _slot: slot,
         })
     }
@@ -248,8 +261,8 @@ pub struct MockGeneration {
     delivered: VecDeque<GenerationEvent>,
     /// What is left of the generator's tool script.
     tools: Option<ToolScript>,
-    /// The proposal the latest model request ends with, until it is taken.
-    staged: Option<ToolProposal>,
+    /// The proposals the latest model request ends with, until each is taken.
+    staged: VecDeque<ToolProposal>,
     _slot: Slot,
 }
 
@@ -303,7 +316,7 @@ impl MockGeneration {
             && script.proposals > 0
         {
             script.proposals -= 1;
-            self.staged = Some(script.proposal.clone());
+            self.staged = script.round.iter().cloned().collect();
         }
     }
 
@@ -360,7 +373,7 @@ impl GenerationHandle for MockGeneration {
 impl ToolCalling for MockGeneration {
     fn take_proposal(&mut self) -> Option<ToolProposal> {
         if self.pending.is_empty() && self.delivered.is_empty() {
-            self.staged.take()
+            self.staged.pop_front()
         } else {
             None
         }
