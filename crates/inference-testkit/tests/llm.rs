@@ -1,0 +1,195 @@
+//! §23.1 test 2 of `docs/design/inference.md`: LLM output streaming and input during output are
+//! verified independently, against the three configurations of the mock generator. Output
+//! streaming is observed as a `TextDelta` delivered while the generation is still Active, before
+//! `GenerationCompleted`; input during output as input offered while the generation is Active
+//! being accepted. Each is observed on a generation of its own, so one cannot stand in for the
+//! other, and what each configuration was observed to do is what it claims.
+
+#![cfg(feature = "llm")]
+
+use std::collections::HashSet;
+
+use inference_core::generation::GenerationState;
+use inference_core::id::{NodeId, RunId};
+use inference_core::model::{Capability, ModelId};
+use inference_llm::{
+    CapabilityNotClaimed, GenerationEvent, GenerationHandle, GenerationRequest, Generator,
+    InputRefused, OfferInput,
+};
+use inference_testkit::llm::{MockConfiguration, MockGenerator};
+
+const SCRIPT: [&str; 3] = ["Hello", ", ", "world"];
+const INPUT: &str = "and the weather?";
+
+fn generator(configuration: MockConfiguration) -> MockGenerator {
+    MockGenerator::new(configuration, ModelId::generate(), SCRIPT)
+}
+
+fn request() -> GenerationRequest {
+    GenerationRequest {
+        run_id: RunId::generate(),
+        node_id: NodeId::generate(),
+        epoch: 1,
+        prompt: "Greet the user.".to_owned(),
+    }
+}
+
+/// Every event one generation delivered, each with the generation's state when the caller
+/// received it.
+fn deliveries(configuration: MockConfiguration) -> Vec<(GenerationEvent, GenerationState)> {
+    let request = request();
+    let mut handle = generator(configuration).start(request.clone());
+    assert_eq!(handle.output().generation().run_id(), request.run_id);
+    assert_eq!(handle.output().generation().node_id(), request.node_id);
+    let mut seen = Vec::new();
+    while let Some(event) = handle.next() {
+        seen.push((event, handle.output().generation().state()));
+    }
+    seen
+}
+
+/// Whether a `TextDelta` reached the caller while the generation was Active, before
+/// `GenerationCompleted`; panics unless the generation completed.
+fn streams(configuration: MockConfiguration) -> bool {
+    let seen = deliveries(configuration);
+    let completed_at = seen
+        .iter()
+        .position(|(event, _)| matches!(event, GenerationEvent::Completed(_)))
+        .unwrap_or_else(|| panic!("{configuration:?} never completed: {seen:?}"));
+    seen[..completed_at].iter().any(|(event, state)| {
+        matches!(event, GenerationEvent::TextDelta(_)) && *state == GenerationState::Active
+    })
+}
+
+/// What happened to input offered to a generation while it was Active, after its first delivered
+/// `TextDelta` if one arrived while Active and right after `GenerationStarted` otherwise.
+struct Offer {
+    answer: Result<(), InputRefused>,
+    completed: bool,
+    deltas_after: Vec<String>,
+}
+
+fn offer_input(configuration: MockConfiguration) -> Offer {
+    let mut handle = generator(configuration).start(request());
+    let started = handle.next();
+    assert!(
+        matches!(started, Some(GenerationEvent::Started(_))),
+        "{configuration:?}: the first event is GenerationStarted, got {started:?}"
+    );
+    let streaming = configuration
+        .capabilities()
+        .contains(&Capability::OutputStreaming);
+    let mut buffered = Vec::new();
+    if streaming {
+        for event in handle.by_ref() {
+            let is_delta = matches!(event, GenerationEvent::TextDelta(_));
+            buffered.push(event);
+            if is_delta {
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        handle.output().generation().state(),
+        GenerationState::Active,
+        "{configuration:?}: input is offered while the generation is Active; delivered so far {buffered:?}"
+    );
+    let answer = handle.offer_input(INPUT.to_owned());
+    let mut completed = false;
+    let mut deltas_after = Vec::new();
+    for event in handle.by_ref() {
+        match event {
+            GenerationEvent::TextDelta(delta) => deltas_after.push(delta.text),
+            GenerationEvent::Completed(_) => completed = true,
+            _ => {}
+        }
+    }
+    Offer {
+        answer,
+        completed,
+        deltas_after,
+    }
+}
+
+#[test]
+fn output_streaming_is_verified_by_a_delta_delivered_before_completion() {
+    assert!(
+        streams(MockConfiguration::StreamingOnly),
+        "claiming output_streaming, a TextDelta reaches the caller before GenerationCompleted: {:?}",
+        deliveries(MockConfiguration::StreamingOnly)
+    );
+
+    let seen = deliveries(MockConfiguration::Neither);
+    assert!(
+        !streams(MockConfiguration::Neither),
+        "claiming neither, no TextDelta reaches the caller before GenerationCompleted: {seen:?}"
+    );
+    let texts: Vec<&str> = seen
+        .iter()
+        .filter_map(|(event, _)| match event {
+            GenerationEvent::TextDelta(delta) => Some(delta.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [SCRIPT.concat()],
+        "claiming neither, the whole script arrives as one segment at completion"
+    );
+}
+
+#[test]
+fn concurrent_input_output_is_verified_by_input_accepted_while_active() {
+    let accepted = offer_input(MockConfiguration::StreamingAndConcurrentInput);
+    assert_eq!(
+        accepted.answer,
+        Ok(()),
+        "claiming concurrent_input_output, input offered while Active is accepted"
+    );
+    assert!(
+        accepted.deltas_after.iter().any(|text| text == INPUT),
+        "the accepted input is reflected in a later delta: {:?}",
+        accepted.deltas_after
+    );
+    assert!(accepted.completed, "the generation still completes");
+
+    let refused = offer_input(MockConfiguration::StreamingOnly);
+    assert_eq!(
+        refused.answer,
+        Err(InputRefused::CapabilityNotClaimed(CapabilityNotClaimed {
+            capability: Capability::ConcurrentInputOutput,
+        })),
+        "claiming output_streaming only, input offered while Active is refused naming the missing capability"
+    );
+    assert!(
+        refused.completed,
+        "the refused generation still completes its output"
+    );
+    assert!(
+        !refused.deltas_after.iter().any(|text| text.contains(INPUT)),
+        "refused input reaches no delta: {:?}",
+        refused.deltas_after
+    );
+}
+
+#[test]
+fn each_configuration_claims_exactly_what_it_was_observed_to_do() {
+    for configuration in MockConfiguration::ALL {
+        let mut observed = HashSet::new();
+        if streams(configuration) {
+            observed.insert(Capability::OutputStreaming);
+        }
+        let offer = offer_input(configuration);
+        assert!(offer.completed, "{configuration:?} completes");
+        if offer.answer.is_ok() && offer.deltas_after.iter().any(|text| text == INPUT) {
+            observed.insert(Capability::ConcurrentInputOutput);
+        }
+        let generator = generator(configuration);
+        let claimed: HashSet<Capability> =
+            generator.adapter().capabilities().iter().copied().collect();
+        assert_eq!(
+            claimed, observed,
+            "{configuration:?} claims what it was observed to do"
+        );
+    }
+}
