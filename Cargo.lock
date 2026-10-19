@@ -282,6 +282,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-runtime"
+version = "0.3.0"
+dependencies = [
+ "inference-core",
+ "inference-pipeline",
+]
+
+[[package]]
 name = "inference-stt"
 version = "0.3.0"
 dependencies = [
