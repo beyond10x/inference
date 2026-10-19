@@ -491,6 +491,100 @@ fn the_bound_runs_only_while_the_caller_awaits_the_provider() {
     );
 }
 
+/// A model that creates every response owes one after the caller answers its call, as after a
+/// commit: the bound runs from the first check after the answer, the time the caller took to
+/// compute the result not counted, and a model that takes responses from the caller is not
+/// awaited until the caller asks.
+#[test]
+fn answering_a_call_of_a_model_that_creates_every_response_arms_the_bound() {
+    let start = Instant::now();
+    let limit = Duration::from_secs(10);
+    let mut caller = config(TurnDetection::ServerVad);
+    caller.auto_response = true;
+    caller.auto_interrupt = true;
+    let mut ledger = open(&server_turns(), caller, start);
+    let response = ResponseId::generate();
+    ledger.response_created(response, start).expect("created");
+    ledger
+        .tool_call(
+            SpeechCallId::new("call-1"),
+            response,
+            "weather",
+            json!({}),
+            start,
+        )
+        .expect("proposed");
+    ledger
+        .response_completed(response, start)
+        .expect("completed");
+    let answered = start + limit * 3;
+    assert!(!ledger.check_liveness(answered), "nothing awaited yet");
+    ledger
+        .answer(&SpeechCallId::new("call-1"), json!({"celsius": 21}))
+        .expect("answered");
+    assert!(
+        !ledger.check_liveness(answered),
+        "the bound starts at the first check after the answer"
+    );
+    assert!(!ledger.check_liveness(answered + limit - Duration::from_millis(1)));
+    assert!(
+        ledger.check_liveness(answered + limit),
+        "the provider owes the response that answers the result"
+    );
+
+    let mut caller = config(TurnDetection::ServerVad);
+    caller.auto_response = true;
+    caller.auto_interrupt = true;
+    let mut early = open(&server_turns(), caller, start);
+    early.response_created(response, start).expect("created");
+    early
+        .tool_call(
+            SpeechCallId::new("call-1"),
+            response,
+            "weather",
+            json!({}),
+            start,
+        )
+        .expect("proposed");
+    early
+        .answer(&SpeechCallId::new("call-1"), json!({"celsius": 21}))
+        .expect("answered before the proposing response ended");
+    let ended = start + limit * 2;
+    early
+        .response_completed(response, ended)
+        .expect("completed");
+    assert!(!early.check_liveness(ended + limit - Duration::from_millis(1)));
+    assert!(
+        early.check_liveness(ended + limit),
+        "the response that answers the result is still owed after the proposing one ended"
+    );
+
+    let mut caller_led = open(&full(), config(TurnDetection::Disabled), start);
+    caller_led
+        .response_created(response, start)
+        .expect("created");
+    caller_led
+        .tool_call(
+            SpeechCallId::new("call-1"),
+            response,
+            "weather",
+            json!({}),
+            start,
+        )
+        .expect("proposed");
+    caller_led
+        .response_completed(response, start)
+        .expect("completed");
+    caller_led
+        .answer(&SpeechCallId::new("call-1"), json!(21))
+        .expect("answered");
+    assert!(!caller_led.check_liveness(start));
+    assert!(
+        !caller_led.check_liveness(start + limit * 5),
+        "the caller asks for the next response itself"
+    );
+}
+
 #[test]
 fn a_closed_transport_fails_the_session_at_once_and_a_closed_session_takes_nothing() {
     let now = Instant::now();

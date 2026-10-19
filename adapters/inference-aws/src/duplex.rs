@@ -27,10 +27,21 @@
 //! - a final text block ending `END_TURN`, or a tool block ending `TOOL_USE`, completes the
 //!   response; the interruption notice or an `INTERRUPTED` end cancels it, as the provider's own
 //!   interruption;
+//! - Nova Sonic reports no voice activity, so the first sign of the user's speech in a turn is
+//!   recorded as speech started, once per turn: the interruption notice (also over a response that
+//!   already completed and whose audio the caller may still be playing), an `INTERRUPTED` end, or
+//!   else the turn's first user transcript, just before its commit; no end of speech is recorded;
 //! - a tool use is a call under the provider's `toolUseId`;
 //! - usage deltas are summed per response: what is reported while a response is in progress counts
 //!   toward it; between responses, input counts toward the next and output toward the last;
 //! - a service error fails the session, a closed stream fails it as `transport_closed`.
+//!
+//! The response boundaries are inferred from the order of content blocks the Nova 2 user guide
+//! and the AWS samples show (speculative text, audio, then final text ending `END_TURN`), not
+//! read from recorded service traffic: the offline replay follows the same order, so only the
+//! first live run (`tests/nova_sonic_duplex_live.rs`) checks it. Should the service end a turn on
+//! another block, a response would complete late (at the next user turn or the completion end) or
+//! drop the content after its end.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -481,6 +492,10 @@ struct Turns {
     /// Usage reported before the next response began.
     pending: ResponseUsage,
     totals: HashMap<ResponseId, ResponseUsage>,
+    /// Whether the user's speech of the current turn was reported.
+    speech_reported: bool,
+    /// The sample after the last input frame accepted.
+    input_end: u64,
 }
 
 /// A session of [`NovaSonicSpeech`].
@@ -531,6 +546,7 @@ impl NovaSonicSpeechSession {
             OutputEvent::ToolUse(tool) => self.tool_use(tool, at),
             OutputEvent::ContentEnd(end) => self.content_end(&end, at),
             OutputEvent::Interrupted { content_id, .. } => {
+                self.report_speech(at);
                 let response = self
                     .turns
                     .blocks
@@ -554,6 +570,21 @@ impl NovaSonicSpeechSession {
         }
     }
 
+    /// Records that the user started speaking, once per user turn: Nova Sonic sends no voice
+    /// activity events, so its interruption notice, or failing that the first transcript of the
+    /// turn, is the first sign of speech. The position is the end of the input sent so far, not
+    /// the onset of the speech, which the provider does not report.
+    fn report_speech(&mut self, at: Instant) {
+        if self.turns.speech_reported {
+            return;
+        }
+        let position =
+            SampleClockPosition::new(self.turns.input_end).unwrap_or(SampleClockPosition::MAX);
+        if self.ledger.speech_started(position, at).is_ok() {
+            self.turns.speech_reported = true;
+        }
+    }
+
     fn content_start(&mut self, start: OutputContentStart, at: Instant) {
         let mut block = Block {
             role: start.role,
@@ -564,11 +595,13 @@ impl NovaSonicSpeechSession {
         };
         match (&block.role, &block.kind) {
             (Role::User, ContentKind::Text) if !block.speculative() => {
+                self.report_speech(at);
                 if let Some(response) = self.ledger.in_progress() {
                     let _ = self.ledger.response_completed(response, at);
                 }
                 if self.ledger.input_committed(at).is_ok() {
                     self.turns.open = true;
+                    self.turns.speech_reported = false;
                 }
             }
             (Role::User, _) => {}
@@ -666,14 +699,17 @@ impl NovaSonicSpeechSession {
     }
 
     fn content_end(&mut self, end: &OutputContentEnd, at: Instant) {
-        let Some(block) = self.turns.blocks.get(&end.content_id) else {
+        let Some(block) = self.turns.blocks.get(&end.content_id).cloned() else {
             return;
         };
         let Some(response) = block.response else {
             return;
         };
         let _ = match end.stop_reason {
-            Some(StopReason::Interrupted) => self.ledger.response_cancelled(response, at),
+            Some(StopReason::Interrupted) => {
+                self.report_speech(at);
+                self.ledger.response_cancelled(response, at)
+            }
             Some(StopReason::ToolUse) => self.ledger.response_completed(response, at),
             Some(StopReason::EndTurn)
                 if block.kind == ContentKind::Text && !block.speculative() =>
@@ -746,7 +782,12 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
             self.transport_closed();
         }
         let pcm = frame.data.clone();
+        let end = frame
+            .position
+            .get()
+            .saturating_add(u64::from(frame.sample_count));
         self.ledger.accept_input(frame)?;
+        self.turns.input_end = self.turns.input_end.max(end);
         self.send(Command::Audio(pcm));
         Ok(())
     }
