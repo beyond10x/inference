@@ -27,6 +27,14 @@ pub enum AudioEncoding {
 impl AudioEncoding {
     /// Every encoding, in the order `ess/domains/audio.yaml` lists them.
     pub const ALL: [Self; 2] = [Self::PcmS16le, Self::PcmF32le];
+
+    /// The bytes one sample of one channel takes: 2 for `pcm_s16le`, 4 for `pcm_f32le`.
+    pub const fn width(self) -> u64 {
+        match self {
+            Self::PcmS16le => 2,
+            Self::PcmF32le => 4,
+        }
+    }
 }
 
 /// `inference.audio.AudioFormat`: the encoding, sample rate in hertz and channel count of a frame.
@@ -38,6 +46,15 @@ pub struct AudioFormat {
     pub encoding: AudioEncoding,
     pub sample_rate: NonZeroU32,
     pub channels: NonZeroU16,
+}
+
+impl AudioFormat {
+    /// The length in bytes of the data of a frame of `sample_count` samples per channel in this
+    /// format: `sample_count * channels * width(encoding)`. It is below `2^50` and never
+    /// overflows.
+    pub const fn data_len(&self, sample_count: u32) -> u64 {
+        sample_count as u64 * self.channels.get() as u64 * self.encoding.width()
+    }
 }
 
 /// `inference.audio.SampleClockPosition`: a non-negative sample index on a stream's sample clock at
@@ -100,6 +117,11 @@ fn samples_at(samples: u64, sample_rate: NonZeroU32) -> Duration {
 ///
 /// `data` is ESS `Bytes` on the serde wire, a padded standard base64 string in both directions.
 /// The design's rule against base64 JSON is about runtime transport, not this conformance wire.
+///
+/// A well-formed frame carries [`AudioFormat::data_len`] of its `sample_count` bytes of data. The
+/// frame does not refuse one that does not: `ess/domains/audio.yaml` cannot state the invariant,
+/// so the wire admits what the specification admits, and a contract that produces frames, such as
+/// the TTS contract, refuses a mismatched one instead.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudioFrame {
