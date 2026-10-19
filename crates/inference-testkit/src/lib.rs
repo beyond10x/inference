@@ -4,15 +4,15 @@
 //! the `run` feature, the runs and node instances of the graph store, the recording mock node
 //! and the mock source and sink nodes the runtime's run controller drives, generic over the
 //! payload of the pipeline, and the run refusals of the stream store, which take
-//! `inference-runtime`; and behind
-//! the `stt`, `llm` and `tts` features, the mocks of the contract crates, with the mock model
+//! `inference-runtime`; and behind the `stt`, `llm`, `tts` and `duplex` features, the mocks of the
+//! contract crates, with the mock model
 //! node of a text-only pipeline behind `llm` and `run` together. Its test tree carries the
 //! conformance target that answers the synthesized suite of `ess/` (`tests/conform.rs`), which
 //! needs the `run` feature; the library itself pulls no ESS crate, so a crate depending on the
 //! stores or the mocks carries no test tooling, and one that leaves `run` off carries no runtime.
 //!
-//! Every module exists from the start, empty until the story that declares its domain fills it, so
-//! that no later story adds a line here.
+//! Every module of a domain `ess/system.yaml` lists exists, empty until the story that declares its
+//! domain fills it; a domain added to the system adds its module line here.
 
 /// `inference.model`: the in-memory stores of the declared models and adapters, and their views.
 pub mod model;
@@ -35,6 +35,10 @@ pub mod tools;
 
 /// `inference.session`: empty until the session stores land.
 pub mod session;
+
+/// `inference.duplex`: the in-memory stores of the native speech sessions, their responses and
+/// tool calls, their views, and behind `duplex` the scripted mock native speech model.
+pub mod duplex;
 
 /// The scripted mock recogniser of the STT contract, in two capability configurations, and
 /// synthetic audio of tone and silence.

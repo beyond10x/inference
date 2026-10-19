@@ -1,0 +1,94 @@
+type: ess-scenario/1
+domain: inference.duplex
+scenario: input-during-output-continues-response
+summary: Input accepted after output began is answered on the same response before it completes, with no second response id.
+arrange:
+  - instance: model
+    entity: inference.model.Model
+  - instance: adapter
+    entity: inference.model.Adapter
+  - instance: session
+    entity: inference.duplex.SpeechSession
+  - instance: response
+    entity: inference.duplex.Response
+timeline:
+  - at: 2026-01-05T09:00:00Z
+    command: inference.model.DeclareModel
+    input:
+      family: speech
+      checkpoint: hosted
+      code_license: none
+      weight_license: none
+      checksum: none
+      input_modalities: [Audio]
+      output_modalities: [Audio, Text]
+      provenance: hosted endpoint
+      source_revision: r1
+    outcome: declared
+    capture: {instance: model, event: inference.model.ModelDeclared, field: model_id}
+  - at: 2026-01-05T09:00:01Z
+    command: inference.model.DeclareAdapter
+    input:
+      model_id: {$instance: model}
+      backend: realtime
+      contract_revision: r1
+      execution_form: hosted_service
+      locality: external_provider
+      capabilities: [output_streaming, incremental_input, concurrent_input_output, native_duplex]
+      max_concurrency: 1
+    outcome: declared
+    capture: {instance: adapter, event: inference.model.AdapterDeclared, field: adapter_id}
+  - at: 2026-01-05T09:00:02Z
+    command: inference.duplex.OpenSpeechSession
+    input:
+      adapter_id: {$instance: adapter}
+      voice: calm
+      instructions: answer briefly
+      input_format: {encoding: pcm_s16le, sample_rate: 24000, channels: 1}
+      output_format: {encoding: pcm_s16le, sample_rate: 24000, channels: 1}
+      turn_detection: disabled
+      auto_response: false
+      auto_interrupt: false
+      tools: []
+      idle_limit_ms: 15000
+    outcome: opened
+    capture: {instance: session, event: inference.duplex.SpeechSessionOpened, field: session_id}
+  - at: 2026-01-05T09:00:03Z
+    command: inference.duplex.CreateResponse
+    input: {session_id: {$instance: session}}
+    outcome: created
+    capture: {instance: response, event: inference.duplex.ResponseCreated, field: response_id}
+  - at: 2026-01-05T09:00:04Z
+    command: inference.duplex.EmitOutputTranscript
+    input: {response_id: {$instance: response}, text: "The weather in"}
+    outcome: emitted
+  - at: 2026-01-05T09:00:05Z
+    command: inference.duplex.AppendInputAudio
+    input:
+      session_id: {$instance: session}
+      frame:
+        format: {encoding: pcm_s16le, sample_rate: 24000, channels: 1}
+        position: 0
+        sample_count: 2
+        data: AAAAAA==
+    outcome: accepted
+  - at: 2026-01-05T09:00:06Z
+    command: inference.duplex.TranscribeInput
+    input: {session_id: {$instance: session}, text: Berlin}
+    outcome: transcribed
+  - at: 2026-01-05T09:00:07Z
+    command: inference.duplex.EmitOutputTranscript
+    input: {response_id: {$instance: response}, text: " Berlin is mild"}
+    outcome: emitted
+    events:
+      - event: inference.duplex.OutputTranscriptDelta
+        payload: {text: " Berlin is mild"}
+  - at: 2026-01-05T09:00:08Z
+    command: inference.duplex.CompleteResponse
+    input: {response_id: {$instance: response}}
+    outcome: completed
+assert:
+  - view: inference.duplex.Responses
+    contains: {response_id: {$instance: response}, state: Completed}
+  - view: inference.duplex.Responses
+    counts: {at_most: 1}

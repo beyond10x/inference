@@ -1,0 +1,109 @@
+type: ess-scenario/1
+domain: inference.duplex
+scenario: barge-in-cancels-response
+summary: Speech started during a response is barge-in; the caller cancels the response, truncates its audio at the heard sample, refuses its late audio, and the next response has a new id.
+arrange:
+  - instance: model
+    entity: inference.model.Model
+  - instance: adapter
+    entity: inference.model.Adapter
+  - instance: session
+    entity: inference.duplex.SpeechSession
+  - instance: interrupted
+    entity: inference.duplex.Response
+  - instance: next
+    entity: inference.duplex.Response
+timeline:
+  - at: 2026-01-05T09:00:00Z
+    command: inference.model.DeclareModel
+    input:
+      family: speech
+      checkpoint: hosted
+      code_license: none
+      weight_license: none
+      checksum: none
+      input_modalities: [Audio]
+      output_modalities: [Audio, Text]
+      provenance: hosted endpoint
+      source_revision: r1
+    outcome: declared
+    capture: {instance: model, event: inference.model.ModelDeclared, field: model_id}
+  - at: 2026-01-05T09:00:01Z
+    command: inference.model.DeclareAdapter
+    input:
+      model_id: {$instance: model}
+      backend: realtime
+      contract_revision: r1
+      execution_form: hosted_service
+      locality: external_provider
+      capabilities: [output_streaming, incremental_input, concurrent_input_output, interruptible]
+      max_concurrency: 1
+    outcome: declared
+    capture: {instance: adapter, event: inference.model.AdapterDeclared, field: adapter_id}
+  - at: 2026-01-05T09:00:02Z
+    command: inference.duplex.OpenSpeechSession
+    input:
+      adapter_id: {$instance: adapter}
+      voice: calm
+      instructions: answer briefly
+      input_format: {encoding: pcm_s16le, sample_rate: 16000, channels: 1}
+      output_format: {encoding: pcm_s16le, sample_rate: 16000, channels: 1}
+      turn_detection: server_vad
+      auto_response: true
+      auto_interrupt: false
+      tools: []
+      idle_limit_ms: 15000
+    outcome: opened
+    capture: {instance: session, event: inference.duplex.SpeechSessionOpened, field: session_id}
+  - at: 2026-01-05T09:00:03Z
+    command: inference.duplex.CreateResponse
+    input: {session_id: {$instance: session}}
+    outcome: created
+    capture: {instance: interrupted, event: inference.duplex.ResponseCreated, field: response_id}
+  - at: 2026-01-05T09:00:04Z
+    command: inference.duplex.EmitOutputAudio
+    input:
+      response_id: {$instance: interrupted}
+      frame:
+        format: {encoding: pcm_s16le, sample_rate: 16000, channels: 1}
+        position: 0
+        sample_count: 2
+        data: AAAAAA==
+    outcome: emitted
+  - at: 2026-01-05T09:00:05Z
+    command: inference.duplex.ObserveSpeechStarted
+    input: {session_id: {$instance: session}, position: 3200}
+    outcome: observed
+  - at: 2026-01-05T09:00:06Z
+    command: inference.duplex.CancelResponse
+    input: {response_id: {$instance: interrupted}}
+    outcome: cancelled
+  - at: 2026-01-05T09:00:07Z
+    command: inference.duplex.TruncateOutput
+    input: {response_id: {$instance: interrupted}, heard: 1}
+    outcome: truncated
+    events:
+      - event: inference.duplex.OutputTruncated
+        payload: {heard: 1}
+  - at: 2026-01-05T09:00:08Z
+    command: inference.duplex.EmitOutputAudio
+    input:
+      response_id: {$instance: interrupted}
+      frame:
+        format: {encoding: pcm_s16le, sample_rate: 16000, channels: 1}
+        position: 2
+        sample_count: 2
+        data: AAAAAA==
+    outcome: not-in-progress
+  - at: 2026-01-05T09:00:09Z
+    command: inference.duplex.CreateResponse
+    input: {session_id: {$instance: session}}
+    outcome: created
+    capture: {instance: next, event: inference.duplex.ResponseCreated, field: response_id}
+assert:
+  - view: inference.duplex.Responses
+    contains: {response_id: {$instance: interrupted}, state: Cancelled}
+  - view: inference.duplex.Responses
+    contains: {response_id: {$instance: next}, state: InProgress}
+  - view: inference.duplex.Responses
+    counts: {at_least: 2, at_most: 2}

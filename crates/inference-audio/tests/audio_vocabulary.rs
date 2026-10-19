@@ -123,7 +123,7 @@ fn the_largest_position_at_the_lowest_sample_rate_converts_without_overflow() {
 fn encodings_serialize_to_the_ess_names_in_order() {
     assert_eq!(
         serde_json::to_value(AudioEncoding::ALL).expect("serializes"),
-        json!(["pcm_s16le", "pcm_f32le"])
+        json!(["pcm_s16le", "pcm_f32le", "pcm_mulaw", "pcm_alaw"])
     );
 }
 
