@@ -18,6 +18,7 @@ on this repository. `README.md` is for people.
 | path | what |
 |---|---|
 | `Cargo.toml`, `crates/` | the Cargo workspace; one crate per directory under `crates/`, `inference-core` first |
+| `examples/` | example packages built and tested with the workspace, never published and with no binary target; `stt-only` recognises speech with the STT contract and the mock alone |
 | `docs/design/` | design documents and their reviews |
 | `ess/` | the ESS specification: `system.yaml`, `ess-inputs.yaml` and one domain document per layer of the design under `domains/` (model, policy, graph, stream, tools, session); every declaration carries a `read from:` line naming the design line it was read from; `scenarios/` holds authored scenarios for what synthesis cannot witness |
 | `.engineering/planning` | the AEP planning store; change it only through `aep plan artifact` verbs |
