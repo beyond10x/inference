@@ -312,6 +312,8 @@ version = "0.3.0"
 dependencies = [
  "inference-core",
  "inference-pipeline",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -332,6 +334,7 @@ dependencies = [
  "inference-core",
  "inference-llm",
  "inference-pipeline",
+ "inference-runtime",
  "inference-stt",
  "inference-text",
  "inference-tts",
