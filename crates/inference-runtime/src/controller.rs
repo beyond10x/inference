@@ -200,6 +200,9 @@ struct Driven<P> {
     implementation: Box<dyn NodeImplementation<P>>,
     instance: Option<NodeInstance>,
     endpoints: Option<NodeEndpoints<P>>,
+    /// Whether the node answered a drain the run loop took early, once its exchange ended while
+    /// the run was Active, so that the run's drain does not call it again.
+    drained: bool,
 }
 
 impl<P> Driven<P> {
@@ -325,6 +328,7 @@ impl<P: Send + 'static> RunController<P> {
                 implementation: implement(node),
                 instance: None,
                 endpoints: Some(NodeEndpoints::default()),
+                drained: false,
             })
             .collect();
         let signals = Arc::new(Signals::default());
@@ -349,6 +353,7 @@ impl<P: Send + 'static> RunController<P> {
                 sender,
                 edge_id,
                 source,
+                to,
                 Arc::clone(&signals),
             ));
             if let Some(endpoints) = Self::endpoints_of(&mut nodes, from) {
@@ -525,7 +530,12 @@ impl<P: Send + 'static> RunController<P> {
         let mut draining: Vec<(usize, NodeFuture<'_, Result<(), NodeError>>)> = Vec::new();
         for (index, driven) in self.nodes.iter_mut().enumerate() {
             if layer.contains(&index) {
-                draining.push((index, driven.implementation.drain()));
+                let drain = if driven.drained {
+                    Box::pin(future::ready(Ok(())))
+                } else {
+                    driven.implementation.drain()
+                };
+                draining.push((index, drain));
             }
         }
         let mut answers: Vec<(usize, Option<Result<(), NodeError>>)> =
@@ -659,6 +669,14 @@ impl<P: Send + 'static> RunController<P> {
     /// issues no command the state machine would refuse; a run already Draining is completed,
     /// and a terminal run is left as it is.
     ///
+    /// From Active it also wakes when an edge refused an envelope as closed: the node it arrives
+    /// at ended its exchange while a producer still sends to it, as a node whose exchange failed
+    /// does. The loop takes that node's drain at once, abandoned if a cancel is asked for
+    /// meanwhile. A node that answers an error is failed through [`RunController::fail_node`],
+    /// which winds every other instance down and fails the run, and the loop returns
+    /// [`RunError::NodeFailed`]; a node that answers `Ok` ended its exchange as it should, its
+    /// answer is kept for the run's drain, and the loop goes on waiting.
+    ///
     /// # Errors
     ///
     /// [`RunError::Conflict`] when the run is Created, Validating or Preparing: the loop drives
@@ -676,6 +694,7 @@ impl<P: Send + 'static> RunController<P> {
                             self.cancel().await?;
                         }
                     }
+                    Next::ConsumerGone(node_id) => self.consumer_gone(node_id).await?,
                 },
                 RunState::Draining => {
                     if self.signals.take_cancel() {
@@ -705,6 +724,50 @@ impl<P: Send + 'static> RunController<P> {
             drain.as_mut().poll(cx).map(Some)
         })
         .await
+    }
+
+    /// Takes the drain of the Started node carrying `node_id`, whose exchange ended while the run
+    /// was Active, and fails it through [`RunController::fail_node`] when it answers an error; see
+    /// [`RunController::drive`]. A node not Started, or drained already, is left alone.
+    async fn consumer_gone(&mut self, node_id: NodeId) -> Result<(), RunError> {
+        let Some(index) = self.nodes.iter().position(|driven| {
+            driven.node.node_id() == node_id
+                && !driven.drained
+                && driven.state() == Some(NodeInstanceState::Started)
+        }) else {
+            return Ok(());
+        };
+        let signals = Arc::clone(&self.signals);
+        let answer = {
+            let mut drain = self.nodes[index].implementation.drain();
+            future::poll_fn(|cx| {
+                if signals.poll_cancel(cx) {
+                    return Poll::Ready(None);
+                }
+                drain.as_mut().poll(cx).map(Some)
+            })
+            .await
+        };
+        match answer {
+            None => self.cancel().await,
+            Some(Ok(())) => {
+                self.nodes[index].drained = true;
+                Ok(())
+            }
+            Some(Err(error)) => {
+                let failure = Self::failure(node_id, &error);
+                self.fail_node(node_id, &error)
+                    .await
+                    .map_err(|refused| match refused {
+                        FailNodeError::Instance(conflict) => RunError::Instance(conflict),
+                        FailNodeError::Run(conflict) => RunError::Conflict(conflict),
+                        FailNodeError::UnknownNode(_) => {
+                            RunError::Instance(InstanceConflict::of(node_id, None))
+                        }
+                    })?;
+                Err(RunError::NodeFailed(failure))
+            }
+        }
     }
 
     /// Every envelope of user content the run refused because its sequence did not increase on

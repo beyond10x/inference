@@ -26,8 +26,8 @@
 //!   given is dropped, and the generation continues without it. The node generates from
 //!   committed spans only, so the provisional-input barrier never bars its proposals; a proposal
 //!   the state machine refuses all the same fails the node;
-//! * one call is awaited at a time: an input arriving while a call is awaited is deferred, and
-//!   answered, in arrival order, once the outcome is integrated and no call is awaited, so a
+//! * one round is awaited at a time: an input arriving while a call is awaited is deferred, and
+//!   answered, in arrival order, once the outcomes are integrated and no call is awaited, so a
 //!   tool result is integrated at the end of the model request that proposed and no outcome is
 //!   lost to a later proposal;
 //! * an outcome of the awaited call arriving on `tool_result`, a result, a failure or a rejection,
@@ -37,6 +37,16 @@
 //!   completes the generation at once, and drops every later proposal. The node runs one
 //!   generation per run, so an input that arrives once the generation is no longer Active is
 //!   dropped and recorded ([`ModelHandle::dropped_inputs`]), and the node does not fail;
+//! * a model request may end with several proposals, the calls of one round
+//!   ([`MockGenerator::proposing_round`](super::MockGenerator::proposing_round)): each is sent, in
+//!   order, and the generation awaits every one of them; each outcome is integrated as it arrives;
+//! * superseded through its handle ([`ModelHandle::supersede`]), the node runs
+//!   `inference.stream.SupersedeGeneration` on its generation, which then emits nothing more, and
+//!   sends its `GenerationSuperseded` on the text port and, given tools, on `tool_call`, so that
+//!   the tool authority rejects the calls of the generation it still holds and the executor is told
+//!   to cancel the one it runs. An outcome that arrives for a generation that is no longer Active,
+//!   superseded or completed, is not reinjected and issues no model request (design 376, 637); it
+//!   is recorded ([`ModelHandle::not_reinjected`]) and still ends the wait for its call;
 //! * the end of input, or a drain once the input edge is closed, completes the generation only
 //!   once no outcome is awaited and no input is deferred; the node then passes the end of input
 //!   on, on both output ports, and ends once every edge into `tool_result` has ended, so that what
@@ -110,6 +120,9 @@ impl ModelPayload for PipelinePayload {
 struct Signal {
     drain: bool,
     cancel: bool,
+    /// The host asked for `SupersedeGeneration`: whether it did, and whether the node took it.
+    supersede: bool,
+    superseded: bool,
 }
 
 /// What the node's generation came to.
@@ -120,6 +133,9 @@ struct Record {
     late_refusal: Option<GenerationStateConflict>,
     failure: Option<String>,
     dropped: Vec<String>,
+    not_reinjected: Vec<ToolCallUpdate>,
+    supersede_refusal: Option<GenerationStateConflict>,
+    requests: usize,
 }
 
 impl fmt::Debug for Watched<Signal> {
@@ -249,6 +265,7 @@ impl<P: ModelPayload> ModelNode<P> {
     pub fn handle(&self) -> ModelHandle {
         ModelHandle {
             record: Arc::clone(&self.record),
+            signal: Arc::clone(&self.signal),
             task: self.exchange.probe(),
         }
     }
@@ -309,6 +326,8 @@ struct Receiving<P> {
 enum Step<P> {
     /// The runtime cancelled the node.
     Cancel,
+    /// The host asked for `SupersedeGeneration`.
+    Supersede,
     /// The runtime drains the node, whose input edge is closed.
     Drain,
     /// The input edge at this index delivered an envelope, or none once it is closed.
@@ -329,8 +348,8 @@ struct ToolLoop<P> {
     turn: Turn,
     /// The latest span the node generated from.
     basis: Option<Span>,
-    /// The call whose outcome the generation awaits.
-    awaiting: Option<ToolCallId>,
+    /// The calls whose outcomes the generation awaits, in the order they were proposed.
+    awaiting: Vec<ToolCallId>,
     /// Whether the loop's iteration rule is exhausted.
     exhausted: bool,
 }
@@ -398,6 +417,12 @@ struct Exchanging<P> {
     deferred: VecDeque<(StreamId, i64, TranscriptCommitted)>,
     /// The text of every input that arrived once the generation was no longer Active.
     dropped: Vec<String>,
+    /// Every outcome that arrived once the generation was no longer Active.
+    not_reinjected: Vec<ToolCallUpdate>,
+    /// The refusal of `SupersedeGeneration`, when the generation was no longer Active.
+    supersede_refusal: Option<GenerationStateConflict>,
+    /// How many model requests the node issued: inputs offered and outcomes integrated.
+    requests: usize,
 }
 
 /// `envelope` carrying its payload as `P`.
@@ -510,32 +535,64 @@ impl<P: ModelPayload> Exchanging<P> {
         let Some(tool_loop) = self.tool_loop.as_mut() else {
             return Ok(());
         };
-        let Some(proposal) = self.generation.take_proposal() else {
-            return Ok(());
-        };
-        if tool_loop.exhausted {
-            return Ok(());
+        while let Some(proposal) = self.generation.take_proposal() {
+            let generation = self.generation.output().generation();
+            if tool_loop.exhausted || generation.state() != GenerationState::Active {
+                continue;
+            }
+            let Some(tool) = tool_loop.tools.get(&proposal.tool_id) else {
+                continue;
+            };
+            let basis = tool_loop.basis.as_ref().ok_or_else(|| {
+                "a proposal was made before any input it could rest on".to_owned()
+            })?;
+            let (call, event) = ToolCall::propose(tool, generation, basis, proposal.arguments)
+                .map_err(|refused| refused.to_string())?;
+            tool_loop.awaiting.push(call.call_id());
+            let envelope = tool_loop.envelope(ToolCallUpdate {
+                call,
+                event: ToolCallEvent::Proposed(event),
+            });
+            tool_loop
+                .output
+                .send(envelope)
+                .await
+                .map_err(|refused| refused.to_string())?;
         }
-        let Some(tool) = tool_loop.tools.get(&proposal.tool_id) else {
-            return Ok(());
+        Ok(())
+    }
+
+    /// Runs `inference.stream.SupersedeGeneration` on the generation and sends its
+    /// `GenerationSuperseded` on the text port and, given tools, on `tool_call`; a generation no
+    /// longer Active refuses it, and the refusal is recorded and nothing is sent.
+    async fn supersede(&mut self) -> Result<(), String> {
+        let superseded = match self.generation.supersede() {
+            Ok(superseded) => superseded,
+            Err(refused) => {
+                self.supersede_refusal = Some(refused);
+                return Ok(());
+            }
         };
-        let basis = tool_loop
-            .basis
-            .as_ref()
-            .ok_or_else(|| "a proposal was made before any input it could rest on".to_owned())?;
-        let generation = self.generation.output().generation();
-        let (call, event) = ToolCall::propose(tool, generation, basis, proposal.arguments)
-            .map_err(|refused| refused.to_string())?;
-        tool_loop.awaiting = Some(call.call_id());
-        let envelope = tool_loop.envelope(ToolCallUpdate {
-            call,
-            event: ToolCallEvent::Proposed(event),
-        });
-        tool_loop
-            .output
-            .send(envelope)
-            .await
-            .map_err(|refused| refused.to_string())
+        let event = StreamEvent::GenerationSuperseded(superseded);
+        emit(
+            &Carrying(self.output.as_ref()),
+            &mut self.emitter,
+            event.clone(),
+        )
+        .await?;
+        if let Some(tool_loop) = self.tool_loop.as_mut() {
+            let envelope = tool_loop.next(
+                event.name().to_owned(),
+                Some(superseded.generation_id),
+                P::stream(event),
+            );
+            tool_loop
+                .output
+                .send(envelope)
+                .await
+                .map_err(|refused| refused.to_string())?;
+        }
+        Ok(())
     }
 
     /// Holds the span `committed` names as the latest the node generates from: a span of the
@@ -568,28 +625,37 @@ impl<P: ModelPayload> Exchanging<P> {
         let Some(tool_loop) = self.tool_loop.as_mut() else {
             return Ok(());
         };
-        if tool_loop.awaiting != Some(update.call.call_id()) {
+        let call_id = update.call.call_id();
+        let Some(awaited) = tool_loop.awaiting.iter().position(|id| *id == call_id) else {
+            return Ok(());
+        };
+        if matches!(
+            update.event,
+            ToolCallEvent::Proposed(_) | ToolCallEvent::Authorized(_) | ToolCallEvent::Started(_)
+        ) {
+            return Ok(());
+        }
+        tool_loop.awaiting.remove(awaited);
+        if self.generation.output().generation().state() != GenerationState::Active {
+            self.not_reinjected.push(update);
             return Ok(());
         }
         let outcome = match update.event {
             ToolCallEvent::Result(result) => ToolOutcome::Result(result.result),
             ToolCallEvent::Failed(failed) => ToolOutcome::Failed(failed.failure),
             ToolCallEvent::Rejected(rejected) if rejected.reason == RejectionReason::Exhausted => {
-                tool_loop.awaiting = None;
                 tool_loop.exhausted = true;
                 return self.complete().await;
             }
             ToolCallEvent::Rejected(rejected) => ToolOutcome::Rejected(rejected.reason),
             ToolCallEvent::Proposed(_)
             | ToolCallEvent::Authorized(_)
-            | ToolCallEvent::Started(_) => {
-                return Ok(());
-            }
+            | ToolCallEvent::Started(_) => return Ok(()),
         };
-        tool_loop.awaiting = None;
         self.generation
             .integrate(outcome)
             .map_err(|refused| refused.to_string())?;
+        self.requests += 1;
         self.answer().await
     }
 
@@ -602,6 +668,9 @@ impl<P: ModelPayload> Exchanging<P> {
             let wanted = pin!(signal.until(|signal| {
                 if signal.cancel {
                     Some(Step::Cancel)
+                } else if signal.supersede && !signal.superseded {
+                    signal.superseded = true;
+                    Some(Step::Supersede)
                 } else if input_closed && signal.drain {
                     Some(Step::Drain)
                 } else {
@@ -654,7 +723,7 @@ impl<P: ModelPayload> Exchanging<P> {
     fn awaiting(&self) -> bool {
         self.tool_loop
             .as_ref()
-            .is_some_and(|tool_loop| tool_loop.awaiting.is_some())
+            .is_some_and(|tool_loop| !tool_loop.awaiting.is_empty())
     }
 
     /// Answers the input `committed`, which arrived on `stream_id` at `sequence`: the generator's
@@ -674,6 +743,7 @@ impl<P: ModelPayload> Exchanging<P> {
         self.generation
             .offer_input((self.reply)(&committed.text))
             .map_err(|refused| refused.to_string())?;
+        self.requests += 1;
         self.answer().await
     }
 
@@ -712,6 +782,7 @@ impl<P: ModelPayload> Exchanging<P> {
             }
             match self.step(input_closed && !input_ended).await {
                 Step::Cancel => return Ok(Ended::Cancelled),
+                Step::Supersede => self.supersede().await?,
                 Step::Drain if self.tool_loop.is_some() => input_ended = true,
                 Step::Drain => {
                     self.complete().await?;
@@ -770,6 +841,8 @@ impl<P: ModelPayload> Exchanging<P> {
             Ended::Failed(failure) => (None, Some(failure)),
         };
         let dropped = std::mem::take(&mut self.dropped);
+        let not_reinjected = std::mem::take(&mut self.not_reinjected);
+        let (supersede_refusal, requests) = (self.supersede_refusal, self.requests);
         let output = self.generation.output();
         let state = output.generation().state();
         let segments = output.segments().iter().map(|s| s.snapshot()).collect();
@@ -779,6 +852,9 @@ impl<P: ModelPayload> Exchanging<P> {
             record.late_refusal = late_refusal;
             record.failure = failure;
             record.dropped = dropped;
+            record.not_reinjected = not_reinjected;
+            record.supersede_refusal = supersede_refusal;
+            record.requests = requests;
         });
     }
 }
@@ -879,7 +955,7 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
                         })
                         .0,
                         basis: None,
-                        awaiting: None,
+                        awaiting: Vec::new(),
                         exhausted: false,
                     }),
                     _ => None,
@@ -902,6 +978,9 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
                     tool_loop,
                     deferred: VecDeque::new(),
                     dropped: Vec::new(),
+                    not_reinjected: Vec::new(),
+                    supersede_refusal: None,
+                    requests: 0,
                 };
                 self.exchange.spawn(move || exchanging.run());
                 Ok(())
@@ -933,6 +1012,7 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
 #[derive(Debug, Clone)]
 pub struct ModelHandle {
     record: Arc<Watched<Record>>,
+    signal: Arc<Watched<Signal>>,
     task: Weak<()>,
 }
 
@@ -973,5 +1053,40 @@ impl ModelHandle {
     #[must_use]
     pub fn task(&self) -> Weak<()> {
         Weak::clone(&self.task)
+    }
+
+    /// Asks the node for `inference.stream.SupersedeGeneration` on its generation, which it runs
+    /// at its next step; see the module documentation. False, asking nothing, once it was asked
+    /// or the node was cancelled.
+    #[must_use]
+    pub fn supersede(&self) -> bool {
+        self.signal.update(|signal| {
+            if signal.supersede || signal.cancel {
+                return false;
+            }
+            signal.supersede = true;
+            true
+        })
+    }
+
+    /// The refusal of the supersede the host asked for, when the generation was no longer
+    /// Active; none before the exchange ended.
+    #[must_use]
+    pub fn supersede_refusal(&self) -> Option<GenerationStateConflict> {
+        self.record.read(|record| record.supersede_refusal)
+    }
+
+    /// Every outcome of an awaited call that arrived once the generation was no longer Active, in
+    /// arrival order, none of them reinjected; empty before the exchange ended.
+    #[must_use]
+    pub fn not_reinjected(&self) -> Vec<ToolCallUpdate> {
+        self.record.read(|record| record.not_reinjected.clone())
+    }
+
+    /// How many model requests the node issued on its generation, each input offered and each
+    /// outcome integrated; zero before the exchange ended.
+    #[must_use]
+    pub fn model_requests(&self) -> usize {
+        self.record.read(|record| record.requests)
     }
 }

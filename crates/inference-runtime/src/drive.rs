@@ -14,6 +14,13 @@
 //!   it (`drop`, `coalesce`, `drop_stale_epochs`), so the loop may drain a run whose consumer
 //!   never sees the end of input.
 //!
+//! The loop also wakes when a node's exchange ended while the run is Active and a producer still
+//! sends to it: the edge into the node refused an envelope as closed ([`SendError::Closed`]),
+//! its receiver gone with the exchange. That is how a consumer whose exchange failed shows, and
+//! its producers' end of input, refused the same way, would never end the run's input; the loop
+//! takes the node's drain at once and, when it answers an error, fails the node and with it the
+//! run ([`RunController::fail_node`](crate::RunController::fail_node)).
+//!
 //! Every sender the run controller hands a node is a [`GuardedSender`]: it refuses an envelope
 //! of user content whose `sequence` is not greater than the last one that edge took on the same
 //! `stream_id` (`docs/design/inference.md:312` and §23.1 test 6), so a repeated or decreasing
@@ -24,7 +31,7 @@
 //! [`SendError::SequenceNotIncreasing`], and the run records the refusal, read from
 //! [`RunController::refusals`](crate::RunController::refusals).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::future;
@@ -46,6 +53,8 @@ pub(crate) enum Next {
     Cancel,
     /// `DrainRun`: the caller asked for it, or every source ended its input.
     Drain,
+    /// An edge into this node refused an envelope as closed while the run was Active.
+    ConsumerGone(NodeId),
 }
 
 /// A node sent an envelope of user content whose `sequence` is not greater than `last`, the
@@ -79,6 +88,9 @@ struct State {
     has_sources: bool,
     cancel: bool,
     drain: bool,
+    /// The nodes an edge into which refused an envelope as closed while the run was Active, in
+    /// the order the refusals happened.
+    gone: VecDeque<NodeId>,
     refusals: Vec<SequenceNotIncreasing>,
     waker: Option<Waker>,
 }
@@ -110,6 +122,7 @@ impl Default for Signals {
                 has_sources: false,
                 cancel: false,
                 drain: false,
+                gone: VecDeque::new(),
                 refusals: Vec::new(),
                 waker: None,
             }),
@@ -129,6 +142,7 @@ impl Signals {
         state.run = run;
         if run != RunState::Active {
             state.drain = false;
+            state.gone.clear();
         }
         if run.is_terminal() {
             state.cancel = false;
@@ -153,6 +167,16 @@ impl Signals {
         }
     }
 
+    /// An edge into the node `node_id` refused an envelope as closed: kept while the run is
+    /// Active, for the loop to act on.
+    fn consumer_gone(&self, node_id: NodeId) {
+        let mut state = self.state();
+        if state.run == RunState::Active && !state.gone.contains(&node_id) {
+            state.gone.push_back(node_id);
+            state.wake();
+        }
+    }
+
     fn refused(&self, refusal: SequenceNotIncreasing) {
         self.state().refusals.push(refusal);
     }
@@ -163,8 +187,8 @@ impl Signals {
     }
 
     /// What to do next from Active, once there is something: a cancel the caller asked for comes
-    /// first, then a drain it asked for or the end of every source's input. Each request is
-    /// taken once.
+    /// first, then a drain it asked for or the end of every source's input, then a node an edge
+    /// into which refused an envelope as closed. Each is taken once.
     pub(crate) async fn next_from_active(&self) -> Next {
         future::poll_fn(|cx| {
             let mut state = self.state();
@@ -173,6 +197,9 @@ impl Signals {
             }
             if std::mem::take(&mut state.drain) || state.input_ended() {
                 return Poll::Ready(Next::Drain);
+            }
+            if let Some(node_id) = state.gone.pop_front() {
+                return Poll::Ready(Next::ConsumerGone(node_id));
             }
             state.waker = Some(cx.waker().clone());
             Poll::Pending
@@ -201,7 +228,7 @@ impl Signals {
         match request {
             Next::Cancel if !state.run.is_terminal() => state.cancel = true,
             Next::Drain if state.run == RunState::Active => state.drain = true,
-            Next::Cancel | Next::Drain => return,
+            Next::Cancel | Next::Drain | Next::ConsumerGone(_) => return,
         }
         state.wake();
     }
@@ -236,13 +263,16 @@ impl fmt::Debug for RunRequests {
 }
 
 /// The sender of one output edge as the run controller hands it to a node: it refuses user
-/// content whose sequence does not increase on its stream, and, on an edge of a source node,
-/// tells the run's [`Signals`] once the edge took the node's end of input.
+/// content whose sequence does not increase on its stream, tells the run's [`Signals`] when the
+/// edge refuses an envelope as closed, naming the node it arrives at, and, on an edge of a source
+/// node, once the edge took the node's end of input.
 pub(crate) struct GuardedSender<E> {
     pub(crate) inner: E,
     pub(crate) edge_id: EdgeId,
     /// The source node the edge leaves from, if it leaves from one.
     pub(crate) source: Option<NodeId>,
+    /// The node the edge arrives at, if it arrives at one.
+    pub(crate) consumer: Option<NodeId>,
     pub(crate) signals: Arc<Signals>,
     pub(crate) ended: AtomicBool,
     /// The last sequence the edge took on each stream.
@@ -254,12 +284,14 @@ impl<E> GuardedSender<E> {
         inner: E,
         edge_id: EdgeId,
         source: Option<NodeId>,
+        consumer: Option<NodeId>,
         signals: Arc<Signals>,
     ) -> Self {
         Self {
             inner,
             edge_id,
             source,
+            consumer,
             signals,
             ended: AtomicBool::new(false),
             sequences: Mutex::new(HashMap::new()),
@@ -326,6 +358,9 @@ impl<P: Send + 'static, E: OutputEndpoint<P>> OutputEndpoint<P> for GuardedSende
             if let Err(refused) = self.inner.send(envelope).await {
                 if let Some((stream_id, sequence, previous)) = taken {
                     self.restore(stream_id, sequence, previous);
+                }
+                if let (SendError::Closed(_), Some(node_id)) = (&refused, self.consumer) {
+                    self.signals.consumer_gone(node_id);
                 }
                 return Err(refused);
             }
