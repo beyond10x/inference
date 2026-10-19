@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T06:43:31Z",
+  "actor": "human:timo",
+  "artifact": "story:audio-and-stt-contract",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-stt -p inference-testkit -p stt-only --all-features (VERIFIED, new behaviour: baseline wave/6 has no inference-stt crate and an empty stt feature; treatment passes 7 + 175 + 2: design 23.1 test 1 refusal in both configurations, incremental and batch claims equal observed behaviour, the A-01 tree holds no inference-llm)"
+  }
+}
