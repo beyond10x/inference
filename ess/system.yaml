@@ -11,6 +11,16 @@ summary: >-
   design line it was read from; no code exists yet, and a relation the design does not settle
   carries an UNMAPPED marker instead of a guess.
 
+# UNMAPPED: no domain declares the STT, LLM and TTS contracts or the audio vocabulary (design
+# 293, 355-389), though stage P0 delivers them (1158). Their nouns (audio frames, transcripts,
+# synthesis, voices) are the contract stories' to declare. Open question for the owner.
+# UNMAPPED: the duplex contract (design 392-403) is deferred to stage P6 (1164) and split out only
+# when stable (273); no domain declares it.
+# UNMAPPED: no event carries the canonical envelope (schema_version, event_id, run_id,
+# session_id, stream_id, sequence, producer and port, timestamp, causation_id; design 303-318,
+# a SHOULD), and the version a public event schema MUST carry across a process or network
+# boundary (278). Whether the envelope is a shared struct on every event or a transport wrapper
+# is not settled. Open question for the owner.
 domains:
   - inference.model
   - inference.policy

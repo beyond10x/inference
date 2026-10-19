@@ -72,11 +72,63 @@ types:
     variants: [batch, turn_based, continuous, duplex]
 
   # The overload behaviours of the per-data-class table, named: pause the producer, drop, coalesce
-  # or supersede, deliver or fail explicitly, drop stale epochs.
+  # or supersede, deliver or fail explicitly, drop stale epochs; live audio may pause or cancel,
+  # STT hypotheses may coalesce or supersede.
   # read from: docs/design/inference.md:679-689
   - name: inference.graph.OverloadPolicy
     kind: enum
-    variants: [pause, drop, coalesce, fail, drop_stale_epochs]
+    variants: [pause, cancel, drop, coalesce, supersede, fail, drop_stale_epochs]
+
+  # Why ConnectPorts refused an edge: an edge runs from an output port to an input port.
+  # read from: docs/design/inference.md:102
+  # read from: docs/design/inference.md:1124
+  - name: inference.graph.EdgeDefect
+    kind: enum
+    variants: [source_not_output]
+
+  # What the graph planner found wrong with a graph: the checks of §10.2 that ValidatePipeline
+  # makes over the whole graph.
+  # read from: docs/design/inference.md:525-532
+  - name: inference.graph.GraphDefect
+    kind: enum
+    variants:
+      - missing_node_or_port
+      - incompatible_edge
+      - unbounded_cycle
+      - unreachable_mandatory_output
+      - disallowed_data_flow
+
+  # The outcomes runtime admission must permit.
+  # read from: docs/design/inference.md:693
+  - name: inference.graph.AdmissionRefusal
+    kind: enum
+    variants: [not_enough_vram, backend_busy, deadline_unachievable]
+
+  # Why a run failed: the failed node, where a node failed, and an actionable description.
+  # read from: docs/design/inference.md:1006
+  # UNMAPPED: a closed set of failure kinds. The design asks for a typed, actionable error (1006)
+  # and names failure codes as part of a worker protocol (892) without listing them; `detail` is
+  # free text until the owner names the kinds.
+  - name: inference.graph.FailureReason
+    kind: struct
+    fields:
+      - name: node_id
+        type: Optional<inference.graph.NodeId>
+      - name: detail
+        type: String
+
+  # One finding of the graph planner, naming where it is when it is at one node or port.
+  # read from: docs/design/inference.md:453
+  # read from: docs/design/inference.md:1149
+  - name: inference.graph.GraphFinding
+    kind: struct
+    fields:
+      - name: defect
+        type: inference.graph.GraphDefect
+      - name: node_id
+        type: Optional<inference.graph.NodeId>
+      - name: port_id
+        type: Optional<inference.graph.PortId>
 
 entities:
   # A validated graph of nodes and edges with declared inputs and outputs; it owns composition
@@ -104,6 +156,14 @@ entities:
         type: List<inference.model.Capability>
       - name: effective_capabilities
         type: Optional<List<inference.model.Capability>>
+      # The required or preferred capabilities planning could not honour; optional downgrades
+      # are visible to the application.
+      # read from: docs/design/inference.md:453
+      - name: downgrades
+        type: Optional<List<inference.model.Capability>>
+    # UNMAPPED: named source and sink interfaces exposed to the application (design 511), tool
+    # permissions and resource budgets (design 516), and optional preferences (design 513). The
+    # design lists them in the declaration without saying their shape; no field carries them yet.
     relations:
       - name: nodes
         kind: owns
@@ -144,7 +204,8 @@ entities:
   # deterministic. Its declaration names a role and the capabilities it requires of its binding.
   # read from: docs/design/inference.md:100
   # read from: docs/design/inference.md:509
-  # read from: docs/design/inference.md:560-571
+  # read from: docs/design/inference.md:461-469
+  # read from: docs/design/inference.md:510
   - name: inference.graph.Node
     naming:
       summary: A processor with named typed ports; a model, a transform, a policy, a tool, a source or a sink.
@@ -176,6 +237,10 @@ entities:
   # may arrive, whether it is essential, and which events may be dropped.
   # read from: docs/design/inference.md:101
   # read from: docs/design/inference.md:473-482
+  # UNMAPPED: accepted content encodings or formats and timing assumptions (design 477), and
+  # cardinality and concurrency constraints (design 480), which every node descriptor MUST
+  # declare (473). The design names them without a type or a closed set of values, so no field
+  # carries them yet. Open question for the owner.
   - name: inference.graph.Port
     naming:
       summary: A named, typed input or output endpoint of a node.
@@ -250,7 +315,7 @@ entities:
   # read from: docs/design/inference.md:519
   - name: inference.graph.Binding
     naming:
-      summary: One node bound to one concrete adapter.
+      summary: A node bound to a concrete adapter.
     identity:
       name: binding_id
       type: inference.graph.BindingId
@@ -290,6 +355,9 @@ entities:
     fields:
       - name: pipeline_id
         type: inference.graph.PipelineId
+      # read from: docs/design/inference.md:1006
+      - name: failure
+        type: Optional<inference.graph.FailureReason>
     relations:
       - name: pipeline
         kind: references
@@ -321,8 +389,12 @@ entities:
         - name: complete
           from: [Draining]
           to: Completed
+        # In-flight events can still fail while a run drains.
+        # UNMAPPED: whether a Created run, which has started nothing, can fail or is only
+        # cancelled. Open question for the owner.
+        # read from: docs/design/inference.md:673
         - name: fail
-          from: [Validating, Preparing, Active]
+          from: [Validating, Preparing, Active, Draining]
           to: Failed
         - name: cancel
           from: [Created, Validating, Preparing, Active, Draining]
@@ -357,25 +429,147 @@ entities:
 
 errors:
   # read from: docs/design/inference.md:679
+  # The name is kept from the first draft; what it refuses is a capacity below one.
+  # UNMAPPED: an upper bound on an edge's capacity. Design 679 asks for finite buffering and names
+  # no limit, so any positive Integer is accepted.
   - name: inference.graph.UnboundedEdge
     summary: Every edge must specify finite buffering; a capacity below one is refused.
     fields:
       - name: submitted
         type: Integer
 
-  # read from: docs/design/inference.md:521-534
-  - name: inference.graph.IncompatibleGraph
-    summary: The graph planner found a missing node or port, an incompatible edge, an unbounded cycle, an unreachable mandatory output or a disallowed data flow.
+  # read from: docs/design/inference.md:102
+  # read from: docs/design/inference.md:1108
+  # read from: docs/design/inference.md:1124
+  - name: inference.graph.IncompatibleEdge
+    summary: The edge does not run from an output port to an input port, so no edge was created.
+    fields:
+      - name: from_port
+        type: inference.graph.PortId
+      - name: to_port
+        type: inference.graph.PortId
+      - name: defect
+        type: inference.graph.EdgeDefect
 
   # read from: docs/design/inference.md:453
+  # read from: docs/design/inference.md:521-534
+  - name: inference.graph.IncompatibleGraph
+    summary: The graph planner found a missing node or port, an incompatible edge, an unbounded cycle, an unreachable mandatory output or a disallowed data flow; each finding is named.
+    fields:
+      - name: findings
+        type: List<inference.graph.GraphFinding>
+
+  # The capability is named, and the node whose binding falls short of it; a capability the
+  # pipeline requires as a whole names no node.
+  # read from: docs/design/inference.md:453
+  # read from: docs/design/inference.md:1149
   - name: inference.graph.CapabilityMismatch
     summary: A mandatory capability is not satisfied by the bound adapters; planning fails with this diagnostic rather than a silent downgrade.
+    fields:
+      - name: node_id
+        type: Optional<inference.graph.NodeId>
+      - name: capability
+        type: inference.model.Capability
+
+  # read from: docs/design/inference.md:519
+  - name: inference.graph.NodeUnbound
+    summary: A node whose role needs an adapter has no Binding, so the pipeline is not runnable.
+    fields:
+      - name: node_id
+        type: inference.graph.NodeId
+
+  # read from: docs/design/inference.md:532
+  # read from: docs/design/inference.md:1147
+  - name: inference.graph.LocalityDenied
+    summary: The adapter runs where the pipeline's deployment profile does not admit compute.
+    fields:
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: locality
+        type: inference.model.Locality
+      - name: profile_id
+        type: inference.policy.ProfileId
 
   - name: inference.graph.PipelineStateConflict
     summary: The pipeline is not in a state this command acts from, so nothing moved.
     fields:
       - name: current
         type: inference.graph.Pipeline.State
+
+  # A command that reads a pipeline it does not address refuses when the pipeline is not in the
+  # state the command needs: a declaration is changed only while Declared, and only a Planned
+  # pipeline is runnable.
+  # read from: docs/design/inference.md:519
+  # read from: docs/design/inference.md:523
+  - name: inference.graph.PipelineNotReady
+    summary: The pipeline is not in the state this command needs, so nothing was created.
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: required
+        type: inference.graph.Pipeline.State
+
+  # read from: docs/design/inference.md:525
+  - name: inference.graph.PipelineNotFound
+    summary: No pipeline carries the identity the command named.
+    fields:
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+
+  # read from: docs/design/inference.md:525
+  - name: inference.graph.NodeNotFound
+    summary: No node carries the identity the command named.
+    fields:
+      - name: node_id
+        type: inference.graph.NodeId
+
+  # read from: docs/design/inference.md:525
+  - name: inference.graph.PortNotFound
+    summary: No port carries the identity the command named.
+    fields:
+      - name: port_id
+        type: inference.graph.PortId
+
+  # read from: docs/design/inference.md:525
+  - name: inference.graph.RunNotFound
+    summary: No run carries the identity the command named.
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+
+  # read from: docs/design/inference.md:531
+  # read from: docs/design/inference.md:693
+  - name: inference.graph.AdmissionDenied
+    summary: The runtime denied the run's resources, and the reason says which limit was hit.
+    fields:
+      - name: reason
+        type: inference.graph.AdmissionRefusal
+
+  # read from: docs/design/inference.md:655
+  - name: inference.graph.RunNotRunning
+    summary: The run is not preparing or running its nodes, so no node instance was described.
+    fields:
+      - name: run_id
+        type: inference.graph.RunId
+
+  # read from: docs/design/inference.md:519
+  - name: inference.graph.AdapterNotFound
+    summary: No adapter carries the identity the command named, so nothing was bound.
+    fields:
+      - name: adapter_id
+        type: inference.model.AdapterId
+
+  # A node belongs to one pipeline; a command naming another pipeline does not reach it.
+  # read from: docs/design/inference.md:525
+  - name: inference.graph.NodeOutsidePipeline
+    summary: The node belongs to another pipeline, so nothing was added or bound.
+    fields:
+      - name: node_id
+        type: inference.graph.NodeId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
 
   - name: inference.graph.RunStateConflict
     summary: The run is not in a state this command acts from, so nothing moved.
@@ -398,6 +592,14 @@ commands:
       - name: required_capabilities
         type: List<inference.model.Capability>
     outcomes:
+      - name: unknown-profile
+        when_related: {via: input.profile_id, exists: false}
+        error: inference.policy.ProfileNotFound
+        payload:
+          inference.policy.ProfileNotFound:
+            profile_id: input.profile_id
+        summary: No deployment profile carries the identity, and no pipeline was declared.
+
       - name: declared
         creates: inference.graph.Pipeline
         instance: pipeline_id
@@ -408,6 +610,7 @@ commands:
           profile_id: input.profile_id
           required_capabilities: input.required_capabilities
           effective_capabilities: {cleared: true}
+          downgrades: {cleared: true}
         emits:
           - inference.graph.PipelineDeclared
         payload:
@@ -416,6 +619,14 @@ commands:
             name: input.name
         summary: The pipeline is declared and holds no nodes yet.
 
+  # A declaration is changed only while the pipeline is Declared: validation and planning hold for
+  # the graph they checked, and a pipeline is runnable only after them.
+  # read from: docs/design/inference.md:519
+  # read from: docs/design/inference.md:523
+  # read from: docs/design/inference.md:525
+  # UNMAPPED: whether node names are unique within a pipeline (and port names within a node) is
+  # not settled; design 475 and 525 say ports and nodes are named, not that a name is unique.
+  # Open question for the owner.
   - name: inference.graph.AddNode
     input:
       - name: pipeline_id
@@ -427,6 +638,23 @@ commands:
       - name: requires
         type: List<inference.model.Capability>
     outcomes:
+      - name: unknown-pipeline
+        when_related: {via: input.pipeline_id, exists: false}
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.pipeline_id
+        summary: No pipeline carries the identity, and no node was added.
+
+      - name: not-declared
+        when_related: {via: input.pipeline_id, predicate: state != Declared}
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.pipeline_id
+            required: Declared
+        summary: The pipeline was already validated, and no node was added.
+
       - name: added
         creates: inference.graph.Node
         instance: node_id
@@ -444,6 +672,15 @@ commands:
             name: input.name
         summary: The node is part of the pipeline's declaration.
 
+  # A port is declared on a node that exists.
+  # UNMAPPED: the pipeline-state guard the other mutators carry (design 519, 523). AddPort names
+  # only the node, and the pipeline's state is two references away (port, node, pipeline); a guard
+  # in ess 0.60.0 reads one row per input reference. Taking `pipeline_id` as an input would need a
+  # guard that the node belongs to that pipeline, and synthesis witnesses no comparison with the
+  # `via` of `Pipeline owns Node` (ESS-SYNTH-003), so the input would be a caller assertion
+  # nothing checks. Until then a port can be added to a node of a validated pipeline.
+  # read from: docs/design/inference.md:473-482
+  # read from: docs/design/inference.md:525
   - name: inference.graph.AddPort
     input:
       - name: node_id
@@ -465,6 +702,14 @@ commands:
       - name: provisional_allowed
         type: Boolean
     outcomes:
+      - name: unknown-node
+        when_related: {via: input.node_id, exists: false}
+        error: inference.graph.NodeNotFound
+        payload:
+          inference.graph.NodeNotFound:
+            node_id: input.node_id
+        summary: No node carries the identity, and no port was added.
+
       - name: added
         creates: inference.graph.Port
         instance: port_id
@@ -487,7 +732,16 @@ commands:
             name: input.name
         summary: The port is declared on its node.
 
+  # An edge connects an output port to a compatible input port with finite buffering. The source
+  # port's existence and direction are refused here. The sink port's existence and direction, and
+  # modality, encoding and pipeline membership, read a second Port row or compare two rows; ess
+  # 0.60.0 synthesis arranges one Port row per command (ESS-SYNTH-003 on a second one), so they
+  # stay the graph planner's (ValidatePipeline `rejected`, IncompatibleGraph `incompatible_edge`).
+  # read from: docs/design/inference.md:102
+  # read from: docs/design/inference.md:519
+  # read from: docs/design/inference.md:523-526
   # read from: docs/design/inference.md:679
+  # read from: docs/design/inference.md:1124
   - name: inference.graph.ConnectPorts
     input:
       - name: pipeline_id
@@ -501,8 +755,50 @@ commands:
       - name: overload
         type: inference.graph.OverloadPolicy
     outcomes:
+      - name: unknown-pipeline
+        when_related: {via: input.pipeline_id, exists: false}
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.pipeline_id
+        summary: No pipeline carries the identity, and no edge was created.
+
+      - name: unknown-source
+        when_related: {via: input.from_port, exists: false}
+        error: inference.graph.PortNotFound
+        payload:
+          inference.graph.PortNotFound:
+            port_id: input.from_port
+        summary: No port carries the source identity, and no edge was created.
+
+      - name: unbounded
+        when: capacity <= 0
+        error: inference.graph.UnboundedEdge
+        payload:
+          inference.graph.UnboundedEdge:
+            submitted: input.capacity
+        summary: The capacity was not positive, and no edge was created.
+
+      - name: not-declared
+        when_related: {via: input.pipeline_id, predicate: state != Declared}
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.pipeline_id
+            required: Declared
+        summary: The pipeline was already validated, and no edge was created.
+
+      - name: source-not-output
+        when_related: {via: input.from_port, predicate: direction != output}
+        error: inference.graph.IncompatibleEdge
+        payload:
+          inference.graph.IncompatibleEdge:
+            from_port: input.from_port
+            to_port: input.to_port
+            defect: source_not_output
+        summary: The source port is an input port, and no edge was created.
+
       - name: connected
-        when: capacity > 0
         creates: inference.graph.Edge
         instance: edge_id
         sets:
@@ -520,14 +816,21 @@ commands:
             to_port: input.to_port
         summary: The edge exists with finite buffering and an overload behaviour.
 
-      - name: unbounded
-        error: inference.graph.UnboundedEdge
-        payload:
-          inference.graph.UnboundedEdge:
-            submitted: input.capacity
-        summary: The capacity was not positive, and no edge was created.
-
+  # Applications select concrete adapters at composition time; binding is one of the steps that
+  # make a pipeline runnable, so it happens while the pipeline is Declared.
   # read from: docs/design/inference.md:248
+  # read from: docs/design/inference.md:519
+  # UNMAPPED: whether a node may hold more than one Binding. A Binding names one node and one
+  # adapter; the design states no one-adapter-per-node rule.
+  # A refusal of a second Binding would read a set of Bindings beside the identity-addressed
+  # guards below, which ess 0.60.0 refuses in one command (ESS-COMMAND-009). Open question for
+  # the owner.
+  # UNMAPPED: whether only an adapter that passed the conformance tests of its claimed
+  # capabilities may be bound (design 899, 1114). inference.model.Adapter has one state,
+  # Declared, and no record of verification; the guard needs that state or record first.
+  # Not refused here: a node of another pipeline. That guard compares the node's `pipeline_id`
+  # (the `via` of `Pipeline owns Node`) with the input, which ess 0.60.0 synthesis cannot witness
+  # (ESS-SYNTH-003), so no guard here checks it.
   - name: inference.graph.BindNode
     input:
       - name: pipeline_id
@@ -537,6 +840,46 @@ commands:
       - name: adapter_id
         type: inference.model.AdapterId
     outcomes:
+      - name: unknown-pipeline
+        when_related: {via: input.pipeline_id, exists: false}
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.pipeline_id
+        summary: No pipeline carries the identity, and nothing was bound.
+
+      - name: unknown-node
+        when_related: {via: input.node_id, exists: false}
+        error: inference.graph.NodeNotFound
+        payload:
+          inference.graph.NodeNotFound:
+            node_id: input.node_id
+        summary: No node carries the identity, and nothing was bound.
+
+      - name: unknown-adapter
+        when_related: {via: input.adapter_id, exists: false}
+        error: inference.graph.AdapterNotFound
+        payload:
+          inference.graph.AdapterNotFound:
+            adapter_id: input.adapter_id
+        summary: No adapter carries the identity, and nothing was bound.
+
+      - name: not-declared
+        when_related: {via: input.pipeline_id, predicate: state != Declared}
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.pipeline_id
+            required: Declared
+        summary: The pipeline was already validated, and nothing was bound.
+
+      # read from: docs/design/inference.md:438
+      # Network and data-class policy permits every selected adapter: an offline profile refuses
+      # a hosted adapter, and a hosted adapter is bound only where its profile opted in.
+      # read from: docs/design/inference.md:532
+      # read from: docs/design/inference.md:904
+      # read from: docs/design/inference.md:1140
+      # read from: docs/design/inference.md:1147
       - name: bound
         creates: inference.graph.Binding
         instance: binding_id
@@ -553,8 +896,15 @@ commands:
             adapter_id: input.adapter_id
         summary: The node has a concrete adapter.
 
-  # The graph planner verifies the ten conditions of §10.2 before anything runs.
+  # The graph planner verifies the conditions of §10.2 that need the whole graph before anything
+  # runs: every named node and port exists, every edge is compatible, every cycle is bounded,
+  # every mandatory output is reachable and every data flow is allowed. Their outcome is the
+  # planner's to decide, so it is external; the diagnostics name each finding.
+  # read from: docs/design/inference.md:453
   # read from: docs/design/inference.md:521-534
+  # UNMAPPED: a feedback-loop declaration (design 517, 529, 546: a feedback edge has a defined
+  # scheduler, queue bounds and a termination or iteration rule). No noun carries it yet, so
+  # "every cycle is bounded" rests on the planner alone. Which fields it has is open.
   - name: inference.graph.ValidatePipeline
     input:
       - name: pipeline_id
@@ -563,7 +913,10 @@ commands:
       - name: rejected
         external: the graph planner finds a missing node or port, an incompatible edge, an unbounded cycle, an unreachable mandatory output or a disallowed data flow
         error: inference.graph.IncompatibleGraph
-        summary: The graph is not valid, the diagnostics say why, and the pipeline stays Declared.
+        payload:
+          inference.graph.IncompatibleGraph:
+            findings: {generated: true}
+        summary: The graph is not valid, the findings say why, and the pipeline stays Declared.
 
       - name: validated
         moves: inference.graph.Pipeline.validate
@@ -584,17 +937,66 @@ commands:
         summary: The pipeline is not Declared, so nothing was validated.
 
   # Planning computes effective capabilities from the weakest required edge or node and fails
-  # with an actionable diagnostic on an unmet mandatory capability; a downgrade is never silent.
+  # with an actionable diagnostic on an unmet mandatory capability; an optional downgrade is
+  # recorded in `downgrades`, never dropped silently. Planning also refuses an adapter the
+  # pipeline's profile does not admit and a node left without the adapter its role needs
+  # (runnable only after binding).
+  # UNMAPPED: how `effective_capabilities` and `downgrades` are computed from the bindings (the
+  # weakest required edge or node, design 444). The planner supplies both; no rule here derives
+  # them from `required_capabilities` and the adapters' claims.
   # read from: docs/design/inference.md:444
   # read from: docs/design/inference.md:453
+  # read from: docs/design/inference.md:519
+  # read from: docs/design/inference.md:528
   - name: inference.graph.PlanPipeline
     input:
       - name: pipeline_id
         type: inference.graph.PipelineId
     outcomes:
+      # Network and data-class policy permits every selected adapter: the offline profile
+      # refuses a hosted adapter. The rule compares a field of each bound adapter with the list
+      # the pipeline's profile admits, two rows away from the pipeline. ess 0.60.0 has no guard
+      # that compares two related rows, synthesis witnesses no copy of either onto the pipeline
+      # or the binding (ESS-SYNTH-003), and a BindNode guard reading pipeline, node, adapter and
+      # profile rows found no arrangement (ESS-SYNTH-003), so the refusal is the planner's to
+      # decide and names what it refused. The profile itself is held to the table by
+      # inference.policy.DeclareProfile.
+      # read from: docs/design/inference.md:532
+      # read from: docs/design/inference.md:904
+      # read from: docs/design/inference.md:1140
+      # read from: docs/design/inference.md:1147
+      - name: locality-denied
+        external: an adapter bound in the pipeline has an allowed locality the pipeline's deployment profile does not admit
+        error: inference.graph.LocalityDenied
+        payload:
+          inference.graph.LocalityDenied:
+            node_id: {generated: true}
+            adapter_id: {generated: true}
+            locality: {generated: true}
+            profile_id: {generated: true}
+        summary: Planning fails naming the node, its adapter, the locality and the profile, and the pipeline stays Validated.
+
+      # Design 100: a node can wrap a model or be deterministic, so not every node needs an
+      # adapter. The planner decides from the node's role and requirements; the check reads the
+      # set of nodes against the set of bindings, which no guard in ess 0.60.0 can express.
+      # UNMAPPED: which node roles need an adapter. The design says a node can be deterministic
+      # (100) and lists roles (461-469) without saying which need a binding; the planning story
+      # reads "a node with a non-empty `requires`". Open question for the owner.
+      - name: unbound
+        external: a node whose role needs an adapter has no Binding
+        error: inference.graph.NodeUnbound
+        payload:
+          inference.graph.NodeUnbound:
+            node_id: {generated: true}
+        summary: Planning fails naming the node that has no adapter, and the pipeline stays Validated.
+
       - name: mismatch
         external: a mandatory capability of a node or of the pipeline is not implemented by its bound adapter, so the effective capabilities fall short of what is required
         error: inference.graph.CapabilityMismatch
+        payload:
+          inference.graph.CapabilityMismatch:
+            node_id: {generated: true}
+            capability: {generated: true}
         summary: Planning fails with the unmet capability named, and the pipeline stays Validated.
 
       - name: planned
@@ -602,12 +1004,13 @@ commands:
         instance: pipeline_id
         sets:
           effective_capabilities: {generated: true}
+          downgrades: {generated: true}
         emits:
           - inference.graph.PipelinePlanned
         payload:
           inference.graph.PipelinePlanned:
             pipeline_id: input.pipeline_id
-        summary: The pipeline has an execution plan and its effective capabilities are known.
+        summary: The pipeline has an execution plan, its effective capabilities are known and every optional downgrade is recorded.
 
       - name: wrong-state
         wrong_state: true
@@ -617,17 +1020,37 @@ commands:
             current: {subject: state}
         summary: The pipeline is not Validated, so nothing was planned.
 
+  # A run executes an approved execution plan: a pipeline that is not Planned is not runnable.
+  # read from: docs/design/inference.md:519
   # read from: docs/design/inference.md:651
   - name: inference.graph.CreateRun
     input:
       - name: pipeline_id
         type: inference.graph.PipelineId
     outcomes:
+      - name: unknown-pipeline
+        when_related: {via: input.pipeline_id, exists: false}
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.pipeline_id
+        summary: No pipeline carries the identity, and no run was created.
+
+      - name: not-planned
+        when_related: {via: input.pipeline_id, predicate: state != Planned}
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.pipeline_id
+            required: Planned
+        summary: The pipeline has no execution plan yet, and no run was created.
+
       - name: created
         creates: inference.graph.Run
         instance: run_id
         sets:
           pipeline_id: input.pipeline_id
+          failure: {cleared: true}
         emits:
           - inference.graph.RunCreated
         payload:
@@ -656,12 +1079,28 @@ commands:
         payload:
           inference.graph.RunStateConflict:
             current: {subject: state}
-
+  # Per-session resources are available or admission is denied cleanly: runtime admission permits
+  # `not_enough_vram`, `backend_busy` and `deadline_unachievable` rather than letting a run degrade
+  # without explanation. Whether resources suffice is the runtime's to observe, so the refusal is
+  # external; the run stays Validating, from which it can be cancelled or failed.
+  # read from: docs/design/inference.md:531
+  # read from: docs/design/inference.md:656
+  # read from: docs/design/inference.md:693
+  # UNMAPPED: whether a denied admission leaves the run Validating (as here, a refusal that moves
+  # nothing) or fails it; design 531 says only that admission "can be denied cleanly". Open
+  # question for the owner.
   - name: inference.graph.PrepareRun
     input:
       - name: run_id
         type: inference.graph.RunId
     outcomes:
+      - name: refused
+        external: the runtime cannot admit the run's resources, because GPU memory is short, the backend is busy or the deadline cannot be met
+        error: inference.graph.AdmissionDenied
+        payload:
+          inference.graph.AdmissionDenied:
+            reason: {generated: true}
+        summary: Admission was denied with its reason, and the run stays Validating.
       - name: preparing
         moves: inference.graph.Run.prepare
         instance: run_id
@@ -677,7 +1116,6 @@ commands:
         payload:
           inference.graph.RunStateConflict:
             current: {subject: state}
-
   - name: inference.graph.ActivateRun
     input:
       - name: run_id
@@ -698,7 +1136,6 @@ commands:
         payload:
           inference.graph.RunStateConflict:
             current: {subject: state}
-
   - name: inference.graph.DrainRun
     input:
       - name: run_id
@@ -719,7 +1156,6 @@ commands:
         payload:
           inference.graph.RunStateConflict:
             current: {subject: state}
-
   - name: inference.graph.CompleteRun
     input:
       - name: run_id
@@ -740,35 +1176,51 @@ commands:
         payload:
           inference.graph.RunStateConflict:
             current: {subject: state}
-
-  # A failed node surfaces a typed, actionable error to the run controller.
+  # A failed node surfaces a typed, actionable error to the run controller; failure branches are
+  # explicit, from every non-terminal state in which work runs (Validating through Draining).
+  # read from: docs/design/inference.md:673
   # read from: docs/design/inference.md:1006
+  # UNMAPPED: partial completion (design 673: failure branches are explicit "including partial
+  # completion"). The design does not say what a partially completed run records (the outputs
+  # delivered, the nodes that finished, a state of its own), so nothing here declares it yet.
+  # Open question for the owner.
   - name: inference.graph.FailRun
     input:
       - name: run_id
         type: inference.graph.RunId
-      - name: reason
-        type: String
+      - name: failure
+        type: inference.graph.FailureReason
     outcomes:
       - name: failed
         moves: inference.graph.Run.fail
         instance: run_id
+        sets:
+          failure: input.failure
         emits:
           - inference.graph.RunFailed
         payload:
           inference.graph.RunFailed:
             run_id: input.run_id
-            reason: input.reason
-        summary: The run is Failed with a typed reason; partial completion is explicit.
+            failure: input.failure
+        summary: The run is Failed with a typed reason naming the failed node where there is one.
       - name: wrong-state
         wrong_state: true
         error: inference.graph.RunStateConflict
         payload:
           inference.graph.RunStateConflict:
             current: {subject: state}
-
-  # Cancellation of delivery is distinct from cancellation of computation.
+  # Cancellation suppresses stale unplayed media and uncommitted output from older generations:
+  # every Active generation of the run is cancelled with it, and every unplayed segment of the run
+  # (selected by the run_id a segment copies from its generation) is discarded; a Played segment
+  # is outside the discard transition's source states and is skipped. Cancellation of delivery is
+  # distinct from cancellation of computation.
+  # read from: docs/design/inference.md:628
+  # read from: docs/design/inference.md:636
   # read from: docs/design/inference.md:641
+  # read from: docs/design/inference.md:620
+  # UNMAPPED: what a terminal run (Completed, Failed, Cancelled) does with its Open turns and
+  # Hypothesis spans, and what a failed or completed run does with its Active generations. The
+  # design states the cancellation rule only (628). Open question for the owner.
   - name: inference.graph.CancelRun
     input:
       - name: run_id
@@ -782,14 +1234,27 @@ commands:
         payload:
           inference.graph.RunCancelled:
             run_id: input.run_id
-        summary: The run is Cancelled; stale output from it is rejected at irreversible sinks.
+        affects:
+          - entity: inference.stream.Generation
+            where: run_id == input.run_id
+            moves: inference.stream.Generation.cancel
+          - entity: inference.stream.OutputSegment
+            where: run_id == input.run_id
+            moves: inference.stream.OutputSegment.discard
+        summary: The run is Cancelled with every Active generation of it and every unplayed segment; stale output from it is rejected at irreversible sinks.
       - name: wrong-state
         wrong_state: true
         error: inference.graph.RunStateConflict
         payload:
           inference.graph.RunStateConflict:
             current: {subject: state}
-
+  # A node instance is described for a run that is preparing or running its nodes; a run that has
+  # not started or has ended admits none.
+  # read from: docs/design/inference.md:655
+  # read from: docs/design/inference.md:671-673
+  # UNMAPPED: whether a node instance may be described while the run is Validating (design 673
+  # puts describe before prepare without tying it to a run state). Open question for the owner.
+  # Not refused here: a node of another pipeline than the run's; that compares two rows.
   - name: inference.graph.DescribeNodeInstance
     input:
       - name: run_id
@@ -797,6 +1262,33 @@ commands:
       - name: node_id
         type: inference.graph.NodeId
     outcomes:
+      - name: unknown-run
+        when_related: {via: input.run_id, exists: false}
+        error: inference.graph.RunNotFound
+        payload:
+          inference.graph.RunNotFound:
+            run_id: input.run_id
+        summary: No run carries the identity, and no instance was described.
+
+      - name: unknown-node
+        when_related: {via: input.node_id, exists: false}
+        error: inference.graph.NodeNotFound
+        payload:
+          inference.graph.NodeNotFound:
+            node_id: input.node_id
+        summary: No node carries the identity, and no instance was described.
+
+      - name: run-not-running
+        when_related:
+          via: input.run_id
+          predicate:
+            all: [state != Preparing, state != Active]
+        error: inference.graph.RunNotRunning
+        payload:
+          inference.graph.RunNotRunning:
+            run_id: input.run_id
+        summary: The run is not preparing or running its nodes, and no instance was described.
+
       - name: described
         creates: inference.graph.NodeInstance
         instance: instance_id
@@ -902,8 +1394,8 @@ events:
     fields:
       - name: run_id
         type: inference.graph.RunId
-      - name: reason
-        type: String
+      - name: failure
+        type: inference.graph.FailureReason
 
   - name: inference.graph.RunCancelled
     fields:
@@ -938,6 +1430,8 @@ views:
         type: List<inference.model.Capability>
       - name: effective_capabilities
         type: Optional<List<inference.model.Capability>>
+      - name: downgrades
+        type: Optional<List<inference.model.Capability>>
       - name: state
         type: inference.graph.Pipeline.State
 
@@ -971,6 +1465,14 @@ views:
       - name: modality
         type: inference.model.Modality
       - name: provisional_allowed
+        type: Boolean
+      - name: essentiality
+        type: inference.graph.Essentiality
+      - name: delivery
+        type: inference.graph.Delivery
+      - name: incremental
+        type: Boolean
+      - name: end_marker_required
         type: Boolean
 
   - name: inference.graph.Edges
@@ -1007,6 +1509,8 @@ views:
         type: inference.graph.RunId
       - name: pipeline_id
         type: inference.graph.PipelineId
+      - name: failure
+        type: Optional<inference.graph.FailureReason>
       - name: state
         type: inference.graph.Run.State
 

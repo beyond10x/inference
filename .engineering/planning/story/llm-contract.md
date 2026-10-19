@@ -18,7 +18,7 @@ scope:
   path: crates/inference-testkit/src/llm.rs
 - confidence: inferred
   path: crates/inference-testkit/tests/llm.rs
-revision: 7
+revision: 8
 ---
 ## Context
 
@@ -55,7 +55,7 @@ is empty), so every `crates/` path below is one the plan declares, not one on di
 - **Files:** `crates/inference-testkit/Cargo.toml` — cited, two lines only: the optional dependency on `inference-llm` and `llm = ["dep:inference-llm"]` in place of `llm = []` (step 2; both slots pre-declared by `story:testkit-conformance-target` step 1)
 - **Files:** `crates/inference-testkit/src/llm.rs` — inferred: the module `llm`, declared empty behind `#[cfg(feature = "llm")]`, is cited (step 2; testkit story step 1), but whether it is `llm.rs` or `llm/mod.rs` is the testkit story's choice and not yet on disk
 - **Files:** `crates/inference-testkit/tests/llm.rs` — inferred: step 3's three tests run under `cargo test -p inference-testkit --features llm`; the story does not say whether they are an integration test file or `#[cfg(test)]` inside the module; a new file is assumed because `tests/conform.rs` and `tests/target/` belong to the testkit story
-- **Symbols:** `inference.model.Adapter` (`ess/domains/model.yaml:100`, relation `model` `:124`), `inference.model.Capability` with `output_streaming`, `incremental_input`, `concurrent_input_output` (`:28-33`); `inference.stream.Generation` with relations `run`, `producer`, `segments` (`ess/domains/stream.yaml:121-148`), `inference.stream.OutputSegment` (`:172`), `StartGeneration`, `CompleteGeneration`, `SupersedeGeneration`, `CancelGeneration`, `EmitTextDelta`, `CommitSegment` (`:366-486`), `GenerationCompleted` (`:629`), `TextDelta` (`:644`) — cited; all consumed, none changed; their Rust homes `inference-core` and `inference-text` are not edited by this story
+- **Symbols:** `inference.model.Adapter` (`ess/domains/model.yaml:115`, relation `model` `:148`), `inference.model.Capability` with `output_streaming`, `incremental_input`, `concurrent_input_output` (`:28-33`); `inference.stream.Generation` with relations `run`, `producer`, `segments` (`ess/domains/stream.yaml:129-160`), `inference.stream.OutputSegment` (`:189`), `StartGeneration`, `CompleteGeneration`, `SupersedeGeneration`, `CancelGeneration`, `EmitTextDelta`, `CommitSegment` (`:495-689`), `GenerationCompleted` (`:869`), `TextDelta` (`:884`) — cited; all consumed, none changed; their Rust homes `inference-core` and `inference-text` are not edited by this story
 - **Not touched, by the bodies' own text:** root `Cargo.toml` (`members = ["crates/*"]`, `story:workspace-skeleton` step 1), `crates/inference-testkit/src/lib.rs` (the `mod llm` line is pre-declared so that "no later story adds a line to `lib.rs`", `story:testkit-conformance-target` step 1), `crates/inference-core`, `crates/inference-text`, `ess/`, `ess/SKIPPED.md` (the mock "records nothing in the testkit log"; acceptance is `--features llm`, not `--test conform`), `AGENTS.md`, `Taskfile.yml`, `README.md` — cited
 - **Documents:** none — cited; Out of scope sends every specification extension (context semantics, token accounting) to `epic:local-llm-adapter`
 - **Confidence:** high — the story names its crate directory and the two testkit slots it fills; only two file names inside the testkit are read rather than given

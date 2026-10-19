@@ -33,7 +33,7 @@ scope:
   path: crates/inference-testkit/tests/target/graph.rs
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 16
+revision: 21
 ---
 # Story: node-instance-lifecycle
 
@@ -49,17 +49,17 @@ Sixth story of `epic:graph-minimum`. The design gives nodes a lifecycle akin to 
 
 Extend `ess/domains/graph.yaml` before any code:
 
-- `inference.graph.NodeInstance.lifecycle`: states `Described`, `Prepared`, `Started`, `Draining`, `Cancelling`, `Stopped`, `Failed`; terminal `Stopped` and `Failed`; transitions `prepare` Described to Prepared, `start` Prepared to Started, `drain` Started to Draining, `cancel` from Described, Prepared, Started, Draining to Cancelling, `stop` from Prepared, Draining, Cancelling to Stopped, `fail` from Described, Prepared, Started, Draining to Failed. The names are the verbs of line 673; `exchange` is what a Started instance does (events flow along the edges, `ActivateRun` summary), not a state. `fail` and `cancel` leave Described because `prepare` is issued on a Described instance and may return an error, and a run cancelled or failed while Validating holds Described instances that must still reach a terminal state.
+- `inference.graph.NodeInstance.lifecycle`: states `Described`, `Prepared`, `Started`, `Draining`, `Cancelling`, `Stopped`, `Failed`; terminal `Stopped` and `Failed`; transitions `prepare` Described to Prepared, `start` Prepared to Started, `drain` Started to Draining, `cancel` from Described, Prepared, Started, Draining to Cancelling, `stop` from Prepared, Draining, Cancelling to Stopped, `fail` from Described, Prepared, Started, Draining to Failed. The names are the verbs of line 673; `exchange` is what a Started instance does (events flow along the edges, `ActivateRun` summary), not a state. `fail` and `cancel` leave Described because `prepare` is issued on a Described instance and may return an error, and a run cancelled or failed while Preparing may hold Described instances that must still reach a terminal state (`DescribeNodeInstance` refuses a run that is not Preparing or Active, `run-not-running`, so a Validating run holds none).
 - commands `PrepareNodeInstance`, `StartNodeInstance`, `DrainNodeInstance`, `CancelNodeInstance`, `StopNodeInstance`, `FailNodeInstance { reason }`, each taking `instance_id`, each with its moving outcome, its event (`NodeInstancePrepared`, `NodeInstanceStarted`, `NodeInstanceDraining`, `NodeInstanceCancelling`, `NodeInstanceStopped`, `NodeInstanceFailed { reason }`) and a `wrong-state` outcome with a new error `inference.graph.NodeInstanceStateConflict { current: inference.graph.NodeInstance.State }`, the shape every Run command already has.
 - the view `inference.graph.NodeInstances` gains `state`.
 
-Then `ess specify validate --path ess` (valid) and `ess verify conform synthesize --path ess --out .engineering/drafts/suite.json` (0 refusals); the new scenario ids are read from that file, not guessed, and named in the PR. Say in the PR that this step came first.
+Then `ess specify validate --path ess` (valid) and `ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json` (no refusal beyond the three ESS-SYNTH-001 refusals the authored scenarios cover); the new scenario ids are read from that file, not guessed, and named in the PR. Say in the PR that this step came first.
 
 ## How the run drives its instances
 
-Each coupling is read from a command summary in graph.yaml: `ValidateRun` (validating its plan against the resources at hand) describes one instance per node of the pipeline; `PrepareRun` (node instances are being prepared and resources admitted) prepares each; `ActivateRun` (events flow along the edges) starts each with its edge endpoints from `story:bounded-edges`; `DrainRun` (no new input is admitted, in-flight events complete) drains each; `CompleteRun` (drained and released its worker resources) stops each; `CancelRun` and `FailRun` cancel then stop each instance that is not already terminal. An instance whose prepare, start or exchange returns an error moves to Failed and the runtime issues `FailRun` with that reason (`docs/design/inference.md:1006`; D10).
+Each coupling is read from a command summary in graph.yaml: `PrepareRun` (node instances are being prepared and resources admitted) describes one instance per node of the pipeline and then prepares each, because `DescribeNodeInstance` admits only a run that is Preparing or Active (`run-not-running`, `inference.graph.RunNotRunning`); a `PrepareRun` refused as `refused` (`inference.graph.AdmissionDenied`) leaves the run Validating with no instance; `ActivateRun` (events flow along the edges) starts each with its edge endpoints from `story:bounded-edges`; `DrainRun` (no new input is admitted, in-flight events complete) drains each; `CompleteRun` (drained and released its worker resources) stops each; `CancelRun` and `FailRun` cancel then stop each instance that is not already terminal. An instance whose prepare, start or exchange returns an error moves to Failed and the runtime issues `FailRun` with an `inference.graph.FailureReason` naming that node (`node_id`) and the error it returned (`detail`) (`docs/design/inference.md:1006`; D10).
 
-This coupling belongs to the Rust runtime and is exercised by the Rust tests. In the conformance runner each command emits only the event graph.yaml declares for it, so a Run command moves no instance and emits no `NodeInstance*` event; the 66 Run scenarios of `story:run-lifecycle` assert `expect_no_event` for every other event and keep passing after the re-synthesis.
+This coupling belongs to the Rust runtime and is exercised by the Rust tests. In the conformance runner each command emits only the event graph.yaml declares for it, so a Run command moves no instance and emits no `NodeInstance*` event; the 70 Run scenarios of `story:run-lifecycle` assert `expect_no_event` for every other event and keep passing after the re-synthesis.
 
 ## Steps
 
@@ -85,7 +85,7 @@ With `ess/domains/graph.yaml` extended as in step 1, so that `ess specify valida
 
 1. A run of two recording mock nodes driven to Completed produced the call sequence describe, prepare, start, drain, stop on each node.
 2. A run driven to Cancelled from Active produced describe, prepare, start, cancel, stop on each node.
-3. A run whose node fails on start ends Failed with the reason the node returned, that instance in Failed and every other instance in Stopped.
+3. A run whose node fails on start ends Failed with a `FailureReason` whose `node_id` is that node and whose `detail` is the error it returned, that instance in Failed and every other instance in Stopped.
 
 ## Out of Scope
 
@@ -93,7 +93,7 @@ Data flowing through `start` (`story:text-pipeline-end-to-end`); retries and hea
 
 ## Ambiguities
 
-- `inferable`: at which run transition instances are described: `ValidateRun`, because describe precedes prepare (line 673) and `PrepareRun` is where graph.yaml says instances are being prepared.
+- `inferable`: at which run transition instances are described: `PrepareRun`, before it prepares them, because describe precedes prepare (line 673) and graph.yaml refuses `DescribeNodeInstance` on a run that is not Preparing or Active (`run-not-running`; whether a Validating run may describe is `UNMAPPED` there).
 - `inferable`: `cancel` leads to `stop` rather than to a terminal state of its own, because line 673 reads drain/cancel then stop.
 - Decision taken here, reversible in `ess/domains/graph.yaml`: the state and command names of step 1, participles and verbs of line 673, and `cancel` and `fail` leaving Described.
 
@@ -110,11 +110,11 @@ path below is one a sibling story promises to create, at the layout `story:works
 step 1 fixes (`members = ["crates/*"]`).
 
 - **Primary surface:** `crates/inference-runtime` — cited; the body says the runtime drives the trait, owns the instance state machine and the run-to-instance coupling ("This coupling belongs to the Rust runtime"), the path from `story:bounded-edges` Context ("creates `crates/inference-runtime`")
-- **Files:** `ess/domains/graph.yaml` — cited; step 1 extends `inference.graph.NodeInstance.lifecycle` (today `states: [Described]`, lines 353-356), adds an error under `errors:` (358), six commands under `commands:` (386), six events under `events:` (815) and `state` on the view `inference.graph.NodeInstances` (1013-1021)
+- **Files:** `ess/domains/graph.yaml` — cited; step 1 extends `inference.graph.NodeInstance.lifecycle` (today `states: [Described]`, lines 425-428), adds an error under `errors:` (430), six commands under `commands:` (580), six events under `events:` (1307) and `state` on the view `inference.graph.NodeInstances` (1517-1525)
 - **Files:** `crates/inference-pipeline` — cited; step 2 puts the node-instance trait in `inference-pipeline`, the path from `story:pipeline-declaration` Context ("creates `crates/inference-pipeline`")
 - **Files:** `crates/inference-testkit` — cited; step 4 puts the recording mock node in `inference-testkit`, the path from `story:testkit-conformance-target` step 1
 - **Files:** `crates/inference-testkit/tests/target/graph.rs` — cited; step 4 has the runner answer the six new commands and the extended view, and `story:testkit-conformance-target` step 2 fixes one target file per domain (`tests/target/graph.rs` for `inference.graph`) so that stories do not meet in `conform.rs` or `mod.rs`
-- **Symbols:** `inference.graph.NodeInstance`, `inference.graph.NodeInstanceStateConflict`, `inference.graph.NodeInstances`, `PrepareNodeInstance`, `StartNodeInstance`, `DrainNodeInstance`, `CancelNodeInstance`, `StopNodeInstance`, `FailNodeInstance`, the trait methods `describe`, `prepare`, `start`, `drain`, `cancel`, `stop` — cited; none exists outside `ess/domains/graph.yaml` today (`DescribeNodeInstance` at 793, `NodeInstanceDescribed` at 913 are the only `NodeInstance` declarations beyond the entity)
+- **Symbols:** `inference.graph.NodeInstance`, `inference.graph.NodeInstanceStateConflict`, `inference.graph.NodeInstances`, `PrepareNodeInstance`, `StartNodeInstance`, `DrainNodeInstance`, `CancelNodeInstance`, `StopNodeInstance`, `FailNodeInstance`, the trait methods `describe`, `prepare`, `start`, `drain`, `cancel`, `stop` — cited; none exists outside `ess/domains/graph.yaml` today (`DescribeNodeInstance` at 1258, `NodeInstanceDescribed` at 1405 are the only `NodeInstance` declarations beyond the entity)
 - **Also likely:** `crates/inference-pipeline/src/lib.rs` — inferred; a new trait module needs its `mod` line, the body names no module
 - **Also likely:** `crates/inference-runtime/src/lib.rs` — inferred; same reason, by analogy with `story:run-lifecycle` ("adds a module of its own and one line to `src/lib.rs`")
 - **Also likely:** `crates/inference-runtime/tests` — inferred; the body does not place the three Rust tests under Checks, `story:text-pipeline-end-to-end` puts its runtime integration test in `crates/inference-runtime/tests/`
