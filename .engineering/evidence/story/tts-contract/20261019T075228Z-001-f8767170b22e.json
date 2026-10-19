@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T07:52:28Z",
+  "actor": "human:timo",
+  "artifact": "story:tts-contract",
+  "kind": "story",
+  "revision": 17,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check (5 steps, each exit 0; cargo test 474 passed, 0 failed) (wave/8 2a6e929)"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T07:52:27Z",
+  "actor": "human:timo",
+  "artifact": "story:bounded-edges",
+  "kind": "story",
+  "revision": 20,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --all-features (VERIFIED, new behaviour: baseline wave/8 4a96264 has no inference-runtime crate; treatment passes 18 cases: each of the five overload policies over a queue built from an Edge carrying it, cancel and supersede refused, wakeups and concurrent senders)"
+  }
+}

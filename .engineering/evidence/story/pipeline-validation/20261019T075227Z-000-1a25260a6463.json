@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T07:52:27Z",
+  "actor": "human:timo",
+  "artifact": "story:pipeline-validation",
+  "kind": "story",
+  "revision": 18,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-testkit --all-features --test conform; cargo test -p inference-pipeline --test validation (VERIFIED: baseline wave/8 4a96264 passes 29 of 229 and has no validation; treatment passes 43, ValidatePipeline validated, rejected and wrong-state among them, failed 0, error 0; one Rust case per check refuses its minimal graph)"
+  }
+}
