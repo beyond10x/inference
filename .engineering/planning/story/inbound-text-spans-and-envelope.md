@@ -33,7 +33,7 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/stream.yaml
-revision: 27
+revision: 28
 ---
 ## Context
 
@@ -139,3 +139,9 @@ The 17 ids of `## Scenarios` whose arrangement creates a Run, computed as in `st
 - `inference.stream.Span/transition/commit/by/inference.stream.CommitSpan/committed`
 - `inference.stream.Turn/state/Completed/refuses/inference.stream.CompleteTurn`
 - `inference.stream.Turn/transition/complete/by/inference.stream.CompleteTurn/completed`
+
+## Event order across domains
+
+Added 2026-10-19 from wave 4 (`review-result:adversary-outbound-text-generations-and-segments-pass-2`, finding F1).
+
+The testkit target issues consistency tokens from one target-wide sequence (`Stores::sequence` in `crates/inference-testkit/tests/target/mod.rs`), but each domain module numbers its observed events by its own position (`ObservedEvent::at` in `tests/target/model.rs` and `tests/target/stream.rs`), so a model event and a stream event can both sit at position 1. This story introduces the event envelope that sequences events; it numbers observed events in the target's one publication order, and flips `observed_event_positions_are_per_domain_until_the_envelope_sequences_them` in `crates/inference-testkit/tests/adversary3_target_sequence.rs` to expect positions 1, 2 and 3. No ess 0.60.0 code reads the position today (adversary grep), so nothing fails before then.

@@ -6,6 +6,10 @@
 //! name it does not answer yet is [`TargetError::Unsupported`], never faked. Every scenario gets
 //! fresh [`Stores`].
 //!
+//! A command's consistency token is the target's, not its module's: [`Stores::token`] counts the
+//! events every store has recorded, so a view of one domain read at the token of another domain's
+//! command is answered.
+//!
 //! The suite writes every number of a request as a float, so an ESS `Integer` arrives as `1.0`.
 //! [`integer`] reads it back as an `i64` and refuses a fractional or out-of-range value as an
 //! error, never as a pass; no request is deserialized whole into an `inference-core` type.
@@ -25,6 +29,7 @@ use ess_conformance::target::{
     ObservedEvent, RedeliveryRequest, ScenarioContext, SemanticCommandRequest,
     SemanticCommandResult, SemanticViewRequest, SemanticViewResult, TargetError,
 };
+use ess_primitives::consistency::{ConsistencyToken, QueryConsistency};
 use ess_primitives::facts::Number;
 use ess_primitives::node::Node;
 use serde::Serialize;
@@ -43,6 +48,54 @@ pub struct Stores {
     pub stream: stream::State,
     pub tools: tools::State,
     pub session: session::State,
+}
+
+impl Stores {
+    /// The target's one sequence: the number of events every store has recorded, whatever its
+    /// domain. Each accepted command that emits an event advances it, and a refusal does not.
+    ///
+    /// It is one number for the whole target because the runner reads a view at the token of the
+    /// scenario's last command, whatever that command's domain. It is read from the stores rather
+    /// than kept beside them, so nothing can advance it that no store recorded. A story that fills
+    /// a module adds that module's events here.
+    pub fn sequence(&self) -> u64 {
+        let events = self.model.events().len() + self.stream.events().len();
+        u64::try_from(events).unwrap_or(u64::MAX)
+    }
+
+    /// The token of everything the stores have recorded: `seq:` and [`Stores::sequence`].
+    pub fn token(&self) -> Result<ConsistencyToken, TargetError> {
+        ConsistencyToken::new(format!("seq:{}", self.sequence()))
+            .map_err(|error| unreadable("writing a consistency token", format!("{error:?}")))
+    }
+
+    /// Refuses a read of `view` demanding a token the stores have not reached, as an error: the
+    /// stores are synchronous, so a read never has anything to wait for.
+    pub fn require(&self, view: &str, consistency: &QueryConsistency) -> Result<(), TargetError> {
+        let Some(demanded) = consistency.token() else {
+            return Ok(());
+        };
+        if sequence_of(demanded) > self.sequence() {
+            return Err(unreadable(
+                format!("reading `{view}`"),
+                format!(
+                    "the read demands {demanded:?}, and the stores have reached seq:{}",
+                    self.sequence()
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The sequence a token of [`Stores::token`] carries; a token this target did not write is beyond
+/// any.
+fn sequence_of(token: &ConsistencyToken) -> u64 {
+    token
+        .as_str()
+        .strip_prefix("seq:")
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(u64::MAX)
 }
 
 /// The target the conformance test runs the suite against.
@@ -309,5 +362,91 @@ mod wire_integers {
         assert_eq!(integer(&number(9.3e18)), None);
         assert_eq!(integer(&number(-9.3e18)), None);
         assert_eq!(integer(&Node::Text("1".to_owned())), None);
+    }
+}
+
+mod one_sequence {
+    use std::collections::BTreeMap;
+
+    use ess_conformance::scenario::{CommandRef, ViewRef};
+    use ess_conformance::target::{
+        ConformanceTarget, Deadline, SemanticCommandRequest, SemanticViewRequest, TargetError,
+    };
+    use ess_primitives::consistency::{ConsistencyToken, QueryConsistency};
+    use ess_primitives::facts::Number;
+    use ess_primitives::ids::CorrelationId;
+    use ess_primitives::node::Node;
+    use ess_primitives::time::Timestamp;
+    use inference_core::generation::StartGeneration;
+    use inference_core::id::{NodeId, RunId};
+    use uuid::Uuid;
+
+    use super::Target;
+
+    fn correlation() -> CorrelationId {
+        CorrelationId::new("one-sequence").expect("a correlation id")
+    }
+
+    fn at(view: &str, token: ConsistencyToken) -> SemanticViewRequest {
+        SemanticViewRequest {
+            view: view.parse::<ViewRef>().expect("a view name"),
+            params: BTreeMap::new(),
+            consistency: QueryConsistency::at_least(token),
+            correlation: correlation(),
+            deadline: Deadline::at(Timestamp::from_epoch_millis(u64::MAX)),
+        }
+    }
+
+    #[test]
+    fn a_model_view_read_at_a_stream_commands_token_is_answered() {
+        let target = Target::default();
+        let started = target
+            .stores
+            .borrow_mut()
+            .stream
+            .start_generation(StartGeneration {
+                run_id: RunId::from(Uuid::from_u128(1)),
+                node_id: NodeId::from(Uuid::from_u128(2)),
+                epoch: 1,
+            });
+        let delta = target
+            .execute_command(SemanticCommandRequest {
+                command: "inference.stream.EmitTextDelta"
+                    .parse::<CommandRef>()
+                    .expect("a command name"),
+                actor: None,
+                caller: None,
+                input: [
+                    (
+                        "generation_id".to_owned(),
+                        Node::Text(started.generation_id.to_string()),
+                    ),
+                    ("sequence".to_owned(), Node::Number(Number::from(1_i64))),
+                    ("text".to_owned(), Node::Text("hello".to_owned())),
+                ]
+                .into_iter()
+                .collect(),
+                correlation: correlation(),
+            })
+            .expect("EmitTextDelta answers");
+        let token = delta.consistency.expect("a command answers a token");
+        assert_eq!(
+            token.as_str(),
+            "seq:2",
+            "every event any store recorded counts"
+        );
+
+        let models = target.query_view(at("inference.model.Models", token));
+        assert!(
+            models.is_ok_and(|answer| answer.rows.is_empty()),
+            "a model view at a stream token"
+        );
+
+        let ahead = ConsistencyToken::new("seq:3").expect("a token");
+        let unreached = target.query_view(at("inference.stream.Segments", ahead));
+        assert!(
+            matches!(unreached, Err(TargetError::Unavailable { .. })),
+            "{unreached:?}"
+        );
     }
 }
