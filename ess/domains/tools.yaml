@@ -1,7 +1,8 @@
 # Tool calling of docs/design/inference.md §15: an inference and orchestration concern, outside
-# model adapters, with proposal, authorization, execution and result as separate events. The
-# ToolCall lifecycle beyond Proposed grows with the tools-and-turns stories; the barrier that a
-# provisional transcript never initiates a side-effecting call is declared now.
+# model adapters, with proposal, authorization, execution and result as separate events. A call
+# is proposed, then authorized or rejected, then started, then completed or failed; the barrier
+# that a provisional transcript never initiates a side-effecting call holds at proposal, and the
+# confirmation hook at authorization.
 domain: inference.tools
 
 summary: >-
@@ -9,7 +10,11 @@ summary: >-
   class: read-only, idempotent write or non-idempotent write. A ToolCall is a proposal a
   generation makes, correlated to that generation, classified by its tool's side-effect class and
   resting on a named inbound span. A side-effecting call proposed while that span is still a
-  hypothesis is refused before it exists.
+  hypothesis is refused before it exists. A proposed call is authorized, or rejected with a
+  reason; where confirmation is required, a call is authorized only with one. An authorized call
+  is started, and a started call completes with a result or fails with a typed failure. Completed,
+  Failed and Rejected are terminal: a retry of the tool is an attempt inside Started, and a retry
+  of the generation is a new call.
 
 naming:
   wire: tools
@@ -28,6 +33,41 @@ types:
   - name: inference.tools.SideEffectClass
     kind: enum
     variants: [read_only, idempotent_write, non_idempotent_write]
+
+  # Why a proposed or authorized call was rejected: its arguments fail the tool's schema, the
+  # authority denies it, its generation was superseded, or a feedback loop's iteration rule is
+  # exhausted. Later stories issue these reasons; none adds a state.
+  # read from: docs/design/inference.md:838
+  # read from: docs/design/inference.md:848
+  # read from: docs/design/inference.md:839
+  # read from: docs/design/inference.md:1054
+  # read from: docs/design/inference.md:376
+  # read from: docs/design/inference.md:638
+  # read from: docs/design/inference.md:546
+  - name: inference.tools.RejectionReason
+    kind: enum
+    variants: [schema_invalid, denied, superseded, exhausted]
+
+  # How a started call failed: its deadline passed, it was cancelled, or the executor reported an
+  # error.
+  # read from: docs/design/inference.md:852
+  # read from: docs/design/inference.md:1006
+  - name: inference.tools.ToolFailureKind
+    kind: enum
+    variants: [deadline_exceeded, cancelled, execution_error]
+
+  # The typed, actionable failure of a started call.
+  # read from: docs/design/inference.md:852
+  # read from: docs/design/inference.md:1006
+  # UNMAPPED: the design names no failure codes for tools; `detail` is free text until the owner
+  # names them. Open question for the owner.
+  - name: inference.tools.ToolFailure
+    kind: struct
+    fields:
+      - name: kind
+        type: inference.tools.ToolFailureKind
+      - name: detail
+        type: String
 
 entities:
   # An external capability invoked through a controlled request/result protocol; it owns
@@ -58,8 +98,8 @@ entities:
         type: String
       - name: side_effect
         type: inference.tools.SideEffectClass
-      # UNMAPPED: no command reads requires_confirmation yet. The confirmation gate belongs to
-      # authorization (design 839, 853, 1054), which the ToolCall lifecycle does not declare yet.
+      # Read by the authority, which passes AuthorizeToolCall whether confirmation is required.
+      # read from: docs/design/inference.md:853
       - name: requires_confirmation
         type: Boolean
     # A single Declared state: ESS requires a lifecycle on every entity; the design gives a tool
@@ -70,18 +110,19 @@ entities:
       terminal: [Declared]
 
   # A structured tool proposal, distinguishable from user-visible prose and correlated to the
-  # generation that made it. The lifecycle proposal, authorization, execution, result or failure
-  # is declared with its first state here and completed by the tools-and-turns stories.
+  # generation that made it, through proposal, authorization, execution and its result or
+  # failure. A tool retry is an attempt inside Started made by the executor; a generation retry is
+  # a new call from a new generation, so no transition leaves Failed or Rejected.
   # read from: docs/design/inference.md:374
   # read from: docs/design/inference.md:849-850
-  # UNMAPPED: authorization, execution, result and failure (design 338, 835-843, 850) are not
-  # declared: no state beyond Proposed, no command moves a call, and the confirmation flag gates
-  # nothing. The states and their commands are the tools-and-turns stories' to declare.
-  # UNMAPPED: deadlines, cancellation, concurrency limits and status reconciliation (design 852,
-  # MUST), and the distinction between tool retries and generation retries (854, MUST), have no
-  # field or command. Whether a deadline is an instant or a duration, and whether a repeated
-  # proposal is answered by a request key, the design does not say (1129 speaks of execution on
-  # reconnect, not of proposals). Open question for the owner.
+  # read from: docs/design/inference.md:835-843
+  # read from: docs/design/inference.md:854
+  # read from: docs/design/inference.md:1007
+  # UNMAPPED: concurrency limits and status reconciliation (design 852, MUST) have no field or
+  # command, and a deadline is an executor's input, not a field of the call. Whether a deadline is
+  # an instant or a duration, and whether a repeated proposal is answered by a request key, the
+  # design does not say (1129 speaks of execution on reconnect, not of proposals). Open question
+  # for the owner.
   - name: inference.tools.ToolCall
     naming:
       summary: A tool proposal a generation made, correlated to it.
@@ -128,10 +169,28 @@ entities:
         target: inference.stream.Span
         cardinality: one
         via: basis_span_id
+    # read from: docs/design/inference.md:835-843
+    # read from: docs/design/inference.md:338
     lifecycle:
       initial: Proposed
-      states: [Proposed]
-      terminal: [Proposed]
+      states: [Proposed, Authorized, Started, Completed, Failed, Rejected]
+      terminal: [Completed, Failed, Rejected]
+      transitions:
+        - name: authorize
+          from: [Proposed]
+          to: Authorized
+        - name: reject
+          from: [Proposed, Authorized]
+          to: Rejected
+        - name: start
+          from: [Authorized]
+          to: Started
+        - name: complete
+          from: [Started]
+          to: Completed
+        - name: fail
+          from: [Started]
+          to: Failed
 
 errors:
   # read from: docs/design/inference.md:866
@@ -147,6 +206,23 @@ errors:
     fields:
       - name: tool_id
         type: inference.tools.ToolId
+
+  # read from: docs/design/inference.md:835-843
+  - name: inference.tools.ToolCallStateConflict
+    summary: The call is not in a state this command moves it from, so nothing moved.
+    fields:
+      - name: current
+        type: inference.tools.ToolCall.State
+
+  # The confirmation hook, not its UI: a call that requires confirmation is not authorized
+  # without one.
+  # read from: docs/design/inference.md:853
+  # read from: docs/design/inference.md:1054
+  - name: inference.tools.ConfirmationRequired
+    summary: Human confirmation is required and none was given; the call stays Proposed.
+    fields:
+      - name: call_id
+        type: inference.tools.ToolCallId
 
 commands:
   - name: inference.tools.DeclareTool
@@ -343,6 +419,160 @@ commands:
             generation_id: input.generation_id
         summary: The read-only proposal exists on speculative input and awaits authorization.
 
+  # Authorization after schema validation: the authority admits the call, and where its policy
+  # requires human confirmation it admits the call only with one. The authority passes in
+  # whether confirmation is required, having read the tool's `requires_confirmation` and its own
+  # policy, and `confirmed`, the confirmation hook's answer; the confirmation UI is not this
+  # specification's.
+  # read from: docs/design/inference.md:839
+  # read from: docs/design/inference.md:850
+  # read from: docs/design/inference.md:853
+  # read from: docs/design/inference.md:1054
+  # UNMAPPED: ess 0.60.0 cannot evaluate the tool's flag itself. A copy of
+  # `requires_confirmation` onto the call at proposal (`{related: …}`) is a stored value the
+  # synthesizer cannot choose (ESS-SYNTH-003 on `authorized` and `unconfirmed`), and a guard over
+  # the tool the call stores (`when_related: {via: tool_id}`) owes an `exists: false` branch no
+  # arrangement reaches (ESS-SYNTH-003). Whether the specification should hold the authority to
+  # the tool's flag is an open question for the owner.
+  - name: inference.tools.AuthorizeToolCall
+    input:
+      - name: call_id
+        type: inference.tools.ToolCallId
+      - name: confirmation_required
+        type: Boolean
+      - name: confirmed
+        type: Boolean
+    outcomes:
+      - name: unconfirmed
+        when:
+          all: [confirmation_required == true, confirmed == false]
+        error: inference.tools.ConfirmationRequired
+        payload:
+          inference.tools.ConfirmationRequired:
+            call_id: input.call_id
+        summary: Confirmation is required and none was given; the call stays Proposed.
+      - name: authorized
+        moves: inference.tools.ToolCall.authorize
+        instance: call_id
+        emits:
+          - inference.tools.ToolCallAuthorized
+        payload:
+          inference.tools.ToolCallAuthorized:
+            call_id: input.call_id
+        summary: The call may be executed.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.tools.ToolCallStateConflict
+        payload:
+          inference.tools.ToolCallStateConflict:
+            current: {subject: state}
+
+  # A proposed or authorized call is rejected with a reason and never executed.
+  # read from: docs/design/inference.md:838-839
+  # read from: docs/design/inference.md:1080
+  - name: inference.tools.RejectToolCall
+    input:
+      - name: call_id
+        type: inference.tools.ToolCallId
+      - name: reason
+        type: inference.tools.RejectionReason
+    outcomes:
+      - name: rejected
+        moves: inference.tools.ToolCall.reject
+        instance: call_id
+        emits:
+          - inference.tools.ToolCallRejected
+        payload:
+          inference.tools.ToolCallRejected:
+            call_id: input.call_id
+            reason: input.reason
+        summary: The call is rejected with its reason and will not be executed.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.tools.ToolCallStateConflict
+        payload:
+          inference.tools.ToolCallStateConflict:
+            current: {subject: state}
+
+  # The executor starts an authorized call.
+  # read from: docs/design/inference.md:840
+  # read from: docs/design/inference.md:850
+  - name: inference.tools.StartToolCall
+    input:
+      - name: call_id
+        type: inference.tools.ToolCallId
+    outcomes:
+      - name: started
+        moves: inference.tools.ToolCall.start
+        instance: call_id
+        emits:
+          - inference.tools.ToolCallStarted
+        payload:
+          inference.tools.ToolCallStarted:
+            call_id: input.call_id
+        summary: The executor is running the call.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.tools.ToolCallStateConflict
+        payload:
+          inference.tools.ToolCallStateConflict:
+            current: {subject: state}
+
+  # A completed call stays completed: stopping a model rolls back no completed write.
+  # read from: docs/design/inference.md:841
+  # read from: docs/design/inference.md:850
+  # read from: docs/design/inference.md:856
+  - name: inference.tools.CompleteToolCall
+    input:
+      - name: call_id
+        type: inference.tools.ToolCallId
+      - name: result
+        type: Json
+    outcomes:
+      - name: completed
+        moves: inference.tools.ToolCall.complete
+        instance: call_id
+        emits:
+          - inference.tools.ToolCallResult
+        payload:
+          inference.tools.ToolCallResult:
+            call_id: input.call_id
+            result: input.result
+        summary: The call completed and its result is published for correlated context reinjection.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.tools.ToolCallStateConflict
+        payload:
+          inference.tools.ToolCallStateConflict:
+            current: {subject: state}
+
+  # read from: docs/design/inference.md:842
+  # read from: docs/design/inference.md:852
+  # read from: docs/design/inference.md:1006
+  - name: inference.tools.FailToolCall
+    input:
+      - name: call_id
+        type: inference.tools.ToolCallId
+      - name: failure
+        type: inference.tools.ToolFailure
+    outcomes:
+      - name: failed
+        moves: inference.tools.ToolCall.fail
+        instance: call_id
+        emits:
+          - inference.tools.ToolCallFailed
+        payload:
+          inference.tools.ToolCallFailed:
+            call_id: input.call_id
+            failure: input.failure
+        summary: The call failed with a typed failure; no transition retries it.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.tools.ToolCallStateConflict
+        payload:
+          inference.tools.ToolCallStateConflict:
+            current: {subject: state}
+
 events:
   - name: inference.tools.ToolDeclared
     fields:
@@ -361,6 +591,45 @@ events:
         type: inference.tools.ToolId
       - name: generation_id
         type: inference.stream.GenerationId
+
+  # read from: docs/design/inference.md:338
+  # read from: docs/design/inference.md:850
+  - name: inference.tools.ToolCallAuthorized
+    fields:
+      - name: call_id
+        type: inference.tools.ToolCallId
+
+  # read from: docs/design/inference.md:1080
+  - name: inference.tools.ToolCallRejected
+    fields:
+      - name: call_id
+        type: inference.tools.ToolCallId
+      - name: reason
+        type: inference.tools.RejectionReason
+
+  # read from: docs/design/inference.md:338
+  - name: inference.tools.ToolCallStarted
+    fields:
+      - name: call_id
+        type: inference.tools.ToolCallId
+
+  # read from: docs/design/inference.md:338
+  # read from: docs/design/inference.md:841
+  - name: inference.tools.ToolCallResult
+    fields:
+      - name: call_id
+        type: inference.tools.ToolCallId
+      - name: result
+        type: Json
+
+  # read from: docs/design/inference.md:338
+  # read from: docs/design/inference.md:842
+  - name: inference.tools.ToolCallFailed
+    fields:
+      - name: call_id
+        type: inference.tools.ToolCallId
+      - name: failure
+        type: inference.tools.ToolFailure
 
 views:
   # read from: docs/design/inference.md:848
@@ -381,7 +650,9 @@ views:
       - name: requires_confirmation
         type: Boolean
 
+  # The audit read of every call: its correlation, class and where it stands.
   # read from: docs/design/inference.md:848
+  # read from: docs/design/inference.md:1080
   # read from: docs/design/inference.md:1145
   - name: inference.tools.ToolCalls
     source: inference.tools.ToolCall
@@ -399,3 +670,5 @@ views:
         type: inference.stream.SpanId
       - name: arguments
         type: Json
+      - name: state
+        type: inference.tools.ToolCall.State
