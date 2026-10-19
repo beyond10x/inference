@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:inbound-text-spans-and-envelope
 kind: story
-status: draft
+status: active
 title: Inbound turns and spans, and the event envelope that sequences them
 summary: inference-text gains Turn and Span; the §6.2 event envelope is declared in ess/ first and lands in inference-core; the target answers the 14 turn and span scenarios and the testkit log enforces event ids, generation ids and per-stream sequence (§23.1 test 6).
 relations:
@@ -33,7 +33,10 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/stream.yaml
-revision: 28
+revision: 30
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T05:24:21Z", actor: "human:timo", revision: 29, decided_on: {"recorded":{"review_outcome":3}}}
+- {from: "proposed", to: "active", at: "2026-10-19T05:24:21Z", actor: "human:timo", revision: 30, decided_on: {"recorded":{"review_outcome":3}}}
 ---
 ## Context
 
