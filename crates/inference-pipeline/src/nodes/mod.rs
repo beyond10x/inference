@@ -42,7 +42,9 @@ pub mod turn_policy;
 /// The voice activity detector: audio frames in, speech activity out, by an energy threshold.
 pub mod vad;
 
-pub use tool_authority::{AuthorityHandle, AuthorityOutcome, Decision, ToolAuthority};
+pub use tool_authority::{
+    AuthorityHandle, AuthorityOutcome, Decision, IterationRuleNotDeclared, ToolAuthority,
+};
 pub use tool_executor::{ExecutorHandle, StartRefusal, ToolCallMeasure, ToolExecutorNode};
 
 /// An event of `inference.tools.ToolCall`'s lifecycle, as its command emitted it.

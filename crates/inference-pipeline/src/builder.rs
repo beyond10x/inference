@@ -25,8 +25,8 @@ use inference_core::policy::{ProfileId, ProfileNotFound};
 
 use crate::{
     AdapterNotFound, AddNode, AddPort, BindingId, Catalog, Declaration, DeclarePipeline, Delivery,
-    EdgeId, Essentiality, InteractionMode, NodeId, NodeRole, OverloadPolicy, PipelineId,
-    PortDirection, PortId,
+    EdgeId, Essentiality, FeedbackLoopId, InteractionMode, NodeId, NodeRole, OverloadPolicy,
+    PipelineId, PortDirection, PortId,
 };
 
 /// The lifetime that brands every handle of one builder; invariant, so no other lifetime stands
@@ -283,6 +283,27 @@ impl<'b> PipelineBuilder<'_, 'b> {
             .edge_id
     }
 
+    /// Connects an output port to an input port as [`PipelineBuilder::connect`] does, and declares
+    /// the new edge a feedback edge of the pipeline bounded by `max_iterations`, as
+    /// `inference.graph.DeclareFeedbackLoop`: a cycle that runs through it validates (check 5).
+    /// Returns the edge's identity and the loop's. A maximum beyond `i64::MAX` is held as
+    /// `i64::MAX`, as [`PipelineBuilder::connect`] holds a capacity.
+    pub fn connect_feedback<M: PortModality>(
+        &mut self,
+        from: &PortHandle<'b, direction::Output, M>,
+        to: &PortHandle<'b, direction::Input, M>,
+        capacity: NonZeroUsize,
+        overload: OverloadPolicy,
+        max_iterations: NonZeroUsize,
+    ) -> (EdgeId, FeedbackLoopId) {
+        let edge_id = self.connect(from, to, capacity, overload);
+        let feedback_id = self
+            .declaration
+            .insert_feedback_loop(self.pipeline_id, edge_id, carried(max_iterations))
+            .feedback_id;
+        (edge_id, feedback_id)
+    }
+
     /// Binds `node` to the adapter carrying `adapter_id`, as `inference.graph.BindNode`.
     ///
     /// # Errors
@@ -304,11 +325,12 @@ impl<'b> PipelineBuilder<'_, 'b> {
     }
 }
 
-/// The capacity a `ConnectPorts` input can carry: `capacity`, or `i64::MAX` when it is larger.
-fn carried(capacity: NonZeroUsize) -> NonZeroUsize {
+/// The value a `ConnectPorts` or `DeclareFeedbackLoop` input can carry: `value`, or `i64::MAX`
+/// when it is larger.
+fn carried(value: NonZeroUsize) -> NonZeroUsize {
     let largest = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
-    if capacity.get() <= largest {
-        capacity
+    if value.get() <= largest {
+        value
     } else {
         NonZeroUsize::new(largest).unwrap_or(NonZeroUsize::MAX)
     }

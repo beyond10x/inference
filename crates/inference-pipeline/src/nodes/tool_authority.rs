@@ -1,18 +1,26 @@
 //! The tool authority: the one node of a pipeline that authorizes and rejects tool calls
 //! (`docs/design/inference.md` §15.1, 699), a node of role `policy` with one input port for
-//! proposed calls and one output port for authorized calls.
+//! proposed calls, one output port for authorized calls and, when it is constructed with one
+//! ([`ToolAuthority::rejecting_on`]), an output port for rejected calls.
 //!
 //! The authority decides each call once. A proposal of a call it already holds or decided is
 //! refused as `AuthorizeToolCall/outcome/wrong-state`, naming the state it holds the call in, and
-//! is neither held again nor sent on. For any other proposal its input edge delivers, it rejects
-//! a call for a tool it was not constructed with (`denied`), then validates the arguments against
-//! the tool's schema and rejects a call that fails it (`schema_invalid`, 848), then runs the
-//! default policy: it authorizes the call, passing the tool's `requires_confirmation` as
-//! `confirmation_required` and `confirmed` false. A tool that requires confirmation answers
-//! `unconfirmed`: the call is held Proposed until the host answers it through the
-//! [`AuthorityHandle`], the confirmation hook (853, 1054). A confirmed call is authorized with
-//! `confirmed` true; a denied one is rejected `denied`. An authorized call is sent on the output
-//! edge; a rejected one is not, and every decision is recorded on the handle.
+//! is neither held again nor sent on. For any other proposal its input edge delivers, it first
+//! enforces its iteration rule: the proposals of one generation past the rule's maximum are
+//! rejected `exhausted`. On a feedback loop the rule is the one the pipeline declares for the
+//! loop whose feedback edge arrives at the authority (529, 546), read from the planned pipeline
+//! ([`ToolAuthority::bounded_by`]); an authority on no loop may be given one
+//! ([`ToolAuthority::with_iteration_bound`]). It then rejects a call for a tool it was
+//! not constructed with (`denied`), then validates the arguments against the tool's schema and
+//! rejects a call that fails it (`schema_invalid`, 848), then runs the default policy: it
+//! authorizes the call, passing the tool's `requires_confirmation` as `confirmation_required` and
+//! `confirmed` false. A tool that requires confirmation answers `unconfirmed`: the call is held
+//! Proposed until the host answers it through the [`AuthorityHandle`], the confirmation hook
+//! (853, 1054). A confirmed call is authorized with `confirmed` true; a denied one is rejected
+//! `denied`. An authorized call is sent on the output edge of authorized calls; a rejected one is
+//! sent on the edge of rejected calls when the authority has one, so that the proposer learns its
+//! proposal will have no result, and otherwise on no edge. Every decision is recorded on the
+//! handle.
 //!
 //! The schema is read as a subset of JSON Schema, the language `ess/domains/tools.yaml` leaves
 //! unmapped: `type`, `properties`, `required`, `additionalProperties`, `items` and `enum`, the
@@ -22,17 +30,20 @@
 //! fails the node's preparation rather than being validated in part.
 //!
 //! On the end of input, a control event of kind `stop`, or once its input edge is closed, the
-//! node waits for the host to answer every call it holds, then passes the end of input on and
-//! ends. Cancelled, it abandons the calls it holds and sends nothing more.
+//! node waits for the host to answer every call it holds, then passes the end of input on, on
+//! each of its output edges, and ends. Cancelled, it abandons the calls it holds and sends nothing
+//! more.
 
 use std::collections::{HashMap, VecDeque};
+use std::error::Error;
 use std::fmt;
 use std::future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId};
-use inference_core::id::{NodeId, RunId};
+use inference_core::id::{GenerationId, NodeId, RunId};
 use inference_tools::{
     AuthorizeError, AuthorizeToolCall, ConfirmationRequired, Json, RejectionReason, Tool, ToolCall,
     ToolCallAuthorized, ToolCallId, ToolCallRejected, ToolCallState, ToolCallStateConflict, ToolId,
@@ -42,7 +53,10 @@ use super::{
     Emitter, Next, Task, ToolCallEvent, ToolCallUpdate, ToolPayload, Watched, block_on, next,
     one_in_one_out,
 };
-use crate::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
+use crate::{
+    Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInput,
+    NodeOutput, PipelineId, PlannedPipeline, PortId,
+};
 
 /// What the authority decided for one call: the outcome of `inference.tools.AuthorizeToolCall`
 /// or `inference.tools.RejectToolCall`.
@@ -117,11 +131,35 @@ impl AuthorityState {
     }
 }
 
+/// No `inference.graph.FeedbackLoop` of the pipeline `pipeline_id` bounds an edge into the node
+/// `node_id`, so there is no declared iteration rule for its authority to enforce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IterationRuleNotDeclared {
+    pub pipeline_id: PipelineId,
+    pub node_id: NodeId,
+}
+
+impl fmt::Display for IterationRuleNotDeclared {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "no feedback loop of pipeline {} bounds an edge into node {}",
+            self.pipeline_id, self.node_id
+        )
+    }
+}
+
+impl Error for IterationRuleNotDeclared {}
+
 /// The tool authority node; see the module documentation.
 #[derive(Debug)]
 pub struct ToolAuthority {
     run_id: RunId,
     tools: Arc<HashMap<ToolId, Tool>>,
+    max_iterations: Option<NonZeroUsize>,
+    /// The iteration rule the pipeline declares for the authority, once it was read.
+    declared: Option<NonZeroUsize>,
+    rejections: Option<PortId>,
     node_id: Option<NodeId>,
     state: Arc<Watched<AuthorityState>>,
     task: Task,
@@ -139,10 +177,78 @@ impl ToolAuthority {
                     .map(|tool| (tool.tool_id(), tool))
                     .collect(),
             ),
+            max_iterations: None,
+            declared: None,
+            rejections: None,
             node_id: None,
             state: Arc::new(Watched::new(AuthorityState::default())),
             task: Task::new(),
         }
+    }
+
+    /// The same authority enforcing an iteration rule of `max_iterations`: of the proposals of
+    /// one generation it decides, the first `max_iterations` are decided as before and every later
+    /// one is rejected `exhausted`. An authority on a feedback loop takes its rule from the loop's
+    /// declaration instead ([`ToolAuthority::bounded_by`]); one given both refuses to prepare
+    /// unless they agree.
+    #[must_use]
+    pub const fn with_iteration_bound(mut self, max_iterations: NonZeroUsize) -> Self {
+        self.max_iterations = Some(max_iterations);
+        self
+    }
+
+    /// The same authority enforcing the iteration rule `planned` declares for it: the
+    /// `max_iterations` of the `inference.graph.FeedbackLoop` of that pipeline, held in
+    /// `declaration`, whose feedback edge arrives at a port of the node `node_id`, the authority's
+    /// node. Of several such loops, the smallest maximum holds. A rule given afterwards through
+    /// [`ToolAuthority::with_iteration_bound`] that differs from it makes the node refuse to
+    /// prepare, so the authority enforces the declared rule or none.
+    ///
+    /// # Errors
+    ///
+    /// [`IterationRuleNotDeclared`] when no feedback loop of the pipeline bounds an edge into the
+    /// node; the authority is not returned.
+    pub fn bounded_by(
+        self,
+        declaration: &Declaration,
+        planned: &PlannedPipeline,
+        node_id: NodeId,
+    ) -> Result<Self, IterationRuleNotDeclared> {
+        let pipeline_id = planned.pipeline_id();
+        let into_node = |edge_id| {
+            declaration.edges().any(|edge| {
+                edge.edge_id() == edge_id
+                    && edge.pipeline_id() == pipeline_id
+                    && declaration
+                        .port(edge.to_port())
+                        .is_some_and(|port| port.node_id() == node_id)
+            })
+        };
+        let declared = declaration
+            .feedback_loops()
+            .filter(|feedback| {
+                feedback.pipeline_id() == pipeline_id && into_node(feedback.edge_id())
+            })
+            .map(crate::FeedbackLoop::max_iterations)
+            .min()
+            .ok_or(IterationRuleNotDeclared {
+                pipeline_id,
+                node_id,
+            })?;
+        Ok(Self {
+            max_iterations: Some(declared),
+            declared: Some(declared),
+            ..self
+        })
+    }
+
+    /// The same authority sending every rejected call on the output edge that leaves its port
+    /// `port_id`, and its authorized calls on its other output edge; it is then handed exactly
+    /// those two output edges.
+    #[must_use]
+    pub const fn rejecting_on(mut self, port_id: PortId) -> Self {
+        self.rejections = Some(port_id);
+        self
     }
 
     /// The host's side of the authority: the confirmation hook and the record of its decisions.
@@ -215,33 +321,80 @@ impl AuthorityHandle {
 /// One started exchange of a [`ToolAuthority`].
 struct Exchanging<P> {
     tools: Arc<HashMap<ToolId, Tool>>,
+    max_iterations: Option<NonZeroUsize>,
     state: Arc<Watched<AuthorityState>>,
     /// Every call the authority held or decided, as it last left it.
     known: HashMap<ToolCallId, ToolCall>,
+    /// How many proposals of each generation the authority decided.
+    iterations: HashMap<GenerationId, usize>,
     input: Box<dyn InputEndpoint<P>>,
-    output: Box<dyn OutputEndpoint<P>>,
+    output: Sending<P>,
+    /// The edge of rejected calls, when the authority has one.
+    rejected: Option<Sending<P>>,
+}
+
+/// One output edge of the authority and the stream it emits on it.
+struct Sending<P> {
+    endpoint: Box<dyn OutputEndpoint<P>>,
     emitter: Emitter,
 }
 
+/// Which output edge an envelope leaves on.
+#[derive(Clone, Copy)]
+enum OutputEdge {
+    Authorized,
+    Rejected,
+}
+
 impl<P: ToolPayload> Exchanging<P> {
-    /// Sends `envelope` on, unless the authority was cancelled: it then sends nothing more.
-    async fn send(&self, envelope: EventEnvelope<P>) -> Result<(), String> {
+    /// Sends `envelope` on `edge`, unless the authority was cancelled: it then sends nothing more.
+    async fn send(&self, edge: OutputEdge, envelope: EventEnvelope<P>) -> Result<(), String> {
         if self.state.read(|state| state.cancelled) {
             return Ok(());
         }
-        self.output
+        let sending = match edge {
+            OutputEdge::Authorized => &self.output,
+            OutputEdge::Rejected => match &self.rejected {
+                Some(sending) => sending,
+                None => return Ok(()),
+            },
+        };
+        sending
+            .endpoint
             .send(envelope)
             .await
             .map_err(|refused| refused.to_string())
     }
 
-    /// Records `decision` and sends the authorized call on, answering `cause`.
+    /// The end of input, on each output edge.
+    async fn end(&mut self) -> Result<(), String> {
+        let end = self.output.emitter.control(ControlKind::Stop);
+        self.send(OutputEdge::Authorized, end).await?;
+        if let Some(rejected) = self.rejected.as_mut() {
+            let end = rejected.emitter.control(ControlKind::Stop);
+            self.send(OutputEdge::Rejected, end).await?;
+        }
+        Ok(())
+    }
+
+    /// Records `decision` and sends the authorized call on, or the rejected one back, answering
+    /// `cause`.
     async fn decided(&mut self, decision: Decision, cause: EventId) -> Result<(), String> {
         let sent = match &decision.outcome {
-            AuthorityOutcome::Authorized(event) => Some(ToolCallUpdate {
-                call: decision.call.clone(),
-                event: ToolCallEvent::Authorized(*event),
-            }),
+            AuthorityOutcome::Authorized(event) => Some((
+                OutputEdge::Authorized,
+                ToolCallUpdate {
+                    call: decision.call.clone(),
+                    event: ToolCallEvent::Authorized(*event),
+                },
+            )),
+            AuthorityOutcome::Rejected(event) => Some((
+                OutputEdge::Rejected,
+                ToolCallUpdate {
+                    call: decision.call.clone(),
+                    event: ToolCallEvent::Rejected(*event),
+                },
+            )),
             AuthorityOutcome::Unconfirmed(_) => {
                 let held = Held {
                     call: decision.call.clone(),
@@ -250,7 +403,7 @@ impl<P: ToolPayload> Exchanging<P> {
                 self.state.update(|state| state.held.push(held));
                 None
             }
-            AuthorityOutcome::Rejected(_) | AuthorityOutcome::WrongState(_) => None,
+            AuthorityOutcome::WrongState(_) => None,
         };
         if !matches!(decision.outcome, AuthorityOutcome::WrongState(_)) {
             self.known
@@ -258,10 +411,17 @@ impl<P: ToolPayload> Exchanging<P> {
         }
         self.state.update(|state| state.decisions.push(decision));
         match sent {
-            Some(update) => {
-                let envelope = self.emitter.update(update, cause);
-                self.send(envelope).await
+            Some((OutputEdge::Authorized, update)) => {
+                let envelope = self.output.emitter.update(update, cause);
+                self.send(OutputEdge::Authorized, envelope).await
             }
+            Some((OutputEdge::Rejected, update)) => match self.rejected.as_mut() {
+                Some(rejected) => {
+                    let envelope = rejected.emitter.update(update, cause);
+                    self.send(OutputEdge::Rejected, envelope).await
+                }
+                None => Ok(()),
+            },
             None => Ok(()),
         }
     }
@@ -295,9 +455,9 @@ impl<P: ToolPayload> Exchanging<P> {
         }
     }
 
-    /// The decision for the proposed `call`: a call held or decided already, then the tool, then
-    /// the schema, then the policy.
-    fn decide(&self, call: &ToolCall) -> Result<Decision, String> {
+    /// The decision for the proposed `call`: a call held or decided already, then the iteration
+    /// rule, then the tool, then the schema, then the policy.
+    fn decide(&mut self, call: &ToolCall) -> Result<Decision, String> {
         if let Some(known) = self.known.get(&call.call_id()) {
             return Ok(Decision {
                 call: known.clone(),
@@ -305,6 +465,14 @@ impl<P: ToolPayload> Exchanging<P> {
                     current: known.state(),
                 }),
             });
+        }
+        let iteration = self.iterations.entry(call.generation_id()).or_default();
+        *iteration += 1;
+        if self
+            .max_iterations
+            .is_some_and(|max_iterations| *iteration > max_iterations.get())
+        {
+            return Self::reject(call, RejectionReason::Exhausted);
         }
         let Some(tool) = self.tools.get(&call.tool_id()) else {
             return Self::reject(call, RejectionReason::Denied);
@@ -368,8 +536,7 @@ impl<P: ToolPayload> Exchanging<P> {
                 }
                 Next::Signal(Signal::Settled) => {
                     if end_of_input {
-                        let end = self.emitter.control(ControlKind::Stop);
-                        self.send(end).await?;
+                        self.end().await?;
                     }
                     return Ok(());
                 }
@@ -405,6 +572,15 @@ impl<P: ToolPayload> NodeImplementation<P> for ToolAuthority {
     }
 
     fn prepare(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        if let Some(declared) = self.declared
+            && self.max_iterations != Some(declared)
+        {
+            return Box::pin(future::ready(Err(NodeError::new(format!(
+                "the tool authority was given the iteration rule {:?}, and its pipeline declares \
+                 {declared}",
+                self.max_iterations.map(NonZeroUsize::get)
+            )))));
+        }
         let supported = self.tools.values().try_for_each(|tool| {
             supported(tool.schema()).map_err(|unsupported| {
                 NodeError::new(format!(
@@ -419,17 +595,25 @@ impl<P: ToolPayload> NodeImplementation<P> for ToolAuthority {
     }
 
     fn start(&mut self, endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
-        let started = one_in_one_out(self.node_id, endpoints).map(|(node_id, input, output)| {
-            let exchanging = Exchanging {
-                tools: Arc::clone(&self.tools),
-                state: Arc::clone(&self.state),
-                known: HashMap::new(),
-                input: input.endpoint,
-                emitter: Emitter::new(self.run_id, node_id, output.port_id.to_string()),
-                output: output.endpoint,
-            };
-            self.task.spawn(move || exchanging.run());
-        });
+        let started = shaped(self.node_id, self.rejections, endpoints).map(
+            |(node_id, input, output, rejected)| {
+                let sending = |output: NodeOutput<P>| Sending {
+                    emitter: Emitter::new(self.run_id, node_id, output.port_id.to_string()),
+                    endpoint: output.endpoint,
+                };
+                let exchanging = Exchanging {
+                    tools: Arc::clone(&self.tools),
+                    max_iterations: self.max_iterations,
+                    state: Arc::clone(&self.state),
+                    known: HashMap::new(),
+                    iterations: HashMap::new(),
+                    input: input.endpoint,
+                    output: sending(output),
+                    rejected: rejected.map(sending),
+                };
+                self.task.spawn(move || exchanging.run());
+            },
+        );
         Box::pin(future::ready(started))
     }
 
@@ -449,6 +633,41 @@ impl<P: ToolPayload> NodeImplementation<P> for ToolAuthority {
         Box::pin(async move {
             let _already_reported_by_drain = self.task.finished().await;
         })
+    }
+}
+
+/// What a started authority takes: its identity, its one input edge, its edge of authorized calls
+/// and its edge of rejected calls, if it has one.
+type Shaped<P> = (NodeId, NodeInput<P>, NodeOutput<P>, Option<NodeOutput<P>>);
+
+/// The node's identity, its one input edge, its edge of authorized calls and, when it rejects on
+/// the port `rejections`, its edge of rejected calls, once it was described and handed exactly
+/// those; otherwise the error saying what it was handed instead.
+fn shaped<P>(
+    node_id: Option<NodeId>,
+    rejections: Option<PortId>,
+    mut endpoints: NodeEndpoints<P>,
+) -> Result<Shaped<P>, NodeError> {
+    let Some(port_id) = rejections else {
+        return one_in_one_out(node_id, endpoints)
+            .map(|(node_id, input, output)| (node_id, input, output, None));
+    };
+    let rejected = endpoints
+        .outputs
+        .iter()
+        .position(|output| output.port_id == port_id);
+    match rejected {
+        Some(index) if endpoints.inputs.len() == 1 && endpoints.outputs.len() == 2 => {
+            let rejected = endpoints.outputs.remove(index);
+            one_in_one_out(node_id, endpoints)
+                .map(|(node_id, input, output)| (node_id, input, output, Some(rejected)))
+        }
+        _ => Err(NodeError::new(format!(
+            "the node takes 1 input edge and 2 output edges, one of them from its port {port_id}, \
+             and was handed {} and {}",
+            endpoints.inputs.len(),
+            endpoints.outputs.len()
+        ))),
     }
 }
 
