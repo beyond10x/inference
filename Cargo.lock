@@ -301,6 +301,7 @@ dependencies = [
  "inference-pipeline",
  "inference-stt",
  "inference-text",
+ "inference-tts",
  "serde",
  "serde_json",
  "uuid",
@@ -313,6 +314,15 @@ dependencies = [
  "inference-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "inference-tts"
+version = "0.3.0"
+dependencies = [
+ "inference-audio",
+ "inference-core",
+ "inference-text",
 ]
 
 [[package]]
