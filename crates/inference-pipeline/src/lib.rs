@@ -2,13 +2,14 @@
 //!
 //! `inference-pipeline` holds the declaration half of `ess/domains/graph.yaml`: a [`Pipeline`] of
 //! named [`Node`]s with typed [`Port`]s, [`Edge`]s that connect an output port to an input port
-//! with finite buffering, and [`Binding`]s of nodes to adapters. A pipeline definition is not an
-//! execution; this crate stops at the declaration, its validation and its plan.
+//! with finite buffering, [`FeedbackLoop`]s that bound the cycles a feedback edge closes, and
+//! [`Binding`]s of nodes to adapters. A pipeline definition is not an execution; this crate stops
+//! at the declaration, its validation and its plan.
 //!
-//! A [`Declaration`] holds the declared entities and runs the five declaration commands
+//! A [`Declaration`] holds the declared entities and runs the six declaration commands
 //! ([`Declaration::declare_pipeline`], [`Declaration::add_node`], [`Declaration::add_port`],
-//! [`Declaration::connect_ports`], [`Declaration::bind_node`]), each refusing what graph.yaml
-//! refuses and creating nothing then. The profiles and adapters a declaration references and does
+//! [`Declaration::connect_ports`], [`Declaration::declare_feedback_loop`],
+//! [`Declaration::bind_node`]), each refusing what graph.yaml refuses and creating nothing then. The profiles and adapters a declaration references and does
 //! not hold are read through a [`Catalog`]. The typed builder ([`Declaration::build`]) declares the
 //! same entities, reading its profile and adapters by identity through the same catalog and
 //! refusing what the commands refuse, with compile-time help: a port handle carries its direction
@@ -19,7 +20,8 @@
 //! The sink port's existence and direction, the modality of the two ports of an edge and pipeline
 //! membership are not refused by a command; they are checks of validation.
 //! [`Declaration::validate_pipeline`] runs checks 1, 2, 3, 5, 6 and 9 of §10.2 over a Declared
-//! pipeline and moves it to Validated only when none finds anything; otherwise it answers
+//! pipeline and moves it to Validated only when none finds anything; check 5 admits a cycle only
+//! when it runs through an edge a [`FeedbackLoop`] of the pipeline bounds; otherwise it answers
 //! [`IncompatibleGraph`] naming each [`GraphFinding`]. A pipeline built through the typed builder
 //! is validated by the identity [`Declaration::build`] returns, and [`Declaration::validate`]
 //! answers the validated form, a [`ValidatedPipeline`], which nothing else produces.
@@ -60,7 +62,7 @@ pub use builder::{
 };
 pub use declaration::{
     AddNodeError, AddPortError, BindNodeError, Catalog, ConnectPortsError, Declaration,
-    ValidatePipelineError,
+    DeclareFeedbackLoopError, ValidatePipelineError,
 };
 pub use inference_core::id::NodeId;
 pub use node::{NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInput, NodeOutput};
@@ -81,6 +83,10 @@ inference_core::uuid_newtype!(
 inference_core::uuid_newtype!(
     /// `inference.graph.BindingId`: identifies a [`Binding`].
     BindingId
+);
+inference_core::uuid_newtype!(
+    /// `inference.graph.FeedbackLoopId`: identifies a [`FeedbackLoop`].
+    FeedbackLoopId
 );
 
 /// `inference.graph.NodeRole`: the node types the design admits; a node is not necessarily a
@@ -212,7 +218,7 @@ pub enum GraphDefect {
     MissingNodeOrPort,
     /// Checks 2 and 3: an edge's ports differ in direction, modality or commitment semantics.
     IncompatibleEdge,
-    /// Check 5: a cycle, which no bounded feedback declaration admits yet.
+    /// Check 5: a cycle that runs through no edge a [`FeedbackLoop`] of the pipeline bounds.
     UnboundedCycle,
     /// Check 6: an essential output port that is the source of no edge, or a sink no source
     /// reaches.
@@ -403,6 +409,16 @@ pub struct ConnectPorts {
     pub overload: OverloadPolicy,
 }
 
+/// `inference.graph.DeclareFeedbackLoop`: the input that declares the edge `edge_id` a feedback
+/// edge of the pipeline, bounded by the iteration rule `max_iterations`. The maximum is the ESS
+/// `Integer` sent; the command refuses one below one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclareFeedbackLoop {
+    pub pipeline_id: PipelineId,
+    pub edge_id: EdgeId,
+    pub max_iterations: i64,
+}
+
 /// `inference.graph.BindNode`: the input that binds a node to an adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BindNode {
@@ -440,6 +456,15 @@ pub struct PortsConnected {
     pub edge_id: EdgeId,
     pub from_port: PortId,
     pub to_port: PortId,
+}
+
+/// `inference.graph.FeedbackLoopDeclared`: the edge is a feedback edge of its pipeline, bounded by
+/// its iteration rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedbackLoopDeclared {
+    pub feedback_id: FeedbackLoopId,
+    pub edge_id: EdgeId,
+    pub max_iterations: i64,
 }
 
 /// `inference.graph.NodeBound`: a node has a concrete adapter.
@@ -511,6 +536,39 @@ impl fmt::Display for PortNotFound {
 }
 
 impl Error for PortNotFound {}
+
+/// `inference.graph.EdgeNotFound`: no edge carries the identity the command named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EdgeNotFound {
+    pub edge_id: EdgeId,
+}
+
+impl fmt::Display for EdgeNotFound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "no edge carries the identity {}", self.edge_id)
+    }
+}
+
+impl Error for EdgeNotFound {}
+
+/// `inference.graph.UnboundedFeedback`: a feedback loop's iteration rule must allow at least one
+/// iteration; a maximum below one is refused. `submitted` is the value that was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnboundedFeedback {
+    pub submitted: i64,
+}
+
+impl fmt::Display for UnboundedFeedback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a feedback loop must allow at least one iteration, got {}",
+            self.submitted
+        )
+    }
+}
+
+impl Error for UnboundedFeedback {}
 
 /// `inference.graph.UnboundedEdge`: every edge must specify finite buffering; a capacity below one
 /// is refused. `submitted` is the value that was sent.
@@ -789,6 +847,42 @@ impl Edge {
     #[must_use]
     pub const fn overload(&self) -> OverloadPolicy {
         self.overload
+    }
+}
+
+/// `inference.graph.FeedbackLoop`: a feedback edge of a pipeline with the iteration rule that
+/// bounds the loop it closes: how many times one generation may go round the loop along the edge
+/// before the loop terminates. The edge's capacity is the loop's queue bound. Its maximum is at
+/// least one by type, the invariant `max_iterations > 0` of graph.yaml.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackLoop {
+    feedback_id: FeedbackLoopId,
+    pipeline_id: PipelineId,
+    edge_id: EdgeId,
+    max_iterations: NonZeroUsize,
+}
+
+impl FeedbackLoop {
+    #[must_use]
+    pub const fn feedback_id(&self) -> FeedbackLoopId {
+        self.feedback_id
+    }
+
+    #[must_use]
+    pub const fn pipeline_id(&self) -> PipelineId {
+        self.pipeline_id
+    }
+
+    /// The feedback edge; it may belong to another pipeline than the loop's, and then bounds no
+    /// cycle of the loop's pipeline.
+    #[must_use]
+    pub const fn edge_id(&self) -> EdgeId {
+        self.edge_id
+    }
+
+    #[must_use]
+    pub const fn max_iterations(&self) -> NonZeroUsize {
+        self.max_iterations
     }
 }
 

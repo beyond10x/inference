@@ -17,8 +17,16 @@
 //! generation runs until its handle is dropped. [`MockGeneration::emit`] emits a delta outside
 //! the script, which a generation no longer Active refuses as stale.
 //!
+//! A generator scripted for tools ([`MockGenerator::proposing`]) also claims `tool_calling` and
+//! implements [`ToolCalling`]: each input offered and each outcome integrated is a model request
+//! of its own, whose text is one segment, and each of its first `proposals` model requests ends
+//! with the same [`ToolProposal`], taken once that request's segment is delivered. The text of a
+//! request that integrates an outcome contains it: the result's JSON, the failure's detail or the
+//! rejection's reason.
+//!
 //! Behind the `run` feature, [`ModelNode`] is the model node of a text-only pipeline the
-//! runtime's run controller drives: one generation per run, one committed segment per input.
+//! runtime's run controller drives: one generation per run, one committed segment per input, and,
+//! given tools, the tool loop of that generation.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -30,11 +38,13 @@ use inference_core::generation::{
 use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
+use inference_llm::tools::{ToolCalling, ToolOutcome, ToolProposal};
 use inference_llm::{
     AdmittedInput, CONTRACT_REVISION, ConcurrencyLimitReached, GenerationEvent, GenerationHandle,
     GenerationOutput, GenerationRequest, Generator, InputRefused,
 };
 use inference_text::TextDelta;
+use inference_tools::{Json, ToolId};
 
 /// The mock model node of a text-only pipeline, behind the `run` feature: a [`ModelNode`] answers
 /// each input on one generation of a [`MockGenerator`] per run.
@@ -42,7 +52,7 @@ use inference_text::TextDelta;
 mod node;
 
 #[cfg(feature = "run")]
-pub use node::{ModelHandle, ModelNode};
+pub use node::{Carried, ModelHandle, ModelNode, ModelPayload};
 
 /// What a [`MockGenerator`] claims, and so how it behaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,7 +137,16 @@ impl Eq for Slot {}
 pub struct MockGenerator {
     adapter: Adapter,
     script: Vec<String>,
+    tools: Option<ToolScript>,
     running: Running,
+}
+
+/// What a generator scripted for tools proposes: `proposal`, at the end of each of its first
+/// `proposals` model requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolScript {
+    proposal: ToolProposal,
+    proposals: usize,
 }
 
 impl MockGenerator {
@@ -152,7 +171,38 @@ impl MockGenerator {
         Self {
             adapter,
             script: script.into_iter().map(Into::into).collect(),
+            tools: None,
             running: Running::default(),
+        }
+    }
+
+    /// The same generator scripted for tools: it claims `tool_calling` besides what it claimed,
+    /// and each of the first `proposals` model requests of a generation ends with a proposal to
+    /// call `tool_id` with `arguments`. Its adapter is declared again with the added claim, under
+    /// a new identity.
+    #[must_use]
+    pub fn proposing(self, tool_id: ToolId, arguments: Json, proposals: usize) -> Self {
+        let mut capabilities = self.adapter.capabilities().to_vec();
+        if !capabilities.contains(&Capability::ToolCalling) {
+            capabilities.push(Capability::ToolCalling);
+        }
+        let (adapter, _) = Adapter::declare(DeclareAdapter {
+            model_id: self.adapter.model_id(),
+            backend: self.adapter.backend().to_owned(),
+            contract_revision: self.adapter.contract_revision().to_owned(),
+            execution_form: self.adapter.execution_form(),
+            locality: self.adapter.locality(),
+            capabilities,
+            max_concurrency: self.adapter.max_concurrency(),
+        })
+        .expect("the declaration it repeats was admitted");
+        Self {
+            adapter,
+            tools: Some(ToolScript {
+                proposal: ToolProposal { tool_id, arguments },
+                proposals,
+            }),
+            ..self
         }
     }
 }
@@ -175,6 +225,8 @@ impl Generator for MockGenerator {
             output,
             pending: self.script.iter().cloned().collect(),
             delivered: VecDeque::from([GenerationEvent::Started(started)]),
+            tools: self.tools.clone(),
+            staged: None,
             _slot: slot,
         })
     }
@@ -194,6 +246,10 @@ pub struct MockGeneration {
     output: GenerationOutput,
     pending: VecDeque<String>,
     delivered: VecDeque<GenerationEvent>,
+    /// What is left of the generator's tool script.
+    tools: Option<ToolScript>,
+    /// The proposal the latest model request ends with, until it is taken.
+    staged: Option<ToolProposal>,
     _slot: Slot,
 }
 
@@ -239,6 +295,18 @@ impl MockGeneration {
         Ok(delta)
     }
 
+    /// Issues one model request whose text is `text`; scripted for tools and with proposals left,
+    /// the request ends with the next one.
+    fn request(&mut self, text: String) {
+        self.pending.push_back(text);
+        if let Some(script) = self.tools.as_mut()
+            && script.proposals > 0
+        {
+            script.proposals -= 1;
+            self.staged = Some(script.proposal.clone());
+        }
+    }
+
     /// Emits `text` as one segment and commits it, queueing both events for delivery.
     fn deliver_segment(&mut self, text: String) {
         let delta = self
@@ -272,7 +340,7 @@ impl GenerationHandle for MockGeneration {
 
     fn accept_input(&mut self, input: AdmittedInput) -> Result<(), InputRefused> {
         let text = self.output.release(input)?;
-        self.pending.push_back(text);
+        self.request(text);
         Ok(())
     }
 
@@ -286,5 +354,29 @@ impl GenerationHandle for MockGeneration {
         let (event, _) = self.output.cancel()?;
         self.delivered.clear();
         Ok(event)
+    }
+}
+
+impl ToolCalling for MockGeneration {
+    fn take_proposal(&mut self) -> Option<ToolProposal> {
+        if self.pending.is_empty() && self.delivered.is_empty() {
+            self.staged.take()
+        } else {
+            None
+        }
+    }
+
+    fn integrate(&mut self, outcome: ToolOutcome) -> Result<(), GenerationStateConflict> {
+        let current = self.output.generation().state();
+        if current != GenerationState::Active {
+            return Err(GenerationStateConflict { current });
+        }
+        let text = match outcome {
+            ToolOutcome::Result(result) => result.to_string(),
+            ToolOutcome::Failed(failure) => format!("the tool failed: {}", failure.detail),
+            ToolOutcome::Rejected(reason) => format!("the tool call was rejected: {reason:?}"),
+        };
+        self.request(text);
+        Ok(())
     }
 }

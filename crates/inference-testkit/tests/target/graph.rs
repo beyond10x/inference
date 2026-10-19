@@ -1,6 +1,6 @@
-//! `inference.graph`: the five declaration commands, `ValidatePipeline`, `PlanPipeline`, the eight
-//! Run commands, `DescribeNodeInstance` and the six node instance commands, the seven views and
-//! the twenty-two events of `ess/domains/graph.yaml`, answered by [`GraphDomain`].
+//! `inference.graph`: the six declaration commands, `ValidatePipeline`, `PlanPipeline`, the eight
+//! Run commands, `DescribeNodeInstance` and the six node instance commands, the eight views and
+//! the twenty-three events of `ess/domains/graph.yaml`, answered by [`GraphDomain`].
 //!
 //! Each request field is read on its own ([`Input`]); the outcome, the error and the event come
 //! from what the store returned. `DeclarePipeline`, `BindNode` and `PlanPipeline` read the
@@ -68,8 +68,9 @@ use inference_core::model::{AdapterId, Capability, Locality};
 use inference_core::policy::ProfileId;
 use inference_pipeline::{
     AddNode, AddNodeError, AddPort, AddPortError, BindNode, BindNodeError, Binding,
-    CapabilityMismatch, Catalog, ConnectPorts, ConnectPortsError, Declaration, DeclarePipeline,
-    Edge, GraphFinding, NodeAdded, NodeBound, NodeId, NodeUnbound, PipelineDeclared, PipelineId,
+    CapabilityMismatch, Catalog, ConnectPorts, ConnectPortsError, Declaration, DeclareFeedbackLoop,
+    DeclareFeedbackLoopError, DeclarePipeline, Edge, FeedbackLoop, FeedbackLoopDeclared,
+    GraphFinding, NodeAdded, NodeBound, NodeId, NodeUnbound, PipelineDeclared, PipelineId,
     PipelineNotFound, PipelineNotReady, PipelinePlanned, PipelineValidated, PlanPipeline,
     PlanPipelineError, Port, PortAdded, PortsConnected, ValidatePipeline, ValidatePipelineError,
 };
@@ -97,6 +98,7 @@ const DECLARE_PIPELINE: &str = "inference.graph.DeclarePipeline";
 const ADD_NODE: &str = "inference.graph.AddNode";
 const ADD_PORT: &str = "inference.graph.AddPort";
 const CONNECT_PORTS: &str = "inference.graph.ConnectPorts";
+const DECLARE_FEEDBACK_LOOP: &str = "inference.graph.DeclareFeedbackLoop";
 const BIND_NODE: &str = "inference.graph.BindNode";
 const VALIDATE_PIPELINE: &str = "inference.graph.ValidatePipeline";
 const PLAN_PIPELINE: &str = "inference.graph.PlanPipeline";
@@ -129,6 +131,7 @@ const PIPELINE_DECLARED: &str = "inference.graph.PipelineDeclared";
 const NODE_ADDED: &str = "inference.graph.NodeAdded";
 const PORT_ADDED: &str = "inference.graph.PortAdded";
 const PORTS_CONNECTED: &str = "inference.graph.PortsConnected";
+const FEEDBACK_LOOP_DECLARED: &str = "inference.graph.FeedbackLoopDeclared";
 const NODE_BOUND: &str = "inference.graph.NodeBound";
 const PIPELINE_VALIDATED: &str = "inference.graph.PipelineValidated";
 const PIPELINE_PLANNED: &str = "inference.graph.PipelinePlanned";
@@ -149,11 +152,12 @@ const NODE_INSTANCE_STOPPED: &str = "inference.graph.NodeInstanceStopped";
 const NODE_INSTANCE_FAILED: &str = "inference.graph.NodeInstanceFailed";
 
 /// Every event this module observes.
-const EVENTS: [&str; 22] = [
+const EVENTS: [&str; 23] = [
     PIPELINE_DECLARED,
     NODE_ADDED,
     PORT_ADDED,
     PORTS_CONNECTED,
+    FEEDBACK_LOOP_DECLARED,
     NODE_BOUND,
     PIPELINE_VALIDATED,
     PIPELINE_PLANNED,
@@ -180,6 +184,8 @@ const PIPELINE_NOT_READY: &str = "inference.graph.PipelineNotReady";
 const NODE_NOT_FOUND: &str = "inference.graph.NodeNotFound";
 const PORT_NOT_FOUND: &str = "inference.graph.PortNotFound";
 const UNBOUNDED_EDGE: &str = "inference.graph.UnboundedEdge";
+const EDGE_NOT_FOUND: &str = "inference.graph.EdgeNotFound";
+const UNBOUNDED_FEEDBACK: &str = "inference.graph.UnboundedFeedback";
 const INCOMPATIBLE_EDGE: &str = "inference.graph.IncompatibleEdge";
 const ADAPTER_NOT_FOUND: &str = "inference.graph.AdapterNotFound";
 const INCOMPATIBLE_GRAPH: &str = "inference.graph.IncompatibleGraph";
@@ -197,6 +203,7 @@ const PIPELINES: &str = "inference.graph.Pipelines";
 const NODES: &str = "inference.graph.Nodes";
 const PORTS: &str = "inference.graph.Ports";
 const EDGES: &str = "inference.graph.Edges";
+const FEEDBACK_LOOPS: &str = "inference.graph.FeedbackLoops";
 const BINDINGS: &str = "inference.graph.Bindings";
 const RUNS: &str = "inference.graph.Runs";
 const NODE_INSTANCES: &str = "inference.graph.NodeInstances";
@@ -221,6 +228,7 @@ pub fn execute_command(
         ADD_NODE => add_node(domain, request)?,
         ADD_PORT => add_port(domain, request)?,
         CONNECT_PORTS => connect_ports(domain, request)?,
+        DECLARE_FEEDBACK_LOOP => declare_feedback_loop(domain, request)?,
         BIND_NODE => bind_node(domain, &catalog, request)?,
         VALIDATE_PIPELINE => validate_pipeline(domain, forced.is_some(), request)?,
         PLAN_PIPELINE => plan_pipeline(domain, &catalog, forced.as_ref(), request)?,
@@ -729,6 +737,38 @@ fn connect_ports(
     })
 }
 
+fn declare_feedback_loop(
+    domain: &mut GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let declare = DeclareFeedbackLoop {
+        pipeline_id: input.named("pipeline_id")?,
+        edge_id: input.named("edge_id")?,
+        max_iterations: input.integer("max_iterations")?,
+    };
+    input.finish()?;
+    let took = |branch| SemanticCommandResult::took(outcome(DECLARE_FEEDBACK_LOOP, branch));
+    Ok(match domain.declare_feedback_loop(declare) {
+        Ok(event) => took("declared")
+            .emitting(feedback_loop_declared(&event)?.in_activity(request.correlation.clone())),
+        Err(DeclareFeedbackLoopError::UnknownPipeline(error)) => {
+            took("unknown-pipeline").with_error(pipeline_not_found(error)?)
+        }
+        Err(DeclareFeedbackLoopError::UnknownEdge(error)) => took("unknown-edge").with_error(
+            DeclaredErrorValue::new(parse::<ErrorRef>(EDGE_NOT_FOUND))
+                .with("edge_id", named_node(&error.edge_id)?),
+        ),
+        Err(DeclareFeedbackLoopError::Unbounded(error)) => took("unbounded").with_error(
+            DeclaredErrorValue::new(parse::<ErrorRef>(UNBOUNDED_FEEDBACK))
+                .with("submitted", integer_node(error.submitted)),
+        ),
+        Err(DeclareFeedbackLoopError::NotDeclared(error)) => {
+            took("not-declared").with_error(pipeline_not_ready(error)?)
+        }
+    })
+}
+
 fn bind_node(
     domain: &mut GraphDomain,
     catalog: &GraphCatalog<'_>,
@@ -1026,6 +1066,10 @@ pub fn query_view(
             .edges()
             .map(edges_row)
             .collect::<Result<Vec<_>, _>>()?,
+        FEEDBACK_LOOPS => declaration
+            .feedback_loops()
+            .map(feedback_loops_row)
+            .collect::<Result<Vec<_>, _>>()?,
         BINDINGS => declaration
             .bindings()
             .map(bindings_row)
@@ -1084,6 +1128,7 @@ fn graph_event(event: &GraphEvent) -> Result<ObservedEvent, TargetError> {
         GraphEvent::PortAdded(event) => port_added(event),
         GraphEvent::PortsConnected(event) => ports_connected(event),
         GraphEvent::NodeBound(event) => node_bound(event),
+        GraphEvent::FeedbackLoopDeclared(event) => feedback_loop_declared(event),
         GraphEvent::PipelineValidated(event) => pipeline_validated(event),
         GraphEvent::PipelinePlanned(event) => pipeline_planned(event),
         GraphEvent::RunCreated(event) => run_created(event),
@@ -1189,6 +1234,15 @@ fn ports_connected(event: &PortsConnected) -> Result<ObservedEvent, TargetError>
         .with("to_port", named_node(&event.to_port)?))
 }
 
+fn feedback_loop_declared(event: &FeedbackLoopDeclared) -> Result<ObservedEvent, TargetError> {
+    Ok(
+        ObservedEvent::new(parse::<EventRef>(FEEDBACK_LOOP_DECLARED))
+            .with("feedback_id", named_node(&event.feedback_id)?)
+            .with("edge_id", named_node(&event.edge_id)?)
+            .with("max_iterations", integer_node(event.max_iterations)),
+    )
+}
+
 fn node_bound(event: &NodeBound) -> Result<ObservedEvent, TargetError> {
     Ok(ObservedEvent::new(parse::<EventRef>(NODE_BOUND))
         .with("binding_id", named_node(&event.binding_id)?)
@@ -1238,6 +1292,24 @@ fn edges_row(edge: &Edge) -> Result<ViewRow, TargetError> {
             integer_node(i64::try_from(edge.capacity().get()).unwrap_or(i64::MAX)),
         ),
         ("overload".to_owned(), named_node(&edge.overload())?),
+    ]))
+}
+
+fn feedback_loops_row(feedback: &FeedbackLoop) -> Result<ViewRow, TargetError> {
+    Ok(BTreeMap::from([
+        (
+            "feedback_id".to_owned(),
+            named_node(&feedback.feedback_id())?,
+        ),
+        (
+            "pipeline_id".to_owned(),
+            named_node(&feedback.pipeline_id())?,
+        ),
+        ("edge_id".to_owned(), named_node(&feedback.edge_id())?),
+        (
+            "max_iterations".to_owned(),
+            integer_node(i64::try_from(feedback.max_iterations().get()).unwrap_or(i64::MAX)),
+        ),
     ]))
 }
 

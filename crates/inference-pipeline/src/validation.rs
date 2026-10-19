@@ -8,17 +8,18 @@
 //! when check 1 finds both of its ports there, and checks 2, 3 and 9 read only such an edge; check
 //! 3 and check 9 read it only when check 2 passes it, since commitment semantics are compared
 //! between an output port and an input port of one modality. Checks 5 and 6 follow every edge
-//! that joins two nodes, compatible or not, from its source port's node to its sink port's node.
+//! that joins two nodes, compatible or not, from its source port's node to its sink port's node,
+//! except that check 5 does not follow a feedback edge: an edge of the pipeline that a
+//! [`FeedbackLoop`](crate::FeedbackLoop) of the pipeline names. A cycle is bounded when it runs
+//! through such an edge, so the cycles check 5 finds are those left without them.
 //!
-//! Media encoding and timebase (the rest of check 3) arrive with `inference-audio`; a bounded
-//! feedback declaration, which would admit a cycle, has no noun in `ess/domains/graph.yaml` yet,
-//! so every cycle is refused.
+//! Media encoding and timebase (the rest of check 3) arrive with `inference-audio`.
 
 use std::collections::BTreeSet;
 
 use crate::{
-    Declaration, Edge, Essentiality, GraphDefect, GraphFinding, Node, NodeId, NodeRole, PipelineId,
-    Port, PortDirection,
+    Declaration, Edge, EdgeId, Essentiality, GraphDefect, GraphFinding, Node, NodeId, NodeRole,
+    PipelineId, Port, PortDirection,
 };
 
 /// The findings of checks 1, 2, 3, 9, 5 and 6 over the pipeline carrying `pipeline_id`; see the
@@ -34,7 +35,8 @@ pub(crate) fn findings(declaration: &Declaration, pipeline_id: PipelineId) -> Ve
 }
 
 /// One pipeline's nodes, the ports declared under it on those nodes, the ports declared under it
-/// on a node of another (`strays`), and the edges and bindings naming it.
+/// on a node of another (`strays`), the edges and bindings naming it, and those of its edges a
+/// feedback loop of it names (`feedback`).
 struct Graph<'d> {
     declaration: &'d Declaration,
     pipeline_id: PipelineId,
@@ -42,6 +44,16 @@ struct Graph<'d> {
     ports: Vec<&'d Port>,
     strays: Vec<&'d Port>,
     edges: Vec<&'d Edge>,
+    feedback: BTreeSet<EdgeId>,
+}
+
+/// Which edges a walk of the graph follows.
+#[derive(Clone, Copy)]
+enum Follow {
+    /// Every edge that joins two nodes.
+    Every,
+    /// Every edge that joins two nodes but a feedback edge.
+    Unbounded,
 }
 
 /// An edge whose two ports are both ports of the pipeline's nodes.
@@ -60,9 +72,15 @@ impl<'d> Graph<'d> {
             .ports()
             .filter(|port| port.pipeline_id() == pipeline_id)
             .partition(|port| nodes.iter().any(|node| node.node_id() == port.node_id()));
-        let edges = declaration
+        let edges: Vec<&Edge> = declaration
             .edges()
             .filter(|edge| edge.pipeline_id() == pipeline_id)
+            .collect();
+        let feedback = declaration
+            .feedback_loops()
+            .filter(|feedback| feedback.pipeline_id() == pipeline_id)
+            .map(crate::FeedbackLoop::edge_id)
+            .filter(|edge_id| edges.iter().any(|edge| edge.edge_id() == *edge_id))
             .collect();
         Self {
             declaration,
@@ -71,6 +89,7 @@ impl<'d> Graph<'d> {
             ports,
             strays,
             edges,
+            feedback,
         }
     }
 
@@ -172,32 +191,41 @@ impl<'d> Graph<'d> {
         }
     }
 
-    /// The nodes an edge leads to from `node_id` in one step.
-    fn successors(&self, node_id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+    /// The nodes an edge that `follow` admits leads to from `node_id` in one step.
+    fn successors(&self, node_id: NodeId, follow: Follow) -> impl Iterator<Item = NodeId> + '_ {
         self.edges
             .iter()
+            .filter(move |edge| match follow {
+                Follow::Every => true,
+                Follow::Unbounded => !self.feedback.contains(&edge.edge_id()),
+            })
             .filter_map(|edge| self.joined(edge))
             .filter(move |joined| joined.source.node_id() == node_id)
             .map(|joined| joined.sink.node_id())
     }
 
-    /// Every node reachable from `starts` by one or more edges.
-    fn reached(&self, starts: impl IntoIterator<Item = NodeId>) -> BTreeSet<NodeId> {
+    /// Every node reachable from `starts` by one or more edges that `follow` admits.
+    fn reached(
+        &self,
+        starts: impl IntoIterator<Item = NodeId>,
+        follow: Follow,
+    ) -> BTreeSet<NodeId> {
         let mut reached = BTreeSet::new();
         let mut pending: Vec<NodeId> = starts
             .into_iter()
-            .flat_map(|start| self.successors(start))
+            .flat_map(|start| self.successors(start, follow))
             .collect();
         while let Some(node_id) = pending.pop() {
             if reached.insert(node_id) {
-                pending.extend(self.successors(node_id));
+                pending.extend(self.successors(node_id, follow));
             }
         }
         reached
     }
 
-    /// Check 5: every cycle is refused, one finding per strongly connected set of nodes that
-    /// reach themselves, naming its first node in declaration order.
+    /// Check 5: every cycle that runs through no feedback edge is refused, one finding per
+    /// strongly connected set of nodes that reach themselves without one, naming its first node
+    /// in declaration order.
     fn cycles(&self, findings: &mut Vec<GraphFinding>) {
         let mut named = BTreeSet::new();
         for node in &self.nodes {
@@ -205,12 +233,12 @@ impl<'d> Graph<'d> {
             if named.contains(&node_id) {
                 continue;
             }
-            let reached = self.reached([node_id]);
+            let reached = self.reached([node_id], Follow::Unbounded);
             if !reached.contains(&node_id) {
                 continue;
             }
             for other in &reached {
-                if self.reached([*other]).contains(&node_id) {
+                if self.reached([*other], Follow::Unbounded).contains(&node_id) {
                     named.insert(*other);
                 }
             }
@@ -248,6 +276,7 @@ impl<'d> Graph<'d> {
                 .iter()
                 .filter(|node| node.role() == NodeRole::Source)
                 .map(|node| node.node_id()),
+            Follow::Every,
         );
         for node in &self.nodes {
             if node.role() == NodeRole::Sink && !reached.contains(&node.node_id()) {
