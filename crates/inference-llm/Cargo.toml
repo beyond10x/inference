@@ -1,0 +1,15 @@
+[package]
+name = "inference-llm"
+description = "LLM contract of the inference framework: generations of text from a prompt, streamed or whole, and input offered while they run."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+inference-core = { path = "../inference-core" }
+inference-text = { path = "../inference-text" }
+
+[lints]
+workspace = true
