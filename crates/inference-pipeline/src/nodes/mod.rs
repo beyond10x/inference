@@ -35,6 +35,7 @@ use inference_tools::{
 
 use crate::{NodeEndpoints, NodeError, NodeInput, NodeOutput};
 
+pub mod descriptors;
 mod tool_authority;
 mod tool_executor;
 /// The turn policy: speech activity in, the turn commands of `inference.stream` out.
