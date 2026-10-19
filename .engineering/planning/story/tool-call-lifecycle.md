@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:tool-call-lifecycle
 kind: story
-status: active
+status: implemented
 title: ToolCall lifecycle in the specification and the inference-tools crate
 summary: Extend ess/domains/tools.yaml with Proposed, Authorized, Started, Completed, Failed, Rejected and their commands, split out inference-tools, and make the testkit target pass every inference.tools scenario.
 relations:
@@ -27,10 +27,11 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/tools.yaml
-revision: 18
+revision: 20
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T10:59:23Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"review_outcome":2}}}
 - {from: "proposed", to: "active", at: "2026-10-19T10:59:23Z", actor: "human:timo", revision: 18, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "active", to: "implemented", at: "2026-10-19T11:39:31Z", actor: "human:timo", revision: 20, decided_on: {"recorded":{"test_result":1,"review_outcome":8,"verification":1}}}
 ---
 ## Context
 
@@ -183,3 +184,9 @@ Derived 2026-10-19 by `story-scoper`. Every line is **cited** (read from the sto
 - **Confidence:** high — the body names every path, the depends_on story names the per-domain module split and the `SKIPPED.md` section, and each cited design line (240, 273, 338, 374-376, 625, 632-639, 835-856, 1006-1007, 1054, 1080, 1109, 1145, 1161, 1175) reads as the body says; medium only on the two inferred testkit paths
 - **Would collide with:** any unit touching `ess/domains/tools.yaml`; `crates/inference-tools` (its executor contract in particular, which the retry and interruption units later edit); the `tools` store module and `tests/target/tools.rs` of the testkit; `crates/inference-testkit/Cargo.toml` (a shared dependency and feature list); and, hunk-adjacent in one file, any unit editing another section of `ess/SKIPPED.md` (the `inference.stream`, `inference.graph`, `inference.policy` sections)
 - **Safety fact:** the testkit was split per domain before this story: `lib.rs` and `tests/target/mod.rs` dispatch on the domain prefix and pre-declare the `tools` modules, and `ess/SKIPPED.md` has one section per domain, so this story fills `tools` files and edits one section and touches nothing else the depends_on story writes; the root workspace takes the new crate through `members = ["crates/*"]` with no shared-manifest edit — step 1 (`story:testkit-conformance-target` steps 1 to 3, `story:workspace-skeleton` step 1), unproven, since no file exists yet. Where the symbol search stops: the `unconfirmed` guard has to be a `when:` the ess 0.60.0 synthesizer evaluates over the referenced Tool's `requires_confirmation` or over a field copied onto the call, and the scenario ids and their count come out of `ess verify conform synthesize`, not out of any file in the tree — step 1, unproven
+
+## Confirmation hook
+
+Scenario count after the extension (2026-10-19, `ess verify conform synthesize --path ess --scenarios ess/scenarios`, ess 0.60.0): 271 scenarios (4 authored), up from 231; 3 refusals, the three ESS-SYNTH-001 affects cascades the authored scenarios cover. `inference.tools` synthesizes 53 scenarios, 40 of them new. `cargo test -p inference-testkit --test conform`: 250 passed, 21 unsupported (all `inference.session`), 0 failed, 0 error.
+
+Confirmation hook, decided here: the authority passes `confirmation_required` and `confirmed` to `AuthorizeToolCall`, and `unconfirmed` is an input guard. Two other forms were tried on ess 0.60.0 and both refused. A copy of the tool's `requires_confirmation` onto the call at proposal gives ESS-SYNTH-003 on `authorized` and `unconfirmed`. A `when_related: {via: tool_id}` guard over the stored tool reference gives ESS-SYNTH-003 on the `exists: false` branch it requires, which no arrangement reaches. Recorded as UNMAPPED in `ess/domains/tools.yaml`.

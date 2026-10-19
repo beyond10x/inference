@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T11:35:28Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-call-lifecycle",
+  "kind": "story",
+  "revision": 19,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-tool-call-lifecycle-pass-1",
+    "reference": "F4 tools.yaml:446 tool flag binds nothing yet; routed to story:tool-authority-and-executor-nodes section The tool's confirmation flag",
+    "review": "review-result:adversary-tool-call-lifecycle-pass-1",
+    "outcome": "escalated"
+  }
+}

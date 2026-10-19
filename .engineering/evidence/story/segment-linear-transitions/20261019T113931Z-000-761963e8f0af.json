@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T11:39:31Z",
+  "actor": "human:timo",
+  "artifact": "story:segment-linear-transitions",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-text -p inference-tts -p inference-llm -p inference-testkit --all-features (VERIFIED, new behaviour: baseline wave/12 010843f compiles a second commit of one segment (two compile_fail doctests fail) and the LLM mock admits 4 concurrent generations where it declares 1; treatment passes 592 including the adversary's eleven guards, conform unchanged at 197 of 231)"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T11:35:27Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-call-lifecycle",
+  "kind": "story",
+  "revision": 19,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-tool-call-lifecycle-pass-1",
+    "reference": "F3 call.rs:252 hook order guarded by adversary1_confirmation",
+    "review": "review-result:adversary-tool-call-lifecycle-pass-1",
+    "outcome": "fixed"
+  }
+}

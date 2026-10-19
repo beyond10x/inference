@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:segment-linear-transitions
 kind: story
-status: active
+status: implemented
 title: 'Output segments: transitions that consume, and the LLM mock''s concurrency'
 relations:
 - decomposes: epic:contracts-and-testkit
@@ -21,10 +21,11 @@ scope:
   path: crates/inference-text/src/lib.rs
 - confidence: cited
   path: crates/inference-tts
-revision: 4
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T10:59:23Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T10:59:23Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-19T11:39:31Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":4,"verification":1}}}
 ---
 ## Context
 
@@ -57,3 +58,13 @@ refuses a second concurrent generation. Each red before the fix.
 ## Out of scope
 
 Voices, alignment, speculative TTS.
+
+## Identity minting
+
+Decided in wave 12:
+
+- `OutputSegment::emit_as` keeps accepting any `SegmentId`: the testkit's identity counter needs
+  it. Two values of one identity can still be made through it; its docs and the inference-tts crate
+  doc name that route. Closing it would take a non-`Copy` identity or a sealed allocator, left for
+  a story that needs it.
+- A refused transition hands the segment back unmoved inside `SegmentMoveRefused`.
