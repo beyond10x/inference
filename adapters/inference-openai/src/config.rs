@@ -66,6 +66,8 @@ pub enum WireFormat {
     Pcm16,
     /// `audio/pcmu`: G.711 mu-law, mono, 8 kHz, one byte per sample.
     Pcmu,
+    /// `audio/pcma`: G.711 A-law, mono, 8 kHz, one byte per sample.
+    Pcma,
 }
 
 impl WireFormat {
@@ -73,7 +75,7 @@ impl WireFormat {
     pub const fn sample_rate(self) -> u32 {
         match self {
             Self::Pcm16 => 24_000,
-            Self::Pcmu => 8_000,
+            Self::Pcmu | Self::Pcma => 8_000,
         }
     }
 }
@@ -196,6 +198,7 @@ impl WireFormat {
         match self {
             Self::Pcm16 => json!({"type": "audio/pcm", "rate": 24_000}),
             Self::Pcmu => json!({"type": "audio/pcmu"}),
+            Self::Pcma => json!({"type": "audio/pcma"}),
         }
     }
 }

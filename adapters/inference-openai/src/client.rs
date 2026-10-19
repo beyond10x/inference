@@ -278,7 +278,8 @@ impl RealtimeClient {
     /// The next server event, events kept during setup first.
     ///
     /// # Errors
-    /// [`RealtimeError::Stalled`] when no event arrives within the endpoint's read timeout;
+    /// [`RealtimeError::Stalled`] when no event arrives within the endpoint's read timeout, pings
+    /// and other frames that are not events counted in it;
     /// [`RealtimeError::Closed`] when the server closed the connection;
     /// [`RealtimeError::Transport`] when the read fails; [`RealtimeError::Protocol`] for a
     /// message that is not a Realtime event.
@@ -292,17 +293,31 @@ impl RealtimeClient {
     /// Sends a close frame and waits for the server's.
     ///
     /// # Errors
-    /// [`RealtimeError::Transport`] when the close handshake fails.
+    /// [`RealtimeError::Transport`] when the close handshake fails;
+    /// [`RealtimeError::Stalled`] when the server does not close within the read timeout.
     pub async fn close(mut self) -> Result<(), RealtimeError> {
+        use tokio_tungstenite::tungstenite::Error;
         self.socket
             .close(None)
             .await
-            .map_err(|error| RealtimeError::Transport(error.to_string()))
+            .map_err(|error| RealtimeError::Transport(error.to_string()))?;
+        let deadline = tokio::time::Instant::now() + self.read_timeout;
+        loop {
+            match tokio::time::timeout_at(deadline, self.socket.next()).await {
+                Err(_) => return Err(RealtimeError::Stalled(self.read_timeout)),
+                Ok(None | Some(Err(Error::ConnectionClosed | Error::AlreadyClosed))) => {
+                    return Ok(());
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(error))) => return Err(RealtimeError::Transport(error.to_string())),
+            }
+        }
     }
 
     async fn read_event(&mut self) -> Result<ServerEvent, RealtimeError> {
+        let deadline = tokio::time::Instant::now() + self.read_timeout;
         loop {
-            let message = tokio::time::timeout(self.read_timeout, self.socket.next())
+            let message = tokio::time::timeout_at(deadline, self.socket.next())
                 .await
                 .map_err(|_| RealtimeError::Stalled(self.read_timeout))?;
             let message = match message {
