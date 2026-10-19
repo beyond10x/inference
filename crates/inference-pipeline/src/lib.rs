@@ -33,8 +33,10 @@
 //!
 //! A node implementation writes one trait, [`NodeImplementation`] ([`node`]): describe, prepare,
 //! start with its edge endpoints, drain or cancel, stop, which the runtime drives for each node
-//! instance of a run. The crate depends on `inference-core` only and carries no concrete model,
-//! backend or provider. Serialized names are the ESS names.
+//! instance of a run. The node implementations that carry no model, the tool authority and the
+//! tool executor, are in [`nodes`]. The crate depends on `inference-core` and, for those nodes,
+//! `inference-tools`, and carries no concrete model, backend or provider. Serialized names are
+//! the ESS names.
 
 use std::error::Error;
 use std::fmt;
@@ -48,6 +50,7 @@ use inference_core::policy::ProfileId;
 mod builder;
 mod declaration;
 pub mod node;
+pub mod nodes;
 mod planning;
 mod validation;
 
