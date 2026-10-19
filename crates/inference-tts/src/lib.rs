@@ -15,10 +15,21 @@
 //! speculative lower-integrity mode is not declared. `inference.stream.CompleteSynthesis` moves a
 //! Queued segment to Synthesized once its audio is produced. `inference.stream.AcknowledgePlayback`
 //! moves a Synthesized segment to Played; it is the media sink's call, never the synthesiser's
-//! (line 388), and after it the segment refuses `inference.stream.DiscardSegment`.
+//! (line 388), and after it the segment refuses `inference.stream.DiscardSegment`. It takes the
+//! [`PlaybackReceipt`] the sink makes by consuming the frames it played, every frame emitted of
+//! the segment; the frames are made only by the synthesis and are not `Clone`, so a synthesiser
+//! that delivered them to a sink cannot make one. A synthesiser that withholds every frame from
+//! every sink still can; no type prevents that in one process.
+//!
+//! [`Synthesiser::start`] refuses a start past the maximum concurrency the adapter record declares
+//! with [`ConcurrencyLimitReached`]; a synthesis runs until its handle is dropped.
 //!
 //! A segment offered to one synthesis cannot be offered to another: it is moved into the first,
-//! since `QueueForSynthesis` on a Queued segment is wrong-state.
+//! since `QueueForSynthesis` on a Queued segment is wrong-state, and [`OutputSegment`] is not
+//! `Clone`. A transition of [`OutputSegment`] reads the segment and returns the moved one, so a
+//! caller still holding an earlier value can move it again into a second value of the same
+//! identity; one synthesis refuses that second value as wrong-state, but two syntheses do not
+//! see each other.
 //!
 //! ```compile_fail,E0382
 //! # use inference_tts::SynthesisOutput;
@@ -45,12 +56,67 @@
 //!   Queued, before its synthesis completes. [`SynthesisOutput::audio`] emits a frame of a Queued
 //!   segment only when the adapter claims [`Capability::OutputStreaming`], and refuses otherwise
 //!   with [`CapabilityNotClaimed`] naming it. Without it, the whole audio of a segment is emitted
-//!   by [`SynthesisOutput::complete`], after its `SynthesisCompleted`; no frame of a segment is
-//!   emitted once it is Synthesized, so its audio is final before it can be played.
+//!   by [`SynthesisOutput::complete`], in the call that moves the segment to Synthesized, after
+//!   its `SynthesisCompleted`. No frame of a segment is emitted after that call, so its audio is
+//!   final before it can be played.
 //! * A frame's data is `sample_count * channels * width(encoding)` bytes
 //!   ([`AudioFormat::data_len`](inference_audio::AudioFormat::data_len)); a frame that
 //!   disagrees is refused with [`FrameLengthMismatch`]. `inference-audio` itself admits such a
 //!   frame, as the specification does.
+//!
+//! Without output streaming, the call that completes a segment returns its `SynthesisCompleted`
+//! and then its frames, and no frame follows:
+//!
+//! ```
+//! # use std::num::{NonZeroU16, NonZeroU32};
+//! # use inference_tts::inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
+//! # use inference_tts::inference_core::generation::{Generation, StartGeneration};
+//! # use inference_tts::inference_core::id::{NodeId, RunId};
+//! # use inference_tts::inference_core::model::{Adapter, DeclareAdapter, ExecutionForm, Locality, ModelId};
+//! # use inference_tts::inference_text::{OutputSegment, SegmentState};
+//! # use inference_tts::{AudioRefused, CONTRACT_REVISION, SynthesisEvent, SynthesisOutput};
+//! # let (adapter, _) = Adapter::declare(DeclareAdapter {
+//! #     model_id: ModelId::generate(),
+//! #     backend: "doc".to_owned(),
+//! #     contract_revision: CONTRACT_REVISION.to_owned(),
+//! #     execution_form: ExecutionForm::InProcess,
+//! #     locality: Locality::SameProcess,
+//! #     capabilities: Vec::new(),
+//! #     max_concurrency: 1,
+//! # }).unwrap();
+//! # let (generation, _) = Generation::start(StartGeneration {
+//! #     run_id: RunId::generate(),
+//! #     node_id: NodeId::generate(),
+//! #     epoch: 1,
+//! # });
+//! # let (tentative, _) = OutputSegment::emit(&generation, 1, "hello".to_owned()).unwrap();
+//! # let (segment, _) = tentative.commit().unwrap();
+//! # let frame = || AudioFrame {
+//! #     format: AudioFormat {
+//! #         encoding: AudioEncoding::PcmS16le,
+//! #         sample_rate: NonZeroU32::new(16_000).unwrap(),
+//! #         channels: NonZeroU16::new(1).unwrap(),
+//! #     },
+//! #     position: SampleClockPosition::new(0).unwrap(),
+//! #     sample_count: 2,
+//! #     data: vec![0; 4],
+//! # };
+//! let id = segment.segment_id();
+//! let mut output = SynthesisOutput::start(&adapter);
+//! output.offer(segment).unwrap();
+//! output.end_utterance().unwrap();
+//! output.take_input().unwrap();
+//! let events = output.complete(id, vec![frame(), frame()]).unwrap();
+//! assert_eq!(output.segment(id).map(OutputSegment::state), Some(SegmentState::Synthesized));
+//! assert!(matches!(events[0], SynthesisEvent::Completed(_)));
+//! assert!(events[1..].iter().all(|event| matches!(event, SynthesisEvent::Audio(_))));
+//! assert_eq!(events.len(), 3, "the frames come in the call that completes the segment");
+//! assert!(matches!(
+//!     output.audio(id, frame()),
+//!     Err(AudioRefused::SegmentStateConflict(_))
+//! ));
+//! assert_eq!(output.frames_emitted(id), Some(2), "and none after it");
+//! ```
 //!
 //! [`SynthesisOutput`] is the bookkeeping every implementation shares: the segments offered and
 //! taken, moved only through the transitions of `inference-text`, and the frames emitted of each.
@@ -72,24 +138,117 @@ pub use inference_text;
 use inference_audio::AudioFrame;
 use inference_core::model::{Adapter, Capability};
 use inference_text::{
-    AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentState,
-    SegmentStateConflict, SynthesisCompleted,
+    AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentSnapshot,
+    SegmentState, SegmentStateConflict, SynthesisCompleted,
 };
 
 /// The revision of this contract, for the `contract_revision` an adapter implementing it
 /// declares.
 pub const CONTRACT_REVISION: &str = env!("CARGO_PKG_VERSION");
 
-/// One frame of the audio of the segment `segment_id`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One frame of the audio of a segment, as the synthesis emitted it. Only [`SynthesisOutput`]
+/// makes one, and it is not `Clone`: once delivered, the frame is the sink's, and a
+/// [`PlaybackReceipt`] is made of it.
+///
+/// ```compile_fail
+/// fn cloneable<T: Clone>() {}
+/// cloneable::<inference_tts::SegmentAudio>();
+/// ```
+///
+/// ```compile_fail,E0451
+/// # use inference_tts::SegmentAudio;
+/// # use inference_tts::inference_audio::AudioFrame;
+/// # use inference_tts::inference_text::SegmentId;
+/// fn forge(segment_id: SegmentId, frame: AudioFrame) -> SegmentAudio {
+///     SegmentAudio { segment_id, frame }
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
 pub struct SegmentAudio {
-    pub segment_id: SegmentId,
-    pub frame: AudioFrame,
+    segment_id: SegmentId,
+    frame: AudioFrame,
+}
+
+impl SegmentAudio {
+    /// The segment the frame speaks.
+    #[must_use]
+    pub const fn segment_id(&self) -> SegmentId {
+        self.segment_id
+    }
+
+    /// The frame.
+    #[must_use]
+    pub const fn frame(&self) -> &AudioFrame {
+        &self.frame
+    }
+}
+
+/// What a media sink makes once it has played the audio of one segment, by consuming the
+/// [`SegmentAudio`] values of it that were delivered to it; a segment synthesized without frames
+/// takes the receipt of no frames.
+///
+/// A [`SegmentAudio`] is made only by the synthesis and is not `Clone`, so a synthesiser that
+/// handed its frames to a sink holds nothing to make a receipt from, and cannot confirm their
+/// playback:
+///
+/// ```compile_fail,E0382
+/// # use inference_tts::{PlaybackReceipt, SegmentAudio};
+/// fn deliver_then_confirm(frames: Vec<SegmentAudio>, sink: &mut Vec<SegmentAudio>) {
+///     sink.extend(frames);
+///     let _ = PlaybackReceipt::from_frames(frames);
+/// }
+/// ```
+///
+/// That is the whole of what the type keeps from the synthesiser. One that withholds every frame
+/// from every sink still holds them, and can make a receipt of them and confirm playback of audio
+/// nobody heard; in one process no type prevents that, and it is a fault of the implementation
+/// for the conformance checks of a real adapter to catch.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PlaybackReceipt {
+    segment_id: Option<SegmentId>,
+    frames: usize,
+}
+
+impl PlaybackReceipt {
+    /// The receipt of playback of `frames`, every one a frame of one segment, consuming them. No
+    /// frames make the receipt of no frames, which names no segment.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameOfAnotherSegment`] when the frames speak more than one segment. No receipt is
+    /// made.
+    pub fn from_frames(frames: Vec<SegmentAudio>) -> Result<Self, FrameOfAnotherSegment> {
+        let segment_id = frames.first().map(|audio| audio.segment_id);
+        if let Some(segment_id) = segment_id
+            && let Some(other) = frames.iter().find(|audio| audio.segment_id != segment_id)
+        {
+            return Err(FrameOfAnotherSegment {
+                segment_id,
+                other: other.segment_id,
+            });
+        }
+        Ok(Self {
+            segment_id,
+            frames: frames.len(),
+        })
+    }
+
+    /// The segment whose frames were played, or `None` for the receipt of no frames.
+    #[must_use]
+    pub const fn segment_id(&self) -> Option<SegmentId> {
+        self.segment_id
+    }
+
+    /// How many frames of it were played.
+    #[must_use]
+    pub const fn frames(&self) -> usize {
+        self.frames
+    }
 }
 
 /// An event of one synthesis, as a [`SynthesisHandle`] yields it, in the order the implementation
 /// produced it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum SynthesisEvent {
     /// A frame of a segment's audio.
     Audio(SegmentAudio),
@@ -197,6 +356,67 @@ impl fmt::Display for FrameLengthMismatch {
 
 impl Error for FrameLengthMismatch {}
 
+/// A playback receipt speaks one segment, `segment_id`, and a frame of `other` was among its
+/// frames, or was offered as the receipt of `segment_id`; no receipt is made and nothing changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameOfAnotherSegment {
+    pub segment_id: SegmentId,
+    pub other: SegmentId,
+}
+
+impl fmt::Display for FrameOfAnotherSegment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a receipt for segment {} was given a frame of segment {}",
+            self.segment_id, self.other
+        )
+    }
+}
+
+impl Error for FrameOfAnotherSegment {}
+
+/// The receipts given for the segment `segment_id` confirm `played` frames of it, this one
+/// included, where the synthesis emitted `emitted`, so its audio was not played exactly; the
+/// segment did not move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayedFramesMismatch {
+    pub segment_id: SegmentId,
+    pub played: usize,
+    pub emitted: usize,
+}
+
+impl fmt::Display for PlayedFramesMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the receipts confirm {} frame(s) of segment {} where {} were emitted",
+            self.played, self.segment_id, self.emitted
+        )
+    }
+}
+
+impl Error for PlayedFramesMismatch {}
+
+/// The synthesiser already runs `max_concurrency` syntheses, the maximum concurrency its adapter
+/// declares, so a further start is refused and nothing started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConcurrencyLimitReached {
+    pub max_concurrency: i64,
+}
+
+impl fmt::Display for ConcurrencyLimitReached {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the synthesiser already runs {} synthesis(es), its declared maximum concurrency",
+            self.max_concurrency
+        )
+    }
+}
+
+impl Error for ConcurrencyLimitReached {}
+
 /// Declares a refusal enum whose variants each wrap one error type of the same name, with its
 /// `Display`, `Error::source` and a `From` for each variant.
 macro_rules! refusal {
@@ -277,13 +497,19 @@ refusal! {
 }
 
 refusal! {
-    /// Why playback was not acknowledged; nothing changed either way.
+    /// Why playback was not acknowledged. The segment did not move; the frames of the receipt
+    /// stay counted as played of the segment they speak, so the receipt is not lost and a later
+    /// acknowledgement confirms them (see [`SynthesisOutput::acknowledge_playback`]).
     pub enum PlaybackRefused {
         /// The synthesis holds no such segment.
         SegmentNotHeld,
         /// The `wrong-state` outcome of `inference.stream.AcknowledgePlayback`: the segment is not
         /// Synthesized.
         SegmentStateConflict,
+        /// The receipt's frames are of another segment.
+        FrameOfAnotherSegment,
+        /// The receipts confirm fewer or more frames than the synthesis emitted of the segment.
+        PlayedFramesMismatch,
     }
 }
 
@@ -299,8 +525,9 @@ refusal! {
 }
 
 /// One synthesis of one utterance: the segments offered, in the order they were, the first
-/// `taken` of them taken by the implementation, and the frames emitted of each, with the
-/// capabilities of the adapter producing it. It is the one record of each segment offered to it:
+/// `taken` of them taken by the implementation, and the frames emitted of each and confirmed as
+/// played of each, with the capabilities of the adapter producing it. It is the one record of
+/// each segment offered to it:
 /// every segment moves through a transition of [`OutputSegment`], so a refused move changes
 /// nothing.
 ///
@@ -315,6 +542,7 @@ pub struct SynthesisOutput {
     capabilities: Vec<Capability>,
     segments: Vec<OutputSegment>,
     frames: Vec<usize>,
+    played: Vec<usize>,
     taken: usize,
     utterance_ended: bool,
 }
@@ -327,6 +555,7 @@ impl SynthesisOutput {
             capabilities: adapter.capabilities().to_vec(),
             segments: Vec::new(),
             frames: Vec::new(),
+            played: Vec::new(),
             taken: 0,
             utterance_ended: false,
         }
@@ -354,6 +583,7 @@ impl SynthesisOutput {
         let (queued, event) = segment.queue()?;
         self.segments.push(queued);
         self.frames.push(0);
+        self.played.push(0);
         Ok(event)
     }
 
@@ -370,14 +600,15 @@ impl SynthesisOutput {
         Ok(())
     }
 
-    /// Gives the segments offered and not yet taken to the implementation, in the order they were
-    /// offered, leaving out those discarded before they were taken.
+    /// Gives a snapshot of each segment offered and not yet taken to the implementation, in the
+    /// order they were offered, leaving out those discarded before they were taken. The segments
+    /// themselves stay in the synthesis's record.
     ///
     /// # Errors
     ///
     /// [`CapabilityNotClaimed`] naming [`Capability::IncrementalInput`] when the utterance is not
     /// complete and the adapter does not claim it; no segment is taken.
-    pub fn take_input(&mut self) -> Result<Vec<OutputSegment>, CapabilityNotClaimed> {
+    pub fn take_input(&mut self) -> Result<Vec<SegmentSnapshot>, CapabilityNotClaimed> {
         if !self.utterance_ended && !self.capabilities.contains(&Capability::IncrementalInput) {
             return Err(CapabilityNotClaimed {
                 capability: Capability::IncrementalInput,
@@ -386,7 +617,7 @@ impl SynthesisOutput {
         let taken = self.segments[self.taken..]
             .iter()
             .filter(|segment| segment.state() == SegmentState::Queued)
-            .cloned()
+            .map(OutputSegment::snapshot)
             .collect();
         self.taken = self.segments.len();
         Ok(taken)
@@ -459,20 +690,65 @@ impl SynthesisOutput {
     }
 
     /// Runs the `played` outcome of `inference.stream.AcknowledgePlayback` on the segment
-    /// `segment_id`: Synthesized to Played. Only the media sink calls it: a synthesiser never
-    /// confirms playback.
+    /// `segment_id`: Synthesized to Played. It takes the [`PlaybackReceipt`] the media sink made
+    /// by consuming the frames of the segment delivered to it, every frame the synthesis emitted
+    /// of it; the receipt of no frames confirms a segment the synthesis emitted no frame of. A
+    /// segment identity is not a receipt:
+    ///
+    /// ```compile_fail,E0308
+    /// # use inference_tts::SynthesisOutput;
+    /// # use inference_tts::inference_text::SegmentId;
+    /// fn confirm_own_playback(output: &mut SynthesisOutput, segment_id: SegmentId) {
+    ///     let _ = output.acknowledge_playback(segment_id, segment_id);
+    /// }
+    /// ```
+    ///
+    /// So a synthesiser that delivered the frames to a sink cannot confirm their playback. One
+    /// that withholds every frame from every sink can make the receipt of them itself; no type
+    /// prevents that in one process (see [`PlaybackReceipt`]).
+    ///
+    /// A refusal loses no playback. The frames of the receipt are counted as played of the
+    /// segment they speak, if the synthesis holds it, whatever the outcome
+    /// ([`SynthesisOutput::frames_played`]); the segment moves only once the frames counted as
+    /// played of it are every frame it emitted. So a sink whose receipt was refused, because the
+    /// segment was still Queued or because it named the wrong segment, acknowledges again once
+    /// the segment is Synthesized, with the receipt of the frames it has played since, the
+    /// receipt of no frames if none.
     ///
     /// # Errors
     ///
-    /// [`PlaybackRefused::SegmentNotHeld`] when the synthesis holds no such segment, and
+    /// [`PlaybackRefused::SegmentNotHeld`] when the synthesis holds no such segment,
     /// [`PlaybackRefused::SegmentStateConflict`] carrying its state when it is not Synthesized, a
-    /// Queued one among them. Nothing moves.
+    /// Queued one among them, [`PlaybackRefused::FrameOfAnotherSegment`] when the receipt's frames
+    /// are of another segment, and [`PlaybackRefused::PlayedFramesMismatch`] carrying the frames
+    /// counted as played when they are not as many as the synthesis emitted of the segment, the
+    /// receipt of no frames for a segment with frames none of which were counted among them. The
+    /// segment does not move; the receipt's frames stay counted.
     pub fn acknowledge_playback(
         &mut self,
         segment_id: SegmentId,
+        receipt: PlaybackReceipt,
     ) -> Result<AudioPlayed, PlaybackRefused> {
+        if let Some(spoken) = receipt.segment_id
+            && let Ok(index) = self.held_index(spoken)
+        {
+            self.played[index] = self.played[index].saturating_add(receipt.frames);
+        }
         let index = self.held_index(segment_id)?;
         let (played, event) = self.segments[index].play()?;
+        if let Some(other) = receipt.segment_id
+            && other != segment_id
+        {
+            return Err(FrameOfAnotherSegment { segment_id, other }.into());
+        }
+        if self.played[index] != self.frames[index] {
+            return Err(PlayedFramesMismatch {
+                segment_id,
+                played: self.played[index],
+                emitted: self.frames[index],
+            }
+            .into());
+        }
         self.segments[index] = played;
         Ok(event)
     }
@@ -533,6 +809,16 @@ impl SynthesisOutput {
             .map(|index| self.frames[index])
     }
 
+    /// How many frames of the segment `segment_id` the receipts given to
+    /// [`SynthesisOutput::acknowledge_playback`] have confirmed as played, refused ones among
+    /// them, or `None` when the synthesis holds no such segment.
+    #[must_use]
+    pub fn frames_played(&self, segment_id: SegmentId) -> Option<usize> {
+        self.held_index(segment_id)
+            .ok()
+            .map(|index| self.played[index])
+    }
+
     fn held_index(&self, segment_id: SegmentId) -> Result<usize, SegmentNotHeld> {
         self.segments
             .iter()
@@ -569,8 +855,13 @@ pub trait Synthesiser {
     /// it.
     fn adapter(&self) -> &Adapter;
 
-    /// Starts one synthesis of one utterance.
-    fn start(&mut self) -> Self::Handle;
+    /// Starts one synthesis of one utterance. A synthesis runs until its handle is dropped.
+    ///
+    /// # Errors
+    ///
+    /// [`ConcurrencyLimitReached`] carrying the adapter's `max_concurrency` when that many
+    /// syntheses of this synthesiser already run; nothing starts.
+    fn start(&mut self) -> Result<Self::Handle, ConcurrencyLimitReached>;
 }
 
 /// One running synthesis. A caller offers committed segments with
@@ -580,9 +871,11 @@ pub trait Synthesiser {
 /// utterance ends, and, once it has ended, that nothing more is delivered at all.
 /// [`SynthesisHandle::output`] shows where the synthesis stands.
 ///
-/// The media sink acknowledges playback through [`SynthesisHandle::acknowledge_playback`], and a
-/// caller discards a segment through [`SynthesisHandle::discard`]; both run on the synthesis's own
-/// record. An implementation passes both through and never calls them itself.
+/// The media sink acknowledges playback through [`SynthesisHandle::acknowledge_playback`] with the
+/// [`PlaybackReceipt`] it made by consuming the frames it played, and a caller discards a segment
+/// through
+/// [`SynthesisHandle::discard`]; both run on the synthesis's own record. An implementation passes
+/// both through and never calls them itself.
 pub trait SynthesisHandle: Iterator<Item = SynthesisEvent> {
     /// The synthesis and its segments, as they stand now.
     fn output(&self) -> &SynthesisOutput;
@@ -601,8 +894,8 @@ pub trait SynthesisHandle: Iterator<Item = SynthesisEvent> {
     /// [`UtteranceEnded`] when the utterance is already complete.
     fn end_utterance(&mut self) -> Result<(), UtteranceEnded>;
 
-    /// Runs `inference.stream.AcknowledgePlayback` through
-    /// [`SynthesisOutput::acknowledge_playback`], on behalf of the media sink.
+    /// Runs `inference.stream.AcknowledgePlayback` on the segment `segment_id` through
+    /// [`SynthesisOutput::acknowledge_playback`] with the media sink's `receipt`.
     ///
     /// # Errors
     ///
@@ -610,6 +903,7 @@ pub trait SynthesisHandle: Iterator<Item = SynthesisEvent> {
     fn acknowledge_playback(
         &mut self,
         segment_id: SegmentId,
+        receipt: PlaybackReceipt,
     ) -> Result<AudioPlayed, PlaybackRefused>;
 
     /// Runs `inference.stream.DiscardSegment` through [`SynthesisOutput::discard`]; nothing of

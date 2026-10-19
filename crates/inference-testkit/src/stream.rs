@@ -162,7 +162,7 @@ impl GenerationStore {
 }
 
 /// The store of `inference.stream.OutputSegment`, in the order the segments were emitted.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct SegmentStore {
     segments: Vec<OutputSegment>,
 }
@@ -660,7 +660,7 @@ pub struct SegmentsRow {
 }
 
 /// `inference.stream` in memory: its four entity stores and the events emitted.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct StreamDomain {
     turns: TurnStore,
     spans: SpanStore,

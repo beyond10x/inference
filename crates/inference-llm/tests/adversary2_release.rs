@@ -16,7 +16,7 @@ use inference_llm::{
     AdmittedByAnotherGeneration, AdmittedInput, CONTRACT_REVISION, GenerationOutput,
     GenerationRequest, InputRefused,
 };
-use inference_text::{OutputSegment, SegmentState};
+use inference_text::{OutputSegment, SegmentSnapshot, SegmentState};
 
 const SECRET: &str = "admitted text 7f3a";
 
@@ -45,10 +45,14 @@ fn started() -> GenerationOutput {
 }
 
 /// Everything a `GenerationOutput` holds; it is not `Clone`.
-fn snapshot(output: &GenerationOutput) -> (Generation, Vec<OutputSegment>, Vec<Capability>) {
+fn snapshot(output: &GenerationOutput) -> (Generation, Vec<SegmentSnapshot>, Vec<Capability>) {
     (
         output.generation().clone(),
-        output.segments().to_vec(),
+        output
+            .segments()
+            .iter()
+            .map(OutputSegment::snapshot)
+            .collect(),
         output.capabilities().to_vec(),
     )
 }

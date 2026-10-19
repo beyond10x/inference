@@ -40,7 +40,9 @@ fn format() -> AudioFormat {
 #[test]
 fn once_the_sink_acknowledges_playback_the_synthesis_record_refuses_discard() {
     for configuration in MockConfiguration::ALL {
-        let mut handle = MockSynthesiser::new(configuration, ModelId::generate(), format()).start();
+        let mut handle = MockSynthesiser::new(configuration, ModelId::generate(), format())
+            .start()
+            .expect("a fresh synthesiser runs nothing else");
         let segment = committed("Hello there.");
         let id = segment.segment_id();
         handle.offer_segment(segment).expect("queued");

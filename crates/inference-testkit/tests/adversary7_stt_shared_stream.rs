@@ -25,7 +25,9 @@ fn recognise(
     recogniser: &mut MockRecogniser,
     request: RecognitionRequest,
 ) -> (Vec<EventEnvelope<TranscriptEvent>>, Vec<i64>) {
-    let mut handle = recogniser.start(request);
+    let mut handle = recogniser
+        .start(request)
+        .expect("the previous recognition was dropped");
     let mut events = Vec::new();
     for frame in frames(6) {
         handle.offer_frame(frame).expect("input has not ended");
@@ -66,7 +68,8 @@ fn two_recognitions_on_one_stream_obey_the_per_stream_sequence() {
                 last.sequence + 1,
                 node_id,
                 "text_out",
-            ),
+            )
+            .expect("one past a recorded sequence is a sequence"),
         };
         let (events, sequences) = recognise(&mut recogniser, request);
         span_sequences.extend(sequences);
