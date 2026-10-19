@@ -8,9 +8,9 @@
 //! target answered is answered. `ObservedEvent::at` places an occurrence "in the target's own
 //! publication order", which is one order for the target as well.
 //!
-//! A run store does not exist yet, so a generation is arranged with the store's own
-//! `start_generation`, as the module tests do. The two modules are loaded as modules of this file
-//! because `target/mod.rs` keeps them private; their functions run unchanged.
+//! A generation is arranged with the store's own `start_generation`, past the run refusals, which
+//! these cases do not exercise, as the module tests do. The two modules are loaded as modules of
+//! this file because `target/mod.rs` keeps them private; their functions run unchanged.
 
 #![allow(clippy::duplicate_mod)]
 

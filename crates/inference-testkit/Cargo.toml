@@ -17,6 +17,7 @@ tts = ["dep:inference-tts"]
 inference-core = { path = "../inference-core" }
 inference-llm = { path = "../inference-llm", optional = true }
 inference-pipeline = { path = "../inference-pipeline" }
+inference-runtime = { path = "../inference-runtime" }
 inference-stt = { path = "../inference-stt", optional = true }
 inference-text = { path = "../inference-text" }
 inference-tts = { path = "../inference-tts", optional = true }
