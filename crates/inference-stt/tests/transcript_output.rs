@@ -16,8 +16,9 @@ use inference_stt::inference_text::{
     CommittedSpanImmutable, ReviseSpan, SpanId, SpanNotFound, SpanState, SpanStateConflict, TurnId,
 };
 use inference_stt::{
-    CONTRACT_REVISION, CapabilityNotClaimed, CommitRefused, InputEnded, RecognitionRequest,
-    RevisionRefused, TranscriptEvent, TranscriptOutput,
+    CONTRACT_REVISION, CapabilityNotClaimed, CommitRefused, HypothesisRefused, InputEnded,
+    NonPositiveSequence, RecognitionRequest, RevisionRefused, SequenceExhausted, TranscriptEvent,
+    TranscriptOutput,
 };
 
 fn adapter(capabilities: Vec<Capability>) -> Adapter {
@@ -89,9 +90,11 @@ fn a_span_is_emitted_before_the_end_only_when_output_streaming_is_claimed() {
     let mut batch = output(vec![Capability::IncrementalInput]);
     assert_eq!(
         batch.hypothesis("early".to_owned()),
-        Err(CapabilityNotClaimed {
-            capability: Capability::OutputStreaming,
-        })
+        Err(HypothesisRefused::CapabilityNotClaimed(
+            CapabilityNotClaimed {
+                capability: Capability::OutputStreaming,
+            }
+        ))
     );
     assert!(batch.spans().is_empty());
     batch.end_input().expect("input ends once");
@@ -235,9 +238,9 @@ fn every_event_is_enveloped_on_the_request_stream_at_the_next_sequence() {
 #[test]
 fn a_recognition_continuing_a_stream_numbers_its_envelopes_and_spans_from_the_given_sequence() {
     let fresh = request();
-    assert_eq!(fresh.first_sequence, 1);
+    assert_eq!(fresh.first_sequence(), 1);
     let fresh_output = TranscriptOutput::start(&adapter(Vec::new()), fresh.clone());
-    assert_eq!(fresh_output.next_sequence(), 1);
+    assert_eq!(fresh_output.next_sequence(), Some(1));
 
     let request = RecognitionRequest::continuing(
         fresh.run_id,
@@ -246,10 +249,11 @@ fn a_recognition_continuing_a_stream_numbers_its_envelopes_and_spans_from_the_gi
         7,
         fresh.node_id,
         "text_out",
-    );
-    assert_eq!(request.first_sequence, 7);
+    )
+    .expect("7 is a sequence of a stream");
+    assert_eq!(request.first_sequence(), 7);
     let mut output = TranscriptOutput::start(&adapter(Vec::new()), request);
-    assert_eq!(output.next_sequence(), 7);
+    assert_eq!(output.next_sequence(), Some(7));
     output.end_input().expect("input ends once");
     let hypothesis = output.hypothesis("hi".to_owned()).expect("input has ended");
     let span_id = hypothesis.payload.span_id();
@@ -258,5 +262,85 @@ fn a_recognition_continuing_a_stream_numbers_its_envelopes_and_spans_from_the_gi
     assert_eq!(hypothesis.sequence, 7);
     assert_eq!(committed.sequence, 8);
     assert_eq!(output.span(span_id).expect("held").sequence(), 7);
-    assert_eq!(output.next_sequence(), 9);
+    assert_eq!(output.next_sequence(), Some(9));
+}
+
+#[test]
+fn a_continuing_request_refuses_a_first_sequence_below_one() {
+    let fresh = request();
+    for submitted in [0, -1, i64::MIN] {
+        assert_eq!(
+            RecognitionRequest::continuing(
+                fresh.run_id,
+                TurnId::generate(),
+                fresh.stream_id,
+                submitted,
+                fresh.node_id,
+                "text_out",
+            )
+            .map(|request| request.first_sequence()),
+            Err(NonPositiveSequence { submitted }),
+            "a stream's sequences start at 1"
+        );
+    }
+    for accepted in [1, i64::MAX] {
+        assert_eq!(
+            RecognitionRequest::continuing(
+                fresh.run_id,
+                TurnId::generate(),
+                fresh.stream_id,
+                accepted,
+                fresh.node_id,
+                "text_out",
+            )
+            .map(|request| request.first_sequence()),
+            Ok(accepted)
+        );
+    }
+}
+
+#[test]
+fn past_the_last_sequence_of_a_stream_the_recognition_refuses_and_nothing_moves() {
+    let fresh = request();
+    let request = RecognitionRequest::continuing(
+        fresh.run_id,
+        TurnId::generate(),
+        fresh.stream_id,
+        i64::MAX,
+        fresh.node_id,
+        "text_out",
+    )
+    .expect("i64::MAX is a sequence of a stream");
+    let mut output = TranscriptOutput::start(&adapter(Vec::new()), request);
+    output.end_input().expect("input ends once");
+
+    let hypothesis = output
+        .hypothesis("last".to_owned())
+        .expect("i64::MAX is left");
+    assert_eq!(hypothesis.sequence, i64::MAX);
+    assert_eq!(output.next_sequence(), None, "no sequence is left");
+    let span_id = hypothesis.payload.span_id();
+    let exhausted = SequenceExhausted {
+        stream_id: fresh.stream_id,
+    };
+
+    assert_eq!(
+        output.hypothesis("past".to_owned()),
+        Err(HypothesisRefused::SequenceExhausted(exhausted))
+    );
+    assert_eq!(output.spans().len(), 1, "no span was added");
+    assert_eq!(
+        output.revise(ReviseSpan {
+            span_id,
+            text: "revised".to_owned(),
+        }),
+        Err(RevisionRefused::SequenceExhausted(exhausted))
+    );
+    assert_eq!(
+        output.commit(span_id),
+        Err(CommitRefused::SequenceExhausted(exhausted))
+    );
+    let span = output.span(span_id).expect("held");
+    assert_eq!(span.text(), "last");
+    assert_eq!(span.state(), SpanState::Hypothesis);
 }

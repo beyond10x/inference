@@ -11,10 +11,11 @@ use inference_tts::inference_core::id::{NodeId, RunId};
 use inference_tts::inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
-use inference_tts::inference_text::{OutputSegment, SegmentState, SegmentStateConflict};
+use inference_tts::inference_text::{OutputSegment, SegmentId, SegmentState, SegmentStateConflict};
 use inference_tts::{
     AudioRefused, CONTRACT_REVISION, CapabilityNotClaimed, CompletionRefused, FrameLengthMismatch,
-    OfferRefused, SegmentNotTaken, SynthesisEvent, SynthesisOutput, UtteranceEnded,
+    FrameOfAnotherSegment, OfferRefused, PlaybackReceipt, PlaybackRefused, PlayedFramesMismatch,
+    SegmentAudio, SegmentNotTaken, SynthesisEvent, SynthesisOutput, UtteranceEnded,
 };
 
 fn adapter(capabilities: Vec<Capability>) -> Adapter {
@@ -55,12 +56,21 @@ fn frame(sample_count: u32, bytes: usize) -> AudioFrame {
     }
 }
 
+/// The frames among `events`, in order.
+fn frames_of(events: Vec<SynthesisEvent>) -> Vec<SegmentAudio> {
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            SynthesisEvent::Audio(audio) => Some(audio),
+            SynthesisEvent::Completed(_) => None,
+        })
+        .collect()
+}
+
 #[test]
 fn input_is_taken_before_the_utterance_ends_only_where_incremental_input_is_claimed() {
-    let segment = committed("hello");
-
     let mut batch = SynthesisOutput::start(&adapter(Vec::new()));
-    batch.offer(segment.clone()).expect("queued");
+    batch.offer(committed("hello")).expect("queued");
     assert_eq!(
         batch.take_input(),
         Err(CapabilityNotClaimed {
@@ -75,7 +85,7 @@ fn input_is_taken_before_the_utterance_ends_only_where_incremental_input_is_clai
     assert_eq!(taken[0].state(), SegmentState::Queued);
 
     let mut incremental = SynthesisOutput::start(&adapter(vec![Capability::IncrementalInput]));
-    incremental.offer(segment.clone()).expect("queued");
+    incremental.offer(committed("hello")).expect("queued");
     assert_eq!(incremental.take_input().map(|taken| taken.len()), Ok(1));
     assert_eq!(incremental.take_input().map(|taken| taken.len()), Ok(0));
     assert_eq!(incremental.segments_taken(), 1);
@@ -87,7 +97,7 @@ fn audio_of_a_queued_segment_is_emitted_only_where_output_streaming_is_claimed()
     let id = segment.segment_id();
 
     let mut batch = SynthesisOutput::start(&adapter(Vec::new()));
-    batch.offer(segment.clone()).expect("queued");
+    batch.offer(segment).expect("queued");
     batch.end_utterance().expect("ends once");
     assert_eq!(
         batch.audio(id, frame(2, 4)),
@@ -128,7 +138,7 @@ fn audio_of_a_queued_segment_is_emitted_only_where_output_streaming_is_claimed()
     assert!(
         completed[1..]
             .iter()
-            .all(|event| matches!(event, SynthesisEvent::Audio(audio) if audio.segment_id == id))
+            .all(|event| matches!(event, SynthesisEvent::Audio(audio) if audio.segment_id() == id))
     );
     assert_eq!(batch.frames_emitted(id), Some(2));
     assert_eq!(
@@ -146,8 +156,10 @@ fn audio_of_a_queued_segment_is_emitted_only_where_output_streaming_is_claimed()
         })),
         "the audio of a Synthesized segment is final"
     );
+    let receipt =
+        PlaybackReceipt::from_frames(frames_of(completed)).expect("frames of one segment");
     batch
-        .acknowledge_playback(id)
+        .acknowledge_playback(id, receipt)
         .expect("Synthesized to Played");
     assert_eq!(
         batch.audio(id, frame(2, 4)),
@@ -158,8 +170,10 @@ fn audio_of_a_queued_segment_is_emitted_only_where_output_streaming_is_claimed()
     );
     assert_eq!(batch.frames_emitted(id), Some(2));
 
+    let streamed = committed("hello");
+    let id = streamed.segment_id();
     let mut streaming = SynthesisOutput::start(&adapter(vec![Capability::OutputStreaming]));
-    streaming.offer(segment.clone()).expect("queued");
+    streaming.offer(streamed).expect("queued");
     streaming.end_utterance().expect("ends once");
     streaming.take_input().expect("after the end");
     assert!(streaming.audio(id, frame(2, 4)).is_ok());
@@ -175,7 +189,7 @@ fn a_frame_whose_data_length_disagrees_with_its_samples_is_refused() {
     let segment = committed("hello");
     let id = segment.segment_id();
     let mut output = SynthesisOutput::start(&adapter(vec![Capability::OutputStreaming]));
-    output.offer(segment.clone()).expect("queued");
+    output.offer(segment).expect("queued");
     output.end_utterance().expect("ends once");
     output.take_input().expect("after the end");
 
@@ -193,12 +207,23 @@ fn a_frame_whose_data_length_disagrees_with_its_samples_is_refused() {
 
 #[test]
 fn a_segment_is_queued_once_and_not_after_the_utterance_ends() {
-    let segment = committed("hello");
+    let (generation, _) = Generation::start(StartGeneration {
+        run_id: RunId::generate(),
+        node_id: NodeId::generate(),
+        epoch: 1,
+    });
+    let (tentative, _) =
+        OutputSegment::emit(&generation, 1, "hello".to_owned()).expect("the generation is Active");
+    let (segment, _) = tentative.commit().expect("a Tentative segment commits");
+    let (again, _) = tentative
+        .commit()
+        .expect("the Tentative segment commits again into a second value of one identity");
+    let id = segment.segment_id();
     let mut output = SynthesisOutput::start(&adapter(Vec::new()));
-    let queued = output.offer(segment.clone()).expect("queued");
-    assert_eq!(queued.segment_id, segment.segment_id());
+    let queued = output.offer(segment).expect("queued");
+    assert_eq!(queued.segment_id, id);
     assert_eq!(
-        output.offer(segment.clone()),
+        output.offer(again),
         Err(OfferRefused::SegmentStateConflict(SegmentStateConflict {
             current: SegmentState::Queued,
         })),
@@ -217,5 +242,151 @@ fn a_segment_is_queued_once_and_not_after_the_utterance_ends() {
         Err(CompletionRefused::SegmentNotTaken(SegmentNotTaken {
             segment_id: stranger,
         }))
+    );
+}
+
+/// A synthesis of `texts` without output streaming, each segment completed with `frames` frames;
+/// returns the synthesis, the identities and the frames of each segment.
+fn synthesised(
+    texts: &[&str],
+    frames: usize,
+) -> (SynthesisOutput, Vec<SegmentId>, Vec<Vec<SegmentAudio>>) {
+    let mut output = SynthesisOutput::start(&adapter(Vec::new()));
+    let mut ids = Vec::new();
+    for text in texts {
+        let segment = committed(text);
+        ids.push(segment.segment_id());
+        output.offer(segment).expect("queued");
+    }
+    output.end_utterance().expect("ends once");
+    output.take_input().expect("after the end");
+    let audio = ids
+        .iter()
+        .map(|id| {
+            frames_of(
+                output
+                    .complete(*id, (0..frames).map(|_| frame(2, 4)).collect())
+                    .expect("Queued to Synthesized"),
+            )
+        })
+        .collect();
+    (output, ids, audio)
+}
+
+#[test]
+fn playback_is_acknowledged_only_with_a_receipt_of_every_frame_the_synthesis_emitted() {
+    let (mut output, ids, mut audio) = synthesised(&["one", "two"], 2);
+    let (one, two) = (ids[0], ids[1]);
+    let mut mixed = audio[0].split_off(1);
+    mixed.push(audio[1].pop().expect("two frames"));
+    assert_eq!(
+        PlaybackReceipt::from_frames(mixed),
+        Err(FrameOfAnotherSegment {
+            segment_id: one,
+            other: two,
+        }),
+        "a receipt speaks one segment"
+    );
+
+    let empty = PlaybackReceipt::from_frames(Vec::new()).expect("the receipt of no frames");
+    assert_eq!(empty.segment_id(), None);
+    assert_eq!(
+        output.acknowledge_playback(one, empty),
+        Err(PlaybackRefused::PlayedFramesMismatch(
+            PlayedFramesMismatch {
+                segment_id: one,
+                played: 0,
+                emitted: 2,
+            }
+        )),
+        "the receipt of no frames does not confirm a segment with frames"
+    );
+
+    let partial = PlaybackReceipt::from_frames(audio.remove(0)).expect("one frame of one");
+    assert_eq!(partial.frames(), 1);
+    assert_eq!(
+        output.acknowledge_playback(one, partial),
+        Err(PlaybackRefused::PlayedFramesMismatch(
+            PlayedFramesMismatch {
+                segment_id: one,
+                played: 1,
+                emitted: 2,
+            }
+        )),
+        "one of the two frames emitted was played, so the segment is not Played"
+    );
+    let of_two = PlaybackReceipt::from_frames(audio.remove(0)).expect("one frame of two");
+    assert_eq!(
+        output.acknowledge_playback(one, of_two),
+        Err(PlaybackRefused::FrameOfAnotherSegment(
+            FrameOfAnotherSegment {
+                segment_id: one,
+                other: two,
+            }
+        )),
+        "a receipt of one segment does not confirm another"
+    );
+    assert_eq!(
+        output.segment(one).map(OutputSegment::state),
+        Some(SegmentState::Synthesized)
+    );
+
+    let (mut whole, ids, mut audio) = synthesised(&["three"], 2);
+    let receipt = PlaybackReceipt::from_frames(audio.remove(0)).expect("both frames of one");
+    assert_eq!(receipt.segment_id(), Some(ids[0]));
+    assert!(whole.acknowledge_playback(ids[0], receipt).is_ok());
+    assert_eq!(
+        whole.segment(ids[0]).map(OutputSegment::state),
+        Some(SegmentState::Played)
+    );
+}
+
+#[test]
+fn a_segment_synthesized_without_frames_is_played_on_the_receipt_of_no_frames() {
+    let (mut output, ids, mut audio) = synthesised(&["silent"], 0);
+    assert_eq!(output.frames_emitted(ids[0]), Some(0));
+    let receipt = PlaybackReceipt::from_frames(audio.remove(0)).expect("the receipt of no frames");
+    assert!(output.acknowledge_playback(ids[0], receipt).is_ok());
+    assert_eq!(
+        output.segment(ids[0]).map(OutputSegment::state),
+        Some(SegmentState::Played)
+    );
+}
+
+#[test]
+fn the_frames_of_a_refused_receipt_stay_counted_and_later_receipts_add_to_them() {
+    let (mut output, ids, mut audio) = synthesised(&["one"], 2);
+    let id = ids[0];
+    let mut frames = audio.remove(0);
+    let second = frames.pop().expect("two frames");
+    assert_eq!(output.frames_played(id), Some(0));
+
+    let first = PlaybackReceipt::from_frames(frames).expect("one frame");
+    assert_eq!(
+        output.acknowledge_playback(id, first),
+        Err(PlaybackRefused::PlayedFramesMismatch(
+            PlayedFramesMismatch {
+                segment_id: id,
+                played: 1,
+                emitted: 2,
+            }
+        ))
+    );
+    assert_eq!(
+        output.frames_played(id),
+        Some(1),
+        "the refused frame stays counted"
+    );
+    assert_eq!(
+        output.segment(id).map(OutputSegment::state),
+        Some(SegmentState::Synthesized)
+    );
+
+    let rest = PlaybackReceipt::from_frames(vec![second]).expect("the other frame");
+    assert!(output.acknowledge_playback(id, rest).is_ok());
+    assert_eq!(output.frames_played(id), Some(2));
+    assert_eq!(
+        output.segment(id).map(OutputSegment::state),
+        Some(SegmentState::Played)
     );
 }
