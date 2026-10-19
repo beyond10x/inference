@@ -1,0 +1,73 @@
+# The audio vocabulary of docs/design/inference.md: the frames, formats and sample clock that audio
+# media carries (§6.1, §6.3, §11.5). Every declaration cites the design line it was read from;
+# these are value types only, and no entity, command, event or view is declared here.
+domain: inference.audio
+
+summary: >-
+  An AudioFrame is a bounded binary buffer of audio samples in one AudioFormat (encoding, sample
+  rate, channels), placed on the stream's sample clock by the SampleClockPosition of its first
+  sample. A sample clock position is a sample index at the format's sample rate: it is audio
+  frame time, one of four distinct clocks beside inference execution time, wall time and playback
+  time. A frame is a value that flows on an edge; it has no identity and no lifecycle.
+
+naming:
+  wire: audio
+  display: Audio
+
+types:
+  # How the samples of a frame are encoded. Two little-endian PCM sample layouts, signed 16-bit
+  # integer and 32-bit float; which layouts are listed is this specification's choice, not the
+  # design's.
+  # read from: docs/design/inference.md:293
+  # UNMAPPED: compressed frames and codec token streams (design 293) have no variant: the design
+  # names neither a codec nor a token stream format. Open question for the owner.
+  - name: inference.audio.AudioEncoding
+    kind: enum
+    variants: [pcm_s16le, pcm_f32le]
+
+  # The format of a frame: encoding, sample rate in hertz and number of channels. That the sample
+  # rate and the channel count are at least one is this specification's rule, not the design's,
+  # and so is a narrowing of the Integer range: a sample rate fits an unsigned 32-bit integer
+  # and a channel count an unsigned 16-bit integer.
+  # read from: docs/design/inference.md:235
+  # read from: docs/design/inference.md:293
+  - name: inference.audio.AudioFormat
+    kind: struct
+    fields:
+      - name: encoding
+        type: inference.audio.AudioEncoding
+      - name: sample_rate
+        type: Integer
+      - name: channels
+        type: Integer
+
+  # A non-negative sample index on a stream's sample clock at the format's sample rate: audio
+  # frame time, distinct from inference execution time, wall time and playback time.
+  # read from: docs/design/inference.md:293
+  # read from: docs/design/inference.md:645
+  - name: inference.audio.SampleClockPosition
+    kind: newtype
+    of: Integer
+
+  # A bounded binary buffer of audio, never base64-encoded JSON on a realtime path; the frame owns
+  # its buffer. Its position is the sample clock position of its first sample; sample_count is the
+  # number of samples per channel, so its duration is sample_count at the format's sample rate.
+  # That sample_count fits an unsigned 32-bit integer is this specification's rule, not the
+  # design's.
+  # read from: docs/design/inference.md:193
+  # read from: docs/design/inference.md:293
+  # read from: docs/design/inference.md:324-325
+  # UNMAPPED: frame timestamps (design 293) have no field beyond the sample clock position: the
+  # design names timestamps without saying which clock they read or how they differ from the
+  # position. Open question for the owner.
+  - name: inference.audio.AudioFrame
+    kind: struct
+    fields:
+      - name: format
+        type: inference.audio.AudioFormat
+      - name: position
+        type: inference.audio.SampleClockPosition
+      - name: sample_count
+        type: Integer
+      - name: data
+        type: Bytes

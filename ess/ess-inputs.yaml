@@ -8,6 +8,7 @@ specification:
   - domains/stream.yaml
   - domains/tools.yaml
   - domains/session.yaml
+  - domains/audio.yaml
 scenarios:
   - scenarios/supersede-discards-unplayed.yaml
   - scenarios/cancel-generation-discards-unplayed.yaml
