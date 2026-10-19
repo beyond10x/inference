@@ -67,8 +67,9 @@ impl Liveness {
 /// output is recorded after.
 ///
 /// The liveness bound runs while the caller awaits the provider: from a request for a response,
-/// or from a commit of the input when `auto_response` is on, until the response ends. A session
-/// nobody awaits anything of is idle, not stalled.
+/// from a commit of the input when `auto_response` is on, or, when the model creates every
+/// response, from the answer to a call, until the response ends. A session nobody awaits
+/// anything of is idle, not stalled.
 #[derive(Debug, Clone)]
 pub struct SessionLedger {
     session: SpeechSession,
@@ -80,6 +81,8 @@ pub struct SessionLedger {
     calls: Vec<SpeechToolCall>,
     liveness: Liveness,
     requested: bool,
+    /// The bound was armed without an instant: it starts at the next liveness check.
+    clock_pending: bool,
     outbox: VecDeque<SessionEvent>,
 }
 
@@ -129,6 +132,7 @@ impl SessionLedger {
             calls: Vec::new(),
             liveness: Liveness::new(config.idle_limit, now),
             requested: false,
+            clock_pending: false,
             outbox: VecDeque::new(),
         };
         Ok((ledger, opened))
@@ -198,6 +202,12 @@ impl SessionLedger {
     #[must_use]
     pub const fn liveness(&self) -> &Liveness {
         &self.liveness
+    }
+
+    /// How many recorded events are not yet delivered.
+    #[must_use]
+    pub fn undelivered(&self) -> usize {
+        self.outbox.len()
     }
 
     /// The next recorded event not yet delivered.
@@ -320,7 +330,12 @@ impl SessionLedger {
         Ok(())
     }
 
-    /// The caller answers a call: `inference.duplex.AnswerSpeechToolCall`.
+    /// The caller answers a call: `inference.duplex.AnswerSpeechToolCall`. A model that creates
+    /// every response owes a new one that answers the result, so the liveness bound runs, as
+    /// after a commit, until that response begins, also when the answer comes before the
+    /// response that proposed the call ended. Time is not passed here: with no response in
+    /// progress the bound runs from the next [`SessionLedger::check_liveness`], so the time the
+    /// caller took to compute the result does not count.
     ///
     /// # Errors
     ///
@@ -339,6 +354,12 @@ impl SessionLedger {
         *slot = moved;
         self.outbox
             .push_back(SessionEvent::SpeechToolCallAnswered(event));
+        if !self.capabilities.manual_response {
+            if !self.awaiting() {
+                self.clock_pending = true;
+            }
+            self.requested = true;
+        }
         Ok(())
     }
 
@@ -385,7 +406,14 @@ impl SessionLedger {
     /// Fails an open session as stalled when the caller awaits the provider and it has been
     /// silent for the whole bound at `now`; returns whether it did.
     pub fn check_liveness(&mut self, now: Instant) -> bool {
-        if self.session.require_open().is_err() || !self.awaiting() || !self.liveness.expired(now) {
+        if self.session.require_open().is_err() || !self.awaiting() {
+            return false;
+        }
+        if self.clock_pending {
+            self.heard(now);
+            return false;
+        }
+        if !self.liveness.expired(now) {
             return false;
         }
         let silent = now.saturating_duration_since(self.liveness.last_heard);
@@ -403,6 +431,7 @@ impl SessionLedger {
     /// The provider was heard from at `now`, whatever it sent.
     pub fn heard(&mut self, now: Instant) {
         self.liveness.heard(now);
+        self.clock_pending = false;
     }
 
     /// The provider's turn detection committed the input. With `auto_response` on it owes a
@@ -691,7 +720,7 @@ impl SessionLedger {
     /// The caller awaits a response from `now`, unless it already awaits one.
     fn await_response(&mut self, now: Instant) {
         if !self.awaiting() {
-            self.liveness.heard(now);
+            self.heard(now);
         }
         self.requested = true;
     }

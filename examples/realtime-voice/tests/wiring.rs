@@ -307,6 +307,41 @@ fn a_provider_side_barge_in_stops_playout_without_truncating() {
     );
 }
 
+/// The operator speaks over a Nova answer the provider finished generating while the speaker
+/// still plays it. The `server_turns` mock reports speech where the Nova Sonic binding does: its
+/// interruption notice, also over a completed response, so playout stops.
+#[test]
+fn speech_over_a_nova_answer_still_playing_stops_playout() {
+    let host = FakeHost::laptop();
+    let mut model = MockSpeechModel::server_turns(vec![
+        say("tell me a story", "Once upon a time."),
+        say("stop", "Stopped."),
+    ]);
+    let mut conversation = open(&mut model, nova_config(), &host);
+
+    speak(&host, 100);
+    pause(&host, 100);
+    let notes = step_until(&mut conversation, completed);
+    let _ = host.pull(TEN_MS_FRAMES).expect("the speaker runs");
+    assert!(
+        conversation.speaker().queued() > 0,
+        "the rest of the answer still plays: {notes:#?}"
+    );
+
+    speak(&host, 40);
+    let mut after = Vec::new();
+    for _ in 0..5 {
+        after.extend(conversation.step());
+    }
+    assert!(
+        after
+            .iter()
+            .any(|note| matches!(note, Note::BargeIn { .. })),
+        "{after:#?}"
+    );
+    assert_eq!(conversation.speaker().queued(), 0, "nothing more plays");
+}
+
 #[test]
 fn the_time_tool_is_answered_by_call_id_and_its_answer_spoken() {
     let host = FakeHost::laptop();

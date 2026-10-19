@@ -9,7 +9,10 @@
 //! what runs against an adapter.
 //!
 //! Dependency is shown by content, never by timing alone: the input sent during output says a
-//! `marker` the output before it did not contain, and the output after it must contain it. A
+//! `marker` the output before it did not contain, and the output after it must contain it. The
+//! output before it is everything recorded before the input is sent, not only the event that
+//! showed output began; and an opening whose transcript already says the marker is refused as
+//! [`NoNativeDuplex::MarkerInOpening`], since output saying it then depends on nothing later. A
 //! live adapter runs it with recorded speech that says the marker; a mock runs it with whatever
 //! its recogniser hears.
 
@@ -76,7 +79,11 @@ pub enum NoNativeDuplex {
         state: ResponseState,
     },
     /// The response completed without output that says the marker, or said it before the input.
+    /// `before` holds every output transcript recorded before the input was sent.
     NotDependent { before: String, after: String },
+    /// The opening's transcript already says the marker, so output saying it shows no
+    /// dependency on the input sent during output: the probe is unfit, nothing was sent of it.
+    MarkerInOpening { heard: String },
     /// The session failed.
     Failed(SessionFailure),
     /// The response did not complete within the patience.
@@ -100,6 +107,10 @@ impl fmt::Display for NoNativeDuplex {
             Self::NotDependent { before, after } => write!(
                 f,
                 "no output derived from the input: before {before:?}, after {after:?}"
+            ),
+            Self::MarkerInOpening { heard } => write!(
+                f,
+                "the opening already says the marker, so the probe shows nothing: {heard:?}"
             ),
             Self::Failed(failure) => write!(f, "the session failed: {failure}"),
             Self::Silent => f.write_str("the response did not complete"),
@@ -143,6 +154,7 @@ fn run<S: SpeechSessionHandle>(
         session.create_response().map_err(NoNativeDuplex::Refused)?;
     }
 
+    let marker = probe.marker.to_lowercase();
     let mut response = None;
     let mut before = String::new();
     let mut idle = 0;
@@ -155,27 +167,27 @@ fn run<S: SpeechSessionHandle>(
             continue;
         };
         idle = 0;
-        match event {
-            SessionEvent::ResponseCreated(created) => match response {
-                None => response = Some(created.response_id),
-                Some(first) => {
-                    return Err(NoNativeDuplex::Restarted {
-                        first,
-                        second: created.response_id,
-                    });
-                }
-            },
-            SessionEvent::OutputTranscriptDelta(delta) if Some(delta.response_id) == response => {
-                before.push_str(&delta.text);
-                break;
-            }
-            SessionEvent::OutputAudio(audio) if Some(audio.response_id) == response => break,
-            event => ended(&event, response)?,
+        let output = matches!(
+            &event,
+            SessionEvent::OutputTranscriptDelta(delta) if Some(delta.response_id) == response
+        ) || matches!(
+            &event,
+            SessionEvent::OutputAudio(audio) if Some(audio.response_id) == response
+        );
+        opening(event, &marker, &mut response, &mut before)?;
+        if output {
+            break;
         }
     }
     let Some(response_id) = response else {
         return Err(NoNativeDuplex::NoOutput);
     };
+    for _ in 0..session.ledger().undelivered() {
+        let Some(event) = session.next_event(Duration::ZERO) else {
+            break;
+        };
+        opening(event, &marker, &mut response, &mut before)?;
+    }
 
     for frame in &probe.during {
         session
@@ -225,7 +237,6 @@ fn run<S: SpeechSessionHandle>(
         }
     }
 
-    let marker = probe.marker.to_lowercase();
     if marker.is_empty()
         || before.to_lowercase().contains(&marker)
         || !after.to_lowercase().contains(&marker)
@@ -237,6 +248,37 @@ fn run<S: SpeechSessionHandle>(
         before,
         after,
     })
+}
+
+/// One event before the input during output was sent: the response it creates, the output it
+/// adds to `before`, an opening transcript that already says `marker`, or the end it stands for.
+fn opening(
+    event: SessionEvent,
+    marker: &str,
+    response: &mut Option<ResponseId>,
+    before: &mut String,
+) -> Result<(), NoNativeDuplex> {
+    match event {
+        SessionEvent::ResponseCreated(created) => match *response {
+            None => *response = Some(created.response_id),
+            Some(first) => {
+                return Err(NoNativeDuplex::Restarted {
+                    first,
+                    second: created.response_id,
+                });
+            }
+        },
+        SessionEvent::InputTranscribed(heard)
+            if !marker.is_empty() && heard.text.to_lowercase().contains(marker) =>
+        {
+            return Err(NoNativeDuplex::MarkerInOpening { heard: heard.text });
+        }
+        SessionEvent::OutputTranscriptDelta(delta) if Some(delta.response_id) == *response => {
+            before.push_str(&delta.text);
+        }
+        event => ended(&event, *response)?,
+    }
+    Ok(())
 }
 
 /// The failure an event that ends the response other than by completion, or fails the session,
