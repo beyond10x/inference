@@ -486,6 +486,7 @@ fn every_frame_carries_sample_count_times_channels_times_encoding_width_bytes() 
         let width = match encoding {
             AudioEncoding::PcmS16le => 2,
             AudioEncoding::PcmF32le => 4,
+            AudioEncoding::PcmMulaw | AudioEncoding::PcmAlaw => 1,
         };
         for channels in [1_u16, 2] {
             for configuration in MockConfiguration::ALL {

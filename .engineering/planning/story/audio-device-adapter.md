@@ -1,0 +1,60 @@
+---
+format: aep.planning-md/3
+id: story:audio-device-adapter
+kind: story
+status: active
+title: Microphone capture and speaker playout as an adapter
+summary: 'adapters/inference-audio-device over cpal: a mic source and a speaker sink with played position and stop, tested without hardware.'
+relations:
+- decomposes: epic:native-voice
+- serves: vision:inference
+scope:
+- confidence: cited
+  path: Cargo.toml
+- confidence: cited
+  path: adapters/inference-audio-device
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T21:13:04Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-19T21:13:04Z", actor: "human:timo", revision: 4}
+---
+## Context
+
+The operator asked on 2026-10-19 for local microphone capture and playout to a headset or speaker
+from Rust, as an adapter, so a voice pipeline can be tried on a laptop against the realtime models.
+The design keeps sources and sinks as ordinary nodes with typed ports (§9, sources and sinks) and
+audio as bounded binary frames on realtime paths (`docs/design/inference.md:324`); a device is an
+adapter like any model (`adapters/`, lines 203-213).
+
+## Planned scope
+
+- `adapters/inference-audio-device` (crate `inference-audio-device`) over `cpal` (ALSA,
+  PulseAudio or PipeWire on Linux, CoreAudio, WASAPI), with no change to any contract crate.
+- Device listing with the default input and output marked; selection by name or default.
+- Capture: a microphone source producing `inference-audio` frames in a requested format (mono PCM16
+  at 8, 16 or 24 kHz, 20 ms frames by default), resampled and down-mixed from the device's native
+  format; bounded buffering that counts and reports dropped frames instead of blocking the device
+  callback.
+- Playout: a speaker sink taking `inference-audio` frames, resampled to the device; it reports the
+  played position (samples actually handed to the device), can be stopped at once (clear unplayed
+  audio, for barge-in), and reports underruns.
+- Both as pipeline nodes (a source and a sink implementing the node trait of
+  `inference-pipeline`) and as plain handles usable without the runtime.
+- Tests that need no audio hardware: format conversion and resampling, frame slicing, the bounded
+  buffer and its drop count, stop-and-clear, played-position accounting, against a fake device
+  behind the same internal trait the cpal backend implements. A hardware test, `#[ignore]` and
+  behind a `device` feature, records two seconds from the default input and plays a tone and the
+  recording back.
+- An example, `mic-loopback`, that plays the microphone back to the speaker with a fixed delay, so
+  the operator can check the devices by ear.
+
+## Acceptance
+
+`cargo test -p inference-audio-device --all-features` passes on a machine with no audio device;
+`cargo run -p inference-audio-device --example mic-loopback` on a laptop plays the microphone back
+through the default output; the ignored hardware test passes on a laptop with a microphone.
+
+## Out of scope
+
+Echo cancellation and noise suppression (the operator's headset or the provider handles them);
+the realtime voice demo that wires the device to a native speech model (`story:realtime-voice-demo`).
