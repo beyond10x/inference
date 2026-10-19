@@ -10,11 +10,12 @@ publish = false
 
 [features]
 stt = []
-llm = []
+llm = ["dep:inference-llm"]
 tts = []
 
 [dependencies]
 inference-core = { path = "../inference-core" }
+inference-llm = { path = "../inference-llm", optional = true }
 inference-text = { path = "../inference-text" }
 uuid.workspace = true
 

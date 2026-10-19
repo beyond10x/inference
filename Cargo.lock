@@ -264,12 +264,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-llm"
+version = "0.2.0"
+dependencies = [
+ "inference-core",
+ "inference-text",
+]
+
+[[package]]
 name = "inference-testkit"
 version = "0.2.0"
 dependencies = [
  "ess-conformance",
  "ess-primitives",
  "inference-core",
+ "inference-llm",
  "inference-text",
  "serde",
  "serde_json",

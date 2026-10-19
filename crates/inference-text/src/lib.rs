@@ -1,6 +1,10 @@
 //! The text vocabulary of the inference framework.
 //!
-//! `inference-text` holds the outbound text of `ess/domains/stream.yaml`: an [`OutputSegment`] is
+//! `inference-text` holds the inbound text of `ess/domains/stream.yaml`: a [`Span`] is a unit of
+//! inbound text, a Hypothesis until committed and immutable after, within a [`Turn`], whose
+//! completion is a control boundary distinct from the commit of its spans.
+//!
+//! It holds the outbound text of `ess/domains/stream.yaml` too: an [`OutputSegment`] is
 //! a unit of text a [`Generation`] produced, Tentative until committed, then Queued for synthesis,
 //! then Synthesized, then Played once the media sink acknowledges it. Synthesis consumes committed
 //! segments only, so a Tentative segment refuses to be queued; a Queued segment refuses playback
@@ -17,6 +21,14 @@ use serde::{Deserialize, Serialize};
 
 use inference_core::generation::{Generation, GenerationState, GenerationStateConflict};
 use inference_core::id::{GenerationId, RunId};
+
+mod inbound;
+
+pub use inbound::{
+    CommittedSpanImmutable, EmitHypothesis, OpenTurn, ReviseSpan, Span, SpanId, SpanNotFound,
+    SpanState, SpanStateConflict, TranscriptCommitted, TranscriptHypothesis, TranscriptRevision,
+    Turn, TurnCompleted, TurnId, TurnNotFound, TurnOpened, TurnState, TurnStateConflict,
+};
 
 inference_core::uuid_newtype!(
     /// `inference.stream.SegmentId`: identifies an [`OutputSegment`]. It is declared as the

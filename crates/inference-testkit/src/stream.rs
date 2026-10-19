@@ -1,46 +1,134 @@
-//! The generations and output segments of `ess/domains/stream.yaml`, held in memory.
+//! The turns, spans, generations and output segments of `ess/domains/stream.yaml`, held in
+//! memory, and the log that records their events in envelopes.
 //!
-//! [`StreamDomain`] holds one store per entity, [`GenerationStore`] and [`SegmentStore`], and
-//! records every event it emits in order. Its commands run the transitions of `inference-core`'s
-//! [`Generation`] and `inference-text`'s [`OutputSegment`] under identities the domain issues from
-//! a counter rendered as a Uuid, `00000000-0000-4000-8000-000000000001` first, so that two runs of
-//! the same commands report the same identities. What only a store can decide is decided here: a
-//! command naming an identity no record carries is refused before anything moves, and
-//! `SupersedeGeneration` and `CancelGeneration` discard every unplayed segment of the generation in
-//! the same outcome, leaving a Played one as it is. The cascade emits no event of its own: the
-//! outcome emits its generation event only, as `ess/domains/stream.yaml` declares it. The views
-//! `inference.stream.Generations` and `inference.stream.Segments` are
-//! [`StreamDomain::generations_view`] and [`StreamDomain::segments_view`]; both are
+//! [`StreamDomain`] holds one store per entity, [`TurnStore`], [`SpanStore`], [`GenerationStore`]
+//! and [`SegmentStore`], and records every event it emits in order. Its commands run the
+//! transitions of `inference-text`'s [`Turn`] and [`Span`], `inference-core`'s [`Generation`] and
+//! `inference-text`'s [`OutputSegment`] under identities the domain issues from one counter
+//! rendered as a Uuid, `00000000-0000-4000-8000-000000000001` first, so that two runs of the same
+//! commands report the same identities. What only a store can decide is decided here: a command
+//! naming an identity no record carries is refused before anything moves, a hypothesis names a
+//! stored Open turn, completing a turn moves none of its spans, and `SupersedeGeneration` and
+//! `CancelGeneration` discard every unplayed segment of the generation in the same outcome,
+//! leaving a Played one as it is. The cascade emits no event of its own: the outcome emits its
+//! generation event only, as `ess/domains/stream.yaml` declares it. The views
+//! `inference.stream.Turns`, `inference.stream.Spans`, `inference.stream.Generations` and
+//! `inference.stream.Segments` are [`StreamDomain::turns_view`], [`StreamDomain::spans_view`],
+//! [`StreamDomain::generations_view`] and [`StreamDomain::segments_view`]; all are
 //! `read_your_writes`, and every row is read from the stores at the call.
 //!
-//! `StartGeneration` refuses a run no store holds, a run that is not Active and a node no
-//! pipeline declares. Those are reads of the `inference.graph` stores, which do not exist yet;
-//! [`StreamDomain::start_generation`] runs the `started` outcome only, for a caller that has
-//! decided the three refusals against them.
+//! `OpenTurn`, `EmitHypothesis` and `StartGeneration` refuse a run no store holds and a run that
+//! is not Active, and `StartGeneration` a node no pipeline declares. Those are reads of the
+//! `inference.graph` stores, which do not exist yet: [`StreamDomain::open_turn`] and
+//! [`StreamDomain::start_generation`] run their one accepting outcome only, and
+//! [`StreamDomain::emit_hypothesis`] decides the turn refusals and leaves the run refusals to a
+//! caller that has decided them against those stores.
+//!
+//! [`EventLog`] is §23.1 test 6 of the design: it records `inference.stream` events in their
+//! [`EventEnvelope`] and refuses a second event carrying an `event_id` already recorded, an event
+//! whose `sequence` is not greater than the last one recorded on its `stream_id`, an event whose
+//! `kind` is not the declared name of its payload's event, and an event whose payload carries a
+//! `generation_id` while the envelope carries none or a different one. It takes envelopes its
+//! caller built: the graph runtime, which knows the producing node, its port and the stream it
+//! orders its events on, is the producer of envelopes, and no store knows those three.
 //!
 //! [`StreamDomain`]: crate::stream::StreamDomain
+//! [`TurnStore`]: crate::stream::TurnStore
+//! [`SpanStore`]: crate::stream::SpanStore
 //! [`GenerationStore`]: crate::stream::GenerationStore
 //! [`SegmentStore`]: crate::stream::SegmentStore
+//! [`EventLog`]: crate::stream::EventLog
+//! [`EventEnvelope`]: inference_core::envelope::EventEnvelope
+//! [`Turn`]: inference_text::Turn
+//! [`Span`]: inference_text::Span
 //! [`Generation`]: inference_core::generation::Generation
 //! [`OutputSegment`]: inference_text::OutputSegment
+//! [`StreamDomain::turns_view`]: crate::stream::StreamDomain::turns_view
+//! [`StreamDomain::spans_view`]: crate::stream::StreamDomain::spans_view
 //! [`StreamDomain::generations_view`]: crate::stream::StreamDomain::generations_view
 //! [`StreamDomain::segments_view`]: crate::stream::StreamDomain::segments_view
+//! [`StreamDomain::open_turn`]: crate::stream::StreamDomain::open_turn
+//! [`StreamDomain::emit_hypothesis`]: crate::stream::StreamDomain::emit_hypothesis
 //! [`StreamDomain::start_generation`]: crate::stream::StreamDomain::start_generation
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
 use uuid::Uuid;
 
+use inference_core::envelope::{EventEnvelope, EventId};
 use inference_core::generation::{
     Generation, GenerationCancelled, GenerationCompleted, GenerationNotFound, GenerationStarted,
     GenerationState, GenerationStateConflict, GenerationSuperseded, StartGeneration,
 };
-use inference_core::id::{GenerationId, NodeId, RunId};
+use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_text::{
-    AudioPlayed, EmitTextDelta, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued,
-    SegmentState, SegmentStateConflict, SynthesisCompleted, TextDelta, TextSegmentCommitted,
+    AudioPlayed, CommittedSpanImmutable, EmitHypothesis, EmitTextDelta, OpenTurn, OutputSegment,
+    ReviseSpan, SegmentDiscarded, SegmentId, SegmentQueued, SegmentState, SegmentStateConflict,
+    Span, SpanId, SpanNotFound, SpanState, SpanStateConflict, SynthesisCompleted, TextDelta,
+    TextSegmentCommitted, TranscriptCommitted, TranscriptHypothesis, TranscriptRevision, Turn,
+    TurnCompleted, TurnId, TurnNotFound, TurnOpened, TurnState, TurnStateConflict,
 };
+
+/// The store of `inference.stream.Turn`, in the order the turns were opened.
+#[derive(Debug, Clone, Default)]
+pub struct TurnStore {
+    turns: Vec<Turn>,
+}
+
+impl TurnStore {
+    /// The turn carrying `turn_id`, if one was opened.
+    #[must_use]
+    pub fn get(&self, turn_id: TurnId) -> Option<&Turn> {
+        self.turns.iter().find(|turn| turn.turn_id() == turn_id)
+    }
+
+    /// Every turn, in the order they were opened.
+    pub fn iter(&self) -> impl Iterator<Item = &Turn> {
+        self.turns.iter()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.turns.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.turns.is_empty()
+    }
+}
+
+/// The store of `inference.stream.Span`, in the order the spans were emitted. A span stays when
+/// its turn completes: a committed span is durable transcript history.
+#[derive(Debug, Clone, Default)]
+pub struct SpanStore {
+    spans: Vec<Span>,
+}
+
+impl SpanStore {
+    /// The span carrying `span_id`, if one was emitted.
+    #[must_use]
+    pub fn get(&self, span_id: SpanId) -> Option<&Span> {
+        self.spans.iter().find(|span| span.span_id() == span_id)
+    }
+
+    /// Every span, in the order they were emitted.
+    pub fn iter(&self) -> impl Iterator<Item = &Span> {
+        self.spans.iter()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.spans.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+}
 
 /// The store of `inference.stream.Generation`, in the order the generations were started.
 #[derive(Debug, Clone, Default)]
@@ -104,9 +192,19 @@ impl SegmentStore {
     }
 }
 
-/// An event of the generations and segments of `inference.stream`, as the domain emitted it.
+/// An event of `inference.stream`, as the domain emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
+    /// `inference.stream.TurnOpened`.
+    TurnOpened(TurnOpened),
+    /// `inference.stream.TurnCompleted`.
+    TurnCompleted(TurnCompleted),
+    /// `inference.stream.TranscriptHypothesis`.
+    TranscriptHypothesis(TranscriptHypothesis),
+    /// `inference.stream.TranscriptRevision`.
+    TranscriptRevision(TranscriptRevision),
+    /// `inference.stream.TranscriptCommitted`.
+    TranscriptCommitted(TranscriptCommitted),
     /// `inference.stream.GenerationStarted`.
     GenerationStarted(GenerationStarted),
     /// `inference.stream.GenerationCompleted`.
@@ -127,6 +225,312 @@ pub enum StreamEvent {
     AudioPlayed(AudioPlayed),
     /// `inference.stream.SegmentDiscarded`.
     SegmentDiscarded(SegmentDiscarded),
+}
+
+impl StreamEvent {
+    /// The name `ess/domains/stream.yaml` declares the event under, `inference.stream.TextDelta`
+    /// for a [`StreamEvent::TextDelta`]: the `kind` of its envelope.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::TurnOpened(_) => "inference.stream.TurnOpened",
+            Self::TurnCompleted(_) => "inference.stream.TurnCompleted",
+            Self::TranscriptHypothesis(_) => "inference.stream.TranscriptHypothesis",
+            Self::TranscriptRevision(_) => "inference.stream.TranscriptRevision",
+            Self::TranscriptCommitted(_) => "inference.stream.TranscriptCommitted",
+            Self::GenerationStarted(_) => "inference.stream.GenerationStarted",
+            Self::GenerationCompleted(_) => "inference.stream.GenerationCompleted",
+            Self::GenerationSuperseded(_) => "inference.stream.GenerationSuperseded",
+            Self::GenerationCancelled(_) => "inference.stream.GenerationCancelled",
+            Self::TextDelta(_) => "inference.stream.TextDelta",
+            Self::TextSegmentCommitted(_) => "inference.stream.TextSegmentCommitted",
+            Self::SegmentQueued(_) => "inference.stream.SegmentQueued",
+            Self::SynthesisCompleted(_) => "inference.stream.SynthesisCompleted",
+            Self::AudioPlayed(_) => "inference.stream.AudioPlayed",
+            Self::SegmentDiscarded(_) => "inference.stream.SegmentDiscarded",
+        }
+    }
+
+    /// The `generation_id` the payload carries: the generation events' and `TextDelta`'s, the
+    /// five events whose declaration has the field, and none for every other event.
+    #[must_use]
+    pub const fn generation_id(&self) -> Option<GenerationId> {
+        match self {
+            Self::GenerationStarted(event) => Some(event.generation_id),
+            Self::GenerationCompleted(event) => Some(event.generation_id),
+            Self::GenerationSuperseded(event) => Some(event.generation_id),
+            Self::GenerationCancelled(event) => Some(event.generation_id),
+            Self::TextDelta(event) => Some(event.generation_id),
+            Self::TurnOpened(_)
+            | Self::TurnCompleted(_)
+            | Self::TranscriptHypothesis(_)
+            | Self::TranscriptRevision(_)
+            | Self::TranscriptCommitted(_)
+            | Self::TextSegmentCommitted(_)
+            | Self::SegmentQueued(_)
+            | Self::SynthesisCompleted(_)
+            | Self::AudioPlayed(_)
+            | Self::SegmentDiscarded(_) => None,
+        }
+    }
+}
+
+/// Why [`EventLog::record`] recorded nothing: one rule of §23.1 test 6 per variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvelopeRefusal {
+    /// An event carrying `event_id` is already recorded.
+    DuplicateEventId { event_id: EventId },
+    /// The event's `sequence` is not greater than `last`, the last one recorded on `stream_id`.
+    SequenceNotIncreasing {
+        stream_id: StreamId,
+        last: i64,
+        sequence: i64,
+    },
+    /// The envelope's `kind` is not `payload`, the declared name of its payload's event, so a
+    /// consumer dispatching on `kind` would read the event as another, a control event as user
+    /// content among them.
+    KindMismatch { kind: String, payload: &'static str },
+    /// The payload carries the generation `payload`, and the envelope `envelope`, which is none
+    /// or another.
+    GenerationMismatch {
+        payload: GenerationId,
+        envelope: Option<GenerationId>,
+    },
+}
+
+impl fmt::Display for EnvelopeRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateEventId { event_id } => {
+                write!(
+                    f,
+                    "an event carrying the identity {event_id} is already recorded"
+                )
+            }
+            Self::SequenceNotIncreasing {
+                stream_id,
+                last,
+                sequence,
+            } => write!(
+                f,
+                "sequence {sequence} on the stream {stream_id} is not greater than its last, {last}"
+            ),
+            Self::GenerationMismatch {
+                payload,
+                envelope: Some(envelope),
+            } => write!(
+                f,
+                "the payload carries the generation {payload} and the envelope {envelope}"
+            ),
+            Self::GenerationMismatch {
+                payload,
+                envelope: None,
+            } => write!(
+                f,
+                "the payload carries the generation {payload} and the envelope none"
+            ),
+            Self::KindMismatch { kind, payload } => write!(
+                f,
+                "the envelope's kind is `{kind}` and its payload is a `{payload}`"
+            ),
+        }
+    }
+}
+
+impl Error for EnvelopeRefusal {}
+
+/// The log of `inference.stream` events, each recorded in its [`EventEnvelope`], in the order
+/// they were recorded. [`EventLog::record`] enforces the event ids, generation ids and per-stream
+/// sequence of §23.1 test 6 (`docs/design/inference.md:1110`), and that `kind` names the
+/// payload's event (line 297); a refused event is not recorded. It takes envelopes its caller
+/// built: the graph runtime, which knows the producing node, its port and its stream, is the
+/// producer of envelopes, and [`StreamDomain`] records its events without them.
+#[derive(Debug, Clone, Default)]
+pub struct EventLog {
+    envelopes: Vec<EventEnvelope<StreamEvent>>,
+    event_ids: BTreeSet<EventId>,
+    last_sequence: BTreeMap<StreamId, i64>,
+}
+
+impl EventLog {
+    /// An empty log.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records `envelope` after the ones recorded before it.
+    ///
+    /// # Errors
+    ///
+    /// [`EnvelopeRefusal::DuplicateEventId`] when an event carrying its `event_id` is recorded,
+    /// [`EnvelopeRefusal::SequenceNotIncreasing`] when its `sequence` is not greater than the last
+    /// one recorded on its `stream_id`, [`EnvelopeRefusal::KindMismatch`] when its `kind` is not
+    /// the declared name of its payload's event, and [`EnvelopeRefusal::GenerationMismatch`] when
+    /// its payload carries a `generation_id` and the envelope carries none or another. The checks
+    /// run in that order, event id, sequence, kind, generation, the first that fails is the
+    /// answer, and a refused event is not recorded.
+    pub fn record(&mut self, envelope: EventEnvelope<StreamEvent>) -> Result<(), EnvelopeRefusal> {
+        if self.event_ids.contains(&envelope.event_id) {
+            return Err(EnvelopeRefusal::DuplicateEventId {
+                event_id: envelope.event_id,
+            });
+        }
+        if let Some(&last) = self.last_sequence.get(&envelope.stream_id)
+            && envelope.sequence <= last
+        {
+            return Err(EnvelopeRefusal::SequenceNotIncreasing {
+                stream_id: envelope.stream_id,
+                last,
+                sequence: envelope.sequence,
+            });
+        }
+        if envelope.kind != envelope.payload.name() {
+            return Err(EnvelopeRefusal::KindMismatch {
+                kind: envelope.kind,
+                payload: envelope.payload.name(),
+            });
+        }
+        if let Some(payload) = envelope.payload.generation_id()
+            && envelope.generation_id != Some(payload)
+        {
+            return Err(EnvelopeRefusal::GenerationMismatch {
+                payload,
+                envelope: envelope.generation_id,
+            });
+        }
+        self.event_ids.insert(envelope.event_id);
+        self.last_sequence
+            .insert(envelope.stream_id, envelope.sequence);
+        self.envelopes.push(envelope);
+        Ok(())
+    }
+
+    /// Every recorded envelope, in the order it was recorded.
+    #[must_use]
+    pub fn envelopes(&self) -> &[EventEnvelope<StreamEvent>] {
+        &self.envelopes
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.envelopes.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.envelopes.is_empty()
+    }
+}
+
+/// Why `inference.stream.CompleteTurn` moved nothing. Both are the command's `wrong-state`
+/// outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnMoveError {
+    /// No stored turn carries the identity sent; there is no state to report.
+    Unknown(TurnNotFound),
+    /// The turn is not Open.
+    Conflict(TurnStateConflict),
+}
+
+impl fmt::Display for TurnMoveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown(error) => fmt::Display::fmt(error, f),
+            Self::Conflict(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for TurnMoveError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Unknown(error) => Some(error),
+            Self::Conflict(error) => Some(error),
+        }
+    }
+}
+
+/// Why `inference.stream.EmitHypothesis` created no span, of the refusals a store holding the
+/// turns decides. The run refusals are the caller's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitHypothesisError {
+    /// The `unknown-turn` outcome: no stored turn carries the identity sent.
+    UnknownTurn(TurnNotFound),
+    /// The `turn-not-open` outcome: the turn is Completed.
+    TurnNotOpen(TurnStateConflict),
+}
+
+impl fmt::Display for EmitHypothesisError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownTurn(error) => fmt::Display::fmt(error, f),
+            Self::TurnNotOpen(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for EmitHypothesisError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::UnknownTurn(error) => Some(error),
+            Self::TurnNotOpen(error) => Some(error),
+        }
+    }
+}
+
+/// Why `inference.stream.ReviseSpan` revised nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviseSpanError {
+    /// The `no-such-span` outcome: no stored span carries the identity sent.
+    NoSuchSpan(SpanNotFound),
+    /// The `immutable` outcome: the span is Committed, and its text is unchanged.
+    Immutable(CommittedSpanImmutable),
+}
+
+impl fmt::Display for ReviseSpanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoSuchSpan(error) => fmt::Display::fmt(error, f),
+            Self::Immutable(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for ReviseSpanError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::NoSuchSpan(error) => Some(error),
+            Self::Immutable(error) => Some(error),
+        }
+    }
+}
+
+/// Why `inference.stream.CommitSpan` moved nothing. Both are the command's `wrong-state` outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanMoveError {
+    /// No stored span carries the identity sent; there is no state to report.
+    Unknown(SpanNotFound),
+    /// The span is not a Hypothesis.
+    Conflict(SpanStateConflict),
+}
+
+impl fmt::Display for SpanMoveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown(error) => fmt::Display::fmt(error, f),
+            Self::Conflict(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for SpanMoveError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Unknown(error) => Some(error),
+            Self::Conflict(error) => Some(error),
+        }
+    }
 }
 
 /// Why `CompleteGeneration`, `SupersedeGeneration` or `CancelGeneration` moved nothing. Both are
@@ -214,6 +618,26 @@ impl Error for SegmentMoveError {
     }
 }
 
+/// A row of the view `inference.stream.Turns`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnsRow {
+    pub turn_id: TurnId,
+    pub run_id: RunId,
+    pub state: TurnState,
+}
+
+/// A row of the view `inference.stream.Spans`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpansRow {
+    pub span_id: SpanId,
+    pub run_id: RunId,
+    pub turn_id: TurnId,
+    pub stream_id: StreamId,
+    pub sequence: i64,
+    pub text: String,
+    pub state: SpanState,
+}
+
 /// A row of the view `inference.stream.Generations`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationsRow {
@@ -235,10 +659,11 @@ pub struct SegmentsRow {
     pub state: SegmentState,
 }
 
-/// The generations and segments of `inference.stream` in memory: their two entity stores and the
-/// events emitted.
+/// `inference.stream` in memory: its four entity stores and the events emitted.
 #[derive(Debug, Clone, Default)]
 pub struct StreamDomain {
+    turns: TurnStore,
+    spans: SpanStore,
     generations: GenerationStore,
     segments: SegmentStore,
     events: Vec<StreamEvent>,
@@ -250,6 +675,121 @@ impl StreamDomain {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Runs the `opened` outcome of `inference.stream.OpenTurn`: stores the Open turn
+    /// [`Turn::open_as`] returns and records its [`TurnOpened`]. The run refusals are the
+    /// caller's, decided before it calls this.
+    pub fn open_turn(&mut self, input: OpenTurn) -> TurnOpened {
+        let turn_id = TurnId::from(self.issue());
+        let (turn, event) = Turn::open_as(turn_id, input);
+        self.turns.turns.push(turn);
+        self.events.push(StreamEvent::TurnOpened(event));
+        event
+    }
+
+    /// Runs `inference.stream.CompleteTurn`: the turn moves to Completed and none of its spans
+    /// moves.
+    ///
+    /// # Errors
+    ///
+    /// [`TurnMoveError::Unknown`] when no stored turn carries `turn_id`,
+    /// [`TurnMoveError::Conflict`] when it is not Open. Nothing moves and no event is recorded.
+    pub fn complete_turn(&mut self, turn_id: TurnId) -> Result<TurnCompleted, TurnMoveError> {
+        let slot = self
+            .turns
+            .turns
+            .iter_mut()
+            .find(|turn| turn.turn_id() == turn_id)
+            .ok_or(TurnMoveError::Unknown(TurnNotFound { turn_id }))?;
+        let (moved, event) = slot.complete().map_err(TurnMoveError::Conflict)?;
+        *slot = moved;
+        self.events.push(StreamEvent::TurnCompleted(event));
+        Ok(event)
+    }
+
+    /// Runs `inference.stream.EmitHypothesis` past its run refusals, which are the caller's:
+    /// stores the Hypothesis span [`Span::emit_as`] returns and records its
+    /// [`TranscriptHypothesis`].
+    ///
+    /// # Errors
+    ///
+    /// [`EmitHypothesisError::UnknownTurn`] when no stored turn carries `turn_id`, otherwise
+    /// [`EmitHypothesisError::TurnNotOpen`] when it is Completed. Nothing is stored, no event is
+    /// recorded and no identity is issued.
+    pub fn emit_hypothesis(
+        &mut self,
+        input: EmitHypothesis,
+    ) -> Result<TranscriptHypothesis, EmitHypothesisError> {
+        let turn = self
+            .turns
+            .get(input.turn_id)
+            .ok_or(EmitHypothesisError::UnknownTurn(TurnNotFound {
+                turn_id: input.turn_id,
+            }))?;
+        let span_id = SpanId::from(Self::identity(self.issued + 1));
+        let (span, event) = Span::emit_as(
+            span_id,
+            turn,
+            input.run_id,
+            input.stream_id,
+            input.sequence,
+            input.text,
+        )
+        .map_err(EmitHypothesisError::TurnNotOpen)?;
+        self.issue();
+        self.spans.spans.push(span);
+        self.events
+            .push(StreamEvent::TranscriptHypothesis(event.clone()));
+        Ok(event)
+    }
+
+    /// Runs `inference.stream.ReviseSpan`: the Hypothesis now reads the revised text.
+    ///
+    /// # Errors
+    ///
+    /// [`ReviseSpanError::NoSuchSpan`] when no stored span carries `span_id`,
+    /// [`ReviseSpanError::Immutable`] when it is Committed. The text is unchanged and no event is
+    /// recorded.
+    pub fn revise_span(
+        &mut self,
+        input: ReviseSpan,
+    ) -> Result<TranscriptRevision, ReviseSpanError> {
+        let slot = self
+            .spans
+            .spans
+            .iter_mut()
+            .find(|span| span.span_id() == input.span_id)
+            .ok_or(ReviseSpanError::NoSuchSpan(SpanNotFound {
+                span_id: input.span_id,
+            }))?;
+        let (moved, event) = slot
+            .revise(input.text)
+            .map_err(ReviseSpanError::Immutable)?;
+        *slot = moved;
+        self.events
+            .push(StreamEvent::TranscriptRevision(event.clone()));
+        Ok(event)
+    }
+
+    /// Runs `inference.stream.CommitSpan`.
+    ///
+    /// # Errors
+    ///
+    /// [`SpanMoveError::Unknown`] when no stored span carries `span_id`,
+    /// [`SpanMoveError::Conflict`] when it is not a Hypothesis.
+    pub fn commit_span(&mut self, span_id: SpanId) -> Result<TranscriptCommitted, SpanMoveError> {
+        let slot = self
+            .spans
+            .spans
+            .iter_mut()
+            .find(|span| span.span_id() == span_id)
+            .ok_or(SpanMoveError::Unknown(SpanNotFound { span_id }))?;
+        let (moved, event) = slot.commit().map_err(SpanMoveError::Conflict)?;
+        *slot = moved;
+        self.events
+            .push(StreamEvent::TranscriptCommitted(event.clone()));
+        Ok(event)
     }
 
     /// Runs the `started` outcome of `inference.stream.StartGeneration`: stores the generation
@@ -491,6 +1031,48 @@ impl StreamDomain {
         Uuid::from_u128(0x0000_0000_0000_4000_8000_0000_0000_0000 | count)
     }
 
+    /// The opened turns.
+    #[must_use]
+    pub const fn turns(&self) -> &TurnStore {
+        &self.turns
+    }
+
+    /// The emitted spans.
+    #[must_use]
+    pub const fn spans(&self) -> &SpanStore {
+        &self.spans
+    }
+
+    /// The view `inference.stream.Turns`: one row per turn, in the order they were opened.
+    #[must_use]
+    pub fn turns_view(&self) -> Vec<TurnsRow> {
+        self.turns
+            .iter()
+            .map(|turn| TurnsRow {
+                turn_id: turn.turn_id(),
+                run_id: turn.run_id(),
+                state: turn.state(),
+            })
+            .collect()
+    }
+
+    /// The view `inference.stream.Spans`: one row per span, in the order they were emitted.
+    #[must_use]
+    pub fn spans_view(&self) -> Vec<SpansRow> {
+        self.spans
+            .iter()
+            .map(|span| SpansRow {
+                span_id: span.span_id(),
+                run_id: span.run_id(),
+                turn_id: span.turn_id(),
+                stream_id: span.stream_id(),
+                sequence: span.sequence(),
+                text: span.text().to_owned(),
+                state: span.state(),
+            })
+            .collect()
+    }
+
     /// The started generations.
     #[must_use]
     pub const fn generations(&self) -> &GenerationStore {
@@ -547,13 +1129,18 @@ mod tests {
     use inference_core::generation::{
         GenerationNotFound, GenerationState, GenerationStateConflict, StartGeneration,
     };
-    use inference_core::id::{GenerationId, NodeId, RunId};
-    use inference_text::{EmitTextDelta, SegmentId, SegmentState, SegmentStateConflict};
+    use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
+    use inference_text::{
+        CommittedSpanImmutable, EmitHypothesis, EmitTextDelta, OpenTurn, ReviseSpan, SegmentId,
+        SegmentState, SegmentStateConflict, SpanId, SpanNotFound, SpanState, SpanStateConflict,
+        TurnId, TurnNotFound, TurnState, TurnStateConflict,
+    };
     use uuid::Uuid;
 
     use super::{
-        EmitTextDeltaError, GenerationMoveError, GenerationsRow, SegmentMoveError, SegmentsRow,
-        StreamDomain, StreamEvent,
+        EmitHypothesisError, EmitTextDeltaError, GenerationMoveError, GenerationsRow,
+        ReviseSpanError, SegmentMoveError, SegmentsRow, SpanMoveError, SpansRow, StreamDomain,
+        StreamEvent, TurnMoveError, TurnsRow,
     };
 
     fn run_id() -> RunId {
@@ -824,6 +1411,225 @@ mod tests {
         assert_eq!(domain.acknowledge_playback(segment), Err(tentative));
         assert_eq!(state(&domain, segment), SegmentState::Tentative);
         assert_eq!(domain.events().len(), events);
+    }
+
+    fn open(domain: &mut StreamDomain) -> TurnId {
+        domain.open_turn(OpenTurn { run_id: run_id() }).turn_id
+    }
+
+    fn hypothesis(turn_id: TurnId, sequence: i64) -> EmitHypothesis {
+        EmitHypothesis {
+            run_id: run_id(),
+            turn_id,
+            stream_id: stream_id(),
+            sequence,
+            text: format!("words {sequence}"),
+        }
+    }
+
+    fn stream_id() -> StreamId {
+        StreamId::from(Uuid::from_u128(0x2a1b_2c3d_4e5f_4a6b_8c7d_9e0f_1a2b_3c4d))
+    }
+
+    #[test]
+    fn turns_and_spans_take_their_identities_from_the_one_counter() {
+        let mut domain = StreamDomain::new();
+        let generation = start(&mut domain);
+        let turn = open(&mut domain);
+        let span = domain
+            .emit_hypothesis(hypothesis(turn, 1))
+            .expect("an Open turn admits a span")
+            .span_id;
+        assert_eq!(
+            generation.to_string(),
+            "00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(turn.to_string(), "00000000-0000-4000-8000-000000000002");
+        assert_eq!(span.to_string(), "00000000-0000-4000-8000-000000000003");
+    }
+
+    #[test]
+    fn a_hypothesis_names_a_stored_open_turn_or_is_refused_and_takes_no_identity() {
+        let mut domain = StreamDomain::new();
+        let unknown = TurnId::from(Uuid::from_u128(0xff));
+        assert_eq!(
+            domain.emit_hypothesis(hypothesis(unknown, 1)),
+            Err(EmitHypothesisError::UnknownTurn(TurnNotFound {
+                turn_id: unknown
+            }))
+        );
+
+        let turn = open(&mut domain);
+        domain.complete_turn(turn).expect("an Open turn completes");
+        let events = domain.events().len();
+        assert_eq!(
+            domain.emit_hypothesis(hypothesis(turn, 1)),
+            Err(EmitHypothesisError::TurnNotOpen(TurnStateConflict {
+                current: TurnState::Completed
+            }))
+        );
+        assert!(domain.spans().is_empty());
+        assert_eq!(domain.events().len(), events);
+
+        let next = open(&mut domain);
+        assert_eq!(
+            next.to_string(),
+            "00000000-0000-4000-8000-000000000002",
+            "a refused hypothesis took no identity"
+        );
+    }
+
+    #[test]
+    fn span_commands_on_an_unknown_or_committed_span_move_nothing() {
+        let mut domain = StreamDomain::new();
+        let unknown = SpanId::from(Uuid::from_u128(0xff));
+        assert_eq!(
+            domain.commit_span(unknown),
+            Err(SpanMoveError::Unknown(SpanNotFound { span_id: unknown }))
+        );
+        assert_eq!(
+            domain.revise_span(ReviseSpan {
+                span_id: unknown,
+                text: "lost".to_owned()
+            }),
+            Err(ReviseSpanError::NoSuchSpan(SpanNotFound {
+                span_id: unknown
+            }))
+        );
+        assert_eq!(
+            domain.complete_turn(TurnId::from(Uuid::from_u128(0xfe))),
+            Err(TurnMoveError::Unknown(TurnNotFound {
+                turn_id: TurnId::from(Uuid::from_u128(0xfe))
+            }))
+        );
+        assert!(domain.events().is_empty());
+
+        let turn = open(&mut domain);
+        let span = domain
+            .emit_hypothesis(hypothesis(turn, 1))
+            .expect("admitted")
+            .span_id;
+        domain.commit_span(span).expect("a Hypothesis commits");
+        let events = domain.events().len();
+        assert_eq!(
+            domain.revise_span(ReviseSpan {
+                span_id: span,
+                text: "rewritten".to_owned()
+            }),
+            Err(ReviseSpanError::Immutable(CommittedSpanImmutable {
+                span_id: span
+            }))
+        );
+        assert_eq!(
+            domain.commit_span(span),
+            Err(SpanMoveError::Conflict(SpanStateConflict {
+                current: SpanState::Committed
+            }))
+        );
+        assert_eq!(domain.spans().get(span).expect("stored").text(), "words 1");
+        assert_eq!(domain.events().len(), events);
+    }
+
+    #[test]
+    fn completing_a_turn_moves_no_span_and_the_views_read_both() {
+        let mut domain = StreamDomain::new();
+        let turn = open(&mut domain);
+        let hypothesis_span = domain
+            .emit_hypothesis(hypothesis(turn, 1))
+            .expect("admitted")
+            .span_id;
+        let committed_span = domain
+            .emit_hypothesis(hypothesis(turn, 2))
+            .expect("admitted")
+            .span_id;
+        domain.commit_span(committed_span).expect("commits");
+        let event = domain.complete_turn(turn).expect("an Open turn completes");
+        assert_eq!(event.turn_id, turn);
+        assert_eq!(
+            domain.events().last(),
+            Some(&StreamEvent::TurnCompleted(event))
+        );
+
+        assert_eq!(
+            domain.turns_view(),
+            [TurnsRow {
+                turn_id: turn,
+                run_id: run_id(),
+                state: TurnState::Completed,
+            }]
+        );
+        assert_eq!(
+            domain.spans_view(),
+            [
+                SpansRow {
+                    span_id: hypothesis_span,
+                    run_id: run_id(),
+                    turn_id: turn,
+                    stream_id: stream_id(),
+                    sequence: 1,
+                    text: "words 1".to_owned(),
+                    state: SpanState::Hypothesis,
+                },
+                SpansRow {
+                    span_id: committed_span,
+                    run_id: run_id(),
+                    turn_id: turn,
+                    stream_id: stream_id(),
+                    sequence: 2,
+                    text: "words 2".to_owned(),
+                    state: SpanState::Committed,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_log_refuses_a_kind_that_is_not_the_payloads_name_after_the_sequence_check() {
+        use inference_core::envelope::{EventEnvelope, EventId, Timebase};
+        use inference_text::TurnCompleted;
+
+        use super::{EnvelopeRefusal, EventLog};
+
+        let envelope = |event: u128, sequence: i64, kind: &str| EventEnvelope {
+            schema_version: 1,
+            event_id: EventId::from(Uuid::from_u128(event)),
+            run_id: run_id(),
+            session_id: None,
+            stream_id: stream_id(),
+            sequence,
+            producer: node_id(),
+            port: "control".to_owned(),
+            kind: kind.to_owned(),
+            generation_id: Some(GenerationId::from(Uuid::from_u128(0x77))),
+            timestamp: 0,
+            timebase: Timebase::WallTime,
+            causation_id: None,
+            payload: StreamEvent::TurnCompleted(TurnCompleted {
+                turn_id: TurnId::from(Uuid::from_u128(0x99)),
+            }),
+        };
+        let mut log = EventLog::new();
+        assert_eq!(
+            log.record(envelope(1, 1, "inference.stream.TranscriptHypothesis")),
+            Err(EnvelopeRefusal::KindMismatch {
+                kind: "inference.stream.TranscriptHypothesis".to_owned(),
+                payload: "inference.stream.TurnCompleted",
+            })
+        );
+        assert!(log.is_empty());
+
+        log.record(envelope(2, 2, "inference.stream.TurnCompleted"))
+            .expect("the payload's own name is its kind");
+        assert_eq!(
+            log.record(envelope(3, 2, "inference.stream.TextDelta")),
+            Err(EnvelopeRefusal::SequenceNotIncreasing {
+                stream_id: stream_id(),
+                last: 2,
+                sequence: 2,
+            }),
+            "the sequence is checked before the kind"
+        );
+        assert_eq!(log.len(), 1);
     }
 
     #[test]

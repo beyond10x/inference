@@ -408,7 +408,7 @@ fn a_fixed_seed_walk_across_both_domains_moves_the_token_by_exactly_the_events_p
 }
 
 #[test]
-fn observed_event_positions_are_per_domain_until_the_envelope_sequences_them() {
+fn observed_event_positions_are_the_targets_one_publication_order_1_2_and_3() {
     let mut stores = Stores::default();
     execute(&mut stores, &declare_model()).expect("DeclareModel answers");
     let generation = arrange_generation(&mut stores, 1);
@@ -439,11 +439,10 @@ fn observed_event_positions_are_per_domain_until_the_envelope_sequences_them() {
         positions,
         vec![
             ("inference.model.ModelDeclared", Some(1)),
-            ("inference.stream.GenerationStarted", Some(1)),
-            ("inference.stream.TextDelta", Some(2)),
+            ("inference.stream.GenerationStarted", Some(2)),
+            ("inference.stream.TextDelta", Some(3)),
         ],
-        "observed-event positions count per domain today, while tokens are target-wide; \
-         story:inbound-text-spans-and-envelope (## Event order across domains) numbers them in \
-         the target's one publication order. When it does, expect positions 1, 2 and 3 here"
+        "observed-event positions are numbered in the target's one publication order, as the \
+         tokens are: the model event first, then the generation, then the delta"
     );
 }

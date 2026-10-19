@@ -4,7 +4,8 @@
 //! Each request field is read on its own ([`Input`]); the outcome, the error and the event come
 //! from what the store returned. A command's consistency token is the target's
 //! ([`Stores::token`]), and a read demanding a token the stores have not reached is an error
-//! ([`Stores::require`]).
+//! ([`Stores::require`]). An observed event's position is its place in the target's one
+//! publication order ([`Stores::model_position`]).
 
 use std::collections::BTreeMap;
 
@@ -39,6 +40,7 @@ pub fn execute_command(
     stores: &mut Stores,
     request: &SemanticCommandRequest,
 ) -> Result<SemanticCommandResult, TargetError> {
+    stores.publish();
     let domain = &mut stores.model;
     let name = request.command.to_string();
     let result = match name.as_str() {
@@ -46,6 +48,7 @@ pub fn execute_command(
         DECLARE_ADAPTER => declare_adapter(domain, request)?,
         _ => return Err(unsupported(&name)),
     };
+    stores.publish();
     Ok(result.with_consistency(stores.token()?))
 }
 
@@ -137,15 +140,16 @@ pub fn observe_events(
     if wanted != MODEL_DECLARED && wanted != ADAPTER_DECLARED {
         return Err(unsupported(&wanted));
     }
+    stores.publish();
     let mut observed = Vec::new();
-    for (position, event) in stores.model.events().iter().enumerate() {
+    for (index, event) in stores.model.events().iter().enumerate() {
         let event = match event {
             ModelEvent::ModelDeclared(event) => model_declared(event)?,
             ModelEvent::AdapterDeclared(event) => adapter_declared(event)?,
         };
         if event.event == request.event {
-            let sequence = u64::try_from(position + 1).unwrap_or(u64::MAX);
-            observed.push(event.in_activity(request.correlation.clone()).at(sequence));
+            let position = stores.model_position(index)?;
+            observed.push(event.in_activity(request.correlation.clone()).at(position));
         }
     }
     Ok(observed)
