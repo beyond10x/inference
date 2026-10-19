@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "inference-audio"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "serde",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "inference-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "inference-llm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "inference-core",
  "inference-text",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "inference-pipeline"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "inference-core",
  "inference-tools",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "inference-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "inference-core",
  "inference-llm",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "inference-stt"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "inference-testkit"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ess-conformance",
  "ess-primitives",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "inference-text"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "inference-core",
  "serde",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tools"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "inference-core",
  "inference-text",
@@ -370,7 +370,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tts"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -638,7 +638,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "stt-only"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
