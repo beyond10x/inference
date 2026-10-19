@@ -55,8 +55,8 @@ use inference_pipeline::{
 
 use crate::drive::{Feed, GuardedSender, Next, RunRequests, SequenceNotIncreasing, Signals};
 use crate::queue::{
-    self, Channel, EdgeQueue, EpochLookup, ExposureWatch, QueueWatch, UnsupportedExposureOverload,
-    UnsupportedOverload,
+    self, Channel, EdgeQueue, EpochLookup, ExposureWatch, QueueWatch, Room,
+    UnsupportedExposureOverload, UnsupportedOverload,
 };
 use crate::run::{
     FailureReason, NodeInstance, NodeInstanceId, NodeInstanceState, NodeInstanceStateConflict, Run,
@@ -214,6 +214,9 @@ pub struct Ingress<P> {
     /// The name the pipeline exposes the port under.
     pub name: String,
     pub endpoint: Box<dyn OutputEndpoint<P>>,
+    /// The room of the ingress's queue, for a sender that waits under `fail`; none for an
+    /// ingress no queue of this run carries.
+    pub(crate) room: Option<Room<P>>,
 }
 
 /// The caller's end of an egress of the run: where it receives what the exposed output port of
@@ -244,11 +247,16 @@ impl<P> ExposedEnds<P> {
     /// Takes the end of the ingress exposed under `name`; none when no ingress carries it or it
     /// was taken.
     pub fn ingress(&mut self, name: &str) -> Option<Box<dyn OutputEndpoint<P>>> {
+        self.take_ingress(name).map(|ingress| ingress.endpoint)
+    }
+
+    /// Takes the end of the ingress exposed under `name` with the handle on its queue's room.
+    pub(crate) fn take_ingress(&mut self, name: &str) -> Option<Ingress<P>> {
         let index = self
             .ingresses
             .iter()
             .position(|ingress| ingress.name == name)?;
-        Some(self.ingresses.remove(index).endpoint)
+        Some(self.ingresses.remove(index))
     }
 
     /// Takes the end of the egress exposed under `name`; none when no egress carries it or it
@@ -483,6 +491,7 @@ impl<P: Send + 'static> RunController<P> {
                 sender,
                 receiver,
                 watch,
+                room,
             } = queue;
             exposure_watches.push(watch);
             let channel = Channel::Exposure(exposure_id);
@@ -501,6 +510,7 @@ impl<P: Send + 'static> RunController<P> {
                             node_id,
                             Arc::clone(&signals),
                         )),
+                        room: Some(room),
                     });
                     if let Some(endpoints) = Self::endpoints_of(&mut nodes, node_id) {
                         endpoints.inputs.push(NodeInput {
