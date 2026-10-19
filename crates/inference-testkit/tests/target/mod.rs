@@ -360,6 +360,12 @@ impl<'a> Input<'a> {
         )
     }
 
+    /// The node of a field whose type no other reader here covers, such as an ESS struct, for the
+    /// caller to read field by field.
+    pub fn node(&mut self, field: &str) -> Result<&'a Node, TargetError> {
+        self.take(field)
+    }
+
     /// An ESS `String`.
     pub fn text(&mut self, field: &str) -> Result<String, TargetError> {
         match self.take(field)? {

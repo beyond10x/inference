@@ -1,6 +1,6 @@
 [package]
 name = "inference-testkit"
-description = "Test utilities of the inference framework: in-memory stores per domain and, behind features, the mocks of the contracts."
+description = "Test utilities of the inference framework: in-memory stores per domain and, behind features, the run stores and the mocks of the contracts."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [features]
+run = ["dep:inference-runtime"]
 stt = ["dep:inference-stt"]
 llm = ["dep:inference-llm"]
 tts = ["dep:inference-tts"]
@@ -17,6 +18,7 @@ tts = ["dep:inference-tts"]
 inference-core = { path = "../inference-core" }
 inference-llm = { path = "../inference-llm", optional = true }
 inference-pipeline = { path = "../inference-pipeline" }
+inference-runtime = { path = "../inference-runtime", optional = true }
 inference-stt = { path = "../inference-stt", optional = true }
 inference-text = { path = "../inference-text" }
 inference-tts = { path = "../inference-tts", optional = true }
@@ -27,6 +29,42 @@ ess-conformance = { git = "https://github.com/beyond10x/ess", tag = "0.60.0" }
 ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.60.0" }
 serde.workspace = true
 serde_json.workspace = true
+
+[[test]]
+name = "conform"
+required-features = ["run"]
+
+[[test]]
+name = "adversary1_planning"
+required-features = ["run"]
+
+[[test]]
+name = "adversary1_run_target"
+required-features = ["run"]
+
+[[test]]
+name = "adversary1_target"
+required-features = ["run"]
+
+[[test]]
+name = "adversary10_validation_force"
+required-features = ["run"]
+
+[[test]]
+name = "adversary2_stream_deferred"
+required-features = ["run"]
+
+[[test]]
+name = "adversary2_stream_tokens"
+required-features = ["run"]
+
+[[test]]
+name = "adversary3_target_sequence"
+required-features = ["run"]
+
+[[test]]
+name = "adversary8_graph_views"
+required-features = ["run"]
 
 [lints]
 workspace = true

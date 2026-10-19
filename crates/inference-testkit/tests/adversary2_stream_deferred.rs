@@ -1,13 +1,13 @@
 //! Adversary pass 1 against the `inference.stream` target module: the 58 generation and segment
-//! scenarios of the synthesized suite that stay in `ess/SKIPPED.md` only because their arrangement
-//! creates a Run, run now against the module itself.
+//! scenarios of the synthesized suite whose arrangement creates a Run, run against the module
+//! itself apart from the run store.
 //!
 //! A stand-in answers the arranging `inference.policy` and `inference.graph` commands with the
 //! outcome and identity each scenario expects, and `inference.stream.StartGeneration` with the
 //! store's own `start_generation`; every other `inference.stream` command, view and event goes to
 //! the module under test, unchanged. The stand-in lives in this test only: it fakes nothing the
 //! target ships. A scenario that does not pass here is a step the stream module answers wrongly,
-//! found before `story:run-lifecycle` lands on top of it.
+//! whatever the run store answers.
 //!
 //! `target/stream.rs` is loaded a second time, as a module of this file, so that the stand-in can
 //! reach the module's functions, which `target/mod.rs` keeps private.

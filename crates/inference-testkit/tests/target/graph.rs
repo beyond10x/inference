@@ -1,5 +1,6 @@
-//! `inference.graph`: the five declaration commands, `ValidatePipeline` and `PlanPipeline`, the
-//! five views and the seven events of `ess/domains/graph.yaml`, answered by [`GraphDomain`].
+//! `inference.graph`: the five declaration commands, `ValidatePipeline`, `PlanPipeline`, the eight
+//! Run commands and `DescribeNodeInstance`, the seven views and the sixteen events of
+//! `ess/domains/graph.yaml`, answered by [`GraphDomain`].
 //!
 //! Each request field is read on its own ([`Input`]); the outcome, the error and the event come
 //! from what the store returned. `DeclarePipeline`, `BindNode` and `PlanPipeline` read the
@@ -30,9 +31,23 @@
 //! decides `locality-denied` (check 8 is not planned yet), so a forced one always carries
 //! stand-ins.
 //!
-//! Runs (the run commands, the views `Runs` and `NodeInstances` and their events) are
-//! [`TargetError::Unsupported`]: no store decides them yet, and they are not faked.
-//! `ess/SKIPPED.md` names the story for each.
+//! The eight Run commands and `DescribeNodeInstance` are the store's too ([`GraphDomain`]), as are
+//! the views `Runs` and `NodeInstances` and their events. `CreateRun` builds the run from the
+//! Planned form the store kept when it planned the pipeline. A moving run command naming a run no
+//! record carries takes its `wrong-state` outcome, whose `RunStateConflict` then carries no
+//! `current`, as `ValidatePipeline` does for a pipeline. `CancelRun`'s `cancelled` outcome also
+//! cancels the run's Active generations and discards its unplayed segments in the
+//! `inference.stream` store ([`StreamDomain::cancel_run`]) and publishes `RunCancelled` only.
+//! `FailRun` reads its `failure` field by field: `detail` and an optional `node_id`, absent or
+//! null for none; a `FailureReason` is written with `node_id` null when it names no node.
+//!
+//! `PrepareRun`'s `refused` outcome is declared `external`: the store never decides it (whether
+//! the runtime can admit a run's resources is not observed here), and a scenario may force it on
+//! the next invocation, which then moves nothing and answers `AdmissionDenied` with a stand-in
+//! reason, the first of [`AdmissionRefusal::ALL`], in every state and for an unknown run, as for
+//! the other forced outcomes.
+//!
+//! [`StreamDomain::cancel_run`]: inference_testkit::stream::StreamDomain::cancel_run
 
 use std::collections::BTreeMap;
 
@@ -52,7 +67,15 @@ use inference_pipeline::{
     PipelineNotFound, PipelineNotReady, PipelinePlanned, PipelineValidated, PlanPipeline,
     PlanPipelineError, Port, PortAdded, PortsConnected, ValidatePipeline, ValidatePipelineError,
 };
-use inference_testkit::graph::{GraphCatalog, GraphDomain, GraphEvent};
+use inference_runtime::RunId;
+use inference_runtime::run::{
+    AdmissionRefusal, FailureReason, NodeInstance, NodeInstanceDescribed, Run, RunCreated,
+    RunFailed, RunStateConflict,
+};
+use inference_testkit::graph::{
+    CreateRunError, DescribeNodeInstanceError, GraphCatalog, GraphDomain, GraphEvent, RunMoveError,
+};
+use inference_testkit::stream::StreamDomain;
 use uuid::Uuid;
 
 use super::{
@@ -70,9 +93,20 @@ const CONNECT_PORTS: &str = "inference.graph.ConnectPorts";
 const BIND_NODE: &str = "inference.graph.BindNode";
 const VALIDATE_PIPELINE: &str = "inference.graph.ValidatePipeline";
 const PLAN_PIPELINE: &str = "inference.graph.PlanPipeline";
+const CREATE_RUN: &str = "inference.graph.CreateRun";
+const VALIDATE_RUN: &str = "inference.graph.ValidateRun";
+const PREPARE_RUN: &str = "inference.graph.PrepareRun";
+const ACTIVATE_RUN: &str = "inference.graph.ActivateRun";
+const DRAIN_RUN: &str = "inference.graph.DrainRun";
+const COMPLETE_RUN: &str = "inference.graph.CompleteRun";
+const FAIL_RUN: &str = "inference.graph.FailRun";
+const CANCEL_RUN: &str = "inference.graph.CancelRun";
+const DESCRIBE_NODE_INSTANCE: &str = "inference.graph.DescribeNodeInstance";
 
 /// The outcome of `ValidatePipeline` that `ess/domains/graph.yaml` declares external.
 const REJECTED: &str = "rejected";
+/// The outcome of `PrepareRun` that `ess/domains/graph.yaml` declares external.
+const REFUSED: &str = "refused";
 /// The outcomes of `PlanPipeline` that `ess/domains/graph.yaml` declares external.
 const UNBOUND: &str = "unbound";
 const MISMATCH: &str = "mismatch";
@@ -85,6 +119,35 @@ const PORTS_CONNECTED: &str = "inference.graph.PortsConnected";
 const NODE_BOUND: &str = "inference.graph.NodeBound";
 const PIPELINE_VALIDATED: &str = "inference.graph.PipelineValidated";
 const PIPELINE_PLANNED: &str = "inference.graph.PipelinePlanned";
+const RUN_CREATED: &str = "inference.graph.RunCreated";
+const RUN_VALIDATING: &str = "inference.graph.RunValidating";
+const RUN_PREPARING: &str = "inference.graph.RunPreparing";
+const RUN_ACTIVATED: &str = "inference.graph.RunActivated";
+const RUN_DRAINING: &str = "inference.graph.RunDraining";
+const RUN_COMPLETED: &str = "inference.graph.RunCompleted";
+const RUN_FAILED: &str = "inference.graph.RunFailed";
+const RUN_CANCELLED: &str = "inference.graph.RunCancelled";
+const NODE_INSTANCE_DESCRIBED: &str = "inference.graph.NodeInstanceDescribed";
+
+/// Every event this module observes.
+const EVENTS: [&str; 16] = [
+    PIPELINE_DECLARED,
+    NODE_ADDED,
+    PORT_ADDED,
+    PORTS_CONNECTED,
+    NODE_BOUND,
+    PIPELINE_VALIDATED,
+    PIPELINE_PLANNED,
+    RUN_CREATED,
+    RUN_VALIDATING,
+    RUN_PREPARING,
+    RUN_ACTIVATED,
+    RUN_DRAINING,
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RUN_CANCELLED,
+    NODE_INSTANCE_DESCRIBED,
+];
 
 const PROFILE_NOT_FOUND: &str = "inference.policy.ProfileNotFound";
 const PIPELINE_NOT_FOUND: &str = "inference.graph.PipelineNotFound";
@@ -99,14 +162,20 @@ const NODE_UNBOUND: &str = "inference.graph.NodeUnbound";
 const CAPABILITY_MISMATCH: &str = "inference.graph.CapabilityMismatch";
 const LOCALITY_DENIED_ERROR: &str = "inference.graph.LocalityDenied";
 const PIPELINE_STATE_CONFLICT: &str = "inference.graph.PipelineStateConflict";
+const RUN_STATE_CONFLICT: &str = "inference.graph.RunStateConflict";
+const RUN_NOT_FOUND: &str = "inference.graph.RunNotFound";
+const RUN_NOT_RUNNING: &str = "inference.graph.RunNotRunning";
+const ADMISSION_DENIED: &str = "inference.graph.AdmissionDenied";
 
 const PIPELINES: &str = "inference.graph.Pipelines";
 const NODES: &str = "inference.graph.Nodes";
 const PORTS: &str = "inference.graph.Ports";
 const EDGES: &str = "inference.graph.Edges";
 const BINDINGS: &str = "inference.graph.Bindings";
+const RUNS: &str = "inference.graph.Runs";
+const NODE_INSTANCES: &str = "inference.graph.NodeInstances";
 
-/// The declaration half of the `inference.graph` store of one scenario.
+/// The `inference.graph` store of one scenario.
 pub type State = GraphDomain;
 
 pub fn execute_command(
@@ -129,16 +198,254 @@ pub fn execute_command(
         BIND_NODE => bind_node(domain, &catalog, request)?,
         VALIDATE_PIPELINE => validate_pipeline(domain, forced.is_some(), request)?,
         PLAN_PIPELINE => plan_pipeline(domain, &catalog, forced.as_ref(), request)?,
+        CREATE_RUN => create_run(domain, request)?,
+        VALIDATE_RUN => {
+            let answer = domain.validate_run(run_id(request)?);
+            run_moved(
+                VALIDATE_RUN,
+                "validating",
+                answer.map(GraphEvent::RunValidating),
+                request,
+            )?
+        }
+        PREPARE_RUN => {
+            let run_id = run_id(request)?;
+            if forced.is_some() {
+                refused()?
+            } else {
+                let answer = domain.prepare_run(run_id);
+                run_moved(
+                    PREPARE_RUN,
+                    "preparing",
+                    answer.map(GraphEvent::RunPreparing),
+                    request,
+                )?
+            }
+        }
+        ACTIVATE_RUN => {
+            let answer = domain.activate_run(run_id(request)?);
+            run_moved(
+                ACTIVATE_RUN,
+                "active",
+                answer.map(GraphEvent::RunActivated),
+                request,
+            )?
+        }
+        DRAIN_RUN => {
+            let answer = domain.drain_run(run_id(request)?);
+            run_moved(
+                DRAIN_RUN,
+                "draining",
+                answer.map(GraphEvent::RunDraining),
+                request,
+            )?
+        }
+        COMPLETE_RUN => {
+            let answer = domain.complete_run(run_id(request)?);
+            run_moved(
+                COMPLETE_RUN,
+                "completed",
+                answer.map(GraphEvent::RunCompleted),
+                request,
+            )?
+        }
+        FAIL_RUN => fail_run(domain, request)?,
+        CANCEL_RUN => cancel_run(domain, &mut stores.stream, request)?,
+        DESCRIBE_NODE_INSTANCE => describe_node_instance(domain, request)?,
         _ => return Err(unsupported(&name)),
     };
     stores.publish();
     Ok(result.with_consistency(stores.token()?))
 }
 
-/// Accepts a force of `ValidatePipeline/rejected` or of `PlanPipeline/unbound`, `mismatch` or
-/// `locality-denied`, the external outcomes of the commands this module answers; refuses a force
-/// of another outcome of those two commands as an error, as no specification-declared external
-/// outcome, and any other command's as unsupported.
+/// The one field of a moving run command but `FailRun`.
+fn run_id(request: &SemanticCommandRequest) -> Result<RunId, TargetError> {
+    let mut input = Input::of(request);
+    let run_id = input.named("run_id")?;
+    input.finish()?;
+    Ok(run_id)
+}
+
+/// The answer of a moving run command: `branch` and its event, or `wrong-state`, whose
+/// `RunStateConflict` carries no `current` for a run no record carries.
+fn run_moved(
+    command: &str,
+    branch: &str,
+    answer: Result<GraphEvent, RunMoveError>,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    Ok(match answer {
+        Ok(event) => SemanticCommandResult::took(outcome(command, branch))
+            .emitting(graph_event(&event)?.in_activity(request.correlation.clone())),
+        Err(RunMoveError::Unknown(_)) => {
+            SemanticCommandResult::took(outcome(command, "wrong-state")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(RUN_STATE_CONFLICT)),
+            )
+        }
+        Err(RunMoveError::Conflict(conflict)) => {
+            SemanticCommandResult::took(outcome(command, "wrong-state"))
+                .with_error(run_conflict(conflict)?)
+        }
+    })
+}
+
+/// `RunStateConflict`, carrying the state the run holds.
+fn run_conflict(conflict: RunStateConflict) -> Result<DeclaredErrorValue, TargetError> {
+    Ok(
+        DeclaredErrorValue::new(parse::<ErrorRef>(RUN_STATE_CONFLICT))
+            .with("current", named_node(&conflict.current)?),
+    )
+}
+
+/// The forced `refused` answer of `PrepareRun`: `AdmissionDenied` with the stand-in reason.
+fn refused() -> Result<SemanticCommandResult, TargetError> {
+    Ok(
+        SemanticCommandResult::took(outcome(PREPARE_RUN, REFUSED)).with_error(
+            DeclaredErrorValue::new(parse::<ErrorRef>(ADMISSION_DENIED))
+                .with("reason", named_node(&AdmissionRefusal::ALL[0])?),
+        ),
+    )
+}
+
+fn create_run(
+    domain: &mut GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let pipeline_id = input.named("pipeline_id")?;
+    input.finish()?;
+    Ok(match domain.create_run(pipeline_id) {
+        Ok(event) => SemanticCommandResult::took(outcome(CREATE_RUN, "created"))
+            .emitting(run_created(&event)?.in_activity(request.correlation.clone())),
+        Err(CreateRunError::UnknownPipeline(error)) => {
+            SemanticCommandResult::took(outcome(CREATE_RUN, "unknown-pipeline"))
+                .with_error(pipeline_not_found(error)?)
+        }
+        Err(CreateRunError::NotPlanned(error)) => {
+            SemanticCommandResult::took(outcome(CREATE_RUN, "not-planned"))
+                .with_error(pipeline_not_ready(error)?)
+        }
+    })
+}
+
+fn fail_run(
+    domain: &mut GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let run_id = input.named("run_id")?;
+    let failure = failure_reason(input.node("failure")?)?;
+    input.finish()?;
+    let answer = domain.fail_run(run_id, failure);
+    run_moved(
+        FAIL_RUN,
+        "failed",
+        answer.map(GraphEvent::RunFailed),
+        request,
+    )
+}
+
+/// `CancelRun`: the run moves to Cancelled in the graph store, and then its Active generations
+/// and unplayed segments in the stream store; `RunCancelled` is the one event.
+fn cancel_run(
+    domain: &mut GraphDomain,
+    stream: &mut StreamDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let run_id = run_id(request)?;
+    let answer = domain.cancel_run(run_id);
+    if answer.is_ok() {
+        stream.cancel_run(run_id);
+    }
+    run_moved(
+        CANCEL_RUN,
+        "cancelled",
+        answer.map(GraphEvent::RunCancelled),
+        request,
+    )
+}
+
+fn describe_node_instance(
+    domain: &mut GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let run_id = input.named("run_id")?;
+    let node_id = input.named("node_id")?;
+    input.finish()?;
+    Ok(match domain.describe_node_instance(run_id, node_id) {
+        Ok(event) => SemanticCommandResult::took(outcome(DESCRIBE_NODE_INSTANCE, "described"))
+            .emitting(node_instance_described(&event)?.in_activity(request.correlation.clone())),
+        Err(DescribeNodeInstanceError::UnknownRun(error)) => {
+            SemanticCommandResult::took(outcome(DESCRIBE_NODE_INSTANCE, "unknown-run")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(RUN_NOT_FOUND))
+                    .with("run_id", named_node(&error.run_id)?),
+            )
+        }
+        Err(DescribeNodeInstanceError::UnknownNode(error)) => {
+            SemanticCommandResult::took(outcome(DESCRIBE_NODE_INSTANCE, "unknown-node")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(NODE_NOT_FOUND))
+                    .with("node_id", named_node(&error.node_id)?),
+            )
+        }
+        Err(DescribeNodeInstanceError::RunNotRunning(error)) => {
+            SemanticCommandResult::took(outcome(DESCRIBE_NODE_INSTANCE, "run-not-running"))
+                .with_error(
+                    DeclaredErrorValue::new(parse::<ErrorRef>(RUN_NOT_RUNNING))
+                        .with("run_id", named_node(&error.run_id)?),
+                )
+        }
+    })
+}
+
+/// An `inference.graph.FailureReason` read field by field: `detail`, a string, and `node_id`, a
+/// node identity, absent or null for none. Any other field, or a field of another type, is an
+/// error.
+fn failure_reason(node: &Node) -> Result<FailureReason, TargetError> {
+    let refuse = |detail: String| unreadable(format!("reading `{FAIL_RUN}`"), detail);
+    let Node::Map(fields) = node else {
+        return Err(refuse(format!("`failure` is not a record: {node:?}")));
+    };
+    let mut detail = None;
+    let mut node_id = None;
+    for (field, value) in fields {
+        match (field.as_str(), value) {
+            ("detail", Node::Text(text)) => detail = Some(text.clone()),
+            ("node_id", Node::Null) => node_id = None,
+            ("node_id", Node::Text(text)) => {
+                node_id = Some(
+                    serde_json::from_value::<NodeId>(serde_json::Value::String(text.clone()))
+                        .map_err(|_| {
+                            refuse(format!("`failure.node_id` is not a node id: {text}"))
+                        })?,
+                );
+            }
+            _ => {
+                return Err(refuse(format!(
+                    "`failure.{field}` is undeclared or not of its declared type: {value:?}"
+                )));
+            }
+        }
+    }
+    let detail = detail.ok_or_else(|| refuse("`failure` carries no `detail`".to_owned()))?;
+    Ok(FailureReason { node_id, detail })
+}
+
+/// The node of an `inference.graph.FailureReason`: `node_id` null when it names no node.
+fn failure_node(failure: &FailureReason) -> Result<Node, TargetError> {
+    Ok(Node::Map(BTreeMap::from([
+        (
+            "node_id".to_owned(),
+            optional_node(failure.node_id.as_ref())?,
+        ),
+        ("detail".to_owned(), text_node(&failure.detail)),
+    ])))
+}
+
+/// Accepts a force of `ValidatePipeline/rejected`, of `PlanPipeline/unbound`, `mismatch` or
+/// `locality-denied`, or of `PrepareRun/refused`, the external outcomes of the commands this
+/// module answers; refuses a force of another outcome of those three commands as an error, as no
+/// specification-declared external outcome, and any other command's as unsupported.
 pub fn configure_external_outcome(
     stores: &mut Stores,
     request: &ExternalOutcomeControl,
@@ -147,6 +454,7 @@ pub fn configure_external_outcome(
     let external: &[&str] = match command.as_str() {
         VALIDATE_PIPELINE => &[REJECTED],
         PLAN_PIPELINE => &[UNBOUND, MISMATCH, LOCALITY_DENIED],
+        PREPARE_RUN => &[REFUSED],
         _ => return Err(unsupported(&request.force.to_string())),
     };
     if !external
@@ -599,6 +907,16 @@ pub fn query_view(
             .bindings()
             .map(bindings_row)
             .collect::<Result<Vec<_>, _>>()?,
+        RUNS => stores
+            .graph
+            .runs()
+            .map(runs_row)
+            .collect::<Result<Vec<_>, _>>()?,
+        NODE_INSTANCES => stores
+            .graph
+            .node_instances()
+            .map(node_instances_row)
+            .collect::<Result<Vec<_>, _>>()?,
         _ => return Err(unsupported(&name)),
     };
     Ok(SemanticViewResult::of(rows))
@@ -609,37 +927,90 @@ pub fn observe_events(
     request: &EventObservationRequest,
 ) -> Result<Vec<ObservedEvent>, TargetError> {
     let wanted = request.event.to_string();
-    if ![
-        PIPELINE_DECLARED,
-        NODE_ADDED,
-        PORT_ADDED,
-        PORTS_CONNECTED,
-        NODE_BOUND,
-        PIPELINE_VALIDATED,
-        PIPELINE_PLANNED,
-    ]
-    .contains(&wanted.as_str())
-    {
+    if !EVENTS.contains(&wanted.as_str()) {
         return Err(unsupported(&wanted));
     }
     stores.publish();
     let mut observed = Vec::new();
     for (index, event) in stores.graph.events().iter().enumerate() {
-        let event = match event {
-            GraphEvent::PipelineDeclared(event) => pipeline_declared(event)?,
-            GraphEvent::NodeAdded(event) => node_added(event)?,
-            GraphEvent::PortAdded(event) => port_added(event)?,
-            GraphEvent::PortsConnected(event) => ports_connected(event)?,
-            GraphEvent::NodeBound(event) => node_bound(event)?,
-            GraphEvent::PipelineValidated(event) => pipeline_validated(event)?,
-            GraphEvent::PipelinePlanned(event) => pipeline_planned(event)?,
-        };
+        let event = graph_event(event)?;
         if event.event == request.event {
             let position = stores.graph_position(index)?;
             observed.push(event.in_activity(request.correlation.clone()).at(position));
         }
     }
     Ok(observed)
+}
+
+/// An event of the store as the suite observes it, every declared field carried.
+fn graph_event(event: &GraphEvent) -> Result<ObservedEvent, TargetError> {
+    let run = |name: &str, run_id: RunId| {
+        Ok::<_, TargetError>(
+            ObservedEvent::new(parse::<EventRef>(name)).with("run_id", named_node(&run_id)?),
+        )
+    };
+    match event {
+        GraphEvent::PipelineDeclared(event) => pipeline_declared(event),
+        GraphEvent::NodeAdded(event) => node_added(event),
+        GraphEvent::PortAdded(event) => port_added(event),
+        GraphEvent::PortsConnected(event) => ports_connected(event),
+        GraphEvent::NodeBound(event) => node_bound(event),
+        GraphEvent::PipelineValidated(event) => pipeline_validated(event),
+        GraphEvent::PipelinePlanned(event) => pipeline_planned(event),
+        GraphEvent::RunCreated(event) => run_created(event),
+        GraphEvent::RunValidating(event) => run(RUN_VALIDATING, event.run_id),
+        GraphEvent::RunPreparing(event) => run(RUN_PREPARING, event.run_id),
+        GraphEvent::RunActivated(event) => run(RUN_ACTIVATED, event.run_id),
+        GraphEvent::RunDraining(event) => run(RUN_DRAINING, event.run_id),
+        GraphEvent::RunCompleted(event) => run(RUN_COMPLETED, event.run_id),
+        GraphEvent::RunFailed(event) => run_failed(event),
+        GraphEvent::RunCancelled(event) => run(RUN_CANCELLED, event.run_id),
+        GraphEvent::NodeInstanceDescribed(event) => node_instance_described(event),
+    }
+}
+
+fn run_created(event: &RunCreated) -> Result<ObservedEvent, TargetError> {
+    Ok(ObservedEvent::new(parse::<EventRef>(RUN_CREATED))
+        .with("run_id", named_node(&event.run_id)?)
+        .with("pipeline_id", named_node(&event.pipeline_id)?))
+}
+
+fn run_failed(event: &RunFailed) -> Result<ObservedEvent, TargetError> {
+    Ok(ObservedEvent::new(parse::<EventRef>(RUN_FAILED))
+        .with("run_id", named_node(&event.run_id)?)
+        .with("failure", failure_node(&event.failure)?))
+}
+
+fn node_instance_described(event: &NodeInstanceDescribed) -> Result<ObservedEvent, TargetError> {
+    Ok(
+        ObservedEvent::new(parse::<EventRef>(NODE_INSTANCE_DESCRIBED))
+            .with("instance_id", named_node(&event.instance_id)?)
+            .with("run_id", named_node(&event.run_id)?)
+            .with("node_id", named_node(&event.node_id)?),
+    )
+}
+
+fn runs_row(run: &Run) -> Result<ViewRow, TargetError> {
+    Ok(BTreeMap::from([
+        ("run_id".to_owned(), named_node(&run.run_id())?),
+        ("pipeline_id".to_owned(), named_node(&run.pipeline_id())?),
+        (
+            "failure".to_owned(),
+            run.failure().map_or(Ok(Node::Null), failure_node)?,
+        ),
+        ("state".to_owned(), named_node(&run.state())?),
+    ]))
+}
+
+fn node_instances_row(instance: &NodeInstance) -> Result<ViewRow, TargetError> {
+    Ok(BTreeMap::from([
+        (
+            "instance_id".to_owned(),
+            named_node(&instance.instance_id())?,
+        ),
+        ("run_id".to_owned(), named_node(&instance.run_id())?),
+        ("node_id".to_owned(), named_node(&instance.node_id())?),
+    ]))
 }
 
 fn pipeline_declared(event: &PipelineDeclared) -> Result<ObservedEvent, TargetError> {
@@ -769,7 +1140,7 @@ mod tests {
     use ess_primitives::node::Node;
     use ess_primitives::time::Timestamp;
 
-    use super::super::{Stores, Target, model, policy};
+    use super::super::{Stores, Target, model, policy, stream};
     use super::{execute_command, observe_events, query_view};
 
     const UNKNOWN: &str = "00000000-0000-4000-8000-6eced0bc8ba0";
@@ -830,19 +1201,23 @@ mod tests {
         result.direct_events[0].payload[field].clone()
     }
 
+    /// The rows of `name`, read through the module of its domain.
     fn rows(stores: &mut Stores, name: &str) -> Vec<BTreeMap<String, Node>> {
-        query_view(
-            stores,
-            &SemanticViewRequest {
-                view: name.parse::<ViewRef>().expect("a view name"),
-                params: BTreeMap::new(),
-                consistency: QueryConsistency::Current,
-                correlation: correlation(),
-                deadline: Deadline::at(Timestamp::from_epoch_millis(u64::MAX)),
-            },
-        )
-        .unwrap_or_else(|error| panic!("`{name}` reads: {error}"))
-        .rows
+        let request = SemanticViewRequest {
+            view: name.parse::<ViewRef>().expect("a view name"),
+            params: BTreeMap::new(),
+            consistency: QueryConsistency::Current,
+            correlation: correlation(),
+            deadline: Deadline::at(Timestamp::from_epoch_millis(u64::MAX)),
+        };
+        let answer = if name.starts_with("inference.stream.") {
+            stream::query_view(stores, &request)
+        } else {
+            query_view(stores, &request)
+        };
+        answer
+            .unwrap_or_else(|error| panic!("`{name}` reads: {error}"))
+            .rows
     }
 
     fn observed(stores: &mut Stores, name: &str) -> Vec<ObservedEvent> {
@@ -1424,27 +1799,452 @@ mod tests {
         );
     }
 
+    /// A Planned pipeline with one node, as the run scenarios arrange it.
+    fn planned(stores: &mut Stores) -> (Node, Node) {
+        let (pipeline_id, node_id) = one_model(stores, &[], false);
+        let planned = plan(stores, pipeline_id.clone());
+        assert_eq!(branch(&planned), "inference.graph.PlanPipeline/planned");
+        (pipeline_id, node_id)
+    }
+
+    fn create(stores: &mut Stores, pipeline_id: Node) -> SemanticCommandResult {
+        run(
+            stores,
+            "inference.graph.CreateRun",
+            &[("pipeline_id", pipeline_id)],
+        )
+    }
+
+    fn on_run(stores: &mut Stores, command: &str, run_id: &Node) -> SemanticCommandResult {
+        run(
+            stores,
+            &format!("inference.graph.{command}"),
+            &[("run_id", run_id.clone())],
+        )
+    }
+
+    fn run_row(stores: &mut Stores) -> BTreeMap<String, Node> {
+        let runs = rows(stores, "inference.graph.Runs");
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        runs[0].clone()
+    }
+
     #[test]
-    fn runs_are_unsupported_not_faked() {
+    fn a_run_of_a_planned_pipeline_moves_to_completed_and_each_event_is_placed() {
         let mut stores = Stores::default();
-        let answer = execute_command(&mut stores, &command("inference.graph.CreateRun", &[]));
-        assert!(
-            matches!(&answer, Err(TargetError::Unsupported { .. })),
-            "{answer:?}"
+        let (pipeline_id, _) = planned(&mut stores);
+        let created = create(&mut stores, pipeline_id.clone());
+        assert_eq!(branch(&created), "inference.graph.CreateRun/created");
+        let run_id = emitted(&created, "run_id");
+        assert_eq!(
+            run_id,
+            text("00000003-0001-4000-8000-000000000001"),
+            "a run counts in the graph space, apart from the declared entities"
         );
-        let event = observe_events(
+        assert_eq!(emitted(&created, "pipeline_id"), pipeline_id);
+        assert_eq!(created.direct_events[0].payload.len(), 2);
+        let row = run_row(&mut stores);
+        assert_eq!(row["run_id"], run_id);
+        assert_eq!(row["pipeline_id"], pipeline_id);
+        assert_eq!(row["failure"], Node::Null);
+        assert_eq!(row["state"], text("Created"));
+        assert_eq!(row.len(), 4);
+
+        for (command, outcome, state, event) in [
+            ("ValidateRun", "validating", "Validating", "RunValidating"),
+            ("PrepareRun", "preparing", "Preparing", "RunPreparing"),
+            ("ActivateRun", "active", "Active", "RunActivated"),
+            ("DrainRun", "draining", "Draining", "RunDraining"),
+            ("CompleteRun", "completed", "Completed", "RunCompleted"),
+        ] {
+            let moved = on_run(&mut stores, command, &run_id);
+            assert_eq!(
+                branch(&moved),
+                format!("inference.graph.{command}/{outcome}")
+            );
+            assert_eq!(emitted(&moved, "run_id"), run_id);
+            assert_eq!(moved.direct_events[0].payload.len(), 1);
+            assert_eq!(run_row(&mut stores)["state"], text(state));
+            let token = moved
+                .consistency
+                .as_ref()
+                .map(|token| token.as_str().to_owned());
+            let placed = observed(&mut stores, &format!("inference.graph.{event}"));
+            assert_eq!(placed.len(), 1);
+            assert_eq!(
+                placed[0].sequence.map(|at| format!("seq:{at}")),
+                token,
+                "the event is the last one the command placed"
+            );
+        }
+    }
+
+    #[test]
+    fn create_run_refuses_an_unknown_pipeline_and_one_that_is_not_planned() {
+        let mut stores = Stores::default();
+        let unknown = create(&mut stores, text(UNKNOWN));
+        assert_eq!(
+            branch(&unknown),
+            "inference.graph.CreateRun/unknown-pipeline"
+        );
+        let error = unknown.error.as_ref().expect("a declared error");
+        assert_eq!(error.error.to_string(), "inference.graph.PipelineNotFound");
+        assert_eq!(
+            error.fields,
+            BTreeMap::from([("pipeline_id".to_owned(), text(UNKNOWN))])
+        );
+
+        let (pipeline_id, _) = one_model(&mut stores, &[], false);
+        let events = stores.graph.events().len();
+        let validated = create(&mut stores, pipeline_id.clone());
+        assert_eq!(branch(&validated), "inference.graph.CreateRun/not-planned");
+        let error = validated.error.as_ref().expect("a declared error");
+        assert_eq!(error.error.to_string(), "inference.graph.PipelineNotReady");
+        assert_eq!(
+            error.fields,
+            BTreeMap::from([
+                ("pipeline_id".to_owned(), pipeline_id),
+                ("required".to_owned(), text("Planned")),
+            ])
+        );
+        assert!(validated.direct_events.is_empty());
+        assert_eq!(stores.graph.events().len(), events);
+        assert!(rows(&mut stores, "inference.graph.Runs").is_empty());
+    }
+
+    #[test]
+    fn a_refused_run_command_moves_nothing_and_an_unknown_run_reports_no_state() {
+        let mut stores = Stores::default();
+        let (pipeline_id, _) = planned(&mut stores);
+        let run_id = emitted(&create(&mut stores, pipeline_id), "run_id");
+        let events = stores.graph.events().len();
+        let before = run_row(&mut stores);
+
+        for command in ["PrepareRun", "ActivateRun", "DrainRun", "CompleteRun"] {
+            let refused = on_run(&mut stores, command, &run_id);
+            assert_eq!(
+                branch(&refused),
+                format!("inference.graph.{command}/wrong-state")
+            );
+            let error = refused.error.as_ref().expect("a declared error");
+            assert_eq!(error.error.to_string(), "inference.graph.RunStateConflict");
+            assert_eq!(
+                error.fields,
+                BTreeMap::from([("current".to_owned(), text("Created"))])
+            );
+            assert!(refused.direct_events.is_empty());
+        }
+        let failed = run(
             &mut stores,
-            &EventObservationRequest {
-                event: "inference.graph.RunCreated"
-                    .parse::<EventRef>()
-                    .expect("an event name"),
-                correlation: correlation(),
-                deadline: Deadline::at(Timestamp::from_epoch_millis(u64::MAX)),
-            },
+            "inference.graph.FailRun",
+            &[
+                ("run_id", run_id.clone()),
+                (
+                    "failure",
+                    Node::Map(BTreeMap::from([("detail".to_owned(), text("d"))])),
+                ),
+            ],
         );
-        assert!(
-            matches!(&event, Err(TargetError::Unsupported { .. })),
-            "{event:?}"
+        assert_eq!(branch(&failed), "inference.graph.FailRun/wrong-state");
+        assert_eq!(stores.graph.events().len(), events);
+        assert_eq!(run_row(&mut stores), before);
+
+        let unknown = on_run(&mut stores, "ValidateRun", &text(UNKNOWN));
+        assert_eq!(branch(&unknown), "inference.graph.ValidateRun/wrong-state");
+        let error = unknown.error.as_ref().expect("a declared error");
+        assert_eq!(error.error.to_string(), "inference.graph.RunStateConflict");
+        assert!(error.fields.is_empty(), "{error:?}");
+    }
+
+    #[test]
+    fn fail_run_records_the_failure_read_field_by_field() {
+        let mut stores = Stores::default();
+        let (pipeline_id, node_id) = planned(&mut stores);
+        let run_id = emitted(&create(&mut stores, pipeline_id), "run_id");
+        on_run(&mut stores, "ValidateRun", &run_id);
+        let fail = |failure: Node| {
+            command(
+                "inference.graph.FailRun",
+                &[("run_id", run_id.clone()), ("failure", failure)],
+            )
+        };
+
+        for broken in [
+            Node::Map(BTreeMap::from([("node_id".to_owned(), node_id.clone())])),
+            Node::Map(BTreeMap::from([
+                ("detail".to_owned(), text("d")),
+                ("code".to_owned(), text("c")),
+            ])),
+            Node::Map(BTreeMap::from([
+                ("detail".to_owned(), text("d")),
+                ("node_id".to_owned(), text("not-a-uuid")),
+            ])),
+            text("d"),
+        ] {
+            let answer = execute_command(&mut stores, &fail(broken));
+            assert!(
+                matches!(&answer, Err(TargetError::Unavailable { .. })),
+                "{answer:?}"
+            );
+        }
+        assert_eq!(run_row(&mut stores)["state"], text("Validating"));
+
+        let failure = Node::Map(BTreeMap::from([
+            ("detail".to_owned(), text("worker lost")),
+            ("node_id".to_owned(), node_id.clone()),
+        ]));
+        let failed = execute_command(&mut stores, &fail(failure.clone())).expect("FailRun answers");
+        assert_eq!(branch(&failed), "inference.graph.FailRun/failed");
+        assert_eq!(emitted(&failed, "failure"), failure);
+        let row = run_row(&mut stores);
+        assert_eq!(row["state"], text("Failed"));
+        assert_eq!(row["failure"], failure);
+
+        let mut other = Stores::default();
+        let (pipeline_id, _) = planned(&mut other);
+        let run_id = emitted(&create(&mut other, pipeline_id), "run_id");
+        on_run(&mut other, "ValidateRun", &run_id);
+        let failed = run(
+            &mut other,
+            "inference.graph.FailRun",
+            &[
+                ("run_id", run_id),
+                (
+                    "failure",
+                    Node::Map(BTreeMap::from([("detail".to_owned(), text("lost"))])),
+                ),
+            ],
+        );
+        assert_eq!(branch(&failed), "inference.graph.FailRun/failed");
+        assert_eq!(
+            run_row(&mut other)["failure"],
+            Node::Map(BTreeMap::from([
+                ("detail".to_owned(), text("lost")),
+                ("node_id".to_owned(), Node::Null),
+            ])),
+            "a failure naming no node carries a null node_id"
+        );
+    }
+
+    #[test]
+    fn a_forced_admission_refusal_answers_the_next_prepare_only_and_moves_nothing() {
+        let mut stores = Stores::default();
+        let (pipeline_id, _) = planned(&mut stores);
+        let run_id = emitted(&create(&mut stores, pipeline_id), "run_id");
+        on_run(&mut stores, "ValidateRun", &run_id);
+        let events = stores.graph.events().len();
+
+        force(&mut stores, "inference.graph.PrepareRun/refused").expect("refused is external");
+        let refused = on_run(&mut stores, "PrepareRun", &run_id);
+        assert_eq!(branch(&refused), "inference.graph.PrepareRun/refused");
+        let error = refused.error.as_ref().expect("a declared error");
+        assert_eq!(error.error.to_string(), "inference.graph.AdmissionDenied");
+        assert_eq!(
+            error.fields,
+            BTreeMap::from([("reason".to_owned(), text("not_enough_vram"))])
+        );
+        assert!(refused.direct_events.is_empty());
+        assert_eq!(stores.graph.events().len(), events);
+        assert_eq!(run_row(&mut stores)["state"], text("Validating"));
+
+        force(&mut stores, "inference.graph.PrepareRun/refused").expect("refused is external");
+        let unknown = on_run(&mut stores, "PrepareRun", &text(UNKNOWN));
+        assert_eq!(
+            branch(&unknown),
+            "inference.graph.PrepareRun/refused",
+            "a forced refusal answers an unknown run, as the specification orders it"
+        );
+
+        let prepared = on_run(&mut stores, "PrepareRun", &run_id);
+        assert_eq!(
+            branch(&prepared),
+            "inference.graph.PrepareRun/preparing",
+            "the force lapses after one invocation"
+        );
+        assert!(matches!(
+            force(&mut stores, "inference.graph.PrepareRun/preparing"),
+            Err(TargetError::Unavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn describe_node_instance_refuses_an_unknown_run_then_node_then_a_run_not_running() {
+        let mut stores = Stores::default();
+        let (pipeline_id, node_id) = planned(&mut stores);
+        let run_id = emitted(&create(&mut stores, pipeline_id), "run_id");
+        let describe = |stores: &mut Stores, run_id: Node, node_id: Node| {
+            run(
+                stores,
+                "inference.graph.DescribeNodeInstance",
+                &[("run_id", run_id), ("node_id", node_id)],
+            )
+        };
+
+        let unknown_run = describe(&mut stores, text(UNKNOWN), text(UNKNOWN));
+        assert_eq!(
+            branch(&unknown_run),
+            "inference.graph.DescribeNodeInstance/unknown-run"
+        );
+        let error = unknown_run.error.as_ref().expect("a declared error");
+        assert_eq!(error.error.to_string(), "inference.graph.RunNotFound");
+        assert_eq!(
+            error.fields,
+            BTreeMap::from([("run_id".to_owned(), text(UNKNOWN))])
+        );
+
+        let unknown_node = describe(&mut stores, run_id.clone(), text(UNKNOWN));
+        assert_eq!(
+            branch(&unknown_node),
+            "inference.graph.DescribeNodeInstance/unknown-node",
+            "an unknown node is refused before the Created run's state"
+        );
+        let error = unknown_node.error.as_ref().expect("a declared error");
+        assert_eq!(error.error.to_string(), "inference.graph.NodeNotFound");
+        assert_eq!(
+            error.fields,
+            BTreeMap::from([("node_id".to_owned(), text(UNKNOWN))])
+        );
+
+        let not_running = describe(&mut stores, run_id.clone(), node_id.clone());
+        assert_eq!(
+            branch(&not_running),
+            "inference.graph.DescribeNodeInstance/run-not-running"
+        );
+        let error = not_running.error.as_ref().expect("a declared error");
+        assert_eq!(error.error.to_string(), "inference.graph.RunNotRunning");
+        assert_eq!(
+            error.fields,
+            BTreeMap::from([("run_id".to_owned(), run_id.clone())])
+        );
+        assert!(rows(&mut stores, "inference.graph.NodeInstances").is_empty());
+
+        on_run(&mut stores, "ValidateRun", &run_id);
+        on_run(&mut stores, "PrepareRun", &run_id);
+        let described = describe(&mut stores, run_id.clone(), node_id.clone());
+        assert_eq!(
+            branch(&described),
+            "inference.graph.DescribeNodeInstance/described"
+        );
+        let instance_id = emitted(&described, "instance_id");
+        assert_eq!(instance_id, text("00000003-0001-4000-8000-000000000002"));
+        assert_eq!(emitted(&described, "run_id"), run_id);
+        assert_eq!(emitted(&described, "node_id"), node_id);
+        let instances = rows(&mut stores, "inference.graph.NodeInstances");
+        assert_eq!(
+            instances,
+            [BTreeMap::from([
+                ("instance_id".to_owned(), instance_id),
+                ("run_id".to_owned(), run_id),
+                ("node_id".to_owned(), node_id),
+            ])]
+        );
+    }
+
+    #[test]
+    fn cancel_run_cancels_its_active_generations_and_discards_its_unplayed_segments() {
+        let mut stores = Stores::default();
+        let (pipeline_id, node_id) = planned(&mut stores);
+        let run_id = emitted(&create(&mut stores, pipeline_id.clone()), "run_id");
+        let other = emitted(&create(&mut stores, pipeline_id), "run_id");
+        for run_id in [&run_id, &other] {
+            for command in ["ValidateRun", "PrepareRun", "ActivateRun"] {
+                on_run(&mut stores, command, run_id);
+            }
+        }
+        let start = |stores: &mut Stores, run_id: &Node| {
+            let started = stream::execute_command(
+                stores,
+                &command(
+                    "inference.stream.StartGeneration",
+                    &[
+                        ("run_id", run_id.clone()),
+                        ("node_id", node_id.clone()),
+                        ("epoch", number(1.0)),
+                    ],
+                ),
+            )
+            .expect("StartGeneration answers");
+            assert_eq!(branch(&started), "inference.stream.StartGeneration/started");
+            emitted(&started, "generation_id")
+        };
+        let delta = |stores: &mut Stores, generation_id: &Node, sequence: f64| {
+            let emitted_delta = stream::execute_command(
+                stores,
+                &command(
+                    "inference.stream.EmitTextDelta",
+                    &[
+                        ("generation_id", generation_id.clone()),
+                        ("sequence", number(sequence)),
+                        ("text", text("t")),
+                    ],
+                ),
+            )
+            .expect("EmitTextDelta answers");
+            emitted(&emitted_delta, "segment_id")
+        };
+        let generation = start(&mut stores, &run_id);
+        let kept = start(&mut stores, &other);
+        let tentative = delta(&mut stores, &generation, 1.0);
+        let elsewhere = delta(&mut stores, &kept, 1.0);
+        let stream_events = stores.stream.events().len();
+
+        let cancelled = on_run(&mut stores, "CancelRun", &run_id);
+        assert_eq!(branch(&cancelled), "inference.graph.CancelRun/cancelled");
+        assert_eq!(cancelled.direct_events.len(), 1, "RunCancelled only");
+        assert_eq!(
+            stores.stream.events().len(),
+            stream_events,
+            "the cascade records no stream event"
+        );
+        let state_of = |stores: &mut Stores, view: &str, field: &str, id: &Node| {
+            rows(stores, view)
+                .into_iter()
+                .find(|row| &row[field] == id)
+                .map(|row| row["state"].clone())
+        };
+        assert_eq!(
+            state_of(
+                &mut stores,
+                "inference.stream.Generations",
+                "generation_id",
+                &generation
+            ),
+            Some(text("Cancelled"))
+        );
+        assert_eq!(
+            state_of(
+                &mut stores,
+                "inference.stream.Segments",
+                "segment_id",
+                &tentative
+            ),
+            Some(text("Discarded"))
+        );
+        assert_eq!(
+            state_of(
+                &mut stores,
+                "inference.stream.Generations",
+                "generation_id",
+                &kept
+            ),
+            Some(text("Active")),
+            "another run's generation is not cancelled"
+        );
+        assert_eq!(
+            state_of(
+                &mut stores,
+                "inference.stream.Segments",
+                "segment_id",
+                &elsewhere
+            ),
+            Some(text("Tentative"))
+        );
+
+        let again = on_run(&mut stores, "CancelRun", &run_id);
+        assert_eq!(branch(&again), "inference.graph.CancelRun/wrong-state");
+        assert_eq!(
+            again.error.as_ref().expect("a declared error").fields,
+            BTreeMap::from([("current".to_owned(), text("Cancelled"))])
         );
     }
 
