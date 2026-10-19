@@ -1,0 +1,15 @@
+[package]
+name = "inference-runtime"
+description = "Graph execution of the inference framework: one bounded queue per edge per run, with the overload policy its declaration carries."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+inference-core = { path = "../inference-core" }
+inference-pipeline = { path = "../inference-pipeline" }
+
+[lints]
+workspace = true
