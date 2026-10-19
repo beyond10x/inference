@@ -13,4 +13,6 @@ this file with it.
 ## inference.tools
 
 
+## inference.duplex
+
 ## inference.session

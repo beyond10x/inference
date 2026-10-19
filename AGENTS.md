@@ -19,7 +19,8 @@ on this repository. `README.md` is for people.
 | path | what |
 |---|---|
 | `Cargo.toml`, `crates/` | the Cargo workspace; one crate per directory under `crates/`, `inference-core` first |
-| `examples/` | example packages built and tested with the workspace, never published and with no binary target; `stt-only` recognises speech with the STT contract and the mock alone |
+| `examples/` | example packages built and tested with the workspace, never published and with no binary target; `stt-only` recognises speech with the STT contract and the mock alone; `realtime-voice` wires microphone, a native speech model and speaker (barge-in, a local-time tool), tested with the duplex mock and the fake audio host, run with `cargo run -p realtime-voice --example talk -- --provider openai\|nova` |
+| `adapters/` | hosted and local integrations, one crate per provider, each enabled explicitly; `inference-openai` is the OpenAI Realtime client, its live test ignored and behind feature `live` |
 | `docs/design/` | design documents and their reviews |
 | `ess/` | the ESS specification: `system.yaml`, `ess-inputs.yaml` and one domain document per layer of the design under `domains/` (model, policy, graph, stream, tools, session); every declaration carries a `read from:` line naming the design line it was read from; `scenarios/` holds authored scenarios for what synthesis cannot witness |
 | `.engineering/planning` | the AEP planning store; change it only through `aep plan artifact` verbs |
@@ -37,7 +38,7 @@ ess verify conform run --path ess --scenarios ess/scenarios --target interpreted
 aep plan artifact validate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features   # --all-features builds the inference-testkit mocks behind its features stt, llm and tts
+cargo test --workspace --all-features   # --all-features builds the inference-testkit mocks behind its features run, stt, llm, tts and duplex
 cargo test -p inference-testkit --test conform   # the testkit conformance target alone: synthesizes the suite, runs it in process, has `ess verify conform report` write the verdict; prints target/tmp/conform-<run>/, where suite.json, results.json and report.json stay, red or green
 git add <paths> && b10x-gates bot -- commit -F <file>   # staging is plain git; the route refuses add
 b10x-gates scan-text --policy <file> <path>...           # release and pull-request bodies before they are sent; no policy found is "not scanned", never "passed"
@@ -57,6 +58,8 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   the reverse. The repository ships libraries: no binary, server or CLI.
 - Other beyond10x repositories (`llm`, `llm-gateway`, `loom`) are not dependencies and the plan
   treats them as absent (owner decision, 2026-10-18). An adapter to one may be written later.
+  The `secrets` library is the exception, used only by adapters' local credential lookup behind a
+  feature (owner decision, 2026-10-19).
 - The planning store is the plan. Work is recorded there, never only in a document or a chat.
 - Work in a managed worktree (`worktree create --purpose <what>`), build into its own `target/`.
 - Every commit, push, pull request and tag goes through the bot route (`b10x-gates bot -- <git

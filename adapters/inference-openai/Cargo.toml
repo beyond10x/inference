@@ -1,0 +1,50 @@
+[package]
+name = "inference-openai"
+description = "OpenAI Realtime API client for the inference framework: a WebSocket session with typed client and server events."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+keychain = ["dep:keyring-core", "dep:secrets-core", "dep:secrets-keychain"]
+native-keychain = ["keychain", "secrets-keychain/native-keychain"]
+duplex = ["dep:inference-core", "dep:inference-duplex", "dep:inference-tools", "tokio/rt"]
+live = ["native-keychain", "duplex"]
+
+[dependencies]
+base64.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+inference-audio = { path = "../../crates/inference-audio" }
+inference-core = { path = "../../crates/inference-core", optional = true }
+inference-duplex = { path = "../../crates/inference-duplex", optional = true }
+inference-tools = { path = "../../crates/inference-tools", optional = true }
+keyring-core = { version = "1", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+secrets-core = { git = "https://github.com/beyond10x/secrets", tag = "v0.6.0", optional = true }
+secrets-keychain = { git = "https://github.com/beyond10x/secrets", tag = "v0.6.0", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["net", "time"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+webpki-roots = "0.26"
+zeroize = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+
+[[test]]
+name = "live"
+required-features = ["live"]
+
+[[test]]
+name = "duplex"
+required-features = ["duplex"]
+
+[[test]]
+name = "live_duplex"
+required-features = ["live"]
+
+[lints]
+workspace = true
