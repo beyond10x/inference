@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:segment-linear-transitions
 kind: story
-status: draft
+status: active
 title: 'Output segments: transitions that consume, and the LLM mock''s concurrency'
 relations:
 - decomposes: epic:contracts-and-testkit
@@ -21,7 +21,10 @@ scope:
   path: crates/inference-text/src/lib.rs
 - confidence: cited
   path: crates/inference-tts
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T10:59:23Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-19T10:59:23Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 

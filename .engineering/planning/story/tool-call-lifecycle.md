@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:tool-call-lifecycle
 kind: story
-status: draft
+status: active
 title: ToolCall lifecycle in the specification and the inference-tools crate
 summary: Extend ess/domains/tools.yaml with Proposed, Authorized, Started, Completed, Failed, Rejected and their commands, split out inference-tools, and make the testkit target pass every inference.tools scenario.
 relations:
@@ -27,7 +27,10 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/tools.yaml
-revision: 16
+revision: 18
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T10:59:23Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "proposed", to: "active", at: "2026-10-19T10:59:23Z", actor: "human:timo", revision: 18, decided_on: {"recorded":{"review_outcome":2}}}
 ---
 ## Context
 
