@@ -13,6 +13,8 @@ this file with it.
 ## inference.tools
 
 
+## inference.duplex
+
 ## inference.session
 
 - inference.session.CloseSession/outcome/draining: answered by epic:session-facade

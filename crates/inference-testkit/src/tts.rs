@@ -295,7 +295,7 @@ impl MockSynthesis {
                 .expect("the mock stays within i64::MAX samples"),
             sample_count: FRAME_SAMPLES,
             data: vec![
-                0;
+                self.format.encoding.silence();
                 usize::try_from(self.format.data_len(FRAME_SAMPLES))
                     .expect("a frame of the mock fits in memory")
             ],

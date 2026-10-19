@@ -288,6 +288,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-duplex"
+version = "0.4.0"
+dependencies = [
+ "inference-audio",
+ "inference-core",
+ "inference-tools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "inference-llm"
 version = "0.4.0"
 dependencies = [
@@ -339,6 +350,7 @@ dependencies = [
  "ess-conformance",
  "ess-primitives",
  "inference-core",
+ "inference-duplex",
  "inference-llm",
  "inference-pipeline",
  "inference-runtime",
