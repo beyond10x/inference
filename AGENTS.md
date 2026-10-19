@@ -20,6 +20,7 @@ on this repository. `README.md` is for people.
 |---|---|
 | `Cargo.toml`, `crates/` | the Cargo workspace; one crate per directory under `crates/`, `inference-core` first |
 | `examples/` | example packages built and tested with the workspace, never published and with no binary target; `stt-only` recognises speech with the STT contract and the mock alone |
+| `adapters/` | hosted and local integrations, one crate per provider, each enabled explicitly; `inference-openai` is the OpenAI Realtime client, its live test ignored and behind feature `live` |
 | `docs/design/` | design documents and their reviews |
 | `ess/` | the ESS specification: `system.yaml`, `ess-inputs.yaml` and one domain document per layer of the design under `domains/` (model, policy, graph, stream, tools, session); every declaration carries a `read from:` line naming the design line it was read from; `scenarios/` holds authored scenarios for what synthesis cannot witness |
 | `.engineering/planning` | the AEP planning store; change it only through `aep plan artifact` verbs |
@@ -57,6 +58,8 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   the reverse. The repository ships libraries: no binary, server or CLI.
 - Other beyond10x repositories (`llm`, `llm-gateway`, `loom`) are not dependencies and the plan
   treats them as absent (owner decision, 2026-10-18). An adapter to one may be written later.
+  The `secrets` library is the exception, used only by adapters' local credential lookup behind a
+  feature (owner decision, 2026-10-19).
 - The planning store is the plan. Work is recorded there, never only in a document or a chat.
 - Work in a managed worktree (`worktree create --purpose <what>`), build into its own `target/`.
 - Every commit, push, pull request and tag goes through the bot route (`b10x-gates bot -- <git
