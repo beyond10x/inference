@@ -22,8 +22,10 @@
 //! names is decided by a store holding them.
 //!
 //! [`ToolExecutor`] is the executor contract: it executes one started call under a deadline and a
-//! [`CancellationSignal`], and returns a result or a typed failure. Stopping a model rolls back no
-//! completed write, so nothing here undoes a result.
+//! [`CancellationSignal`], and returns a result or a typed failure. Its caller attempts a call that
+//! failed transiently again by the [`RetryPolicy`] of the call's side-effect class, under the same
+//! `call_id`, and a non-idempotent write once. Stopping a model rolls back no completed write, so
+//! nothing here undoes a result.
 //!
 //! The crate depends on `inference-core` and `inference-text`, whose [`SpanId`] and
 //! [`SpanState`] the proposal reads, and carries no executor, node or other concrete
@@ -41,7 +43,7 @@ mod call;
 mod executor;
 
 pub use call::{AuthorizeError, ProposeError, ProposeSpeculativeError, ToolCall};
-pub use executor::{CancellationSignal, ExecutionFuture, ToolExecutor};
+pub use executor::{CancellationSignal, ExecutionFuture, RetryPolicy, ToolExecutor};
 
 /// An ESS `Json` value: a tool's schema, a call's arguments, a call's result. It is held unread.
 pub type Json = serde_json::Value;

@@ -67,6 +67,8 @@ const COMPLETE_SYNTHESIS: &str = "inference.stream.CompleteSynthesis";
 const ACKNOWLEDGE_PLAYBACK: &str = "inference.stream.AcknowledgePlayback";
 const DISCARD_SEGMENT: &str = "inference.stream.DiscardSegment";
 
+const SPEECH_STARTED: &str = "inference.stream.SpeechStarted";
+const SPEECH_ENDED: &str = "inference.stream.SpeechEnded";
 const TURN_OPENED: &str = "inference.stream.TurnOpened";
 const TURN_COMPLETED: &str = "inference.stream.TurnCompleted";
 const TRANSCRIPT_HYPOTHESIS: &str = "inference.stream.TranscriptHypothesis";
@@ -84,7 +86,9 @@ const AUDIO_PLAYED: &str = "inference.stream.AudioPlayed";
 const SEGMENT_DISCARDED: &str = "inference.stream.SegmentDiscarded";
 
 /// Every event this module observes.
-const EVENTS: [&str; 15] = [
+const EVENTS: [&str; 17] = [
+    SPEECH_STARTED,
+    SPEECH_ENDED,
     TURN_OPENED,
     TURN_COMPLETED,
     TRANSCRIPT_HYPOTHESIS,
@@ -574,6 +578,10 @@ fn stream_event(event: &StreamEvent) -> Result<ObservedEvent, TargetError> {
         )
     };
     Ok(match event {
+        StreamEvent::SpeechStarted(event) => ObservedEvent::new(parse::<EventRef>(SPEECH_STARTED))
+            .with("onset", position_node(event.onset.get())),
+        StreamEvent::SpeechEnded(event) => ObservedEvent::new(parse::<EventRef>(SPEECH_ENDED))
+            .with("offset", position_node(event.offset.get())),
         StreamEvent::TurnOpened(event) => ObservedEvent::new(parse::<EventRef>(TURN_OPENED))
             .with("turn_id", named_node(&event.turn_id)?)
             .with("run_id", named_node(&event.run_id)?),
@@ -623,6 +631,11 @@ fn stream_event(event: &StreamEvent) -> Result<ObservedEvent, TargetError> {
         StreamEvent::AudioPlayed(event) => segment_event(AUDIO_PLAYED, event.segment_id)?,
         StreamEvent::SegmentDiscarded(event) => segment_event(SEGMENT_DISCARDED, event.segment_id)?,
     })
+}
+
+/// A sample clock position as the Integer it is declared over; a position never exceeds `i64::MAX`.
+fn position_node(position: u64) -> ess_primitives::node::Node {
+    integer_node(i64::try_from(position).unwrap_or(i64::MAX))
 }
 
 fn generation_started(event: &GenerationStarted) -> Result<ObservedEvent, TargetError> {

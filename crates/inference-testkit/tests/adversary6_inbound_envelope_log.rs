@@ -80,6 +80,12 @@ fn one_of_each(generation_id: GenerationId) -> Vec<StreamEvent> {
     let span_id = SpanId::from(id(0x8001));
     let turn_id = TurnId::from(id(0x9001));
     vec![
+        StreamEvent::SpeechStarted(
+            serde_json::from_value(serde_json::json!({"onset": 0})).expect("a sample position"),
+        ),
+        StreamEvent::SpeechEnded(
+            serde_json::from_value(serde_json::json!({"offset": 160})).expect("a sample position"),
+        ),
         StreamEvent::TurnOpened(TurnOpened {
             turn_id,
             run_id: RunId::from(id(0x2000)),
@@ -165,8 +171,8 @@ fn every_stream_event_is_named_and_carries_a_generation_exactly_as_stream_yaml_d
     let events = declared("events");
     assert_eq!(
         events.len(),
-        15,
-        "stream.yaml declares 15 events: {events:?}"
+        17,
+        "stream.yaml declares 17 events: {events:?}"
     );
     let carried = generation(9);
     let all = one_of_each(carried);

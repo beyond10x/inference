@@ -1,7 +1,11 @@
 //! The node implementations that carry no model: the tool authority ([`ToolAuthority`], role
 //! `policy`) and the tool executor ([`ToolExecutorNode`], role `tool`) of
 //! `docs/design/inference.md` §15.1, between which a proposed tool call is validated, authorized,
-//! executed and answered with a result or a typed failure.
+//! executed and answered with a result or a typed failure; and the endpoint controller, the voice
+//! activity detector ([`vad::VoiceActivityDetector`]) and the turn policy
+//! ([`turn_policy::TurnPolicy`]), both policy nodes of §9.1 (466), between which audio frames
+//! become speech activity and speech activity becomes the turns of `inference.stream` (§11.1,
+//! 606), with the turn policy as their single authority (§12.5, 699).
 //!
 //! A tool call travels along the edges as a [`ToolCallUpdate`], a Structured payload: the call as
 //! the last command left it and the event that command emitted. A run carries one payload type on
@@ -33,9 +37,13 @@ use crate::{NodeEndpoints, NodeError, NodeInput, NodeOutput};
 
 mod tool_authority;
 mod tool_executor;
+/// The turn policy: speech activity in, the turn commands of `inference.stream` out.
+pub mod turn_policy;
+/// The voice activity detector: audio frames in, speech activity out, by an energy threshold.
+pub mod vad;
 
 pub use tool_authority::{AuthorityHandle, AuthorityOutcome, Decision, ToolAuthority};
-pub use tool_executor::ToolExecutorNode;
+pub use tool_executor::{ExecutorHandle, StartRefusal, ToolCallMeasure, ToolExecutorNode};
 
 /// An event of `inference.tools.ToolCall`'s lifecycle, as its command emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
