@@ -12,10 +12,11 @@
 /// `inference.model`: the in-memory stores of the declared models and adapters, and their views.
 pub mod model;
 
-/// `inference.policy`: empty until the deployment-profile stores land.
+/// `inference.policy`: the in-memory store of the declared deployment profiles, and its view.
 pub mod policy;
 
-/// `inference.graph`: empty until the pipeline and run stores land.
+/// `inference.graph`: the in-memory pipeline declaration, its nodes, ports, edges and bindings,
+/// and their views; empty of runs until the run stores land.
 pub mod graph;
 
 /// `inference.stream`: the in-memory stores of the turns, spans, generations and output segments,

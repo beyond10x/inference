@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:pipeline-declaration
 kind: story
-status: draft
+status: implemented
 title: 'Declare a pipeline: nodes, typed ports, bounded edges and bindings through the typed builder'
 summary: inference-pipeline crate and the inference.graph declaration commands; the testkit answers them
 relations:
@@ -31,7 +31,11 @@ scope:
   path: crates/inference-testkit/tests/target/policy.rs
 - confidence: cited
   path: ess/SKIPPED.md
-revision: 21
+revision: 24
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T06:47:18Z", actor: "human:timo", revision: 22, decided_on: {"recorded":{"review_outcome":4}}}
+- {from: "proposed", to: "active", at: "2026-10-19T06:47:18Z", actor: "human:timo", revision: 23, decided_on: {"recorded":{"review_outcome":4}}}
+- {from: "active", to: "implemented", at: "2026-10-19T07:22:03Z", actor: "human:timo", revision: 24, decided_on: {"recorded":{"test_result":1,"review_outcome":10,"verification":1}}}
 ---
 # Story: pipeline-declaration
 
