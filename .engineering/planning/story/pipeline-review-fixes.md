@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:pipeline-review-fixes
 kind: story
-status: draft
+status: active
 title: 'Pipeline declaration and validation: the six problems of the 0.3.0 review'
 relations:
 - decomposes: epic:graph-minimum
@@ -25,7 +25,10 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 9
+revision: 11
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T08:33:19Z", actor: "human:timo", revision: 10}
+- {from: "proposed", to: "active", at: "2026-10-19T08:33:19Z", actor: "human:timo", revision: 11}
 ---
 ## Context
 

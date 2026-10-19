@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:contracts-review-fixes
 kind: story
-status: draft
+status: active
 title: 'STT and TTS contracts: the six problems of the 0.3.0 review'
 relations:
 - decomposes: epic:contracts-and-testkit
@@ -24,7 +24,10 @@ scope:
   path: crates/inference-text/src/lib.rs
 - confidence: cited
   path: crates/inference-tts
-revision: 8
+revision: 10
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T08:33:20Z", actor: "human:timo", revision: 9}
+- {from: "proposed", to: "active", at: "2026-10-19T08:33:20Z", actor: "human:timo", revision: 10}
 ---
 ## Context
 
