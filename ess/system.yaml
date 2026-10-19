@@ -11,9 +11,10 @@ summary: >-
   design line it was read from; no code exists yet, and a relation the design does not settle
   carries an UNMAPPED marker instead of a guess.
 
-# UNMAPPED: no domain declares the STT, LLM and TTS contracts or the audio vocabulary (design
-# 293, 355-389), though stage P0 delivers them (1158). Their nouns (audio frames, transcripts,
-# synthesis, voices) are the contract stories' to declare. Open question for the owner.
+# UNMAPPED: no domain declares the STT, LLM and TTS contracts (design 355-389), though stage P0
+# delivers them (1158); inference.audio declares the audio vocabulary they share (293). Their
+# nouns (transcripts, synthesis, voices) are the contract stories' to declare. Open question for
+# the owner.
 # UNMAPPED: the duplex contract (design 392-403) is deferred to stage P6 (1164) and split out only
 # when stable (273); no domain declares it.
 # UNMAPPED: no event carries the canonical envelope (schema_version, event_id, run_id,
@@ -28,3 +29,4 @@ domains:
   - inference.stream
   - inference.tools
   - inference.session
+  - inference.audio
