@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:run-lifecycle
 kind: story
-status: draft
+status: implemented
 title: 'Run lifecycle: a run of a planned pipeline moves through its states by command and refuses the rest'
 summary: inference-runtime crate, the eight Run commands, DescribeNodeInstance, 66 scenarios
 relations:
@@ -17,13 +17,25 @@ scope:
   path: crates/inference-runtime/src/lib.rs
 - confidence: inferred
   path: crates/inference-runtime/src/run.rs
+- confidence: cited
+  path: crates/inference-runtime/tests/run_lifecycle.rs
 - confidence: inferred
   path: crates/inference-testkit/src/graph.rs
 - confidence: cited
+  path: crates/inference-testkit/src/stream.rs
+- confidence: cited
+  path: crates/inference-testkit/tests/conform.rs
+- confidence: cited
   path: crates/inference-testkit/tests/target/graph.rs
 - confidence: cited
+  path: crates/inference-testkit/tests/target/stream.rs
+- confidence: cited
   path: ess/SKIPPED.md
-revision: 23
+revision: 27
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T09:44:38Z", actor: "human:timo", revision: 24}
+- {from: "proposed", to: "active", at: "2026-10-19T09:44:38Z", actor: "human:timo", revision: 25}
+- {from: "active", to: "implemented", at: "2026-10-19T10:55:56Z", actor: "human:timo", revision: 27, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 # Story: run-lifecycle
 

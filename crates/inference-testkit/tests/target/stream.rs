@@ -9,9 +9,16 @@
 //! `CancelGeneration` publish their generation event only: the discard of the generation's
 //! unplayed segments, which the store makes in the same outcome, emits none.
 //!
-//! `OpenTurn`, `EmitHypothesis` and `StartGeneration` are [`TargetError::Unsupported`]: their
-//! refusals read the run stores of `inference.graph`, and `StartGeneration`'s its node store too,
-//! which do not exist yet, and a run is not faked. `ess/SKIPPED.md` names the story for each.
+//! `OpenTurn`, `EmitHypothesis` and `StartGeneration` read the runs, and `StartGeneration` the
+//! nodes, of the `inference.graph` store ([`GraphDomain`]) through the stream store's
+//! [`StreamDomain::open_turn_in`], [`StreamDomain::emit_hypothesis_in`] and
+//! [`StreamDomain::start_generation_in`], which decide an identity no record carries before a
+//! state. Their `run-not-active` error, `RunStateConflict`, carries the state the run holds, and
+//! `EmitHypothesis`'s `turn-not-open` error, `TurnStateConflict`, the turn's.
+//!
+//! [`StreamDomain::open_turn_in`]: inference_testkit::stream::StreamDomain::open_turn_in
+//! [`StreamDomain::emit_hypothesis_in`]: inference_testkit::stream::StreamDomain::emit_hypothesis_in
+//! [`StreamDomain::start_generation_in`]: inference_testkit::stream::StreamDomain::start_generation_in
 //!
 //! A command's consistency token is the target's
 //! ([`Stores::token`]), and a read demanding a token the stores have not reached is an error
@@ -25,15 +32,18 @@ use ess_conformance::target::{
     DeclaredErrorValue, EventObservationRequest, ObservedEvent, SemanticCommandRequest,
     SemanticCommandResult, SemanticViewRequest, SemanticViewResult, TargetError, ViewRow,
 };
-use inference_core::generation::{GenerationStarted, GenerationStateConflict};
+use inference_core::generation::{GenerationStarted, GenerationStateConflict, StartGeneration};
 use inference_core::id::GenerationId;
+use inference_runtime::run::{RunNotFound, RunStateConflict};
+use inference_testkit::graph::GraphDomain;
 use inference_testkit::stream::{
-    EmitTextDeltaError, GenerationMoveError, GenerationsRow, ReviseSpanError, SegmentMoveError,
-    SegmentsRow, SpanMoveError, SpansRow, StreamDomain, StreamEvent, TurnMoveError, TurnsRow,
+    EmitHypothesisError, EmitTextDeltaError, GenerationMoveError, GenerationsRow, OpenTurnError,
+    ReviseSpanError, SegmentMoveError, SegmentsRow, SpanMoveError, SpansRow, StartGenerationError,
+    StreamDomain, StreamEvent, TurnMoveError, TurnsRow,
 };
 use inference_text::{
-    EmitTextDelta, ReviseSpan, SegmentId, SegmentStateConflict, SpanId, SpanStateConflict, TurnId,
-    TurnStateConflict,
+    EmitHypothesis, EmitTextDelta, OpenTurn, ReviseSpan, SegmentId, SegmentStateConflict, SpanId,
+    SpanStateConflict, TurnId, TurnStateConflict,
 };
 
 use super::{Input, Stores, integer_node, named_node, text_node, unsupported};
@@ -99,6 +109,10 @@ const COMMITTED_SPAN_IMMUTABLE: &str = "inference.stream.CommittedSpanImmutable"
 const GENERATION_STATE_CONFLICT: &str = "inference.stream.GenerationStateConflict";
 const SEGMENT_STATE_CONFLICT: &str = "inference.stream.SegmentStateConflict";
 const GENERATION_NOT_FOUND: &str = "inference.stream.GenerationNotFound";
+const TURN_NOT_FOUND: &str = "inference.stream.TurnNotFound";
+const RUN_NOT_FOUND: &str = "inference.graph.RunNotFound";
+const RUN_STATE_CONFLICT: &str = "inference.graph.RunStateConflict";
+const NODE_NOT_FOUND: &str = "inference.graph.NodeNotFound";
 
 const TURNS: &str = "inference.stream.Turns";
 const SPANS: &str = "inference.stream.Spans";
@@ -113,16 +127,12 @@ pub fn execute_command(
     request: &SemanticCommandRequest,
 ) -> Result<SemanticCommandResult, TargetError> {
     stores.publish();
+    let graph = &stores.graph;
     let domain = &mut stores.stream;
     let name = request.command.to_string();
     let result = match name.as_str() {
-        OPEN_TURN | EMIT_HYPOTHESIS => {
-            return Err(TargetError::unsupported(
-                format!("`{name}`"),
-                "its run refusals read the inference.graph run store, which does not exist yet; \
-                 ess/SKIPPED.md names the story that adds it",
-            ));
-        }
+        OPEN_TURN => open_turn(domain, graph, request)?,
+        EMIT_HYPOTHESIS => emit_hypothesis(domain, graph, request)?,
         COMPLETE_TURN => {
             let answer = domain.complete_turn(turn_id(request)?);
             turn_moved(answer.map(StreamEvent::TurnCompleted), request)?
@@ -132,13 +142,7 @@ pub fn execute_command(
             let answer = domain.commit_span(span_id(request)?);
             span_moved(answer.map(StreamEvent::TranscriptCommitted), request)?
         }
-        START_GENERATION => {
-            return Err(TargetError::unsupported(
-                format!("`{name}`"),
-                "its refusals read the inference.graph run and node stores, which do not exist \
-                 yet; ess/SKIPPED.md names the story that adds them",
-            ));
-        }
+        START_GENERATION => start_generation(domain, graph, request)?,
         COMPLETE_GENERATION => {
             let answer = domain.complete_generation(generation_id(request)?);
             let answer = answer.map(StreamEvent::GenerationCompleted);
@@ -184,6 +188,117 @@ pub fn execute_command(
     };
     stores.publish();
     Ok(result.with_consistency(stores.token()?))
+}
+
+fn open_turn(
+    domain: &mut StreamDomain,
+    graph: &GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let open = OpenTurn {
+        run_id: input.named("run_id")?,
+    };
+    input.finish()?;
+    Ok(match domain.open_turn_in(graph, open) {
+        Ok(event) => SemanticCommandResult::took(outcome(OPEN_TURN, "opened")).emitting(
+            stream_event(&StreamEvent::TurnOpened(event))?.in_activity(request.correlation.clone()),
+        ),
+        Err(OpenTurnError::UnknownRun(error)) => {
+            SemanticCommandResult::took(outcome(OPEN_TURN, "unknown-run"))
+                .with_error(run_not_found(error)?)
+        }
+        Err(OpenTurnError::RunNotActive(conflict)) => {
+            SemanticCommandResult::took(outcome(OPEN_TURN, "run-not-active"))
+                .with_error(run_conflict(conflict)?)
+        }
+    })
+}
+
+fn emit_hypothesis(
+    domain: &mut StreamDomain,
+    graph: &GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let emit = EmitHypothesis {
+        run_id: input.named("run_id")?,
+        turn_id: input.named("turn_id")?,
+        stream_id: input.named("stream_id")?,
+        sequence: input.integer("sequence")?,
+        text: input.text("text")?,
+    };
+    input.finish()?;
+    Ok(match domain.emit_hypothesis_in(graph, emit) {
+        Ok(event) => SemanticCommandResult::took(outcome(EMIT_HYPOTHESIS, "emitted")).emitting(
+            stream_event(&StreamEvent::TranscriptHypothesis(event))?
+                .in_activity(request.correlation.clone()),
+        ),
+        Err(EmitHypothesisError::UnknownRun(error)) => {
+            SemanticCommandResult::took(outcome(EMIT_HYPOTHESIS, "unknown-run"))
+                .with_error(run_not_found(error)?)
+        }
+        Err(EmitHypothesisError::RunNotActive(conflict)) => {
+            SemanticCommandResult::took(outcome(EMIT_HYPOTHESIS, "run-not-active"))
+                .with_error(run_conflict(conflict)?)
+        }
+        Err(EmitHypothesisError::UnknownTurn(error)) => {
+            SemanticCommandResult::took(outcome(EMIT_HYPOTHESIS, "unknown-turn")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(TURN_NOT_FOUND))
+                    .with("turn_id", named_node(&error.turn_id)?),
+            )
+        }
+        Err(EmitHypothesisError::TurnNotOpen(conflict)) => {
+            SemanticCommandResult::took(outcome(EMIT_HYPOTHESIS, "turn-not-open"))
+                .with_error(turn_conflict(conflict)?)
+        }
+    })
+}
+
+fn start_generation(
+    domain: &mut StreamDomain,
+    graph: &GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let start = StartGeneration {
+        run_id: input.named("run_id")?,
+        node_id: input.named("node_id")?,
+        epoch: input.integer("epoch")?,
+    };
+    input.finish()?;
+    Ok(match domain.start_generation_in(graph, start) {
+        Ok(event) => SemanticCommandResult::took(outcome(START_GENERATION, "started"))
+            .emitting(generation_started(&event)?.in_activity(request.correlation.clone())),
+        Err(StartGenerationError::UnknownRun(error)) => {
+            SemanticCommandResult::took(outcome(START_GENERATION, "unknown-run"))
+                .with_error(run_not_found(error)?)
+        }
+        Err(StartGenerationError::UnknownNode(error)) => {
+            SemanticCommandResult::took(outcome(START_GENERATION, "unknown-node")).with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(NODE_NOT_FOUND))
+                    .with("node_id", named_node(&error.node_id)?),
+            )
+        }
+        Err(StartGenerationError::RunNotActive(conflict)) => {
+            SemanticCommandResult::took(outcome(START_GENERATION, "run-not-active"))
+                .with_error(run_conflict(conflict)?)
+        }
+    })
+}
+
+/// `inference.graph.RunNotFound`, naming the identity sent.
+fn run_not_found(error: RunNotFound) -> Result<DeclaredErrorValue, TargetError> {
+    Ok(DeclaredErrorValue::new(parse::<ErrorRef>(RUN_NOT_FOUND))
+        .with("run_id", named_node(&error.run_id)?))
+}
+
+/// `inference.graph.RunStateConflict`, carrying the state the run holds.
+fn run_conflict(conflict: RunStateConflict) -> Result<DeclaredErrorValue, TargetError> {
+    Ok(
+        DeclaredErrorValue::new(parse::<ErrorRef>(RUN_STATE_CONFLICT))
+            .with("current", named_node(&conflict.current)?),
+    )
 }
 
 /// The one field of `CompleteTurn`.
@@ -593,6 +708,11 @@ mod tests {
     use ess_primitives::time::Timestamp;
     use inference_core::generation::StartGeneration;
     use inference_core::id::{NodeId, RunId, StreamId};
+    use inference_core::policy::{DeclareProfile, Egress, ProfileKind};
+    use inference_pipeline::{
+        AddNode, DeclarePipeline, InteractionMode, NodeRole, PlanPipeline, ValidatePipeline,
+    };
+    use inference_testkit::graph::GraphCatalog;
     use inference_text::{EmitHypothesis, OpenTurn};
     use uuid::Uuid;
 
@@ -650,8 +770,8 @@ mod tests {
         .rows
     }
 
-    /// A generation in the store, started as `story:run-lifecycle`'s `StartGeneration` will start
-    /// one once a run store decides its refusals; returns its identity as the runner captures it.
+    /// A generation in the store, started past the run refusals, which these cases do not
+    /// exercise; returns its identity as the runner captures it.
     fn started(stores: &mut Stores) -> Node {
         let event = stores.stream.start_generation(StartGeneration {
             run_id: RunId::from(Uuid::from_u128(0x0a1b_2c3d_4e5f_4a6b_8c7d_9e0f_1a2b_3c4d)),
@@ -873,25 +993,128 @@ mod tests {
         assert_eq!(carried.fields["generation_id"], text(UNKNOWN));
     }
 
+    /// Two runs of one Planned pipeline holding one node, arranged in the graph store: the first
+    /// Created, the second Active. Returns the two run identities and the node's.
+    fn runs(stores: &mut Stores) -> (Node, Node, Node) {
+        let profile_id = stores
+            .policy
+            .declare_profile(DeclareProfile {
+                kind: ProfileKind::OfflineStrict,
+                egress: Egress::Denied,
+                admitted: Vec::new(),
+            })
+            .expect("a row of the table")
+            .profile_id;
+        let catalog = GraphCatalog {
+            policy: &stores.policy,
+            model: &stores.model,
+        };
+        let graph = &mut stores.graph;
+        let pipeline_id = graph
+            .declare_pipeline(
+                DeclarePipeline {
+                    name: "p".to_owned(),
+                    schema_revision: "1".to_owned(),
+                    mode: InteractionMode::TurnBased,
+                    profile_id,
+                    required_capabilities: Vec::new(),
+                },
+                &catalog,
+            )
+            .expect("the profile is declared")
+            .pipeline_id;
+        let node_id = graph
+            .add_node(AddNode {
+                pipeline_id,
+                name: "llm".to_owned(),
+                role: NodeRole::Model,
+                requires: Vec::new(),
+            })
+            .expect("the pipeline is declared")
+            .node_id;
+        graph
+            .validate_pipeline(ValidatePipeline { pipeline_id })
+            .expect("a lone node is valid");
+        graph
+            .plan_pipeline(PlanPipeline { pipeline_id }, &catalog)
+            .expect("nothing is required");
+        let created = graph.create_run(pipeline_id).expect("planned").run_id;
+        let active = graph.create_run(pipeline_id).expect("planned").run_id;
+        graph.validate_run(active).expect("Created");
+        graph.prepare_run(active).expect("Validating");
+        graph.activate_run(active).expect("Preparing");
+        let node = |id: String| text(&id);
+        (
+            node(created.to_string()),
+            node(active.to_string()),
+            node(node_id.to_string()),
+        )
+    }
+
     #[test]
-    fn start_generation_is_unsupported_until_a_run_store_decides_its_refusals() {
+    fn start_generation_refuses_an_unknown_run_then_node_then_a_run_that_is_not_active() {
         let mut stores = Stores::default();
-        let answer = execute_command(
-            &mut stores,
-            &command(
+        let (created, active, node_id) = runs(&mut stores);
+        let start = |stores: &mut Stores, run_id: &Node, node_id: &Node| {
+            run(
+                stores,
                 "inference.stream.StartGeneration",
                 &[
-                    ("run_id", text(UNKNOWN)),
-                    ("node_id", text(UNKNOWN)),
+                    ("run_id", run_id.clone()),
+                    ("node_id", node_id.clone()),
                     ("epoch", Node::Number(Number::from(1_i64))),
                 ],
-            ),
+            )
+        };
+
+        let unknown_run = start(&mut stores, &text(UNKNOWN), &text(UNKNOWN));
+        assert_eq!(
+            branch(&unknown_run),
+            "inference.stream.StartGeneration/unknown-run"
         );
-        assert!(
-            matches!(&answer, Err(error) if error.is_unsupported()),
-            "{answer:?}"
+        let carried = unknown_run.error.expect("a declared error");
+        assert_eq!(carried.error.to_string(), "inference.graph.RunNotFound");
+        assert_eq!(
+            carried.fields,
+            BTreeMap::from([("run_id".to_owned(), text(UNKNOWN))])
+        );
+
+        let unknown_node = start(&mut stores, &created, &text(UNKNOWN));
+        assert_eq!(
+            branch(&unknown_node),
+            "inference.stream.StartGeneration/unknown-node",
+            "an unknown node is refused before the Created run's state"
+        );
+        let carried = unknown_node.error.expect("a declared error");
+        assert_eq!(carried.error.to_string(), "inference.graph.NodeNotFound");
+        assert_eq!(
+            carried.fields,
+            BTreeMap::from([("node_id".to_owned(), text(UNKNOWN))])
+        );
+
+        let not_active = start(&mut stores, &created, &node_id);
+        assert_eq!(
+            branch(&not_active),
+            "inference.stream.StartGeneration/run-not-active"
+        );
+        let carried = not_active.error.expect("a declared error");
+        assert_eq!(
+            carried.error.to_string(),
+            "inference.graph.RunStateConflict"
+        );
+        assert_eq!(
+            carried.fields,
+            BTreeMap::from([("current".to_owned(), text("Created"))])
         );
         assert!(stores.stream.generations().is_empty());
+        assert!(stores.stream.events().is_empty());
+
+        let started = start(&mut stores, &active, &node_id);
+        assert_eq!(branch(&started), "inference.stream.StartGeneration/started");
+        let generations = rows(&mut stores, "inference.stream.Generations");
+        assert_eq!(generations.len(), 1);
+        assert_eq!(generations[0]["run_id"], active);
+        assert_eq!(generations[0]["node_id"], node_id);
     }
 
     #[test]
@@ -967,8 +1190,8 @@ mod tests {
         .unwrap_or_else(|error| panic!("`{name}` is observed: {error}"))
     }
 
-    /// An Open turn in the store, opened as `story:run-lifecycle`'s `OpenTurn` will open one once
-    /// a run store decides its refusals; returns its identity as the runner captures it.
+    /// An Open turn in the store, opened past the run refusals, which these cases do not
+    /// exercise; returns its identity as the runner captures it.
     fn turn(stores: &mut Stores) -> Node {
         let event = stores.stream.open_turn(OpenTurn {
             run_id: RunId::from(Uuid::from_u128(0x0a1b_2c3d_4e5f_4a6b_8c7d_9e0f_1a2b_3c4d)),
@@ -976,8 +1199,8 @@ mod tests {
         text(&event.turn_id.to_string())
     }
 
-    /// A Hypothesis span of `turn`, emitted as `EmitHypothesis` will emit one once a run store
-    /// decides its run refusals.
+    /// A Hypothesis span of `turn`, emitted past the run refusals, which these cases do not
+    /// exercise.
     fn span(stores: &mut Stores, turn: &Node, sequence: i64) -> Node {
         let Node::Text(turn_id) = turn else {
             panic!("a turn identity is a string: {turn:?}")
@@ -1041,35 +1264,106 @@ mod tests {
     }
 
     #[test]
-    fn open_turn_and_emit_hypothesis_are_unsupported_until_a_run_store_decides_their_refusals() {
+    fn open_turn_and_emit_hypothesis_read_the_run_store_and_refuse_an_identity_before_a_state() {
         let mut stores = Stores::default();
-        let opened = execute_command(
-            &mut stores,
-            &command("inference.stream.OpenTurn", &[("run_id", text(UNKNOWN))]),
+        let (created, active, _) = runs(&mut stores);
+        let open = |stores: &mut Stores, run_id: &Node| {
+            run(
+                stores,
+                "inference.stream.OpenTurn",
+                &[("run_id", run_id.clone())],
+            )
+        };
+        let unknown = open(&mut stores, &text(UNKNOWN));
+        assert_eq!(branch(&unknown), "inference.stream.OpenTurn/unknown-run");
+        assert_eq!(
+            unknown.error.expect("a declared error").fields,
+            BTreeMap::from([("run_id".to_owned(), text(UNKNOWN))])
         );
-        assert!(
-            matches!(&opened, Err(error) if error.is_unsupported()),
-            "{opened:?}"
+        let not_active = open(&mut stores, &created);
+        assert_eq!(
+            branch(&not_active),
+            "inference.stream.OpenTurn/run-not-active"
         );
-        let emitted = execute_command(
+        let carried = not_active.error.expect("a declared error");
+        assert_eq!(
+            carried.error.to_string(),
+            "inference.graph.RunStateConflict"
+        );
+        assert_eq!(
+            carried.fields,
+            BTreeMap::from([("current".to_owned(), text("Created"))])
+        );
+        assert!(stores.stream.turns().is_empty());
+        let opened = open(&mut stores, &active);
+        assert_eq!(branch(&opened), "inference.stream.OpenTurn/opened");
+        let turn_id = opened.direct_events[0].payload["turn_id"].clone();
+        assert_eq!(opened.direct_events[0].payload["run_id"], active);
+        let completed = open(&mut stores, &active).direct_events[0].payload["turn_id"].clone();
+        run(
             &mut stores,
-            &command(
+            "inference.stream.CompleteTurn",
+            &[("turn_id", completed.clone())],
+        );
+
+        let emit = |stores: &mut Stores, run_id: &Node, turn_id: &Node| {
+            run(
+                stores,
                 "inference.stream.EmitHypothesis",
                 &[
-                    ("run_id", text(UNKNOWN)),
-                    ("turn_id", text(UNKNOWN)),
+                    ("run_id", run_id.clone()),
+                    ("turn_id", turn_id.clone()),
                     ("stream_id", text(UNKNOWN)),
                     ("sequence", Node::Number(Number::from(1_i64))),
                     ("text", text("hello")),
                 ],
+            )
+        };
+        for (run_id, turn_id, outcome, error) in [
+            (
+                text(UNKNOWN),
+                text(UNKNOWN),
+                "unknown-run",
+                "inference.graph.RunNotFound",
             ),
-        );
-        assert!(
-            matches!(&emitted, Err(error) if error.is_unsupported()),
-            "{emitted:?}"
-        );
-        assert!(stores.stream.turns().is_empty());
+            (
+                created.clone(),
+                text(UNKNOWN),
+                "unknown-turn",
+                "inference.stream.TurnNotFound",
+            ),
+            (
+                created.clone(),
+                completed.clone(),
+                "run-not-active",
+                "inference.graph.RunStateConflict",
+            ),
+            (
+                active.clone(),
+                completed.clone(),
+                "turn-not-open",
+                "inference.stream.TurnStateConflict",
+            ),
+        ] {
+            let refused = emit(&mut stores, &run_id, &turn_id);
+            assert_eq!(
+                branch(&refused),
+                format!("inference.stream.EmitHypothesis/{outcome}")
+            );
+            assert_eq!(
+                refused.error.expect("a declared error").error.to_string(),
+                error
+            );
+            assert!(refused.direct_events.is_empty());
+        }
         assert!(stores.stream.spans().is_empty());
+
+        let emitted = emit(&mut stores, &active, &turn_id);
+        assert_eq!(branch(&emitted), "inference.stream.EmitHypothesis/emitted");
+        let spans = rows(&mut stores, "inference.stream.Spans");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0]["run_id"], active);
+        assert_eq!(spans[0]["turn_id"], turn_id);
     }
 
     #[test]

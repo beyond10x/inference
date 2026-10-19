@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T10:50:51Z",
+  "actor": "human:timo",
+  "artifact": "story:run-lifecycle",
+  "kind": "story",
+  "revision": 26,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-run-lifecycle-pass-1",
+    "reference": "F1 target/graph.rs:357 refused CancelRun cascade guarded by adversary1_run_target.rs:215",
+    "review": "review-result:adversary-run-lifecycle-pass-1",
+    "outcome": "fixed"
+  }
+}

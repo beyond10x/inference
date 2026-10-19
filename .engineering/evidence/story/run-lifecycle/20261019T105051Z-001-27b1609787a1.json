@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T10:50:51Z",
+  "actor": "human:timo",
+  "artifact": "story:run-lifecycle",
+  "kind": "story",
+  "revision": 26,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-run-lifecycle-pass-1",
+    "reference": "F2 target/graph.rs:280 unknown run answers like ValidatePipeline on an unknown pipeline; no scenario reaches it",
+    "review": "review-result:adversary-run-lifecycle-pass-1",
+    "outcome": "no-op"
+  }
+}

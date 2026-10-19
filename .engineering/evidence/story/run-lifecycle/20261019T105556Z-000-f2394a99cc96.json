@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T10:55:56Z",
+  "actor": "human:timo",
+  "artifact": "story:run-lifecycle",
+  "kind": "story",
+  "revision": 26,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime -p inference-testkit --all-features (VERIFIED, new behaviour: baseline wave/11 1111057 answers every Run command unsupported, conform 54 of 231; treatment passes runtime 32 and testkit 515, conform 197 of 231 with failed 0, error 0: a run from a Planned form reaches Completed through six states and Cancelled from every non-terminal state, CancelRun discards the run's unplayed segments)"
+  }
+}
