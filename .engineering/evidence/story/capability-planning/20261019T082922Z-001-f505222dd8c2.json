@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T08:29:22Z",
+  "actor": "human:timo",
+  "artifact": "story:capability-planning",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check (5 steps, each exit 0; cargo test 563 passed, 0 failed) (wave/9 13620dc)"
+  }
+}

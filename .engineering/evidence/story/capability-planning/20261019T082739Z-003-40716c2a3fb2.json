@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T08:27:39Z",
+  "actor": "human:timo",
+  "artifact": "story:capability-planning",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-capability-planning-pass-1",
+    "reference": "F6 testkit lib.rs and adversary1_target.rs edits were the coordinator applying the unit's scratch patches",
+    "review": "review-result:adversary-capability-planning-pass-1",
+    "outcome": "no-op"
+  }
+}
