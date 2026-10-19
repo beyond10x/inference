@@ -16,6 +16,7 @@ tts = []
 [dependencies]
 inference-core = { path = "../inference-core" }
 inference-llm = { path = "../inference-llm", optional = true }
+inference-pipeline = { path = "../inference-pipeline" }
 inference-stt = { path = "../inference-stt", optional = true }
 inference-text = { path = "../inference-text" }
 uuid.workspace = true
