@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-19T06:18:31Z",
+  "actor": "human:timo",
+  "artifact": "story:llm-contract",
+  "kind": "story",
+  "revision": 10,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-llm --all-features; cargo test -p inference-testkit --features llm --test llm (VERIFIED, new behaviour: baseline wave/5 75df5fb has no inference-llm crate and an empty llm feature; treatment impl/llm-contract passes 20 + 3 cases: deltas while Active only with output_streaming, input during output only with concurrent_input_output, claims equal observed behaviour)"
+  }
+}
