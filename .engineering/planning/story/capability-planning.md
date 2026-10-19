@@ -24,7 +24,7 @@ scope:
   path: ess/SKIPPED.md
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 16
+revision: 17
 ---
 # Story: capability-planning
 
@@ -99,3 +99,9 @@ Derived 2026-10-19 by `story-scoper`. Every line is **cited** (read from the sto
 - **Confidence:** high — the body names the crate, the spec line and the skipped-list; the two testkit paths are read from the neighbour stories' layout, not from a tree that does not exist yet
 - **Would collide with:** any unit editing `ess/domains/graph.yaml` lines 430-579 (the `errors:` block: `IncompatibleGraph` at 456 and `CapabilityMismatch` at 466 are one diff hunk), the `## graph` section of `ess/SKIPPED.md`, `crates/inference-testkit/tests/target/graph.rs` or `src/graph.rs`, or anything in `crates/inference-pipeline`
 - **Safety fact:** `inference.graph.CapabilityMismatch` is referenced by exactly one outcome (`PlanPipeline/mismatch`, `graph.yaml:995`) and the synthesized `mismatch` scenario asserts the error by name only (`expect_error`, no field assertion; `.engineering/drafts/suite.json`, 153 scenarios), and `effective_capabilities` is written by two outcomes (`:612`, `:1006`) and read by one view (`inference.graph.Pipelines`, `:1431`), so the two new fields and the computation reach no other command — step 2 (`grep -n` over `ess/` and the suite), unproven; the search stops at whether ess 0.60's synthesizer emits field assertions once the error has fields, which step 1's re-synthesis (0 refusals) is the check for
+
+## Validated builder form
+
+Added 2026-10-19 from wave 8 (`review-result:adversary-pipeline-validation-pass-1`, acceptance note).
+
+`story:pipeline-validation` step 3 asked for "the Validated form of the typed builder" as the return value; it was not built: `inference_pipeline::Builder::build` (`crates/inference-pipeline/src/builder.rs`) still returns the bare pipeline identity, and validation is a separate call by that identity. Planning is the first consumer that needs a validated pipeline, so this story gives the typed builder a validated form: a handle that only `ValidatePipeline`'s `validated` outcome produces, and that planning takes, so planning an unvalidated pipeline does not compile through the builder.

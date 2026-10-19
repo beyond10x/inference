@@ -65,6 +65,25 @@ const GRAPH_SCENARIOS: [&str; 10] = [
     "inference.graph.DeclarePipeline/outcome/unknown-profile",
 ];
 
+/// The fourteen `inference.graph` scenarios this target answers by validating a pipeline: the
+/// five of `ValidatePipeline` and the nine declaration scenarios whose arrangement validates one.
+const GRAPH_VALIDATION_SCENARIOS: [&str; 14] = [
+    "inference.graph.Pipeline/state/Validated/refuses/inference.graph.ValidatePipeline",
+    "inference.graph.Pipeline/transition/validate/by/inference.graph.ValidatePipeline/validated",
+    "inference.graph.ValidatePipeline/outcome/rejected",
+    "inference.graph.ValidatePipeline/outcome/validated",
+    "inference.graph.ValidatePipeline/outcome/wrong-state",
+    "inference.graph.AddNode/outcome/added",
+    "inference.graph.AddNode/outcome/not-declared",
+    "inference.graph.BindNode/outcome/bound",
+    "inference.graph.BindNode/outcome/not-declared",
+    "inference.graph.BindNode/outcome/unknown-adapter",
+    "inference.graph.BindNode/outcome/unknown-node",
+    "inference.graph.ConnectPorts/outcome/connected",
+    "inference.graph.ConnectPorts/outcome/not-declared",
+    "inference.graph.Edge/invariant/after/inference.graph.ConnectPorts/connected",
+];
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -241,6 +260,7 @@ fn the_suite_runs_against_the_testkit_target() {
         .chain(STREAM_SCENARIOS)
         .chain(POLICY_SCENARIOS)
         .chain(GRAPH_SCENARIOS)
+        .chain(GRAPH_VALIDATION_SCENARIOS)
     {
         assert!(
             passed.contains(id),

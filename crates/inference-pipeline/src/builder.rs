@@ -49,6 +49,22 @@ pub struct PortTraits {
     pub provisional_allowed: bool,
 }
 
+/// An essential, reliable port of whole frames with no end marker that admits committed data only.
+/// Committed only is the default of every port and so of a tool's input ports, since a
+/// side-effecting tool requires committed input by default (§11.3); a port that admits
+/// provisional data says so explicitly.
+impl Default for PortTraits {
+    fn default() -> Self {
+        Self {
+            essentiality: Essentiality::Essential,
+            delivery: Delivery::Reliable,
+            incremental: false,
+            end_marker_required: false,
+            provisional_allowed: false,
+        }
+    }
+}
+
 /// A port direction as a type: [`direction::Input`] or [`direction::Output`].
 pub trait PortDirectionType {
     /// The direction the type stands for.

@@ -16,7 +16,7 @@ pub mod model;
 pub mod policy;
 
 /// `inference.graph`: the in-memory pipeline declaration, its nodes, ports, edges and bindings,
-/// and their views; empty of runs until the run stores land.
+/// their validation and their views; empty of runs until the run stores land.
 pub mod graph;
 
 /// `inference.stream`: the in-memory stores of the turns, spans, generations and output segments,
@@ -37,6 +37,7 @@ pub mod stt;
 #[cfg(feature = "llm")]
 pub mod llm;
 
-/// The mock synthesiser of the TTS contract; empty until that contract lands.
+/// The scripted mock synthesiser of the TTS contract, in four capability configurations, and a
+/// sink double that acknowledges playback.
 #[cfg(feature = "tts")]
 pub mod tts;

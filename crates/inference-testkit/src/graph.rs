@@ -1,21 +1,22 @@
-//! The declaration half of the `inference.graph` domain of `ess/domains/graph.yaml`, held in
-//! memory.
+//! The declaration and validation half of the `inference.graph` domain of
+//! `ess/domains/graph.yaml`, held in memory.
 //!
 //! [`GraphDomain`] holds one [`Declaration`] of `inference-pipeline` with counted identities, so
 //! that two runs of the same commands report the same identities, and records every event its
-//! commands emit in order. The commands are the declaration's own; what a declaration references
-//! and does not hold, the declared profiles and adapters, it reads through [`GraphCatalog`] over
-//! the [`PolicyDomain`] and [`ModelDomain`] stores. A refused command stores nothing, records no
-//! event and takes no identity. The views `inference.graph.Pipelines`, `Nodes`, `Ports`, `Edges`
-//! and `Bindings` are the declaration's entities ([`GraphDomain::declaration`]), read at the call.
-//! Validation, planning and runs are not here yet.
+//! commands emit in order. The commands are the declaration's own, `ValidatePipeline` among them;
+//! what a declaration references and does not hold, the declared profiles and adapters, it reads
+//! through [`GraphCatalog`] over the [`PolicyDomain`] and [`ModelDomain`] stores. A refused
+//! command stores nothing, records no event and takes no identity. The views
+//! `inference.graph.Pipelines`, `Nodes`, `Ports`, `Edges` and `Bindings` are the declaration's
+//! entities ([`GraphDomain::declaration`]), read at the call. Planning and runs are not here yet.
 
 use inference_core::model::{Adapter, AdapterId};
 use inference_core::policy::{DeploymentProfile, ProfileId, ProfileNotFound};
 use inference_pipeline::{
     AddNode, AddNodeError, AddPort, BindNode, BindNodeError, Catalog, ConnectPorts,
     ConnectPortsError, Declaration, DeclarePipeline, NodeAdded, NodeBound, NodeNotFound,
-    PipelineDeclared, PortAdded, PortsConnected,
+    PipelineDeclared, PipelineValidated, PortAdded, PortsConnected, ValidatePipeline,
+    ValidatePipelineError,
 };
 
 use crate::model::ModelDomain;
@@ -34,6 +35,8 @@ pub enum GraphEvent {
     PortsConnected(PortsConnected),
     /// `inference.graph.NodeBound`.
     NodeBound(NodeBound),
+    /// `inference.graph.PipelineValidated`.
+    PipelineValidated(PipelineValidated),
 }
 
 /// The declared profiles and adapters a [`GraphDomain`] reads, from their own stores.
@@ -141,6 +144,20 @@ impl GraphDomain {
     ) -> Result<NodeBound, BindNodeError> {
         let event = self.declaration.bind_node(input, catalog)?;
         self.events.push(GraphEvent::NodeBound(event));
+        Ok(event)
+    }
+
+    /// Runs `inference.graph.ValidatePipeline` and records its [`PipelineValidated`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Declaration::validate_pipeline`].
+    pub fn validate_pipeline(
+        &mut self,
+        input: ValidatePipeline,
+    ) -> Result<PipelineValidated, ValidatePipelineError> {
+        let event = self.declaration.validate_pipeline(input)?;
+        self.events.push(GraphEvent::PipelineValidated(event));
         Ok(event)
     }
 
@@ -277,6 +294,42 @@ mod tests {
                 GraphEvent::PipelineDeclared(declared),
                 GraphEvent::NodeAdded(added)
             ]
+        );
+    }
+
+    #[test]
+    fn a_validation_records_its_event_and_a_refused_one_records_nothing() {
+        use inference_pipeline::{
+            PipelineState, PipelineStateConflict, PipelineValidated, ValidatePipeline,
+            ValidatePipelineError,
+        };
+
+        let (policy, model) = stores();
+        let catalog = GraphCatalog {
+            policy: &policy,
+            model: &model,
+        };
+        let mut domain = GraphDomain::new();
+        let pipeline_id = domain
+            .declare_pipeline(declare_pipeline(&policy), &catalog)
+            .expect("the profile is declared")
+            .pipeline_id;
+        let validate = ValidatePipeline { pipeline_id };
+
+        assert_eq!(
+            domain.validate_pipeline(validate),
+            Ok(PipelineValidated { pipeline_id })
+        );
+        assert_eq!(
+            domain.validate_pipeline(validate),
+            Err(ValidatePipelineError::WrongState(PipelineStateConflict {
+                current: PipelineState::Validated
+            }))
+        );
+        assert_eq!(domain.events().len(), 2);
+        assert_eq!(
+            domain.events()[1],
+            GraphEvent::PipelineValidated(PipelineValidated { pipeline_id })
         );
     }
 
