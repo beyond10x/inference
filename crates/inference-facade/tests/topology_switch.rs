@@ -12,6 +12,7 @@
 mod text;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::thread;
 
@@ -24,10 +25,12 @@ use inference_facade::live::{LiveSession, LiveSessions};
 use inference_facade::session::{SessionState, SwitchPipelineError};
 use inference_facade::switch::SwitchError;
 use inference_pipeline::{
-    Declaration, InteractionMode, Node, NodeImplementation, PipelineNotFound,
+    Declaration, InteractionMode, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation,
+    PipelineNotFound,
 };
 use inference_runtime::run::RunState;
 use inference_testkit::cascade::{AUDIO_INGRESS, CascadePayload, Mocks, TurnStore, declare};
+use inference_testkit::graph::PipelinePayload;
 use inference_testkit::graph::RunLog;
 use inference_testkit::llm::{MockConfiguration as LlmConfiguration, MockGenerator, ModelNode};
 use inference_testkit::stream::StreamEvent;
@@ -41,7 +44,7 @@ use inference_testkit::stt::{
 use inference_testkit::tts::{MockConfiguration as TtsConfiguration, MockSynthesiser};
 use inference_text::{SpanId, TranscriptCommitted};
 
-use text::{INGRESS, block_on, generator, planned, reply};
+use text::{INGRESS, block_on, echo_planned, generator, implement, planned, reply};
 
 /// What the user asks by voice: the recogniser's scripted span.
 const QUESTION: &str = "how warm is it outside";
@@ -458,4 +461,186 @@ fn a_switch_to_a_pipeline_the_declaration_does_not_hold_is_refused_and_moves_not
     while block_on(session.receive()).is_some() {}
     let run = drive.join().expect("no panic").expect("the run ends");
     assert_eq!(run.state(), RunState::Completed);
+}
+
+/// A node whose drain fails, or never finishes; cancelled or stopped, it lets go of its edges.
+struct Stuck {
+    endpoints: Option<NodeEndpoints<PipelinePayload>>,
+    fail: bool,
+}
+
+impl NodeImplementation<PipelinePayload> for Stuck {
+    fn describe(&mut self, _: &Node) -> NodeFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn prepare(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn start(
+        &mut self,
+        endpoints: NodeEndpoints<PipelinePayload>,
+    ) -> NodeFuture<'_, Result<(), NodeError>> {
+        self.endpoints = Some(endpoints);
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        if self.fail {
+            self.endpoints = None;
+            Box::pin(std::future::ready(Err(NodeError::new("the drain failed"))))
+        } else {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn cancel(&mut self) -> NodeFuture<'_, ()> {
+        self.endpoints = None;
+        Box::pin(std::future::ready(()))
+    }
+
+    fn stop(&mut self) -> NodeFuture<'_, ()> {
+        self.endpoints = None;
+        Box::pin(std::future::ready(()))
+    }
+}
+
+/// Opens a session over a node that drains as `fail` says, and switches it towards the text
+/// pipeline, the old run driven on a thread of its own: the switch answers `Drained(Failed)` for
+/// a failing drain. Answers the session's store, the session and the old run's driver thread.
+fn switched_without_a_run() -> (
+    LiveSessions,
+    LiveSession<PipelinePayload>,
+    thread::JoinHandle<Result<inference_runtime::run::Run, inference_runtime::RunError>>,
+) {
+    let first = generator(Vec::<String>::new());
+    let (declaration, echo) = echo_planned(&first);
+    let second = generator(Vec::<String>::new());
+    let (second_declaration, text) = planned(&second, &[Capability::OutputStreaming]);
+    let sessions = LiveSessions::new();
+    let (mut session, driver) =
+        block_on(
+            sessions.open(&declaration, &echo, InteractionMode::TurnBased, |_, _| {
+                Box::new(Stuck {
+                    endpoints: None,
+                    fail: true,
+                }) as Box<dyn NodeImplementation<PipelinePayload>>
+            }),
+        )
+        .expect("opens");
+    let drive = thread::spawn(move || block_on(driver.drive()));
+    let switched = block_on(session.switch(
+        &second_declaration,
+        &text,
+        InteractionMode::TurnBased,
+        implement(&second),
+    ));
+    assert!(
+        matches!(switched, Err(SwitchError::Drained(RunState::Failed))),
+        "{switched:?}"
+    );
+    (sessions, session, drive)
+}
+
+/// The run the session left at a switch that did not drain still delivers its end, before the
+/// close; with no run left in flight, `close` completes at once.
+#[test]
+fn a_session_whose_switch_did_not_drain_is_closed_at_once_by_close_after_the_left_runs_end() {
+    let (sessions, mut session, drive) = switched_without_a_run();
+    let session_id = session.session_id();
+    let _ = drive.join().expect("no panic");
+    block_on(session.close()).expect("an Opened session drains");
+    assert_eq!(
+        sessions.session(session_id).map(|s| s.state()),
+        Some(SessionState::Closed),
+        "close left a session with no run unclosed"
+    );
+    let mut received = Vec::new();
+    while let Some(event) = block_on(session.receive()) {
+        received.push(event);
+    }
+    let failed = position(&received, |event| {
+        matches!(event, SessionEvent::RunFailed(_))
+    });
+    assert!(
+        matches!(received.last(), Some(SessionEvent::SessionClosed(_))),
+        "the close is delivered last: {received:#?}"
+    );
+    assert!(failed < received.len() - 1);
+}
+
+/// A session with no run in flight whose application lets go of its handle closes at once.
+#[test]
+fn a_session_whose_switch_did_not_drain_closes_once_its_handle_is_let_go() {
+    let (sessions, session, drive) = switched_without_a_run();
+    let session_id = session.session_id();
+    let _ = drive.join().expect("no panic");
+    drop(session);
+    assert_eq!(
+        sessions.session(session_id).map(|s| s.state()),
+        Some(SessionState::Closed)
+    );
+}
+
+/// A switch dropped while the old run drains leaves the old run in flight; `cancel` cancels it,
+/// and its end counts as the session's run's: the session closes once it ended, and delivers that
+/// end before the close.
+#[test]
+fn a_dropped_switch_delivers_the_left_runs_end_before_the_close_cancel_brings() {
+    let first = generator(Vec::<String>::new());
+    let (declaration, echo) = echo_planned(&first);
+    let second = generator(Vec::<String>::new());
+    let (second_declaration, text) = planned(&second, &[Capability::OutputStreaming]);
+    let sessions = LiveSessions::new();
+    let (mut session, driver) =
+        block_on(
+            sessions.open(&declaration, &echo, InteractionMode::TurnBased, |_, _| {
+                Box::new(Stuck {
+                    endpoints: None,
+                    fail: false,
+                }) as Box<dyn NodeImplementation<PipelinePayload>>
+            }),
+        )
+        .expect("opens");
+    let session_id = session.session_id();
+    let old_run = session.run_id();
+    let drive = thread::spawn(move || block_on(driver.drive()));
+    {
+        let mut switching = Box::pin(session.switch(
+            &second_declaration,
+            &text,
+            InteractionMode::TurnBased,
+            implement(&second),
+        ));
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        for _ in 0..3 {
+            assert!(
+                switching.as_mut().poll(&mut cx).is_pending(),
+                "the old run never drains"
+            );
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    session.cancel().expect("an Opened session is cancelled");
+    let mut received = Vec::new();
+    while let Some(event) = block_on(session.receive()) {
+        received.push(event);
+    }
+    let old = drive.join().expect("no panic").expect("the old run ends");
+    assert_eq!(old.state(), RunState::Cancelled);
+    assert_eq!(
+        sessions.session(session_id).map(|s| s.state()),
+        Some(SessionState::Closed)
+    );
+    let cancelled = position(
+        &received,
+        |event| matches!(event, SessionEvent::RunCancelled(cancelled) if cancelled.run_id == old_run),
+    );
+    assert!(
+        matches!(received.last(), Some(SessionEvent::SessionClosed(_))),
+        "the close is delivered last: {received:#?}"
+    );
+    assert!(cancelled < received.len() - 1);
 }
