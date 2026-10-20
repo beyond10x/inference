@@ -442,14 +442,16 @@ pub struct CapabilityEvidence {
 /// `inference.model.ResourceProfile`: what an adapter needs on one hardware target, measured
 /// there and promised nowhere else. Peak resident memory in MiB, model load time in
 /// milliseconds, the real-time factor on CPU in thousandths (250: one second of input takes a
-/// quarter of a second), and GPU memory in MiB, `None` when it runs without a GPU, which the wire
-/// carries as `null` or leaves out. A field the specification does not declare is refused.
+/// quarter of a second), `None` for a model whose input has no duration, such as a text model,
+/// and GPU memory in MiB, `None` when it runs without a GPU. The wire carries a `None` as `null`
+/// or leaves it out. A field the specification does not declare is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceProfile {
     pub peak_resident_memory_mib: i64,
     pub load_time_ms: i64,
-    pub cpu_real_time_factor_milli: i64,
+    #[serde(default)]
+    pub cpu_real_time_factor_milli: Option<i64>,
     #[serde(default)]
     pub gpu_memory_mib: Option<i64>,
 }

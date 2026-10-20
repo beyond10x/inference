@@ -594,7 +594,7 @@ mod tests {
             resource_profile: ResourceProfile {
                 peak_resident_memory_mib: 1,
                 load_time_ms: 2,
-                cpu_real_time_factor_milli: 3,
+                cpu_real_time_factor_milli: Some(3),
                 gpu_memory_mib: None,
             },
             adapter_revision: "adapter_revision".to_owned(),
