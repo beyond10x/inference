@@ -60,7 +60,7 @@ fn frame() -> AudioFrame {
 fn audio_of(event: SynthesisEvent) -> Option<SegmentAudio> {
     match event {
         SynthesisEvent::Audio(audio) => Some(audio),
-        SynthesisEvent::Completed(_) => None,
+        SynthesisEvent::Completed(_) | SynthesisEvent::Usage(_) => None,
     }
 }
 

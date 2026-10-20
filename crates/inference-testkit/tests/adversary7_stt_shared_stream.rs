@@ -73,8 +73,8 @@ fn two_recognitions_on_one_stream_obey_the_per_stream_sequence() {
         };
         let (events, sequences) = recognise(&mut recogniser, request);
         span_sequences.extend(sequences);
-        for envelope in events {
-            log.record(stream_envelope(envelope))
+        for envelope in events.into_iter().filter_map(stream_envelope) {
+            log.record(envelope)
                 .unwrap_or_else(|refusal| panic!("turn {turn} on the shared stream: {refusal}"));
         }
     }
@@ -103,8 +103,8 @@ fn a_second_recognition_started_fresh_on_one_stream_is_refused_by_the_log() {
         || RecognitionRequest::new(run_id, TurnId::generate(), stream_id, node_id, "text_out");
 
     let (first, _) = recognise(&mut recogniser, fresh());
-    for envelope in first {
-        log.record(stream_envelope(envelope))
+    for envelope in first.into_iter().filter_map(stream_envelope) {
+        log.record(envelope)
             .expect("the first recognition on the stream is recorded");
     }
     let last = log.envelopes().last().expect("recorded").sequence;
@@ -115,7 +115,7 @@ fn a_second_recognition_started_fresh_on_one_stream_is_refused_by_the_log() {
         .next()
         .expect("the second recognition emits");
     assert_eq!(
-        log.record(stream_envelope(opening)),
+        log.record(stream_envelope(opening).expect("a hypothesis is a stream event")),
         Err(EnvelopeRefusal::SequenceNotIncreasing {
             stream_id,
             last,

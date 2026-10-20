@@ -4,8 +4,10 @@
 //! the whole synthesis. The synthesis still emits them, through the contract, while the segment is
 //! Queued, so they are its own frames; the wrapper only delays their delivery. They are delivered
 //! once the segment is discarded through the handle, as a backend that had them in flight when its
-//! output was cut would deliver them, or, if it never is, once the utterance ends. Every other
-//! event passes as the wrapped synthesis delivers it.
+//! output was cut would deliver them, or, if it never is, once the utterance ends; from the end of
+//! the utterance on, nothing more is held back. Every other event passes as the wrapped synthesis
+//! delivers it, except the synthesis's usage record, which `inference-tts` makes its last event:
+//! it waits until no frame is held back, so it stays last.
 //!
 //! A barge-in test scripts it on a segment the interruption discards, so that frames of a
 //! superseded generation reach the sink after the interruption, which is to drop them
@@ -92,6 +94,7 @@ impl<S: Synthesiser> Synthesiser for LateSynthesiser<S> {
             ordinal: self.ordinal,
             offered: 0,
             held: Vec::new(),
+            usage: None,
             released: VecDeque::new(),
             handle: self.handle.clone(),
         })
@@ -105,15 +108,18 @@ pub struct LateSynthesis<H> {
     ordinal: usize,
     offered: usize,
     held: Vec<SynthesisEvent>,
+    /// The usage record, waiting until no frame is held back.
+    usage: Option<SynthesisEvent>,
     released: VecDeque<SynthesisEvent>,
     handle: LateHandle,
 }
 
 impl<H> LateSynthesis<H> {
-    /// Delivers what is held back, from the next event on.
+    /// Delivers what is held back, from the next event on, the usage record after the frames.
     fn release(&mut self) {
         let late = self.held.len();
         self.released.extend(self.held.drain(..));
+        self.released.extend(self.usage.take());
         self.handle.with(|record| record.late += late);
     }
 }
@@ -129,8 +135,14 @@ impl<H: SynthesisHandle> Iterator for LateSynthesis<H> {
         loop {
             let event = self.inner.next()?;
             match &event {
-                SynthesisEvent::Audio(audio) if Some(audio.segment_id()) == withheld => {
+                SynthesisEvent::Audio(audio)
+                    if Some(audio.segment_id()) == withheld
+                        && !self.inner.output().utterance_ended() =>
+                {
                     self.held.push(event);
+                }
+                SynthesisEvent::Usage(_) if !self.held.is_empty() => {
+                    self.usage = Some(event);
                 }
                 _ => return Some(event),
             }
