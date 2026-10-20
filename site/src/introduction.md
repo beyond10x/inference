@@ -43,7 +43,8 @@ Every page marks what it describes:
 | Label | Meaning |
 |---|---|
 | <span class="st st-rel">0.5.0</span> | In the released tag `0.5.0` (2026-10-20, `CHANGELOG.md`). |
-| <span class="st st-rel">0.6.0</span> | Implemented and tested on the integration branch for the next release; not in a tag yet. |
+| <span class="st st-rel">0.6.0</span> | In the released tag `0.6.0` (2026-10-20). |
+| <span class="st st-rel">0.7.0</span> | In the released tag `0.7.0` (2026-10-21). |
 | <span class="st st-plan">planned</span> | In the plan; no code yet. |
 
 Where everything stands: [Status and roadmap](status.md). Back to the [home page](index.html).
