@@ -2409,11 +2409,15 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 name = "local-voice-cascade"
 version = "0.4.0"
 dependencies = [
+ "clap",
  "inference-audio",
  "inference-audio-device",
  "inference-core",
+ "inference-llama-server",
+ "inference-llm",
  "inference-pipeline",
  "inference-runtime",
+ "inference-sherpa-onnx",
  "inference-testkit",
  "inference-text",
  "inference-tts",
