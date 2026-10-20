@@ -1,8 +1,9 @@
 //! The adapter against the loopback fixture of `common`, which replays a stream recorded from a
 //! running `llama-server`. No server is started and no weights are read.
 //!
-//! The capability record committed in `capability/` is checked here against the adapter
-//! declaration; its `output_streaming` evidence names the tests of this file that observe it.
+//! The capability record committed in `capability/` is checked here against the declaration of
+//! the adapter with its `tools` option on; its `output_streaming` evidence names the tests of this
+//! file that observe it, its `tool_calling` evidence those of `tool_proposals`.
 
 mod common;
 
@@ -226,7 +227,8 @@ fn the_model_declaration_names_the_pinned_checkpoint_its_licences_and_checksum()
 
 #[test]
 fn the_committed_capability_record_checks_against_the_adapter_declaration() {
-    let config = Config::new("http://127.0.0.1:8080/v1", SERVED_MODEL);
+    let mut config = Config::new("http://127.0.0.1:8080/v1", SERVED_MODEL);
+    config.tools = true;
     let (_, adapter) = declared(&config);
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let record = capability::load(crate_dir.join(RECORD), &adapter)
