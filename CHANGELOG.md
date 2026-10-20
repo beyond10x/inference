@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.6.0] — 2026-10-20
+
+### Added
+
+- `adapters/inference-sherpa-onnx`: the sherpa-onnx streaming recogniser as a local STT adapter
+  (incremental input, output streaming), linked against the shared library built without TTS so
+  no GPL phonemiser is linked; checkpoint and native archive pinned by sha256; conformance tests
+  and a capability record for the reference machine.
+- `adapters/inference-whispercpp`: whisper.cpp as a local batch STT adapter (no streaming claims),
+  CPU-only; silence and non-speech annotations commit nothing.
+- `adapters/inference-llama-server`: a local llama.cpp `llama-server` as an output-streaming LLM
+  through `llm`'s Chat Completions client: cancellation, failures and deadlines, tool proposals as
+  structured events, and one capability record per configuration.
+- `adapters/inference-openai`: OpenAI GPT-Live (`v1/live/sessions`) behind feature `gpt-live`, as
+  an `inference-duplex` native speech model that the probe observes as native duplex.
+- `inference.model.CapabilityRecord`: an adapter's claims, the tests that evidence them, languages,
+  formats and a resource profile per hardware target; the testkit checks a record file against
+  the adapter's declaration.
+- `inference.usage`: one usage record per model call (who, when, quantities, each reported,
+  measured or unknown); `inference-llm` emits one per `llm` turn on a pipeline's `usage` egress.
+- `inference-pipeline`: the commit-gate node; planning refuses an adapter whose locality the
+  deployment profile does not admit, inside subgraphs too.
+- `inference-runtime`: the egress watch that fails an `offline_strict` run on a connection or
+  unconnected datagram socket that is not loopback; a recorder and replay driver that compare a
+  run's control decisions; a best-effort telemetry sink that never delays a node.
+- `inference-audio-device`: a sink that acknowledges playback and drops frames of superseded
+  generations after a barge-in.
+- `examples/local-voice-cascade`: STT, LLM and TTS through commit gates with barge-in, on the
+  testkit mocks and, behind feature `local`, on sherpa-onnx and `llama-server` (TTS still a mock);
+  `examples/stt-sherpa-onnx`; `realtime-voice` shows usage per response and session totals,
+  selects `openai`, `openai-live` or `nova` by `--provider`, and its `compare` example measures
+  latency and usage across providers.
+- `inference-testkit`: backend-neutral TTS adapter checks.
+- The documentation site under `site/`, deployed to GitHub Pages on each release tag.
+
+### Changed
+
+- The specification adds the capability record and the usage domain (`ess verify diff` against
+  0.5.0: 18 changes, all compatible); the synthesized suite grows from 454 to 460 scenarios, all
+  answered.
+- `AGENTS.md` states the licence policy for local adapters and that tests download no weights and
+  start no model server.
+- CI installs `libclang-dev` and `cmake` and gives the check job 45 minutes.
+
 ## [0.5.0] — 2026-10-20
 
 ### Added
