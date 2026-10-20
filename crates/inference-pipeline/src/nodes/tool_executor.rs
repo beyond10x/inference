@@ -576,8 +576,10 @@ where
     }
 
     fn cancel(&mut self) -> NodeFuture<'_, ()> {
-        self.cancellation.cancel();
+        // The cancel is recorded under the lock every send polls under before the call's signal
+        // fires, so the executor's answer to the signal finds it and is not sent.
         self.state.update(|state| state.cancelled = true);
+        self.cancellation.cancel();
         self.task.unpark();
         Box::pin(future::ready(()))
     }

@@ -565,6 +565,10 @@ fn adversary1_no_attempt_starts_after_the_run_is_cancelled() {
         1,
         "the first attempt is running"
     );
+    assert!(
+        run.sink.wait_received(1, PATIENCE),
+        "the sink took the call's ToolCallStarted before the cancel"
+    );
     run.requests.cancel();
     let (controller, _) = run.drive.join().expect("the drive loop does not panic");
     assert_eq!(controller.run().state(), RunState::Cancelled);
