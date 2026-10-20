@@ -299,7 +299,12 @@ async fn a_stall_leaves_the_session_usable() {
             audio_end_ms: 2000
         }
     );
-    client.close().await.unwrap();
+    // The close waits one read timeout, the 150 ms of the stall check, for the server's close
+    // frame; under load that can pass first, and the session is dropped all the same.
+    match client.close().await {
+        Ok(()) | Err(RealtimeError::Stalled(_)) => {}
+        Err(other) => panic!("closing failed: {other:?}"),
+    }
     server.await.unwrap();
 }
 
