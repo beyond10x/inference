@@ -18,7 +18,10 @@
 //! At the end of input every cue left runs, whatever its frame count, and then the recognition's
 //! usage record, [`TranscriptEvent::Usage`], is its last event: the audio offered and one request,
 //! as the contract measures them, and its local compute `unknown`, since the mock computes
-//! nothing of its own. A recognition dropped before its input ended records none. [`frames`] is
+//! nothing of its own. The contract records it only once every span is committed, so a script
+//! that leaves a span uncommitted records none, and after it the contract refuses every move, a
+//! revision through the handle among them. A recognition dropped before its input ended records
+//! none. [`frames`] is
 //! a fixture of silent frames and [`script`] a script fitting six of them; [`stream_envelope`]
 //! carries an event of the mock into the [`EventLog`](crate::stream::EventLog) of the stream
 //! domain, and the usage record, no `inference.stream` event, nowhere.
@@ -375,9 +378,10 @@ impl Iterator for MockRecognition {
 
 impl MockRecognition {
     /// Takes the input the contract gives up and runs every cue that is due, stopping at the
-    /// first the contract refuses until more input is taken or input ends. Once input has ended
-    /// and every cue ran, records the recognition's usage, once. Once the stream has issued its
-    /// last sequence, no cue runs again and no usage is recorded.
+    /// first the contract refuses until more input is taken or input ends. Once input has ended,
+    /// every cue ran and every event they emitted was delivered, records the recognition's usage,
+    /// once, at that next step. Once the stream has issued its last sequence, no cue runs again
+    /// and no usage is recorded.
     ///
     /// # Panics
     ///
@@ -420,7 +424,10 @@ impl MockRecognition {
             self.pending.pop_front();
             self.delivered.push_back(envelope);
         }
-        if ended && let Ok(envelope) = self.output.usage() {
+        if ended
+            && self.delivered.is_empty()
+            && let Ok(envelope) = self.output.usage()
+        {
             self.delivered.push_back(envelope);
         }
     }
