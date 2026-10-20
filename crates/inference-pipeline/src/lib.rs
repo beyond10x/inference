@@ -33,8 +33,10 @@
 //! [`ValidatedPipeline`], so a pipeline that was not validated cannot be planned through the
 //! builder, and [`Declaration::plan_pipeline`] runs `inference.graph.PlanPipeline` by identity.
 //! Both compute the pipeline's effective capabilities from the weakest node on every required path
-//! and refuse a node left without the adapter its requirements need ([`NodeUnbound`]) or an unmet
-//! mandatory capability ([`CapabilityMismatch`]); the planned form is a [`PlannedPipeline`].
+//! and refuse an adapter running at a locality the pipeline's profile does not admit
+//! ([`LocalityDenied`]), a node left without the adapter its requirements need ([`NodeUnbound`])
+//! or an unmet mandatory capability ([`CapabilityMismatch`]); the planned form is a
+//! [`PlannedPipeline`].
 //!
 //! A Planned pipeline may stand as a node of another ([`Declaration::add_subgraph_node`],
 //! [`PipelineBuilder::subgraph`]): its exposures are the ingress and egress contracts the node's
@@ -60,7 +62,7 @@ use std::num::NonZeroUsize;
 
 use serde::{Deserialize, Serialize};
 
-use inference_core::model::{AdapterId, Capability, Modality};
+use inference_core::model::{AdapterId, Capability, Locality, Modality};
 use inference_core::policy::ProfileId;
 
 mod builder;
@@ -459,6 +461,30 @@ impl fmt::Display for SubgraphInterfaceMismatch {
 }
 
 impl Error for SubgraphInterfaceMismatch {}
+
+/// `inference.graph.LocalityDenied`: the adapter `adapter_id` bound to the node `node_id` runs at
+/// `locality`, which the pipeline's deployment profile `profile_id` does not admit, so planning
+/// failed and the pipeline stays Validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalityDenied {
+    pub node_id: NodeId,
+    pub adapter_id: AdapterId,
+    pub locality: Locality,
+    pub profile_id: ProfileId,
+}
+
+impl fmt::Display for LocalityDenied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the node {} is bound to the adapter {}, which runs at {:?}, a locality the profile {} \
+             does not admit",
+            self.node_id, self.adapter_id, self.locality, self.profile_id
+        )
+    }
+}
+
+impl Error for LocalityDenied {}
 
 /// `inference.graph.AddPort`: the input that declares a [`Port`] on a node, under the pipeline it
 /// names.

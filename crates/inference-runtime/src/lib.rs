@@ -17,8 +17,10 @@
 //! moves, and fails the run with a reason naming a node that returned an error. Its run loop,
 //! [`RunController::drive`], issues `DrainRun` once every source node has sent its end of input,
 //! a control event of kind `stop`, and `CompleteRun` once every instance has drained, and takes
-//! the cancel or drain its caller asks for through [`RunRequests`]; a [`QueueWatch`] shows that a
-//! run's edge queues are gone once it ended. Every sender a node is handed refuses user content
+//! the cancel, drain or failure its caller asks for through [`RunRequests`]; a [`QueueWatch`]
+//! shows that a run's edge queues are gone once it ended. On Linux, the egress watch (`egress`)
+//! fails a run whose pipeline profile denies egress once a socket of the process is connected to
+//! an address that is neither loopback nor unspecified; it is a tripwire, not a sandbox. Every sender a node is handed refuses user content
 //! whose sequence does not increase on its stream, and the run records the refusal
 //! ([`SequenceNotIncreasing`]). A [`SubgraphNode`] ([`subgraph`]) is the implementation of a
 //! subgraph node: it runs its child pipeline as a child run nested under its own instance
@@ -35,6 +37,8 @@
 
 pub mod controller;
 mod drive;
+#[cfg(target_os = "linux")]
+pub mod egress;
 pub mod queue;
 pub mod record;
 pub mod replay;
