@@ -1,27 +1,98 @@
 //! What the screen shows, fed with the show's events: who speaks and how loud, the transcript
 //! of the turn playing, and running counters per host and in total, with the cost by a price
 //! table. [`plain_line`] gives the same events as lines.
+//!
+//! The counters are read from the session ledger's usage records ([`Event::Recorded`]), one
+//! per response, with what the provider reported ([`Event::Usage`]) standing in until a
+//! response's record arrives. A count nobody counted is unknown, never zero: a response whose
+//! record knows no count at all, such as one that stalled or was stopped, is left out of the
+//! sums and counted apart, `(1 without usage)`, a count one response left unknown makes the sum
+//! of that count `?`, and a cost that leaves out such a response is shown as a lower bound.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::ops::Add;
 use std::time::Duration;
 
-use realtime_voice::{Counts, Ending, Note, Reported, Tally};
+use inference_duplex::ResponseId;
+use realtime_voice::{Counts, Reported, Usage};
 
 use crate::hosts::{Directive, Host};
-use crate::prices::{Money, PriceTable};
+use crate::prices::{Money, PriceTable, Rates};
 use crate::show::Event;
 
 /// The meter history kept per host.
 const HISTORY: usize = 96;
+
+/// One response of a host as the board knows it.
+#[derive(Debug, Clone, Copy)]
+struct Response {
+    response_id: ResponseId,
+    /// Its counts; `None` while nothing reported any, or when its record knows none.
+    counts: Option<Counts>,
+    /// Whether the ledger's record of it arrived, which nothing replaces.
+    recorded: bool,
+}
 
 /// One host's side of the board.
 #[derive(Debug, Clone)]
 struct Panel {
     level: f32,
     history: VecDeque<u64>,
-    tally: Tally,
+    responses: Vec<Response>,
     turns: usize,
     seconds: f64,
+    /// What the sessions billed by time cost, each priced on its own, and how many.
+    session_cost: Money,
+    sessions: usize,
+}
+
+impl Panel {
+    fn response(&mut self, response_id: ResponseId) -> &mut Response {
+        let at = if let Some(at) = self
+            .responses
+            .iter()
+            .position(|response| response.response_id == response_id)
+        {
+            at
+        } else {
+            self.responses.push(Response {
+                response_id,
+                counts: None,
+                recorded: false,
+            });
+            self.responses.len() - 1
+        };
+        &mut self.responses[at]
+    }
+}
+
+/// An estimated cost: the sum of what could be priced, and how many responses or sessions were
+/// priced and how many could not be, which makes the sum a lower bound.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Estimate {
+    pub amount: Money,
+    pub priced: usize,
+    pub unpriced: usize,
+}
+
+impl Estimate {
+    /// Whether the amount leaves something out.
+    #[must_use]
+    pub const fn lower_bound(&self) -> bool {
+        self.unpriced > 0
+    }
+}
+
+impl Add for Estimate {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            amount: self.amount + other.amount,
+            priced: self.priced + other.priced,
+            unpriced: self.unpriced + other.unpriced,
+        }
+    }
 }
 
 /// What the screen shows.
@@ -31,6 +102,7 @@ pub struct Board {
     title: String,
     limit: Duration,
     prices: Option<PriceTable>,
+    reported: Reported,
     panels: [Panel; 2],
     texts: BTreeMap<usize, String>,
     playing: Option<(usize, usize)>,
@@ -53,15 +125,18 @@ impl Board {
         let panel = || Panel {
             level: 0.0,
             history: VecDeque::with_capacity(HISTORY),
-            tally: Tally::new(reported),
+            responses: Vec::new(),
             turns: 0,
             seconds: 0.0,
+            session_cost: Money::default(),
+            sessions: 0,
         };
         Self {
             hosts,
             title: String::new(),
             limit,
             prices,
+            reported,
             panels: [panel(), panel()],
             texts: BTreeMap::new(),
             playing: None,
@@ -122,22 +197,46 @@ impl Board {
                         .push_back((meter(panel.level) * 100.0).round() as u64);
                 }
             }
-            Event::Usage { host, usage } => {
+            Event::Usage {
+                host,
+                usage: Usage::Response { response_id, usage },
+            } => {
+                let counts = Counts::of(usage, self.reported);
                 if let Some(panel) = self.panels.get_mut(*host) {
-                    panel.tally.record(&Note::Usage(*usage));
+                    let response = panel.response(*response_id);
+                    if !response.recorded {
+                        response.counts = Some(counts);
+                    }
+                }
+            }
+            Event::Usage { .. } => {}
+            Event::Recorded {
+                host,
+                response_id,
+                counts,
+            } => {
+                let counts = masked(*counts, self.reported);
+                if let Some(panel) = self.panels.get_mut(*host) {
+                    let response = panel.response(*response_id);
+                    response.counts = (counts != Counts::default()).then_some(counts);
+                    response.recorded = true;
                 }
             }
             Event::Ended { host, response_id } => {
                 if let Some(panel) = self.panels.get_mut(*host) {
-                    panel.tally.record(&Note::Ended {
-                        response_id: *response_id,
-                        how: Ending::Completed,
-                    });
+                    panel.response(*response_id);
                 }
             }
             Event::Billed { host, seconds } => {
+                let cost = self
+                    .prices
+                    .as_ref()
+                    .map(|prices| prices.session_cost(*seconds))
+                    .unwrap_or_default();
                 if let Some(panel) = self.panels.get_mut(*host) {
                     panel.seconds += seconds;
+                    panel.session_cost = panel.session_cost + cost;
+                    panel.sessions += 1;
                 }
             }
             Event::Problem { host, detail } => {
@@ -202,37 +301,79 @@ impl Board {
         self.panels.get(host).map_or(0, |panel| panel.turns)
     }
 
-    /// The token counts of `host`'s responses.
+    /// The responses of `host` that have counts.
+    fn counted(&self, host: usize) -> impl Iterator<Item = Counts> + '_ {
+        self.panels.get(host).into_iter().flat_map(|panel| {
+            panel
+                .responses
+                .iter()
+                .filter_map(|response| response.counts)
+        })
+    }
+
+    /// The token counts of `host`'s responses: each count the sum over the responses that have
+    /// counts, unknown when one of them does not know it. Responses without usage are left
+    /// out; [`Board::without_usage`] counts them.
     #[must_use]
     pub fn counts(&self, host: usize) -> Counts {
-        self.panels
-            .get(host)
-            .map(|panel| panel.tally.totals().counts)
+        self.counted(host).reduce(sum_known).unwrap_or_default()
+    }
+
+    /// The token counts of both hosts, summed as [`Board::counts`] sums.
+    #[must_use]
+    pub fn total_counts(&self) -> Counts {
+        self.counted(0)
+            .chain(self.counted(1))
+            .reduce(sum_known)
             .unwrap_or_default()
     }
 
-    /// The token counts of both hosts.
+    /// The responses of `host` that ended or were recorded without any count known.
     #[must_use]
-    pub fn total_counts(&self) -> Counts {
-        self.counts(0).plus(self.counts(1))
+    pub fn without_usage(&self, host: usize) -> usize {
+        self.panels.get(host).map_or(0, |panel| {
+            panel
+                .responses
+                .iter()
+                .filter(|response| response.counts.is_none())
+                .count()
+        })
     }
 
-    /// The estimated cost of `host`'s part; `None` without a price table or with a count it
-    /// needs unknown.
+    /// The estimated cost of `host`'s part; `None` without a price table. By a table per token
+    /// each response with counts it can price is priced, and every other response makes the
+    /// estimate a lower bound; by a table per session minute each session is priced.
     #[must_use]
-    pub fn cost(&self, host: usize) -> Option<Money> {
+    pub fn cost(&self, host: usize) -> Option<Estimate> {
         let prices = self.prices.as_ref()?;
         let panel = self.panels.get(host)?;
-        prices.cost(&panel.tally, panel.seconds)
+        Some(match &prices.rates {
+            Rates::Tokens(table) => panel.responses.iter().fold(
+                Estimate::default(),
+                |estimate, response| match response.counts.and_then(|counts| table.cost(&counts)) {
+                    Some(cost) => Estimate {
+                        amount: estimate.amount + Money::from_picos(cost.picos()),
+                        priced: estimate.priced + 1,
+                        ..estimate
+                    },
+                    None => Estimate {
+                        unpriced: estimate.unpriced + 1,
+                        ..estimate
+                    },
+                },
+            ),
+            Rates::SessionMinute(_) => Estimate {
+                amount: panel.session_cost,
+                priced: panel.sessions,
+                unpriced: 0,
+            },
+        })
     }
 
-    /// The estimated cost of the show so far: the sum of the hosts' costs that are known.
+    /// The estimated cost of the show so far, both hosts' estimates summed.
     #[must_use]
-    pub fn total_cost(&self) -> Option<Money> {
-        match (self.cost(0), self.cost(1)) {
-            (Some(left), Some(right)) => Some(left + right),
-            (known, None) | (None, known) => known,
-        }
+    pub fn total_cost(&self) -> Option<Estimate> {
+        Some(self.cost(0)? + self.cost(1)?)
     }
 
     /// The price table.
@@ -271,33 +412,49 @@ impl Board {
         self.problem.as_deref()
     }
 
-    /// The cost as shown: the amount and currency, `?` when unknown.
+    /// The cost as shown: the amount and currency, `at least` before it when it is a lower
+    /// bound, `?` when nothing was priced yet.
     #[must_use]
-    pub fn shown_cost(&self, cost: Option<Money>) -> String {
+    pub fn shown_cost(&self, cost: Option<Estimate>) -> String {
         match (&self.prices, cost) {
-            (Some(prices), Some(cost)) => format!("{cost} {}", prices.currency),
-            (Some(prices), None) => format!("? {}", prices.currency),
+            (Some(prices), Some(cost)) if cost.lower_bound() => {
+                format!("at least {} {}", cost.amount, prices.currency)
+            }
+            (Some(prices), Some(cost)) if cost.priced > 0 => {
+                format!("{} {}", cost.amount, prices.currency)
+            }
+            (Some(prices), _) => format!("? {}", prices.currency),
             (None, _) => "no price table".to_owned(),
         }
     }
 
-    /// One counter line of `host`, or of both hosts with `None`.
+    /// One counter line of `host`, or of both hosts with `None`: the counts, `(n without
+    /// usage)` after them when responses have none, the turns and the cost.
     #[must_use]
     pub fn counter_line(&self, host: Option<usize>) -> String {
-        match host {
-            Some(host) => format!(
-                "{} · turns {} · {}",
+        let (counts, without, turns, cost) = match host {
+            Some(host) => (
                 self.counts(host),
+                self.without_usage(host),
                 self.turns(host),
-                self.shown_cost(self.cost(host))
+                self.cost(host),
             ),
-            None => format!(
-                "{} · turns {} · {}",
+            None => (
                 self.total_counts(),
+                self.without_usage(0) + self.without_usage(1),
                 self.turns(0) + self.turns(1),
-                self.shown_cost(self.total_cost())
+                self.total_cost(),
             ),
-        }
+        };
+        let without = if without > 0 {
+            format!(" ({without} without usage)")
+        } else {
+            String::new()
+        };
+        format!(
+            "{counts}{without} · turns {turns} · {}",
+            self.shown_cost(cost)
+        )
     }
 
     /// The usage of the show, per host and in total, with the price table, as lines.
@@ -318,7 +475,40 @@ impl Board {
         if let Some(prices) = &self.prices {
             lines.push(format!("cost estimated by {prices}"));
         }
+        if let Some(cost) = self.total_cost().filter(Estimate::lower_bound) {
+            lines.push(format!(
+                "the cost is a lower bound: {} responses have no usage or a count the price \
+                 table needs unknown",
+                cost.unpriced
+            ));
+        }
         lines
+    }
+}
+
+/// `counts` with the counts a provider that reports `reported` does not report unknown.
+const fn masked(counts: Counts, reported: Reported) -> Counts {
+    const fn known(reported: bool, count: Option<u64>) -> Option<u64> {
+        if reported { count } else { None }
+    }
+    Counts {
+        input_text: known(reported.input_text, counts.input_text),
+        input_audio: known(reported.input_audio, counts.input_audio),
+        input_cached: known(reported.input_cached, counts.input_cached),
+        output_text: known(reported.output_text, counts.output_text),
+        output_audio: known(reported.output_audio, counts.output_audio),
+    }
+}
+
+/// The sum, count by count, known only where both know it.
+fn sum_known(left: Counts, right: Counts) -> Counts {
+    let add = |left: Option<u64>, right: Option<u64>| Some(left?.saturating_add(right?));
+    Counts {
+        input_text: add(left.input_text, right.input_text),
+        input_audio: add(left.input_audio, right.input_audio),
+        input_cached: add(left.input_cached, right.input_cached),
+        output_text: add(left.output_text, right.output_text),
+        output_audio: add(left.output_audio, right.output_audio),
     }
 }
 
@@ -354,13 +544,17 @@ pub fn plain_line(board: &Board, event: &Event) -> Option<String> {
         } if !transcript.is_empty() => Some(format!("{}: {transcript}", name(*host))),
         Event::Ended { host, response_id } => {
             let panel = board.panels.get(*host)?;
-            let counts = panel.tally.response(*response_id)?;
+            let counts = panel
+                .responses
+                .iter()
+                .find(|response| response.response_id == *response_id)?
+                .counts?;
             let cost = board
                 .prices
                 .as_ref()
                 .and_then(|prices| match &prices.rates {
-                    crate::prices::Rates::Tokens(table) => table.cost(&counts),
-                    crate::prices::Rates::SessionMinute(_) => None,
+                    Rates::Tokens(table) => table.cost(&counts),
+                    Rates::SessionMinute(_) => None,
                 });
             Some(match (cost, &board.prices) {
                 (Some(cost), Some(prices)) => format!(

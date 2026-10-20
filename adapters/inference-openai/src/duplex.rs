@@ -80,6 +80,12 @@ use crate::event::{
 /// The input transcription model the binding asks for unless told otherwise.
 pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
 
+/// The slowest output speed the API takes, `audio.output.speed`.
+const MIN_SPEED: f32 = 0.25;
+
+/// The fastest output speed the API takes, `audio.output.speed`.
+const MAX_SPEED: f32 = 1.5;
+
 /// The formats the Realtime API takes and gives, in the contract's terms.
 fn formats() -> Vec<AudioFormat> {
     let mono = |encoding, rate| AudioFormat {
@@ -167,6 +173,7 @@ pub struct OpenAiRealtime {
     source: Box<dyn CredentialSource>,
     credential: String,
     transcription: Option<String>,
+    speed: Option<f32>,
     capabilities: SpeechCapabilities,
 }
 
@@ -176,6 +183,7 @@ impl std::fmt::Debug for OpenAiRealtime {
             .field("adapter", &self.adapter.adapter_id())
             .field("endpoint", &self.endpoint)
             .field("transcription", &self.transcription)
+            .field("speed", &self.speed)
             .finish_non_exhaustive()
     }
 }
@@ -205,6 +213,7 @@ impl OpenAiRealtime {
             source,
             credential: credential.into(),
             transcription: Some(DEFAULT_TRANSCRIPTION_MODEL.to_owned()),
+            speed: None,
             capabilities: capabilities(),
         }
     }
@@ -219,6 +228,16 @@ impl OpenAiRealtime {
     /// yields no input transcripts.
     pub fn with_input_transcription(mut self, model: Option<String>) -> Self {
         self.transcription = model;
+        self
+    }
+
+    /// This model speaking at `speed` times its own pace (`audio.output.speed`), held to the
+    /// API's range of 0.25 to 1.5; `None`, or a speed that is not a number, leaves the server's
+    /// default of 1.0.
+    pub fn with_output_speed(mut self, speed: Option<f32>) -> Self {
+        self.speed = speed
+            .filter(|speed| !speed.is_nan())
+            .map(|speed| speed.clamp(MIN_SPEED, MAX_SPEED));
         self
     }
 
@@ -276,6 +295,7 @@ impl OpenAiRealtime {
             output_format,
             turn_detection,
             input_transcription: self.transcription.clone(),
+            speed: self.speed,
             tools: config
                 .tools
                 .iter()

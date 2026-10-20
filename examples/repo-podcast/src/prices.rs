@@ -1,5 +1,6 @@
 //! Price tables: per token, in the JSON form `realtime_voice::Prices` reads, or per minute of
-//! session, billed per second, for a model that bills its voice by time:
+//! session, billed per second (a started second counts whole), for a model that bills its voice
+//! by time:
 //!
 //! ```json
 //! {"name": "gpt-live-1 list prices", "date": "2026-10-20", "currency": "USD",
@@ -12,7 +13,6 @@
 
 use std::error::Error;
 use std::fmt;
-use std::time::Duration;
 
 use realtime_voice::{Prices, Tally};
 use serde_json::Value;
@@ -95,19 +95,20 @@ impl PriceTable {
         })
     }
 
-    /// The cost of `seconds` of session, by a table priced per session minute; zero by a table
-    /// per token.
+    /// The cost of one session of `seconds`, by a table priced per session minute: billed per
+    /// second, so a started second is a whole one, and a time too large to count costs the most
+    /// [`Money`] holds. Zero by a table per token, and for a time that is not a positive number.
     #[must_use]
     pub fn session_cost(&self, seconds: f64) -> Money {
         let Rates::SessionMinute(per_minute) = self.rates else {
             return Money::default();
         };
-        let millis = if seconds.is_finite() && seconds > 0.0 {
-            Duration::from_secs_f64(seconds).as_millis()
-        } else {
-            0
-        };
-        Money(u128::from(per_minute) * 1_000_000 * millis / 60_000)
+        Money(
+            u128::from(per_minute)
+                .saturating_mul(1_000_000)
+                .saturating_mul(u128::from(billed_seconds(seconds)))
+                / 60,
+        )
     }
 
     /// The cost of the responses `tally` holds, by a table per token; `None` when none
@@ -135,6 +136,17 @@ impl fmt::Display for PriceTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({})", self.name, self.date)
     }
+}
+
+/// The whole seconds a session of `seconds` is billed: rounded up, saturating at `u64::MAX`;
+/// zero for a time that is not a positive number.
+fn billed_seconds(seconds: f64) -> u64 {
+    if !(seconds.is_finite() && seconds > 0.0) {
+        return 0;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let whole = seconds.ceil() as u64;
+    whole
 }
 
 /// A price in millionths, read from the JSON number's decimal digits so nothing is rounded.
@@ -178,6 +190,12 @@ impl Error for PriceTableError {}
 pub struct Money(u128);
 
 impl Money {
+    /// The amount of `picos` millionths of a millionth of the currency unit.
+    #[must_use]
+    pub const fn from_picos(picos: u128) -> Self {
+        Self(picos)
+    }
+
     /// The amount in millionths of a millionth of the currency unit.
     #[must_use]
     pub const fn picos(self) -> u128 {

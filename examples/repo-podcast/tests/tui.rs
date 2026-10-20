@@ -5,7 +5,7 @@ use std::time::Duration;
 use inference_duplex::{ResponseId, ResponseUsage, TokenCounts};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use realtime_voice::{Reported, Usage};
+use realtime_voice::{Counts, Reported, Usage};
 use repo_podcast::{
     Board, Directive, Event, LIVE_PRICES, PriceTable, REALTIME_PRICES, default_hosts, draw,
     plain_line,
@@ -255,4 +255,81 @@ fn plain_mode_prints_the_same_events_as_lines() {
         "{summary}"
     );
     assert!(summary.contains("0.020928 USD"), "{summary}");
+}
+
+/// The counts of a usage record: `None` for a count nobody counted.
+fn counts(known: [Option<u64>; 5]) -> Counts {
+    Counts {
+        input_text: known[0],
+        input_audio: known[1],
+        input_cached: known[2],
+        output_text: known[3],
+        output_audio: known[4],
+    }
+}
+
+#[test]
+fn a_record_replaces_reported_usage_and_one_without_counts_is_apart_and_a_lower_bound() {
+    let mut board = board();
+    let response_id = ResponseId::generate();
+    for event in reported(1, usage((1, 1, 0), (1, 1))) {
+        board.apply(&event);
+    }
+    let stalled = ResponseId::generate();
+    board.apply(&Event::Usage {
+        host: 1,
+        usage: Usage::Response {
+            response_id: stalled,
+            usage: usage((5, 5, 0), (5, 5)),
+        },
+    });
+    board.apply(&Event::Recorded {
+        host: 1,
+        response_id: stalled,
+        counts: counts([None; 5]),
+    });
+    board.apply(&Event::Recorded {
+        host: 0,
+        response_id,
+        counts: counts([Some(10), None, Some(0), Some(2), Some(3)]),
+    });
+    let theo = board.counter_line(Some(1));
+    assert!(theo.contains("(1 without usage)"), "{theo}");
+    assert!(theo.contains("at least"), "{theo}");
+    assert!(
+        theo.contains("in text 101 audio 1 cached 40, out text 13 audio 201"),
+        "the stalled response's reported usage gave way to its record: {theo}"
+    );
+    let maya = board.counter_line(Some(0));
+    assert!(
+        maya.contains("in text 50 audio ? cached 0, out text 18 audio 63"),
+        "a count one response left unknown is unknown in the sum: {maya}"
+    );
+    assert!(maya.contains("at least"), "{maya}");
+    let total = board.counter_line(None);
+    assert!(total.contains("(1 without usage)"), "{total}");
+    assert!(total.contains("at least"), "{total}");
+    let summary = board.summary().join("\n");
+    assert!(summary.contains("the cost is a lower bound"), "{summary}");
+    let screen = rendered(&board).join("\n");
+    assert!(screen.contains("without usage"), "{screen}");
+}
+
+#[test]
+fn each_session_is_billed_in_whole_seconds_rounded_up() {
+    let table = PriceTable::parse(LIVE_PRICES).expect("the shipped table");
+    let mut board = Board::new(
+        default_hosts(),
+        Duration::from_secs(300),
+        Some(table),
+        Reported::OPENAI_LIVE,
+    );
+    for seconds in [0.4, 0.4, 0.4] {
+        board.apply(&Event::Billed { host: 0, seconds });
+    }
+    let line = board.counter_line(Some(0));
+    assert!(
+        line.contains("0.002500 USD"),
+        "three sessions of 0.4 s are billed 1 s each: {line}"
+    );
 }

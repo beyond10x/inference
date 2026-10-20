@@ -169,7 +169,7 @@ fn the_time_limit_ends_the_show_with_a_closing_turn_by_the_host() {
 }
 
 #[test]
-fn a_closing_turn_falls_to_the_host_when_the_guest_spoke_last() {
+fn a_closing_that_would_run_past_the_limit_begins_a_turn_early() {
     let (mut show, host) = support::open(Scripted::alternating(12), Duration::from_millis(160));
     let events = support::run(&mut show, &host);
     let directives: Vec<(usize, Directive)> = generating(&events)
@@ -182,10 +182,72 @@ fn a_closing_turn_falls_to_the_host_when_the_guest_spoke_last() {
             (0, Directive::Open),
             (1, Directive::Reply),
             (0, Directive::Reply),
-            (1, Directive::Reply),
+            (1, Directive::FinalWords),
             (0, Directive::Close),
-        ]
+        ],
+        "after 120 ms a reply and the two closing turns would end at 240 ms: the guest's \
+         final words come instead"
     );
+}
+
+#[test]
+fn the_closing_begins_early_enough_to_end_near_the_limit() {
+    let limit = Duration::from_millis(260);
+    let (mut show, host) = support::open(Scripted::alternating(40), limit);
+    let events = support::run(&mut show, &host);
+    let played = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Finished { played } => Some(*played),
+            _ => None,
+        })
+        .expect("the show finished");
+    assert!(
+        played >= limit && played <= limit + TURN_AUDIO,
+        "{played:?} for a limit of {limit:?}: the closing began too late (the recorded \
+         two-minute show ran 3:02) or too early; {:?}",
+        generating(&events)
+    );
+    assert_eq!(
+        generating(&events).last().map(|(.., directive)| *directive),
+        Some(Directive::Close)
+    );
+}
+
+#[test]
+fn a_show_of_short_turns_closes_at_its_most_turns() {
+    let (mut show, host) = support::open(Scripted::alternating(40), Duration::from_secs(60));
+    let events = support::run(&mut show, &host);
+    let turns = generating(&events);
+    let most = usize::try_from(60 / repo_podcast::SHORTEST_TURN.as_secs()).expect("small") + 2;
+    assert!(
+        turns.len() <= most,
+        "{} turns of 40 ms in a show of 60 s, at most {most}",
+        turns.len()
+    );
+    assert_eq!(
+        turns.last().map(|(.., directive)| *directive),
+        Some(Directive::Close)
+    );
+}
+
+#[test]
+fn every_usage_record_of_the_ledger_is_handed_on_with_its_host() {
+    let (mut show, host) = support::open(Scripted::alternating(12), LIMIT);
+    let events = support::run(&mut show, &host);
+    let mut recorded = [0_usize; 2];
+    for event in &events {
+        if let Event::Recorded {
+            host: speaker,
+            counts,
+            ..
+        } = event
+        {
+            assert!(counts.input_text.is_some(), "the mock counts every token");
+            recorded[*speaker] += 1;
+        }
+    }
+    assert_eq!(recorded, [4, 3], "one record per response, per host");
 }
 
 #[test]

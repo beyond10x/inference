@@ -11,10 +11,16 @@
 //! silence, paced in real time, as such a model needs input to give output, and its first
 //! response is the turn.
 //!
-//! The time limit is in audio: once the turns generated hold `limit` of audio, the guest, if it
-//! is the guest's turn, gives its final words, and the host closes the show. The show is over
-//! when the closing turn has played, or at once on [`Show::stop`]. A session that fails ends
-//! the show the same way once what was generated has played.
+//! The time limit is in audio: once the turns generated and the closing turns, at their
+//! average length, would run past `limit`, the closing begins, so the show ends near the limit:
+//! the guest, if it is the guest's turn, gives its final words, and the host closes the show. The
+//! closing begins as well when the turns reach the most a show of `limit` may take (one per
+//! [`SHORTEST_TURN`] of the limit, and never fewer than [`FEWEST_TURNS`]). The show is over when
+//! the closing turn has played, or at once on [`Show::stop`].
+//!
+//! A turn whose session fails, stalls or is cancelled after its audio arrived keeps that audio
+//! and counts as done, and the show goes on. One that fails before any audio ends the show once
+//! what was generated has played, and so do [`SILENT_TURNS`] turns in a row without audio.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -24,13 +30,26 @@ use inference_audio_device::{
     AudioHost, DeviceError, DeviceSelector, PlayoutConfig, PushError, Speaker,
 };
 use inference_duplex::inference_audio::{AudioFrame, SampleClockPosition};
-use inference_duplex::{NativeSpeechModel, ResponseId, SessionEvent, SpeechSessionHandle};
-use realtime_voice::Usage;
+use inference_duplex::{
+    NativeSpeechModel, QuantityKind, ResponseId, SessionEvent, SpeechSessionHandle, UsageRecorded,
+};
+use realtime_voice::{Counts, Usage};
 
 use crate::hosts::{Directive, Host, Line, Role, instructions, turn_config};
 
-/// How long a model that creates its own responses may stay silent before its turn is given up.
-const SILENT_TURN: Duration = Duration::from_secs(20);
+/// How long a model that creates its own responses may send no output before its turn is given
+/// up: the turn's liveness bound, which the session's ledger does not run while no response is
+/// awaited.
+const SILENT_TURN: Duration = Duration::from_secs(10);
+
+/// The turns in a row without audio that end the show.
+pub const SILENT_TURNS: usize = 3;
+
+/// The shortest average turn the most turns of a show are counted by.
+pub const SHORTEST_TURN: Duration = Duration::from_secs(3);
+
+/// The fewest turns a show may take, whatever its limit.
+pub const FEWEST_TURNS: usize = 12;
 
 /// How a show runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +120,13 @@ pub enum Event {
     },
     /// A session reported usage.
     Usage { host: usize, usage: Usage },
+    /// The session's ledger recorded a response's usage: each count as recorded, `None` where
+    /// nobody counted it. It replaces what [`Event::Usage`] said of the response.
+    Recorded {
+        host: usize,
+        response_id: ResponseId,
+        counts: Counts,
+    },
     /// A response of a host ended.
     Ended {
         host: usize,
@@ -170,6 +196,8 @@ struct Live<S> {
     session: S,
     host: usize,
     opened: Instant,
+    /// When the session last sent output: a response, a transcript or audio.
+    heard: Instant,
     /// Input samples sent, for a model fed silence.
     sent: u64,
     listen: bool,
@@ -189,6 +217,8 @@ pub struct Show<M: NativeSpeechModel> {
     next: usize,
     closing: bool,
     closed: bool,
+    /// The turns in a row generated without audio.
+    silent_turns: usize,
     played: Duration,
     level: f32,
     over: bool,
@@ -223,6 +253,7 @@ impl<M: NativeSpeechModel> Show<M> {
             next: 0,
             closing: false,
             closed: false,
+            silent_turns: 0,
             played: Duration::ZERO,
             level: 0.0,
             over: false,
@@ -314,10 +345,9 @@ impl<M: NativeSpeechModel> Show<M> {
         }
         let index = self.next;
         let host = index % 2;
-        let generated: Duration = self.played + self.queue.iter().map(Turn::audio).sum();
         let directive = if index == 0 {
             Directive::Open
-        } else if self.closing || generated >= self.settings.limit {
+        } else if self.closing || self.time_to_close(index) {
             self.closing = true;
             match self.hosts[host].role {
                 Role::Guest => Directive::FinalWords,
@@ -376,13 +406,43 @@ impl<M: NativeSpeechModel> Show<M> {
             playing: false,
             finished: false,
         });
+        let opened = Instant::now();
         self.live = Some(Live {
             session,
             host,
-            opened: Instant::now(),
+            opened,
+            heard: opened,
             sent: 0,
             listen,
         });
+    }
+
+    /// Whether turn `index`, every turn before it generated, should begin the closing: when
+    /// the audio generated and the closing it would begin, at the average turn length so far
+    /// (the guest's final words and the host's close on the guest's turn, the close alone on
+    /// the host's), would run past the limit, or when the closing would otherwise not fit in
+    /// the most turns of the show. Until the most turns are reached the show does not end
+    /// before the limit, and it ends at most two average turns after it, where it began the
+    /// closing only once the limit was generated.
+    fn time_to_close(&self, index: usize) -> bool {
+        let generated: Duration = self.played + self.queue.iter().map(Turn::audio).sum();
+        let average = generated / u32::try_from(index.max(1)).unwrap_or(u32::MAX);
+        let closing = match self.hosts[index % 2].role {
+            Role::Guest => average * 2,
+            Role::Host => average,
+        };
+        generated + closing > self.settings.limit || index + 2 >= self.most_turns()
+    }
+
+    /// The most turns the show takes: one per [`SHORTEST_TURN`] of the limit and the two
+    /// closing turns, never fewer than [`FEWEST_TURNS`].
+    fn most_turns(&self) -> usize {
+        let per_turn = SHORTEST_TURN.as_millis().max(1);
+        let turns = self.settings.limit.as_millis().div_ceil(per_turn);
+        usize::try_from(turns)
+            .unwrap_or(usize::MAX)
+            .saturating_add(2)
+            .max(FEWEST_TURNS)
     }
 
     /// Reads the generating turn's session.
@@ -398,23 +458,25 @@ impl<M: NativeSpeechModel> Show<M> {
             let Some(event) = live.session.next_event(self.settings.wait) else {
                 break;
             };
+            if matches!(
+                event,
+                SessionEvent::ResponseCreated(_)
+                    | SessionEvent::OutputTranscriptDelta(_)
+                    | SessionEvent::OutputAudio(_)
+            ) {
+                live.heard = Instant::now();
+            }
             done |= self.handle(live.host, event, events);
             if done {
                 break;
             }
         }
-        let silent = live.listen
-            && live.opened.elapsed() > SILENT_TURN
-            && self
-                .queue
-                .back()
-                .is_some_and(|turn| turn.response.is_none());
-        if silent {
-            events.push(Event::Problem {
-                host: Some(live.host),
-                detail: format!("no speech within {} s", SILENT_TURN.as_secs()),
-            });
-            self.closed = true;
+        if !done && live.listen && live.heard.elapsed() >= SILENT_TURN {
+            self.broken(
+                live.host,
+                format!("nothing from the provider for {} s", SILENT_TURN.as_secs()),
+                events,
+            );
             done = true;
         }
         if done {
@@ -488,11 +550,7 @@ impl<M: NativeSpeechModel> Show<M> {
                     host,
                     response_id: cancelled.response_id,
                 });
-                events.push(Event::Problem {
-                    host: Some(host),
-                    detail: "the response was cancelled".to_owned(),
-                });
-                self.closed = true;
+                self.broken(host, "the response was cancelled".to_owned(), events);
                 return true;
             }
             SessionEvent::ResponseFailed(failed) if ours(turn, failed.response_id) => {
@@ -500,20 +558,25 @@ impl<M: NativeSpeechModel> Show<M> {
                     host,
                     response_id: failed.response_id,
                 });
-                events.push(Event::Problem {
-                    host: Some(host),
-                    detail: format!("the response failed: {}", failed.failure),
-                });
-                self.closed = true;
+                self.broken(
+                    host,
+                    format!("the response failed: {}", failed.failure),
+                    events,
+                );
                 return true;
             }
             SessionEvent::SpeechSessionFailed(failed) => {
-                events.push(Event::Problem {
-                    host: Some(host),
-                    detail: format!("the session failed: {}", failed.failure),
-                });
-                self.closed = true;
+                self.broken(
+                    host,
+                    format!("the session failed: {}", failed.failure),
+                    events,
+                );
                 return true;
+            }
+            SessionEvent::UsageRecorded(record) => {
+                if let Some(event) = recorded(host, &record) {
+                    events.push(event);
+                }
             }
             SessionEvent::ResponseUsageRecorded(recorded) => events.push(Event::Usage {
                 host,
@@ -549,6 +612,11 @@ impl<M: NativeSpeechModel> Show<M> {
                     host: live.host,
                     usage: Usage::Transcription(recorded.usage),
                 }),
+                SessionEvent::UsageRecorded(record) => {
+                    if let Some(event) = recorded(live.host, &record) {
+                        events.push(event);
+                    }
+                }
                 _ => {}
             }
         }
@@ -566,17 +634,41 @@ impl<M: NativeSpeechModel> Show<M> {
             return;
         };
         turn.generated = true;
+        let host = turn.host;
+        let silent = turn.received == 0;
         let text = turn.text.trim().to_owned();
         events.push(Event::Generated {
-            host: turn.host,
+            host,
             turn: turn.index,
             transcript: text.clone(),
         });
         if !text.is_empty() {
             self.transcript.push(Line {
-                speaker: turn.host,
+                speaker: host,
                 text,
             });
+        }
+        self.silent_turns = if silent { self.silent_turns + 1 } else { 0 };
+        if self.silent_turns == SILENT_TURNS && !self.closed {
+            self.fail(
+                Some(host),
+                format!("{SILENT_TURNS} turns in a row carried no audio"),
+                events,
+            );
+        }
+    }
+
+    /// The generating turn of `host` broke off for `detail`: with audio it keeps what arrived,
+    /// counts as done and the show goes on; without, the show ends once what was generated has
+    /// played.
+    fn broken(&mut self, host: usize, detail: String, events: &mut Vec<Event>) {
+        if self.queue.back().is_some_and(|turn| turn.received > 0) {
+            events.push(Event::Problem {
+                host: Some(host),
+                detail: format!("{detail}; the turn's audio is kept and the show goes on"),
+            });
+        } else {
+            self.fail(Some(host), detail, events);
         }
     }
 
@@ -647,4 +739,27 @@ impl<M: NativeSpeechModel> Show<M> {
         events.push(Event::Problem { host, detail });
         self.closed = true;
     }
+}
+
+/// The event of a response's usage record of `host`; `None` for a record of no response.
+fn recorded(host: usize, record: &UsageRecorded) -> Option<Event> {
+    let count = |kind: QuantityKind| {
+        record
+            .quantities
+            .iter()
+            .find(|quantity| quantity.kind() == kind)
+            .and_then(|quantity| quantity.value())
+            .and_then(|value| u64::try_from(value).ok())
+    };
+    Some(Event::Recorded {
+        host,
+        response_id: record.response_id?,
+        counts: Counts {
+            input_text: count(QuantityKind::InputTextTokens),
+            input_audio: count(QuantityKind::InputAudioTokens),
+            input_cached: count(QuantityKind::CachedInputTokens),
+            output_text: count(QuantityKind::OutputTextTokens),
+            output_audio: count(QuantityKind::OutputAudioTokens),
+        },
+    })
 }

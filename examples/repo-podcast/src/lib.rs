@@ -25,12 +25,18 @@ mod brief;
 mod hosts;
 mod prices;
 mod show;
+mod title;
 mod tui;
 
-pub use board::{Board, plain_line};
-pub use brief::{DISTIL_PROMPT, DistilError, brief, distil, distil_command};
-pub use hosts::{Directive, Host, Line, Role, default_hosts, instructions, turn_config};
+pub use board::{Board, Estimate, plain_line};
+pub use brief::{
+    DISTIL_CUT, DISTIL_LIMIT, DISTIL_PROMPT, DistilError, brief, distil, distil_command,
+};
+pub use hosts::{
+    BRIEF_LIMIT, Directive, Host, Line, Role, default_hosts, instructions, turn_config,
+};
 pub use prices::{LIVE_PRICES, Money, PriceTable, PriceTableError, REALTIME_PRICES, Rates};
 pub use realtime_voice::{Counts, Reported, Usage};
-pub use show::{Event, Settings, Show, level};
+pub use show::{Event, FEWEST_TURNS, SHORTEST_TURN, SILENT_TURNS, Settings, Show, level};
+pub use title::{project_name, repository_name};
 pub use tui::draw;
