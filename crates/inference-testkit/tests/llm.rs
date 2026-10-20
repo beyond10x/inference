@@ -8,11 +8,16 @@
 #![cfg(feature = "llm")]
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::pin;
+use std::task::{Context, Poll, Waker};
 
 use inference_core::generation::GenerationState;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Capability, ModelId};
-use inference_llm::llm_core::{Item, TurnRequest};
+use inference_llm::llm_core::{
+    Cancel, Item, Model, StreamEvent, TurnOutcome, TurnRequest, VecSink,
+};
 use inference_llm::{
     CapabilityNotClaimed, ConcurrencyLimitReached, GenerationEvent, GenerationRequest, InputRefused,
 };
@@ -194,6 +199,70 @@ fn each_configuration_claims_exactly_what_it_was_observed_to_do() {
         assert_eq!(
             claimed, observed,
             "{configuration:?} claims what it was observed to do"
+        );
+    }
+}
+
+#[test]
+fn each_configuration_model_declares_its_streaming_claim_and_no_input_during_output() {
+    for configuration in MockConfiguration::ALL {
+        let generator = generator(configuration);
+        let declared = generator.generator().model().capabilities();
+        assert_eq!(
+            (declared.output_streaming, declared.input_during_output),
+            (
+                generator
+                    .adapter()
+                    .capabilities()
+                    .contains(&Capability::OutputStreaming),
+                false
+            ),
+            "{configuration:?}: the model streams as claimed and, as every llm protocol, takes no \
+             input during output"
+        );
+        assert_eq!(declared, &configuration.declared());
+    }
+}
+
+/// The outcome of one turn of `model` on `request`, and the text deltas it showed.
+fn one_turn(model: &dyn Model, request: &TurnRequest) -> (TurnOutcome, Vec<String>) {
+    let mut sink = VecSink::new(64, 1 << 16);
+    let cancel = Cancel::new();
+    let outcome = {
+        let mut turn = pin!(model.turn(request, &mut sink, &cancel));
+        match turn.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(outcome) => outcome.expect("the mock answers"),
+            Poll::Pending => panic!("the mock answers without waiting"),
+        }
+    };
+    let deltas = sink
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::TextDelta { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    (outcome, deltas)
+}
+
+#[test]
+fn a_mock_model_that_does_not_stream_shows_no_delta_and_returns_its_text_in_the_outcome() {
+    let request = TurnRequest::new("mock", vec![Item::user("Greet the user.")]);
+    for configuration in MockConfiguration::ALL {
+        let generator = generator(configuration);
+        let model = generator.generator().model();
+        let (outcome, deltas) = one_turn(model, &request);
+        let shown: Vec<String> = if model.capabilities().output_streaming {
+            SCRIPT.iter().map(|piece| (*piece).to_owned()).collect()
+        } else {
+            Vec::new()
+        };
+        assert_eq!(deltas, shown, "{configuration:?}: the deltas shown");
+        assert_eq!(
+            outcome.items,
+            vec![Item::assistant(SCRIPT.concat())],
+            "{configuration:?}: the turn's text is in its outcome"
         );
     }
 }

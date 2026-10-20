@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T06:06:07Z",
+  "actor": "human:timo",
+  "artifact": "story:llm-0-8-0",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-llm --all-features --test model_turns and adversary1_llm_declarations (VERIFIED, new behaviour: with Generator::new accepting every claim the refusal cases fail; treatment refuses OutputStreaming, ToolCalling and NativeDuplex claims the llm model does not declare, keeps ConcurrentInputOutput claimable, and a turn with no shown delta gives its outcome text; adversary pass 1's eight findings fixed)"
+  }
+}
