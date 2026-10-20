@@ -18,8 +18,8 @@ use inference_core::model::{
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
     AddNode, AddPort, AddSubgraphNode, AddSubgraphNodeError, Catalog, Declaration, Delivery,
-    Essentiality, ExposureId, InteractionMode, NodeId, NodeRole, OverloadPolicy, PipelineId,
-    PipelineNotFound, PipelineNotReady, PipelineSpec, PipelineState, PlanPipelineError,
+    Essentiality, ExposureId, InteractionMode, LocalityDenied, NodeId, NodeRole, OverloadPolicy,
+    PipelineId, PipelineNotFound, PipelineNotReady, PipelineSpec, PipelineState, PlanPipelineError,
     PortDirection, PortId, PortTraits, SubgraphInterfaceMismatch, SubgraphNodeAdded, modality,
 };
 use serde_json::json;
@@ -502,5 +502,155 @@ fn the_subgraph_names_serialize_as_the_ess_names() {
             "port_id": null,
             "exposure_id": "00000000-0000-0000-0000-000000000002"
         })
+    );
+}
+
+/// Two profiles, one admitting the same process only and one the external provider as well, and
+/// an adapter at each locality.
+struct Mixed {
+    offline: DeploymentProfile,
+    hybrid: DeploymentProfile,
+    local: Adapter,
+    hosted: Adapter,
+}
+
+impl Catalog for Mixed {
+    fn profile(&self, profile_id: ProfileId) -> Option<&DeploymentProfile> {
+        [&self.offline, &self.hybrid]
+            .into_iter()
+            .find(|profile| profile.profile_id() == profile_id)
+    }
+
+    fn adapter(&self, adapter_id: AdapterId) -> Option<&Adapter> {
+        [&self.local, &self.hosted]
+            .into_iter()
+            .find(|adapter| adapter.adapter_id() == adapter_id)
+    }
+}
+
+#[test]
+fn a_binding_nested_two_subgraphs_deep_is_refused_under_the_parents_profile_naming_the_inner_node()
+{
+    let profile = |kind: ProfileKind, admitted| {
+        DeploymentProfile::declare(DeclareProfile {
+            kind,
+            egress: kind.egress(),
+            admitted,
+        })
+        .expect("a row of the table")
+        .0
+    };
+    let adapter = |locality, execution_form| {
+        Adapter::declare(DeclareAdapter {
+            model_id: ModelId::generate(),
+            backend: "model".to_owned(),
+            contract_revision: "llm/1".to_owned(),
+            execution_form,
+            locality,
+            capabilities: vec![Capability::OutputStreaming],
+            max_concurrency: 1,
+        })
+        .expect("a positive concurrency")
+        .0
+    };
+    let known = Mixed {
+        offline: profile(ProfileKind::OfflineStrict, vec![Locality::SameProcess]),
+        hybrid: profile(
+            ProfileKind::HybridOptIn,
+            vec![Locality::SameProcess, Locality::ExternalProvider],
+        ),
+        local: adapter(Locality::SameProcess, ExecutionForm::InProcess),
+        hosted: adapter(Locality::ExternalProvider, ExecutionForm::HostedService),
+    };
+    let capacity = NonZeroUsize::new(4).expect("4");
+    let mut declaration = Declaration::new();
+    let planned = |declaration: &mut Declaration, pipeline_id| {
+        let validated = declaration.validate(pipeline_id).expect("valid");
+        let _planned = declaration
+            .plan(validated, &known)
+            .expect("planned under the hybrid profile");
+    };
+
+    let (innermost, hosted_model) = declaration
+        .build(
+            &known,
+            known.hybrid.profile_id(),
+            spec("hosted"),
+            |pipeline| {
+                let model = pipeline.node("model", NodeRole::Model, Vec::new());
+                let prompt = pipeline.input::<modality::Text>(&model, "prompt", TEXT);
+                let answer = pipeline.output::<modality::Text>(&model, "answer", TEXT);
+                pipeline.expose(&prompt, "user text", capacity, OverloadPolicy::Pause);
+                pipeline.expose(&answer, "reply", capacity, OverloadPolicy::Pause);
+                pipeline
+                    .bind(&model, known.hosted.adapter_id())
+                    .expect("the adapter is known");
+                model.id()
+            },
+        )
+        .expect("the profile is known");
+    planned(&mut declaration, innermost);
+    let (middle, ()) = declaration
+        .build(
+            &known,
+            known.hybrid.profile_id(),
+            spec("middle"),
+            |pipeline| {
+                let inner = pipeline
+                    .subgraph("inner", NodeRole::Transform, innermost)
+                    .expect("the innermost is Planned");
+                let asked = pipeline.input::<modality::Text>(&inner, "user text", TEXT);
+                let replied = pipeline.output::<modality::Text>(&inner, "reply", TEXT);
+                pipeline.expose(&asked, "user text", capacity, OverloadPolicy::Pause);
+                pipeline.expose(&replied, "reply", capacity, OverloadPolicy::Pause);
+            },
+        )
+        .expect("the profile is known");
+    planned(&mut declaration, middle);
+    let (parent, ()) = declaration
+        .build(
+            &known,
+            known.offline.profile_id(),
+            spec("offline"),
+            |pipeline| {
+                let source = pipeline.node("source", NodeRole::Source, Vec::new());
+                let local = pipeline.node("local", NodeRole::Transform, Vec::new());
+                let frontend = pipeline
+                    .subgraph("frontend", NodeRole::Transform, middle)
+                    .expect("the middle is Planned");
+                let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+                let emitted = pipeline.output::<modality::Text>(&source, "text", TEXT);
+                let taken = pipeline.input::<modality::Text>(&local, "in", TEXT);
+                let passed = pipeline.output::<modality::Text>(&local, "out", TEXT);
+                let asked = pipeline.input::<modality::Text>(&frontend, "user text", TEXT);
+                let replied = pipeline.output::<modality::Text>(&frontend, "reply", TEXT);
+                let collected = pipeline.input::<modality::Text>(&sink, "text", TEXT);
+                pipeline.connect(&emitted, &taken, capacity, OverloadPolicy::Pause);
+                pipeline.connect(&passed, &asked, capacity, OverloadPolicy::Pause);
+                pipeline.connect(&replied, &collected, capacity, OverloadPolicy::Pause);
+                pipeline
+                    .bind(&local, known.local.adapter_id())
+                    .expect("the adapter is known");
+            },
+        )
+        .expect("the profile is known");
+    let validated = declaration.validate(parent).expect("valid");
+
+    assert_eq!(
+        declaration.plan(validated, &known),
+        Err(PlanPipelineError::LocalityDenied(LocalityDenied {
+            node_id: hosted_model,
+            adapter_id: known.hosted.adapter_id(),
+            locality: Locality::ExternalProvider,
+            profile_id: known.offline.profile_id(),
+        })),
+        "the parent's offline profile decides for every binding its subgraphs reach"
+    );
+    assert_eq!(
+        declaration
+            .pipeline(parent)
+            .map(inference_pipeline::Pipeline::state),
+        Some(PipelineState::Validated),
+        "nothing moved"
     );
 }
