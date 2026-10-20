@@ -1,0 +1,19 @@
+[package]
+name = "stt-sherpa-onnx"
+description = "Example: speech recognition alone, against the STT contract and the local sherpa-onnx recogniser."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+inference-sherpa-onnx = { path = "../../adapters/inference-sherpa-onnx", features = ["stt"] }
+inference-stt = { path = "../../crates/inference-stt" }
+
+[dev-dependencies]
+clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
+
+[lints]
+workspace = true

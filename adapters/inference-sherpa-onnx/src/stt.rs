@@ -20,7 +20,10 @@
 //! stream for the next utterance; an utterance with no text emits nothing. At the end of input
 //! the stream is flushed and the last span committed.
 //!
-//! Conformance against the claims, cancellation and stale output are not decided here.
+//! The crate's `stt_conformance` tests hold the recogniser to adapter conformance against the
+//! pinned checkpoint: the claims observed, stream order and finalization, timestamps and format
+//! transformations, cancellation, concurrency and provenance. Its capability record on the
+//! reference machine, `records/stt-i9-10900k-cpu.json`, names them as the evidence of its claims.
 //!
 //! # Known limitation
 //!
