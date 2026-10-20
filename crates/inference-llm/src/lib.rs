@@ -24,15 +24,26 @@
 //! earlier turn returned included, once there is something new to answer: input offered while it
 //! runs, as user text, or the results of every tool call the latest turn ended with. A turn that
 //! fails cancels the generation: [`GenerationEvent::Cancelled`] is delivered with the segments it
-//! discarded, and [`GenerationHandle::failure`] keeps the `llm` error. Text a turn streams is the
-//! generation's output, and the commit point is the delta: `llm`'s stream has no event that
-//! revises a delta it streamed, so each becomes one segment, committed as it is emitted. That
-//! `llm` never revises one is not stated in `llm` itself, an `llm` gap.
+//! discarded, and [`GenerationHandle::failure`] keeps the `llm` error. The wrapper makes one
+//! attempt per turn, as [`llm_core::Model::turn`] runs one: a caller that wants a failure before
+//! output retried wraps its model in `llm`'s routing, its fallback run, before handing it to a
+//! [`Generator`]. The text of a turn is the generation's output, under `llm`'s rule that every
+//! [`StreamEvent`] is final, that each assistant message of a successful turn carries exactly the
+//! text deltas shown for it, and that a message no delta was shown for carries the text the
+//! server sent. So the commit point is the delta: each becomes one segment, committed as it is
+//! emitted; a turn that showed no delta gives the assistant text of its outcome as one segment
+//! when it ends.
 //!
 //! Output streaming, incremental input and input during output are distinct capabilities
 //! (`inference.model.Capability`), and a persistent connection proves none of them. What the
 //! contract can observe, it decides here:
 //!
+//! * [`Generator::new`] refuses an adapter record claiming what its model's
+//!   [`llm_core::Capabilities`] do not declare, with [`CapabilityNotDeclared`]:
+//!   [`Capability::OutputStreaming`] needs `output_streaming`, [`Capability::ToolCalling`] needs
+//!   `tools`, and [`Capability::NativeDuplex`] needs `input_during_output`.
+//!   [`Capability::ConcurrentInputOutput`] needs no declaration: the wrapper itself takes input
+//!   while the generation emits output, as the next turn's text.
 //! * An adapter claiming [`Capability::OutputStreaming`] delivers each delta of a turn as a
 //!   [`TextDelta`] while the generation is still Active, and the turn may still be running. One
 //!   that does not delivers each turn's text as one segment, held until the generation completes
@@ -44,7 +55,9 @@
 //!   that admission returns, and the text inside is reachable only through
 //!   [`GenerationOutput::release`] of the generation that admitted it, while that generation is
 //!   still Active; input admitted elsewhere is refused with [`AdmittedByAnotherGeneration`]. So no
-//!   input the adapter does not claim reaches the model, and an admission is taken once.
+//!   input the adapter does not claim reaches the model, and an admission is taken once. Admitted
+//!   input is the user text of the next turn, not of the running one: no `llm` protocol carries
+//!   input during output.
 //! * A turn ending with tool calls stages them as proposals, which never reach the caller as
 //!   [`TextDelta`]s: structured proposals stay distinguishable from prose. The caller takes each
 //!   with [`GenerationHandle::take_proposal`] once the turn's text is delivered and answers it
@@ -154,6 +167,27 @@ impl fmt::Display for CapabilityNotClaimed {
 }
 
 impl Error for CapabilityNotClaimed {}
+
+/// The adapter record claims `capability`, which the `llm` model implementing it does not
+/// declare in its [`llm_core::Capabilities`], so no generator is made of the two:
+/// [`Capability::OutputStreaming`] needs `output_streaming`, [`Capability::ToolCalling`] needs
+/// `tools`, and [`Capability::NativeDuplex`] needs `input_during_output`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityNotDeclared {
+    pub capability: Capability,
+}
+
+impl fmt::Display for CapabilityNotDeclared {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the adapter claims {:?}, which its llm model does not declare",
+            self.capability
+        )
+    }
+}
+
+impl Error for CapabilityNotDeclared {}
 
 /// Why input offered to a generation was refused; nothing changed either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -599,13 +633,27 @@ impl fmt::Debug for Generator {
 
 impl Generator {
     /// The adapter `adapter` implemented by `model`.
-    #[must_use]
-    pub fn new(adapter: Adapter, model: Arc<dyn Model>) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// [`CapabilityNotDeclared`] naming the first claim of `adapter` that `model` does not
+    /// declare; no generator is made.
+    pub fn new(adapter: Adapter, model: Arc<dyn Model>) -> Result<Self, CapabilityNotDeclared> {
+        let declared = model.capabilities();
+        let undeclared = adapter.capabilities().iter().find(|claim| match claim {
+            Capability::OutputStreaming => !declared.output_streaming,
+            Capability::NativeDuplex => !declared.input_during_output,
+            Capability::ToolCalling => !declared.tools,
+            _ => false,
+        });
+        if let Some(&capability) = undeclared {
+            return Err(CapabilityNotDeclared { capability });
+        }
+        Ok(Self {
             adapter,
             model,
             running: Running::default(),
-        }
+        })
     }
 
     /// The adapter record this generator was declared with, the capabilities it claims among it.
@@ -636,7 +684,8 @@ impl Generator {
         let (output, started) = GenerationOutput::start(&self.adapter, &request);
         Ok(GenerationHandle {
             model: Arc::clone(&self.model),
-            streams: output.capabilities().contains(&Capability::OutputStreaming),
+            streams: self.model.capabilities().output_streaming
+                && output.capabilities().contains(&Capability::OutputStreaming),
             output,
             conversation: request.turn,
             first: true,
@@ -650,6 +699,7 @@ impl Generator {
             delivered: VecDeque::from([GenerationEvent::Started(started)]),
             held: VecDeque::new(),
             text: String::new(),
+            shown: false,
             outcomes: Vec::new(),
             failure: None,
             _slot: slot,
@@ -730,6 +780,8 @@ pub struct GenerationHandle {
     held: VecDeque<GenerationEvent>,
     /// The text of the running turn of an adapter that does not stream.
     text: String,
+    /// Whether the running turn showed a text delta.
+    shown: bool,
     outcomes: Vec<TurnOutcome>,
     failure: Option<llm_core::Error>,
     _slot: Slot,
@@ -1000,6 +1052,7 @@ impl GenerationHandle {
                 .extend(self.inputs.drain(..).map(Item::user));
         }
         self.answered = false;
+        self.shown = false;
         let request = self.conversation.clone();
         let model = Arc::clone(&self.model);
         let cancel = self.cancel.clone();
@@ -1024,6 +1077,7 @@ impl GenerationHandle {
             if let StreamEvent::TextDelta { text } = event
                 && !text.is_empty()
             {
+                self.shown = true;
                 if self.streams {
                     self.segment(text);
                 } else {
@@ -1050,14 +1104,26 @@ impl GenerationHandle {
         }
     }
 
-    /// Takes the outcome of the turn that ended: its items join the conversation and its calls
-    /// are staged. A turn ending with calls is the safe boundary at which an adapter that does
-    /// not stream delivers what it held, so the caller can take the calls while the generation
-    /// is Active.
+    /// Takes the outcome of the turn that ended: its text, when no delta showed it, becomes one
+    /// segment, its items join the conversation and its calls are staged. A turn ending with
+    /// calls is the safe boundary at which an adapter that does not stream delivers what it held,
+    /// so the caller can take the calls while the generation is Active.
     fn turn_ended(&mut self, outcome: TurnOutcome) {
         self.turn = None;
-        if !self.text.is_empty() {
-            let text = std::mem::take(&mut self.text);
+        let text = if self.shown {
+            std::mem::take(&mut self.text)
+        } else {
+            outcome
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::AssistantText { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        self.shown = false;
+        if !text.is_empty() {
             self.segment(text);
         }
         self.conversation
