@@ -1,6 +1,6 @@
 [package]
 name = "inference-openai"
-description = "OpenAI Realtime API client for the inference framework: a WebSocket session with typed client and server events."
+description = "OpenAI Realtime and GPT-Live clients for the inference framework: WebSocket sessions with typed client and server events."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,7 @@ keychain = ["dep:keyring-core", "dep:secrets-core", "dep:secrets-keychain"]
 native-keychain = ["keychain", "secrets-keychain/native-keychain"]
 duplex = ["dep:inference-core", "dep:inference-duplex", "dep:inference-tools", "tokio/rt"]
 live = ["native-keychain", "duplex"]
+gpt-live = []
 
 [dependencies]
 base64.workspace = true
@@ -32,7 +33,7 @@ webpki-roots = "0.26"
 zeroize = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [[test]]
 name = "live"
@@ -45,6 +46,18 @@ required-features = ["duplex"]
 [[test]]
 name = "live_duplex"
 required-features = ["live"]
+
+[[test]]
+name = "gpt_live"
+required-features = ["gpt-live"]
+
+[[test]]
+name = "gpt_live_duplex"
+required-features = ["gpt-live", "duplex"]
+
+[[test]]
+name = "live_gpt"
+required-features = ["live", "gpt-live"]
 
 [lints]
 workspace = true
