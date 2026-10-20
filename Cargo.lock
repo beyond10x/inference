@@ -664,6 +664,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "b10x-llm-core"
+version = "0.7.0"
+source = "git+https://github.com/beyond10x/llm?tag=0.7.0#75455f32a2a2ad728f307daf943b12a42a29e114"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio-util",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1802,9 +1813,11 @@ dependencies = [
 name = "inference-llm"
 version = "0.4.0"
 dependencies = [
+ "b10x-llm-core",
  "inference-core",
  "inference-text",
  "inference-tools",
+ "serde_json",
 ]
 
 [[package]]
@@ -3144,6 +3157,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

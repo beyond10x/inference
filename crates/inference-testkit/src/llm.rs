@@ -1,66 +1,68 @@
-//! The scripted mock generator of the LLM contract of `inference-llm`.
+//! The scripted mock model of the LLM contract of `inference-llm`.
 //!
 //! [`MockGenerator`] is an `inference.model.Adapter` of one model, declared in one of three
-//! [`MockConfiguration`]s, and generates the text pieces of its script in order. It yields its
-//! events to the caller through the [`MockGeneration`] handle and records nothing in any store of
-//! this crate. How it behaves follows from what its configuration claims:
+//! [`MockConfiguration`]s, implemented by a scripted [`llm_core::Model`] and wrapped by
+//! `inference-llm`'s [`Generator`]. Its generations are [`MockGeneration`]s, the wrapper's
+//! handles; it records nothing in any store of this crate. With a script, the model answers the
+//! first turn of a conversation with it, one delta per piece; every other turn, and the first of
+//! a model without a script, it answers with the text of each caller item after its last answer,
+//! one delta each: the user text of an input, or the text of a tool result. Each turn answered so
+//! is a model request. What a generation delivers follows from what its configuration claims, as
+//! the wrapper decides it:
 //!
-//! * claiming `output_streaming`, it emits and commits one segment per piece, each delivered while
-//!   the generation is Active, then completes;
-//! * claiming neither, it emits the whole script as one segment, commits it and completes before
-//!   delivering anything after `GenerationStarted`;
+//! * claiming `output_streaming`, each piece is one segment, emitted and committed while the
+//!   generation is Active, and the generation completes once nothing is left to answer;
+//! * claiming neither, the whole script is one segment, committed, and the generation completes
+//!   before anything after `GenerationStarted` is delivered;
 //! * claiming `output_streaming` and `concurrent_input_output`, it streams, and input offered
-//!   while the generation is Active is emitted as a later segment of its own.
+//!   while the generation is Active is answered by a later turn, one segment of its own.
 //!
-//! It declares a maximum concurrency of one and holds to it: while one generation of a generator,
-//! or of a clone of it, runs, a second start is refused with [`ConcurrencyLimitReached`]. A
-//! generation runs until its handle is dropped. [`MockGeneration::emit`] emits a delta outside
-//! the script, which a generation no longer Active refuses as stale.
+//! It declares a maximum concurrency of one, which the wrapper holds to: while one generation of a
+//! generator, or of a clone of it, runs, a second start is refused with
+//! [`ConcurrencyLimitReached`]. A generation runs until its handle is dropped.
 //!
-//! A generator scripted for tools ([`MockGenerator::proposing`]) also claims `tool_calling` and
-//! implements [`ToolCalling`]: each input offered and each outcome integrated is a model request
-//! of its own, whose text is one segment, and each of its first `proposals` model requests ends
-//! with the same [`ToolProposal`], taken once that request's segment is delivered. Scripted with a
-//! round ([`MockGenerator::proposing_round`]), each of those requests ends with every proposal of
-//! the round, taken one by one in the round's order. The text of a request that integrates an
-//! outcome contains it: the result's JSON, the failure's detail or the rejection's reason.
+//! A generator scripted for tools ([`MockGenerator::proposing`]) also claims `tool_calling`, and
+//! its model declares tools: each of its first `proposals` model requests ends with the
+//! same [`ToolProposal`], an `llm` tool call of the tool named as
+//! [`tool_name`](inference_llm::tools::tool_name) names it. Scripted with a round
+//! ([`MockGenerator::proposing_round`]), each of those turns ends with every proposal of the
+//! round, in the round's order. The text of a turn answering tool results contains each: the
+//! result's JSON, the failure's detail or the rejection's reason.
 //!
-//! The contract's request carries no tool set, so a caller offers one to the mock directly
-//! ([`MockGenerator::start_offering`]); the generator records every set it was offered
+//! A caller offers its tool set on the request, `llm`'s tool specifications; the model records the
+//! set the first turn of each conversation carries, when it carries one
 //! ([`MockGenerator::offered`]).
 //!
 //! Behind the `run` feature, [`ModelNode`] is the model node of a text-only pipeline the
 //! runtime's run controller drives: one generation per run, one committed segment per input,
 //! given tools, the tool loop of that generation and, given a turns input, a generation started at
-//! the completion of the first turn.
+//! the completion of the first turn. It answers on any `inference-llm` [`Generator`], the mock's
+//! among them.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use inference_core::generation::{
-    GenerationCancelled, GenerationState, GenerationStateConflict, GenerationSuperseded,
-};
 use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
-use inference_llm::tools::{ToolCalling, ToolOutcome, ToolProposal};
-use inference_llm::{
-    AdmittedInput, CONTRACT_REVISION, ConcurrencyLimitReached, GenerationEvent, GenerationHandle,
-    GenerationOutput, GenerationRequest, Generator, InputRefused,
+use inference_llm::llm_core::{
+    self, BoxFuture, CallId, Cancel, Capabilities, Id, Item, Protocol, Provenance, StopReason,
+    StreamEvent, StreamSink, ToolCall, ToolSpec, TurnObservation, TurnOutcome, TurnRequest,
 };
-use inference_text::TextDelta;
-use inference_tools::{Json, Tool, ToolId};
+use inference_llm::tools::{ToolOutcome, tool_name};
+use inference_llm::{
+    CONTRACT_REVISION, ConcurrencyLimitReached, GenerationHandle, GenerationRequest, Generator,
+};
+use inference_tools::{Json, RejectionReason, ToolId};
 
 /// The mock model node of a text-only pipeline, behind the `run` feature: a [`ModelNode`] answers
-/// each input on one generation of a [`MockGenerator`] per run.
+/// each input on one generation of a [`Generator`] per run.
 #[cfg(feature = "run")]
 mod node;
 
 #[cfg(feature = "run")]
 pub use node::{Carried, ModelHandle, ModelNode, ModelPayload};
 
-/// What a [`MockGenerator`] claims, and so how it behaves.
+/// What a [`MockGenerator`] claims, and so how its generations deliver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MockConfiguration {
     /// Claims `output_streaming` only.
@@ -93,59 +95,30 @@ impl MockConfiguration {
     }
 }
 
-/// The generations of one generator that run, shared by its clones, which are the same adapter.
-#[derive(Debug, Clone, Default)]
-struct Running(Arc<AtomicUsize>);
-
-impl PartialEq for Running {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
+/// A proposal of the mock's tool script: the tool and the arguments each scripted turn proposes
+/// to call it with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolProposal {
+    pub tool_id: ToolId,
+    pub arguments: Json,
 }
 
-impl Eq for Running {}
-
-impl Running {
-    /// Counts one more running generation, if fewer than `max_concurrency` run.
-    fn admit(&self, max_concurrency: i64) -> Result<Slot, ConcurrencyLimitReached> {
-        let limit = usize::try_from(max_concurrency).unwrap_or(usize::MAX);
-        let slot = Slot(Arc::clone(&self.0));
-        if self.0.fetch_add(1, Ordering::AcqRel) < limit {
-            Ok(slot)
-        } else {
-            drop(slot);
-            Err(ConcurrencyLimitReached { max_concurrency })
-        }
-    }
-}
-
-/// The place of one running generation among [`Running`], given back when it is dropped.
-#[derive(Debug)]
-struct Slot(Arc<AtomicUsize>);
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-impl PartialEq for Slot {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for Slot {}
+/// One generation of a [`MockGenerator`]: `inference-llm`'s handle over the mock model; it runs
+/// until it is dropped. It is not `Clone`: a copy taken while the generation is Active would
+/// deliver output for it after it was superseded or cancelled.
+///
+/// ```compile_fail
+/// fn cloneable<T: Clone>() {}
+/// cloneable::<inference_testkit::llm::MockGeneration>();
+/// ```
+pub type MockGeneration = GenerationHandle;
 
 /// The scripted mock generator: an in-process adapter of one model with a maximum concurrency of
-/// one, which it holds to, generating the same script for every request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// one, whose model answers every conversation with the same script.
+#[derive(Debug, Clone)]
 pub struct MockGenerator {
-    adapter: Adapter,
-    script: Vec<String>,
-    tools: Option<ToolScript>,
-    running: Running,
-    offered: Offered,
+    generator: Generator,
+    model: Arc<MockModel>,
 }
 
 /// What a generator scripted for tools proposes: every proposal of `round`, at the end of each
@@ -156,9 +129,39 @@ struct ToolScript {
     proposals: usize,
 }
 
+/// The scripted [`llm_core::Model`] behind a [`MockGenerator`].
+#[derive(Debug)]
+struct MockModel {
+    provenance: Provenance,
+    capabilities: Capabilities,
+    script: Vec<String>,
+    tools: Option<ToolScript>,
+    offered: Offered,
+}
+
+/// The tool sets offered to the model of one generator, shared by its clones.
+#[derive(Debug, Clone, Default)]
+struct Offered(Arc<Mutex<Vec<Vec<ToolSpec>>>>);
+
+impl Offered {
+    fn record(&self, tools: Vec<ToolSpec>) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(tools);
+    }
+
+    fn read(&self) -> Vec<Vec<ToolSpec>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
 impl MockGenerator {
-    /// Declares a mock generator of the model `model_id` in `configuration`, generating `script`
-    /// piece by piece.
+    /// Declares a mock generator of the model `model_id` in `configuration`, whose model answers
+    /// the first turn of a conversation with `script`, piece by piece.
     #[must_use]
     pub fn new<I, S>(configuration: MockConfiguration, model_id: ModelId, script: I) -> Self
     where
@@ -175,286 +178,229 @@ impl MockGenerator {
             max_concurrency: 1,
         })
         .expect("a maximum concurrency of one is positive");
-        Self {
-            adapter,
+        let id = |value: &str| Id::new(value).expect("a printable identifier");
+        let model = MockModel {
+            provenance: Provenance {
+                protocol: Protocol::Responses,
+                provider: id("inference-testkit"),
+                account: id("mock"),
+                endpoint: id("in-process"),
+                model: id("mock"),
+                binding_revision: id("1"),
+            },
+            capabilities: Capabilities::text(1 << 20, 1 << 16),
             script: script.into_iter().map(Into::into).collect(),
             tools: None,
-            running: Running::default(),
             offered: Offered::default(),
-        }
+        };
+        Self::over(adapter, model)
     }
 
     /// The same generator scripted for tools: it claims `tool_calling` besides what it claimed,
-    /// and each of the first `proposals` model requests of a generation ends with a proposal to
-    /// call `tool_id` with `arguments`. Its adapter is declared again with the added claim, under
-    /// a new identity.
+    /// and each of the first `proposals` model requests of a conversation ends with a
+    /// proposal to call `tool_id` with `arguments`. Its adapter is declared again with the added
+    /// claim, under a new identity.
     #[must_use]
     pub fn proposing(self, tool_id: ToolId, arguments: Json, proposals: usize) -> Self {
         self.proposing_round([ToolProposal { tool_id, arguments }], proposals)
     }
 
-    /// As [`MockGenerator::proposing`], each of the first `proposals` model requests of a
-    /// generation ending with every proposal of `round`, in its order: the calls of one tool
-    /// round.
+    /// As [`MockGenerator::proposing`], each of the first `proposals` model requests
+    /// ending with every proposal of `round`, in its order: the calls of one tool round.
     #[must_use]
     pub fn proposing_round(
         self,
         round: impl IntoIterator<Item = ToolProposal>,
         proposals: usize,
     ) -> Self {
-        let mut capabilities = self.adapter.capabilities().to_vec();
+        let adapter = self.generator.adapter();
+        let mut capabilities = adapter.capabilities().to_vec();
         if !capabilities.contains(&Capability::ToolCalling) {
             capabilities.push(Capability::ToolCalling);
         }
         let (adapter, _) = Adapter::declare(DeclareAdapter {
-            model_id: self.adapter.model_id(),
-            backend: self.adapter.backend().to_owned(),
-            contract_revision: self.adapter.contract_revision().to_owned(),
-            execution_form: self.adapter.execution_form(),
-            locality: self.adapter.locality(),
+            model_id: adapter.model_id(),
+            backend: adapter.backend().to_owned(),
+            contract_revision: adapter.contract_revision().to_owned(),
+            execution_form: adapter.execution_form(),
+            locality: adapter.locality(),
             capabilities,
-            max_concurrency: self.adapter.max_concurrency(),
+            max_concurrency: adapter.max_concurrency(),
         })
         .expect("the declaration it repeats was admitted");
-        Self {
-            adapter,
+        let model = MockModel {
+            provenance: self.model.provenance.clone(),
+            capabilities: Capabilities {
+                tools: true,
+                tool_choice: true,
+                ..self.model.capabilities.clone()
+            },
+            script: self.model.script.clone(),
             tools: Some(ToolScript {
                 round: round.into_iter().collect(),
                 proposals,
             }),
-            ..self
-        }
-    }
-}
-
-impl MockGenerator {
-    /// Starts a generation for `request` as [`Generator::start`] does, offering the model
-    /// `tools`, the tool set a caller such as an LLM node declares to it. The contract's
-    /// [`GenerationRequest`] carries no tool set, so the mock takes it here and records it once
-    /// the generation started ([`MockGenerator::offered`]); what its script proposes does not
-    /// depend on it. Offering through the mock is a stand-in: the request is to carry the tool set
-    /// once `inference-llm` moves onto its new model contract (`story:llm-over-b10x-llm`), and
-    /// this method then goes.
-    ///
-    /// # Errors
-    ///
-    /// The [`ConcurrencyLimitReached`] of [`Generator::start`]; nothing is recorded.
-    pub fn start_offering(
-        &mut self,
-        request: GenerationRequest,
-        tools: &[Tool],
-    ) -> Result<MockGeneration, ConcurrencyLimitReached> {
-        let generation = self.start(request)?;
-        self.offered.record(tools.to_vec());
-        Ok(generation)
-    }
-
-    /// Every tool set offered to a generation of the generator, or of a clone of it, in the order
-    /// the generations started, each in the order it was offered.
-    #[must_use]
-    pub fn offered(&self) -> Vec<Vec<Tool>> {
-        self.offered.read()
-    }
-}
-
-/// The tool sets offered to the generations of one generator, shared by its clones.
-#[derive(Debug, Clone, Default)]
-struct Offered(Arc<Mutex<Vec<Vec<Tool>>>>);
-
-impl PartialEq for Offered {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for Offered {}
-
-impl Offered {
-    fn record(&self, tools: Vec<Tool>) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(tools);
-    }
-
-    fn read(&self) -> Vec<Vec<Tool>> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-}
-
-impl Generator for MockGenerator {
-    type Handle = MockGeneration;
-
-    fn adapter(&self) -> &Adapter {
-        &self.adapter
-    }
-
-    fn start(
-        &mut self,
-        request: GenerationRequest,
-    ) -> Result<MockGeneration, ConcurrencyLimitReached> {
-        let slot = self.running.admit(self.adapter.max_concurrency())?;
-        let (output, started) = GenerationOutput::start(&self.adapter, &request);
-        Ok(MockGeneration {
-            streams: output.capabilities().contains(&Capability::OutputStreaming),
-            output,
-            pending: self.script.iter().cloned().collect(),
-            delivered: VecDeque::from([GenerationEvent::Started(started)]),
-            tools: self.tools.clone(),
-            staged: VecDeque::new(),
-            _slot: slot,
-        })
-    }
-}
-
-/// One generation of a [`MockGenerator`]; it runs until it is dropped. It is not `Clone`, as the
-/// `GenerationOutput` it holds is not: a copy taken while the generation is Active would deliver
-/// output for it after it was superseded or cancelled.
-///
-/// ```compile_fail
-/// fn cloneable<T: Clone>() {}
-/// cloneable::<inference_testkit::llm::MockGeneration>();
-/// ```
-#[derive(Debug, PartialEq, Eq)]
-pub struct MockGeneration {
-    streams: bool,
-    output: GenerationOutput,
-    pending: VecDeque<String>,
-    delivered: VecDeque<GenerationEvent>,
-    /// What is left of the generator's tool script.
-    tools: Option<ToolScript>,
-    /// The proposals the latest model request ends with, until each is taken.
-    staged: VecDeque<ToolProposal>,
-    _slot: Slot,
-}
-
-impl Iterator for MockGeneration {
-    type Item = GenerationEvent;
-
-    fn next(&mut self) -> Option<GenerationEvent> {
-        if let Some(event) = self.delivered.pop_front() {
-            return Some(event);
-        }
-        if self.output.generation().state() != GenerationState::Active {
-            return None;
-        }
-        if self.streams {
-            match self.pending.pop_front() {
-                Some(piece) => self.deliver_segment(piece),
-                None => self.deliver_completion(),
-            }
-        } else {
-            let whole = self.pending.drain(..).collect();
-            self.deliver_segment(whole);
-            self.deliver_completion();
-        }
-        self.delivered.pop_front()
-    }
-}
-
-impl MockGeneration {
-    /// Runs `inference.stream.EmitTextDelta` for `text` now, outside the script, and queues the
-    /// `TextDelta` for delivery; the segment stays Tentative. Computation may outlive the
-    /// cancellation of delivery (`docs/design/inference.md:641`), so a caller may call it on a
-    /// generation that is no longer Active, as a model still computing does.
-    ///
-    /// # Errors
-    ///
-    /// [`GenerationStateConflict`] carrying the generation's state when it is not Active, the
-    /// `stale-generation` outcome of `EmitTextDelta`: no segment is created and nothing is
-    /// delivered.
-    pub fn emit(&mut self, text: impl Into<String>) -> Result<TextDelta, GenerationStateConflict> {
-        let delta = self.output.emit(text.into())?;
-        self.delivered
-            .push_back(GenerationEvent::TextDelta(delta.clone()));
-        Ok(delta)
-    }
-
-    /// Issues one model request whose text is `text`; scripted for tools and with proposals left,
-    /// the request ends with the next one.
-    fn request(&mut self, text: String) {
-        self.pending.push_back(text);
-        if let Some(script) = self.tools.as_mut()
-            && script.proposals > 0
-        {
-            script.proposals -= 1;
-            self.staged = script.round.iter().cloned().collect();
-        }
-    }
-
-    /// Emits `text` as one segment and commits it, queueing both events for delivery.
-    fn deliver_segment(&mut self, text: String) {
-        let delta = self
-            .output
-            .emit(text)
-            .expect("the generation was checked Active");
-        self.delivered.push_back(GenerationEvent::TextDelta(delta));
-        let committed = self
-            .output
-            .commit_tentative()
-            .expect("only Tentative segments are committed");
-        self.delivered
-            .extend(committed.into_iter().map(GenerationEvent::SegmentCommitted));
-    }
-
-    /// Completes the generation, queueing its event for delivery.
-    fn deliver_completion(&mut self) {
-        let completed = self
-            .output
-            .complete()
-            .expect("the generation was checked Active");
-        self.delivered
-            .push_back(GenerationEvent::Completed(completed));
-    }
-}
-
-impl GenerationHandle for MockGeneration {
-    fn output(&self) -> &GenerationOutput {
-        &self.output
-    }
-
-    fn accept_input(&mut self, input: AdmittedInput) -> Result<(), InputRefused> {
-        let text = self.output.release(input)?;
-        self.request(text);
-        Ok(())
-    }
-
-    fn supersede(&mut self) -> Result<GenerationSuperseded, GenerationStateConflict> {
-        let (event, _) = self.output.supersede()?;
-        self.delivered.clear();
-        Ok(event)
-    }
-
-    fn cancel(&mut self) -> Result<GenerationCancelled, GenerationStateConflict> {
-        let (event, _) = self.output.cancel()?;
-        self.delivered.clear();
-        Ok(event)
-    }
-}
-
-impl ToolCalling for MockGeneration {
-    fn take_proposal(&mut self) -> Option<ToolProposal> {
-        if self.pending.is_empty() && self.delivered.is_empty() {
-            self.staged.pop_front()
-        } else {
-            None
-        }
-    }
-
-    fn integrate(&mut self, outcome: ToolOutcome) -> Result<(), GenerationStateConflict> {
-        let current = self.output.generation().state();
-        if current != GenerationState::Active {
-            return Err(GenerationStateConflict { current });
-        }
-        let text = match outcome {
-            ToolOutcome::Result(result) => result.to_string(),
-            ToolOutcome::Failed(failure) => format!("the tool failed: {}", failure.detail),
-            ToolOutcome::Rejected(reason) => format!("the tool call was rejected: {reason:?}"),
+            offered: self.model.offered.clone(),
         };
-        self.request(text);
-        Ok(())
+        Self::over(adapter, model)
+    }
+
+    fn over(adapter: Adapter, model: MockModel) -> Self {
+        let model = Arc::new(model);
+        let generator = Generator::new(adapter, Arc::clone(&model) as Arc<dyn llm_core::Model>);
+        Self { generator, model }
+    }
+
+    /// The adapter record this generator was declared with, the capabilities it claims among it.
+    #[must_use]
+    pub const fn adapter(&self) -> &Adapter {
+        self.generator.adapter()
+    }
+
+    /// The `inference-llm` generator over the mock model, which a [`ModelNode`] answers on.
+    #[must_use]
+    pub const fn generator(&self) -> &Generator {
+        &self.generator
+    }
+
+    /// Starts a generation for `request`, as [`Generator::start`] does.
+    ///
+    /// # Errors
+    ///
+    /// The [`ConcurrencyLimitReached`] of [`Generator::start`]; nothing starts.
+    pub fn start(
+        &mut self,
+        request: GenerationRequest,
+    ) -> Result<MockGeneration, ConcurrencyLimitReached> {
+        self.generator.start(request)
+    }
+
+    /// Every tool set the first turn of a conversation of the generator's model, or of a clone's,
+    /// carried, in the order those turns ran, each in the order it was offered; a first turn
+    /// carrying no tools records none.
+    #[must_use]
+    pub fn offered(&self) -> Vec<Vec<ToolSpec>> {
+        self.model.offered.read()
+    }
+}
+
+impl From<MockGenerator> for Generator {
+    fn from(mock: MockGenerator) -> Self {
+        mock.generator
+    }
+}
+
+impl MockModel {
+    /// What the model answers `request` with: the pieces it streams, and the calls the turn ends
+    /// with.
+    fn answer(&self, request: &TurnRequest) -> (Vec<String>, Vec<ToolCall>) {
+        let answered = request
+            .items
+            .iter()
+            .filter(|item| matches!(item, Item::AssistantText { .. }))
+            .count();
+        let last = request
+            .items
+            .iter()
+            .rposition(|item| matches!(item, Item::AssistantText { .. } | Item::ToolCall(_)));
+        if last.is_none() && !request.tools.is_empty() {
+            self.offered.record(request.tools.clone());
+        }
+        let scripted = last.is_none() && !self.script.is_empty();
+        let pieces = if scripted {
+            self.script.clone()
+        } else {
+            request.items[last.map_or(0, |at| at + 1)..]
+                .iter()
+                .filter_map(caller_text)
+                .collect()
+        };
+        let number = answered + usize::from(self.script.is_empty());
+        let calls = match &self.tools {
+            Some(script) if !scripted && number >= 1 && number <= script.proposals => script
+                .round
+                .iter()
+                .enumerate()
+                .map(|(index, proposal)| ToolCall {
+                    call_id: CallId::new(format!("call-{number}-{index}"))
+                        .expect("a printable identifier"),
+                    name: tool_name(proposal.tool_id),
+                    arguments: proposal.arguments.clone(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        (pieces, calls)
+    }
+}
+
+/// The text the model answers a caller item with: user text as it is, a tool result as its
+/// JSON, a failure's detail or a rejection's reason.
+fn caller_text(item: &Item) -> Option<String> {
+    match item {
+        Item::UserText { text } => Some(text.clone()),
+        Item::ToolResult {
+            output,
+            failed: false,
+            ..
+        } => Some(output.to_string()),
+        Item::ToolResult { output, .. } => Some(
+            match RejectionReason::ALL
+                .into_iter()
+                .find(|reason| ToolOutcome::Rejected(*reason).output() == *output)
+            {
+                Some(reason) => format!("the tool call was rejected: {reason:?}"),
+                None => format!(
+                    "the tool failed: {}",
+                    output
+                        .pointer("/failure/detail")
+                        .and_then(Json::as_str)
+                        .map_or_else(|| output.to_string(), str::to_owned)
+                ),
+            },
+        ),
+        _ => None,
+    }
+}
+
+impl llm_core::Model for MockModel {
+    fn provenance(&self) -> &Provenance {
+        &self.provenance
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
+    fn turn<'a>(
+        &'a self,
+        request: &'a TurnRequest,
+        sink: &'a mut dyn StreamSink,
+        _cancel: &'a Cancel,
+    ) -> BoxFuture<'a, Result<TurnOutcome, llm_core::Error>> {
+        Box::pin(async move {
+            let (pieces, calls) = self.answer(request);
+            for piece in &pieces {
+                sink.emit(StreamEvent::TextDelta {
+                    text: piece.clone(),
+                })
+                .await?;
+            }
+            let stop_reason = if calls.is_empty() {
+                StopReason::EndTurn
+            } else {
+                StopReason::ToolCalls
+            };
+            let mut items = vec![Item::assistant(pieces.concat())];
+            items.extend(calls.into_iter().map(Item::ToolCall));
+            Ok(TurnOutcome {
+                stop_reason,
+                items,
+                observation: TurnObservation {
+                    final_usage: true,
+                    ..TurnObservation::new(self.provenance.clone())
+                },
+            })
+        })
     }
 }

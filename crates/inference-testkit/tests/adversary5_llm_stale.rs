@@ -10,14 +10,13 @@
 use inference_core::generation::{GenerationState, GenerationStateConflict};
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::ModelId;
-use inference_llm::{
-    GenerationEvent, GenerationHandle, GenerationRequest, Generator, InputRefused, OfferInput,
-};
-use inference_testkit::llm::{MockConfiguration, MockGenerator};
+use inference_llm::llm_core::{Item, TurnRequest};
+use inference_llm::{GenerationEvent, GenerationRequest, InputRefused};
+use inference_testkit::llm::{MockConfiguration, MockGeneration, MockGenerator};
 
 const INPUT: &str = "late input";
 
-fn start() -> <MockGenerator as Generator>::Handle {
+fn start() -> MockGeneration {
     MockGenerator::new(
         MockConfiguration::StreamingAndConcurrentInput,
         ModelId::generate(),
@@ -27,7 +26,7 @@ fn start() -> <MockGenerator as Generator>::Handle {
         run_id: RunId::generate(),
         node_id: NodeId::generate(),
         epoch: 1,
-        prompt: "prompt".to_owned(),
+        turn: TurnRequest::new("mock", vec![Item::user("prompt")]),
     })
     .expect("a fresh generator runs nothing else")
 }

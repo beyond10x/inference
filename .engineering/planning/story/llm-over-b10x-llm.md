@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:llm-over-b10x-llm
 kind: story
-status: draft
+status: implemented
 title: inference-llm wraps the beyond10x llm Model contract
 summary: inference-llm builds on llm_core::Model from b10x-llm at a release tag and adds only what a graph node needs; design §7.2 and AGENTS.md follow.
 relations:
@@ -19,7 +19,11 @@ scope:
   path: crates/inference-testkit/src/llm.rs
 - confidence: cited
   path: docs/design/inference.md
-revision: 4
+revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T01:07:59Z", actor: "human:timo", revision: 6}
+- {from: "proposed", to: "active", at: "2026-10-20T01:07:59Z", actor: "human:timo", revision: 7}
+- {from: "active", to: "implemented", at: "2026-10-20T01:08:00Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 
@@ -68,3 +72,21 @@ Confirmed 2026-10-20 (owner, relayed by another session of the owner's), option 
 - The 2026-10-18 rule in `AGENTS.md` reverses for `llm` only; `llm-gateway` and `loom` stay
   non-dependencies. The workspace moves to Rust 1.98, as `llm` 0.7.0 requires.
 - If `llm` lacks something the wrapper needs, it is reported as an `llm` gap, not re-created here.
+
+## llm gaps
+
+Gaps in `llm` 0.7.0 that the wrapper works around; each workaround goes when `llm` closes the gap.
+Reported to the owner's sessions on 2026-10-20.
+
+- llm's `Capabilities` cannot declare output streaming or input during output (llm 0.7.0
+  `crates/llm-core/src/vocabulary.rs:45-58`). The `inference.model.Adapter` record's claims decide
+  delivery; nothing checks them against the model.
+- llm's `Model::turn` takes a fixed `TurnRequest`, so no input reaches a running turn (llm 0.7.0
+  `crates/llm-core/src/port.rs:42-52`). Input admitted during output becomes user text of the next
+  turn.
+- llm's stream does not state that a `TextDelta` is never revised (llm 0.7.0
+  `crates/llm-core/src/port.rs:10-35`). The wrapper commits each delta's segment at once.
+- llm's `ToolResult` cannot tell a call rejected before running from one that failed while running
+  (llm 0.7.0 `crates/llm-core/src/item.rs:25-29`). `ToolOutcome::output` encodes `{"failure": …}`
+  or `{"rejected": …}` inside the output, with `failed: true` for both.
+- Every llm crate is `publish = false`, so inference depends on llm by git tag.

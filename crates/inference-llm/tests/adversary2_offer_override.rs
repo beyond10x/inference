@@ -1,55 +1,62 @@
 //! `inference-llm`'s crate documentation: "A handle takes input only as the `AdmittedInput` that
-//! admission returns [...] So no implementation accepts input its adapter does not claim."
-//! `GenerationHandle::offer_input` was a provided method, and an implementation could override it:
-//! the text then arrived as a `String`, admission never ran, and an adapter claiming
-//! `output_streaming` only took input while its generation was Active. `offer_input` is now the
-//! sealed `OfferInput`, implemented once for every handle; that an implementation defining
-//! `offer_input` does not compile is pinned by the `compile_fail` examples on `GenerationHandle`
-//! and `OfferInput`. What runs here is the public offer path on a handle that takes whatever its
-//! `accept_input` is given.
+//! admission returns [...] So no input the adapter does not claim reaches the model."
+//! `GenerationHandle::offer_input` was once a provided method of a trait, and an implementation
+//! could override it: the text then arrived as a `String`, admission never ran, and an adapter
+//! claiming `output_streaming` only took input while its generation was Active. The handle is now
+//! the one concrete wrapper over `llm_core::Model`, so no implementation defines the offer path;
+//! what runs here is that path on a handle whose model records every request it is asked, and
+//! the refused text reaches none of them.
 
-use inference_core::generation::{
-    GenerationCancelled, GenerationStateConflict, GenerationSuperseded,
-};
+use std::sync::{Arc, Mutex, PoisonError};
+
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
+use inference_llm::llm_core::{
+    BoxFuture, Cancel, Capabilities, Error, Id, Item, Model, Protocol, Provenance, StopReason,
+    StreamSink, TurnObservation, TurnOutcome, TurnRequest,
+};
 use inference_llm::{
-    AdmittedInput, CONTRACT_REVISION, CapabilityNotClaimed, GenerationEvent, GenerationHandle,
-    GenerationOutput, GenerationRequest, InputRefused, OfferInput,
+    CONTRACT_REVISION, CapabilityNotClaimed, GenerationRequest, Generator, InputRefused,
 };
 
-struct Overriding {
-    output: GenerationOutput,
-    taken: Vec<String>,
+/// A model answering nothing, recording every request it is asked.
+struct Recording {
+    provenance: Provenance,
+    capabilities: Capabilities,
+    taken: Arc<Mutex<Vec<TurnRequest>>>,
 }
 
-impl Iterator for Overriding {
-    type Item = GenerationEvent;
-
-    fn next(&mut self) -> Option<GenerationEvent> {
-        None
-    }
-}
-
-impl GenerationHandle for Overriding {
-    fn output(&self) -> &GenerationOutput {
-        &self.output
+impl Model for Recording {
+    fn provenance(&self) -> &Provenance {
+        &self.provenance
     }
 
-    fn accept_input(&mut self, input: AdmittedInput) -> Result<(), InputRefused> {
-        let text = self.output.release(input)?;
-        self.taken.push(text);
-        Ok(())
+    fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
     }
 
-    fn supersede(&mut self) -> Result<GenerationSuperseded, GenerationStateConflict> {
-        Ok(self.output.supersede()?.0)
-    }
-
-    fn cancel(&mut self) -> Result<GenerationCancelled, GenerationStateConflict> {
-        Ok(self.output.cancel()?.0)
+    fn turn<'a>(
+        &'a self,
+        request: &'a TurnRequest,
+        _sink: &'a mut dyn StreamSink,
+        _cancel: &'a Cancel,
+    ) -> BoxFuture<'a, Result<TurnOutcome, Error>> {
+        Box::pin(async move {
+            self.taken
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(request.clone());
+            Ok(TurnOutcome {
+                stop_reason: StopReason::EndTurn,
+                items: Vec::new(),
+                observation: TurnObservation {
+                    final_usage: true,
+                    ..TurnObservation::new(self.provenance.clone())
+                },
+            })
+        })
     }
 }
 
@@ -66,25 +73,44 @@ fn an_adapter_not_claiming_concurrent_input_output_takes_no_input_through_offer_
     })
     .expect("one is positive")
     .0;
+    let id = |value: &str| Id::new(value).expect("a printable identifier");
+    let taken = Arc::new(Mutex::new(Vec::new()));
+    let model = Recording {
+        provenance: Provenance {
+            protocol: Protocol::ChatCompletions,
+            provider: id("test"),
+            account: id("test"),
+            endpoint: id("in-process"),
+            model: id("model"),
+            binding_revision: id("1"),
+        },
+        capabilities: Capabilities::text(1024, 256),
+        taken: Arc::clone(&taken),
+    };
     let request = GenerationRequest {
         run_id: RunId::generate(),
         node_id: NodeId::generate(),
         epoch: 1,
-        prompt: "prompt".to_owned(),
+        turn: TurnRequest::new("model", vec![Item::user("prompt")]),
     };
-    let mut handle = Overriding {
-        output: GenerationOutput::start(&adapter, &request).0,
-        taken: Vec::new(),
-    };
+    let mut handle = Generator::new(adapter, Arc::new(model))
+        .start(request)
+        .expect("a fresh generator runs nothing else");
     let offered = handle.offer_input("input during output".to_owned());
+    handle.by_ref().for_each(drop);
+    let reached = taken
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|request| request.items.contains(&Item::user("input during output")));
     assert_eq!(
-        (offered, handle.taken.as_slice()),
+        (offered, reached),
         (
             Err(InputRefused::CapabilityNotClaimed(CapabilityNotClaimed {
                 capability: Capability::ConcurrentInputOutput,
             })),
-            &[][..]
+            false
         ),
-        "the trait lets an implementation take input its adapter does not claim"
+        "the handle lets input its adapter does not claim reach the model"
     );
 }

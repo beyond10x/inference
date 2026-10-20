@@ -56,10 +56,15 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   contract crates and `inference-pipeline` carry no concrete model, backend or provider
   implementation. A concrete integration is an adapter crate that depends on the contracts, never
   the reverse. The repository ships libraries: no binary, server or CLI.
-- Other beyond10x repositories (`llm`, `llm-gateway`, `loom`) are not dependencies and the plan
-  treats them as absent (owner decision, 2026-10-18). An adapter to one may be written later.
-  The `secrets` library is the exception, used only by adapters' local credential lookup behind a
-  feature (owner decision, 2026-10-19).
+- `inference-llm` is a thin wrapper over the `llm` repository's model contract
+  (`b10x-llm-core`, `llm_core::Model`) at a release tag, 0.7.0 now, and the workspace's
+  `rust-version` is what that tag requires, 1.98 (owner decision, 2026-10-20, reversing the
+  2026-10-18 rule for `llm` only). Its request, items, tool calls and usage are `llm`'s; the
+  wrapper adds only graph concerns, and `llm`'s wire crates, being provider implementations, stay
+  out of the contract crates. Other beyond10x repositories (`llm-gateway`, `loom`) are not
+  dependencies and the plan treats them as absent (owner decision, 2026-10-18); an adapter to one
+  may be written later. The `secrets` library is the exception, used only by adapters' local
+  credential lookup behind a feature (owner decision, 2026-10-19).
 - The planning store is the plan. Work is recorded there, never only in a document or a chat.
 - Work in a managed worktree (`worktree create --purpose <what>`), build into its own `target/`.
 - Every commit, push, pull request and tag goes through the bot route (`b10x-gates bot -- <git

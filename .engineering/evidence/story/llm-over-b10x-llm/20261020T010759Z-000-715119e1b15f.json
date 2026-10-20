@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T01:07:59Z",
+  "actor": "human:timo",
+  "artifact": "story:llm-over-b10x-llm",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-testkit --all-features --test llm_model_node (VERIFIED, new behaviour: on base 15a3349 the wrapper tests do not compile, inference_llm has no llm_core; treatment drives a ModelNode with an llm_core::Model; adversary pass 1 found a generation completing with calls unanswered, calls lost after several deltas, an empty first request and a silent failing turn, all fixed; its 14 cases kept)"
+  }
+}

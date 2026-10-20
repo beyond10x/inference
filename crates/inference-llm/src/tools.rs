@@ -1,34 +1,61 @@
-//! Tool proposals of a generation, behind the `tools` feature (`docs/design/inference.md` 237).
+//! Tool calling between the graph and `llm`, behind the `tools` feature
+//! (`docs/design/inference.md` 237).
 //!
-//! A model that claims `inference.model.Capability::ToolCalling` may end a model request with a
-//! structured [`ToolProposal`] instead of, or after, its prose. The proposal never reaches the
-//! caller as a [`TextDelta`](inference_text::TextDelta): it is taken from the handle through
-//! [`ToolCalling::take_proposal`], so structured proposals stay distinguishable from user-visible
-//! prose (374). The caller turns it into an `inference.tools.ProposeToolCall` of the generation
-//! that made it.
+//! A model that claims `inference.model.Capability::ToolCalling` may end a turn with `llm` tool
+//! calls instead of, or after, its prose. The calls never reach the caller as
+//! [`TextDelta`](inference_text::TextDelta)s: they are taken from the handle with
+//! [`GenerationHandle::take_proposal`](crate::GenerationHandle::take_proposal), so structured
+//! proposals stay distinguishable from user-visible prose (374). The caller turns each into an
+//! `inference.tools.ProposeToolCall` of the generation that made it, of the tool [`tool_id`]
+//! names.
 //!
-//! What became of the proposal returns to the same generation as a [`ToolOutcome`] through
-//! [`ToolCalling::integrate`], which issues the generation's next model request with the outcome
-//! appended. An ordinary text model integrates a tool result at a safe boundary only, the end of
-//! the model request that emitted the proposal (402, 721): a proposal is taken once that request's
-//! text is delivered, and the outcome is integrated as a request of its own. The generation stays
-//! Active from the proposal to its completion, so every segment emitted after the outcome carries
-//! the generation's identity (376).
+//! This module maps the two vocabularies onto each other and defines neither side. A declared
+//! [`Tool`] is offered to the model as the `llm` [`ToolSpec`] [`tool_spec`] makes of it, named by
+//! its [`ToolId`] so that a call names exactly one tool; what became of a call, a
+//! [`ToolOutcome`], returns to the generation that proposed as the output of an `llm` tool result
+//! ([`ToolOutcome::output`], [`ToolOutcome::failed`]), through
+//! [`GenerationHandle::integrate`](crate::GenerationHandle::integrate). An ordinary text model
+//! integrates a tool result at a safe boundary only, the end of the turn that proposed (402, 721):
+//! the next turn runs once every call of the round is answered. The generation stays Active from
+//! the proposal to its completion, so every segment emitted after the outcome carries the
+//! generation's identity (376).
 
-use inference_core::generation::GenerationStateConflict;
-use inference_tools::{Json, RejectionReason, ToolFailure, ToolId};
+use inference_tools::{Json, RejectionReason, Tool, ToolFailure, ToolId};
+use llm_core::{ToolName, ToolSpec};
+use serde_json::{Value, json};
 
-use crate::GenerationHandle;
-
-/// A structured tool proposal a model request ended with: the tool and the arguments the model
-/// proposes to call it with.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolProposal {
-    pub tool_id: ToolId,
-    pub arguments: Json,
+/// The name `tool_id` is offered to the model under: its canonical hyphenated form.
+///
+/// # Panics
+///
+/// Never: the hyphenated form of an identifier is 36 printable ASCII bytes, which every `llm`
+/// tool name admits.
+#[must_use]
+pub fn tool_name(tool_id: ToolId) -> ToolName {
+    ToolName::new(tool_id.to_string()).expect("a hyphenated identifier is a valid tool name")
 }
 
-/// What became of a proposal, as the generation that made it is told.
+/// The tool a call named `name` proposes to call, when `name` is one [`tool_name`] gives; none
+/// otherwise, a name no declared tool was offered under.
+#[must_use]
+pub fn tool_id(name: &ToolName) -> Option<ToolId> {
+    serde_json::from_value(Value::String(name.as_str().to_owned()))
+        .ok()
+        .filter(|tool_id| tool_name(*tool_id) == *name)
+}
+
+/// `tool` as the model is offered it: named by its [`ToolId`], described by its name, its schema
+/// the input schema.
+#[must_use]
+pub fn tool_spec(tool: &Tool) -> ToolSpec {
+    ToolSpec {
+        name: tool_name(tool.tool_id()),
+        description: tool.name().to_owned(),
+        input_schema: tool.schema().clone(),
+    }
+}
+
+/// What became of a proposal, as the tools domain reports it to the generation that made it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolOutcome {
     /// The call completed with this result (`inference.tools.ToolCallResult`).
@@ -39,20 +66,23 @@ pub enum ToolOutcome {
     Rejected(RejectionReason),
 }
 
-/// A running generation whose model proposes tool calls; see the module documentation.
-pub trait ToolCalling: GenerationHandle {
-    /// Takes the next proposal the generation's latest model request ended with, once that
-    /// request's text has been delivered; a request may end with several, the calls of one round,
-    /// taken one by one in order. None while text of it is still to be delivered, when it ended
-    /// in prose only, or when every proposal of it was taken already.
-    fn take_proposal(&mut self) -> Option<ToolProposal>;
+impl ToolOutcome {
+    /// The output of the `llm` tool result: the result itself, `{"failure": <ToolFailure>}` or
+    /// `{"rejected": <RejectionReason>}`, each serialized under its ESS names. An `llm` tool
+    /// result says only whether it failed, not whether the call failed or was rejected, an `llm`
+    /// gap; the kind travels in the output until `llm` carries it.
+    #[must_use]
+    pub fn output(&self) -> Value {
+        match self {
+            Self::Result(result) => result.clone(),
+            Self::Failed(failure) => json!({ "failure": failure }),
+            Self::Rejected(reason) => json!({ "rejected": reason }),
+        }
+    }
 
-    /// Issues the generation's next model request with `outcome` appended; its text and any
-    /// proposal it ends with are delivered as for any request.
-    ///
-    /// # Errors
-    ///
-    /// [`GenerationStateConflict`] carrying the generation's state when it is not Active: the
-    /// outcome rejoins the generation that proposed and no other, and nothing is issued.
-    fn integrate(&mut self, outcome: ToolOutcome) -> Result<(), GenerationStateConflict>;
+    /// Whether the `llm` tool result is a failure: the call failed or was rejected.
+    #[must_use]
+    pub const fn failed(&self) -> bool {
+        !matches!(self, Self::Result(_))
+    }
 }
