@@ -1,0 +1,12 @@
+{
+  "name": "gpt-realtime-2.1 list prices, https://developers.openai.com/api/docs/models/gpt-realtime-2.1",
+  "date": "2026-10-20",
+  "currency": "USD",
+  "per_million_tokens": {
+    "text_in": 4.0,
+    "cached_in": 0.4,
+    "text_out": 24.0,
+    "audio_in": 32.0,
+    "audio_out": 64.0
+  }
+}

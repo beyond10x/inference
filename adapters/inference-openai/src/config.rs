@@ -143,6 +143,9 @@ pub struct SessionConfig {
     /// The transcription model for input audio; `None` turns input transcription off.
     pub input_transcription: Option<String>,
     pub tools: Vec<FunctionTool>,
+    /// The speed of the spoken output as a multiple of the model's own, `audio.output.speed`
+    /// (0.25 to 1.5, the server's default 1.0); `None` leaves it out.
+    pub speed: Option<f32>,
 }
 
 impl Default for SessionConfig {
@@ -158,6 +161,7 @@ impl Default for SessionConfig {
             turn_detection: TurnDetection::Off,
             input_transcription: None,
             tools: Vec::new(),
+            speed: None,
         }
     }
 }
@@ -165,8 +169,9 @@ impl Default for SessionConfig {
 impl SessionConfig {
     /// The `session` object of a `session.update` client event, in the reference's session
     /// configuration shape: `type` `realtime`, `output_modalities`, `instructions`, `audio.input`
-    /// (`format`, `transcription`, `turn_detection`), `audio.output` (`format`, `voice`) and
-    /// `tools`. Turn detection off is an explicit `null`; other unset fields are left out.
+    /// (`format`, `transcription`, `turn_detection`), `audio.output` (`format`, `voice`,
+    /// `speed`) and `tools`. Turn detection off is an explicit `null`; other unset fields are
+    /// left out. A speed is sent as the shortest decimal that reads back as the same `f32`.
     pub fn to_session_json(&self) -> Value {
         let modality = match self.output_modality {
             OutputModality::Audio => "audio",
@@ -184,6 +189,12 @@ impl SessionConfig {
         let mut output = json!({"format": self.output_format.to_json()});
         if let Some(voice) = &self.voice {
             output["voice"] = json!(voice);
+        }
+        if let Some(speed) = self.speed {
+            output["speed"] = speed
+                .to_string()
+                .parse::<f64>()
+                .map_or_else(|_| json!(speed), |speed| json!(speed));
         }
         session["audio"] = json!({"input": input, "output": output});
         if !self.tools.is_empty() {
