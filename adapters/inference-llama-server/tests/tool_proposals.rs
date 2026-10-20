@@ -3,8 +3,8 @@
 //! started with `--jinja` (see `fixtures/llama-server-b11752-tool.txt`). No server is started and
 //! no weights are read.
 //!
-//! The `tool_calling` evidence of the capability record in `capability/` names the tests of this
-//! file.
+//! The `tool_calling` evidence of the capability record of the adapter with tools on,
+//! `capability/reference-machine-cpu-tools.json`, names the tests of this file.
 
 mod common;
 
@@ -42,8 +42,12 @@ const PROSE: [&str; 4] = ["Let", " me", " check", ".\n"];
 /// The text the recorded server streamed after the result.
 const ANSWER: &str = "The current time in Berlin is 14:05.";
 
-/// The record committed for the reference machine, CPU only.
-const RECORD: &str = "capability/reference-machine-cpu.json";
+/// The record committed for the adapter with tools on, on the reference machine, CPU only, the
+/// server started with `--jinja`.
+const RECORD: &str = "capability/reference-machine-cpu-tools.json";
+
+/// The record committed for the default adapter, tools off, on the same machine.
+const DEFAULT_RECORD: &str = "capability/reference-machine-cpu.json";
 
 fn tool_id() -> ToolId {
     serde_json::from_value(json!(TOOL_NAME)).expect("a hyphenated identifier")
@@ -418,5 +422,10 @@ fn the_capability_record_evidences_tool_calling_with_the_tests_of_this_file() {
         capability::load(crate_dir.join(RECORD), &off).map(drop),
         Err(RecordRefused::Unclaimed(Capability::ToolCalling)),
         "the record is the record of the adapter with tools on"
+    );
+    assert_eq!(
+        capability::load(crate_dir.join(DEFAULT_RECORD), &on).map(drop),
+        Err(RecordRefused::Unevidenced(Capability::ToolCalling)),
+        "the record of the default adapter evidences no tool calling"
     );
 }
