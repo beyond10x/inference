@@ -791,6 +791,60 @@ fn voice_seconds_are_the_running_total_and_close_confirms_the_final_usage() {
     );
 }
 
+/// A backend response that completes before the model has spoken has no response to count
+/// toward; its tokens are billed all the same, so the session's end records them as usage of the
+/// session, naming no response, before `SpeechSessionClosed`.
+#[test]
+fn backend_usage_before_any_response_is_recorded_for_the_session_at_its_end() {
+    let server = Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        send(
+            &mut socket,
+            backend("del_1", backend_completed("resp_1", 12, 4, 3)),
+        )
+        .await;
+        send(&mut socket, heard(" Bye.", 0)).await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::InputTranscribed(_))
+    });
+    assert!(created(&events).is_empty(), "{events:?}");
+    assert_eq!(session.backend_usage().len(), 1);
+    session.close().expect("open");
+    server.finish();
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert!(
+        matches!(
+            closing.as_slice(),
+            [
+                SessionEvent::UsageRecorded(held),
+                SessionEvent::SpeechSessionClosed(_),
+                SessionEvent::UsageRecorded(seconds),
+            ] if held.response_id.is_none() && seconds.response_id.is_none()
+        ),
+        "{closing:?}"
+    );
+    assert_eq!(
+        records(&closing)[0].quantities,
+        vec![
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 12),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 4),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 3),
+        ]
+    );
+    assert_eq!(session.ledger().usage_records().len(), 2);
+}
+
 fn records(events: &[SessionEvent]) -> Vec<&UsageRecorded> {
     events
         .iter()

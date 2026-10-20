@@ -143,7 +143,7 @@ async fn one_audio_in_audio_out_exchange() {
     println!("completion end: {:?}", seen.completion_end);
     match &seen.usage {
         Some(usage) => println!(
-            "usage: input {} tokens (speech {}, text {}), output {} tokens (speech {}, text {}), total {}",
+            "usage: input {:?} tokens (speech {:?}, text {:?}), output {:?} tokens (speech {:?}, text {:?}), total {:?}",
             usage.total_input_tokens,
             usage.total.input.speech,
             usage.total.input.text,

@@ -130,13 +130,13 @@ pub struct OutputContentEnd {
     pub stop_reason: Option<StopReason>,
 }
 
-/// Speech and text token counts.
+/// Speech and text token counts, each `None` when the event left it out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TokenCounts {
     /// `speechTokens`.
-    pub speech: u64,
+    pub speech: Option<u64>,
     /// `textTokens`.
-    pub text: u64,
+    pub text: Option<u64>,
 }
 
 /// Input and output token counts.
@@ -157,12 +157,12 @@ pub struct Usage {
     pub delta: TokenUsage,
     /// `details.total`: the running totals.
     pub total: TokenUsage,
-    /// `totalInputTokens`.
-    pub total_input_tokens: u64,
-    /// `totalOutputTokens`.
-    pub total_output_tokens: u64,
-    /// `totalTokens`.
-    pub total_tokens: u64,
+    /// `totalInputTokens`, `None` when the event left it out.
+    pub total_input_tokens: Option<u64>,
+    /// `totalOutputTokens`, `None` when the event left it out.
+    pub total_output_tokens: Option<u64>,
+    /// `totalTokens`, `None` when the event left it out.
+    pub total_tokens: Option<u64>,
 }
 
 /// One output event.
@@ -401,8 +401,10 @@ fn stage(body: &Value) -> Option<GenerationStage> {
         .map(GenerationStage::parse)
 }
 
-fn count(value: Option<&Value>) -> u64 {
-    value.and_then(Value::as_u64).unwrap_or(0)
+/// A count the event carries; one it leaves out, or carries as anything but a non-negative
+/// integer, is absent, never 0.
+fn count(value: Option<&Value>) -> Option<u64> {
+    value.and_then(Value::as_u64)
 }
 
 fn token_counts(value: Option<&Value>) -> TokenCounts {

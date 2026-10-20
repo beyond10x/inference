@@ -47,7 +47,9 @@
 //!   the billed seconds as `input_audio_ms` (the session timeline advances with the input, so
 //!   they are the audio the model read), `final` only when `session.closed` confirmed them,
 //!   unknown when nothing was reported. The token usage of each backend response is summed onto
-//!   the response in progress, or the latest one, as text tokens (the backend takes no audio),
+//!   the response in progress, or the latest one, or, before the first response, onto the
+//!   session, recorded at its end before the end event as usage naming no response; each sum
+//!   as text tokens (the backend takes no audio),
 //!   cached tokens inside them; a session without backend work records no `ResponseUsage`. In a
 //!   response's usage record those sums are reported, its audio tokens unknown, and its cached
 //!   tokens unknown once one backend response left them out; backend usage may arrive after a
@@ -421,11 +423,11 @@ pub struct OpenAiLiveSession {
     silent_run: u64,
     /// The output samples each response emitted, the position of its next frame.
     emitted: HashMap<ResponseId, u64>,
-    /// The backend usage summed onto each response.
-    usage: HashMap<ResponseId, ResponseUsage>,
-    /// The cached tokens summed onto each response; `None` once a backend response left them
-    /// out.
-    cached: HashMap<ResponseId, Option<u64>>,
+    /// The backend usage summed onto each response, under `None` onto the session before the
+    /// first response.
+    usage: HashMap<Option<ResponseId>, ResponseUsage>,
+    /// The cached tokens summed as `usage` is; `None` once a backend response left them out.
+    cached: HashMap<Option<ResponseId>, Option<u64>>,
     backend_usage: Vec<BackendUsage>,
     voice_seconds: Option<f64>,
     final_usage: Option<LiveClosed>,
@@ -569,16 +571,16 @@ impl OpenAiLiveSession {
         }
     }
 
+    /// Sums a backend response's usage onto the response in progress or the latest one; before
+    /// the first response, onto the session, held in the ledger for its end.
     fn backend_usage_recorded(&mut self, usage: BackendUsage, now: Instant) {
         self.backend_usage.push(usage);
-        let Some(id) = self.current.or_else(|| {
+        let id = self.current.or_else(|| {
             self.ledger
                 .responses()
                 .last()
                 .map(|response| response.response_id())
-        }) else {
-            return;
-        };
+        });
         let sum = self.usage.entry(id).or_default();
         *sum = ResponseUsage {
             input: TokenCounts {
@@ -598,17 +600,23 @@ impl OpenAiLiveSession {
             .entry(id)
             .and_modify(|cached| *cached = cached.zip(usage.cached_tokens).map(|(a, b)| a + b))
             .or_insert(usage.cached_tokens);
-        let _ = self.ledger.response_usage_reported(
-            id,
-            Some(sum),
-            vec![
-                reported(QuantityKind::InputTextTokens, Some(sum.input.text_tokens)),
-                reported(QuantityKind::CachedInputTokens, cached),
-                reported(QuantityKind::OutputTextTokens, Some(sum.output.text_tokens)),
-            ],
-            UsageTotal::Running,
-            now,
-        );
+        let quantities = vec![
+            reported(QuantityKind::InputTextTokens, Some(sum.input.text_tokens)),
+            reported(QuantityKind::CachedInputTokens, cached),
+            reported(QuantityKind::OutputTextTokens, Some(sum.output.text_tokens)),
+        ];
+        match id {
+            Some(id) => {
+                let _ = self.ledger.response_usage_reported(
+                    id,
+                    Some(sum),
+                    quantities,
+                    UsageTotal::Running,
+                    now,
+                );
+            }
+            None => self.ledger.hold_usage(quantities),
+        }
     }
 
     /// Once the session ended, records its billed voice seconds, once: what `session.closed`

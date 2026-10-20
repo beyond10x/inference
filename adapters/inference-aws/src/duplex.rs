@@ -35,9 +35,12 @@
 //! - usage deltas are summed per response: what is reported while a response is in progress counts
 //!   toward it; between responses, input counts toward the next and output toward the last. The
 //!   response's usage record holds those sums, text and speech tokens each way as reported once a
-//!   delta counted toward that direction, unknown before, and cached tokens, which Nova Sonic does
-//!   not report, unknown. Since output may be reported after a response ended, the record waits
-//!   for the next response or the session's end;
+//!   delta counted toward that count, unknown before and once a delta counted toward it left it
+//!   out, and cached tokens, which Nova Sonic does not report, unknown. Since output may be
+//!   reported after a response ended, the record waits for the next response or the session's
+//!   end. What waits for a next response that never begins is recorded at the session's end, by
+//!   close or failure, before its end event, as usage of the session naming no response, when
+//!   a count of it is above 0 or left out;
 //! - a service error fails the session, a closed stream fails it as `transport_closed`.
 //!
 //! The response boundaries are inferred from the order of content blocks the Nova 2 user guide
@@ -63,7 +66,7 @@ use inference_duplex::inference_core::model::{
 };
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
-    NativeSpeechModel, OpenError, QuantityKind, ResponseId, ResponseUsage, SessionConfig,
+    NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage, SessionConfig,
     SessionError, SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
     SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TokenCounts, TuningSupport,
     TurnDetection, TurnSensitivity, UsageTotal,
@@ -482,28 +485,122 @@ impl Block {
     }
 }
 
-/// The directions of a response's usage that a usage delta counted toward.
+/// What the usage deltas counted toward one count said of it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Directions {
-    input: bool,
-    output: bool,
+enum Count {
+    /// No delta counted toward it: unknown.
+    #[default]
+    Unreported,
+    /// Every delta counted toward it carried it: their sum is known.
+    Reported,
+    /// A delta counted toward it left it out: unknown, whatever the others carried.
+    Missing,
 }
 
-impl Directions {
-    const BOTH: Self = Self {
-        input: true,
-        output: true,
-    };
-    const OUTPUT: Self = Self {
-        input: false,
-        output: true,
-    };
-
-    fn or(self, other: Self) -> Self {
-        Self {
-            input: self.input || other.input,
-            output: self.output || other.output,
+impl Count {
+    /// The count once a delta that `carried` it, or left it out, counted toward it.
+    fn add(self, carried: bool) -> Self {
+        match (self, carried) {
+            (Self::Missing, _) | (_, false) => Self::Missing,
+            _ => Self::Reported,
         }
+    }
+
+    /// The count of two sums of deltas taken together.
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Missing, _) | (_, Self::Missing) => Self::Missing,
+            (Self::Unreported, count) | (count, Self::Unreported) => count,
+            (Self::Reported, Self::Reported) => Self::Reported,
+        }
+    }
+}
+
+/// Usage deltas summed: of one response, or reported before the next response began. `sum` adds
+/// what the deltas carried, a count they left out as nothing, for the contract's
+/// `ResponseUsage`, which has no unknown; `counts` says which sums are known.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Tally {
+    sum: ResponseUsage,
+    /// Input text, input speech, output text, output speech.
+    counts: [Count; 4],
+}
+
+impl Tally {
+    fn add_input(&mut self, delta: nova_sonic::TokenCounts) {
+        add_counts(&mut self.sum.input, delta);
+        self.counts[0] = self.counts[0].add(delta.text.is_some());
+        self.counts[1] = self.counts[1].add(delta.speech.is_some());
+    }
+
+    fn add_output(&mut self, delta: nova_sonic::TokenCounts) {
+        add_counts(&mut self.sum.output, delta);
+        self.counts[2] = self.counts[2].add(delta.text.is_some());
+        self.counts[3] = self.counts[3].add(delta.speech.is_some());
+    }
+
+    fn merge(&mut self, other: Self) {
+        add_token_counts(&mut self.sum.input, other.sum.input);
+        add_token_counts(&mut self.sum.output, other.sum.output);
+        for (count, other) in self.counts.iter_mut().zip(other.counts) {
+            *count = count.merge(other);
+        }
+    }
+
+    /// Each count with its quantity kind, its state and its sum.
+    fn fields(&self) -> [(QuantityKind, Count, u64); 4] {
+        [
+            (
+                QuantityKind::InputTextTokens,
+                self.counts[0],
+                self.sum.input.text_tokens,
+            ),
+            (
+                QuantityKind::InputAudioTokens,
+                self.counts[1],
+                self.sum.input.audio_tokens,
+            ),
+            (
+                QuantityKind::OutputTextTokens,
+                self.counts[2],
+                self.sum.output.text_tokens,
+            ),
+            (
+                QuantityKind::OutputAudioTokens,
+                self.counts[3],
+                self.sum.output.audio_tokens,
+            ),
+        ]
+    }
+
+    /// The four token quantities of a response record: each sum as reported once known,
+    /// unknown before and once a delta left it out.
+    fn quantities(&self) -> Vec<Quantity> {
+        self.fields()
+            .into_iter()
+            .map(|(kind, count, sum)| {
+                inference_duplex::reported(kind, (count == Count::Reported).then_some(sum))
+            })
+            .collect()
+    }
+
+    /// The quantities to hold for no response: the counts a delta counted toward, when one of
+    /// them may have been billed (a sum above 0, or a count left out); nothing otherwise.
+    fn held(&self) -> Vec<Quantity> {
+        let fields = self.fields();
+        let billed = fields.iter().any(|&(_, count, sum)| {
+            count == Count::Missing || (count == Count::Reported && sum > 0)
+        });
+        if !billed {
+            return Vec::new();
+        }
+        fields
+            .into_iter()
+            .filter(|&(_, count, _)| count != Count::Unreported)
+            .map(|(kind, count, sum)| {
+                inference_duplex::reported(kind, (count == Count::Reported).then_some(sum))
+            })
+            .collect()
     }
 }
 
@@ -518,13 +615,10 @@ struct Turns {
     last: Option<ResponseId>,
     /// Samples of output audio the last response emitted.
     emitted: u64,
-    /// Usage reported before the next response began.
-    pending: ResponseUsage,
-    /// Which directions of `pending` a delta counted toward.
-    pending_reported: Directions,
-    totals: HashMap<ResponseId, ResponseUsage>,
-    /// Which directions of each response's total a delta counted toward.
-    reported: HashMap<ResponseId, Directions>,
+    /// Usage reported before the next response began, held in the ledger for no response until
+    /// one takes it.
+    pending: Tally,
+    totals: HashMap<ResponseId, Tally>,
     /// Whether the user's speech of the current turn was reported.
     speech_reported: bool,
     /// The sample after the last input frame accepted.
@@ -658,9 +752,9 @@ impl NovaSonicSpeechSession {
         self.turns.last = Some(response);
         self.turns.emitted = 0;
         let pending = std::mem::take(&mut self.turns.pending);
-        let pending_reported = std::mem::take(&mut self.turns.pending_reported);
-        if pending_reported != Directions::default() {
-            self.add_usage(response, pending, pending_reported, at);
+        self.ledger.hold_usage(Vec::new());
+        if pending != Tally::default() {
+            self.add_usage(response, pending, at);
         }
         Some(response)
     }
@@ -755,89 +849,65 @@ impl NovaSonicSpeechSession {
     }
 
     /// Sums a usage delta per response: into the response in progress, or between responses its
-    /// input into the next and its output into the last.
+    /// input into the next and its output into the last. What waits for the next response is
+    /// held in the ledger, so the session's end records it when no response takes it.
     fn usage(&mut self, usage: &Usage, at: Instant) {
-        let counts = |counts: nova_sonic::TokenCounts| TokenCounts {
-            text_tokens: counts.text,
-            audio_tokens: counts.speech,
-            cached_tokens: 0,
-        };
-        let delta = ResponseUsage {
-            input: counts(usage.delta.input),
-            output: counts(usage.delta.output),
-        };
+        let delta = usage.delta;
         if let Some(response) = self.ledger.in_progress() {
-            self.add_usage(response, delta, Directions::BOTH, at);
+            let mut tally = Tally::default();
+            tally.add_input(delta.input);
+            tally.add_output(delta.output);
+            self.add_usage(response, tally, at);
             return;
         }
-        add_counts(&mut self.turns.pending.input, delta.input);
-        self.turns.pending_reported.input = true;
-        if delta.output == TokenCounts::default() {
-            return;
-        }
-        match self.turns.last {
-            Some(response) => self.add_usage(
-                response,
-                ResponseUsage {
-                    input: TokenCounts::default(),
-                    output: delta.output,
-                },
-                Directions::OUTPUT,
-                at,
-            ),
-            None => {
-                add_counts(&mut self.turns.pending.output, delta.output);
-                self.turns.pending_reported.output = true;
+        self.turns.pending.add_input(delta.input);
+        let none = nova_sonic::TokenCounts {
+            speech: Some(0),
+            text: Some(0),
+        };
+        if delta.output != none {
+            match self.turns.last {
+                Some(response) => {
+                    let mut tally = Tally::default();
+                    tally.add_output(delta.output);
+                    self.add_usage(response, tally, at);
+                }
+                None => self.turns.pending.add_output(delta.output),
             }
         }
+        self.ledger.hold_usage(self.turns.pending.held());
     }
 
-    /// Adds `delta`, counted toward the directions `counted`, to the response's total, and
-    /// reports the total: as the contract's `ResponseUsage` when the delta changed it, and as the
-    /// quantities of its usage record, a running total.
-    fn add_usage(
-        &mut self,
-        response: ResponseId,
-        delta: ResponseUsage,
-        counted: Directions,
-        at: Instant,
-    ) {
+    /// Adds `delta` to the response's total, and reports the total: as the contract's
+    /// `ResponseUsage` when the delta changed it, and as the quantities of its usage record, a
+    /// running total.
+    fn add_usage(&mut self, response: ResponseId, delta: Tally, at: Instant) {
         let total = self.turns.totals.entry(response).or_default();
-        add_counts(&mut total.input, delta.input);
-        add_counts(&mut total.output, delta.output);
+        total.merge(delta);
         let total = *total;
-        let reported = self.turns.reported.entry(response).or_default();
-        *reported = reported.or(counted);
-        let directions = *reported;
-        let known = |reported: bool, count: u64| reported.then_some(count);
         let _ = self.ledger.response_usage_reported(
             response,
-            (delta != ResponseUsage::default()).then_some(total),
-            vec![
-                inference_duplex::reported(
-                    QuantityKind::InputTextTokens,
-                    known(directions.input, total.input.text_tokens),
-                ),
-                inference_duplex::reported(
-                    QuantityKind::InputAudioTokens,
-                    known(directions.input, total.input.audio_tokens),
-                ),
-                inference_duplex::reported(
-                    QuantityKind::OutputTextTokens,
-                    known(directions.output, total.output.text_tokens),
-                ),
-                inference_duplex::reported(
-                    QuantityKind::OutputAudioTokens,
-                    known(directions.output, total.output.audio_tokens),
-                ),
-            ],
+            (delta.sum != ResponseUsage::default()).then_some(total.sum),
+            total.quantities(),
             UsageTotal::Running,
             at,
         );
     }
 }
 
-fn add_counts(total: &mut TokenCounts, delta: TokenCounts) {
+/// Adds the counts a delta carried; one it left out adds nothing.
+fn add_counts(total: &mut TokenCounts, delta: nova_sonic::TokenCounts) {
+    add_token_counts(
+        total,
+        TokenCounts {
+            text_tokens: delta.text.unwrap_or(0),
+            audio_tokens: delta.speech.unwrap_or(0),
+            cached_tokens: 0,
+        },
+    );
+}
+
+fn add_token_counts(total: &mut TokenCounts, delta: TokenCounts) {
     total.text_tokens = total.text_tokens.saturating_add(delta.text_tokens);
     total.audio_tokens = total.audio_tokens.saturating_add(delta.audio_tokens);
     total.cached_tokens = total.cached_tokens.saturating_add(delta.cached_tokens);
