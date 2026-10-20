@@ -62,6 +62,10 @@
 //!   to cancel the one it runs. An outcome that arrives for a generation that is no longer Active,
 //!   superseded or completed, is not reinjected and runs no turn (design 376, 637); it
 //!   is recorded ([`ModelHandle::not_reinjected`]) and still ends the wait for its call;
+//! * cancelled through its handle ([`ModelHandle::cancel_generation`]), the host's interrupt by
+//!   cancel rather than supersede (design 716), the node runs `inference.stream.CancelGeneration`
+//!   on its generation and sends its `GenerationCancelled` on the same ports, as for a supersede;
+//!   the node does not fail, as it does when a turn fails, and goes on to the end of input;
 //! * the end of input, or a drain once the input edge is closed, completes the generation only
 //!   once no outcome is awaited and no input is deferred; the node then passes the end of input
 //!   on, on both output ports, and ends once every edge into `tool_result` has ended, so that what
@@ -95,7 +99,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{GenerationState, GenerationStateConflict};
-use inference_core::id::{NodeId, RunId, StreamId};
+use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_llm::llm_core::{CallId, TurnRequest};
 use inference_llm::tools::{ToolOutcome, tool_id, tool_spec};
 use inference_llm::{GenerationEvent, GenerationHandle, GenerationRequest, Generator};
@@ -152,6 +156,9 @@ struct Signal {
     /// The host asked for `SupersedeGeneration`: whether it did, and whether the node took it.
     supersede: bool,
     superseded: bool,
+    /// The host asked for `CancelGeneration`: whether it did, and whether the node took it.
+    cancel_generation: bool,
+    generation_cancelled: bool,
 }
 
 /// What the node's generation came to.
@@ -386,6 +393,8 @@ enum Step<P> {
     Cancel,
     /// The host asked for `SupersedeGeneration`.
     Supersede,
+    /// The host asked for `CancelGeneration`.
+    CancelGeneration,
     /// The runtime drains the node, whose input edge is closed.
     Drain,
     /// The input edge at this index delivered an envelope, or none once it is closed.
@@ -431,7 +440,7 @@ impl<P: From<ControlKind>> ToolLoop<P> {
     fn next(
         &mut self,
         kind: String,
-        generation_id: Option<inference_core::id::GenerationId>,
+        generation_id: Option<GenerationId>,
         payload: P,
     ) -> EventEnvelope<P> {
         self.sequence += 1;
@@ -720,7 +729,37 @@ impl<P: ModelPayload> Exchanging<P> {
                 return Ok(());
             }
         };
-        let event = StreamEvent::GenerationSuperseded(superseded);
+        self.interrupted(
+            superseded.generation_id,
+            StreamEvent::GenerationSuperseded(superseded),
+        )
+        .await
+    }
+
+    /// Runs `inference.stream.CancelGeneration` on the generation and sends its
+    /// `GenerationCancelled` as [`Self::supersede`] sends a `GenerationSuperseded`; a generation
+    /// no longer Active refuses it, and nothing is sent.
+    async fn cancel_generation(&mut self) -> Result<(), String> {
+        let Some(generation) = self.generation.as_mut() else {
+            return Ok(());
+        };
+        let Ok(cancelled) = generation.cancel() else {
+            return Ok(());
+        };
+        self.interrupted(
+            cancelled.generation_id,
+            StreamEvent::GenerationCancelled(cancelled),
+        )
+        .await
+    }
+
+    /// Sends `event`, the interruption of the generation `generation_id`, on the text port and,
+    /// given tools, on `tool_call`.
+    async fn interrupted(
+        &mut self,
+        generation_id: GenerationId,
+        event: StreamEvent,
+    ) -> Result<(), String> {
         emit(
             &Carrying(self.output.as_ref(), &self.signal),
             &mut self.emitter,
@@ -730,7 +769,7 @@ impl<P: ModelPayload> Exchanging<P> {
         if let Some(tool_loop) = self.tool_loop.as_mut() {
             let envelope = tool_loop.next(
                 event.name().to_owned(),
-                Some(superseded.generation_id),
+                Some(generation_id),
                 P::stream(event),
             );
             send_unless(
@@ -825,6 +864,9 @@ impl<P: ModelPayload> Exchanging<P> {
                 } else if signal.supersede && !signal.superseded {
                     signal.superseded = true;
                     Some(Step::Supersede)
+                } else if signal.cancel_generation && !signal.generation_cancelled {
+                    signal.generation_cancelled = true;
+                    Some(Step::CancelGeneration)
                 } else if input_closed && signal.drain {
                     Some(Step::Drain)
                 } else {
@@ -1051,6 +1093,7 @@ impl<P: ModelPayload> Exchanging<P> {
             match self.step(self.input_closed && !self.input_ended).await {
                 Step::Cancel => return Ok(Ended::Cancelled),
                 Step::Supersede => self.supersede().await?,
+                Step::CancelGeneration => self.cancel_generation().await?,
                 Step::Drain if self.tool_loop.is_some() || self.gated => self.input_ended = true,
                 Step::Drain => {
                     self.complete().await?;
@@ -1351,6 +1394,20 @@ impl ModelHandle {
                 return false;
             }
             signal.supersede = true;
+            true
+        })
+    }
+
+    /// Asks the node for `inference.stream.CancelGeneration` on its generation, which it runs at
+    /// its next step; see the module documentation. False, asking nothing, once it was asked, a
+    /// supersede was asked, or the node was cancelled.
+    #[must_use]
+    pub fn cancel_generation(&self) -> bool {
+        self.signal.update(|signal| {
+            if signal.cancel_generation || signal.supersede || signal.cancel {
+                return false;
+            }
+            signal.cancel_generation = true;
             true
         })
     }

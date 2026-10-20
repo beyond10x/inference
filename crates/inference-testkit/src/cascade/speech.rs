@@ -6,7 +6,9 @@
 //! input. On `text` it takes the output of an LLM node, as a commit gate passes it, and rebuilds
 //! each output segment from the events that name it, as the testkit's
 //! [`TtsNode`](crate::tts::TtsNode) does: a `GenerationStarted` makes the generation known, its
-//! producer being the envelope's; a `TextDelta` of a known generation emits the Tentative segment
+//! producer being the envelope's, and is sent on, on `audio`, so that it reaches the sink ahead of
+//! every frame of the generation and names the generation's epoch there; a `TextDelta` of a known
+//! generation emits the Tentative segment
 //! under the delta's identity; the segment's `TextSegmentCommitted` commits it and offers it to
 //! the synthesis, `inference.stream.QueueForSynthesis`, and the node emits its `SegmentQueued`. A
 //! segment never committed is never offered (`docs/design/inference.md` 626).
@@ -20,9 +22,11 @@
 //! sink's receipts, each the [`PlaybackReceipt`] of one segment, and runs
 //! `inference.stream.AcknowledgePlayback` with it through its synthesis handle, which moves the
 //! segment from Synthesized to Played; the node records the segment as the acknowledgement left
-//! it ([`SpeechHandle::played`]) and its `AudioPlayed` in the run's [`RunLog`]. A receipt the
-//! synthesis refuses fails the node, but for the receipt of a segment the node discarded, which
-//! the sink made before it learnt of the discard: it is recorded
+//! it ([`SpeechHandle::played`]) and its `AudioPlayed` in the run's [`RunLog`]. Given a playback
+//! port ([`SpeechNode::with_playback`]), an output port of its own, it also sends each
+//! `AudioPlayed` there, so that the node whose output it speaks learns what was played. A
+//! receipt the synthesis refuses fails the node, but for the receipt of a segment the node
+//! discarded, which the sink made before it learnt of the discard: it is recorded
 //! ([`SpeechHandle::receipts_of_discarded`]) and moves nothing.
 //!
 //! A `GenerationSuperseded` on `text` is the interruption of that generation
@@ -34,13 +38,17 @@
 //! ([`SpeechHandle::discarded`]). A discarded segment is never offered again, and its
 //! `SynthesisCompleted` is not sent. The node does not judge frames: one the synthesis delivers
 //! after the discard, of a discarded segment, is sent like any other, and the sink, the
-//! irreversible end of the output, refuses it as stale.
+//! irreversible end of the output, refuses it as stale. A `GenerationCancelled` is taken the same
+//! way: the generation is marked Cancelled, the event sent on and its unplayed segments discarded
+//! (`ess/domains/stream.yaml`: superseding or cancelling a generation discards its unplayed
+//! segments).
 //!
 //! Every `inference.stream` event it emits is recorded in the run's log in its envelope. On the
 //! end of input on `text`, a control event of kind `stop`, or once that edge is closed, it ends
 //! the utterance, sends what the synthesis has left and passes the end of input on, on `audio`;
 //! it then goes on taking receipts until the end of input on `played`, or until that edge is
-//! closed, and ends. Cancelled, it sends nothing more: a cancel taken while a send waits for room
+//! closed, passes the end of input on, on its playback port if it has one, and ends. Cancelled,
+//! it sends nothing more: a cancel taken while a send waits for room
 //! ends the wait. Content other than an `inference.stream` event on `text`, or a receipt on
 //! `played`, is taken and ignored; a segment the synthesis refuses fails the node.
 
@@ -53,9 +61,7 @@ use std::task::Poll;
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
-use inference_core::generation::{
-    Generation, GenerationState, GenerationSuperseded, StartGeneration,
-};
+use inference_core::generation::{Generation, GenerationState, StartGeneration};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
 use inference_text::{OutputSegment, SegmentId, SegmentSnapshot, SegmentState, SynthesisCompleted};
@@ -134,6 +140,7 @@ pub struct SpeechNode<S> {
     run_id: RunId,
     synthesiser: S,
     ports: SpeechPorts,
+    playback: Option<PortId>,
     log: RunLog,
     node_id: Option<NodeId>,
     state: Arc<Watched<State>>,
@@ -146,6 +153,7 @@ impl<S: fmt::Debug> fmt::Debug for SpeechNode<S> {
             .field("run_id", &self.run_id)
             .field("synthesiser", &self.synthesiser)
             .field("ports", &self.ports)
+            .field("playback", &self.playback)
             .field("node_id", &self.node_id)
             .field("state", &self.state)
             .field("exchange", &self.exchange)
@@ -162,11 +170,20 @@ impl<S: Synthesiser> SpeechNode<S> {
             run_id,
             synthesiser,
             ports,
+            playback: None,
             log,
             node_id: None,
             state: Arc::new(Watched::new(State::default())),
             exchange: Exchange::new(),
         }
+    }
+
+    /// The same node given a playback port, `playback`, an output port of its own at which it
+    /// sends each `AudioPlayed`; see the module documentation.
+    #[must_use]
+    pub fn with_playback(mut self, playback: PortId) -> Self {
+        self.playback = Some(playback);
+        self
     }
 
     /// The test's side of the node.
@@ -295,6 +312,8 @@ struct Exchanging<P, H> {
     text: Box<dyn InputEndpoint<P>>,
     played: Box<dyn InputEndpoint<P>>,
     audio: Box<dyn OutputEndpoint<P>>,
+    /// The edge at the playback port, if the node was given one, and its emitter.
+    playback: Option<(Box<dyn OutputEndpoint<P>>, Emitter)>,
     text_ended: bool,
     played_ended: bool,
     emitter: Emitter,
@@ -434,8 +453,22 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
                     },
                 );
                 self.generations.insert(started.generation_id, generation);
+                self.emit(StreamEvent::GenerationStarted(started)).await?;
             }
-            StreamEvent::GenerationSuperseded(superseded) => self.superseded(superseded).await?,
+            StreamEvent::GenerationSuperseded(superseded) => {
+                self.interrupted(
+                    superseded.generation_id,
+                    StreamEvent::GenerationSuperseded(superseded),
+                )
+                .await?;
+            }
+            StreamEvent::GenerationCancelled(cancelled) => {
+                self.interrupted(
+                    cancelled.generation_id,
+                    StreamEvent::GenerationCancelled(cancelled),
+                )
+                .await?;
+            }
             StreamEvent::TextDelta(delta) => {
                 if let Some(generation) = self
                     .generations
@@ -472,18 +505,24 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
         Ok(())
     }
 
-    /// The generation `superseded` was superseded: marks it so, discards every segment of it not
-    /// yet Played, sends the `GenerationSuperseded` on and then each `SegmentDiscarded`, and sends
-    /// what the synthesis delivers after the discards.
-    async fn superseded(&mut self, superseded: GenerationSuperseded) -> Result<(), String> {
-        let generation_id = superseded.generation_id;
-        if let Some(generation) = self.generations.get_mut(&generation_id)
-            && let Ok((moved, _)) = generation.supersede()
-        {
-            *generation = moved;
+    /// The generation `generation_id` was superseded or cancelled, as `event` says: marks it so,
+    /// discards every segment of it not yet Played, sends `event` on and then each
+    /// `SegmentDiscarded`, and sends what the synthesis delivers after the discards.
+    async fn interrupted(
+        &mut self,
+        generation_id: GenerationId,
+        event: StreamEvent,
+    ) -> Result<(), String> {
+        if let Some(generation) = self.generations.get_mut(&generation_id) {
+            let moved = match event {
+                StreamEvent::GenerationCancelled(_) => generation.cancel().map(|(moved, _)| moved),
+                _ => generation.supersede().map(|(moved, _)| moved),
+            };
+            if let Ok(moved) = moved {
+                *generation = moved;
+            }
         }
-        self.emit(StreamEvent::GenerationSuperseded(superseded))
-            .await?;
+        self.emit(event).await?;
         let mut tentative: Vec<SegmentId> = self
             .tentative
             .iter()
@@ -537,10 +576,11 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
         self.pump().await
     }
 
-    /// Runs `inference.stream.AcknowledgePlayback` on `segment_id` with the sink's `receipt`. A
-    /// receipt of a segment the node discarded, made before the sink learnt of the discard, is
-    /// recorded and moves nothing.
-    fn acknowledge(
+    /// Runs `inference.stream.AcknowledgePlayback` on `segment_id` with the sink's `receipt`, and
+    /// sends its `AudioPlayed` on the playback port, if the node has one. A receipt of a segment
+    /// the node discarded, made before the sink learnt of the discard, is recorded and moves
+    /// nothing.
+    async fn acknowledge(
         &mut self,
         segment_id: SegmentId,
         receipt: PlaybackReceipt,
@@ -566,9 +606,23 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
             .segment(segment_id)
             .map(OutputSegment::snapshot)
             .ok_or_else(|| format!("the synthesis no longer holds segment {segment_id}"))?;
-        self.emitter
-            .stream(StreamEvent::AudioPlayed(event))
-            .map_err(|refusal| refusal.to_string())?;
+        let event = StreamEvent::AudioPlayed(event);
+        if let Some((output, emitter)) = self.playback.as_mut() {
+            let envelope = emitter
+                .stream(event)
+                .map_err(|refusal| refusal.to_string())?;
+            send_unless(
+                output.as_ref(),
+                &self.state,
+                |state| state.cancel,
+                carry(envelope),
+            )
+            .await?;
+        } else {
+            self.emitter
+                .stream(event)
+                .map_err(|refusal| refusal.to_string())?;
+        }
         self.state.update(|state| {
             state.acknowledged.push(Acknowledged { segment_id, frames });
             state.played.push(played);
@@ -596,7 +650,7 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
                     Said::Receipt {
                         segment_id,
                         receipt,
-                    } => self.acknowledge(segment_id, receipt)?,
+                    } => self.acknowledge(segment_id, receipt).await?,
                     Said::Control(ControlKind::Stop) => self.played_ended = true,
                     Said::Stream(_) | Said::Control(_) | Said::Other => {}
                 },
@@ -610,6 +664,10 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
                     }
                 }
             }
+        }
+        if let Some((output, emitter)) = self.playback.as_mut() {
+            let end = emitter.control(ControlKind::Stop);
+            send_unless(output.as_ref(), &self.state, |state| state.cancel, end).await?;
         }
         Ok(())
     }
@@ -635,10 +693,12 @@ where
             .node_id
             .ok_or_else(|| NodeError::new("the node was started before it was described"))?;
         let ports = self.ports;
-        if endpoints.inputs.len() != 2 || endpoints.outputs.len() != 1 {
+        let outputs_wanted = 1 + usize::from(self.playback.is_some());
+        if endpoints.inputs.len() != 2 || endpoints.outputs.len() != outputs_wanted {
             return Err(NodeError::new(format!(
                 "the node takes one input edge at each of its ports {} and {} and one output \
-                 edge at its port {}, and was handed {} and {}",
+                 edge at its port {} and at its playback port, if it was given one, and was \
+                 handed {} and {}",
                 ports.text,
                 ports.played,
                 ports.audio,
@@ -646,10 +706,7 @@ where
                 endpoints.outputs.len()
             )));
         }
-        let NodeEndpoints {
-            inputs,
-            mut outputs,
-        } = endpoints;
+        let NodeEndpoints { inputs, outputs } = endpoints;
         let (mut text, mut played) = (None, None);
         for input in inputs {
             match input.port_id {
@@ -660,8 +717,24 @@ where
                 _ => {}
             }
         }
-        let output = outputs.remove(0);
-        let (Some(text), Some(played), true) = (text, played, output.port_id == ports.audio) else {
+        let (mut audio, mut playback) = (None, None);
+        for output in outputs {
+            match output.port_id {
+                port if port == ports.audio && audio.is_none() => audio = Some(output.endpoint),
+                port if Some(port) == self.playback && playback.is_none() => {
+                    let emitter =
+                        Emitter::new(self.run_id, producer, port.to_string(), self.log.clone());
+                    playback = Some((output.endpoint, emitter));
+                }
+                _ => {}
+            }
+        }
+        let (Some(text), Some(played), Some(audio), true) = (
+            text,
+            played,
+            audio,
+            playback.is_some() == self.playback.is_some(),
+        ) else {
             return Err(NodeError::new(
                 "the node was not handed one edge at each of its ports",
             ));
@@ -670,7 +743,7 @@ where
             .synthesiser
             .start()
             .map_err(|refused| NodeError::new(refused.to_string()))?;
-        let port = output.port_id.to_string();
+        let port = ports.audio.to_string();
         Ok(Exchanging {
             run_id: self.run_id,
             producer,
@@ -679,7 +752,8 @@ where
             synthesis,
             text,
             played,
-            audio: output.endpoint,
+            audio,
+            playback,
             text_ended: false,
             played_ended: false,
             audio_stream: StreamId::generate(),

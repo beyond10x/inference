@@ -17,7 +17,11 @@
 //! Before anything else, planning refuses a binding whose adapter runs at a locality the
 //! pipeline's deployment profile does not admit (A-04 of the design, line 1140: the offline
 //! profile refuses a hosted adapter): [`LocalityDenied`] naming the node, the adapter, its
-//! locality and the profile, the first such binding with nodes in declaration order. The
+//! locality and the profile, the first such binding with nodes in declaration order. The check
+//! covers every binding reachable through subgraph nodes, against the pipeline's own profile: a
+//! subgraph node's child, planned under a profile of its own, runs inside the pipeline, and a
+//! binding inside it is refused naming the inner node, at the subgraph node's place in the order.
+//! The
 //! `admitted` list is read as declared; the table rules of `inference.policy.DeclareProfile`
 //! already decide which localities a kind may admit, and planning adds none. A binding whose
 //! adapter the catalog does not hold has no locality and is not refused for one; a profile the
@@ -39,8 +43,8 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
-use inference_core::model::{Adapter, Capability};
-use inference_core::policy::DeploymentProfile;
+use inference_core::model::{Adapter, Capability, Locality};
+use inference_core::policy::{DeploymentProfile, ProfileId};
 
 use crate::{
     CapabilityMismatch, Catalog, Declaration, Essentiality, LocalityDenied, Node, NodeId, NodeRole,
@@ -348,10 +352,13 @@ impl Declaration {
         Ok(effective)
     }
 
-    /// The first binding of `nodes`, nodes in declaration order and each node's bindings in theirs,
-    /// whose adapter the catalog holds and runs at a locality the `admitted` list of `pipeline`'s
-    /// profile does not name, read as declared; a profile the catalog does not hold admits
-    /// nothing.
+    /// The first binding reachable from `nodes` whose adapter the catalog holds and runs at a
+    /// locality the `admitted` list of `pipeline`'s profile does not name, read as declared; a
+    /// profile the catalog does not hold admits nothing. Nodes are read in declaration order, each
+    /// node's own bindings in theirs, and a subgraph node then contributes every binding of its
+    /// child pipeline, recursively, read the same way: a child planned under a profile of its own
+    /// still runs inside the parent, so the parent's profile decides. The refusal names the node
+    /// the binding belongs to, which for a binding inside a subgraph is the inner node.
     fn locality_denied(
         &self,
         pipeline: &Pipeline,
@@ -362,10 +369,25 @@ impl Declaration {
         let admitted = catalog
             .profile(profile_id)
             .map_or(&[][..], DeploymentProfile::admitted);
-        nodes.iter().find_map(|node| {
-            self.bindings()
+        let mut visited = BTreeSet::from([pipeline.pipeline_id()]);
+        self.locality_denied_within(nodes, admitted, profile_id, catalog, &mut visited)
+    }
+
+    /// [`Declaration::locality_denied`] over `nodes` against `admitted`, descending into the child
+    /// of every subgraph node not yet in `visited`.
+    fn locality_denied_within(
+        &self,
+        nodes: &[&Node],
+        admitted: &[Locality],
+        profile_id: ProfileId,
+        catalog: &(impl Catalog + ?Sized),
+        visited: &mut BTreeSet<PipelineId>,
+    ) -> Option<LocalityDenied> {
+        for node in nodes {
+            let denied = self
+                .bindings()
                 .filter(|binding| {
-                    binding.pipeline_id() == pipeline.pipeline_id()
+                    binding.pipeline_id() == node.pipeline_id()
                         && binding.node_id() == node.node_id()
                 })
                 .find_map(|binding| {
@@ -376,8 +398,27 @@ impl Declaration {
                         locality,
                         profile_id,
                     })
-                })
-        })
+                });
+            if denied.is_some() {
+                return denied;
+            }
+            let Some(child) = node.subgraph_id() else {
+                continue;
+            };
+            if !visited.insert(child) {
+                continue;
+            }
+            let inner: Vec<&Node> = self
+                .nodes()
+                .filter(|inner| inner.pipeline_id() == child)
+                .collect();
+            if let Some(denied) =
+                self.locality_denied_within(&inner, admitted, profile_id, catalog, visited)
+            {
+                return Some(denied);
+            }
+        }
+        None
     }
 
     /// The first subgraph node of `nodes`, in declaration order, whose ports and its child's
