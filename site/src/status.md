@@ -16,7 +16,7 @@ one epic.
 | Local TTS adapter | backend-neutral TTS checks exist; the adapter waits on a licence decision | <span class="st st-plan">planned</span> |
 | Local voice cascade, offline (P2) | commit gates, barge-in, `offline_strict` and egress watch, the `talk` example; TTS is a mock until a local one exists | <span class="st st-rel">0.6.0</span> |
 | Backend replacement from configuration | swap sherpa-onnx and whisper.cpp in the cascade by configuration, same tests, no contract change | <span class="st st-plan">planned</span> |
-| Usage and cost | usage records, one per LLM call, and the realtime example's usage in 0.6.0; per-call records for STT, TTS and speech models, totals, pricing, provider comparison planned | <span class="st st-rel">0.6.0</span> <span class="st st-plan">planned</span> |
+| Usage and cost | usage records, one per LLM call, and the realtime example's usage in 0.6.0; per-call records for STT, TTS and speech models, totals and pricing planned; provider comparison in 0.6.0 | <span class="st st-rel">0.6.0</span> <span class="st st-plan">planned</span> |
 | Duplex research (P6) | orchestrated and native duplex text, reported as different capabilities; trace export with consent | <span class="st st-plan">planned</span> |
 | Hosted providers and scale-out (P7) | worker process protocol, quotas, egress audit | <span class="st st-plan">planned</span> |
 

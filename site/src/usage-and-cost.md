@@ -60,4 +60,4 @@ no cost is estimated from a count that is not known.
 | TTS usage: characters, output audio and compute per synthesis | <span class="st st-plan">planned</span> |
 | Run and session totals in the facade, kept by the replay recorder, never dropped with telemetry | <span class="st st-plan">planned</span> |
 | Cost records from a caller price document, behind a facade `cost` feature | <span class="st st-plan">planned</span> |
-| Picking the voice provider by configuration and comparing latency and usage across providers | <span class="st st-plan">planned</span> |
+| Picking the voice provider by configuration (`talk --provider openai\|openai-live\|nova`) and comparing latency and usage across providers (`cargo run -p realtime-voice --example compare`) | <span class="st st-rel">0.6.0</span> |
