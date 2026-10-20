@@ -20,6 +20,11 @@
 //! | `tts` | model | the testkit's [`SpeechNode`] over its mock synthesiser |
 //! | `speaker` | sink | the device adapter's [`AcknowledgingSink`] on the audio host's speaker |
 //!
+//! With feature `local`, the module `local` binds the same declaration to the local adapters
+//! (A-05, 1141): the sherpa-onnx recogniser at `stt`, the generator of a loopback `llama-server`
+//! at `agent` and, until a local TTS adapter exists, the mock synthesiser at `tts`, under an
+//! `offline_strict` profile that also admits local workers.
+//!
 //! The input gate passes the committed spans and the turn events to the LLM and holds back the
 //! hypotheses; it refuses a revision of a span it passed as Committed. The output gate passes a
 //! segment to the TTS node only with its commit, so the TTS node never queues a Tentative one. The
@@ -57,6 +62,9 @@
 //! asserted. [`LocalCascade::nodes_with`] makes the same nodes over another synthesiser made of
 //! the mock, such as one scripted to emit late.
 
+#[cfg(feature = "local")]
+pub mod local;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -72,6 +80,7 @@ use inference_core::envelope::ControlKind;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Adapter, AdapterId, Capability, Locality};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
+use inference_llm::Generator;
 use inference_pipeline::nodes::commit_gate::{
     CommitGate, CommitGateHandle, GateLane, GatePayload, Gated,
 };
@@ -389,6 +398,15 @@ pub struct LocalCascade {
     pub pipeline_id: PipelineId,
     pub planned: PlannedPipeline,
     pub ids: CascadeIds,
+    admitted: Vec<Locality>,
+}
+
+impl LocalCascade {
+    /// The localities the profile the cascade was declared under admits.
+    #[must_use]
+    pub fn admitted(&self) -> &[Locality] {
+        &self.admitted
+    }
 }
 
 /// The profile the cascade is declared under and the adapters of its models.
@@ -424,21 +442,43 @@ pub fn declare(
     declaration: &mut Declaration,
     mocks: &Mocks,
 ) -> Result<LocalCascade, CascadeRefused> {
-    let (profile, _) = DeploymentProfile::declare(DeclareProfile {
-        kind: ProfileKind::OfflineStrict,
-        egress: Egress::Denied,
-        admitted: vec![Locality::SameProcess],
-    })
-    .expect("a row of the table");
-    let profile_id = profile.profile_id();
-    let catalog = Fixture {
-        profile,
-        adapters: [
+    declare_over(
+        declaration,
+        [
             mocks.recogniser.adapter().clone(),
             mocks.generator.adapter().clone(),
             mocks.synthesiser.adapter().clone(),
         ],
-    };
+        vec![Locality::SameProcess],
+    )
+}
+
+/// Declares the cascade in `declaration` under the `offline_strict` profile with egress denied
+/// admitting `admitted`, its nodes `stt`, `agent` and `tts` bound to `adapters` in that order,
+/// and validates and plans it.
+///
+/// # Errors
+///
+/// [`CascadeRefused`] when the declaration does not validate or plan, as when an adapter claims
+/// less than its node requires or its locality is not admitted.
+///
+/// # Panics
+///
+/// When `admitted` is not a row of the deployment-profile table for `offline_strict`, which
+/// admits neither a cluster nor an external provider.
+pub(crate) fn declare_over(
+    declaration: &mut Declaration,
+    adapters: [Adapter; 3],
+    admitted: Vec<Locality>,
+) -> Result<LocalCascade, CascadeRefused> {
+    let (profile, _) = DeploymentProfile::declare(DeclareProfile {
+        kind: ProfileKind::OfflineStrict,
+        egress: Egress::Denied,
+        admitted: admitted.clone(),
+    })
+    .expect("a row of the table");
+    let profile_id = profile.profile_id();
+    let catalog = Fixture { profile, adapters };
     let audio = PortTraits {
         essentiality: Essentiality::Essential,
         delivery: Delivery::Reliable,
@@ -590,6 +630,7 @@ pub fn declare(
         pipeline_id,
         planned,
         ids,
+        admitted,
     })
 }
 
@@ -654,6 +695,22 @@ impl CascadeHandles {
     }
 }
 
+/// The models of one run's three model nodes, and the reply the LLM node asks its generator for
+/// a committed span's text.
+pub(crate) struct Models<R, S> {
+    pub(crate) recogniser: R,
+    pub(crate) generator: Generator,
+    pub(crate) reply: fn(&str) -> String,
+    pub(crate) synthesiser: S,
+}
+
+/// The speaker of a run: the output device `device` of `host`, queuing `playout`.
+pub(crate) struct Output<'a> {
+    pub(crate) host: &'a dyn AudioHost,
+    pub(crate) device: &'a DeviceSelector,
+    pub(crate) playout: PlayoutConfig,
+}
+
 /// The implementations of one run's nodes, by node, and their handles.
 pub struct CascadeRun {
     pub implementations: HashMap<NodeId, Box<dyn NodeImplementation<VoicePayload>>>,
@@ -711,25 +768,56 @@ impl LocalCascade {
         S: Synthesiser + Send + 'static,
         S::Handle: Send + 'static,
     {
-        let speaker = Speaker::open(host, &DeviceSelector::Default, playout)?;
+        let models = Models {
+            recogniser: mocks.recogniser,
+            generator: mocks.generator.into(),
+            reply: mocks.reply,
+            synthesiser: speak(mocks.synthesiser),
+        };
+        let output = Output {
+            host,
+            device: &DeviceSelector::Default,
+            playout,
+        };
+        self.nodes_over(run_id, models, VAD, turns, log, &output)
+    }
+
+    /// The implementations of the nodes of the run `run_id` over `models`, the detector
+    /// configured by `vad`, the turn policy's commands answered by `turns`, what the nodes emit
+    /// recorded in `log`, and the speaker `output` names.
+    ///
+    /// # Errors
+    ///
+    /// The [`DeviceError`] of opening the speaker; no node is made.
+    pub(crate) fn nodes_over<R, S>(
+        &self,
+        run_id: RunId,
+        models: Models<R, S>,
+        vad: VadConfig,
+        turns: TurnStore,
+        log: &RunLog,
+        output: &Output<'_>,
+    ) -> Result<CascadeRun, DeviceError>
+    where
+        R: Recogniser + Clone + Send + 'static,
+        R::Handle: Send + 'static,
+        S: Synthesiser + Send + 'static,
+        S::Handle: Send + 'static,
+    {
+        let speaker = Speaker::open(output.host, output.device, output.playout)?;
         let ids = self.ids;
         let policy = TurnPolicy::new(run_id, turns);
-        let stt = SttNode::new(run_id, mocks.recogniser, ids.stt_ports, log.clone());
+        let stt = SttNode::new(run_id, models.recogniser, ids.stt_ports, log.clone());
         let input_gate = CommitGate::new(ids.input_lanes);
         let llm = AgentNode::new(
             run_id,
-            mocks.generator,
-            mocks.reply,
+            models.generator,
+            models.reply,
             ids.llm_turns,
             log.clone(),
         );
         let output_gate = CommitGate::new([ids.output_lane]);
-        let tts = SpeechNode::new(
-            run_id,
-            speak(mocks.synthesiser),
-            ids.speech_ports,
-            log.clone(),
-        );
+        let tts = SpeechNode::new(run_id, models.synthesiser, ids.speech_ports, log.clone());
         let sink = AcknowledgingSink::new(run_id, speaker).with_turns(ids.sink_turns);
         let handles = CascadeHandles {
             policy: policy.handle(),
@@ -746,7 +834,7 @@ impl LocalCascade {
                     ids.split,
                     Box::new(FanOut::new()) as Box<dyn NodeImplementation<VoicePayload>>,
                 ),
-                (ids.vad, Box::new(VoiceActivityDetector::new(run_id, VAD))),
+                (ids.vad, Box::new(VoiceActivityDetector::new(run_id, vad))),
                 (ids.policy, Box::new(policy)),
                 (ids.stt, Box::new(stt)),
                 (ids.input_gate, Box::new(input_gate)),
