@@ -14,7 +14,14 @@
 //! The contract crate of a call fills the adapter, model, timing and quantities
 //! ([`RecordUsage::new`]); the node that places the record on a run fills the run, node and
 //! session ([`RecordUsage::placed`]). A call inside a subgraph names the child run it was made in.
+//!
+//! A [`UsageTotal`] adds records up, kind by kind ([`KindTotal`]): the sum of the known values,
+//! the number of unknown quantities and the number of records that carried the kind, complete
+//! only when none of them was unknown. An unknown quantity is counted as unknown, never added as
+//! zero. The total is a value its holder keeps, such as a session over its runs; the
+//! specification declares no entity for it.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
@@ -474,14 +481,92 @@ impl UsageRecord {
     }
 }
 
+/// The total of one [`QuantityKind`] over the records a [`UsageTotal`] took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KindTotal {
+    /// The sum of the known values of the kind. Wider than a value, so that no sum overflows.
+    pub known: i128,
+    /// How many quantities of the kind were [`QuantitySource::Unknown`]: counted here, never
+    /// added to `known`.
+    pub unknown: u64,
+    /// How many records carried a quantity of the kind.
+    pub records: u64,
+}
+
+impl KindTotal {
+    /// Whether `known` is the whole total of the kind: no quantity of it was unknown.
+    #[must_use]
+    pub const fn complete(&self) -> bool {
+        self.unknown == 0
+    }
+}
+
+/// The usage of several calls added up, kind by kind; see the module documentation. A kind no
+/// record carried has no [`KindTotal`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UsageTotal {
+    records: u64,
+    kinds: BTreeMap<QuantityKind, KindTotal>,
+}
+
+impl UsageTotal {
+    /// The total of no record.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds the record whose quantities are `quantities`: each known value to its kind's sum,
+    /// each unknown quantity to its kind's unknown count, and the record to the count of every
+    /// kind it carries.
+    pub fn add(&mut self, quantities: &[Quantity]) {
+        self.records += 1;
+        let mut carried: Vec<QuantityKind> = Vec::with_capacity(quantities.len());
+        for quantity in quantities {
+            let total = self.kinds.entry(quantity.kind()).or_default();
+            match quantity.value() {
+                Some(value) => total.known += i128::from(value),
+                None => total.unknown += 1,
+            }
+            if !carried.contains(&quantity.kind()) {
+                carried.push(quantity.kind());
+                total.records += 1;
+            }
+        }
+    }
+
+    /// How many records the total took.
+    #[must_use]
+    pub const fn records(&self) -> u64 {
+        self.records
+    }
+
+    /// The total of `kind`; none when no record carried it.
+    #[must_use]
+    pub fn kind(&self, kind: QuantityKind) -> Option<KindTotal> {
+        self.kinds.get(&kind).copied()
+    }
+
+    /// The total of every kind some record carried, in the order of [`QuantityKind::ALL`].
+    pub fn kinds(&self) -> impl Iterator<Item = (QuantityKind, KindTotal)> + '_ {
+        self.kinds.iter().map(|(kind, total)| (*kind, *total))
+    }
+
+    /// Whether every kind is complete: no quantity the total took was unknown.
+    #[must_use]
+    pub fn complete(&self) -> bool {
+        self.kinds.values().all(KindTotal::complete)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
     use super::{
-        Quantity, QuantityKind, QuantityMismatch, QuantitySource, RecordUsage, UsageRecord,
-        UsageRecordId, UsageRecorded,
+        KindTotal, Quantity, QuantityKind, QuantityMismatch, QuantitySource, RecordUsage,
+        UsageRecord, UsageRecordId, UsageRecorded, UsageTotal,
     };
     use crate::id::{NodeId, RunId, SessionId};
     use crate::model::{AdapterId, ModelId};
@@ -639,6 +724,107 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&event).expect("serializes"))
                 .expect("the event reads back");
         assert_eq!(read, event);
+    }
+
+    #[test]
+    fn a_total_sums_known_values_and_counts_unknowns_apart_from_zero() {
+        let mut total = UsageTotal::new();
+        assert_eq!(total.records(), 0);
+        assert!(total.complete(), "no record is a complete total of nothing");
+        assert_eq!(total.kind(QuantityKind::Requests), None);
+
+        total.add(&[
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 12),
+            Quantity::measured(QuantityKind::Requests, 1),
+            Quantity::unknown(QuantityKind::LocalComputeMs),
+        ]);
+        total.add(&[
+            Quantity::unknown(QuantityKind::InputTextTokens),
+            Quantity::measured(QuantityKind::Requests, 1),
+            Quantity::measured(QuantityKind::LocalComputeMs, 0),
+        ]);
+        total.add(&[Quantity::provider_reported(
+            QuantityKind::InputTextTokens,
+            30,
+        )]);
+
+        assert_eq!(total.records(), 3);
+        assert_eq!(
+            total.kind(QuantityKind::InputTextTokens),
+            Some(KindTotal {
+                known: 42,
+                unknown: 1,
+                records: 3,
+            }),
+            "the unknown count of the second record is not added as zero"
+        );
+        assert_eq!(
+            total.kind(QuantityKind::Requests),
+            Some(KindTotal {
+                known: 2,
+                unknown: 0,
+                records: 2,
+            })
+        );
+        assert_eq!(
+            total.kind(QuantityKind::LocalComputeMs),
+            Some(KindTotal {
+                known: 0,
+                unknown: 1,
+                records: 2,
+            }),
+            "a measured zero is known; the unknown beside it stays unknown"
+        );
+        assert_eq!(total.kind(QuantityKind::OutputTextTokens), None);
+        assert!(
+            !total
+                .kind(QuantityKind::InputTextTokens)
+                .expect("carried")
+                .complete()
+        );
+        assert!(
+            total
+                .kind(QuantityKind::Requests)
+                .expect("carried")
+                .complete()
+        );
+        assert!(!total.complete());
+        assert_eq!(
+            total.kinds().map(|(kind, _)| kind).collect::<Vec<_>>(),
+            [
+                QuantityKind::InputTextTokens,
+                QuantityKind::Requests,
+                QuantityKind::LocalComputeMs
+            ],
+            "kinds in the order the specification lists them"
+        );
+    }
+
+    #[test]
+    fn a_total_of_unknowns_only_knows_nothing_and_a_sum_past_i64_does_not_overflow() {
+        let mut unknown = UsageTotal::new();
+        unknown.add(&[Quantity::unknown(QuantityKind::OutputAudioMs)]);
+        unknown.add(&[Quantity::unknown(QuantityKind::OutputAudioMs)]);
+        assert_eq!(
+            unknown.kind(QuantityKind::OutputAudioMs),
+            Some(KindTotal {
+                known: 0,
+                unknown: 2,
+                records: 2,
+            })
+        );
+        assert!(!unknown.complete());
+
+        let mut large = UsageTotal::new();
+        large.add(&[Quantity::measured(QuantityKind::InputAudioMs, i64::MAX)]);
+        large.add(&[Quantity::measured(QuantityKind::InputAudioMs, i64::MAX)]);
+        assert_eq!(
+            large
+                .kind(QuantityKind::InputAudioMs)
+                .map(|kind| kind.known),
+            Some(2 * i128::from(i64::MAX))
+        );
+        assert!(large.complete());
     }
 
     #[test]

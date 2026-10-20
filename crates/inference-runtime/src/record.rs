@@ -32,6 +32,10 @@
 //! 1217); which span or segment is meant is compared by position, a node's decisions being
 //! compared in the order it made them.
 //!
+//! A usage record a node emits, an envelope of kind `inference.usage.UsageRecorded`, is recorded
+//! like any envelope and listed by [`Recording::usage`]; it is no decision, so a replay never
+//! compares usage, and a replay whose models report other counts does not diverge.
+//!
 //! [`RunController::create`]: crate::RunController::create
 
 use std::collections::HashSet;
@@ -42,6 +46,7 @@ use std::time::{Duration, Instant};
 use inference_core::endpoint::{EndpointFuture, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId};
 use inference_core::id::NodeId;
+use inference_core::usage::UsageRecorded;
 use inference_pipeline::{
     Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInstanceId, NodeOutput,
     PortId,
@@ -278,6 +283,26 @@ impl<P> Recording<P> {
                     envelope,
                     ..
                 } if *emitter == node_id => Some(envelope),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every usage record a node of the run emitted, an envelope of kind
+    /// [`UsageRecorded::KIND`], in merge order; an envelope a node passed on unchanged, carrying
+    /// an event identity already listed, is listed once. Usage is recorded, never compared: no
+    /// [`DecisionKind`] reads it, so a replay whose models report other counts does not diverge.
+    #[must_use]
+    pub fn usage(&self) -> Vec<&EventEnvelope<P>> {
+        let mut seen = HashSet::new();
+        self.entries
+            .iter()
+            .filter_map(|recorded| match &recorded.entry {
+                Entry::Emitted { envelope, .. }
+                    if envelope.kind == UsageRecorded::KIND && seen.insert(envelope.event_id) =>
+                {
+                    Some(envelope)
+                }
                 _ => None,
             })
             .collect()
@@ -595,6 +620,7 @@ mod tests {
     use inference_core::endpoint::{EndpointFuture, OutputEndpoint, SendError};
     use inference_core::envelope::{EventEnvelope, EventId, Timebase};
     use inference_core::id::{NodeId, RunId, StreamId};
+    use inference_core::usage::UsageRecorded;
 
     use inference_pipeline::PortId;
 
@@ -675,6 +701,56 @@ mod tests {
         ] {
             assert_eq!(DecisionKind::of(content), None, "{content}");
         }
+    }
+
+    #[test]
+    fn a_usage_record_is_no_decision_so_replay_never_compares_usage() {
+        assert_eq!(UsageRecorded::KIND, "inference.usage.UsageRecorded");
+        assert_eq!(DecisionKind::of(UsageRecorded::KIND), None);
+    }
+
+    #[test]
+    fn the_usage_of_a_recording_is_every_usage_envelope_a_node_emitted_in_merge_order_once() {
+        let (llm, tts, port) = (NodeId::generate(), NodeId::generate(), PortId::generate());
+        let emitted = |node_id, envelope| Entry::Emitted {
+            node_id,
+            port_id: port,
+            envelope,
+        };
+        let first = envelope(UsageRecorded::KIND, 1);
+        let second = envelope(UsageRecorded::KIND, 1);
+        let entries = vec![
+            Entry::Ingress {
+                name: "audio".to_owned(),
+                envelope: envelope(UsageRecorded::KIND, 1),
+            },
+            emitted(llm, envelope("inference.stream.TextDelta", 1)),
+            emitted(llm, first.clone()),
+            Entry::Host {
+                action: "barge-in".to_owned(),
+            },
+            emitted(tts, second.clone()),
+            emitted(tts, first.clone()),
+            emitted(llm, envelope("stop", 2)),
+        ];
+        let recording = Recording {
+            policy_version: String::new(),
+            entries: entries
+                .into_iter()
+                .zip(0..)
+                .map(|(entry, merge_order)| Recorded { merge_order, entry })
+                .collect(),
+        };
+        assert_eq!(
+            recording
+                .usage()
+                .iter()
+                .map(|envelope| envelope.event_id)
+                .collect::<Vec<_>>(),
+            [first.event_id, second.event_id],
+            "what the caller sent is no usage of the run, and a copy passed on is listed once"
+        );
+        assert_eq!(recording.decisions(), [], "usage records no decision");
     }
 
     #[test]
