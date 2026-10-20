@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.5.0] — 2026-10-20
+
+### Added
+
+- `inference-facade`: the session facade. An application opens one session, sends, receives,
+  commits input, interrupts, describes and closes it, and sees one event vocabulary whether the
+  session runs the text-only pipeline or the voice cascade; the topology switches by
+  configuration; history and a live session over a running graph.
+- `inference-duplex`: the native speech session contract (one multiport node for a model that
+  listens and speaks), its session ledger, a mock, and a conformance probe that reports whether a
+  model's native duplex claim was observed.
+- `inference-pipeline`: exposed ports, declarative graph definitions validated against runtime
+  node descriptors, and subgraphs that keep cancellation and tracing boundaries; the endpoint
+  controller, voice activity and turn policy nodes; tool retries by side-effect class with an
+  at-most-once start; a bounded tool feedback loop through the LLM node; tool calls under
+  interruption.
+- `adapters/inference-openai`: OpenAI Realtime as an `inference-duplex` native speech model, with
+  offline tests and live tests gated on a credential (environment, or the local keychain behind a
+  feature).
+- `adapters/inference-aws`: Amazon Nova Sonic as an `inference-duplex` native speech model, with
+  offline and live tests; service errors are shown with ARNs and account ids redacted.
+- `adapters/inference-audio-device`: microphone capture and speaker playout over cpal, with a
+  lock-free ring and G.711 conversion.
+- `examples/realtime-voice`: talk to a realtime model from a laptop
+  (`cargo run -p realtime-voice --example talk -- --provider openai|nova`).
+- `inference-testkit`: the session to run link and the session store; the conformance target
+  answers all 454 scenarios of the synthesized suite.
+
+### Changed
+
+- `inference-llm` is a thin wrapper over the `llm` repository's model contract
+  (`llm_core::Model`, tag 0.8.0). A `Generator` refuses an adapter claim its model does not
+  declare; a turn that showed no delta gives the outcome's text as one segment. The workspace's
+  `rust-version` moves from 1.88 to 1.98, which that tag requires.
+- The workspace includes `adapters/*`.
+- The specification adds the session, duplex and audio-encoding changes above (`ess verify diff`
+  against 0.4.0: 146 changes; 3 breaking for readers, the new `AudioEncoding` variants `pcm_mulaw`
+  and `pcm_alaw` and the new `GraphDefect` variant `duplicate_exposure_name`; 23 unknown, 120
+  compatible). The synthesized suite grows from 317 to 454 scenarios.
+
 ## [0.4.0] — 2026-10-19
 
 ### Added
