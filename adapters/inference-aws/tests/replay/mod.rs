@@ -72,6 +72,9 @@ pub struct Faults {
     pub error_after: Option<(usize, ServiceError)>,
     /// The stream does not open: the connect error the client reports for a refusal.
     pub refuse: bool,
+    /// Every usage event's delta leaves out this count of this direction, such as
+    /// `("output", "textTokens")`.
+    pub usage_omits: Option<(&'static str, &'static str)>,
 }
 
 /// The replay as a [`Connector`].
@@ -350,14 +353,20 @@ impl Provider {
             *total += change;
         }
         let [is, it, os, ot] = self.totals;
+        let mut delta = json!({
+            "input": {"speechTokens": delta[0], "textTokens": delta[1]},
+            "output": {"speechTokens": delta[2], "textTokens": delta[3]}
+        });
+        if let Some((direction, count)) = self.faults.usage_omits
+            && let Some(counts) = delta.get_mut(direction).and_then(Value::as_object_mut)
+        {
+            counts.remove(count);
+        }
         self.plan.push_back(Self::event(
             "usageEvent",
             json!({
                 "details": {
-                    "delta": {
-                        "input": {"speechTokens": delta[0], "textTokens": delta[1]},
-                        "output": {"speechTokens": delta[2], "textTokens": delta[3]}
-                    },
+                    "delta": delta,
                     "total": {
                         "input": {"speechTokens": is, "textTokens": it},
                         "output": {"speechTokens": os, "textTokens": ot}
