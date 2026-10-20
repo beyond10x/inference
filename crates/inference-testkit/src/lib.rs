@@ -53,7 +53,8 @@ pub mod usage;
 pub mod stt;
 
 /// The scripted mock `llm` model of the LLM contract, wrapped by its generator, in three
-/// capability configurations, which may also be scripted to propose tool calls.
+/// capability configurations, which may also be scripted to propose tool calls and to report the
+/// usage of each turn.
 #[cfg(feature = "llm")]
 pub mod llm;
 

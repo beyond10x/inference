@@ -117,7 +117,9 @@ fn a_running_server_streams_a_generation_and_refuses_input_during_output() {
             GenerationEvent::Cancelled(..) => {
                 panic!("the generation was cancelled: {:?}", handle.failure())
             }
-            GenerationEvent::Started(_) | GenerationEvent::SegmentCommitted(_) => {}
+            GenerationEvent::Started(_)
+            | GenerationEvent::SegmentCommitted(_)
+            | GenerationEvent::Usage(_) => {}
         }
     }
 

@@ -16,6 +16,7 @@ use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
+use inference_core::usage::{Quantity, QuantityKind, UsageRecorded};
 use inference_llm::llm_core::{
     BoxFuture, CallId, Cancel, Capabilities, Error, ErrorCode, Id, Item, Model, Protocol,
     Provenance, StopReason, StreamEvent, StreamSink, ToolCall, ToolName, TurnObservation,
@@ -27,11 +28,17 @@ use inference_llm::{
 };
 use serde_json::json;
 
+/// The upstream model a [`Answer::Text`] turn reports serving.
+const UPSTREAM: &str = "scripted-upstream";
+
 /// What the scripted model answers one turn with.
 #[derive(Debug, Clone)]
 enum Answer {
-    /// These deltas, then an outcome ending with these calls.
+    /// These deltas, then an outcome ending with these calls, reporting as usage one output
+    /// token per delta and the upstream model [`UPSTREAM`].
     Text(Vec<&'static str>, Vec<ToolCall>),
+    /// These deltas, then an outcome reporting no usage and no upstream model.
+    Unreported(Vec<&'static str>),
     /// A failure, before any delta.
     Fail,
     /// This delta, then nothing until the turn is cancelled.
@@ -121,6 +128,22 @@ impl Model for Scripted {
                     cancel.cancelled().await;
                     Err(Error::cancelled())
                 }
+                Answer::Unreported(deltas) => {
+                    for text in &deltas {
+                        sink.emit(StreamEvent::TextDelta {
+                            text: (*text).to_owned(),
+                        })
+                        .await?;
+                    }
+                    Ok(TurnOutcome {
+                        stop_reason: StopReason::EndTurn,
+                        items: vec![Item::assistant(deltas.concat())],
+                        observation: TurnObservation {
+                            final_usage: true,
+                            ..TurnObservation::new(self.provenance.clone())
+                        },
+                    })
+                }
                 Answer::Text(deltas, calls) => {
                     for text in &deltas {
                         sink.emit(StreamEvent::TextDelta {
@@ -143,6 +166,7 @@ impl Model for Scripted {
                                 output_tokens: Some(u64::try_from(deltas.len()).unwrap_or(0)),
                                 ..Usage::default()
                             }),
+                            upstream_model: Some(Id::new(UPSTREAM).expect("printable")),
                             final_usage: true,
                             ..TurnObservation::new(self.provenance.clone())
                         },
@@ -198,6 +222,49 @@ fn drain(handle: &mut GenerationHandle) -> Vec<(GenerationEvent, GenerationState
     seen
 }
 
+/// The kind of each event in `seen`, in order.
+fn kinds(seen: &[(GenerationEvent, GenerationState)]) -> Vec<&'static str> {
+    seen.iter()
+        .map(|(event, _)| match event {
+            GenerationEvent::Started(_) => "started",
+            GenerationEvent::TextDelta(_) => "delta",
+            GenerationEvent::SegmentCommitted(_) => "committed",
+            GenerationEvent::Usage(_) => "usage",
+            GenerationEvent::Completed(_) => "completed",
+            GenerationEvent::Cancelled(..) => "cancelled",
+        })
+        .collect()
+}
+
+/// The usage record of each event in `seen` that carries one, in order.
+fn usage(seen: &[(GenerationEvent, GenerationState)]) -> Vec<UsageRecorded> {
+    seen.iter()
+        .filter_map(|(event, _)| match event {
+            GenerationEvent::Usage(recorded) => Some(recorded.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The quantity of `kind` in `recorded`; panics unless it carries exactly one.
+fn quantity(recorded: &UsageRecorded, kind: QuantityKind) -> Quantity {
+    let found: Vec<&Quantity> = recorded
+        .quantities
+        .iter()
+        .filter(|quantity| quantity.kind() == kind)
+        .collect();
+    assert_eq!(found.len(), 1, "one {kind:?} quantity: {recorded:?}");
+    *found[0]
+}
+
+/// The token kinds an LLM record carries.
+const TOKEN_KINDS: [QuantityKind; 4] = [
+    QuantityKind::InputTextTokens,
+    QuantityKind::OutputTextTokens,
+    QuantityKind::CachedInputTokens,
+    QuantityKind::CacheCreationInputTokens,
+];
+
 fn texts(seen: &[(GenerationEvent, GenerationState)]) -> Vec<(String, GenerationState)> {
     seen.iter()
         .filter_map(|(event, state)| match event {
@@ -214,24 +281,15 @@ fn a_streaming_adapter_delivers_each_delta_as_a_committed_segment_while_active()
         .start(request())
         .expect("a fresh generator runs nothing else");
     let seen = drain(&mut handle);
-    let kinds: Vec<&str> = seen
-        .iter()
-        .map(|(event, _)| match event {
-            GenerationEvent::Started(_) => "started",
-            GenerationEvent::TextDelta(_) => "delta",
-            GenerationEvent::SegmentCommitted(_) => "committed",
-            GenerationEvent::Completed(_) => "completed",
-            GenerationEvent::Cancelled(..) => "cancelled",
-        })
-        .collect();
     assert_eq!(
-        kinds,
+        kinds(&seen),
         [
             "started",
             "delta",
             "committed",
             "delta",
             "committed",
+            "usage",
             "completed"
         ]
     );
@@ -450,9 +508,9 @@ fn a_failing_turn_cancels_the_generation_and_keeps_the_llm_error() {
     assert!(
         matches!(
             seen.as_slice(),
-            [(GenerationEvent::Started(_), _), (GenerationEvent::Cancelled(_, discarded), GenerationState::Cancelled)] if discarded.is_empty()
+            [(GenerationEvent::Started(_), _), (GenerationEvent::Usage(_), _), (GenerationEvent::Cancelled(_, discarded), GenerationState::Cancelled)] if discarded.is_empty()
         ),
-        "GenerationStarted, then the cancellation of the failed turn: {seen:?}"
+        "GenerationStarted, the usage of the failed turn, then its cancellation: {seen:?}"
     );
     assert_eq!(
         handle.output().generation().state(),
@@ -493,4 +551,192 @@ fn a_delta_reaches_the_caller_while_the_turn_runs_and_a_cancel_reaches_the_turn(
         handle.output().generation().state(),
         GenerationState::Cancelled
     );
+}
+
+#[test]
+fn each_turn_that_ended_yields_one_usage_record_after_its_events() {
+    let model = Scripted::new([
+        Answer::Text(vec!["Hel", "lo"], Vec::new()),
+        Answer::Unreported(vec!["Sunny"]),
+    ]);
+    let generator = generator(
+        vec![
+            Capability::OutputStreaming,
+            Capability::ConcurrentInputOutput,
+        ],
+        &model,
+    );
+    let adapter = generator.adapter().clone();
+    let mut handle = generator
+        .clone()
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_millis();
+    let mut seen = Vec::new();
+    for event in handle.by_ref() {
+        let ended = matches!(event, GenerationEvent::Usage(_));
+        seen.push((event, GenerationState::Active));
+        if ended {
+            break;
+        }
+    }
+    handle
+        .offer_input("and the weather?".to_owned())
+        .expect("the generation is Active and claims concurrent input");
+    seen.extend(drain(&mut handle));
+
+    assert_eq!(
+        kinds(&seen),
+        [
+            "started",
+            "delta",
+            "committed",
+            "delta",
+            "committed",
+            "usage",
+            "delta",
+            "committed",
+            "usage",
+            "completed"
+        ],
+        "one record per turn, after the events of that turn"
+    );
+    let records = usage(&seen);
+    for record in &records {
+        assert_eq!(record.adapter_id, adapter.adapter_id());
+        assert_eq!(record.model_id, adapter.model_id());
+        assert_eq!(
+            (record.run_id, record.node_id, record.session_id),
+            (None, None, None),
+            "the contract crate places the record on no run, node or session"
+        );
+        assert_eq!((record.speech_session_id, record.response_id), (None, None));
+        assert!(record.r#final, "the turn reported final counts");
+        assert!(
+            i128::from(record.started_at_ms) >= i128::try_from(before).expect("fits") - 1_000
+                && record.started_at_ms <= record.ended_at_ms,
+            "measured around the turn on the wall clock: {record:?}"
+        );
+        assert_eq!(
+            quantity(record, QuantityKind::Requests),
+            Quantity::measured(QuantityKind::Requests, 1)
+        );
+        assert_eq!(
+            quantity(record, QuantityKind::LocalComputeMs),
+            Quantity::unknown(QuantityKind::LocalComputeMs),
+            "no local backend computed it as far as the contract knows"
+        );
+        assert_eq!(record.quantities.len(), 6, "{record:?}");
+    }
+    let [reported, unreported] = records.as_slice() else {
+        panic!("two records: {records:?}")
+    };
+    assert_ne!(reported.usage_record_id, unreported.usage_record_id);
+    assert_eq!(reported.upstream_model.as_deref(), Some(UPSTREAM));
+    assert_eq!(
+        quantity(reported, QuantityKind::OutputTextTokens),
+        Quantity::provider_reported(QuantityKind::OutputTextTokens, 2)
+    );
+    for kind in [
+        QuantityKind::InputTextTokens,
+        QuantityKind::CachedInputTokens,
+        QuantityKind::CacheCreationInputTokens,
+    ] {
+        assert_eq!(
+            quantity(reported, kind),
+            Quantity::unknown(kind),
+            "a count the provider left out is unknown, never zero"
+        );
+    }
+    assert_eq!(unreported.upstream_model, None);
+    for kind in TOKEN_KINDS {
+        assert_eq!(
+            quantity(unreported, kind),
+            Quantity::unknown(kind),
+            "a turn reporting no usage counts every token unknown"
+        );
+    }
+}
+
+#[test]
+fn every_reported_count_maps_to_its_kind_and_reasoning_stays_inside_output() {
+    let usage = Usage {
+        input_tokens: Some(35),
+        output_tokens: Some(9),
+        cached_input_tokens: Some(20),
+        cache_creation_input_tokens: Some(5),
+        reasoning_output_tokens: Some(4),
+    };
+    let record = inference_llm::usage_of_turn(
+        &adapter(Vec::new()),
+        Some(&usage),
+        Some("served"),
+        true,
+        (10, 20),
+    );
+    assert_eq!(
+        TOKEN_KINDS.map(|kind| quantity(&record, kind)),
+        [
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 35),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 9),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 20),
+            Quantity::provider_reported(QuantityKind::CacheCreationInputTokens, 5),
+        ]
+    );
+    assert_eq!(
+        record.quantities.len(),
+        6,
+        "reasoning is no kind of its own"
+    );
+    assert_eq!((record.started_at_ms, record.ended_at_ms), (10, 20));
+    assert_eq!(record.upstream_model.as_deref(), Some("served"));
+    assert!(record.r#final);
+}
+
+#[test]
+fn a_non_streaming_adapter_delivers_the_usage_after_the_text_it_held() {
+    let model = Scripted::new([Answer::Text(vec!["Hel", "lo"], Vec::new())]);
+    let mut handle = generator(Vec::new(), &model)
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+    let seen = drain(&mut handle);
+    assert_eq!(
+        kinds(&seen),
+        ["started", "delta", "committed", "usage", "completed"]
+    );
+}
+
+#[test]
+fn a_failed_turn_yields_a_record_of_one_request_with_every_token_count_unknown() {
+    let model = Scripted::new([Answer::Fail]);
+    let generator = generator(vec![Capability::OutputStreaming], &model);
+    let adapter = generator.adapter().clone();
+    let mut handle = generator
+        .clone()
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+    let seen = drain(&mut handle);
+    assert_eq!(kinds(&seen), ["started", "usage", "cancelled"]);
+    let records = usage(&seen);
+    let [record] = records.as_slice() else {
+        panic!("one record: {records:?}")
+    };
+    assert_eq!(record.adapter_id, adapter.adapter_id());
+    assert_eq!(record.model_id, adapter.model_id());
+    assert_eq!(
+        quantity(record, QuantityKind::Requests),
+        Quantity::measured(QuantityKind::Requests, 1),
+        "a failed call is still counted as a request"
+    );
+    for kind in TOKEN_KINDS {
+        assert_eq!(quantity(record, kind), Quantity::unknown(kind));
+    }
+    assert!(
+        !record.r#final,
+        "the counts of a failed turn are never final"
+    );
+    assert!(record.started_at_ms <= record.ended_at_ms);
 }

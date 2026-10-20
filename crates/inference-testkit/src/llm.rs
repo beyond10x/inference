@@ -8,7 +8,9 @@
 //! a model without a script, it answers with the text of each caller item after its last answer,
 //! one delta each: the user text of an input, or the text of a tool result. A model that does not
 //! stream shows no delta and returns that text in the turn's outcome only, as `llm` defines one.
-//! Each turn answered so is a model request. The model declares to `llm` that it streams exactly
+//! Each turn answered so is a model request. A turn reports no usage unless the generator was
+//! scripted to ([`MockGenerator::reporting`]), so the wrapper's record of it counts every token
+//! unknown. The model declares to `llm` that it streams exactly
 //! when its configuration claims `output_streaming` ([`MockConfiguration::declared`]), so the
 //! wrapper accepts the claims. What a generation
 //! delivers follows from what its configuration claims, as the wrapper decides it:
@@ -39,7 +41,8 @@
 //! Behind the `run` feature, [`ModelNode`] is the model node of a text-only pipeline the
 //! runtime's run controller drives: one generation per run, one committed segment per input,
 //! given tools, the tool loop of that generation and, given a turns input, a generation started at
-//! the completion of the first turn. It answers on any `inference-llm` [`Generator`], the mock's
+//! the completion of the first turn, and, given a usage port, the usage record of each of its
+//! turns on that port. It answers on any `inference-llm` [`Generator`], the mock's
 //! among them.
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -49,7 +52,7 @@ use inference_core::model::{
 };
 use inference_llm::llm_core::{
     self, BoxFuture, CallId, Cancel, Capabilities, Id, Item, Protocol, Provenance, StopReason,
-    StreamEvent, StreamSink, ToolCall, ToolSpec, TurnObservation, TurnOutcome, TurnRequest,
+    StreamEvent, StreamSink, ToolCall, ToolSpec, TurnObservation, TurnOutcome, TurnRequest, Usage,
 };
 use inference_llm::tools::{ToolOutcome, tool_name};
 use inference_llm::{
@@ -150,6 +153,8 @@ struct MockModel {
     script: Vec<String>,
     tools: Option<ToolScript>,
     offered: Offered,
+    /// The usage the n-th turn of a conversation reports; a turn past the list reports none.
+    usage: Vec<Option<Usage>>,
 }
 
 /// The tool sets offered to the model of one generator, shared by its clones.
@@ -205,6 +210,7 @@ impl MockGenerator {
             script: script.into_iter().map(Into::into).collect(),
             tools: None,
             offered: Offered::default(),
+            usage: Vec::new(),
         };
         Self::over(adapter, model)
     }
@@ -254,8 +260,25 @@ impl MockGenerator {
                 proposals,
             }),
             offered: self.model.offered.clone(),
+            usage: self.model.usage.clone(),
         };
         Self::over(adapter, model)
+    }
+
+    /// The same generator, whose model reports `usage` for its turns: the n-th turn of a
+    /// conversation reports the n-th entry, `None` reporting no usage, and a turn past the list
+    /// reports none, as every turn of a generator does by default. Its adapter is the same.
+    #[must_use]
+    pub fn reporting(self, usage: impl IntoIterator<Item = Option<Usage>>) -> Self {
+        let model = MockModel {
+            provenance: self.model.provenance.clone(),
+            capabilities: self.model.capabilities.clone(),
+            script: self.model.script.clone(),
+            tools: self.model.tools.clone(),
+            offered: self.model.offered.clone(),
+            usage: usage.into_iter().collect(),
+        };
+        Self::over(self.generator.adapter().clone(), model)
     }
 
     fn over(adapter: Adapter, model: MockModel) -> Self {
@@ -409,10 +432,16 @@ impl llm_core::Model for MockModel {
             };
             let mut items = vec![Item::assistant(pieces.concat())];
             items.extend(calls.into_iter().map(Item::ToolCall));
+            let turn = request
+                .items
+                .iter()
+                .filter(|item| matches!(item, Item::AssistantText { .. }))
+                .count();
             Ok(TurnOutcome {
                 stop_reason,
                 items,
                 observation: TurnObservation {
+                    usage: self.usage.get(turn).cloned().flatten(),
                     final_usage: true,
                     ..TurnObservation::new(self.provenance.clone())
                 },

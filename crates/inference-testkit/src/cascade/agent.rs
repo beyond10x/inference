@@ -35,7 +35,8 @@
 //! `GenerationCancelled` and fails with the `llm` error.
 //!
 //! Every event it emits is recorded in the run's [`RunLog`] in its envelope, which names the
-//! event's generation. [`AgentHandle`] reads every generation, the turn it answered and its
+//! event's generation. It has no usage port and sends no usage record; the usage of a cascade
+//! is the [`ModelNode`](crate::llm::ModelNode)'s to send. [`AgentHandle`] reads every generation, the turn it answered and its
 //! state, as the node goes.
 
 use std::collections::VecDeque;
@@ -239,6 +240,9 @@ fn carry<P: ModelPayload>(envelope: EventEnvelope<PipelinePayload>) -> EventEnve
         payload: match payload {
             PipelinePayload::Stream(event) => P::stream(event),
             PipelinePayload::Control(kind) => P::from(kind),
+            PipelinePayload::Usage(_) => {
+                unreachable!("the emitter of this node wraps no usage record")
+            }
         },
     }
 }
@@ -333,9 +337,11 @@ impl<P: ModelPayload> Exchanging<P> {
     }
 
     /// Emits `event` of the current generation; a cancellation, of a turn that failed, fails the
-    /// node with the `llm` error.
+    /// node with the `llm` error. The node has no usage port, so the usage record of a turn is
+    /// not sent.
     async fn deliver(&mut self, event: GenerationEvent) -> Result<(), String> {
         let (event, failed) = match event {
+            GenerationEvent::Usage(_) => return Ok(()),
             GenerationEvent::Started(started) => (StreamEvent::GenerationStarted(started), false),
             GenerationEvent::TextDelta(delta) => (StreamEvent::TextDelta(delta), false),
             GenerationEvent::SegmentCommitted(committed) => {
@@ -450,7 +456,7 @@ impl<P: ModelPayload> Exchanging<P> {
             Carried::Stream(StreamEvent::TranscriptCommitted(committed)) => {
                 self.held.push_back(committed.text);
             }
-            Carried::Stream(_) | Carried::Tool(_) | Carried::Control(_) => {}
+            Carried::Stream(_) | Carried::Tool(_) | Carried::Usage(_) | Carried::Control(_) => {}
         }
     }
 
@@ -526,7 +532,10 @@ impl<P: ModelPayload> Exchanging<P> {
                         self.turn_completed().await?;
                     }
                     Carried::Control(ControlKind::Stop) => self.turns_ended = true,
-                    Carried::Stream(_) | Carried::Tool(_) | Carried::Control(_) => {}
+                    Carried::Stream(_)
+                    | Carried::Tool(_)
+                    | Carried::Usage(_)
+                    | Carried::Control(_) => {}
                 },
                 Step::Input(received) => self.received(received),
             }

@@ -6,15 +6,20 @@
 //! off, and [`TOOLS_RECORD`] against the adapter with its `tools` option on. Their
 //! `output_streaming` evidence names the tests of this file that observe it, the `tool_calling`
 //! evidence of [`TOOLS_RECORD`] those of `tool_proposals`.
+//!
+//! The usage record of a turn reads the counts of the recorded `usage` chunk, and counts every
+//! token unknown for the same stream with that chunk removed (`story:usage-llm`).
 
 mod common;
 
 use std::path::Path;
 use std::sync::Arc;
 
+use common::scripted::{Scripted, TEXT_NO_USAGE};
 use common::{DELTAS, Fixture, SERVED_MODEL};
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Adapter, Capability, ExecutionForm, Locality, Model};
+use inference_core::usage::{Quantity, QuantityKind, UsageRecorded};
 use inference_llama_server::{
     BACKEND, CHECKPOINT, CHECKSUM, CODE_LICENSE, Config, LlamaServer, SOURCE, SOURCE_REVISION,
     WEIGHT_LICENSE, binding, declare_adapter, declare_model,
@@ -44,7 +49,11 @@ fn declared(config: &Config) -> (Model, Adapter) {
 }
 
 fn generator(fixture: &Fixture) -> Generator {
-    let config = Config::new(fixture.base_url(), SERVED_MODEL);
+    generator_at(fixture.base_url())
+}
+
+fn generator_at(base_url: &str) -> Generator {
+    let config = Config::new(base_url, SERVED_MODEL);
     let (_, adapter) = declared(&config);
     LlamaServer::new(&config)
         .expect("the fixture's base URL makes a binding")
@@ -83,6 +92,7 @@ fn names(events: &[GenerationEvent]) -> Vec<&'static str> {
             GenerationEvent::Started(_) => "StartGeneration",
             GenerationEvent::TextDelta(_) => "EmitTextDelta",
             GenerationEvent::SegmentCommitted(_) => "CommitSegment",
+            GenerationEvent::Usage(_) => "RecordUsage",
             GenerationEvent::Completed(_) => "CompleteGeneration",
             GenerationEvent::Cancelled(..) => "CancelGeneration",
         })
@@ -113,7 +123,7 @@ fn a_delta_reaches_the_caller_while_the_server_still_holds_the_rest_of_the_strea
     for _ in &DELTAS[1..] {
         expected.extend(["EmitTextDelta", "CommitSegment"]);
     }
-    expected.push("CompleteGeneration");
+    expected.extend(["RecordUsage", "CompleteGeneration"]);
     assert_eq!(names(&rest), expected, "{rest:?}");
     let texts: Vec<&str> = first
         .iter()
@@ -281,4 +291,94 @@ fn each_committed_capability_record_checks_against_the_declaration_of_its_adapte
             }
         }
     }
+}
+
+/// The one usage record a whole generation over `generator` delivered, checked for what every
+/// record of this adapter carries: its adapter and model, one measured request, local compute
+/// unknown for this out-of-process server, and start and end in order.
+fn the_record(generator: &mut Generator) -> UsageRecorded {
+    let adapter = generator.adapter().clone();
+    let events: Vec<GenerationEvent> = start(generator).collect();
+    let kinds = names(&events);
+    assert_eq!(
+        kinds[kinds.len() - 2..],
+        ["RecordUsage", "CompleteGeneration"],
+        "the record follows the events of its turn: {events:?}"
+    );
+    let records: Vec<UsageRecorded> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            GenerationEvent::Usage(recorded) => Some(recorded),
+            _ => None,
+        })
+        .collect();
+    let [record] = records.as_slice() else {
+        panic!("one turn, one record: {records:?}")
+    };
+    assert_eq!(record.adapter_id, adapter.adapter_id());
+    assert_eq!(record.model_id, adapter.model_id());
+    assert!(record.started_at_ms <= record.ended_at_ms, "{record:?}");
+    assert!(record.r#final, "the stream terminated");
+    let of = |kind| {
+        record
+            .quantities
+            .iter()
+            .find(|quantity| quantity.kind() == kind)
+            .copied()
+            .unwrap_or_else(|| panic!("no {kind:?} quantity: {record:?}"))
+    };
+    assert_eq!(
+        of(QuantityKind::Requests),
+        Quantity::measured(QuantityKind::Requests, 1)
+    );
+    assert_eq!(
+        of(QuantityKind::LocalComputeMs),
+        Quantity::unknown(QuantityKind::LocalComputeMs),
+        "the server computes out of process; its wall time is the record's start and end"
+    );
+    record.clone()
+}
+
+/// The token quantities of `record`, in the order of [`TOKEN_KINDS`].
+fn tokens(record: &UsageRecorded) -> [Quantity; 4] {
+    TOKEN_KINDS.map(|kind| {
+        record
+            .quantities
+            .iter()
+            .find(|quantity| quantity.kind() == kind)
+            .copied()
+            .unwrap_or_else(|| panic!("no {kind:?} quantity: {record:?}"))
+    })
+}
+
+const TOKEN_KINDS: [QuantityKind; 4] = [
+    QuantityKind::InputTextTokens,
+    QuantityKind::OutputTextTokens,
+    QuantityKind::CachedInputTokens,
+    QuantityKind::CacheCreationInputTokens,
+];
+
+#[test]
+fn a_recorded_response_carrying_usage_yields_the_record_with_its_counts() {
+    let fixture = Fixture::replaying();
+    let record = the_record(&mut generator(&fixture));
+    assert_eq!(
+        tokens(&record),
+        [
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 35),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 4),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 0),
+            Quantity::unknown(QuantityKind::CacheCreationInputTokens),
+        ],
+        "prompt_tokens, completion_tokens and cached_tokens of the recorded usage chunk"
+    );
+    assert_eq!(record.upstream_model.as_deref(), Some(SERVED_MODEL));
+}
+
+#[test]
+fn a_recorded_response_without_usage_yields_the_record_with_every_token_count_unknown() {
+    let fixture = Scripted::new(vec![TEXT_NO_USAGE]);
+    let record = the_record(&mut generator_at(fixture.base_url()));
+    assert_eq!(tokens(&record), TOKEN_KINDS.map(Quantity::unknown));
+    assert_eq!(fixture.requests().len(), 1);
 }
