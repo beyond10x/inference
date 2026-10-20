@@ -256,7 +256,8 @@ fn run(scripted: &Scripted, inputs: &[&str]) -> Ran {
     })
     .expect("one is positive");
     let (declaration, planned, [source_id, model_id, sink_id]) = planned(&adapter);
-    let generator = Generator::new(adapter, Arc::new(scripted.clone()));
+    let generator = Generator::new(adapter, Arc::new(scripted.clone()))
+        .expect("the model declares what the adapter claims");
     let run_id = RunId::generate();
     let log = RunLog::new();
     let source = TextSource::new(run_id, inputs.iter().copied(), log.clone());

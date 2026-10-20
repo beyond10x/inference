@@ -68,9 +68,10 @@ pub enum ToolOutcome {
 
 impl ToolOutcome {
     /// The output of the `llm` tool result: the result itself, `{"failure": <ToolFailure>}` or
-    /// `{"rejected": <RejectionReason>}`, each serialized under its ESS names. An `llm` tool
-    /// result says only whether it failed, not whether the call failed or was rejected, an `llm`
-    /// gap; the kind travels in the output until `llm` carries it.
+    /// `{"rejected": <RejectionReason>}`, each serialized under its ESS names. A call rejected
+    /// before it ran is sent as `llm` sends every such call, a failed result whose output is the
+    /// caller's own text of the reason; no `llm` wire carries a separate rejected state, and the
+    /// tools domain keeps `ToolCallFailed` and `ToolCallRejected` apart.
     #[must_use]
     pub fn output(&self) -> Value {
         match self {
@@ -80,7 +81,8 @@ impl ToolOutcome {
         }
     }
 
-    /// Whether the `llm` tool result is a failure: the call failed or was rejected.
+    /// Whether the `llm` tool result is a failure: the call failed or was rejected, as `llm`
+    /// sends both.
     #[must_use]
     pub const fn failed(&self) -> bool {
         !matches!(self, Self::Result(_))
