@@ -1,0 +1,28 @@
+{
+  "hardware": "any host of the test suite",
+  "languages": ["en"],
+  "audio_formats": [{"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1}],
+  "evidence": [
+    {
+      "capability": "incremental_input",
+      "tests": [
+        "stt::incremental_emits_a_hypothesis_before_end_of_input_and_batch_nothing",
+        "stt::each_configuration_claims_exactly_what_it_was_observed_to_do"
+      ]
+    },
+    {
+      "capability": "output_streaming",
+      "tests": [
+        "stt::incremental_emits_a_hypothesis_before_end_of_input_and_batch_nothing",
+        "stt::each_configuration_claims_exactly_what_it_was_observed_to_do"
+      ]
+    }
+  ],
+  "resource_profile": {
+    "peak_resident_memory_mib": 0,
+    "load_time_ms": 0,
+    "cpu_real_time_factor_milli": 0,
+    "gpu_memory_mib": null
+  },
+  "adapter_revision": "0.4.0"
+}

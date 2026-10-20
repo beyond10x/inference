@@ -26,13 +26,13 @@ inference-stt = { path = "../inference-stt", optional = true }
 inference-text = { path = "../inference-text" }
 inference-tools = { path = "../inference-tools" }
 inference-tts = { path = "../inference-tts", optional = true }
+serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 ess-conformance = { git = "https://github.com/beyond10x/ess", tag = "0.60.0" }
 ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.60.0" }
 serde.workspace = true
-serde_json.workspace = true
 
 [[test]]
 name = "conform"

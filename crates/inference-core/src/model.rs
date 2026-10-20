@@ -3,13 +3,17 @@
 //!
 //! A [`Model`] is a trained inference artifact or hosted endpoint. An [`Adapter`] is the concrete
 //! implementation that connects one model or backend to the framework's contracts; it references
-//! its model by [`ModelId`], and a model stands on its own. Both are created only through their
-//! declaring commands, [`Model::declare`] and [`Adapter::declare`], which return the entity and the
-//! event the declaration emits. Serialized names are the ESS names.
+//! its model by [`ModelId`], and a model stands on its own. A [`CapabilityRecord`] is the
+//! machine-readable profile of one adapter on one hardware target: the evidence for each claimed
+//! capability and the resource profile measured there. Each is created only through its
+//! declaring command, [`Model::declare`], [`Adapter::declare`] and [`CapabilityRecord::declare`],
+//! which return the entity and the event the declaration emits. Serialized names are the ESS
+//! names.
 
 use std::error::Error;
 use std::fmt;
 
+use inference_audio::AudioFormat;
 use serde::{Deserialize, Serialize};
 
 use crate::id::uuid_newtype;
@@ -21,6 +25,10 @@ uuid_newtype!(
 uuid_newtype!(
     /// `inference.model.AdapterId`: identifies an [`Adapter`].
     AdapterId
+);
+uuid_newtype!(
+    /// `inference.model.CapabilityRecordId`: identifies a [`CapabilityRecord`].
+    CapabilityRecordId
 );
 
 /// `inference.model.Capability`: the core streaming capability matrix. An adapter claims each one
@@ -418,5 +426,177 @@ impl Adapter {
     #[must_use]
     pub const fn max_concurrency(&self) -> i64 {
         self.max_concurrency
+    }
+}
+
+/// `inference.model.CapabilityEvidence`: the evidence for one claimed capability, the names of
+/// the conformance tests that observed it. A claim is verified by its evidence, never by the claim
+/// itself. A field the specification does not declare is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityEvidence {
+    pub capability: Capability,
+    pub tests: Vec<String>,
+}
+
+/// `inference.model.ResourceProfile`: what an adapter needs on one hardware target, measured
+/// there and promised nowhere else. Peak resident memory in MiB, model load time in
+/// milliseconds, the real-time factor on CPU in thousandths (250: one second of input takes a
+/// quarter of a second), and GPU memory in MiB, `None` when it runs without a GPU, which the wire
+/// carries as `null` or leaves out. A field the specification does not declare is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceProfile {
+    pub peak_resident_memory_mib: i64,
+    pub load_time_ms: i64,
+    pub cpu_real_time_factor_milli: i64,
+    #[serde(default)]
+    pub gpu_memory_mib: Option<i64>,
+}
+
+/// `inference.model.DeclareCapabilityRecord`: the input that declares a [`CapabilityRecord`] of
+/// the adapter `adapter_id` and the model `model_id` on the hardware target `hardware`. A field
+/// the specification does not declare is refused, so that a hand-written record file with a
+/// misspelt field is not read as one without it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclareCapabilityRecord {
+    pub adapter_id: AdapterId,
+    pub model_id: ModelId,
+    pub hardware: String,
+    pub languages: Vec<String>,
+    pub audio_formats: Vec<AudioFormat>,
+    pub evidence: Vec<CapabilityEvidence>,
+    pub resource_profile: ResourceProfile,
+    pub adapter_revision: String,
+}
+
+/// `inference.model.CapabilityRecordDeclared`: a capability record was declared for an adapter,
+/// its model and a hardware target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityRecordDeclared {
+    pub capability_record_id: CapabilityRecordId,
+    pub adapter_id: AdapterId,
+    pub model_id: ModelId,
+    pub hardware: String,
+}
+
+/// `inference.model.AdapterNotFound`: no adapter carries the identity a record named; nothing was
+/// declared. `adapter_id` is the identity that was sent. It is the error of
+/// `DeclareCapabilityRecord`'s `unknown-adapter` outcome, which only a store holding the declared
+/// adapters can decide; [`CapabilityRecord::declare`] never returns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterNotFound {
+    pub adapter_id: AdapterId,
+}
+
+impl fmt::Display for AdapterNotFound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "no adapter carries the identity {}", self.adapter_id)
+    }
+}
+
+impl Error for AdapterNotFound {}
+
+/// `inference.model.CapabilityRecord`: the machine-readable profile of one adapter on one
+/// hardware target. It references its [`Adapter`] by `adapter_id` and its [`Model`] by
+/// `model_id`; the model's source, checkpoint, hashes and licences stay on the model. A second
+/// hardware target is a second record. Binding a node does not require one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapabilityRecord {
+    capability_record_id: CapabilityRecordId,
+    adapter_id: AdapterId,
+    model_id: ModelId,
+    hardware: String,
+    languages: Vec<String>,
+    audio_formats: Vec<AudioFormat>,
+    evidence: Vec<CapabilityEvidence>,
+    resource_profile: ResourceProfile,
+    adapter_revision: String,
+}
+
+impl CapabilityRecord {
+    /// Runs `inference.model.DeclareCapabilityRecord`: generates a [`CapabilityRecordId`] and
+    /// returns the record with the input's fields and the [`CapabilityRecordDeclared`] event.
+    #[must_use]
+    pub fn declare(input: DeclareCapabilityRecord) -> (Self, CapabilityRecordDeclared) {
+        Self::declare_as(CapabilityRecordId::generate(), input)
+    }
+
+    /// Runs `inference.model.DeclareCapabilityRecord` under `capability_record_id` instead of a
+    /// generated one, and otherwise as [`CapabilityRecord::declare`]. It is for a store that
+    /// assigns the identities itself, such as the counter of `inference-testkit`, whose runs must
+    /// report the same identities each time.
+    #[must_use]
+    pub fn declare_as(
+        capability_record_id: CapabilityRecordId,
+        input: DeclareCapabilityRecord,
+    ) -> (Self, CapabilityRecordDeclared) {
+        let event = CapabilityRecordDeclared {
+            capability_record_id,
+            adapter_id: input.adapter_id,
+            model_id: input.model_id,
+            hardware: input.hardware.clone(),
+        };
+        let record = Self {
+            capability_record_id,
+            adapter_id: input.adapter_id,
+            model_id: input.model_id,
+            hardware: input.hardware,
+            languages: input.languages,
+            audio_formats: input.audio_formats,
+            evidence: input.evidence,
+            resource_profile: input.resource_profile,
+            adapter_revision: input.adapter_revision,
+        };
+        (record, event)
+    }
+
+    #[must_use]
+    pub const fn capability_record_id(&self) -> CapabilityRecordId {
+        self.capability_record_id
+    }
+
+    #[must_use]
+    pub const fn adapter_id(&self) -> AdapterId {
+        self.adapter_id
+    }
+
+    #[must_use]
+    pub const fn model_id(&self) -> ModelId {
+        self.model_id
+    }
+
+    /// The name of the hardware target the record was measured on.
+    #[must_use]
+    pub fn hardware(&self) -> &str {
+        &self.hardware
+    }
+
+    #[must_use]
+    pub fn languages(&self) -> &[String] {
+        &self.languages
+    }
+
+    #[must_use]
+    pub fn audio_formats(&self) -> &[AudioFormat] {
+        &self.audio_formats
+    }
+
+    /// For each claimed capability, the conformance tests that observed it.
+    #[must_use]
+    pub fn evidence(&self) -> &[CapabilityEvidence] {
+        &self.evidence
+    }
+
+    #[must_use]
+    pub const fn resource_profile(&self) -> ResourceProfile {
+        self.resource_profile
+    }
+
+    /// The revision of the adapter that was measured.
+    #[must_use]
+    pub fn adapter_revision(&self) -> &str {
+        &self.adapter_revision
     }
 }
