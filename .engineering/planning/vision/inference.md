@@ -5,12 +5,12 @@ kind: vision
 status: draft
 title: 'inference: a reusable Rust inference ecosystem'
 summary: Six objectives O1 to O6 the epics and stories serve, from the design's final recommendation and goals.
-revision: 1
+revision: 3
 ---
 ## Vision
 
 A reusable Rust inference ecosystem in which voice agents are one kind of graph assembled from
-independent, interoperable building blocks (`docs/design/inference.md:1276`). Contracts first,
+independent, interoperable building blocks (`docs/design/inference.md:1275`). Contracts first,
 adapters below them, pipelines of typed nodes, a runtime that owns execution, an optional session
 facade above. Self-hosted and open-source first.
 
@@ -30,6 +30,8 @@ Each objective names the goals of `product-requirements:inference` it carries. A
 
 ## Boundaries
 
-The library ships no binary, server or CLI; its core carries no concrete implementation; other
-repositories of the organization are treated as absent until an adapter to one is planned (owner,
-2026-10-18).
+The library ships no binary, server or CLI; its core carries no concrete implementation. Other
+repositories of the organization are dependencies only where `AGENTS.md` names them: `inference-llm`
+wraps the `llm` repository's model contract at a release tag (owner decision, 2026-10-20), and
+adapters may use the `secrets` library for local credential lookup (owner decision, 2026-10-19).
+Every other repository is treated as absent until an adapter to it is planned (owner, 2026-10-18).
