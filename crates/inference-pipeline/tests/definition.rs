@@ -442,12 +442,32 @@ fn a_descriptor_is_declared_once_per_kind() {
         })
     );
     assert_eq!(descriptors, before, "a refused declaration changes nothing");
-    let all = NodeDescriptors::of(descriptors::all()).expect("four kinds");
+    let all = NodeDescriptors::of(descriptors::all()).expect("five kinds");
     assert_eq!(
         all.iter()
             .map(|descriptor| descriptor.kind().as_str().to_owned())
             .collect::<Vec<_>>(),
-        ["vad", "turn_policy", "tool_authority", "tool_executor"]
+        [
+            "vad",
+            "turn_policy",
+            "tool_authority",
+            "tool_executor",
+            "commit_gate"
+        ]
+    );
+    let gate = all
+        .descriptor(&NodeKind::new(descriptors::COMMIT_GATE))
+        .expect("declared");
+    assert_eq!(gate.role(), NodeRole::Policy);
+    assert_eq!(
+        gate.port("input").map(|port| port.provisional_allowed),
+        Some(true),
+        "the gate takes what is not committed, to hold it back"
+    );
+    assert_eq!(
+        gate.port("turns").map(|port| port.essentiality),
+        Some(Essentiality::Optional),
+        "the output gate has no turns lane"
     );
     let authority = all
         .descriptor(&NodeKind::new(descriptors::TOOL_AUTHORITY))

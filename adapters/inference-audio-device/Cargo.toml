@@ -10,16 +10,21 @@ repository.workspace = true
 [features]
 default = ["device"]
 device = ["dep:cpal"]
-pipeline = ["dep:inference-core", "dep:inference-pipeline"]
+pipeline = ["dep:inference-core", "dep:inference-pipeline", "dep:inference-tts"]
 
 [dependencies]
 cpal = { version = "0.18.2", optional = true }
 inference-audio = { path = "../../crates/inference-audio" }
 inference-core = { path = "../../crates/inference-core", optional = true }
 inference-pipeline = { path = "../../crates/inference-pipeline", optional = true }
+inference-tts = { path = "../../crates/inference-tts", optional = true }
 
 [[test]]
 name = "nodes"
+required-features = ["pipeline"]
+
+[[test]]
+name = "acknowledging"
 required-features = ["pipeline"]
 
 [[test]]

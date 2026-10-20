@@ -27,7 +27,9 @@
 //! activity and turn events among them, and control events. [`VoiceCascade::nodes`] makes the
 //! implementations of one run's nodes and the handles a test reads them through. The commit gate,
 //! the acknowledging audio sink and the real adapters are not here: they belong to a local voice
-//! cascade, whose adapters replace the mocks.
+//! cascade, whose adapters replace the mocks. [`speech`] holds the TTS node of such a cascade,
+//! over any synthesiser, which sends the synthesis's own frames to the sink and acknowledges
+//! playback only with the sink's receipts.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -61,6 +63,10 @@ use crate::session::{SessionEvent, SessionPayload, stream_session_event};
 use crate::stream::{StreamDomain, StreamEvent, TurnMoveError};
 use crate::stt::{FanOut, Heard, MockRecogniser, SttHandle, SttNode, SttPayload, SttPorts};
 use crate::tts::{MockSynthesiser, Spoken, TtsHandle, TtsNode, TtsPayload};
+
+/// The TTS node of a cascade whose playback an acknowledging sink confirms: the synthesis's
+/// frames out, the sink's receipts in.
+pub mod speech;
 
 /// The name of the ingress the utterance's frames enter by.
 pub const AUDIO_INGRESS: &str = "audio";
