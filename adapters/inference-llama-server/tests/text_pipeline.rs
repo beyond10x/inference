@@ -23,7 +23,7 @@ use common::{DELTAS, Fixture, SERVED_MODEL};
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, RunId, StreamId};
-use inference_core::model::{Adapter, AdapterId, Capability, Model};
+use inference_core::model::{Adapter, AdapterId, Capability, Locality, Model};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_llama_server::{Config, LlamaServer, declare_adapter, declare_model};
 use inference_llm::llm_core::{Item, TurnRequest};
@@ -312,7 +312,7 @@ fn planned(adapter: &Adapter) -> (Declaration, PlannedPipeline, [NodeId; 3]) {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
-        admitted: Vec::new(),
+        admitted: vec![Locality::LocalWorker],
     })
     .expect("a row of the table");
     let profile_id = profile.profile_id();
