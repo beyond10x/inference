@@ -53,8 +53,9 @@ pub mod stt;
 #[cfg(feature = "llm")]
 pub mod llm;
 
-/// The scripted mock synthesiser of the TTS contract, in four capability configurations, and a
-/// sink double that acknowledges playback.
+/// The scripted mock synthesiser of the TTS contract, in four capability configurations, a sink
+/// double that acknowledges playback, and the backend-neutral checks of the TTS adapter exit
+/// criteria that an adapter crate runs against its own synthesiser.
 #[cfg(feature = "tts")]
 pub mod tts;
 
