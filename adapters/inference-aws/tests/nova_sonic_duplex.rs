@@ -1012,6 +1012,129 @@ fn usage_records(events: &[SessionEvent]) -> Vec<&UsageRecorded> {
         .collect()
 }
 
+/// The replay reports the user turn's 50 input speech tokens as its fifth event, before any
+/// response begins. Whatever ends the session then (a stall, a service error, a closed transport)
+/// records them as usage of the session, naming no response, just before `SpeechSessionFailed`.
+#[test]
+fn input_usage_no_response_took_is_recorded_before_the_sessions_failure() {
+    let faults = [
+        Faults {
+            stall_after: Some(5),
+            ..Faults::default()
+        },
+        Faults {
+            error_after: Some((
+                5,
+                ServiceError::new(ServiceErrorKind::ModelStreamError, "it failed"),
+            )),
+            ..Faults::default()
+        },
+        Faults {
+            close_after: Some(5),
+            ..Faults::default()
+        },
+    ];
+    for fault in faults {
+        let mut replay = Replay::new(vec![turn("goodbye", "Goodbye")]);
+        replay.faults = fault.clone();
+        let mut caller = config();
+        caller.idle_limit = Duration::from_millis(300);
+        let mut session = model(&replay).open(caller).expect("opens");
+        speak(&mut session, 0, 2);
+        let events = until(&mut session, |event| {
+            matches!(event, SessionEvent::SpeechSessionFailed(_))
+        });
+        assert!(created(&events).is_empty(), "{fault:?}: {events:#?}");
+        let recorded = usage_records(&events);
+        assert_eq!(recorded.len(), 1, "{fault:?}: {events:#?}");
+        assert!(
+            matches!(
+                &events[events.len() - 2],
+                SessionEvent::UsageRecorded(record) if record.response_id.is_none()
+            ),
+            "{fault:?}: {events:#?}"
+        );
+        assert_eq!(
+            recorded[0].quantities,
+            vec![
+                Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
+                Quantity::provider_reported(QuantityKind::InputAudioTokens, 50),
+            ],
+            "{fault:?}"
+        );
+        assert_eq!(
+            recorded[0].speech_session_id,
+            Some(session.ledger().session().session_id())
+        );
+    }
+}
+
+/// A usage event that leaves a count out reports nothing of it: the response's record has it
+/// unknown, never 0. Left out of every delta of a direction, so is input reported after the
+/// response ended, for a next response that never begins: the session's end records it as
+/// unknown, for the session.
+#[test]
+fn a_count_nova_sonic_leaves_out_is_recorded_unknown_never_zero() {
+    let complete = |unknown: QuantityKind| {
+        [
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
+            Quantity::provider_reported(QuantityKind::InputAudioTokens, 50),
+            Quantity::unknown(QuantityKind::CachedInputTokens),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 8),
+            Quantity::provider_reported(QuantityKind::OutputAudioTokens, 30),
+            Quantity::measured(QuantityKind::Requests, 1),
+        ]
+        .map(|quantity| {
+            if quantity.kind() == unknown {
+                Quantity::unknown(unknown)
+            } else {
+                quantity
+            }
+        })
+        .to_vec()
+    };
+    for (omits, unknown, session_record) in [
+        (
+            ("output", "textTokens"),
+            QuantityKind::OutputTextTokens,
+            None,
+        ),
+        (
+            ("input", "speechTokens"),
+            QuantityKind::InputAudioTokens,
+            Some(vec![
+                Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
+                Quantity::unknown(QuantityKind::InputAudioTokens),
+            ]),
+        ),
+    ] {
+        let mut replay = Replay::new(vec![turn("hi", "Hello")]);
+        replay.faults = Faults {
+            usage_omits: Some(omits),
+            ..Faults::default()
+        };
+        let mut session = model(&replay).open(config()).expect("opens");
+        speak(&mut session, 0, 2);
+        let mut events = drain(&mut session);
+        let response = created(&events)[0];
+        session.close().expect("open");
+        events.extend(drain(&mut session));
+        let recorded = usage_records(&events);
+        let of_response: Vec<_> = recorded
+            .iter()
+            .filter(|record| record.response_id == Some(response))
+            .collect();
+        assert_eq!(of_response.len(), 1, "{omits:?}: {events:#?}");
+        assert_eq!(of_response[0].quantities, complete(unknown), "{omits:?}");
+        let of_session: Vec<_> = recorded
+            .iter()
+            .filter(|record| record.response_id.is_none())
+            .map(|record| record.quantities.clone())
+            .collect();
+        assert_eq!(of_session, Vec::from_iter(session_record), "{omits:?}");
+    }
+}
+
 /// Closing cancels the response in progress, ends the prompt and the session on the wire, and
 /// nothing the provider sends after it is delivered.
 #[test]

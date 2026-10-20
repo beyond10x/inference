@@ -268,34 +268,78 @@ fn usage_is_typed() {
     assert_eq!(
         usage.delta.input,
         TokenCounts {
-            speech: 10,
-            text: 2
+            speech: Some(10),
+            text: Some(2)
         }
     );
     assert_eq!(
         usage.delta.output,
         TokenCounts {
-            speech: 30,
-            text: 4
+            speech: Some(30),
+            text: Some(4)
         }
     );
     assert_eq!(
         usage.total.input,
         TokenCounts {
-            speech: 110,
-            text: 52
+            speech: Some(110),
+            text: Some(52)
         }
     );
     assert_eq!(
         usage.total.output,
         TokenCounts {
-            speech: 130,
-            text: 14
+            speech: Some(130),
+            text: Some(14)
         }
     );
-    assert_eq!(usage.total_input_tokens, 162);
-    assert_eq!(usage.total_output_tokens, 144);
-    assert_eq!(usage.total_tokens, 306);
+    assert_eq!(usage.total_input_tokens, Some(162));
+    assert_eq!(usage.total_output_tokens, Some(144));
+    assert_eq!(usage.total_tokens, Some(306));
+}
+
+/// Section "1. UsageEvent", with counts left out: a count the event does not carry is absent,
+/// never 0, so a meter records it as unknown.
+#[test]
+fn a_count_the_usage_event_leaves_out_is_absent_not_zero() {
+    let mut decoder = Decoder::default();
+    let event = decode(
+        &mut decoder,
+        json!({"event": {"usageEvent": with_ids(json!({
+            "details": {
+                "delta": {
+                    "input": {"speechTokens": 10},
+                    "output": {"textTokens": 4}
+                },
+                "total": {
+                    "input": {"speechTokens": 110, "textTokens": 52}
+                }
+            },
+            "totalInputTokens": 162
+        }))}}),
+    );
+    let OutputEvent::Usage(usage) = event else {
+        panic!("expected usage, got {event:?}");
+    };
+    assert_eq!(
+        usage.delta.input,
+        TokenCounts {
+            speech: Some(10),
+            text: None
+        }
+    );
+    assert_eq!(
+        usage.delta.output,
+        TokenCounts {
+            speech: None,
+            text: Some(4)
+        }
+    );
+    assert_eq!(usage.total.output, TokenCounts::default());
+    assert_eq!(usage.total.output.speech, None);
+    assert_eq!(usage.total_input_tokens, Some(162));
+    assert_eq!(usage.total_output_tokens, None);
+    assert_eq!(usage.total_tokens, None);
 }
 
 /// Section "6. CompletionEndEvent".

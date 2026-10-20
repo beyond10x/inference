@@ -88,6 +88,8 @@ impl Liveness {
 ///   recorded with every token count unknown.
 /// * A transcription's usage is recorded when reported, and so is usage of the whole session
 ///   ([`SessionLedger::session_usage`]); neither names a response.
+/// * Usage no response holds yet ([`SessionLedger::hold_usage`]) is recorded at the session's
+///   end, before its end events, as usage of the session naming no response.
 ///
 /// Records carry wall-clock times: the ledger reads the system clock once, at opening, and
 /// places every instant it is given relative to it, so a mock running a clock of its own records
@@ -105,6 +107,8 @@ pub struct SessionLedger {
     usage: Vec<Option<ResponseUsage>>,
     meters: Vec<Meter>,
     records: Vec<UsageRecord>,
+    /// Usage the provider reported that no response holds yet ([`SessionLedger::hold_usage`]).
+    held: Vec<Quantity>,
     calls: Vec<SpeechToolCall>,
     liveness: Liveness,
     requested: bool,
@@ -214,6 +218,7 @@ impl SessionLedger {
             usage: Vec::new(),
             meters: Vec::new(),
             records: Vec::new(),
+            held: Vec::new(),
             calls: Vec::new(),
             liveness: Liveness::new(config.idle_limit, now),
             requested: false,
@@ -454,7 +459,8 @@ impl SessionLedger {
 
     /// The caller closes the session: `inference.duplex.CloseSpeechSession`. The response in
     /// progress is cancelled first, its `ResponseCancelled` just before `SpeechSessionClosed`;
-    /// every response not yet recorded is recorded before both.
+    /// every response not yet recorded, and any usage held for no response, is recorded before
+    /// both.
     ///
     /// # Errors
     ///
@@ -475,7 +481,7 @@ impl SessionLedger {
     /// The session fails with `failure`: `inference.duplex.FailSpeechSession`, for a closed
     /// transport, an error the provider reported or a stall. The response in progress fails with
     /// it first, its `ResponseFailed` just before `SpeechSessionFailed`; every response not yet
-    /// recorded is recorded before both.
+    /// recorded, and any usage held for no response, is recorded before both.
     ///
     /// # Errors
     ///
@@ -851,6 +857,22 @@ impl SessionLedger {
         Ok(())
     }
 
+    /// The provider reported usage that no response holds yet, as `quantities`, built from its
+    /// own fields: input reported before the response it counts toward begins, for one. They
+    /// replace what was held before, and an empty list holds nothing; an adapter releases them
+    /// so once a response takes them. What is held when the session ends, by a close, a failure
+    /// or a stall, is recorded as usage of the session, naming no response, before the end
+    /// events; held after the end, it is recorded at once.
+    pub fn hold_usage(&mut self, quantities: Vec<Quantity>) {
+        if self.session.require_open().is_err() {
+            if !quantities.is_empty() {
+                self.record_of_session(quantities, true, self.opened.0, self.latest);
+            }
+            return;
+        }
+        self.held = quantities;
+    }
+
     /// Every usage record of the session, in the order they were recorded.
     #[must_use]
     pub fn usage_records(&self) -> &[UsageRecord] {
@@ -892,6 +914,10 @@ impl SessionLedger {
         self.settle_ended();
         for meter in &mut self.meters {
             meter.settled = true;
+        }
+        let held = std::mem::take(&mut self.held);
+        if !held.is_empty() {
+            self.record_of_session(held, true, self.opened.0, self.latest);
         }
     }
 
