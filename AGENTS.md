@@ -9,8 +9,7 @@ on this repository. `README.md` is for people.
 |---|---|
 | `docs/design/inference.md` | the design (v0.2, 2026-10-16): vocabulary, contracts, streaming semantics, graph, runtime, roadmap, open questions |
 | `docs/design/review-2026-10-18.md` | the review of that design: findings, what the plan does differently, and why |
-| `docs/handoff/2026-10-19-implementation.md` | where the implementation waves stopped after 0.4.0: what is implemented, the stories left in order, the facts a next session needs |
-| `docs/handoff/2026-10-19-planning.md` | where the planning session stopped: what is in the store, what is left (un-reviewed post-round fixes, open blockers) |
+| `docs/handoff/2026-10-19-implementation.md`, `docs/handoff/2026-10-19-planning.md` | historical snapshots from 2026-10-19, before 0.5.0; the planning store and `CHANGELOG.md` are current, these are not |
 | `aep plan artifact list` | the plan: epics, stories, blockers and their status |
 | `aep plan artifact waves --kind story --status draft` | what can be worked next |
 
