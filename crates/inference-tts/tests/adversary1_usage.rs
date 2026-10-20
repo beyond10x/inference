@@ -3,7 +3,7 @@
 //! milliseconds long reports exactly that many, whatever frame size carried it, and frames shorter
 //! than a millisecond add up; characters are Unicode scalar values, not graphemes; playback and
 //! discard stay open after the record and change none of its counts; a failed backend call that
-//! left a taken segment Queued is recorded once that segment is discarded, not final; and the
+//! left a taken segment Queued is recorded with it still Queued, not final; and the
 //! contract places the record on no run, node, session, speech session or response.
 
 use std::num::{NonZeroU16, NonZeroU32};
@@ -226,7 +226,7 @@ fn playback_and_discard_stay_open_after_the_record_and_change_none_of_its_counts
 }
 
 #[test]
-fn a_failed_backend_call_with_a_taken_segment_left_queued_is_recorded_once_it_is_discarded() {
+fn a_failed_backend_call_with_a_taken_segment_left_queued_is_recorded_without_its_discard() {
     let mut output = SynthesisOutput::start(&adapter(vec![Capability::OutputStreaming]));
     let segment = committed("Cut short.");
     let id = segment.segment_id();
@@ -236,16 +236,22 @@ fn a_failed_backend_call_with_a_taken_segment_left_queued_is_recorded_once_it_is
     output
         .audio(id, frame_at(16_000, 160))
         .expect("output streaming is claimed");
-    output.mark_failed();
     assert_eq!(
         output.usage(),
         Err(UsageRefused::SegmentNotSynthesized(SegmentNotSynthesized {
             segment_id: id
         })),
-        "a failed call is not recorded while its segment is Queued"
+        "a call that has not failed is not recorded while its segment is Queued"
     );
-    output.discard(id).expect("a Queued segment is discarded");
-    let recorded = recorded(output.usage().expect("no segment is Queued"));
+    output.mark_failed();
+    let recorded = recorded(
+        output
+            .usage()
+            .expect("a failed call is recorded with its taken segment still Queued"),
+    );
+    output
+        .discard(id)
+        .expect("a Queued segment is discarded after the record");
     assert!(!recorded.r#final);
     assert_eq!(
         quantity(&recorded, QuantityKind::InputCharacters),

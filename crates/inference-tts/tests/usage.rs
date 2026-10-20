@@ -385,3 +385,84 @@ fn a_usage_event_names_no_segment() {
     assert_eq!(event.segment_id(), None);
     assert_eq!(event.name(), UsageRecorded::KIND);
 }
+
+#[test]
+fn a_failed_backend_call_is_recorded_with_its_taken_segments_still_queued_and_ends_the_synthesis() {
+    let mut output = SynthesisOutput::start(&adapter(vec![Capability::OutputStreaming]));
+    let spoken = committed(TWELVE);
+    let spoken_id = spoken.segment_id();
+    let cut = committed(THIRTY);
+    let cut_id = cut.segment_id();
+    output.offer(spoken).expect("queued");
+    output.offer(cut).expect("queued");
+    output.end_utterance().expect("the utterance ends once");
+    output.take_input().expect("the utterance has ended");
+    output
+        .complete(spoken_id, vec![frame()])
+        .expect("a taken Queued segment completes");
+    output
+        .audio(cut_id, frame())
+        .expect("output streaming is claimed");
+    assert_eq!(
+        output.usage(),
+        Err(UsageRefused::SegmentNotSynthesized(SegmentNotSynthesized {
+            segment_id: cut_id,
+        })),
+        "a call that has not failed waits for its last segment"
+    );
+
+    output.mark_failed();
+    let recorded = recorded(
+        output
+            .usage()
+            .expect("a failed call will not synthesize the rest"),
+    );
+    assert!(!recorded.r#final);
+    assert_eq!(
+        quantity(&recorded, QuantityKind::InputCharacters),
+        Quantity::measured(QuantityKind::InputCharacters, 42),
+        "the text of a taken segment left Queued counts"
+    );
+    assert_eq!(
+        quantity(&recorded, QuantityKind::OutputAudioMs),
+        Quantity::measured(QuantityKind::OutputAudioMs, 20),
+        "the audio emitted counts, and no more"
+    );
+    assert_eq!(
+        output.audio(cut_id, frame()),
+        Err(AudioRefused::SynthesisEnded(SynthesisEnded))
+    );
+    assert_eq!(
+        output.complete(cut_id, Vec::new()),
+        Err(CompletionRefused::SynthesisEnded(SynthesisEnded))
+    );
+    assert_eq!(
+        output.usage(),
+        Err(UsageRefused::UsageAlreadyRecorded(UsageAlreadyRecorded))
+    );
+    assert_eq!(output.output_audio_ms(), 20);
+}
+
+#[test]
+fn a_failed_backend_call_still_waits_for_a_segment_it_has_not_taken() {
+    let mut output = SynthesisOutput::start(&adapter(Vec::new()));
+    let segment = committed(TWELVE);
+    let id = segment.segment_id();
+    output.offer(segment).expect("queued");
+    output.end_utterance().expect("the utterance ends once");
+    output.mark_failed();
+    assert_eq!(
+        output.usage(),
+        Err(UsageRefused::SegmentNotSynthesized(SegmentNotSynthesized {
+            segment_id: id,
+        })),
+        "a segment never taken is the implementation's to take"
+    );
+    output.take_input().expect("the utterance has ended");
+    let recorded = recorded(output.usage().expect("a taken segment of a failed call"));
+    assert!(!recorded.r#final);
+    assert_eq!(
+        quantity(&recorded, QuantityKind::InputCharacters),
+        Quantity::measured(QuantityKind::InputCharacters, 12)
+    );
+}

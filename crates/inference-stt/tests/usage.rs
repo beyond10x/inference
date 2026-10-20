@@ -351,3 +351,51 @@ fn a_failed_backend_call_records_what_was_measured_with_counts_not_final() {
         Quantity::measured(QuantityKind::Requests, 1)
     );
 }
+
+#[test]
+fn a_failed_backend_call_is_recorded_with_a_span_not_committed_and_ends_the_recognition() {
+    let mut output = TranscriptOutput::start(&adapter(Vec::new()), request());
+    output
+        .offer(frame(0, 16_000, 16_000, 1))
+        .expect("input has not ended");
+    output.end_input().expect("input ends once");
+    let open = output.hypothesis("cut".to_owned()).expect("a span");
+    let open = open.payload.span_id().expect("a span event");
+    assert_eq!(
+        output.usage().map(|_| ()),
+        Err(UsageRefused::SpanNotCommitted(SpanNotCommitted {
+            span_id: open
+        })),
+        "a call that has not failed waits for its last commit"
+    );
+
+    output.mark_failed();
+    let envelope = output
+        .usage()
+        .expect("a failed call will not commit the span");
+    assert_eq!(envelope.sequence, 2, "right after the hypothesis");
+    let record = recorded(&envelope.payload);
+    assert!(!record.r#final);
+    assert_eq!(
+        quantity(record, QuantityKind::InputAudioMs),
+        Quantity::measured(QuantityKind::InputAudioMs, 1_000)
+    );
+    assert_eq!(
+        output.commit(open).map(|_| ()),
+        Err(CommitRefused::RecognitionEnded(RecognitionEnded)),
+        "the span stays uncommitted"
+    );
+    assert_eq!(
+        output
+            .revise(ReviseSpan {
+                span_id: open,
+                text: "rewritten".to_owned(),
+            })
+            .map(|_| ()),
+        Err(RevisionRefused::RecognitionEnded(RecognitionEnded))
+    );
+    assert_eq!(
+        output.usage().map(|_| ()),
+        Err(UsageRefused::UsageAlreadyRecorded(UsageAlreadyRecorded))
+    );
+}
