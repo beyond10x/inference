@@ -83,6 +83,7 @@ fn names(events: &[GenerationEvent]) -> Vec<&'static str> {
             GenerationEvent::Started(_) => "StartGeneration",
             GenerationEvent::TextDelta(_) => "EmitTextDelta",
             GenerationEvent::SegmentCommitted(_) => "CommitSegment",
+            GenerationEvent::Usage(_) => "RecordUsage",
             GenerationEvent::Completed(_) => "CompleteGeneration",
             GenerationEvent::Cancelled(..) => "CancelGeneration",
         })
@@ -219,7 +220,7 @@ fn a_loading_server_answering_503_cancels_the_generation_with_no_segment_and_kee
 
     assert_eq!(
         names(&events),
-        ["StartGeneration", "CancelGeneration"],
+        ["StartGeneration", "RecordUsage", "CancelGeneration"],
         "{events:?}"
     );
     let Some(GenerationEvent::Cancelled(cancelled, discarded)) = events.last() else {
@@ -252,6 +253,7 @@ fn a_stream_cut_after_one_delta_cancels_the_generation_discarding_that_segment()
             "StartGeneration",
             "EmitTextDelta",
             "CommitSegment",
+            "RecordUsage",
             "CancelGeneration"
         ],
         "{events:?}"
@@ -292,6 +294,7 @@ fn a_server_silent_past_the_idle_limit_cancels_the_generation_with_the_deadline_
             "StartGeneration",
             "EmitTextDelta",
             "CommitSegment",
+            "RecordUsage",
             "CancelGeneration"
         ],
         "{events:?}"

@@ -292,6 +292,9 @@ fn carry<P: SpeechPayload>(envelope: EventEnvelope<PipelinePayload>) -> EventEnv
         payload: match payload {
             PipelinePayload::Stream(event) => P::stream(event),
             PipelinePayload::Control(kind) => P::from(kind),
+            PipelinePayload::Usage(_) => {
+                unreachable!("the emitter of this node wraps no usage record")
+            }
         },
     }
 }

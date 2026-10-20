@@ -23,6 +23,11 @@ pub const TOOL_RESULT: &[u8] = include_bytes!("../fixtures/llama-server-b11752-t
 pub const TOOL_NAMELESS: &[u8] =
     include_bytes!("../fixtures/llama-server-b11752-tool-nameless.sse");
 
+/// The recorded text stream of the parent module without its usage chunk; see
+/// `fixtures/llama-server-b11752-text.txt`.
+pub const TEXT_NO_USAGE: &[u8] =
+    include_bytes!("../fixtures/llama-server-b11752-text-no-usage.sse");
+
 /// A server on a loopback port answering its n-th connection with the n-th body of its script,
 /// and every connection past the script with an HTTP 500.
 pub struct Scripted {
