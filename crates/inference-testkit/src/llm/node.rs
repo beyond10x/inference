@@ -17,8 +17,20 @@
 //! generation, which discards its unplayed segments, and sends nothing more, a cancel taken while
 //! a send waits for room ending the wait; scripted to emit after the cancel, it emits once into
 //! the cancelled generation, which refuses it as stale.
-//! Every event it emits is recorded in the run's [`RunLog`] in its envelope, the
-//! `GenerationCancelled` that is not sent among them. Each envelope of a generation's event names
+//! Given a usage port ([`ModelNode::with_usage`]), the output port its pipeline declares under the
+//! name `usage`, the node sends on the edge or exposure leaving it the usage record of each turn
+//! of its generation that ended, a failed one among them, as `inference-llm` delivers it after the
+//! events of that turn: an envelope of kind `inference.usage.UsageRecorded` on a stream of its
+//! own, naming the generation, whose record the node places on the run, itself as the node and
+//! the session its envelopes name, none. It passes the end of input on there too. The convention
+//! is the design's (684-688): a model node that emits usage declares one output port `usage`, and
+//! the edge or exposure leaving it uses an overload policy that never drops (`pause` or `fail`),
+//! so usage keeps the reliability of committed facts, never that of telemetry. A node with no edge
+//! leaving its usage port, or given none, or on a payload that carries no usage
+//! ([`ModelPayload::usage`]), sends no record.
+//!
+//! Every `inference.stream` event it emits is recorded in the run's [`RunLog`] in its envelope,
+//! the `GenerationCancelled` that is not sent among them. Each envelope of a generation's event names
 //! the generation, a `TextSegmentCommitted`'s too, whose payload names only its segment, so that
 //! a reader of the envelope, such as a session cutting an interrupted generation, cuts the
 //! segment with it. The node runs one generation per run, and only that generation's events name
@@ -95,7 +107,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{GenerationState, GenerationStateConflict};
-use inference_core::id::{NodeId, RunId, StreamId};
+use inference_core::id::{GenerationId, NodeId, RunId, SessionId, StreamId};
+use inference_core::usage::UsageRecorded;
 use inference_llm::llm_core::{CallId, TurnRequest};
 use inference_llm::tools::{ToolOutcome, tool_id, tool_spec};
 use inference_llm::{GenerationEvent, GenerationHandle, GenerationRequest, Generator};
@@ -116,16 +129,25 @@ pub enum Carried {
     Stream(StreamEvent),
     /// A step of a tool call.
     Tool(ToolCallUpdate),
+    /// The usage record of a model call.
+    Usage(UsageRecorded),
     /// A control event.
     Control(ControlKind),
 }
 
-/// The payload of the edges around a [`ModelNode`]: `inference.stream` events and control events,
-/// and, for a node given tools, the steps of tool calls, which such a payload also carries as a
-/// [`ToolPayload`].
+/// The payload of the edges around a [`ModelNode`]: `inference.stream` events, the usage records
+/// it sends on its `usage` port and control events, and, for a node given tools, the steps of tool
+/// calls, which such a payload also carries as a [`ToolPayload`].
 pub trait ModelPayload: From<ControlKind> + Send + 'static {
     /// The payload carrying `event`.
     fn stream(event: StreamEvent) -> Self;
+
+    /// The payload carrying the usage record `recorded`; none, the default, for a payload that
+    /// carries no usage, on whose edges the node sends no record.
+    fn usage(recorded: UsageRecorded) -> Option<Self> {
+        let _ = recorded;
+        None
+    }
 
     /// What the payload carries.
     fn carried(self) -> Carried;
@@ -136,9 +158,14 @@ impl ModelPayload for PipelinePayload {
         Self::Stream(event)
     }
 
+    fn usage(recorded: UsageRecorded) -> Option<Self> {
+        Some(Self::Usage(recorded))
+    }
+
     fn carried(self) -> Carried {
         match self {
             Self::Stream(event) => Carried::Stream(event),
+            Self::Usage(recorded) => Carried::Usage(recorded),
             Self::Control(kind) => Carried::Control(kind),
         }
     }
@@ -226,6 +253,7 @@ pub struct ModelNode<P = PipelinePayload> {
     late: Option<String>,
     tools: Option<Tools<P>>,
     turns: Option<PortId>,
+    usage: Option<PortId>,
     log: RunLog,
     node_id: Option<NodeId>,
     signal: Arc<Watched<Signal>>,
@@ -241,6 +269,7 @@ impl<P> fmt::Debug for ModelNode<P> {
             .field("late", &self.late)
             .field("tools", &self.tools)
             .field("turns", &self.turns)
+            .field("usage", &self.usage)
             .field("node_id", &self.node_id)
             .field("signal", &self.signal)
             .field("record", &self.record)
@@ -281,6 +310,7 @@ impl<P: ModelPayload> ModelNode<P> {
             late: None,
             tools: None,
             turns: None,
+            usage: None,
             log,
             node_id: None,
             signal: Arc::new(Watched::new(Signal::default())),
@@ -302,6 +332,15 @@ impl<P: ModelPayload> ModelNode<P> {
     #[must_use]
     pub const fn with_turns(mut self, turns: PortId) -> Self {
         self.turns = Some(turns);
+        self
+    }
+
+    /// The same node given a usage port, `usage`, the output port its pipeline declares under the
+    /// name `usage`: once an edge or exposure leaves it, the node sends there the usage record of
+    /// each turn of its generation that ended; see the module documentation.
+    #[must_use]
+    pub const fn with_usage(mut self, usage: PortId) -> Self {
+        self.usage = Some(usage);
         self
     }
 
@@ -351,12 +390,13 @@ impl<P: ModelPayload + ToolPayload> ModelNode<P> {
     }
 }
 
-/// What a started node takes: its identity, its input edges, its text output edge and, given
-/// tools, its `tool_call` output edge.
+/// What a started node takes: its identity, its input edges, its text output edge, given tools,
+/// its `tool_call` output edge and, given a usage port with an edge leaving it, that edge.
 type Shaped<P> = (
     NodeId,
     Vec<Receiving<P>>,
     inference_pipeline::NodeOutput<P>,
+    Option<inference_pipeline::NodeOutput<P>>,
     Option<inference_pipeline::NodeOutput<P>>,
 );
 
@@ -459,6 +499,66 @@ impl<P: From<ControlKind>> ToolLoop<P> {
     }
 }
 
+/// The `usage` port of a started node given one: the edge or exposure leaving it, on which the
+/// node sends the usage record of each turn as one stream of its own, numbered from 1.
+struct UsageOut<P> {
+    output: Box<dyn OutputEndpoint<P>>,
+    run_id: RunId,
+    producer: NodeId,
+    /// The session the node's envelopes name: none, as every envelope of the node names none.
+    session_id: Option<SessionId>,
+    port: String,
+    stream_id: StreamId,
+    sequence: i64,
+}
+
+impl<P: ModelPayload> UsageOut<P> {
+    /// The envelope of `recorded`, of a turn of the generation `generation_id`, placed on the
+    /// run, node and session the envelope names; none when the payload carries no usage.
+    fn envelope(
+        &mut self,
+        mut recorded: UsageRecorded,
+        generation_id: Option<GenerationId>,
+    ) -> Option<EventEnvelope<P>> {
+        recorded.run_id = Some(self.run_id);
+        recorded.node_id = Some(self.producer);
+        recorded.session_id = self.session_id;
+        let payload = P::usage(recorded)?;
+        Some(self.next(UsageRecorded::KIND.to_owned(), generation_id, payload))
+    }
+
+    /// The next envelope on the node's `usage` stream.
+    fn next(
+        &mut self,
+        kind: String,
+        generation_id: Option<GenerationId>,
+        payload: P,
+    ) -> EventEnvelope<P> {
+        self.sequence += 1;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_micros()).unwrap_or(i64::MAX)
+            });
+        EventEnvelope {
+            schema_version: 1,
+            event_id: EventId::generate(),
+            run_id: self.run_id,
+            session_id: self.session_id,
+            stream_id: self.stream_id,
+            sequence: self.sequence,
+            producer: self.producer,
+            port: self.port.clone(),
+            kind,
+            generation_id,
+            timestamp,
+            timebase: Timebase::WallTime,
+            causation_id: None,
+            payload,
+        }
+    }
+}
+
 /// One started exchange of a [`ModelNode`].
 struct Exchanging<P> {
     run_id: RunId,
@@ -480,6 +580,8 @@ struct Exchanging<P> {
     output: Box<dyn OutputEndpoint<P>>,
     emitter: Emitter,
     tool_loop: Option<ToolLoop<P>>,
+    /// The node's `usage` port, given one with an edge or exposure leaving it.
+    usage: Option<UsageOut<P>>,
     /// The inputs that arrived while a call was awaited, with the stream and sequence they
     /// arrived on, to be answered once it is not.
     deferred: VecDeque<(StreamId, i64, TranscriptCommitted)>,
@@ -544,6 +646,9 @@ fn carry<P: ModelPayload>(envelope: EventEnvelope<PipelinePayload>) -> EventEnve
         causation_id,
         payload: match payload {
             PipelinePayload::Stream(event) => P::stream(event),
+            PipelinePayload::Usage(_) => {
+                unreachable!("the emitter of this node wraps no usage record")
+            }
             PipelinePayload::Control(kind) => P::from(kind),
         },
     }
@@ -613,10 +718,12 @@ impl<P: ModelPayload> Exchanging<P> {
         }
     }
 
-    /// Emits `event` on the text port. The cancellation of a generation whose turn failed is
-    /// emitted as `GenerationCancelled`, and then fails the node with the `llm` error.
+    /// Emits `event` on the text port, or a usage record on the `usage` port. The cancellation of
+    /// a generation whose turn failed is emitted as `GenerationCancelled`, and then fails the node
+    /// with the `llm` error.
     async fn send(&mut self, event: GenerationEvent) -> Result<(), String> {
         let (event, failed) = match event {
+            GenerationEvent::Usage(recorded) => return self.send_usage(recorded).await,
             GenerationEvent::Started(started) => (StreamEvent::GenerationStarted(started), false),
             GenerationEvent::TextDelta(delta) => (StreamEvent::TextDelta(delta), false),
             GenerationEvent::SegmentCommitted(committed) => {
@@ -646,6 +753,29 @@ impl<P: ModelPayload> Exchanging<P> {
                 || "the model's turn failed".to_owned(),
                 |error| format!("the model's turn failed: {error}"),
             ))
+    }
+
+    /// Sends `recorded`, the usage of a turn of the node's generation, on the `usage` port, placed
+    /// on the run, the node and the session of its envelope; a node with no edge leaving its
+    /// `usage` port sends nothing.
+    async fn send_usage(&mut self, recorded: UsageRecorded) -> Result<(), String> {
+        let generation_id = self
+            .generation
+            .as_ref()
+            .map(|generation| generation.output().generation().generation_id());
+        let Some(usage) = self.usage.as_mut() else {
+            return Ok(());
+        };
+        let Some(envelope) = usage.envelope(recorded, generation_id) else {
+            return Ok(());
+        };
+        send_unless(
+            usage.output.as_ref(),
+            &self.signal,
+            |signal| signal.cancel,
+            envelope,
+        )
+        .await
     }
 
     /// Completes the generation, whatever call is unanswered, and emits `GenerationCompleted`.
@@ -848,8 +978,23 @@ impl<P: ModelPayload> Exchanging<P> {
         .await
     }
 
-    /// Passes the end of input on, on the text port and, given tools, on `tool_call`.
+    /// Passes the end of input on, on the text port, given tools, on `tool_call` and, given a
+    /// usage port, on `usage`.
     async fn end(&mut self) -> Result<(), String> {
+        if let Some(usage) = self.usage.as_mut() {
+            let end = usage.next(
+                ControlKind::Stop.as_str().to_owned(),
+                None,
+                P::from(ControlKind::Stop),
+            );
+            send_unless(
+                usage.output.as_ref(),
+                &self.signal,
+                |signal| signal.cancel,
+                end,
+            )
+            .await?;
+        }
         let end = carry(self.emitter.control(ControlKind::Stop));
         send_unless(
             self.output.as_ref(),
@@ -992,7 +1137,7 @@ impl<P: ModelPayload> Exchanging<P> {
                     self.input(stream_id, sequence, committed).await?;
                 }
             }
-            Carried::Stream(_) | Carried::Tool(_) | Carried::Control(_) => {}
+            Carried::Stream(_) | Carried::Tool(_) | Carried::Usage(_) | Carried::Control(_) => {}
         }
         Ok(())
     }
@@ -1110,6 +1255,15 @@ impl<P: ModelPayload> ModelNode<P> {
         node_id: Option<NodeId>,
         mut endpoints: NodeEndpoints<P>,
     ) -> Result<Shaped<P>, NodeError> {
+        let usage = self
+            .usage
+            .and_then(|port| {
+                endpoints
+                    .outputs
+                    .iter()
+                    .position(|output| output.port_id == port)
+            })
+            .map(|at| endpoints.outputs.remove(at));
         let arrives = |port_id: PortId| {
             if self
                 .tools
@@ -1139,7 +1293,7 @@ impl<P: ModelPayload> ModelNode<P> {
                     ended: false,
                 })
                 .collect();
-            return Ok((node_id, inputs, endpoints.outputs.remove(0), None));
+            return Ok((node_id, inputs, endpoints.outputs.remove(0), None, usage));
         };
         let node_id = node_id
             .ok_or_else(|| NodeError::new("the node was started before it was described"))?;
@@ -1178,7 +1332,7 @@ impl<P: ModelPayload> ModelNode<P> {
                 ended: false,
             })
             .collect();
-        Ok((node_id, inputs, text, Some(tool_call)))
+        Ok((node_id, inputs, text, Some(tool_call), usage))
     }
 }
 
@@ -1194,7 +1348,7 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
 
     fn start(&mut self, endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
         let started = self.shaped(self.node_id, endpoints).and_then(
-            |(node_id, inputs, output, tool_call)| {
+            |(node_id, inputs, output, tool_call, usage)| {
                 let mut turn = TurnRequest::new(
                     self.generator.model().provenance().model.as_str(),
                     Vec::new(),
@@ -1259,6 +1413,15 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
                     ),
                     output: output.endpoint,
                     tool_loop,
+                    usage: usage.map(|usage| UsageOut {
+                        run_id: self.run_id,
+                        producer: node_id,
+                        session_id: None,
+                        port: usage.port_id.to_string(),
+                        output: usage.endpoint,
+                        stream_id: StreamId::generate(),
+                        sequence: 0,
+                    }),
                     deferred: VecDeque::new(),
                     dropped: Vec::new(),
                     not_reinjected: Vec::new(),

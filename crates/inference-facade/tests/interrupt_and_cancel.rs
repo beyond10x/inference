@@ -135,6 +135,7 @@ impl NodeImplementation<PipelinePayload> for Streamer {
                                     StreamEvent::GenerationStarted(started)
                                 }
                                 GenerationEvent::TextDelta(delta) => StreamEvent::TextDelta(delta),
+                                GenerationEvent::Usage(_) => continue,
                                 GenerationEvent::SegmentCommitted(segment) => {
                                     StreamEvent::TextSegmentCommitted(segment)
                                 }
@@ -173,7 +174,7 @@ impl NodeImplementation<PipelinePayload> for Streamer {
                     PipelinePayload::Control(kind) => {
                         controls.lock().expect("the record").push(kind);
                     }
-                    PipelinePayload::Stream(_) => {}
+                    PipelinePayload::Stream(_) | PipelinePayload::Usage(_) => {}
                 }
             }
         }));

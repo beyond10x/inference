@@ -43,6 +43,7 @@ use inference_core::envelope::ControlKind;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Adapter, AdapterId, Capability};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
+use inference_core::usage::UsageRecorded;
 use inference_pipeline::nodes::turn_policy::{
     CompleteTurnRefused, TurnCommands, TurnEvent, TurnPayload, TurnPolicy, TurnPolicyHandle,
 };
@@ -104,6 +105,9 @@ pub enum CascadePayload {
     Audio(AudioFrame),
     /// An `inference.stream` event; its envelope's `kind` is the event's declared name.
     Stream(StreamEvent),
+    /// The usage of one model call, sent on a model node's `usage` port; its envelope's `kind`
+    /// is [`UsageRecorded::KIND`].
+    Usage(UsageRecorded),
     /// A control event; its envelope's `kind` is [`ControlKind::as_str`].
     Control(ControlKind),
 }
@@ -170,7 +174,7 @@ impl SessionPayload for CascadePayload {
         match self {
             Self::Audio(frame) => Some(SessionEvent::AudioChunk(frame.clone())),
             Self::Stream(event) => stream_session_event(event),
-            Self::Control(_) => None,
+            Self::Usage(_) | Self::Control(_) => None,
         }
     }
 }
@@ -185,6 +189,7 @@ impl SttPayload for CascadePayload {
             Self::Audio(frame) => Heard::Audio(frame),
             Self::Stream(event) => Heard::Stream(event),
             Self::Control(kind) => Heard::Control(kind),
+            Self::Usage(_) => Heard::Other,
         }
     }
 }
@@ -194,11 +199,16 @@ impl ModelPayload for CascadePayload {
         Self::Stream(event)
     }
 
+    fn usage(recorded: UsageRecorded) -> Option<Self> {
+        Some(Self::Usage(recorded))
+    }
+
     fn carried(self) -> Carried {
         match self {
             Self::Stream(event) => Carried::Stream(event),
             Self::Control(kind) => Carried::Control(kind),
             Self::Audio(_) => Carried::Control(ControlKind::Error),
+            Self::Usage(recorded) => Carried::Usage(recorded),
         }
     }
 }
@@ -216,7 +226,7 @@ impl TtsPayload for CascadePayload {
         match self {
             Self::Stream(event) => Spoken::Stream(event),
             Self::Control(kind) => Spoken::Control(kind),
-            Self::Audio(_) => Spoken::Other,
+            Self::Audio(_) | Self::Usage(_) => Spoken::Other,
         }
     }
 }

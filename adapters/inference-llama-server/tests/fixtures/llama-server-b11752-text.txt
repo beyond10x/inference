@@ -14,3 +14,8 @@ The server answered with chunked transfer encoding and Content-Type text/event-s
 a role-only first chunk with `"content":null`, `system_fingerprint` on every chunk, a final
 usage chunk with an empty `choices` and a `timings` object, then `[DONE]`. The loopback fixture
 of the tests replays the body with `Connection: close` instead of chunked encoding.
+
+llama-server-b11752-text-no-usage.sse (derived, not recorded): llama-server-b11752-text.sse with
+the final usage chunk, the one with an empty `choices`, and the blank line after it removed and
+every other byte kept, so the stream reports no `usage` object. No server was seen to send this;
+it stands for a server that reports no usage.

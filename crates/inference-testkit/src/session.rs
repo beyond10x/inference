@@ -52,7 +52,7 @@ impl SessionPayload for PipelinePayload {
     fn session_event(&self) -> Option<SessionEvent> {
         match self {
             Self::Stream(event) => stream_session_event(event),
-            Self::Control(_) => None,
+            Self::Usage(_) | Self::Control(_) => None,
         }
     }
 }
