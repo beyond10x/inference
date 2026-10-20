@@ -15,7 +15,8 @@
 //! Every module of a domain `ess/system.yaml` lists exists, empty until the story that declares its
 //! domain fills it; a domain added to the system adds its module line here.
 
-/// `inference.model`: the in-memory stores of the declared models and adapters, and their views.
+/// `inference.model`: the in-memory stores of the declared models, adapters and capability
+/// records, their views, and the loader that checks an adapter's record file against its claims.
 pub mod model;
 
 /// `inference.policy`: the in-memory store of the declared deployment profiles, and its view.

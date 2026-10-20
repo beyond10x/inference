@@ -19,12 +19,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ess_conformance::{AdmittedSuite, Runner, Status};
 use serde_json::{Value, json};
 
-/// The four `inference.model` scenarios this target answers.
-const MODEL_SCENARIOS: [&str; 4] = [
+/// The seven `inference.model` scenarios this target answers.
+const MODEL_SCENARIOS: [&str; 7] = [
     "inference.model.DeclareModel/outcome/declared",
     "inference.model.DeclareAdapter/outcome/declared",
     "inference.model.DeclareAdapter/outcome/refused",
     "inference.model.DeclareAdapter/outcome/unknown-model",
+    "inference.model.DeclareCapabilityRecord/outcome/declared",
+    "inference.model.DeclareCapabilityRecord/outcome/unknown-adapter",
+    "inference.model.DeclareCapabilityRecord/outcome/unknown-model",
 ];
 
 /// The eleven `inference.stream` scenarios this target answers without a run.
