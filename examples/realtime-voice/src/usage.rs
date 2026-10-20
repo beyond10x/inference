@@ -67,6 +67,13 @@ impl Reported {
     };
     /// What the OpenAI Realtime binding reports: every count.
     pub const OPENAI: Self = Self::ALL;
+    /// What the GPT-Live binding reports: the tokens of its Responses backend, as text tokens
+    /// with the cached ones inside them. Its voice model bills seconds, which no count holds.
+    pub const OPENAI_LIVE: Self = Self {
+        input_audio: false,
+        output_audio: false,
+        ..Self::ALL
+    };
     /// What the Nova Sonic binding reports: text and speech tokens each way, no cached tokens.
     pub const NOVA: Self = Self {
         input_cached: false,

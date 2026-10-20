@@ -6,13 +6,20 @@
 //! cargo run -p realtime-voice --example talk -- --provider openai
 //! cargo run -p realtime-voice --example talk -- --provider openai --prices prices.json
 //! INFERENCE_OPENAI_KEY_SOURCE=env OPENAI_API_KEY=... cargo run -p realtime-voice --example talk -- --provider openai
+//! cargo run -p realtime-voice --example talk -- --provider openai-live
 //! AWS_REGION=us-east-1 cargo run -p realtime-voice --example talk -- --provider nova
 //! ```
 //!
-//! OpenAI reads its key from the OS keychain, secret `openai-api-key`, or with
-//! `INFERENCE_OPENAI_KEY_SOURCE=env` from `OPENAI_API_KEY`; `INFERENCE_OPENAI_REALTIME_MODEL`
-//! names another model. Nova Sonic takes its credentials from the AWS default chain and its region
-//! from `AWS_REGION`; `INFERENCE_NOVA_SONIC_MODEL` names another model. The key is never printed.
+//! The provider is configuration only: each has its session configuration and binding, and the
+//! conversation is the same for all.
+//!
+//! OpenAI, both the Realtime API (`openai`) and GPT-Live (`openai-live`), reads its key from the
+//! OS keychain, secret `openai-api-key`, or with `INFERENCE_OPENAI_KEY_SOURCE=env` from
+//! `OPENAI_API_KEY`; `INFERENCE_OPENAI_REALTIME_MODEL` names another Realtime model. GPT-Live
+//! decides itself when to speak and when it is interrupted, so the conversation never cancels or
+//! truncates it; it bills the voice in seconds, printed with the totals. Nova Sonic takes its
+//! credentials from the AWS default chain and its region from `AWS_REGION`;
+//! `INFERENCE_NOVA_SONIC_MODEL` names another model. The key is never printed.
 //!
 //! Speak, interrupt the model mid-answer, ask for the time. Enter ends the conversation and prints
 //! the session's usage totals and its duration; Ctrl-C ends it without them.
@@ -35,12 +42,13 @@ use inference_audio_device::CpalHost;
 use inference_aws::duplex::NovaSonicSpeech;
 use inference_duplex::{NativeSpeechModel, ResponseId, SessionConfig};
 use inference_openai::duplex::OpenAiRealtime;
+use inference_openai::live_duplex::{OpenAiLive, OpenAiLiveSession};
 use inference_openai::{
     CredentialSource, Endpoint, EnvironmentSource, KeychainSource, OPENAI_KEY_NAME,
 };
 use realtime_voice::{
     Conversation, Ending, Note, Options, Prices, Reported, Tally, Usage, local_time, nova_config,
-    openai_config,
+    openai_config, openai_live_config,
 };
 
 /// The variable that switches the OpenAI key from the keychain to `OPENAI_API_KEY`.
@@ -61,6 +69,8 @@ struct Args {
 enum Provider {
     /// The OpenAI Realtime API.
     Openai,
+    /// OpenAI GPT-Live.
+    OpenaiLive,
     /// Amazon Nova Sonic on Bedrock.
     Nova,
 }
@@ -70,12 +80,24 @@ fn main() -> ExitCode {
     let outcome = prices(args.prices.as_ref()).and_then(|prices| {
         let host = CpalHost::new();
         match args.provider {
-            Provider::Openai => openai().and_then(|mut model| {
+            Provider::Openai => openai_key().and_then(|source| {
+                let mut model = OpenAiRealtime::new(Endpoint::from_env(), source, OPENAI_KEY_NAME);
                 talk(
                     &mut model,
                     openai_config(),
                     &host,
                     Report::new(Reported::OPENAI, prices),
+                    |_| None,
+                )
+            }),
+            Provider::OpenaiLive => openai_key().and_then(|source| {
+                let mut model = OpenAiLive::hosted(source, OPENAI_KEY_NAME);
+                talk(
+                    &mut model,
+                    openai_live_config(),
+                    &host,
+                    Report::new(Reported::OPENAI_LIVE, prices),
+                    OpenAiLiveSession::voice_seconds,
                 )
             }),
             Provider::Nova => NovaSonicSpeech::from_env()
@@ -86,6 +108,7 @@ fn main() -> ExitCode {
                         nova_config(),
                         &host,
                         Report::new(Reported::NOVA, prices),
+                        |_| None,
                     )
                 }),
         }
@@ -111,27 +134,25 @@ fn prices(path: Option<&PathBuf>) -> Result<Option<Prices>, Box<dyn Error>> {
     Ok(Some(prices))
 }
 
-/// The OpenAI Realtime model, its key from the keychain or the environment.
-fn openai() -> Result<OpenAiRealtime, Box<dyn Error>> {
-    let source: Box<dyn CredentialSource> =
+/// Where the OpenAI key is read: the keychain, or the environment.
+fn openai_key() -> Result<Box<dyn CredentialSource>, Box<dyn Error>> {
+    Ok(
         if std::env::var(KEY_SOURCE_VARIABLE).as_deref() == Ok("env") {
             Box::new(EnvironmentSource::openai())
         } else {
             Box::new(KeychainSource::native()?)
-        };
-    Ok(OpenAiRealtime::new(
-        Endpoint::from_env(),
-        source,
-        OPENAI_KEY_NAME,
-    ))
+        },
+    )
 }
 
-/// Holds the conversation until the session ends or Enter is pressed, then prints the totals.
+/// Holds the conversation until the session ends or Enter is pressed, then prints the totals
+/// and, for a provider that bills by the second, the `seconds` it billed.
 fn talk<M: NativeSpeechModel>(
     model: &mut M,
     config: SessionConfig,
     host: &CpalHost,
     mut report: Report,
+    seconds: fn(&M::Session) -> Option<f64>,
 ) -> Result<(), Box<dyn Error>> {
     let mut conversation = Conversation::open(
         model,
@@ -163,6 +184,9 @@ fn talk<M: NativeSpeechModel>(
     }
     report.finish_line();
     report.totals(started.elapsed());
+    if let Some(seconds) = seconds(conversation.session()) {
+        println!("billed: {seconds:.1} s of voice");
+    }
     println!("capture: {:?}", conversation.microphone().stats());
     println!("playout: {:?}", conversation.speaker().stats());
     Ok(())
