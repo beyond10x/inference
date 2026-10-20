@@ -1,0 +1,19 @@
+[package]
+name = "inference-sherpa-onnx"
+description = "Local adapters of the inference framework over the sherpa-onnx runtime: a streaming speech recogniser behind feature stt."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+stt = ["dep:inference-stt", "dep:sha2", "dep:sherpa-onnx"]
+
+[dependencies]
+inference-stt = { path = "../../crates/inference-stt", optional = true }
+sha2 = { version = "0.11", optional = true }
+sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"], optional = true }
+
+[lints]
+workspace = true
