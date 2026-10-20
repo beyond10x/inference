@@ -401,6 +401,38 @@ fn a_configuration_maps_onto_the_session_update_and_refuses_what_a_mode_cannot_t
         json!({"type": "server_vad", "prefix_padding_ms": 300, "silence_duration_ms": 500, "create_response": true, "interrupt_response": true})
     );
 
+    assert!(
+        session["audio"]["output"].get("speed").is_none(),
+        "no speed unless one is given: {session}"
+    );
+    let slower = OpenAiRealtime::new(
+        Endpoint::new("gpt-realtime-2.1"),
+        Box::new(FixedSource),
+        OPENAI_KEY_NAME,
+    )
+    .with_output_speed(Some(0.9));
+    let session = slower
+        .client_config(&server)
+        .expect("server detection")
+        .to_session_json();
+    assert_eq!(session["audio"]["output"]["speed"], json!(0.9));
+    for (asked, sent) in [(0.1, 0.25), (3.0, 1.5)] {
+        let session = OpenAiRealtime::new(
+            Endpoint::new("gpt-realtime-2.1"),
+            Box::new(FixedSource),
+            OPENAI_KEY_NAME,
+        )
+        .with_output_speed(Some(asked))
+        .client_config(&server)
+        .expect("server detection")
+        .to_session_json();
+        assert_eq!(
+            session["audio"]["output"]["speed"],
+            json!(sent),
+            "{asked} is held to the reference's range"
+        );
+    }
+
     let mut alaw = config(TurnDetection::Disabled, false);
     alaw.input_format = format(AudioEncoding::PcmAlaw, 8_000);
     alaw.output_format = alaw.input_format;

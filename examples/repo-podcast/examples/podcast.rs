@@ -12,7 +12,10 @@
 //!
 //! The brief comes from the Claude Code CLI (`claude -p`, read-only tools, run in `--dir`,
 //! which defaults to this repository), or from `--context-file`, which skips that step;
-//! `--save-context` keeps it for the next run. `--claude` names another CLI binary.
+//! `--save-context` keeps it for the next run. `--claude` names another CLI binary. The title
+//! names the repository (its `origin` remote's name, or its top-level directory's), or
+//! `--title <name>`. `--speed` sets how fast the OpenAI Realtime voices speak, 0.9 of the
+//! model's own pace by default.
 //!
 //! OpenAI, both the Realtime API (`openai`, `INFERENCE_OPENAI_REALTIME_MODEL` names another
 //! model) and GPT-Live (`openai-live`), reads its key from the OS keychain, secret
@@ -44,8 +47,8 @@ use inference_openai::{
 };
 use ratatui::crossterm::event::{self, Event as Terminal, KeyCode, KeyEventKind, KeyModifiers};
 use repo_podcast::{
-    Board, LIVE_PRICES, PriceTable, REALTIME_PRICES, Reported, Settings, Show, brief,
-    default_hosts, draw, plain_line,
+    BRIEF_LIMIT, Board, DISTIL_CUT, DISTIL_LIMIT, LIVE_PRICES, PriceTable, REALTIME_PRICES,
+    Reported, Settings, Show, brief, default_hosts, draw, plain_line, project_name,
 };
 
 /// The variable that switches the OpenAI key from the keychain to `OPENAI_API_KEY`.
@@ -81,6 +84,14 @@ struct Args {
     /// The Claude Code CLI to distil with.
     #[arg(long, value_name = "PATH", default_value = "claude")]
     claude: PathBuf,
+    /// The name in the title; the repository's name by default (its `origin` remote's, or its
+    /// top-level directory's).
+    #[arg(long, value_name = "NAME")]
+    title: Option<String>,
+    /// How fast the OpenAI Realtime voices speak, as a multiple of the model's own pace, 0.25
+    /// to 1.5 (GPT-Live takes no speed).
+    #[arg(long, default_value_t = 0.9)]
+    speed: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -104,6 +115,9 @@ fn main() -> ExitCode {
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
     if !(args.minutes.is_finite() && args.minutes > 0.0) {
         return Err("--minutes must be a positive number".into());
+    }
+    if !(0.25..=1.5).contains(&args.speed) {
+        return Err("--speed must be from 0.25 to 1.5".into());
     }
     let dir = match &args.dir {
         Some(dir) => dir.clone(),
@@ -130,10 +144,20 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     if let Some(saved) = &args.save_context {
         eprintln!("the brief is saved in {}", saved.display());
     }
-    let name = dir.file_name().map_or_else(
-        || dir.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
+    if brief.ends_with(DISTIL_CUT) {
+        eprintln!(
+            "claude printed more than {} KiB; the brief is cut there",
+            DISTIL_LIMIT / 1024
+        );
+    }
+    if brief.trim().len() > BRIEF_LIMIT {
+        eprintln!(
+            "the brief has {} bytes; the hosts are given its first {} KiB",
+            brief.trim().len(),
+            BRIEF_LIMIT / 1024
+        );
+    }
+    let name = args.title.clone().unwrap_or_else(|| project_name(&dir));
     let settings = Settings {
         limit: Duration::from_secs_f64(args.minutes * 60.0),
         ..Settings::default()
@@ -143,7 +167,8 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         Provider::Openai => {
             let title = format!("{name} · OpenAI {}", endpoint.model);
             let model = OpenAiRealtime::new(endpoint, openai_key()?, OPENAI_KEY_NAME)
-                .with_input_transcription(None);
+                .with_input_transcription(None)
+                .with_output_speed(Some(args.speed));
             let board = Board::new(default_hosts(), settings.limit, prices, Reported::OPENAI)
                 .with_title(title);
             play(model, brief, &host, settings, board, args.plain, |_| None)
@@ -224,27 +249,13 @@ fn play<M: NativeSpeechModel>(
             }
         }
     } else {
-        let mut terminal = ratatui::init();
-        let mut drawn = Instant::now() - FRAME;
-        let outcome = loop {
-            let events = if stop_pressed()? {
-                show.stop()
-            } else {
-                show.step()
-            };
-            for event in &events {
-                board.apply(event);
-            }
-            if show.is_over() || drawn.elapsed() >= FRAME {
-                terminal.draw(|frame| draw(frame, &board))?;
-                drawn = Instant::now();
-            }
-            if show.is_over() {
-                break Ok::<(), Box<dyn Error>>(());
-            }
+        let outcome = {
+            let mut screen = Screen(ratatui::init());
+            tui(&mut show, &mut board, &mut screen.0)
         };
-        std::thread::sleep(Duration::from_millis(800));
-        ratatui::restore();
+        if outcome.is_err() {
+            let _ = show.stop();
+        }
         outcome?;
         if let Some(problem) = board.problem() {
             println!("problem: {problem}");
@@ -254,6 +265,44 @@ fn play<M: NativeSpeechModel>(
         println!("{line}");
     }
     Ok(())
+}
+
+/// The terminal in the UI's mode, given back to the shell when it is dropped, on every way out
+/// of the UI: the end of the show, a draw or key-poll error, or a panic.
+struct Screen(ratatui::DefaultTerminal);
+
+impl Drop for Screen {
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
+}
+
+/// Runs the show in the terminal UI until it is over or stopped, and shows the last frame
+/// for a moment.
+fn tui<M: NativeSpeechModel>(
+    show: &mut Show<M>,
+    board: &mut Board,
+    terminal: &mut ratatui::DefaultTerminal,
+) -> Result<(), Box<dyn Error>> {
+    let mut drawn = Instant::now() - FRAME;
+    loop {
+        let events = if stop_pressed()? {
+            show.stop()
+        } else {
+            show.step()
+        };
+        for event in &events {
+            board.apply(event);
+        }
+        if show.is_over() || drawn.elapsed() >= FRAME {
+            terminal.draw(|frame| draw(frame, board))?;
+            drawn = Instant::now();
+        }
+        if show.is_over() {
+            std::thread::sleep(Duration::from_millis(800));
+            return Ok(());
+        }
+    }
 }
 
 /// Whether Enter, q, Esc or Ctrl-C was pressed in the terminal UI.

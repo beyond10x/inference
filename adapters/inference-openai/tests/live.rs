@@ -140,6 +140,7 @@ async fn text_in_audio_out_then_speech_in() {
         turn_detection: TurnDetection::Off,
         input_transcription: Some("gpt-4o-mini-transcribe".to_owned()),
         tools: Vec::new(),
+        speed: None,
     };
     let mut client = RealtimeClient::connect(&endpoint, source.as_ref(), &name, &session)
         .await
