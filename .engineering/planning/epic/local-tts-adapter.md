@@ -9,7 +9,7 @@ relations:
 - derived_from: architecture-design:inference
 - depends_on: epic:contracts-and-testkit
 - serves: vision:inference
-revision: 2
+revision: 3
 ---
 ## Context
 
@@ -49,3 +49,15 @@ consumes committed segments, emits audio chunks, and reports synthesised, queued
 
 A second TTS backend (backend-replacement); speculative synthesis gated on commitment (§11.3 line
 627, local-voice-cascade); hosted TTS.
+
+## Decisions
+
+Settled on 2026-10-20 (owner took the defaults):
+
+- Backends (`decision-blocker:first-adapters`): sherpa-onnx for STT, TTS and VAD; llama.cpp
+  `llama-server` over its local HTTP API for the LLM. The swap is STT, sherpa-onnx to whisper.cpp.
+- Hardware (`decision-blocker:reference-hardware`): i9-10900K, 62 GiB, RTX 3090 24 GiB, Linux
+  x86_64; tests run on CPU, the GPU is optional.
+- Licences (`decision-blocker:weight-licenses`): code Apache-2.0 or MIT, weights CC BY 4.0 or more
+  permissive, each checkpoint recorded at adoption; tests read weight paths from environment
+  variables and are ignored without them.

@@ -56,6 +56,11 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   contract crates and `inference-pipeline` carry no concrete model, backend or provider
   implementation. A concrete integration is an adapter crate that depends on the contracts, never
   the reverse. The repository ships libraries: no binary, server or CLI.
+- A local adapter's backend code is Apache-2.0 or MIT (or more permissive), and the weights it
+  pins are CC BY 4.0 or more permissive. Each checkpoint's licence, source URL and hash go in the
+  adapter's capability record at adoption; any other licence needs the owner's word for that
+  checkpoint. Tests download no weights and start no model server: a test that needs one reads
+  its path or URL from an environment variable and is ignored without it.
 - `inference-llm` is a thin wrapper over the `llm` repository's model contract
   (`b10x-llm-core`, `llm_core::Model`) at a release tag, 0.8.0 now, and the workspace's
   `rust-version` is what that tag requires, 1.98 (owner decision, 2026-10-20, reversing the

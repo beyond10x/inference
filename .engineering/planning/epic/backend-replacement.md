@@ -9,7 +9,7 @@ relations:
 - derived_from: architecture-design:inference
 - depends_on: epic:local-voice-cascade
 - serves: vision:inference
-revision: 1
+revision: 2
 ---
 ## Context
 
@@ -42,3 +42,15 @@ crate.
 ## Out of scope
 
 A third adapter; hosted adapters; performance comparison between the two (§20.2, later).
+
+## Decisions
+
+Settled on 2026-10-20 (owner took the defaults):
+
+- Backends (`decision-blocker:first-adapters`): sherpa-onnx for STT, TTS and VAD; llama.cpp
+  `llama-server` over its local HTTP API for the LLM. The swap is STT, sherpa-onnx to whisper.cpp.
+- Hardware (`decision-blocker:reference-hardware`): i9-10900K, 62 GiB, RTX 3090 24 GiB, Linux
+  x86_64; tests run on CPU, the GPU is optional.
+- Licences (`decision-blocker:weight-licenses`): code Apache-2.0 or MIT, weights CC BY 4.0 or more
+  permissive, each checkpoint recorded at adoption; tests read weight paths from environment
+  variables and are ignored without them.
