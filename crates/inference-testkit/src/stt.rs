@@ -21,10 +21,10 @@
 //! [`synthetic_audio`] generates frames of tone and silence, such as the speech and pauses a voice
 //! activity detector is tested on.
 //!
-//! Behind the `run` feature, `SttNode` is the graph node of a voice pipeline over the mock: one
-//! recognition per turn the turn policy opens, its committed spans and the turn's completion sent
-//! on in that order; `FanOut` hands the microphone's frames to it and to the voice activity
-//! detector alike.
+//! Behind the `run` feature, `SttNode` is the graph node of a voice pipeline over any recogniser,
+//! the mock by default: one recognition per turn the turn policy opens, its committed spans and
+//! the turn's completion sent on in that order; `FanOut` hands the microphone's frames to it and
+//! to the voice activity detector alike.
 //!
 //! It declares a maximum concurrency of one and holds to it: while one recognition of a
 //! recogniser, or of a clone of it, runs, a second start is refused with
@@ -82,8 +82,9 @@ pub use inference_stt;
 /// Synthetic audio: tone and silence, generated, never recorded.
 pub mod synthetic_audio;
 
-/// The mock STT node of a voice pipeline, behind the `run` feature: an [`SttNode`] recognises
-/// each turn the turn policy opens on one recognition of a [`MockRecogniser`].
+/// The STT node of a voice pipeline, behind the `run` feature: an [`SttNode`] recognises each
+/// turn the turn policy opens on one recognition of its recogniser, a [`MockRecogniser`] by
+/// default.
 #[cfg(feature = "run")]
 mod node;
 

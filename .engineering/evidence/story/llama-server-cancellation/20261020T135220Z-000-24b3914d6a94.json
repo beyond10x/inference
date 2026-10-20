@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T13:52:20Z",
+  "actor": "human:timo",
+  "artifact": "story:llama-server-cancellation",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "wave/21 at 3114451: task check steps ess, aep, fmt and clippy exit 0; cargo test --workspace --all-features --no-fail-fast 1839 passed, 2 failed (the sherpa-onnx and whisper.cpp capability records name adapter revision 0.4.0 after the 0.5.0 bump; fixed by the 0.6.0 release commit); conform 460/460; earlier gate runs failed once each on two timing tests (nova_sonic_duplex, adversary1_realtime stall 150 ms) under load average 25-32, both green on rerun (21/21 twice, 12/12 five times)"
+  }
+}

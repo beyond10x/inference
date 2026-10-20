@@ -27,7 +27,11 @@
 //! activity and turn events among them, and control events. [`VoiceCascade::nodes`] makes the
 //! implementations of one run's nodes and the handles a test reads them through. The commit gate,
 //! the acknowledging audio sink and the real adapters are not here: they belong to a local voice
-//! cascade, whose adapters replace the mocks.
+//! cascade, whose adapters replace the mocks. [`speech`] holds the TTS node of such a cascade,
+//! over any synthesiser, which sends the synthesis's own frames to the sink and acknowledges
+//! playback only with the sink's receipts. [`agent`] holds the model node of a cascade that can be
+//! interrupted, one generation per turn, superseded at the next turn's opening, and [`late`] a
+//! synthesiser scripted to deliver the frames of one segment only once it was discarded.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -39,6 +43,7 @@ use inference_core::envelope::ControlKind;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Adapter, AdapterId, Capability};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
+use inference_core::usage::UsageRecorded;
 use inference_pipeline::nodes::turn_policy::{
     CompleteTurnRefused, TurnCommands, TurnEvent, TurnPayload, TurnPolicy, TurnPolicyHandle,
 };
@@ -61,6 +66,17 @@ use crate::session::{SessionEvent, SessionPayload, stream_session_event};
 use crate::stream::{StreamDomain, StreamEvent, TurnMoveError};
 use crate::stt::{FanOut, Heard, MockRecogniser, SttHandle, SttNode, SttPayload, SttPorts};
 use crate::tts::{MockSynthesiser, Spoken, TtsHandle, TtsNode, TtsPayload};
+
+/// The TTS node of a cascade whose playback an acknowledging sink confirms: the synthesis's
+/// frames out, the sink's receipts in.
+pub mod speech;
+
+/// The model node of a cascade that can be interrupted: one generation per turn, superseded at
+/// the opening of the next.
+pub mod agent;
+
+/// A synthesiser scripted to deliver the frames of one segment late, once it was discarded.
+pub mod late;
 
 /// The name of the ingress the utterance's frames enter by.
 pub const AUDIO_INGRESS: &str = "audio";
@@ -89,6 +105,9 @@ pub enum CascadePayload {
     Audio(AudioFrame),
     /// An `inference.stream` event; its envelope's `kind` is the event's declared name.
     Stream(StreamEvent),
+    /// The usage of one model call, sent on a model node's `usage` port; its envelope's `kind`
+    /// is [`UsageRecorded::KIND`].
+    Usage(UsageRecorded),
     /// A control event; its envelope's `kind` is [`ControlKind::as_str`].
     Control(ControlKind),
 }
@@ -155,7 +174,7 @@ impl SessionPayload for CascadePayload {
         match self {
             Self::Audio(frame) => Some(SessionEvent::AudioChunk(frame.clone())),
             Self::Stream(event) => stream_session_event(event),
-            Self::Control(_) => None,
+            Self::Usage(_) | Self::Control(_) => None,
         }
     }
 }
@@ -170,6 +189,7 @@ impl SttPayload for CascadePayload {
             Self::Audio(frame) => Heard::Audio(frame),
             Self::Stream(event) => Heard::Stream(event),
             Self::Control(kind) => Heard::Control(kind),
+            Self::Usage(_) => Heard::Other,
         }
     }
 }
@@ -179,11 +199,16 @@ impl ModelPayload for CascadePayload {
         Self::Stream(event)
     }
 
+    fn usage(recorded: UsageRecorded) -> Option<Self> {
+        Some(Self::Usage(recorded))
+    }
+
     fn carried(self) -> Carried {
         match self {
             Self::Stream(event) => Carried::Stream(event),
             Self::Control(kind) => Carried::Control(kind),
             Self::Audio(_) => Carried::Control(ControlKind::Error),
+            Self::Usage(recorded) => Carried::Usage(recorded),
         }
     }
 }
@@ -201,7 +226,7 @@ impl TtsPayload for CascadePayload {
         match self {
             Self::Stream(event) => Spoken::Stream(event),
             Self::Control(kind) => Spoken::Control(kind),
-            Self::Audio(_) => Spoken::Other,
+            Self::Audio(_) | Self::Usage(_) => Spoken::Other,
         }
     }
 }
@@ -335,7 +360,7 @@ pub fn declare(
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
-        admitted: Vec::new(),
+        admitted: vec![inference_core::model::Locality::SameProcess],
     })
     .expect("a row of the table");
     let profile_id = profile.profile_id();

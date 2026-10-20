@@ -16,11 +16,15 @@
 //! Devices are reached through [`AudioHost`]: `CpalHost` (feature `device`, on by default)
 //! over cpal, and [`fake::FakeHost`], which tests drive callback by callback without audio
 //! hardware. With feature `pipeline`, `node::MicrophoneSource` and `node::SpeakerSink` are
-//! the same handles as pipeline nodes.
+//! the same handles as pipeline nodes, and `acknowledging::AcknowledgingSink` is a speaker node
+//! that plays what a TTS node synthesises and confirms the playback of each segment with the
+//! `inference-tts` receipt it makes of the frames it played.
 //!
 //! The resampler is linear and has no anti-aliasing filter ([`convert::LinearResampler`]).
 //! There is no echo cancellation or noise suppression.
 
+#[cfg(feature = "pipeline")]
+pub mod acknowledging;
 pub mod capture;
 pub mod convert;
 #[cfg(feature = "device")]

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sherpa-onnx-stt-conformance
 kind: story
-status: draft
+status: implemented
 title: sherpa-onnx STT adapter passes adapter conformance and stands alone (A-01)
 summary: Section 23.2 checks against the recogniser (claims observed, order, timestamps, cancellation, concurrency, provenance, no network crates) and an example depending on inference-stt and the adapter only.
 relations:
@@ -10,7 +10,11 @@ relations:
 - serves: vision:inference
 - depends_on: story:sherpa-onnx-recogniser
 - depends_on: story:capability-record
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T08:43:27Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-10-20T08:43:27Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:20Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

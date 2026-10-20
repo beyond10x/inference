@@ -63,6 +63,42 @@ types:
     kind: enum
     variants: [in_process, native_ffi, subprocess, local_service, hosted_service]
 
+  - name: inference.model.CapabilityRecordId
+    kind: newtype
+    of: Uuid
+
+  # The evidence for one claimed capability: the names of the conformance tests that observed
+  # it. A claim is verified by its evidence, never by the claim itself.
+  # read from: docs/design/inference.md:898
+  # read from: docs/design/inference.md:949
+  # read from: docs/design/inference.md:951
+  - name: inference.model.CapabilityEvidence
+    kind: struct
+    fields:
+      - name: capability
+        type: inference.model.Capability
+      - name: tests
+        type: List<String>
+
+  # What an adapter needs on one hardware target, measured there and promised nowhere else: peak
+  # resident memory in MiB, model load time in milliseconds, the real-time factor on CPU in
+  # thousandths (250: one second of input takes a quarter of a second), none for a model whose
+  # input has no duration, such as a text model, and GPU memory in MiB, none when it runs without
+  # a GPU. The parts and their units are this specification's choice, not the design's.
+  # read from: docs/design/inference.md:434
+  # read from: docs/design/inference.md:950
+  - name: inference.model.ResourceProfile
+    kind: struct
+    fields:
+      - name: peak_resident_memory_mib
+        type: Integer
+      - name: load_time_ms
+        type: Integer
+      - name: cpu_real_time_factor_milli
+        type: Optional<Integer>
+      - name: gpu_memory_mib
+        type: Optional<Integer>
+
 entities:
   # A trained inference artifact or hosted model endpoint, described by capabilities and
   # resources; it owns model identity, modality support and constraints. Family and checkpoint,
@@ -129,19 +165,14 @@ entities:
         type: inference.model.ExecutionForm
       - name: locality
         type: inference.model.Locality
-      # The capabilities the adapter claims. Every adapter must pass the tests for its claims.
-      # read from: docs/design/inference.md:899
-      # UNMAPPED: a claimed capability and a verified one look the same. The design asks for
-      # evidence, the adapter revision and conformance-suite results per integration (899, 950,
-      # 952) and the review names a CapabilityDescriptor noun; what that record holds, and whether
-      # binding a node requires a verified claim, is not settled. Open question for the owner.
+      # The capabilities the adapter claims. Every adapter must pass the tests for its claims;
+      # the evidence that it did, and its resource profile, are in its CapabilityRecord, one per
+      # hardware target. Binding a node does not require a verified claim.
+      # read from: docs/design/inference.md:898
       - name: capabilities
         type: List<inference.model.Capability>
       - name: max_concurrency
         type: Integer
-      # UNMAPPED: the resource plan (expected startup footprint, CPU and GPU memory needs,
-      # admission limits; design 435, 951) has no field: the design lists its parts without a
-      # shape or units. Open question for the owner.
     relations:
       # An adapter connects one model; the model artifact stands on its own.
       # read from: docs/design/inference.md:99
@@ -152,6 +183,56 @@ entities:
         via: model_id
     # A single Declared state: ESS requires a lifecycle on every entity; the design gives an
     # adapter no states, and no transition is planned.
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
+  # The machine-readable profile of one adapter on one hardware target: the reference machine it
+  # was measured on, the languages and audio formats it handles, for each claimed capability the
+  # conformance tests that observed it, its resource profile there and the adapter revision that
+  # was measured. A second hardware target is a second record. The model is the adapter's; its
+  # source, checkpoint, hashes and licences stay on the Model. That the evidence answers exactly
+  # the adapter's claims is checked by the test that loads the record, not by declaring it.
+  # read from: docs/design/inference.md:433
+  # read from: docs/design/inference.md:435
+  # read from: docs/design/inference.md:941-951
+  - name: inference.model.CapabilityRecord
+    naming:
+      summary: The capability and resource profile of one adapter on one hardware target.
+    identity:
+      name: capability_record_id
+      type: inference.model.CapabilityRecordId
+    fields:
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: model_id
+        type: inference.model.ModelId
+      - name: hardware
+        type: String
+      - name: languages
+        type: List<String>
+      - name: audio_formats
+        type: List<inference.audio.AudioFormat>
+      - name: evidence
+        type: List<inference.model.CapabilityEvidence>
+      - name: resource_profile
+        type: inference.model.ResourceProfile
+      - name: adapter_revision
+        type: String
+    relations:
+      - name: adapter
+        kind: references
+        target: inference.model.Adapter
+        cardinality: one
+        via: adapter_id
+      - name: model
+        kind: references
+        target: inference.model.Model
+        cardinality: one
+        via: model_id
+    # A single Declared state: ESS requires a lifecycle on every entity; the design gives a
+    # record no states, and no transition is planned.
     lifecycle:
       initial: Declared
       states: [Declared]
@@ -173,6 +254,13 @@ errors:
     fields:
       - name: model_id
         type: inference.model.ModelId
+
+  # read from: docs/design/inference.md:941-951
+  - name: inference.model.AdapterNotFound
+    summary: No adapter carries the identity the record named; nothing was declared.
+    fields:
+      - name: adapter_id
+        type: inference.model.AdapterId
 
 commands:
   - name: inference.model.DeclareModel
@@ -280,6 +368,70 @@ commands:
             submitted: input.max_concurrency
         summary: The concurrency limit was not positive, and nothing was declared.
 
+  # The record names its adapter and its model, and each must be declared. That the model is the
+  # adapter's, and that an adapter has one record per hardware target, are rules the adapter
+  # crate keeps by taking both identities from the adapter and committing one record file per
+  # target; declaring does not refuse either, because a command reads the rows of one selector in
+  # this release of ESS, and synthesis witnesses no selector over the identities a declaration
+  # generates.
+  # read from: docs/design/inference.md:941-951
+  - name: inference.model.DeclareCapabilityRecord
+    input:
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: model_id
+        type: inference.model.ModelId
+      - name: hardware
+        type: String
+      - name: languages
+        type: List<String>
+      - name: audio_formats
+        type: List<inference.audio.AudioFormat>
+      - name: evidence
+        type: List<inference.model.CapabilityEvidence>
+      - name: resource_profile
+        type: inference.model.ResourceProfile
+      - name: adapter_revision
+        type: String
+    outcomes:
+      - name: unknown-adapter
+        when_related: {via: input.adapter_id, exists: false}
+        error: inference.model.AdapterNotFound
+        payload:
+          inference.model.AdapterNotFound:
+            adapter_id: input.adapter_id
+        summary: No adapter carries this identity, and nothing was declared.
+
+      - name: unknown-model
+        when_related: {via: input.model_id, exists: false}
+        error: inference.model.ModelNotFound
+        payload:
+          inference.model.ModelNotFound:
+            model_id: input.model_id
+        summary: No model carries this identity, and nothing was declared.
+
+      - name: declared
+        creates: inference.model.CapabilityRecord
+        instance: capability_record_id
+        sets:
+          adapter_id: input.adapter_id
+          model_id: input.model_id
+          hardware: input.hardware
+          languages: input.languages
+          audio_formats: input.audio_formats
+          evidence: input.evidence
+          resource_profile: input.resource_profile
+          adapter_revision: input.adapter_revision
+        emits:
+          - inference.model.CapabilityRecordDeclared
+        payload:
+          inference.model.CapabilityRecordDeclared:
+            capability_record_id: {generated: true}
+            adapter_id: input.adapter_id
+            model_id: input.model_id
+            hardware: input.hardware
+        summary: The record is declared for the adapter, its model and the hardware target.
+
 events:
   - name: inference.model.ModelDeclared
     fields:
@@ -298,6 +450,17 @@ events:
         type: inference.model.ModelId
       - name: capabilities
         type: List<inference.model.Capability>
+
+  - name: inference.model.CapabilityRecordDeclared
+    fields:
+      - name: capability_record_id
+        type: inference.model.CapabilityRecordId
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: model_id
+        type: inference.model.ModelId
+      - name: hardware
+        type: String
 
 views:
   - name: inference.model.Models
@@ -349,3 +512,27 @@ views:
         type: List<inference.model.Capability>
       - name: max_concurrency
         type: Integer
+
+  # read from: docs/design/inference.md:941-951
+  - name: inference.model.CapabilityRecords
+    source: inference.model.CapabilityRecord
+    consistency: read_your_writes
+    fields:
+      - name: capability_record_id
+        type: inference.model.CapabilityRecordId
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: model_id
+        type: inference.model.ModelId
+      - name: hardware
+        type: String
+      - name: languages
+        type: List<String>
+      - name: audio_formats
+        type: List<inference.audio.AudioFormat>
+      - name: evidence
+        type: List<inference.model.CapabilityEvidence>
+      - name: resource_profile
+        type: inference.model.ResourceProfile
+      - name: adapter_revision
+        type: String

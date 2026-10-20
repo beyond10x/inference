@@ -19,12 +19,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ess_conformance::{AdmittedSuite, Runner, Status};
 use serde_json::{Value, json};
 
-/// The four `inference.model` scenarios this target answers.
-const MODEL_SCENARIOS: [&str; 4] = [
+/// The seven `inference.model` scenarios this target answers.
+const MODEL_SCENARIOS: [&str; 7] = [
     "inference.model.DeclareModel/outcome/declared",
     "inference.model.DeclareAdapter/outcome/declared",
     "inference.model.DeclareAdapter/outcome/refused",
     "inference.model.DeclareAdapter/outcome/unknown-model",
+    "inference.model.DeclareCapabilityRecord/outcome/declared",
+    "inference.model.DeclareCapabilityRecord/outcome/unknown-adapter",
+    "inference.model.DeclareCapabilityRecord/outcome/unknown-model",
 ];
 
 /// The eleven `inference.stream` scenarios this target answers without a run.
@@ -546,6 +549,14 @@ const DUPLEX_SCENARIOS: [&str; 74] = [
     "inference.duplex/authored/input-during-output-continues-response",
 ];
 
+/// The three `inference.usage` scenarios this target answers: a usage record of a declared adapter
+/// and model, and the refusals of an undeclared adapter and an undeclared model.
+const USAGE_SCENARIOS: [&str; 3] = [
+    "inference.usage.RecordUsage/outcome/recorded",
+    "inference.usage.RecordUsage/outcome/unknown-adapter",
+    "inference.usage.RecordUsage/outcome/unknown-model",
+];
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -733,6 +744,7 @@ fn the_suite_runs_against_the_testkit_target() {
         .chain(TOOLS_SCENARIOS)
         .chain(SESSION_SCENARIOS)
         .chain(DUPLEX_SCENARIOS)
+        .chain(USAGE_SCENARIOS)
     {
         assert!(
             passed.contains(id),

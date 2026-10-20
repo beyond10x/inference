@@ -25,12 +25,10 @@
 //!
 //! `PlanPipeline` naming a pipeline no record carries takes `wrong-state` the same way. Its
 //! outcomes `unbound`, `mismatch` and `locality-denied` are declared `external`: the store takes
-//! the first two when planning finds them, and a scenario may force any of the three on the next
+//! each when planning finds it, and a scenario may force any of the three on the next
 //! invocation, which then moves nothing and answers the forced error with every field its
 //! declaration does not make `Optional`: what the planner finds for that same refusal over that
-//! pipeline, and otherwise a stand-in read from the declaration ([`forced_plan`]). The store never
-//! decides `locality-denied` (check 8 is not planned yet), so a forced one always carries
-//! stand-ins.
+//! pipeline, and otherwise a stand-in read from the declaration ([`forced_plan`]).
 //!
 //! The eight Run commands and `DescribeNodeInstance` are the store's too ([`GraphDomain`]), as are
 //! the views `Runs` and `NodeInstances` and their events. `CreateRun` builds the run from the
@@ -72,7 +70,7 @@ use inference_pipeline::{
     BindNodeError, Binding, CapabilityMismatch, Catalog, ConnectPorts, ConnectPortsError,
     Declaration, DeclareFeedbackLoop, DeclareFeedbackLoopError, DeclareNodeDescriptor,
     DeclarePipeline, Edge, ExposePort, ExposePortError, Exposure, FeedbackLoop,
-    FeedbackLoopDeclared, GraphFinding, NodeAdded, NodeBound, NodeDescriptor,
+    FeedbackLoopDeclared, GraphFinding, LocalityDenied, NodeAdded, NodeBound, NodeDescriptor,
     NodeDescriptorDeclared, NodeId, NodeUnbound, PipelineDeclared, PipelineId, PipelineNotFound,
     PipelineNotReady, PipelinePlanned, PipelineValidated, PlanPipeline, PlanPipelineError, Port,
     PortAdded, PortDescriptor, PortExposed, PortsConnected, SubgraphInterfaceMismatch,
@@ -1140,6 +1138,10 @@ fn plan_pipeline(
             SemanticCommandResult::took(outcome(PLAN_PIPELINE, MISMATCH))
                 .with_error(capability_mismatch(error)?)
         }
+        Err(PlanPipelineError::LocalityDenied(error)) => {
+            SemanticCommandResult::took(outcome(PLAN_PIPELINE, LOCALITY_DENIED))
+                .with_error(locality_denied(error)?)
+        }
     })
 }
 
@@ -1191,6 +1193,8 @@ fn forced_plan(
                     .unwrap_or(Capability::ALL[0]),
             },
         })?
+    } else if let Err(PlanPipelineError::LocalityDenied(error)) = decided {
+        locality_denied(error)?
     } else {
         let binding = declaration
             .bindings()
@@ -1199,27 +1203,17 @@ fn forced_plan(
             || AdapterId::from(Uuid::nil()),
             |binding| binding.adapter_id(),
         );
-        DeclaredErrorValue::new(parse::<ErrorRef>(LOCALITY_DENIED_ERROR))
-            .with(
-                "node_id",
-                named_node(&binding.map_or(first_node, |binding| binding.node_id()))?,
-            )
-            .with("adapter_id", named_node(&adapter_id)?)
-            .with(
-                "locality",
-                named_node(
-                    &catalog
-                        .adapter(adapter_id)
-                        .map_or(Locality::ALL[0], |adapter| adapter.locality()),
-                )?,
-            )
-            .with(
-                "profile_id",
-                named_node(&pipeline.map_or_else(
-                    || ProfileId::from(Uuid::nil()),
-                    |pipeline| pipeline.profile_id(),
-                ))?,
-            )
+        locality_denied(LocalityDenied {
+            node_id: binding.map_or(first_node, |binding| binding.node_id()),
+            adapter_id,
+            locality: catalog
+                .adapter(adapter_id)
+                .map_or(Locality::ALL[0], |adapter| adapter.locality()),
+            profile_id: pipeline.map_or_else(
+                || ProfileId::from(Uuid::nil()),
+                |pipeline| pipeline.profile_id(),
+            ),
+        })?
     };
     Ok(SemanticCommandResult::took(forced.clone()).with_error(error))
 }
@@ -1238,6 +1232,17 @@ fn interface_mismatch(error: SubgraphInterfaceMismatch) -> Result<DeclaredErrorV
 fn node_unbound(error: NodeUnbound) -> Result<DeclaredErrorValue, TargetError> {
     Ok(DeclaredErrorValue::new(parse::<ErrorRef>(NODE_UNBOUND))
         .with("node_id", named_node(&error.node_id)?))
+}
+
+/// `LocalityDenied`, naming the node, its adapter, the adapter's locality and the profile.
+fn locality_denied(error: LocalityDenied) -> Result<DeclaredErrorValue, TargetError> {
+    Ok(
+        DeclaredErrorValue::new(parse::<ErrorRef>(LOCALITY_DENIED_ERROR))
+            .with("node_id", named_node(&error.node_id)?)
+            .with("adapter_id", named_node(&error.adapter_id)?)
+            .with("locality", named_node(&error.locality)?)
+            .with("profile_id", named_node(&error.profile_id)?),
+    )
 }
 
 /// `CapabilityMismatch`, naming the node (null for the pipeline as a whole) and the capability.

@@ -1,0 +1,19 @@
+[package]
+name = "inference-whispercpp"
+description = "Local adapter of the inference framework over whisper.cpp: a batch speech recogniser over one pinned ggml checkpoint."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+inference-stt = { path = "../../crates/inference-stt" }
+sha2 = "0.11"
+whisper-rs = "=0.16.0"
+
+[dev-dependencies]
+inference-testkit = { path = "../../crates/inference-testkit" }
+
+[lints]
+workspace = true

@@ -2,11 +2,16 @@
 format: aep.planning-md/3
 id: story:capability-record
 kind: story
-status: draft
+status: implemented
 title: Declare the adapter capability record and check it against the adapter's claims
 relations:
 - decomposes: epic:local-stt-adapter
-revision: 1
+- serves: vision:inference
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T08:01:30Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-10-20T08:01:30Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:10Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

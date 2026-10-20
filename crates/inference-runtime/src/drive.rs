@@ -51,7 +51,7 @@ use inference_core::id::{NodeId, StreamId};
 use inference_pipeline::ExposureId;
 
 use crate::queue::Channel;
-use crate::run::RunState;
+use crate::run::{FailureReason, RunState};
 
 /// What feeds the run's input: a source node, over each of its output edges, or the caller, over
 /// an ingress.
@@ -62,14 +62,24 @@ pub(crate) enum Feed {
 }
 
 /// What the run loop acts on next while the run is Active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Next {
-    /// `CancelRun`: the caller asked for it.
-    Cancel,
+    /// The caller asked for the run to end before it completes.
+    Halt(Halt),
     /// `DrainRun`: the caller asked for it, or every source ended its input.
     Drain,
     /// An edge into this node refused an envelope as closed while the run was Active.
     ConsumerGone(NodeId),
+}
+
+/// How the caller asked for the run to end before it completes; a failure comes before a cancel
+/// when both were asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Halt {
+    /// `FailRun` with this reason.
+    Fail(FailureReason),
+    /// `CancelRun`.
+    Cancel,
 }
 
 /// A node, or the caller on an ingress, sent an envelope of user content whose `sequence` is not
@@ -103,6 +113,8 @@ struct State {
     open_sources: HashMap<Feed, usize>,
     /// Whether any source node feeds an edge, or the caller an ingress.
     has_sources: bool,
+    /// The first failure the caller reported and the loop has not acted on.
+    fail: Option<FailureReason>,
     cancel: bool,
     drain: bool,
     /// The nodes an edge into which refused an envelope as closed while the run was Active, in
@@ -122,6 +134,15 @@ impl State {
     fn input_ended(&self) -> bool {
         self.has_sources && self.open_sources.values().all(|open| *open == 0)
     }
+
+    /// Takes the failure the caller reported, else the cancel it asked for. A failure taken
+    /// leaves a cancel asked for, which the failed run then drops.
+    fn take_halt(&mut self) -> Option<Halt> {
+        if let Some(failure) = self.fail.take() {
+            return Some(Halt::Fail(failure));
+        }
+        std::mem::take(&mut self.cancel).then_some(Halt::Cancel)
+    }
 }
 
 /// The signals of one run, shared by its controller, the senders of its edges and the
@@ -137,6 +158,7 @@ impl Default for Signals {
                 run: RunState::Created,
                 open_sources: HashMap::new(),
                 has_sources: false,
+                fail: None,
                 cancel: false,
                 drain: false,
                 gone: VecDeque::new(),
@@ -165,6 +187,7 @@ impl Signals {
             state.gone.clear();
         }
         if run.is_terminal() {
+            state.fail = None;
             state.cancel = false;
         }
     }
@@ -215,14 +238,15 @@ impl Signals {
         self.state().refusals.clone()
     }
 
-    /// What to do next from Active, once there is something: a cancel the caller asked for comes
-    /// first, then a drain it asked for or the end of every source's input, then a node an edge
-    /// into which refused an envelope as closed. Each is taken once.
+    /// What to do next from Active, once there is something: a failure the caller reported or a
+    /// cancel it asked for comes first, the failure before the cancel, then a drain it asked for
+    /// or the end of every source's input, then a node an edge into which refused an envelope as
+    /// closed. Each is taken once.
     pub(crate) async fn next_from_active(&self) -> Next {
         future::poll_fn(|cx| {
             let mut state = self.state();
-            if std::mem::take(&mut state.cancel) {
-                return Poll::Ready(Next::Cancel);
+            if let Some(halt) = state.take_halt() {
+                return Poll::Ready(Next::Halt(halt));
             }
             if std::mem::take(&mut state.drain) || state.input_ended() {
                 return Poll::Ready(Next::Drain);
@@ -236,38 +260,41 @@ impl Signals {
         .await
     }
 
-    /// Takes a cancel the caller asked for, if it did; otherwise the task of `cx` is woken by the
-    /// next request.
-    pub(crate) fn poll_cancel(&self, cx: &Context<'_>) -> bool {
+    /// Takes a failure the caller reported or a cancel it asked for, if it did; otherwise the
+    /// task of `cx` is woken by the next request.
+    pub(crate) fn poll_halt(&self, cx: &Context<'_>) -> Option<Halt> {
         let mut state = self.state();
-        if std::mem::take(&mut state.cancel) {
-            return true;
+        let halt = state.take_halt();
+        if halt.is_none() {
+            state.waker = Some(cx.waker().clone());
         }
-        state.waker = Some(cx.waker().clone());
-        false
+        halt
     }
 
-    /// Takes a cancel the caller asked for, if it did.
-    pub(crate) fn take_cancel(&self) -> bool {
-        std::mem::take(&mut self.state().cancel)
+    /// Takes a failure the caller reported or a cancel it asked for, if it did.
+    pub(crate) fn take_halt(&self) -> Option<Halt> {
+        self.state().take_halt()
     }
 
     fn request(&self, request: Next) {
         let mut state = self.state();
         match request {
-            Next::Cancel if !state.run.is_terminal() => state.cancel = true,
+            Next::Halt(Halt::Fail(failure)) if !state.run.is_terminal() => {
+                state.fail.get_or_insert(failure);
+            }
+            Next::Halt(Halt::Cancel) if !state.run.is_terminal() => state.cancel = true,
             Next::Drain if state.run == RunState::Active => state.drain = true,
-            Next::Cancel | Next::Drain | Next::ConsumerGone(_) => return,
+            Next::Halt(_) | Next::Drain | Next::ConsumerGone(_) => return,
         }
         state.wake();
     }
 }
 
 /// How the caller of [`RunController::drive`](crate::RunController::drive) asks the loop to
-/// cancel or drain the run while it runs; clones ask the same loop. A request the run's state
-/// machine does not admit when it is made is dropped, and so is one the run has left behind: a
-/// drain is kept only while the run is Active, a cancel only until the run is terminal. So the
-/// loop issues no command the run would refuse.
+/// cancel, drain or fail the run while it runs; clones ask the same loop. A request the run's
+/// state machine does not admit when it is made is dropped, and so is one the run has left
+/// behind: a drain is kept only while the run is Active, a cancel or a failure only until the run
+/// is terminal. So the loop issues no command the run would refuse.
 #[derive(Clone)]
 pub struct RunRequests {
     pub(crate) signals: Arc<Signals>,
@@ -276,12 +303,20 @@ pub struct RunRequests {
 impl RunRequests {
     /// Asks for `inference.graph.CancelRun`; dropped once the run is terminal.
     pub fn cancel(&self) {
-        self.signals.request(Next::Cancel);
+        self.signals.request(Next::Halt(Halt::Cancel));
     }
 
     /// Asks for `inference.graph.DrainRun`; dropped unless the run is Active.
     pub fn drain(&self) {
         self.signals.request(Next::Drain);
+    }
+
+    /// Asks for `inference.graph.FailRun` with `failure`, which names what failed: something the
+    /// caller watches, such as the egress watch of the `egress` module on Linux, rather than a node
+    /// the run drives. Dropped once the run is terminal; of two failures asked for before the
+    /// loop takes one, the first is kept. A failure is taken before a cancel.
+    pub fn fail(&self, failure: FailureReason) {
+        self.signals.request(Next::Halt(Halt::Fail(failure)));
     }
 }
 

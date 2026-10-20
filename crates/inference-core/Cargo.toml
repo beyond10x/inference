@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+inference-audio = { path = "../inference-audio" }
 serde.workspace = true
 uuid.workspace = true
 

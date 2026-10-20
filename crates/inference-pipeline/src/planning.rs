@@ -14,9 +14,20 @@
 //!
 //! A subgraph node (one whose [`Node::subgraph_id`] names a Planned pipeline) is bound to nothing:
 //! it contributes its child's effective capabilities as a bound node contributes its adapter's.
-//! Before anything else, planning refuses a subgraph node whose ports and its child's exposures do
-//! not match one to one by name, direction and modality ([`SubgraphInterfaceMismatch`], the first
-//! such node in declaration order).
+//! Before anything else, planning refuses a binding whose adapter runs at a locality the
+//! pipeline's deployment profile does not admit (A-04 of the design, line 1140: the offline
+//! profile refuses a hosted adapter): [`LocalityDenied`] naming the node, the adapter, its
+//! locality and the profile, the first such binding with nodes in declaration order. The check
+//! covers every binding reachable through subgraph nodes, against the pipeline's own profile: a
+//! subgraph node's child, planned under a profile of its own, runs inside the pipeline, and a
+//! binding inside it is refused naming the inner node, at the subgraph node's place in the order.
+//! The
+//! `admitted` list is read as declared; the table rules of `inference.policy.DeclareProfile`
+//! already decide which localities a kind may admit, and planning adds none. A binding whose
+//! adapter the catalog does not hold has no locality and is not refused for one; a profile the
+//! catalog does not hold admits nothing. Next, planning refuses a subgraph node whose ports and
+//! its child's exposures do not match one to one by name, direction and modality
+//! ([`SubgraphInterfaceMismatch`], the first such node in declaration order).
 //!
 //! Planning refuses, in this order: a node with a non-empty `requires` and no binding
 //! ([`NodeUnbound`], the first such node in declaration order); a node requiring a capability a
@@ -32,12 +43,14 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
-use inference_core::model::{Adapter, Capability};
+use inference_core::model::{Adapter, Capability, Locality};
+use inference_core::policy::{DeploymentProfile, ProfileId};
 
 use crate::{
-    CapabilityMismatch, Catalog, Declaration, Essentiality, Node, NodeId, NodeRole, NodeUnbound,
-    PipelineId, PipelineNotFound, PipelinePlanned, PipelineState, PipelineStateConflict,
-    PlanPipeline, PortId, SubgraphInterfaceMismatch, ValidatePipeline, ValidatePipelineError,
+    CapabilityMismatch, Catalog, Declaration, Essentiality, LocalityDenied, Node, NodeId, NodeRole,
+    NodeUnbound, Pipeline, PipelineId, PipelineNotFound, PipelinePlanned, PipelineState,
+    PipelineStateConflict, PlanPipeline, PortId, SubgraphInterfaceMismatch, ValidatePipeline,
+    ValidatePipelineError,
 };
 
 /// The validated form of a pipeline: only [`Declaration::validate`] produces one, from the
@@ -104,6 +117,9 @@ pub enum PlanPipelineError {
     /// The `mismatch` outcome: a mandatory capability of a node or of the pipeline is not
     /// implemented.
     Mismatch(CapabilityMismatch),
+    /// The `locality-denied` outcome: a bound adapter runs at a locality the pipeline's
+    /// deployment profile does not admit.
+    LocalityDenied(LocalityDenied),
 }
 
 impl fmt::Display for PlanPipelineError {
@@ -114,6 +130,7 @@ impl fmt::Display for PlanPipelineError {
             Self::InterfaceMismatch(error) => fmt::Display::fmt(error, f),
             Self::Unbound(error) => fmt::Display::fmt(error, f),
             Self::Mismatch(error) => fmt::Display::fmt(error, f),
+            Self::LocalityDenied(error) => fmt::Display::fmt(error, f),
         }
     }
 }
@@ -126,6 +143,7 @@ impl Error for PlanPipelineError {
             Self::InterfaceMismatch(error) => Some(error),
             Self::Unbound(error) => Some(error),
             Self::Mismatch(error) => Some(error),
+            Self::LocalityDenied(error) => Some(error),
         }
     }
 }
@@ -202,7 +220,8 @@ impl Declaration {
     /// # Errors
     ///
     /// In this order: [`PlanPipelineError::UnknownPipeline`]; [`PlanPipelineError::WrongState`]
-    /// for a pipeline that is not Validated; [`PlanPipelineError::Unbound`] and
+    /// for a pipeline that is not Validated; [`PlanPipelineError::LocalityDenied`],
+    /// [`PlanPipelineError::InterfaceMismatch`], [`PlanPipelineError::Unbound`] and
     /// [`PlanPipelineError::Mismatch`] as [`Declaration::plan_of`] decides them. A refused plan
     /// moves nothing.
     pub fn plan_pipeline(
@@ -221,7 +240,8 @@ impl Declaration {
     ///
     /// # Errors
     ///
-    /// [`PlanPipelineError::UnknownPipeline`]; then [`PlanPipelineError::Unbound`] and
+    /// [`PlanPipelineError::UnknownPipeline`]; then [`PlanPipelineError::LocalityDenied`],
+    /// [`PlanPipelineError::InterfaceMismatch`], [`PlanPipelineError::Unbound`] and
     /// [`PlanPipelineError::Mismatch`], never [`PlanPipelineError::WrongState`].
     pub fn plan_of(
         &self,
@@ -248,6 +268,9 @@ impl Declaration {
                         .map_or(&[][..], Adapter::capabilities)
                 })
         };
+        if let Some(denied) = self.locality_denied(pipeline, &nodes, catalog) {
+            return Err(PlanPipelineError::LocalityDenied(denied));
+        }
         if let Some(mismatch) = self.interface_mismatch(&nodes) {
             return Err(PlanPipelineError::InterfaceMismatch(mismatch));
         }
@@ -327,6 +350,75 @@ impl Declaration {
             pipeline.state = PipelineState::Planned;
         }
         Ok(effective)
+    }
+
+    /// The first binding reachable from `nodes` whose adapter the catalog holds and runs at a
+    /// locality the `admitted` list of `pipeline`'s profile does not name, read as declared; a
+    /// profile the catalog does not hold admits nothing. Nodes are read in declaration order, each
+    /// node's own bindings in theirs, and a subgraph node then contributes every binding of its
+    /// child pipeline, recursively, read the same way: a child planned under a profile of its own
+    /// still runs inside the parent, so the parent's profile decides. The refusal names the node
+    /// the binding belongs to, which for a binding inside a subgraph is the inner node.
+    fn locality_denied(
+        &self,
+        pipeline: &Pipeline,
+        nodes: &[&Node],
+        catalog: &(impl Catalog + ?Sized),
+    ) -> Option<LocalityDenied> {
+        let profile_id = pipeline.profile_id();
+        let admitted = catalog
+            .profile(profile_id)
+            .map_or(&[][..], DeploymentProfile::admitted);
+        let mut visited = BTreeSet::from([pipeline.pipeline_id()]);
+        self.locality_denied_within(nodes, admitted, profile_id, catalog, &mut visited)
+    }
+
+    /// [`Declaration::locality_denied`] over `nodes` against `admitted`, descending into the child
+    /// of every subgraph node not yet in `visited`.
+    fn locality_denied_within(
+        &self,
+        nodes: &[&Node],
+        admitted: &[Locality],
+        profile_id: ProfileId,
+        catalog: &(impl Catalog + ?Sized),
+        visited: &mut BTreeSet<PipelineId>,
+    ) -> Option<LocalityDenied> {
+        for node in nodes {
+            let denied = self
+                .bindings()
+                .filter(|binding| {
+                    binding.pipeline_id() == node.pipeline_id()
+                        && binding.node_id() == node.node_id()
+                })
+                .find_map(|binding| {
+                    let locality = catalog.adapter(binding.adapter_id())?.locality();
+                    (!admitted.contains(&locality)).then_some(LocalityDenied {
+                        node_id: node.node_id(),
+                        adapter_id: binding.adapter_id(),
+                        locality,
+                        profile_id,
+                    })
+                });
+            if denied.is_some() {
+                return denied;
+            }
+            let Some(child) = node.subgraph_id() else {
+                continue;
+            };
+            if !visited.insert(child) {
+                continue;
+            }
+            let inner: Vec<&Node> = self
+                .nodes()
+                .filter(|inner| inner.pipeline_id() == child)
+                .collect();
+            if let Some(denied) =
+                self.locality_denied_within(&inner, admitted, profile_id, catalog, visited)
+            {
+                return Some(denied);
+            }
+        }
+        None
     }
 
     /// The first subgraph node of `nodes`, in declaration order, whose ports and its child's

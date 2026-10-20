@@ -174,7 +174,7 @@ fn planned(adapter: &Adapter) -> (Declaration, PlannedPipeline, [NodeId; 3]) {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
-        admitted: Vec::new(),
+        admitted: vec![Locality::SameProcess],
     })
     .expect("a row of the table");
     let profile_id = profile.profile_id();
