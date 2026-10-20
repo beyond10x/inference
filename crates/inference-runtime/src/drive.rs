@@ -21,7 +21,10 @@
 //! its receiver gone with the exchange. That is how a consumer whose exchange failed shows, and
 //! its producers' end of input, refused the same way, would never end the run's input; the loop
 //! takes the node's drain at once and, when it answers an error, fails the node and with it the
-//! run ([`RunController::fail_node`](crate::RunController::fail_node)).
+//! run ([`RunController::fail_node`](crate::RunController::fail_node)). While the run is Draining
+//! the refusal is kept too: a producer whose drain then answers the closed edge as its error is
+//! not the node that failed, so the drain asks the node the edge arrives at for its own answer
+//! first and fails the run naming it with its own error.
 //!
 //! Every sender the run controller hands a node, and the sender of every ingress it hands its
 //! caller, is a [`GuardedSender`]: it refuses an envelope
@@ -149,13 +152,16 @@ impl Signals {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The run is now `run`: a drain asked for is dropped once the run left Active, and every
+    /// The run is now `run`: a drain asked for is dropped once the run left Active, a node an edge
+    /// into which refused an envelope as closed once it left Active and Draining, and every
     /// request once it is terminal.
     pub(crate) fn run_moved(&self, run: RunState) {
         let mut state = self.state();
         state.run = run;
         if run != RunState::Active {
             state.drain = false;
+        }
+        if !matches!(run, RunState::Active | RunState::Draining) {
             state.gone.clear();
         }
         if run.is_terminal() {
@@ -182,13 +188,22 @@ impl Signals {
     }
 
     /// An edge into the node `node_id` refused an envelope as closed: kept while the run is
-    /// Active, for the loop to act on.
+    /// Active, for the loop to act on, and while it is Draining, for the drain to name the node
+    /// whose exchange failed rather than the producer the closed edge then failed.
     fn consumer_gone(&self, node_id: NodeId) {
         let mut state = self.state();
-        if state.run == RunState::Active && !state.gone.contains(&node_id) {
+        if matches!(state.run, RunState::Active | RunState::Draining)
+            && !state.gone.contains(&node_id)
+        {
             state.gone.push_back(node_id);
             state.wake();
         }
+    }
+
+    /// Takes every node an edge into which refused an envelope as closed and that the loop has
+    /// not acted on, in the order they were recorded.
+    pub(crate) fn take_gone(&self) -> Vec<NodeId> {
+        std::mem::take(&mut self.state().gone).into()
     }
 
     fn refused(&self, refusal: SequenceNotIncreasing) {

@@ -22,8 +22,9 @@
 //! Every `inference.stream` event it emits is recorded in the run's [`RunLog`] in its envelope. On
 //! the end of input, a control event of kind `stop`, or once its input edge is closed, it ends the
 //! utterance, delivers what the synthesis has left and passes the end of input on. Cancelled, it
-//! sends nothing more. Every other event, such as `GenerationCompleted`, is taken and ignored; a
-//! segment the synthesis refuses fails the node.
+//! sends nothing more: a cancel taken while a send waits for room ends the wait. Every other
+//! event, such as `GenerationCompleted`, is taken and ignored; a segment the synthesis refuses
+//! fails the node.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -41,7 +42,8 @@ use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
 
 use super::{MockSink, MockSynthesis, MockSynthesiser};
 use crate::graph::nodes::{
-    Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on, recv_unless, started,
+    Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on, recv_unless, send_unless,
+    started,
 };
 use crate::stream::StreamEvent;
 
@@ -235,11 +237,15 @@ struct Exchanging<P> {
 }
 
 impl<P: TtsPayload> Exchanging<P> {
+    /// Sends `envelope`, unless the node is cancelled first or while the send waits for room.
     async fn send(&self, envelope: EventEnvelope<P>) -> Result<(), String> {
-        self.output
-            .send(envelope)
-            .await
-            .map_err(|refused| refused.to_string())
+        send_unless(
+            self.output.as_ref(),
+            &self.state,
+            |state| state.cancel,
+            envelope,
+        )
+        .await
     }
 
     /// Sends `event` on, recorded in the run's log.

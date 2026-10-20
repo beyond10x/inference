@@ -8,7 +8,8 @@
 //! The envelope is sent as it arrived, its producer, stream and sequence unchanged, as an edge of
 //! its own from the producer would carry it. The end of input, a control event of kind `stop`, is
 //! handed on like any envelope and then the node ends; it also ends, sending nothing more, once its
-//! input edge is closed or it is cancelled. An edge that refuses an envelope fails the node.
+//! input edge is closed or it is cancelled; a cancel taken while a send waits for room ends the
+//! wait, and nothing more is sent. An edge that refuses an envelope fails the node.
 
 use std::fmt;
 use std::future;
@@ -18,7 +19,7 @@ use inference_core::envelope::ControlKind;
 use inference_core::id::NodeId;
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
 
-use crate::graph::nodes::{Exchange, Watched, block_on, recv_unless};
+use crate::graph::nodes::{Exchange, Watched, block_on, recv_unless, send_unless};
 
 /// What the fan-out was asked, and what failed it.
 #[derive(Debug, Default)]
@@ -117,8 +118,14 @@ impl<P: Clone + Send + 'static> NodeImplementation<P> for FanOut {
                         };
                         let stop = ControlKind::of(&envelope.kind) == Some(ControlKind::Stop);
                         for output in &outputs {
-                            if let Err(refused) = output.send(envelope.clone()).await {
-                                return Some(refused.to_string());
+                            let sent = send_unless(
+                                output.as_ref(),
+                                &state,
+                                |state| state.cancel,
+                                envelope.clone(),
+                            );
+                            if let Err(refused) = sent.await {
+                                return Some(refused);
                             }
                         }
                         if stop {

@@ -232,7 +232,9 @@ impl MockGenerator {
     /// `tools`, the tool set a caller such as an LLM node declares to it. The contract's
     /// [`GenerationRequest`] carries no tool set, so the mock takes it here and records it once
     /// the generation started ([`MockGenerator::offered`]); what its script proposes does not
-    /// depend on it.
+    /// depend on it. Offering through the mock is a stand-in: the request is to carry the tool set
+    /// once `inference-llm` moves onto its new model contract (`story:llm-over-b10x-llm`), and
+    /// this method then goes.
     ///
     /// # Errors
     ///
