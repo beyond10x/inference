@@ -40,8 +40,32 @@
 //!   span is refused with [`CommittedSpanImmutable`] and its text stays as it was.
 //!
 //! [`TranscriptOutput`] is the bookkeeping every implementation shares: the frames offered, the
-//! spans emitted, moved only through the transitions of `inference-text`, and the sequence of the
-//! stream. The crate carries no concrete model, backend or provider; the scripted mock recogniser
+//! spans emitted, moved only through the transitions of `inference-text`, the sequence of the
+//! stream and the usage of the recognition.
+//!
+//! A recognition is one model call, and a recognition whose input has ended yields one usage
+//! record, [`TranscriptEvent::Usage`], the `inference.usage.UsageRecorded` that
+//! [`TranscriptOutput::usage`] runs `inference.usage.RecordUsage` for. It is the last event of
+//! the recognition, and the contract holds it there: the record is refused before the end of
+//! input with [`InputNotEnded`] and while a span of the recognition is not committed with
+//! [`SpanNotCommitted`], so the implementation records it right after its last commit; once it
+//! is made, every further hypothesis, revision or commit, one issued from outside the recogniser
+//! through [`RecognitionHandle::revise`] among them, is refused with [`RecognitionEnded`], and a
+//! second record with [`UsageAlreadyRecorded`]. It is enveloped like any other event, at the next
+//! sequence of the request's stream. Its quantities are measured by the contract, so every
+//! recogniser reports them without code of its own: `input_audio_ms`, the audio offered, the
+//! samples per channel at each sample rate counted exactly, over that rate, summed and rounded
+//! down to the millisecond once, and `requests`, 1. The implementation adds the time its backend
+//! computed through [`TranscriptOutput::add_local_compute`], reported as `local_compute_ms`,
+//! `measured`, and `unknown` when it adds none. A backend call that failed is still recorded,
+//! with what was measured, its counts not final (`final` false) once the implementation marks it
+//! with [`TranscriptOutput::mark_failed`], as `inference-llm` records a failed turn. The record
+//! names the adapter and the model, starts when the recognition started and ends when it is made,
+//! on the wall clock, and is placed on no run, node or session: the node that places it fills
+//! those. A recognition dropped before its input ended completed no call and yields no record,
+//! and one whose stream has no sequence left yields none either.
+//!
+//! The crate carries no concrete model, backend or provider; the scripted mock recogniser
 //! is `inference-testkit`'s, behind its `stt` feature. Languages, audio formats, sample rates and
 //! channel limits as adapter descriptors, speech activity, endpointing, timing and diarization
 //! metadata are not part of the contract yet.
@@ -49,9 +73,10 @@
 //! The vocabulary crates the contract is written in are re-exported, so that a consumer of speech
 //! recognition alone depends on this crate and one adapter.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use inference_audio;
 pub use inference_core;
@@ -60,10 +85,11 @@ pub use inference_text;
 use inference_audio::AudioFrame;
 use inference_core::envelope::{EventEnvelope, EventId, Timebase};
 use inference_core::id::{NodeId, RunId, StreamId};
-use inference_core::model::{Adapter, Capability};
+use inference_core::model::{Adapter, AdapterId, Capability, ModelId};
+use inference_core::usage::{Quantity, QuantityKind, RecordUsage, UsageRecord, UsageRecorded};
 use inference_text::{
-    CommittedSpanImmutable, OpenTurn, ReviseSpan, Span, SpanId, SpanNotFound, SpanStateConflict,
-    TranscriptCommitted, TranscriptHypothesis, TranscriptRevision, Turn, TurnId,
+    CommittedSpanImmutable, OpenTurn, ReviseSpan, Span, SpanId, SpanNotFound, SpanState,
+    SpanStateConflict, TranscriptCommitted, TranscriptHypothesis, TranscriptRevision, Turn, TurnId,
 };
 
 /// The revision of this contract, for the `contract_revision` an adapter implementing it
@@ -236,26 +262,32 @@ pub enum TranscriptEvent {
     Revision(TranscriptRevision),
     /// `inference.stream.TranscriptCommitted`: a span is immutable.
     Committed(TranscriptCommitted),
+    /// `inference.usage.UsageRecorded`: the usage of the recognition, the last event its
+    /// implementation delivers once input has ended; see [`TranscriptOutput::usage`].
+    Usage(UsageRecorded),
 }
 
 impl TranscriptEvent {
-    /// The name `ess/domains/stream.yaml` declares the event under: the `kind` of its envelope.
+    /// The name the event is declared under, in `ess/domains/stream.yaml` or, for a usage
+    /// record, `ess/domains/usage.yaml`: the `kind` of its envelope.
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Hypothesis(_) => "inference.stream.TranscriptHypothesis",
             Self::Revision(_) => "inference.stream.TranscriptRevision",
             Self::Committed(_) => "inference.stream.TranscriptCommitted",
+            Self::Usage(_) => UsageRecorded::KIND,
         }
     }
 
-    /// The span the event is about.
+    /// The span the event is about; none for a usage record, which is about the recognition.
     #[must_use]
-    pub const fn span_id(&self) -> SpanId {
+    pub const fn span_id(&self) -> Option<SpanId> {
         match self {
-            Self::Hypothesis(event) => event.span_id,
-            Self::Revision(event) => event.span_id,
-            Self::Committed(event) => event.span_id,
+            Self::Hypothesis(event) => Some(event.span_id),
+            Self::Revision(event) => Some(event.span_id),
+            Self::Committed(event) => Some(event.span_id),
+            Self::Usage(_) => None,
         }
     }
 }
@@ -291,6 +323,65 @@ impl fmt::Display for InputEnded {
 }
 
 impl Error for InputEnded {}
+
+/// Input has not ended, so the recognition has not completed and its usage is not recorded;
+/// nothing changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputNotEnded;
+
+impl fmt::Display for InputNotEnded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("input has not ended, so the recognition's usage is not recorded yet")
+    }
+}
+
+impl Error for InputNotEnded {}
+
+/// The usage of the recognition is recorded already, once per recognition; nothing changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageAlreadyRecorded;
+
+impl fmt::Display for UsageAlreadyRecorded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the recognition's usage is recorded already, so it is not recorded again")
+    }
+}
+
+impl Error for UsageAlreadyRecorded {}
+
+/// The span `span_id` of the recognition is not committed, so the recognition's last span is not
+/// committed and its usage is not recorded; nothing changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpanNotCommitted {
+    pub span_id: SpanId,
+}
+
+impl fmt::Display for SpanNotCommitted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "span {} is not committed, so the recognition's usage is not recorded yet",
+            self.span_id
+        )
+    }
+}
+
+impl Error for SpanNotCommitted {}
+
+/// The recognition's usage is recorded, its last event, so the recognition has ended and emits
+/// nothing more; nothing changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecognitionEnded;
+
+impl fmt::Display for RecognitionEnded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            "the recognition's usage is recorded, its last event, so nothing more is emitted",
+        )
+    }
+}
+
+impl Error for RecognitionEnded {}
 
 /// Declares a refusal enum whose variants each wrap one error type of the same name, with its
 /// `Display`, `Error::source` and a `From` for each variant.
@@ -338,6 +429,8 @@ refusal! {
     pub enum HypothesisRefused {
         /// Input has not ended and the adapter does not claim [`Capability::OutputStreaming`].
         CapabilityNotClaimed,
+        /// The recognition's usage is recorded, so it emits nothing more.
+        RecognitionEnded,
         /// The stream has issued its last sequence.
         SequenceExhausted,
     }
@@ -346,6 +439,8 @@ refusal! {
 refusal! {
     /// Why a revision was refused; nothing changed either way.
     pub enum RevisionRefused {
+        /// The recognition's usage is recorded, so it emits nothing more.
+        RecognitionEnded,
         /// No span of the recognition carries the identity the revision named.
         SpanNotFound,
         /// The span is Committed, so its text is not rewritten.
@@ -358,10 +453,26 @@ refusal! {
 refusal! {
     /// Why a commit was refused; nothing changed either way.
     pub enum CommitRefused {
+        /// The recognition's usage is recorded, so it emits nothing more.
+        RecognitionEnded,
         /// No span of the recognition carries the identity the commit named.
         SpanNotFound,
         /// The span is not a Hypothesis.
         SpanStateConflict,
+        /// The stream has issued its last sequence.
+        SequenceExhausted,
+    }
+}
+
+refusal! {
+    /// Why the usage record was refused; nothing changed either way.
+    pub enum UsageRefused {
+        /// Input has not ended.
+        InputNotEnded,
+        /// The usage of the recognition is recorded already.
+        UsageAlreadyRecorded,
+        /// A span of the recognition is not committed yet.
+        SpanNotCommitted,
         /// The stream has issued its last sequence.
         SequenceExhausted,
     }
@@ -387,18 +498,27 @@ refusal! {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TranscriptOutput {
     capabilities: Vec<Capability>,
+    adapter_id: AdapterId,
+    model_id: ModelId,
     request: RecognitionRequest,
     turn: Turn,
     offered: VecDeque<AudioFrame>,
+    /// The samples per channel offered so far, by sample rate.
+    offered_samples: BTreeMap<u32, u128>,
     taken: usize,
     taken_through: i64,
     input_ended: bool,
     next_sequence: Option<i64>,
     spans: Vec<Span>,
+    started_at_ms: i64,
+    local_compute: Option<Duration>,
+    failed: bool,
+    usage_recorded: bool,
 }
 
 impl TranscriptOutput {
-    /// Starts the recognition `request` asks for on behalf of `adapter`, whose claims it keeps.
+    /// Starts the recognition `request` asks for on behalf of `adapter`, whose claims, identity
+    /// and model it keeps, now on the wall clock.
     #[must_use]
     pub fn start(adapter: &Adapter, request: RecognitionRequest) -> Self {
         let (turn, _) = Turn::open_as(
@@ -409,14 +529,21 @@ impl TranscriptOutput {
         );
         Self {
             capabilities: adapter.capabilities().to_vec(),
+            adapter_id: adapter.adapter_id(),
+            model_id: adapter.model_id(),
             next_sequence: Some(request.first_sequence),
             request,
             turn,
             offered: VecDeque::new(),
+            offered_samples: BTreeMap::new(),
             taken: 0,
             taken_through: 0,
             input_ended: false,
             spans: Vec::new(),
+            started_at_ms: wall_clock_ms(),
+            local_compute: None,
+            failed: false,
+            usage_recorded: false,
         }
     }
 
@@ -429,6 +556,11 @@ impl TranscriptOutput {
         if self.input_ended {
             return Err(InputEnded);
         }
+        let samples = self
+            .offered_samples
+            .entry(frame.format.sample_rate.get())
+            .or_insert(0);
+        *samples = samples.saturating_add(u128::from(frame.sample_count));
         self.offered.push_back(frame);
         Ok(())
     }
@@ -474,6 +606,7 @@ impl TranscriptOutput {
     ///
     /// # Errors
     ///
+    /// [`HypothesisRefused::RecognitionEnded`] once the recognition's usage is recorded,
     /// [`HypothesisRefused::CapabilityNotClaimed`] naming [`Capability::OutputStreaming`] when
     /// input has not ended and the adapter does not claim it, and
     /// [`HypothesisRefused::SequenceExhausted`] when the stream has issued its last sequence; no
@@ -482,6 +615,7 @@ impl TranscriptOutput {
         &mut self,
         text: String,
     ) -> Result<EventEnvelope<TranscriptEvent>, HypothesisRefused> {
+        self.require_running()?;
         self.require_before_end(Capability::OutputStreaming)?;
         let sequence = self.sequence()?;
         let (span, event) = Span::emit(
@@ -501,14 +635,16 @@ impl TranscriptOutput {
     ///
     /// # Errors
     ///
-    /// [`RevisionRefused::SpanNotFound`] when no span of the recognition carries `span_id`,
-    /// [`RevisionRefused::SequenceExhausted`] when the stream has issued its last sequence, and
-    /// [`RevisionRefused::CommittedSpanImmutable`] when the span is Committed; its text is
-    /// unchanged and no sequence is used.
+    /// [`RevisionRefused::RecognitionEnded`] once the recognition's usage is recorded, whatever
+    /// the span, [`RevisionRefused::SpanNotFound`] when no span of the recognition carries
+    /// `span_id`, [`RevisionRefused::SequenceExhausted`] when the stream has issued its last
+    /// sequence, and [`RevisionRefused::CommittedSpanImmutable`] when the span is Committed; its
+    /// text is unchanged and no sequence is used.
     pub fn revise(
         &mut self,
         input: ReviseSpan,
     ) -> Result<EventEnvelope<TranscriptEvent>, RevisionRefused> {
+        self.require_running()?;
         let index = self.index_of(input.span_id)?;
         self.sequence()?;
         let (span, event) = self.spans[index].revise(input.text)?;
@@ -521,7 +657,8 @@ impl TranscriptOutput {
     ///
     /// # Errors
     ///
-    /// [`CommitRefused::SpanNotFound`] when no span of the recognition carries `span_id`,
+    /// [`CommitRefused::RecognitionEnded`] once the recognition's usage is recorded, whatever the
+    /// span, [`CommitRefused::SpanNotFound`] when no span of the recognition carries `span_id`,
     /// [`CommitRefused::SequenceExhausted`] when the stream has issued its last sequence, and
     /// [`CommitRefused::SpanStateConflict`] when the span is not a Hypothesis; nothing moves and
     /// no sequence is used.
@@ -529,11 +666,124 @@ impl TranscriptOutput {
         &mut self,
         span_id: SpanId,
     ) -> Result<EventEnvelope<TranscriptEvent>, CommitRefused> {
+        self.require_running()?;
         let index = self.index_of(span_id)?;
         self.sequence()?;
         let (span, event) = self.spans[index].commit()?;
         self.spans[index] = span;
         Ok(self.envelope(TranscriptEvent::Committed(event)))
+    }
+
+    /// Adds `spent`, time the implementation's backend computed for this recognition, to the
+    /// recognition's local compute, which its usage record then reports as `local_compute_ms`,
+    /// `measured`. A recognition to which nothing is added reports it `unknown`.
+    pub fn add_local_compute(&mut self, spent: Duration) {
+        self.local_compute = Some(self.local_compute.unwrap_or_default().saturating_add(spent));
+    }
+
+    /// The local compute added so far, none when nothing was.
+    #[must_use]
+    pub const fn local_compute(&self) -> Option<Duration> {
+        self.local_compute
+    }
+
+    /// Marks the implementation's backend call for this recognition failed: its usage record is
+    /// still made, with what was measured, and its counts are not final (`final` false), as
+    /// `inference-llm` records a failed turn.
+    pub const fn mark_failed(&mut self) {
+        self.failed = true;
+    }
+
+    /// Whether the implementation marked its backend call failed.
+    #[must_use]
+    pub const fn failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Milliseconds of audio offered to the recognition so far: the samples per channel offered
+    /// at each sample rate, counted exactly, over that rate, summed as an exact fraction and
+    /// rounded down to the millisecond once, at the end. Should that fraction not fit `u128`,
+    /// which takes several sample rates with no common divisor in one recognition, each rate's
+    /// milliseconds are rounded down on their own and summed.
+    #[must_use]
+    pub fn input_audio_ms(&self) -> i64 {
+        let exact = self.offered_samples.iter().try_fold(
+            (0_u128, 1_u128),
+            |(numerator, denominator), (&rate, &samples)| {
+                add_fraction(
+                    (numerator, denominator),
+                    (samples.checked_mul(1_000)?, u128::from(rate)),
+                )
+            },
+        );
+        let ms = exact.map_or_else(
+            || {
+                self.offered_samples
+                    .iter()
+                    .map(|(&rate, &samples)| samples.saturating_mul(1_000) / u128::from(rate))
+                    .fold(0_u128, u128::saturating_add)
+            },
+            |(numerator, denominator)| numerator / denominator,
+        );
+        i64::try_from(ms).unwrap_or(i64::MAX)
+    }
+
+    /// Runs `inference.usage.RecordUsage` for the recognition and returns its enveloped
+    /// `inference.usage.UsageRecorded`; see the crate documentation.
+    ///
+    /// # Errors
+    ///
+    /// [`UsageRefused::InputNotEnded`] before the end of input,
+    /// [`UsageRefused::UsageAlreadyRecorded`] once the record was made, and
+    /// [`UsageRefused::SequenceExhausted`] when the stream has issued its last sequence; nothing
+    /// is recorded and no sequence is used.
+    pub fn usage(&mut self) -> Result<EventEnvelope<TranscriptEvent>, UsageRefused> {
+        if !self.input_ended {
+            return Err(InputNotEnded.into());
+        }
+        if self.usage_recorded {
+            return Err(UsageAlreadyRecorded.into());
+        }
+        if let Some(open) = self
+            .spans
+            .iter()
+            .find(|span| span.state() != SpanState::Committed)
+        {
+            return Err(SpanNotCommitted {
+                span_id: open.span_id(),
+            }
+            .into());
+        }
+        self.sequence()?;
+        let local_compute =
+            self.local_compute
+                .map_or(Quantity::unknown(QuantityKind::LocalComputeMs), |spent| {
+                    Quantity::measured(
+                        QuantityKind::LocalComputeMs,
+                        i64::try_from(spent.as_millis()).unwrap_or(i64::MAX),
+                    )
+                });
+        let mut input = RecordUsage::new(
+            self.adapter_id,
+            self.model_id,
+            self.started_at_ms,
+            wall_clock_ms().max(self.started_at_ms),
+            vec![
+                Quantity::measured(QuantityKind::InputAudioMs, self.input_audio_ms()),
+                Quantity::measured(QuantityKind::Requests, 1),
+                local_compute,
+            ],
+        );
+        input.r#final = !self.failed;
+        let (_, recorded) = UsageRecord::record(input);
+        self.usage_recorded = true;
+        Ok(self.envelope(TranscriptEvent::Usage(recorded)))
+    }
+
+    /// Whether the usage of the recognition is recorded.
+    #[must_use]
+    pub const fn usage_recorded(&self) -> bool {
+        self.usage_recorded
     }
 
     /// The request the recognition was started for.
@@ -587,6 +837,15 @@ impl TranscriptOutput {
             .ok_or(SpanNotFound { span_id })
     }
 
+    /// Passes until the recognition's usage is recorded, its last event.
+    const fn require_running(&self) -> Result<(), RecognitionEnded> {
+        if self.usage_recorded {
+            Err(RecognitionEnded)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Passes once input has ended, and before that only when the adapter claims `capability`.
     fn require_before_end(&self, capability: Capability) -> Result<(), CapabilityNotClaimed> {
         if self.input_ended || self.capabilities.contains(&capability) {
@@ -630,6 +889,35 @@ impl TranscriptOutput {
             payload,
         }
     }
+}
+
+/// The greatest common divisor of `a` and `b`; `a` when `b` is 0.
+const fn gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// The sum of the fractions `left` and `right`, each a numerator over a denominator above 0, in
+/// lowest terms; none when it does not fit `u128`.
+fn add_fraction(left: (u128, u128), right: (u128, u128)) -> Option<(u128, u128)> {
+    let ((a, b), (c, d)) = (left, right);
+    let denominator = b.checked_mul(d / gcd(b, d))?;
+    let numerator = a
+        .checked_mul(denominator / b)?
+        .checked_add(c.checked_mul(denominator / d)?)?;
+    let common = gcd(numerator, denominator);
+    Some((numerator / common, denominator / common))
+}
+
+/// Now, in Unix epoch milliseconds on the wall clock; 0 before the epoch.
+fn wall_clock_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// An implementation of the STT contract: an `inference.model.Adapter` that recognises speech.
@@ -682,7 +970,7 @@ pub trait RecognitionHandle: Iterator<Item = EventEnvelope<TranscriptEvent>> {
     ///
     /// # Errors
     ///
-    /// The [`RevisionRefused`] of [`TranscriptOutput::revise`]: no such span, or a Committed one
-    /// whose text stays as it was.
+    /// The [`RevisionRefused`] of [`TranscriptOutput::revise`]: a recognition whose usage is
+    /// recorded, no such span, or a Committed one whose text stays as it was.
     fn revise(&mut self, input: ReviseSpan) -> Result<(), RevisionRefused>;
 }

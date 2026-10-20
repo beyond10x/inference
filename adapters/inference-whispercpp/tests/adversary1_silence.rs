@@ -18,10 +18,11 @@ fn two_seconds_of_silence_emit_no_span() {
     let texts: Vec<String> = feed
         .deliveries
         .iter()
-        .map(|delivery| match &delivery.envelope.payload {
-            TranscriptEvent::Hypothesis(event) => event.text.clone(),
-            TranscriptEvent::Revision(event) => event.text.clone(),
-            TranscriptEvent::Committed(event) => event.text.clone(),
+        .filter_map(|delivery| match &delivery.envelope.payload {
+            TranscriptEvent::Hypothesis(event) => Some(event.text.clone()),
+            TranscriptEvent::Revision(event) => Some(event.text.clone()),
+            TranscriptEvent::Committed(event) => Some(event.text.clone()),
+            TranscriptEvent::Usage(_) => None,
         })
         .collect();
     assert!(

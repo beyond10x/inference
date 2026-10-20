@@ -136,8 +136,9 @@ fn the_stream_is_ordered_one_hypothesis_committed_at_once_and_finalized_at_the_e
         .collect();
     assert_eq!(
         sequences,
-        vec![first_sequence, first_sequence + 1],
-        "one hypothesis and its commit, from the request's first sequence without gaps"
+        vec![first_sequence, first_sequence + 1, first_sequence + 2],
+        "one hypothesis, its commit and the usage record, from the request's first sequence \
+         without gaps"
     );
     assert_on_request(&feed, &request, "the recognition");
 
@@ -162,8 +163,23 @@ fn the_stream_is_ordered_one_hypothesis_committed_at_once_and_finalized_at_the_e
                     "a commit names the open hypothesis, once: {payload:?}"
                 );
             }
+            TranscriptEvent::Usage(_) => {
+                assert!(
+                    open_spans.is_empty(),
+                    "the usage record follows the commit: {payload:?}"
+                );
+            }
         }
     }
+    assert!(
+        matches!(
+            feed.deliveries
+                .last()
+                .map(|delivery| &delivery.envelope.payload),
+            Some(TranscriptEvent::Usage(_))
+        ),
+        "the usage record comes last"
+    );
     assert!(
         matches!(
             feed.deliveries[0].envelope.payload,
@@ -174,7 +190,7 @@ fn the_stream_is_ordered_one_hypothesis_committed_at_once_and_finalized_at_the_e
     assert!(open_spans.is_empty(), "the span is committed at once");
     assert_eq!(handle.output().spans().len(), 1);
     assert_eq!(handle.output().spans()[0].state(), SpanState::Committed);
-    assert_eq!(handle.output().next_sequence(), Some(first_sequence + 2));
+    assert_eq!(handle.output().next_sequence(), Some(first_sequence + 3));
     assert!(handle.next().is_none(), "nothing follows the finalization");
     assert_eq!(
         handle.offer_frame(frames(&[0; 320], PCM16_16K_MONO).remove(0)),

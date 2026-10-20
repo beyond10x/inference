@@ -15,15 +15,23 @@
 //! * claiming neither, it takes no frame and emits nothing before the end of input, then takes
 //!   them all and runs the whole script.
 //!
-//! At the end of input every cue left runs, whatever its frame count. [`frames`] is a fixture of
-//! silent frames and [`script`] a script fitting six of them; [`stream_envelope`] carries an
-//! event of the mock into the [`EventLog`](crate::stream::EventLog) of the stream domain.
+//! At the end of input every cue left runs, whatever its frame count, and then the recognition's
+//! usage record, [`TranscriptEvent::Usage`], is its last event: the audio offered and one request,
+//! as the contract measures them, and its local compute `unknown`, since the mock computes
+//! nothing of its own. The contract records it only once every span is committed, so a script
+//! that leaves a span uncommitted records none, and after it the contract refuses every move, a
+//! revision through the handle among them. A recognition dropped before its input ended records
+//! none. [`frames`] is
+//! a fixture of silent frames and [`script`] a script fitting six of them; [`stream_envelope`]
+//! carries an event of the mock into the [`EventLog`](crate::stream::EventLog) of the stream
+//! domain, and the usage record, no `inference.stream` event, nowhere.
 //! [`synthetic_audio`] generates frames of tone and silence, such as the speech and pauses a voice
 //! activity detector is tested on.
 //!
 //! Behind the `run` feature, `SttNode` is the graph node of a voice pipeline over any recogniser,
 //! the mock by default: one recognition per turn the turn policy opens, its committed spans and
-//! the turn's completion sent on in that order; `FanOut` hands the microphone's frames to it and
+//! the turn's completion sent on in that order, and, given a `usage` port, each recognition's
+//! usage record there; `FanOut` hands the microphone's frames to it and
 //! to the voice activity detector alike.
 //!
 //! It declares a maximum concurrency of one and holds to it: while one recognition of a
@@ -67,6 +75,7 @@ use inference_stt::inference_core::envelope::EventEnvelope;
 use inference_stt::inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
+use inference_stt::inference_core::usage::UsageRecorded;
 use inference_stt::inference_text::{ReviseSpan, SpanId};
 use inference_stt::{
     CONTRACT_REVISION, CommitRefused, ConcurrencyLimitReached, InputEnded, Recogniser,
@@ -194,9 +203,12 @@ pub fn frames(count: usize) -> Vec<AudioFrame> {
 }
 
 /// The envelope of an event of the mock with its payload as a [`StreamEvent`], for the
-/// [`EventLog`](crate::stream::EventLog).
+/// [`EventLog`](crate::stream::EventLog); none for the usage record of a recognition, which is
+/// an `inference.usage` event, not an `inference.stream` one.
 #[must_use]
-pub fn stream_envelope(envelope: EventEnvelope<TranscriptEvent>) -> EventEnvelope<StreamEvent> {
+pub fn stream_envelope(
+    envelope: EventEnvelope<TranscriptEvent>,
+) -> Option<EventEnvelope<StreamEvent>> {
     let EventEnvelope {
         schema_version,
         event_id,
@@ -213,7 +225,7 @@ pub fn stream_envelope(envelope: EventEnvelope<TranscriptEvent>) -> EventEnvelop
         causation_id,
         payload,
     } = envelope;
-    EventEnvelope {
+    Some(EventEnvelope {
         schema_version,
         event_id,
         run_id,
@@ -227,16 +239,21 @@ pub fn stream_envelope(envelope: EventEnvelope<TranscriptEvent>) -> EventEnvelop
         timestamp,
         timebase,
         causation_id,
-        payload: payload.into(),
-    }
+        payload: payload.try_into().ok()?,
+    })
 }
 
-impl From<TranscriptEvent> for StreamEvent {
-    fn from(event: TranscriptEvent) -> Self {
+/// A transcript event as an `inference.stream` event; the usage record of a recognition is
+/// none, and is handed back.
+impl TryFrom<TranscriptEvent> for StreamEvent {
+    type Error = UsageRecorded;
+
+    fn try_from(event: TranscriptEvent) -> Result<Self, UsageRecorded> {
         match event {
-            TranscriptEvent::Hypothesis(event) => Self::TranscriptHypothesis(event),
-            TranscriptEvent::Revision(event) => Self::TranscriptRevision(event),
-            TranscriptEvent::Committed(event) => Self::TranscriptCommitted(event),
+            TranscriptEvent::Hypothesis(event) => Ok(Self::TranscriptHypothesis(event)),
+            TranscriptEvent::Revision(event) => Ok(Self::TranscriptRevision(event)),
+            TranscriptEvent::Committed(event) => Ok(Self::TranscriptCommitted(event)),
+            TranscriptEvent::Usage(recorded) => Err(recorded),
         }
     }
 }
@@ -361,8 +378,10 @@ impl Iterator for MockRecognition {
 
 impl MockRecognition {
     /// Takes the input the contract gives up and runs every cue that is due, stopping at the
-    /// first the contract refuses until more input is taken or input ends. Once the stream has
-    /// issued its last sequence, no cue runs again.
+    /// first the contract refuses until more input is taken or input ends. Once input has ended,
+    /// every cue ran and every event they emitted was delivered, records the recognition's usage,
+    /// once, at that next step. Once the stream has issued its last sequence, no cue runs again
+    /// and no usage is recorded.
     ///
     /// # Panics
     ///
@@ -378,7 +397,12 @@ impl MockRecognition {
             let envelope = match &cue.step {
                 ScriptStep::Hypothesis(text) => match self.output.hypothesis(text.clone()) {
                     Ok(envelope) => {
-                        self.emitted.push(envelope.payload.span_id());
+                        self.emitted.push(
+                            envelope
+                                .payload
+                                .span_id()
+                                .expect("a hypothesis is about its span"),
+                        );
                         envelope
                     }
                     Err(_) => return,
@@ -398,6 +422,12 @@ impl MockRecognition {
                 },
             };
             self.pending.pop_front();
+            self.delivered.push_back(envelope);
+        }
+        if ended
+            && self.delivered.is_empty()
+            && let Ok(envelope) = self.output.usage()
+        {
             self.delivered.push_back(envelope);
         }
     }

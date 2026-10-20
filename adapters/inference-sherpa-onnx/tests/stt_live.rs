@@ -1,9 +1,9 @@
 //! Recognition by the pinned checkpoint, streamed in 20 ms frames.
 //!
-//! Both tests need the unpacked pinned checkpoint in the directory
-//! `INFERENCE_SHERPA_ONNX_STT_DIR`: the four files `stt::FILES` names, and for the first also
-//! `stt::REFERENCE_CLIP`, the checkpoint's own LibriSpeech clip `test_wavs/0.wav`. They are
-//! ignored by default and fail naming that variable when run without it. Run them with
+//! Every test needs the unpacked pinned checkpoint in the directory
+//! `INFERENCE_SHERPA_ONNX_STT_DIR`: the four files `stt::FILES` names, and the first and the
+//! third also `stt::REFERENCE_CLIP`, the checkpoint's own LibriSpeech clip `test_wavs/0.wav`.
+//! They are ignored by default and fail naming that variable when run without it. Run them with
 //! `INFERENCE_SHERPA_ONNX_STT_DIR=<dir> cargo test -p inference-sherpa-onnx --all-features -- --ignored`.
 //! No test downloads weights.
 //!
@@ -11,6 +11,9 @@
 //! synthesised with eSpeak NG, provenance in `question-16k.txt`). The checkpoint does not
 //! recognise synthetic speech (the known limitation in the `stt` module documentation), so that
 //! test asserts only that the recognition runs to the end of input.
+//!
+//! The third streams the reference clip again and reads the recognition's usage record, its last
+//! event: `input_audio_ms` the clip's length and `local_compute_ms` measured above 0.
 #![cfg(feature = "stt")]
 
 use std::ffi::OsString;
@@ -23,6 +26,7 @@ use inference_sherpa_onnx::stt::{REFERENCE_CLIP, SherpaOnnxRecogniser};
 use inference_stt::inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 use inference_stt::inference_core::envelope::EventEnvelope;
 use inference_stt::inference_core::id::{NodeId, RunId, StreamId};
+use inference_stt::inference_core::usage::{Quantity, QuantityKind, QuantitySource, UsageRecorded};
 use inference_stt::inference_text::{SpanState, TurnId};
 use inference_stt::{Recogniser, RecognitionHandle, RecognitionRequest, TranscriptEvent};
 
@@ -174,4 +178,80 @@ fn the_reference_clip_is_recognised_into_a_committed_span() {
 fn the_synthetic_question_runs_to_the_end_of_input() {
     let clip = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/question-16k.wav");
     recognise(&clip);
+}
+
+/// The one quantity of `kind` in `recorded`.
+fn quantity(recorded: &UsageRecorded, kind: QuantityKind) -> Quantity {
+    let found: Vec<&Quantity> = recorded
+        .quantities
+        .iter()
+        .filter(|quantity| quantity.kind() == kind)
+        .collect();
+    let [quantity] = found.as_slice() else {
+        panic!("one {kind:?} quantity in {recorded:?}")
+    };
+    **quantity
+}
+
+#[test]
+#[ignore = "needs the pinned checkpoint unpacked in the directory INFERENCE_SHERPA_ONNX_STT_DIR"]
+fn the_reference_clip_is_recorded_as_its_length_with_the_compute_measured() {
+    let dir = checkpoint_dir();
+    let pcm = wav_pcm(&PathBuf::from(&dir).join(REFERENCE_CLIP.name));
+    let clip_ms = i64::try_from(pcm.len() / 2 * 1_000 / 16_000).expect("a short clip");
+    let mut recogniser = SherpaOnnxRecogniser::open(&dir).unwrap_or_else(|refused| {
+        panic!("{CHECKPOINT_DIR} holds the pinned checkpoint: {refused}")
+    });
+    let mut handle = recogniser
+        .start(RecognitionRequest::new(
+            RunId::generate(),
+            TurnId::generate(),
+            StreamId::generate(),
+            NodeId::generate(),
+            "text_out",
+        ))
+        .expect("nothing else runs");
+    let mut events: Vec<EventEnvelope<TranscriptEvent>> = Vec::new();
+    for frame in frames(&pcm) {
+        handle.offer_frame(frame).expect("input has not ended");
+        events.extend(handle.by_ref());
+    }
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.payload, TranscriptEvent::Usage(_))),
+        "no usage is recorded before the end of input"
+    );
+    handle.end_input().expect("input ends once");
+    events.extend(handle.by_ref());
+
+    let Some(TranscriptEvent::Usage(recorded)) = events.last().map(|event| &event.payload) else {
+        panic!("the usage record is the last event: {events:?}")
+    };
+    eprintln!("usage of the {clip_ms} ms clip: {recorded:?}");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.payload, TranscriptEvent::Usage(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        quantity(recorded, QuantityKind::InputAudioMs),
+        Quantity::measured(QuantityKind::InputAudioMs, clip_ms),
+        "the clip's length"
+    );
+    assert_eq!(
+        quantity(recorded, QuantityKind::Requests),
+        Quantity::measured(QuantityKind::Requests, 1)
+    );
+    let compute = quantity(recorded, QuantityKind::LocalComputeMs);
+    assert_eq!(compute.source(), QuantitySource::Measured, "{compute:?}");
+    assert!(
+        compute.value().is_some_and(|ms| ms > 0),
+        "decoding the clip took time: {compute:?}"
+    );
+    assert_eq!(recorded.adapter_id, recogniser.adapter().adapter_id());
+    assert_eq!(recorded.model_id, recogniser.model().model_id());
+    assert!(handle.next().is_none(), "nothing follows the usage record");
 }

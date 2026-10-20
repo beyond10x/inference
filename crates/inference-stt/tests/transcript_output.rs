@@ -120,7 +120,8 @@ fn a_committed_span_refuses_a_revision_and_keeps_its_text() {
         .hypothesis("hello".to_owned())
         .expect("streaming")
         .payload
-        .span_id();
+        .span_id()
+        .expect("a span event");
     output
         .revise(ReviseSpan {
             span_id,
@@ -194,7 +195,7 @@ fn every_event_is_enveloped_on_the_request_stream_at_the_next_sequence() {
     output.take_input().expect("incremental");
 
     let hypothesis = output.hypothesis("hi".to_owned()).expect("streaming");
-    let span_id = hypothesis.payload.span_id();
+    let span_id = hypothesis.payload.span_id().expect("a span event");
     let revision = output
         .revise(ReviseSpan {
             span_id,
@@ -256,7 +257,7 @@ fn a_recognition_continuing_a_stream_numbers_its_envelopes_and_spans_from_the_gi
     assert_eq!(output.next_sequence(), Some(7));
     output.end_input().expect("input ends once");
     let hypothesis = output.hypothesis("hi".to_owned()).expect("input has ended");
-    let span_id = hypothesis.payload.span_id();
+    let span_id = hypothesis.payload.span_id().expect("a span event");
     let committed = output.commit(span_id).expect("a Hypothesis commits");
 
     assert_eq!(hypothesis.sequence, 7);
@@ -319,7 +320,7 @@ fn past_the_last_sequence_of_a_stream_the_recognition_refuses_and_nothing_moves(
         .expect("i64::MAX is left");
     assert_eq!(hypothesis.sequence, i64::MAX);
     assert_eq!(output.next_sequence(), None, "no sequence is left");
-    let span_id = hypothesis.payload.span_id();
+    let span_id = hypothesis.payload.span_id().expect("a span event");
     let exhausted = SequenceExhausted {
         stream_id: fresh.stream_id,
     };

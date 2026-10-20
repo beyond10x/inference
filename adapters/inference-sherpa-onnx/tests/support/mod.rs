@@ -253,14 +253,16 @@ impl Feed {
             .join(" ")
     }
 
-    /// The text every delivered event carries, in lowercase and joined by spaces.
+    /// The text every delivered span event carries, in lowercase and joined by spaces; the usage
+    /// record carries none.
     pub fn every_text(&self) -> String {
         self.deliveries
             .iter()
-            .map(|delivery| match &delivery.envelope.payload {
-                TranscriptEvent::Hypothesis(event) => event.text.to_lowercase(),
-                TranscriptEvent::Revision(event) => event.text.to_lowercase(),
-                TranscriptEvent::Committed(event) => event.text.to_lowercase(),
+            .filter_map(|delivery| match &delivery.envelope.payload {
+                TranscriptEvent::Hypothesis(event) => Some(event.text.to_lowercase()),
+                TranscriptEvent::Revision(event) => Some(event.text.to_lowercase()),
+                TranscriptEvent::Committed(event) => Some(event.text.to_lowercase()),
+                TranscriptEvent::Usage(_) => None,
             })
             .collect::<Vec<_>>()
             .join(" ")
