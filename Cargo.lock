@@ -2129,6 +2129,7 @@ name = "inference-sherpa-onnx"
 version = "0.4.0"
 dependencies = [
  "inference-stt",
+ "inference-testkit",
  "sha2",
  "sherpa-onnx",
 ]
@@ -3453,6 +3454,15 @@ version = "0.4.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
+]
+
+[[package]]
+name = "stt-sherpa-onnx"
+version = "0.4.0"
+dependencies = [
+ "clap",
+ "inference-sherpa-onnx",
+ "inference-stt",
 ]
 
 [[package]]
