@@ -18,4 +18,14 @@ of the tests replays the body with `Connection: close` instead of chunked encodi
 llama-server-b11752-text-no-usage.sse (derived, not recorded): llama-server-b11752-text.sse with
 the final usage chunk, the one with an empty `choices`, and the blank line after it removed and
 every other byte kept, so the stream reports no `usage` object. No server was seen to send this;
-it stands for a server that reports no usage.
+it stands for a server that reports no usage. It carries no `timings` object either, so it
+reports no counter at all.
+
+llama-server-b11752-text-timings-only.sse is the response body of the same request without
+`stream_options`, recorded byte for byte on 2026-10-21 from the same server build, checkpoint and
+arguments, the request the first the server answered after starting:
+
+  {"model":"qwen2.5-1.5b-instruct","messages":[{"role":"user","content":"Say hello in three words."}],"stream":true,"max_completion_tokens":16,"seed":7,"temperature":0}
+
+Asked for no usage, the server sends no usage chunk; its finish chunk carries the `timings`
+object instead (`prompt_n` 35, `cache_n` 0, `predicted_n` 4), then `[DONE]`.
