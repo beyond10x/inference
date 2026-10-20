@@ -27,13 +27,14 @@
 //!
 //! # The runtime bridge
 //!
-//! The HTTP transport of `llm` must be polled inside a tokio runtime, and neither
-//! `inference-llm` nor the graph runtime polls in one. [`LlamaServer`] runs each turn on a thread
-//! of its own through `llm`'s `BlockingModel`, which owns a one-worker runtime that drives the
-//! I/O; the turn's events cross to the poller of [`llm_core::Model::turn`] as they are decoded,
-//! and the poller is woken for each. Dropping the turn, or a sink refusing an event, cancels the
-//! running request through a child of the caller's [`llm_core::Cancel`]. The bridge goes when
-//! `llm` offers a client that can be polled outside a runtime.
+//! The HTTP transport of `llm` must be polled inside a tokio runtime, and its clients refuse a
+//! turn polled outside one; neither `inference-llm` nor the graph runtime polls in one.
+//! [`LlamaServer`] runs each turn on a thread of its own through `llm`'s `BlockingModel`, which
+//! owns a one-worker runtime that drives the I/O; the turn's events cross to the poller of
+//! [`llm_core::Model::turn`] as they are decoded, and the poller is woken for each. Dropping the
+//! turn, or a sink refusing an event, cancels the running request through a child of the
+//! caller's [`llm_core::Cancel`]. The bridge goes when `llm` offers a client that can be polled
+//! outside a runtime.
 //!
 //! # Cancellation and failures
 //!
@@ -91,7 +92,7 @@ use llm_core::{
     AuthKind, BillingKind, BoxFuture, Cancel, Capabilities, Dispatch, Error, ErrorCode, Id, Model,
     Protocol, Provenance, StreamEvent, StreamSink, TurnOutcome, TurnRequest,
 };
-use llm_credentials::{ResolvedSecret, SecretError, SecretRef, SecretResolver};
+use llm_credentials::AnonymousResolver;
 use llm_http::{HttpClient, Limits};
 
 pub use inference_core::model::Adapter;
@@ -257,19 +258,6 @@ pub fn declare_adapter(model_id: ModelId, config: &Config) -> DeclareAdapter {
     }
 }
 
-/// Handed to the client of the anonymous binding, which never asks for a secret: it refuses every
-/// reference. `llm` keeps its own private; this copy goes once `llm` exports one.
-struct Anonymous;
-
-impl SecretResolver for Anonymous {
-    fn resolve<'a>(
-        &'a self,
-        _reference: &'a SecretRef,
-    ) -> BoxFuture<'a, Result<ResolvedSecret, SecretError>> {
-        Box::pin(async { Err(SecretError::InvalidReference) })
-    }
-}
-
 /// The [`llm_core::Model`] of one `llama-server`: `llm`'s Chat Completions client on the binding
 /// of a [`Config`], each turn run on a thread of its own through `llm`'s `BlockingModel`, so the
 /// turn can be polled outside a tokio runtime; see the crate documentation.
@@ -290,7 +278,8 @@ impl fmt::Debug for LlamaServer {
 }
 
 impl LlamaServer {
-    /// The model of the server `config` names. Nothing is sent before the first turn.
+    /// The model of the server `config` names, its client handed `llm`'s `AnonymousResolver`,
+    /// which the anonymous binding never asks for a secret. Nothing is sent before the first turn.
     ///
     /// # Errors
     ///
@@ -300,7 +289,7 @@ impl LlamaServer {
         let client = ChatClient::new(
             binding(config)?,
             HttpClient::new(config.limits)?,
-            Arc::new(Anonymous),
+            Arc::new(AnonymousResolver),
         );
         Ok(Self {
             blocking: BlockingModel::new(Arc::new(client))?,

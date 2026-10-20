@@ -16,11 +16,11 @@ inference-core = { path = "../../crates/inference-core" }
 inference-llm = { path = "../../crates/inference-llm" }
 inference-text = { path = "../../crates/inference-text", optional = true }
 inference-tools = { path = "../../crates/inference-tools", optional = true }
-llm-blocking = { package = "b10x-llm-blocking", git = "https://github.com/beyond10x/llm", tag = "0.8.0" }
-llm-chat = { package = "b10x-llm-chat", git = "https://github.com/beyond10x/llm", tag = "0.8.0" }
+llm-blocking = { package = "b10x-llm-blocking", git = "https://github.com/beyond10x/llm", tag = "0.8.3" }
+llm-chat = { package = "b10x-llm-chat", git = "https://github.com/beyond10x/llm", tag = "0.8.3" }
 llm-core.workspace = true
-llm-credentials = { package = "b10x-llm-credentials", git = "https://github.com/beyond10x/llm", tag = "0.8.0" }
-llm-http = { package = "b10x-llm-http", git = "https://github.com/beyond10x/llm", tag = "0.8.0" }
+llm-credentials = { package = "b10x-llm-credentials", git = "https://github.com/beyond10x/llm", tag = "0.8.3" }
+llm-http = { package = "b10x-llm-http", git = "https://github.com/beyond10x/llm", tag = "0.8.3" }
 
 [dev-dependencies]
 inference-pipeline = { path = "../../crates/inference-pipeline" }
