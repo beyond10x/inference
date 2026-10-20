@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>inference: Swap the model. Keep the product.</title>
+  <meta name="description" content="Open-source Rust framework for speech and language AI. Speech-to-text, LLMs, text-to-speech and native speech models behind one set of Rust contracts.">
+  <link rel="stylesheet" href="landing.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <a class="brand" href="index.html" style="color: var(--fg)">inference</a>
+      <nav aria-label="Site">
+        <a href="introduction.html">Docs</a>
+        <a href="quick-start.html">Quick start</a>
+        <a href="adapters.html">Adapters</a>
+        <a href="status.html">Status</a>
+        <a href="https://github.com/beyond10x/inference">GitHub</a>
+      </nav>
+    </header>
+
+    <section class="hero">
+      <div>
+        <p class="eyebrow">open-source · Rust · Apache-2.0</p>
+        <h1>inference</h1>
+        <p class="claim"><span>Swap the model.</span><span class="accent">Keep the product.</span></p>
+        <p class="sub">Speech-to-text, LLMs, text-to-speech and native speech models behind one set of Rust contracts, composed into streaming pipelines that are checked before they run.</p>
+        <div class="cta">
+          <a class="btn primary" href="introduction.html">Read the five-minute tour</a>
+          <a class="btn" href="quick-start.html">Quick start</a>
+          <a class="btn" href="examples.html#realtime-voice">See the voice agent example</a>
+        </div>
+      </div>
+      <figure style="margin: 0">
+        <svg class="diagram" viewBox="790 84 644 272" role="img" aria-labelledby="pipe-title pipe-desc">
+          <title id="pipe-title">Two pipelines behind one contract</title>
+          <desc id="pipe-desc">A cascade of microphone, speech-to-text, language model, text-to-speech and speaker with local adapters under each node, or one native speech model with hosted adapters under it. Local text-to-speech is planned.</desc>
+          <defs>
+            <marker id="arrow-pipe" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="#8B949E"/>
+            </marker>
+          </defs>
+          <g class="d-mono" font-size="14" text-anchor="middle">
+            <rect class="d-io" x="804" y="96" width="64" height="52" rx="26"/>
+            <text x="836" y="127" class="d-muted">mic</text>
+            <rect class="d-io" x="1340" y="96" width="80" height="52" rx="26"/>
+            <text x="1380" y="127" class="d-muted">speaker</text>
+          </g>
+          <g class="d-sans" font-size="22" font-weight="700" text-anchor="middle">
+            <rect class="d-node" x="894" y="96" width="120" height="52" rx="8"/>
+            <text x="954" y="130" class="d-fg">STT</text>
+            <rect class="d-node" x="1044" y="96" width="120" height="52" rx="8"/>
+            <text x="1104" y="130" class="d-fg">LLM</text>
+            <rect class="d-node" x="1194" y="96" width="120" height="52" rx="8"/>
+            <text x="1254" y="130" class="d-fg">TTS</text>
+          </g>
+          <path class="d-wire" d="M868 122 H890" marker-end="url(#arrow-pipe)"/>
+          <path class="d-wire" d="M1014 122 H1040" marker-end="url(#arrow-pipe)"/>
+          <path class="d-wire" d="M1164 122 H1190" marker-end="url(#arrow-pipe)"/>
+          <path class="d-wire" d="M1314 122 H1336" marker-end="url(#arrow-pipe)"/>
+          <path class="d-wire" d="M954 148 V160 M1104 148 V160 M1254 148 V160"/>
+          <text x="836" y="178" class="d-mono d-muted" font-size="13" text-anchor="middle">local</text>
+          <g class="d-mono" font-size="13" text-anchor="middle">
+            <rect class="d-slot-on" x="894" y="160" width="120" height="26" rx="5"/>
+            <text x="954" y="178" class="d-fg">sherpa-onnx</text>
+            <rect class="d-slot-on" x="894" y="194" width="120" height="26" rx="5"/>
+            <text x="954" y="212" class="d-fg">whisper.cpp</text>
+            <rect class="d-slot-on" x="1044" y="160" width="120" height="26" rx="5"/>
+            <text x="1104" y="178" class="d-fg">llama-server</text>
+            <rect class="d-slot" x="1194" y="160" width="120" height="26" rx="5"/>
+            <text x="1254" y="178" class="d-muted">local TTS</text>
+          </g>
+
+          <text x="836" y="244" class="d-sans d-muted" font-size="15" font-style="italic" text-anchor="middle">or</text>
+          <path d="M894 236 H1420" stroke="#30363D" stroke-width="1" stroke-dasharray="2 4"/>
+
+          <g class="d-mono" font-size="14" text-anchor="middle">
+            <rect class="d-io" x="804" y="256" width="64" height="48" rx="24"/>
+            <text x="836" y="285" class="d-muted">mic</text>
+            <rect class="d-io" x="1340" y="256" width="80" height="48" rx="24"/>
+            <text x="1380" y="285" class="d-muted">speaker</text>
+          </g>
+          <rect class="d-node" x="894" y="256" width="420" height="48" rx="8"/>
+          <text x="1104" y="287" class="d-sans d-fg" font-size="20" font-weight="700" text-anchor="middle">native speech model</text>
+          <path class="d-wire" d="M872 280 H890" marker-start="url(#arrow-pipe)" marker-end="url(#arrow-pipe)"/>
+          <path class="d-wire" d="M1318 280 H1336" marker-start="url(#arrow-pipe)" marker-end="url(#arrow-pipe)"/>
+
+          <path class="d-wire" d="M960 304 V316 M1104 304 V316 M1248 304 V316"/>
+          <text x="836" y="334" class="d-mono d-muted" font-size="13" text-anchor="middle">hosted</text>
+          <g class="d-mono" font-size="12" text-anchor="middle">
+            <rect class="d-slot-on" x="894" y="316" width="132" height="26" rx="5"/>
+            <text x="960" y="333" class="d-fg">OpenAI Realtime</text>
+            <rect class="d-slot-on" x="1038" y="316" width="132" height="26" rx="5"/>
+            <text x="1104" y="333" class="d-fg">Amazon Nova Sonic</text>
+            <rect class="d-slot-on" x="1182" y="316" width="132" height="26" rx="5"/>
+            <text x="1248" y="333" class="d-fg">OpenAI GPT-Live</text>
+          </g>
+        </svg>
+        <figcaption class="legend">
+          <span><i class="on"></i>implemented</span>
+          <span><i class="off"></i>planned</span>
+        </figcaption>
+      </figure>
+    </section>
+
+    <ul class="chips" aria-label="Highlights">
+      <li>runs offline, egress denied <span class="st st-rel">0.6.0</span></li>
+      <li>swap providers by config <span class="st st-rel">0.5.0</span></li>
+      <li>barge-in built in <span class="st st-rel">0.5.0</span></li>
+      <li>usage and cost per call <span class="st st-plan">planned</span></li>
+    </ul>
+
+    <section class="problem">
+      <p style="margin: 0 0 22px"><strong>The problem:</strong> <span>every voice or language product is wired to the models it launched with.</span></p>
+    </section>
+    <ul class="problem-list">
+      <li>The provider's SDK leaks into the application: its event names, audio formats, way of interrupting, tool-call shape.</li>
+      <li>Changing provider, or running a model yourself, means rewriting the pipeline.</li>
+      <li>"Streaming" means different things across providers, and a demo cannot tell you which one you bought.</li>
+      <li>Interruptions, partial transcripts and tool calls are where conversations break.</li>
+    </ul>
+
+    <section class="stack">
+      <figure style="margin: 0">
+        <svg class="diagram" viewBox="104 344 972 600" role="img" aria-labelledby="stack-title stack-desc">
+          <title id="stack-title">The layers of inference</title>
+          <desc id="stack-desc">Your application talks to a session facade over a graph of typed nodes, built on contracts for speech-to-text, language models, text-to-speech, tools and native speech, with local and hosted adapters underneath. Local text-to-speech is planned.</desc>
+          <defs>
+            <marker id="arrow-stack" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="#8B949E"/>
+            </marker>
+          </defs>
+
+          <rect class="d-band-app" x="120" y="360" width="940" height="60" rx="10"/>
+          <text x="148" y="398" class="d-sans d-fg" font-size="22" font-weight="700">Your application</text>
+          <text x="430" y="397" class="d-sans d-muted" font-size="19">talks to one session, whatever model answers</text>
+
+          <rect class="d-band" x="120" y="432" width="940" height="60" rx="10"/>
+          <text x="148" y="470" class="d-sans d-fg" font-size="22" font-weight="700">Session facade</text>
+          <text x="430" y="469" class="d-sans d-muted" font-size="19">one interface over any pipeline: cascade or native model</text>
+
+          <rect class="d-band" x="120" y="504" width="940" height="200" rx="10"/>
+          <text x="148" y="540" class="d-sans d-fg" font-size="22" font-weight="700">Graph of typed nodes</text>
+          <text x="1036" y="539" class="d-sans d-muted" font-size="17" text-anchor="end">run by a bounded, cancellable runtime</text>
+
+          <g class="d-mono" font-size="16" text-anchor="middle">
+            <rect class="d-io" x="150" y="556" width="100" height="42" rx="21"/>
+            <text x="200" y="582" class="d-muted">audio</text>
+            <rect class="d-node-dark" x="280" y="556" width="100" height="42" rx="7"/>
+            <text x="330" y="583" class="d-fg" font-weight="700">STT</text>
+            <rect class="d-gate" x="410" y="556" width="100" height="42" rx="7"/>
+            <text x="460" y="582" class="d-accent">commit</text>
+            <rect class="d-node-dark" x="540" y="556" width="100" height="42" rx="7"/>
+            <text x="590" y="583" class="d-fg" font-weight="700">LLM</text>
+            <rect class="d-gate" x="670" y="556" width="100" height="42" rx="7"/>
+            <text x="720" y="582" class="d-accent">commit</text>
+            <rect class="d-node-dark" x="800" y="556" width="100" height="42" rx="7"/>
+            <text x="850" y="583" class="d-fg" font-weight="700">TTS</text>
+            <rect class="d-io" x="930" y="556" width="100" height="42" rx="21"/>
+            <text x="980" y="582" class="d-muted">audio</text>
+          </g>
+          <path class="d-wire" d="M250 577 H276" marker-end="url(#arrow-stack)"/>
+          <path class="d-wire" d="M380 577 H406" marker-end="url(#arrow-stack)"/>
+          <path class="d-wire" d="M510 577 H536" marker-end="url(#arrow-stack)"/>
+          <path class="d-wire" d="M640 577 H666" marker-end="url(#arrow-stack)"/>
+          <path class="d-wire" d="M770 577 H796" marker-end="url(#arrow-stack)"/>
+          <path class="d-wire" d="M900 577 H926" marker-end="url(#arrow-stack)"/>
+
+          <path d="M150 610 H560 M620 610 H1030" stroke="#30363D" stroke-width="1" stroke-dasharray="2 4"/>
+          <text x="590" y="615" class="d-sans d-muted" font-size="15" font-style="italic" text-anchor="middle">or</text>
+
+          <g class="d-mono" font-size="16" text-anchor="middle">
+            <rect class="d-io" x="150" y="622" width="100" height="42" rx="21"/>
+            <text x="200" y="648" class="d-muted">audio</text>
+            <rect class="d-node-dark" x="280" y="622" width="620" height="42" rx="7"/>
+            <text x="590" y="649" class="d-sans" font-size="18"><tspan class="d-fg" font-weight="700">native speech model</tspan><tspan class="d-muted" dx="8">· one node, full duplex</tspan></text>
+            <rect class="d-io" x="930" y="622" width="100" height="42" rx="21"/>
+            <text x="980" y="648" class="d-muted">audio</text>
+          </g>
+          <path class="d-wire" d="M254 643 H276" marker-start="url(#arrow-stack)" marker-end="url(#arrow-stack)"/>
+          <path class="d-wire" d="M904 643 H926" marker-start="url(#arrow-stack)" marker-end="url(#arrow-stack)"/>
+
+          <text x="148" y="690" class="d-sans d-muted" font-size="17">typed ports · bounded edges · commit gates · checked before it runs</text>
+
+          <rect class="d-band" x="120" y="716" width="940" height="60" rx="10"/>
+          <text x="148" y="754" class="d-sans d-fg" font-size="22" font-weight="700">Contracts</text>
+          <g class="d-mono" font-size="17" text-anchor="middle">
+            <rect class="d-pill" x="430" y="730" width="60" height="32" rx="16"/>
+            <text x="460" y="752" class="d-fg">STT</text>
+            <rect class="d-pill" x="502" y="730" width="60" height="32" rx="16"/>
+            <text x="532" y="752" class="d-fg">LLM</text>
+            <rect class="d-pill" x="574" y="730" width="60" height="32" rx="16"/>
+            <text x="604" y="752" class="d-fg">TTS</text>
+            <rect class="d-pill" x="646" y="730" width="80" height="32" rx="16"/>
+            <text x="686" y="752" class="d-fg">tools</text>
+            <rect class="d-pill" x="738" y="730" width="164" height="32" rx="16"/>
+            <text x="820" y="752" class="d-fg">native speech</text>
+          </g>
+
+          <text x="590" y="799" class="d-sans d-accent" font-size="16" text-anchor="middle">bound per node by configuration · each adapter declares its capabilities and licences</text>
+
+          <rect class="d-band" x="120" y="810" width="460" height="120" rx="10"/>
+          <text x="144" y="844" class="d-sans d-fg" font-size="20" font-weight="700">Local adapters</text>
+          <text x="556" y="843" class="d-sans d-muted" font-size="15" text-anchor="end">offline, egress denied</text>
+          <g class="d-mono" font-size="15" text-anchor="middle">
+            <rect class="d-pill" x="144" y="858" width="159" height="28" rx="14"/>
+            <text x="223.5" y="877" class="d-fg">sherpa-onnx STT</text>
+            <rect class="d-pill" x="315" y="858" width="159" height="28" rx="14"/>
+            <text x="394.5" y="877" class="d-fg">whisper.cpp STT</text>
+            <rect class="d-pill" x="144" y="894" width="168" height="28" rx="14"/>
+            <text x="228" y="913" class="d-fg">llama.cpp server</text>
+            <rect class="d-pill-plan" x="324" y="894" width="192" height="28" rx="14"/>
+            <text x="420" y="913" class="d-muted">local TTS · planned</text>
+          </g>
+
+          <rect class="d-band" x="600" y="810" width="460" height="120" rx="10"/>
+          <text x="624" y="844" class="d-sans d-fg" font-size="20" font-weight="700">Hosted adapters</text>
+          <text x="1036" y="843" class="d-sans d-muted" font-size="15" text-anchor="end">opt-in</text>
+          <g class="d-mono" font-size="15" text-anchor="middle">
+            <rect class="d-pill" x="624" y="858" width="159" height="28" rx="14"/>
+            <text x="703.5" y="877" class="d-fg">OpenAI Realtime</text>
+            <rect class="d-pill" x="795" y="858" width="177" height="28" rx="14"/>
+            <text x="883.5" y="877" class="d-fg">Amazon Nova Sonic</text>
+            <rect class="d-pill" x="624" y="894" width="166" height="28" rx="14"/>
+            <text x="707" y="913" class="d-fg">OpenAI GPT-Live</text>
+          </g>
+        </svg>
+      </figure>
+
+      <div>
+        <p class="kicker">WHY IT MATTERS</p>
+        <div class="benefit">
+          <h3>No lock-in</h3>
+          <p>Changing provider changes a binding, not the application.</p>
+          <p>Comparing providers on latency and usage: <span class="st st-plan">planned</span></p>
+        </div>
+        <div class="benefit">
+          <h3>Honest capabilities</h3>
+          <p>Each adapter declares what it can do. A pipeline that needs more is refused before it runs, with an error that names it.</p>
+        </div>
+        <div class="benefit">
+          <h3>Conversations that behave</h3>
+          <p>Barge-in stops unplayed speech. Provisional words stay provisional. Tools run once, on committed input.</p>
+        </div>
+        <div class="benefit">
+          <h3>Runs where you need it</h3>
+          <p>Offline with egress denied, or hosted when you opt in.</p>
+          <p>Usage and cost for every model call: <span class="st st-plan">planned</span></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="status">
+      <h2 class="section-title">Where it stands</h2>
+      <p class="section-sub">Libraries only: no binary, server or CLI. Details on <a href="status.html">Status and roadmap</a>.</p>
+      <div class="status-grid">
+        <div class="status-card">
+          <h3><span class="st st-rel">0.5.0</span> released 2026-10-20</h3>
+          <ul>
+            <li>STT, LLM, TTS, tools and native speech contracts</li>
+            <li>pipelines: validate, plan, subgraphs</li>
+            <li>runtime and session facade</li>
+            <li>OpenAI Realtime, Amazon Nova Sonic, audio devices</li>
+            <li>454 of 454 synthesized conformance scenarios answered (<code>CHANGELOG.md</code>)</li>
+          </ul>
+        </div>
+        <div class="status-card">
+          <h3><span class="st st-rel">0.6.0</span> released 2026-10-20</h3>
+          <ul>
+            <li>sherpa-onnx and whisper.cpp STT, llama-server LLM</li>
+            <li>local voice cascade with commit gates and barge-in</li>
+            <li><code>offline_strict</code> and the egress watch</li>
+            <li>OpenAI GPT-Live; usage records per LLM call; record and replay</li>
+          </ul>
+        </div>
+        <div class="status-card planned">
+          <h3><span class="st st-plan">planned</span></h3>
+          <ul>
+            <li>local TTS adapter</li>
+                        <li>usage for STT, TTS and speech calls, pricing, provider comparison</li>
+            <li>backend swap by configuration, worker protocol</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="docs">
+      <h2 class="section-title">Read the docs</h2>
+      <p class="section-sub">Short pages, accurate to the code.</p>
+      <div class="cards">
+        <a class="card" href="introduction.html"><b>Introduction</b><span>What it is, why, and what it is not.</span></a>
+        <a class="card" href="quick-start.html"><b>Quick start</b><span>Build, check, and talk to a model.</span></a>
+        <a class="card" href="concepts/index.html"><b>Concepts</b><span>Contracts, streams, graphs, runtime, sessions.</span></a>
+        <a class="card" href="adapters.html"><b>Adapters</b><span>Every adapter: capabilities, licences, variables.</span></a>
+        <a class="card" href="offline-and-privacy.html"><b>Offline and privacy</b><span>Profiles, the egress watch, licence policy.</span></a>
+        <a class="card" href="usage-and-cost.html"><b>Usage and cost</b><span>What is recorded now, what is planned.</span></a>
+        <a class="card" href="examples.html"><b>Examples</b><span>Four runnable packages.</span></a>
+        <a class="card" href="status.html"><b>Status and roadmap</b><span>Every epic, one line each.</span></a>
+        <a class="card" href="contributing.html"><b>Contributing</b><span>Spec first, <code>task check</code>, the plan.</span></a>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <p style="margin: 0"><strong>What it is not:</strong> <span>a model, a training framework or a hosted service. You run it.</span></p>
+      <a class="repo" href="https://github.com/beyond10x/inference">github.com/beyond10x/inference</a>
+    </footer>
+  </div>
+</body>
+</html>
