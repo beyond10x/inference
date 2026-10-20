@@ -8,8 +8,8 @@
 use inference_audio_device::fake::FakeHost;
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
-    NativeSpeechModel, ResponseId, ResponseUsage, SessionConfig, SpeechSessionHandle, TokenCounts,
-    TranscriptionUsage,
+    NativeSpeechModel, Quantity, QuantityKind, QuantitySource, ResponseId, ResponseUsage,
+    SessionConfig, SpeechSessionHandle, TokenCounts, TranscriptionUsage,
 };
 use inference_testkit::duplex::mock::{MockSpeechModel, Reply, ScriptedTurn};
 use realtime_voice::{
@@ -317,6 +317,89 @@ fn a_response_without_usage_stays_unknown_and_out_of_the_sum() {
             .starts_with("responses 2 (1 without usage): "),
         "{totals}"
     );
+}
+
+/// The session's ledger records one `inference.usage` record per response, the one the barge-in
+/// cancelled before the mock reported usage with every token count unknown, and one per
+/// transcribed turn.
+#[test]
+fn the_session_records_one_usage_record_per_response_and_per_transcription() {
+    let host = FakeHost::laptop();
+    let mut model = MockSpeechModel::native(vec![
+        say("tell me a story", "Once upon a time."),
+        say("stop", "Stopped."),
+    ]);
+    let mut conversation = open(&mut model, openai_config(), &host);
+    let mut tally = Tally::new(Reported::OPENAI);
+
+    speak(&host, 100);
+    pause(&host, 100);
+    let mut cancelled = None;
+    for _ in 0..100 {
+        let mut notes = conversation.pump_microphone();
+        notes.extend(conversation.pump_events(1));
+        conversation.feed_speaker(&mut notes);
+        if conversation.speaker().queued() > 0 {
+            cancelled = conversation.session().ledger().in_progress();
+            break;
+        }
+    }
+    let cancelled = cancelled.expect("audio of a response in progress plays");
+    let _ = host.pull(TEN_MS_FRAMES).expect("the speaker runs");
+    speak(&host, 40);
+    let _ = conversation.step();
+    pause(&host, 100);
+    let completed = completed_response(&until_completed(&mut conversation, &mut tally));
+    let _ = conversation.close();
+
+    let records = conversation.session().ledger().usage_records();
+    let of = |response: ResponseId| {
+        records
+            .iter()
+            .filter(|record| record.response_id() == Some(response))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(of(cancelled).len(), 1, "{records:#?}");
+    assert_eq!(of(completed).len(), 1, "{records:#?}");
+    let responses = conversation.session().ledger().responses().len();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.response_id().is_some())
+            .count(),
+        responses,
+        "one record per response"
+    );
+    assert!(
+        of(cancelled)[0]
+            .quantities()
+            .iter()
+            .filter(|quantity| quantity.kind() != QuantityKind::Requests)
+            .all(|quantity| quantity.source() == QuantitySource::Unknown),
+        "cancelled before any usage: {:?}",
+        of(cancelled)[0]
+    );
+    assert_eq!(
+        of(completed)[0].quantities(),
+        [
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 20),
+            Quantity::provider_reported(QuantityKind::InputAudioTokens, 50),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 0),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 8),
+            Quantity::provider_reported(QuantityKind::OutputAudioTokens, 30),
+            Quantity::measured(QuantityKind::Requests, 1),
+        ]
+    );
+    let transcriptions: Vec<_> = records
+        .iter()
+        .filter(|record| record.response_id().is_none())
+        .collect();
+    assert_eq!(transcriptions.len(), 2, "one per transcribed turn");
+    assert!(transcriptions.iter().all(|record| record.quantities()
+        == [
+            Quantity::provider_reported(QuantityKind::InputAudioTokens, 10),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 3),
+        ]));
 }
 
 #[test]

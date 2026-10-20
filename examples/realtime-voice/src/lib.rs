@@ -28,7 +28,8 @@
 //! Usage: each usage the session reports, of a response or of a transcription, is a
 //! [`Note::Usage`]. A [`Tally`] fed with the notes holds the latest usage of each response and
 //! the totals, a count the provider does not report unknown rather than zero, and [`Prices`], a
-//! table the caller supplies, estimates their cost.
+//! table the caller supplies, estimates their cost. The session's `inference.usage` records
+//! ([`SessionEvent::UsageRecorded`]) make no note; the session's ledger keeps them.
 
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
@@ -457,7 +458,8 @@ impl<S: SpeechSessionHandle> Conversation<S> {
             }
             SessionEvent::InputAccepted(_)
             | SessionEvent::InputCommitted(_)
-            | SessionEvent::SpeechStopped(_) => {}
+            | SessionEvent::SpeechStopped(_)
+            | SessionEvent::UsageRecorded(_) => {}
         }
     }
 

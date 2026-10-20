@@ -24,13 +24,22 @@
 //! * Each `response.created` gets a new [`ResponseId`]; provider response ids map to it and are
 //!   never reused. `response.done` ends the response as completed, cancelled (the caller's
 //!   cancellation already recorded is not recorded again), or failed for `failed` and
-//!   `incomplete`. Its `usage` is the response's total and is recorded as the running total.
+//!   `incomplete`. Its `usage` is the response's final total. The usage record of the response
+//!   takes each count from its own field (text, audio and cached input tokens, text and audio
+//!   output tokens) and keeps a count the server left out unknown; a `response.done` without
+//!   usage settles the response with every count unknown. A response the caller cancels is
+//!   recorded when its `response.done` arrives, with the usage of what it generated, or, failing
+//!   that, at the next response or the session's end. The contract's `ResponseUsage`, which has no
+//!   unknown, still counts an absent detail as 0, or in text where the total says so.
 //! * The server's `input_audio_buffer.committed` that acknowledges a caller's commit is not a
 //!   second commit; one the server's own turn detection makes is. A caller's commit the server
 //!   refuses (an `error` whose code begins `input_audio_buffer_commit`) is owed no
 //!   acknowledgement.
-//! * The usage of `conversation.item.input_audio_transcription.completed`, in tokens, is recorded
-//!   as the transcription usage; a usage in seconds has no place in the contract and is not.
+//! * The usage of `conversation.item.input_audio_transcription.completed` is a usage record: in
+//!   tokens, the input tokens as `input_audio_tokens` and the output tokens as
+//!   `output_text_tokens`, a count the server left out unknown; in seconds, as `input_audio_ms`.
+//!   A usage in tokens with both counts is also the contract's transcription usage; one in
+//!   seconds, or missing a count, has no place in it.
 //! * A handshake the server refuses with HTTP 401 or 403 fails the open as rejected; any other
 //!   failure to connect as a closed transport.
 //! * Truncation converts the heard sample to `audio_end_ms` of the response's audio item.
@@ -49,11 +58,11 @@ use inference_core::model::{
 };
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseId, ResponseUsage, SessionConfig as SpeechConfig,
-    SessionError, SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
-    SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TokenCounts, TranscriptionUsage,
-    TuningOption, TuningSupport, TurnDetection as SpeechTurnDetection, TurnSensitivity,
-    Unsupported,
+    NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
+    SessionConfig as SpeechConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
+    SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechSessionId,
+    TokenCounts, TranscriptionUsage, TuningOption, TuningSupport,
+    TurnDetection as SpeechTurnDetection, TurnSensitivity, Unsupported, UsageTotal, reported,
 };
 use inference_tools::Json;
 use tokio::runtime::Runtime;
@@ -498,20 +507,32 @@ impl OpenAiRealtimeSession {
                 transcript, usage, ..
             } => {
                 let _ = self.ledger.input_transcribed(transcript, now);
-                if let Some(ClientTranscriptionUsage::Tokens {
-                    input_tokens,
-                    output_tokens,
-                    ..
-                }) = usage
-                {
-                    let _ = self.ledger.transcription_usage(
-                        TranscriptionUsage {
-                            input_tokens,
-                            output_tokens,
-                        },
-                        now,
-                    );
-                }
+                let (contract, quantities) = match usage {
+                    Some(ClientTranscriptionUsage::Tokens {
+                        input_tokens,
+                        output_tokens,
+                        ..
+                    }) => (
+                        input_tokens
+                            .zip(output_tokens)
+                            .map(|(input, output)| TranscriptionUsage {
+                                input_tokens: input,
+                                output_tokens: output,
+                            }),
+                        vec![
+                            reported(QuantityKind::InputAudioTokens, input_tokens),
+                            reported(QuantityKind::OutputTextTokens, output_tokens),
+                        ],
+                    ),
+                    Some(ClientTranscriptionUsage::Duration { seconds }) => (
+                        None,
+                        vec![reported(QuantityKind::InputAudioMs, milliseconds(seconds))],
+                    ),
+                    None => return,
+                };
+                let _ = self
+                    .ledger
+                    .transcription_usage_reported(contract, quantities, now);
             }
             ServerEvent::SpeechStarted { audio_start_ms, .. } => {
                 if let Some(position) = at(audio_start_ms) {
@@ -557,9 +578,13 @@ impl OpenAiRealtimeSession {
                 let Some(id) = self.response(&response_id) else {
                     return;
                 };
-                if let Some(usage) = usage {
-                    let _ = self.ledger.response_usage(id, response_usage(&usage), now);
-                }
+                let _ = self.ledger.response_usage_reported(
+                    id,
+                    usage.as_ref().map(response_usage),
+                    usage.as_ref().map(quantities).unwrap_or_default(),
+                    UsageTotal::Final,
+                    now,
+                );
                 let _ = match status {
                     ResponseStatus::Completed => self.ledger.response_completed(id, now),
                     ResponseStatus::Cancelled => self.ledger.response_cancelled(id, now),
@@ -597,7 +622,27 @@ impl OpenAiRealtimeSession {
     }
 }
 
-/// The contract's usage of a response total. A detail the server left out is counted in text.
+/// The quantities of a response total, each from its own field, unknown where the server left
+/// it out.
+fn quantities(usage: &Usage) -> Vec<Quantity> {
+    vec![
+        reported(QuantityKind::InputTextTokens, usage.input_text_tokens),
+        reported(QuantityKind::InputAudioTokens, usage.input_audio_tokens),
+        reported(QuantityKind::CachedInputTokens, usage.cached_input_tokens),
+        reported(QuantityKind::OutputTextTokens, usage.output_text_tokens),
+        reported(QuantityKind::OutputAudioTokens, usage.output_audio_tokens),
+    ]
+}
+
+/// `seconds` in whole milliseconds, rounded, saturating at `u64::MAX`; `None` for a count that
+/// is no duration (negative or not finite).
+pub(crate) fn milliseconds(seconds: f64) -> Option<u64> {
+    let millis = (seconds * 1_000.0).round();
+    (millis.is_finite() && millis >= 0.0).then_some(millis as u64)
+}
+
+/// The contract's usage of a response total, which has no unknown: a detail the server left out
+/// is counted as 0, the text tokens as the total's rest where the total says so.
 fn response_usage(usage: &Usage) -> ResponseUsage {
     let input_audio = usage.input_audio_tokens.unwrap_or(0);
     let output_audio = usage.output_audio_tokens.unwrap_or(0);

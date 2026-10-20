@@ -24,9 +24,10 @@ use inference_duplex::inference_audio::{
 use inference_duplex::inference_core::model::Capability;
 use inference_duplex::inference_tools::{DeclareTool, SideEffectClass, Tool};
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseId, ResponseState, ResponseUsage, SessionConfig,
-    SessionError, SessionEvent, SessionFailureKind, SpeechSessionHandle, SpeechSessionState,
-    TokenCounts, TuningOption, TurnDetection, TurnSensitivity, TurnTuning, Unsupported,
+    NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseState, ResponseUsage,
+    SessionConfig, SessionError, SessionEvent, SessionFailureKind, SpeechSessionHandle,
+    SpeechSessionState, TokenCounts, TuningOption, TurnDetection, TurnSensitivity, TurnTuning,
+    Unsupported, UsageRecorded,
 };
 use replay::{Faults, Replay, Reply, Turn, turn};
 use serde_json::{Value, json};
@@ -420,6 +421,34 @@ fn speech_during_a_response_cancels_it_and_the_next_response_has_a_new_id() {
     assert_eq!(
         session.ledger().response(first).map(|r| r.state()),
         Some(ResponseState::Cancelled)
+    );
+    let of_first: Vec<&UsageRecorded> = usage_records(&rest)
+        .into_iter()
+        .filter(|record| record.response_id == Some(first))
+        .collect();
+    assert_eq!(
+        of_first.len(),
+        1,
+        "the interrupted response is recorded once: {rest:#?}"
+    );
+    assert!(
+        of_first[0]
+            .quantities
+            .contains(&Quantity::provider_reported(
+                QuantityKind::InputAudioTokens,
+                50
+            )),
+        "the input reported before it began counts toward it: {:?}",
+        of_first[0]
+    );
+    let next_created = position(
+        &rest,
+        |event| matches!(event, SessionEvent::ResponseCreated(c) if c.response_id == next[0]),
+    )
+    .expect("the next response");
+    assert!(
+        matches!(&rest[next_created - 1], SessionEvent::UsageRecorded(record) if record.response_id == Some(first)),
+        "{rest:#?}"
     );
 }
 
@@ -921,6 +950,66 @@ fn usage_is_a_running_total_per_response() {
             "running totals never fall: {recorded:?}"
         );
     }
+
+    session.close().expect("open");
+    let closing = drain(&mut session);
+    let first = created(&first_turn)[0];
+    let second = created(&second_turn)[0];
+    assert!(
+        usage_records(&first_turn).is_empty(),
+        "output usage follows the end of a turn, so the first is not settled yet: {first_turn:#?}"
+    );
+    let second_created = position(&second_turn, |event| {
+        matches!(event, SessionEvent::ResponseCreated(_))
+    })
+    .expect("the second response");
+    assert!(
+        matches!(
+            &second_turn[second_created - 1],
+            SessionEvent::UsageRecorded(record) if record.response_id == Some(first)
+        ),
+        "the next response settles the first: {second_turn:#?}"
+    );
+    let records: Vec<&UsageRecorded> = usage_records(&second_turn)
+        .into_iter()
+        .chain(usage_records(&closing))
+        .collect();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.response_id)
+            .collect::<Vec<_>>(),
+        [Some(first), Some(second)],
+        "one record per response: {closing:#?}"
+    );
+    for record in records {
+        assert_eq!(
+            record.quantities,
+            vec![
+                Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
+                Quantity::provider_reported(QuantityKind::InputAudioTokens, 50),
+                Quantity::unknown(QuantityKind::CachedInputTokens),
+                Quantity::provider_reported(QuantityKind::OutputTextTokens, 8),
+                Quantity::provider_reported(QuantityKind::OutputAudioTokens, 30),
+                Quantity::measured(QuantityKind::Requests, 1),
+            ],
+            "the sum of the response's deltas; Nova Sonic reports no cached tokens"
+        );
+        assert_eq!(
+            record.speech_session_id,
+            Some(session.ledger().session().session_id())
+        );
+    }
+}
+
+fn usage_records(events: &[SessionEvent]) -> Vec<&UsageRecorded> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::UsageRecorded(recorded) => Some(recorded),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Closing cancels the response in progress, ends the prompt and the session on the wire, and
@@ -937,6 +1026,10 @@ fn closing_cancels_the_response_in_progress_and_drops_what_follows() {
     });
     let response = created(&events)[0];
     session.close().expect("open");
+    assert!(matches!(
+        session.next_event(WAIT),
+        Some(SessionEvent::UsageRecorded(record)) if record.response_id == Some(response)
+    ));
     assert!(matches!(
         session.next_event(WAIT),
         Some(SessionEvent::ResponseCancelled(c)) if c.response_id == response

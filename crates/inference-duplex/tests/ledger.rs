@@ -13,11 +13,12 @@ use inference_duplex::inference_core::model::{
 use inference_duplex::inference_core::model::{AdapterId, ModelId};
 use inference_duplex::inference_tools::{DeclareTool, SideEffectClass, Tool};
 use inference_duplex::{
-    OpenError, ResponseId, ResponseState, ResponseStateConflict, ResponseUsage, SessionConfig,
-    SessionError, SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
-    SpeechCapabilities, SpeechSessionId, SpeechSessionState, SpeechSessionStateConflict,
-    SpeechToolCallState, SpeechToolCallStateConflict, TokenCounts, TranscriptionUsage,
-    TuningSupport, TurnDetection, TurnTuning, Unsupported,
+    OpenError, Quantity, QuantityKind, ResponseId, ResponseState, ResponseStateConflict,
+    ResponseUsage, SessionConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
+    SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionId, SpeechSessionState,
+    SpeechSessionStateConflict, SpeechToolCallState, SpeechToolCallStateConflict, TokenCounts,
+    TranscriptionUsage, TuningSupport, TurnDetection, TurnTuning, Unsupported, UsageRecorded,
+    UsageTotal,
 };
 use serde_json::json;
 
@@ -624,6 +625,426 @@ fn a_closed_transport_fails_the_session_at_once_and_a_closed_session_takes_nothi
     );
 }
 
+/// The token kinds every response record carries, unknown where the provider left them out.
+const RESPONSE_TOKENS: [QuantityKind; 5] = [
+    QuantityKind::InputTextTokens,
+    QuantityKind::InputAudioTokens,
+    QuantityKind::CachedInputTokens,
+    QuantityKind::OutputTextTokens,
+    QuantityKind::OutputAudioTokens,
+];
+
+fn records(events: &[SessionEvent]) -> Vec<&UsageRecorded> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::UsageRecorded(recorded) => Some(recorded),
+            _ => None,
+        })
+        .collect()
+}
+
+fn quantity(record: &UsageRecorded, kind: QuantityKind) -> Quantity {
+    let found: Vec<&Quantity> = record
+        .quantities
+        .iter()
+        .filter(|quantity| quantity.kind() == kind)
+        .collect();
+    assert_eq!(found.len(), 1, "one {kind:?} quantity: {record:#?}");
+    *found[0]
+}
+
+fn kinds(events: &[SessionEvent]) -> Vec<&'static str> {
+    events.iter().map(kind).collect()
+}
+
+#[test]
+fn a_response_ending_with_its_final_usage_is_recorded_once_just_before_its_end() {
+    let start = Instant::now();
+    let adapter = adapter();
+    let session_id = SpeechSessionId::generate();
+    let (mut ledger, _) = SessionLedger::open(
+        session_id,
+        &adapter,
+        &full(),
+        config(TurnDetection::Disabled),
+        start,
+    )
+    .expect("the session opens");
+    let response = ResponseId::generate();
+    ledger
+        .response_created(response, start + Duration::from_millis(100))
+        .expect("created");
+    ledger
+        .response_usage_reported(
+            response,
+            None,
+            vec![
+                Quantity::provider_reported(QuantityKind::InputTextTokens, 12),
+                Quantity::provider_reported(QuantityKind::OutputAudioTokens, 60),
+            ],
+            UsageTotal::Final,
+            start + Duration::from_millis(300),
+        )
+        .expect("a response of the session");
+    ledger
+        .response_completed(response, start + Duration::from_millis(400))
+        .expect("in progress");
+    let events = drain(&mut ledger);
+    assert_eq!(
+        kinds(&events),
+        ["ResponseCreated", "UsageRecorded", "ResponseCompleted"]
+    );
+    let recorded = records(&events);
+    assert_eq!(recorded.len(), 1);
+    let record = recorded[0];
+    assert_eq!(record.speech_session_id, Some(session_id));
+    assert_eq!(record.response_id, Some(response));
+    assert_eq!(record.adapter_id, adapter.adapter_id());
+    assert_eq!(record.model_id, adapter.model_id());
+    assert_eq!(
+        (record.run_id, record.node_id, record.session_id),
+        (None, None, None),
+        "a speech session runs in no graph run"
+    );
+    assert_eq!(record.upstream_model, None);
+    assert!(record.r#final);
+    assert_eq!(record.ended_at_ms - record.started_at_ms, 300);
+    assert_eq!(
+        quantity(record, QuantityKind::InputTextTokens),
+        Quantity::provider_reported(QuantityKind::InputTextTokens, 12)
+    );
+    assert_eq!(
+        quantity(record, QuantityKind::OutputAudioTokens),
+        Quantity::provider_reported(QuantityKind::OutputAudioTokens, 60)
+    );
+    for kind in [
+        QuantityKind::InputAudioTokens,
+        QuantityKind::CachedInputTokens,
+        QuantityKind::OutputTextTokens,
+    ] {
+        assert_eq!(
+            quantity(record, kind),
+            Quantity::unknown(kind),
+            "a count the provider left out is unknown, never zero"
+        );
+    }
+    assert_eq!(
+        quantity(record, QuantityKind::Requests),
+        Quantity::measured(QuantityKind::Requests, 1)
+    );
+    assert_eq!(record.quantities.len(), 6, "{record:#?}");
+    assert_eq!(ledger.usage_records().len(), 1);
+    assert_eq!(&ledger.usage_records()[0].recorded(), record);
+
+    assert_eq!(
+        ledger.response_usage_reported(
+            response,
+            None,
+            vec![Quantity::provider_reported(
+                QuantityKind::InputTextTokens,
+                99
+            )],
+            UsageTotal::Final,
+            start + Duration::from_millis(500),
+        ),
+        Err(SessionError::ResponseNotInProgress(ResponseStateConflict {
+            current: ResponseState::Completed
+        })),
+        "a response is recorded once"
+    );
+    assert!(records(&drain(&mut ledger)).is_empty());
+    assert_eq!(ledger.usage_records().len(), 1);
+}
+
+#[test]
+fn a_response_cancelled_before_any_usage_is_recorded_unknown_when_the_next_begins() {
+    let now = Instant::now();
+    let mut ledger = open(&server_turns(), server_config(), now);
+    let first = ResponseId::generate();
+    ledger.response_created(first, now).expect("created");
+    ledger
+        .response_cancelled(first, now)
+        .expect("the provider's barge-in");
+    assert!(
+        records(&drain(&mut ledger)).is_empty(),
+        "usage may still come after the end"
+    );
+    let second = ResponseId::generate();
+    ledger.response_created(second, now).expect("created");
+    let events = drain(&mut ledger);
+    assert_eq!(kinds(&events), ["UsageRecorded", "ResponseCreated"]);
+    let record = records(&events)[0];
+    assert_eq!(record.response_id, Some(first));
+    for kind in RESPONSE_TOKENS {
+        assert_eq!(quantity(record, kind), Quantity::unknown(kind));
+    }
+    assert_eq!(
+        quantity(record, QuantityKind::Requests),
+        Quantity::measured(QuantityKind::Requests, 1)
+    );
+}
+
+#[test]
+fn a_final_report_after_the_callers_cancellation_records_the_response_at_once() {
+    let now = Instant::now();
+    let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
+    let response = ResponseId::generate();
+    ledger.response_created(response, now).expect("created");
+    ledger.cancel(response).expect("barge-in by the caller");
+    assert!(records(&drain(&mut ledger)).is_empty());
+    ledger
+        .response_usage_reported(
+            response,
+            None,
+            vec![Quantity::provider_reported(
+                QuantityKind::OutputAudioTokens,
+                7,
+            )],
+            UsageTotal::Final,
+            now,
+        )
+        .expect("a cancelled response is metered too");
+    let events = drain(&mut ledger);
+    assert_eq!(kinds(&events), ["UsageRecorded"]);
+    assert_eq!(
+        quantity(records(&events)[0], QuantityKind::OutputAudioTokens),
+        Quantity::provider_reported(QuantityKind::OutputAudioTokens, 7)
+    );
+}
+
+#[test]
+fn running_totals_replace_each_other_until_the_response_is_settled() {
+    let now = Instant::now();
+    let mut ledger = open(&server_turns(), server_config(), now);
+    let running = |ledger: &mut SessionLedger, response, output| {
+        ledger
+            .response_usage_reported(
+                response,
+                None,
+                vec![Quantity::provider_reported(
+                    QuantityKind::OutputTextTokens,
+                    output,
+                )],
+                UsageTotal::Running,
+                now,
+            )
+            .expect("a response of the session");
+    };
+    let first = ResponseId::generate();
+    ledger.response_created(first, now).expect("created");
+    running(&mut ledger, first, 5);
+    ledger.response_completed(first, now).expect("in progress");
+    running(&mut ledger, first, 8);
+    let second = ResponseId::generate();
+    ledger.response_created(second, now).expect("created");
+    running(&mut ledger, second, 3);
+    ledger.close().expect("open");
+    let events = drain(&mut ledger);
+    let at = |events: &[SessionEvent], name| {
+        events
+            .iter()
+            .position(|event| kind(event) == name)
+            .expect("delivered")
+    };
+    assert_eq!(
+        kinds(&events[events.len() - 3..]),
+        ["UsageRecorded", "ResponseCancelled", "SpeechSessionClosed"],
+        "the session's end settles the response it cancels, recorded before its end"
+    );
+    let recorded = records(&events);
+    assert_eq!(recorded.len(), 2, "one record per response: {events:#?}");
+    assert_eq!(recorded[0].response_id, Some(first));
+    assert_eq!(
+        quantity(recorded[0], QuantityKind::OutputTextTokens),
+        Quantity::provider_reported(QuantityKind::OutputTextTokens, 8),
+        "the last running total, reported after the response ended"
+    );
+    assert!(
+        matches!(
+            &events[at(&events, "UsageRecorded") + 1],
+            SessionEvent::ResponseCreated(created) if created.response_id == second
+        ),
+        "the next response settles the first: {events:#?}"
+    );
+    assert_eq!(recorded[1].response_id, Some(second));
+    assert_eq!(
+        quantity(recorded[1], QuantityKind::OutputTextTokens),
+        Quantity::provider_reported(QuantityKind::OutputTextTokens, 3)
+    );
+}
+
+#[test]
+fn a_failed_session_records_the_response_it_fails_before_its_own_failure() {
+    let now = Instant::now();
+    let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
+    let response = ResponseId::generate();
+    ledger.response_created(response, now).expect("created");
+    ledger
+        .fail(SessionFailure {
+            kind: SessionFailureKind::TransportClosed,
+            detail: "the socket closed".to_owned(),
+        })
+        .expect("open");
+    let events = drain(&mut ledger);
+    assert_eq!(
+        kinds(&events),
+        [
+            "ResponseCreated",
+            "UsageRecorded",
+            "ResponseFailed",
+            "SpeechSessionFailed"
+        ]
+    );
+    let record = records(&events)[0];
+    for kind in RESPONSE_TOKENS {
+        assert_eq!(quantity(record, kind), Quantity::unknown(kind));
+    }
+}
+
+#[test]
+fn the_contracts_usage_forms_are_recorded_as_reported_quantities() {
+    let now = Instant::now();
+    let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
+    let response = ResponseId::generate();
+    ledger.response_created(response, now).expect("created");
+    let usage = ResponseUsage {
+        input: TokenCounts {
+            text_tokens: 12,
+            audio_tokens: 40,
+            cached_tokens: 8,
+        },
+        output: TokenCounts {
+            text_tokens: 5,
+            audio_tokens: 60,
+            cached_tokens: 0,
+        },
+    };
+    ledger
+        .response_usage(response, usage, now)
+        .expect("a response of the session");
+    ledger
+        .response_completed(response, now)
+        .expect("in progress");
+    ledger
+        .transcription_usage(
+            TranscriptionUsage {
+                input_tokens: 40,
+                output_tokens: 6,
+            },
+            now,
+        )
+        .expect("recorded");
+    let events = drain(&mut ledger);
+    assert_eq!(
+        kinds(&events),
+        [
+            "ResponseCreated",
+            "ResponseUsageRecorded",
+            "UsageRecorded",
+            "ResponseCompleted",
+            "TranscriptionUsageRecorded",
+            "UsageRecorded"
+        ]
+    );
+    let recorded = records(&events);
+    assert_eq!(
+        recorded[0].quantities,
+        vec![
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 12),
+            Quantity::provider_reported(QuantityKind::InputAudioTokens, 40),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 8),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 5),
+            Quantity::provider_reported(QuantityKind::OutputAudioTokens, 60),
+            Quantity::measured(QuantityKind::Requests, 1),
+        ]
+    );
+    assert_eq!(recorded[1].response_id, None);
+    assert_eq!(
+        recorded[1].speech_session_id,
+        Some(ledger.session().session_id())
+    );
+    assert_eq!(
+        recorded[1].quantities,
+        vec![
+            Quantity::provider_reported(QuantityKind::InputAudioTokens, 40),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 6),
+        ],
+        "a transcription is no request of a response"
+    );
+}
+
+#[test]
+fn a_transcription_in_seconds_and_a_session_total_are_records_of_the_session() {
+    let start = Instant::now();
+    let mut ledger = open(&full(), config(TurnDetection::Disabled), start);
+    ledger.close().expect("open");
+    ledger
+        .transcription_usage_reported(
+            None,
+            vec![Quantity::provider_reported(
+                QuantityKind::InputAudioMs,
+                1_500,
+            )],
+            start + Duration::from_secs(2),
+        )
+        .expect("in any state of the session");
+    ledger
+        .session_usage(
+            vec![Quantity::provider_reported(
+                QuantityKind::InputAudioMs,
+                4_500,
+            )],
+            false,
+            start + Duration::from_secs(5),
+        )
+        .expect("in any state of the session");
+    let events = drain(&mut ledger);
+    assert_eq!(
+        kinds(&events),
+        ["SpeechSessionClosed", "UsageRecorded", "UsageRecorded"],
+        "a usage in seconds has no TranscriptionUsageRecorded"
+    );
+    let recorded = records(&events);
+    assert_eq!(
+        recorded[0].quantities,
+        vec![Quantity::provider_reported(
+            QuantityKind::InputAudioMs,
+            1_500
+        )]
+    );
+    assert_eq!(recorded[0].started_at_ms, recorded[0].ended_at_ms);
+    let session = recorded[1];
+    assert_eq!(session.response_id, None);
+    assert_eq!(
+        session.speech_session_id,
+        Some(ledger.session().session_id())
+    );
+    assert_eq!(
+        session.ended_at_ms - session.started_at_ms,
+        5_000,
+        "from the session's opening"
+    );
+    assert!(!session.r#final, "not confirmed final");
+    assert_eq!(
+        session.quantities,
+        vec![Quantity::provider_reported(
+            QuantityKind::InputAudioMs,
+            4_500
+        )]
+    );
+    assert_eq!(ledger.usage_records().len(), 2);
+}
+
+fn server_config() -> SessionConfig {
+    SessionConfig {
+        turn_detection: TurnDetection::ServerVad,
+        auto_response: true,
+        auto_interrupt: true,
+        ..config(TurnDetection::ServerVad)
+    }
+}
+
 fn kind(event: &SessionEvent) -> &'static str {
     match event {
         SessionEvent::InputAccepted(_) => "InputAccepted",
@@ -644,5 +1065,6 @@ fn kind(event: &SessionEvent) -> &'static str {
         SessionEvent::SpeechToolCallAnswered(_) => "SpeechToolCallAnswered",
         SessionEvent::SpeechSessionClosed(_) => "SpeechSessionClosed",
         SessionEvent::SpeechSessionFailed(_) => "SpeechSessionFailed",
+        SessionEvent::UsageRecorded(_) => "UsageRecorded",
     }
 }

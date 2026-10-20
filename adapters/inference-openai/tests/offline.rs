@@ -604,9 +604,9 @@ async fn barge_in_cancels_the_response_and_truncates_the_played_audio() {
                 item_id: "msg_003".to_owned(),
                 transcript: "Hey, can you hear me?".to_owned(),
                 usage: Some(TranscriptionUsage::Tokens {
-                    total_tokens: 22,
-                    input_tokens: 13,
-                    output_tokens: 9
+                    total_tokens: Some(22),
+                    input_tokens: Some(13),
+                    output_tokens: Some(9)
                 })
             },
         ]

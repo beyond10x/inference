@@ -20,6 +20,12 @@
 //! events in the order they were recorded. An adapter records what its provider sends through it
 //! and what its caller asks through it, so two adapters refuse the same things the same way.
 //!
+//! The ledger also records usage as `inference.usage` records ([`SessionEvent::UsageRecorded`]):
+//! one per response, one per transcription the provider reports usage of, and usage of the whole
+//! session where a provider bills per session, besides the duplex's own `ResponseUsageRecorded`
+//! and `TranscriptionUsageRecorded`. An adapter builds the [`Quantity`]s from its provider's own
+//! fields ([`reported`]), so a count the provider left out is `unknown`, never zero.
+//!
 //! The crate depends on `inference-core`, `inference-audio` and `inference-tools` and carries no
 //! provider, transport or other concrete implementation. Serialized names are the ESS names.
 
@@ -47,6 +53,12 @@ pub use contract::{
 };
 pub use ledger::{Liveness, SessionLedger};
 pub use record::{Response, SpeechSession, SpeechToolCall};
+
+/// The `inference.usage` vocabulary a session's usage records are written in, re-exported from
+/// `inference_core::usage`.
+pub use inference_core::usage::{
+    Quantity, QuantityKind, QuantitySource, UsageRecord, UsageRecorded,
+};
 
 #[cfg(doc)]
 use inference_tools::Tool;
@@ -182,12 +194,74 @@ pub struct ResponseUsage {
     pub output: TokenCounts,
 }
 
+impl ResponseUsage {
+    /// Every count as a quantity the provider reported, mapped as `ess/domains/usage.yaml` maps
+    /// them: input text, audio and cached tokens, output text and audio tokens (output cached
+    /// tokens have no kind). It is for a provider that reports every count; one that leaves a
+    /// count out builds its quantities from its own fields, so that count stays unknown.
+    #[must_use]
+    pub fn quantities(&self) -> Vec<Quantity> {
+        vec![
+            reported(QuantityKind::InputTextTokens, Some(self.input.text_tokens)),
+            reported(
+                QuantityKind::InputAudioTokens,
+                Some(self.input.audio_tokens),
+            ),
+            reported(
+                QuantityKind::CachedInputTokens,
+                Some(self.input.cached_tokens),
+            ),
+            reported(
+                QuantityKind::OutputTextTokens,
+                Some(self.output.text_tokens),
+            ),
+            reported(
+                QuantityKind::OutputAudioTokens,
+                Some(self.output.audio_tokens),
+            ),
+        ]
+    }
+}
+
+/// The quantity `kind` as a provider reports it: `count` as `provider_reported`, or `unknown`
+/// when the provider left it out. A count beyond the ESS `Integer` saturates.
+#[must_use]
+pub fn reported(kind: QuantityKind, count: Option<u64>) -> Quantity {
+    count.map_or(Quantity::unknown(kind), |count| {
+        Quantity::provider_reported(kind, i64::try_from(count).unwrap_or(i64::MAX))
+    })
+}
+
 /// `inference.duplex.TranscriptionUsage`: the usage of transcribing the input.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscriptionUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+impl TranscriptionUsage {
+    /// Both counts as quantities the provider reported: the input tokens as
+    /// `input_audio_tokens`, the output tokens as `output_text_tokens`.
+    #[must_use]
+    pub fn quantities(&self) -> Vec<Quantity> {
+        vec![
+            reported(QuantityKind::InputAudioTokens, Some(self.input_tokens)),
+            reported(QuantityKind::OutputTextTokens, Some(self.output_tokens)),
+        ]
+    }
+}
+
+/// Whether a provider's report of a response's usage is the response's final total, which no
+/// later report changes ([`UsageTotal::Final`]), or a running total that a later report may still
+/// replace, also after the response ended ([`UsageTotal::Running`]). It decides when
+/// [`SessionLedger`] records the response's usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UsageTotal {
+    /// A later report may still replace it, also after the response ended.
+    Running,
+    /// No later report changes it.
+    Final,
 }
 
 /// `inference.duplex.SpeechSession.State`. Serialized as written in ESS (`Open`).

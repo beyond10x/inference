@@ -40,14 +40,20 @@
 //!   completes is proposed on the response in progress, or on a new response when none is. The
 //!   result goes back as a `function_call_output` item followed by `response.create`; the
 //!   backend continues and the model speaks the outcome.
-//! * Usage: the voice model is billed in seconds, which the contract's usage events have no
-//!   place for; [`OpenAiLiveSession::voice_seconds`] holds the latest running total and
-//!   [`OpenAiLiveSession::final_usage`] what `session.closed` confirmed, `None` while nothing was
-//!   reported. The token usage of each backend response is summed onto the response in
-//!   progress, or the latest one, as text tokens (the backend takes no audio), cached tokens
-//!   inside them; a session without backend work records no usage. A cached count the server
-//!   left out is recorded as 0 cached, its absence kept in
-//!   [`OpenAiLiveSession::backend_usage`].
+//! * Usage: the voice model is billed in seconds of session. [`OpenAiLiveSession::voice_seconds`]
+//!   holds the latest running total and [`OpenAiLiveSession::final_usage`] what `session.closed`
+//!   confirmed, `None` while nothing was reported. Once the session ended (closed, ended by the
+//!   server, or failed) they are one usage record of the session as a whole, naming no response:
+//!   the billed seconds as `input_audio_ms` (the session timeline advances with the input, so
+//!   they are the audio the model read), `final` only when `session.closed` confirmed them,
+//!   unknown when nothing was reported. The token usage of each backend response is summed onto
+//!   the response in progress, or the latest one, as text tokens (the backend takes no audio),
+//!   cached tokens inside them; a session without backend work records no `ResponseUsage`. In a
+//!   response's usage record those sums are reported, its audio tokens unknown, and its cached
+//!   tokens unknown once one backend response left them out; backend usage may arrive after a
+//!   response's silence gap ended it, so the record waits for the next response or the session's
+//!   end. In the contract's `ResponseUsage` a cached count the server left out is 0, its absence
+//!   kept in [`OpenAiLiveSession::backend_usage`].
 //! * A refused handshake (HTTP 401 or 403) fails the open as rejected, any other failure to
 //!   connect as a closed transport. A `session.closed` the caller did not ask for (expired, a
 //!   safety filter, a remote hangup) fails the session as a provider error, `connection_lost` as
@@ -63,17 +69,17 @@ use inference_core::model::{
 };
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseId, ResponseUsage, SessionConfig as SpeechConfig,
-    SessionError, SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
-    SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TokenCounts, TuningSupport,
-    TurnDetection, Unsupported,
+    NativeSpeechModel, OpenError, QuantityKind, ResponseId, ResponseUsage,
+    SessionConfig as SpeechConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
+    SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechSessionId,
+    TokenCounts, TuningSupport, TurnDetection, Unsupported, UsageTotal, reported,
 };
 use inference_tools::Json;
 use tokio::runtime::Runtime;
 
 use crate::config::{Endpoint, FunctionTool};
 use crate::credential::CredentialSource;
-use crate::duplex::failure;
+use crate::duplex::{failure, milliseconds};
 use crate::error::RealtimeError;
 use crate::event::ServerError;
 use crate::live::{
@@ -390,9 +396,11 @@ impl NativeSpeechModel for OpenAiLive {
             silent_run: 0,
             emitted: HashMap::new(),
             usage: HashMap::new(),
+            cached: HashMap::new(),
             backend_usage: Vec::new(),
             voice_seconds: None,
             final_usage: None,
+            session_recorded: false,
             server_errors: Vec::new(),
         })
     }
@@ -415,9 +423,14 @@ pub struct OpenAiLiveSession {
     emitted: HashMap<ResponseId, u64>,
     /// The backend usage summed onto each response.
     usage: HashMap<ResponseId, ResponseUsage>,
+    /// The cached tokens summed onto each response; `None` once a backend response left them
+    /// out.
+    cached: HashMap<ResponseId, Option<u64>>,
     backend_usage: Vec<BackendUsage>,
     voice_seconds: Option<f64>,
     final_usage: Option<LiveClosed>,
+    /// Whether the session's own usage record was made.
+    session_recorded: bool,
     server_errors: Vec<ServerError>,
 }
 
@@ -580,7 +593,43 @@ impl OpenAiLiveSession {
             },
         };
         let sum = *sum;
-        let _ = self.ledger.response_usage(id, sum, now);
+        let cached = *self
+            .cached
+            .entry(id)
+            .and_modify(|cached| *cached = cached.zip(usage.cached_tokens).map(|(a, b)| a + b))
+            .or_insert(usage.cached_tokens);
+        let _ = self.ledger.response_usage_reported(
+            id,
+            Some(sum),
+            vec![
+                reported(QuantityKind::InputTextTokens, Some(sum.input.text_tokens)),
+                reported(QuantityKind::CachedInputTokens, cached),
+                reported(QuantityKind::OutputTextTokens, Some(sum.output.text_tokens)),
+            ],
+            UsageTotal::Running,
+            now,
+        );
+    }
+
+    /// Once the session ended, records its billed voice seconds, once: what `session.closed`
+    /// confirmed, else the latest running total, unconfirmed.
+    fn record_session_usage(&mut self) {
+        if self.session_recorded || self.ledger.session().require_open().is_ok() {
+            return;
+        }
+        self.session_recorded = true;
+        let (seconds, confirmed) = match &self.final_usage {
+            Some(closed) => (Some(closed.seconds), true),
+            None => (self.voice_seconds, false),
+        };
+        let _ = self.ledger.session_usage(
+            vec![reported(
+                QuantityKind::InputAudioMs,
+                seconds.and_then(milliseconds),
+            )],
+            confirmed,
+            Instant::now(),
+        );
     }
 
     /// Records one server event through the ledger; what the ledger refuses is dropped.
@@ -705,18 +754,21 @@ impl SpeechSessionHandle for OpenAiLiveSession {
         {
             self.final_usage = Some(closed);
         }
+        self.record_session_usage();
         Ok(())
     }
 
     fn next_event(&mut self, wait: Duration) -> Option<SessionEvent> {
         let deadline = Instant::now() + wait;
         loop {
+            self.record_session_usage();
             if let Some(event) = self.ledger.next_event() {
                 return Some(event);
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() || self.ledger.session().require_open().is_err() {
                 self.ledger.check_liveness(Instant::now());
+                self.record_session_usage();
                 return self.ledger.next_event();
             }
             let (Some(client), Some(runtime)) = (self.client.as_mut(), self.runtime.as_ref())
