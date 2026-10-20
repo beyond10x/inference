@@ -514,11 +514,11 @@ fn history_kind(input: &mut Input<'_>) -> Result<HistoryKind, TargetError> {
         })
 }
 
-/// An `Optional<inference.tools.ToolCallId>`: absent when null.
+/// An `Optional<inference.tools.ToolCallId>`: absent when the input leaves it out or sends null.
 fn optional_call(input: &mut Input<'_>) -> Result<Option<ToolCallId>, TargetError> {
-    match input.node("call_id")? {
-        Node::Null => Ok(None),
-        Node::Text(text) => serde_json::from_value(serde_json::Value::String(text.clone()))
+    match input.optional("call_id") {
+        None => Ok(None),
+        Some(Node::Text(text)) => serde_json::from_value(serde_json::Value::String(text.clone()))
             .map(Some)
             .map_err(|error| {
                 unreadable(
