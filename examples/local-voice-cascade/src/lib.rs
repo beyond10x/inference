@@ -20,10 +20,16 @@
 //! | `tts` | model | the testkit's [`SpeechNode`] over its mock synthesiser |
 //! | `speaker` | sink | the device adapter's [`AcknowledgingSink`] on the audio host's speaker |
 //!
+//! The model nodes require what their mocks claim, except `stt`, which requires nothing
+//! ([`STT_REQUIRES`]): the `SttNode` offers a recogniser each frame and ends its input at the
+//! turn's completion, so a batch recogniser claiming neither incremental input nor output
+//! streaming runs at `stt` as a streaming one does.
+//!
 //! With feature `local`, the module `local` binds the same declaration to the local adapters
-//! (A-05, 1141): the sherpa-onnx recogniser at `stt`, the generator of a loopback `llama-server`
-//! at `agent` and, until a local TTS adapter exists, the mock synthesiser at `tts`, under an
-//! `offline_strict` profile that also admits local workers.
+//! (A-05, 1140): at `stt` the recogniser its configuration selects, sherpa-onnx's streaming one or
+//! whisper.cpp's batch one, the generator of a loopback `llama-server` at `agent` and, until a
+//! local TTS adapter exists, the mock synthesiser at `tts`, under an `offline_strict` profile
+//! that also admits local workers.
 //!
 //! The input gate passes the committed spans and the turn events to the LLM and holds back the
 //! hypotheses; it refuses a revision of a span it passed as Committed. The output gate passes a
@@ -464,9 +470,38 @@ pub fn declare(
     )
 }
 
+/// What the cascade's `stt` node requires: nothing, so that a batch recogniser, which claims
+/// neither incremental input nor output streaming, binds there as a streaming one does. The node
+/// implementation offers a recogniser each frame as it arrives and ends its input at the turn's
+/// completion, which a batch recogniser takes as well.
+pub const STT_REQUIRES: [Capability; 0] = [];
+
+/// What the `stt` node required before a batch recogniser could take its place: incremental
+/// input and output streaming, which planning refuses a recogniser lacking either of with
+/// `CapabilityMismatch` naming the node.
+pub const STREAMING_STT_REQUIRES: [Capability; 2] =
+    [Capability::IncrementalInput, Capability::OutputStreaming];
+
 /// Declares the cascade in `declaration` under the `offline_strict` profile with egress denied
 /// admitting `admitted`, its nodes `stt`, `agent` and `tts` bound to `adapters` in that order,
-/// and validates and plans it.
+/// the `stt` node requiring [`STT_REQUIRES`], and validates and plans it.
+///
+/// # Errors
+///
+/// [`CascadeRefused`] when the declaration does not validate or plan, as when an adapter claims
+/// less than its node requires or its locality is not admitted.
+pub(crate) fn declare_over(
+    declaration: &mut Declaration,
+    adapters: [Adapter; 3],
+    admitted: Vec<Locality>,
+) -> Result<LocalCascade, CascadeRefused> {
+    declare_requiring(declaration, adapters, admitted, &STT_REQUIRES)
+}
+
+/// Declares the cascade in `declaration` under the `offline_strict` profile with egress denied
+/// admitting `admitted`, its nodes `stt`, `agent` and `tts` bound to `adapters` in that order,
+/// the `stt` node requiring `stt_requires`, such as [`STT_REQUIRES`] or
+/// [`STREAMING_STT_REQUIRES`], and validates and plans it.
 ///
 /// # Errors
 ///
@@ -477,10 +512,11 @@ pub fn declare(
 ///
 /// When `admitted` is not a row of the deployment-profile table for `offline_strict`, which
 /// admits neither a cluster nor an external provider.
-pub(crate) fn declare_over(
+pub fn declare_requiring(
     declaration: &mut Declaration,
     adapters: [Adapter; 3],
     admitted: Vec<Locality>,
+    stt_requires: &[Capability],
 ) -> Result<LocalCascade, CascadeRefused> {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
@@ -520,13 +556,13 @@ pub(crate) fn declare_over(
             let split = pipeline.node("split", NodeRole::FanOut, Vec::new());
             let vad = pipeline.node("vad", NodeRole::Policy, Vec::new());
             let policy = pipeline.node("turn policy", NodeRole::Policy, Vec::new());
-            let stt = pipeline.node("stt", NodeRole::Model, streaming.clone());
+            let stt = pipeline.node("stt", NodeRole::Model, stt_requires.to_vec());
             let input_gate = pipeline.node("input gate", NodeRole::Policy, Vec::new());
             let turn_split = pipeline.node("turn split", NodeRole::FanOut, Vec::new());
             let llm = pipeline.node("agent", NodeRole::Model, vec![Capability::OutputStreaming]);
             let text_split = pipeline.node("text split", NodeRole::FanOut, Vec::new());
             let output_gate = pipeline.node("output gate", NodeRole::Policy, Vec::new());
-            let tts = pipeline.node("tts", NodeRole::Model, streaming.clone());
+            let tts = pipeline.node("tts", NodeRole::Model, streaming);
             let sink = pipeline.node("speaker", NodeRole::Sink, Vec::new());
 
             let microphone = pipeline.input::<modality::Audio>(&split, "audio", audio);
