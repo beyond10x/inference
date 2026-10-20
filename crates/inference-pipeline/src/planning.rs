@@ -12,6 +12,12 @@
 //! of [`Capability`]; over no contribution they are every capability, except that a pipeline with
 //! no node has none.
 //!
+//! A subgraph node (one whose [`Node::subgraph_id`] names a Planned pipeline) is bound to nothing:
+//! it contributes its child's effective capabilities as a bound node contributes its adapter's.
+//! Before anything else, planning refuses a subgraph node whose ports and its child's exposures do
+//! not match one to one by name, direction and modality ([`SubgraphInterfaceMismatch`], the first
+//! such node in declaration order).
+//!
 //! Planning refuses, in this order: a node with a non-empty `requires` and no binding
 //! ([`NodeUnbound`], the first such node in declaration order); a node requiring a capability a
 //! bound adapter of it does not implement ([`CapabilityMismatch`] naming the node and its first
@@ -31,7 +37,7 @@ use inference_core::model::{Adapter, Capability};
 use crate::{
     CapabilityMismatch, Catalog, Declaration, Essentiality, Node, NodeId, NodeRole, NodeUnbound,
     PipelineId, PipelineNotFound, PipelinePlanned, PipelineState, PipelineStateConflict,
-    PlanPipeline, PortId, ValidatePipeline, ValidatePipelineError,
+    PlanPipeline, PortId, SubgraphInterfaceMismatch, ValidatePipeline, ValidatePipelineError,
 };
 
 /// The validated form of a pipeline: only [`Declaration::validate`] produces one, from the
@@ -90,6 +96,9 @@ pub enum PlanPipelineError {
     UnknownPipeline(PipelineNotFound),
     /// The `wrong-state` outcome: the pipeline is not Validated.
     WrongState(PipelineStateConflict),
+    /// The `interface-mismatch` outcome: a subgraph node's ports do not match its child's
+    /// exposures.
+    InterfaceMismatch(SubgraphInterfaceMismatch),
     /// The `unbound` outcome: a node whose requirements need an adapter has no binding.
     Unbound(NodeUnbound),
     /// The `mismatch` outcome: a mandatory capability of a node or of the pipeline is not
@@ -102,6 +111,7 @@ impl fmt::Display for PlanPipelineError {
         match self {
             Self::UnknownPipeline(error) => fmt::Display::fmt(error, f),
             Self::WrongState(error) => fmt::Display::fmt(error, f),
+            Self::InterfaceMismatch(error) => fmt::Display::fmt(error, f),
             Self::Unbound(error) => fmt::Display::fmt(error, f),
             Self::Mismatch(error) => fmt::Display::fmt(error, f),
         }
@@ -113,6 +123,7 @@ impl Error for PlanPipelineError {
         match self {
             Self::UnknownPipeline(error) => Some(error),
             Self::WrongState(error) => Some(error),
+            Self::InterfaceMismatch(error) => Some(error),
             Self::Unbound(error) => Some(error),
             Self::Mismatch(error) => Some(error),
         }
@@ -237,6 +248,20 @@ impl Declaration {
                         .map_or(&[][..], Adapter::capabilities)
                 })
         };
+        if let Some(mismatch) = self.interface_mismatch(&nodes) {
+            return Err(PlanPipelineError::InterfaceMismatch(mismatch));
+        }
+        let subgraph = |node_id: NodeId| {
+            nodes
+                .iter()
+                .find(|node| node.node_id() == node_id)
+                .and_then(|node| node.subgraph_id())
+                .map(|child| {
+                    self.pipeline(child)
+                        .and_then(crate::Pipeline::effective_capabilities)
+                        .unwrap_or(&[])
+                })
+        };
         if let Some(node) = nodes
             .iter()
             .find(|node| !node.requires().is_empty() && adapters(node.node_id()).next().is_none())
@@ -261,7 +286,7 @@ impl Declaration {
         }
         let mut effective = Capability::ALL.to_vec();
         for node_id in contributing {
-            for implemented in adapters(node_id) {
+            for implemented in adapters(node_id).chain(subgraph(node_id)) {
                 effective.retain(|capability| implemented.contains(capability));
             }
         }
@@ -302,6 +327,61 @@ impl Declaration {
             pipeline.state = PipelineState::Planned;
         }
         Ok(effective)
+    }
+
+    /// The first subgraph node of `nodes`, in declaration order, whose ports and its child's
+    /// exposures do not match one to one by name, direction and modality, with what does not
+    /// match: in the node's port order, a port no exposure carries the name of, or one whose
+    /// exposure of that name differs in direction or modality or was matched by an earlier port;
+    /// then, in the child's exposure order, an exposure no port carries the name of.
+    fn interface_mismatch(&self, nodes: &[&Node]) -> Option<SubgraphInterfaceMismatch> {
+        for node in nodes {
+            let Some(child) = node.subgraph_id() else {
+                continue;
+            };
+            let node_id = node.node_id();
+            let ports: Vec<&crate::Port> = self
+                .ports()
+                .filter(|port| {
+                    port.node_id() == node_id && port.pipeline_id() == node.pipeline_id()
+                })
+                .collect();
+            let exposures: Vec<&crate::Exposure> = self
+                .exposures()
+                .filter(|exposure| exposure.pipeline_id() == child)
+                .collect();
+            let mut matched = BTreeSet::new();
+            for port in &ports {
+                let mismatch = |exposure_id| SubgraphInterfaceMismatch {
+                    node_id,
+                    port_id: Some(port.port_id()),
+                    exposure_id,
+                };
+                let Some(exposure) = exposures
+                    .iter()
+                    .find(|exposure| exposure.name() == port.name())
+                else {
+                    return Some(mismatch(None));
+                };
+                let alike = self.port(exposure.port_id()).is_some_and(|exposed| {
+                    exposed.direction() == port.direction() && exposed.modality() == port.modality()
+                });
+                if !alike || !matched.insert(exposure.exposure_id()) {
+                    return Some(mismatch(Some(exposure.exposure_id())));
+                }
+            }
+            if let Some(exposure) = exposures
+                .iter()
+                .find(|exposure| !matched.contains(&exposure.exposure_id()))
+            {
+                return Some(SubgraphInterfaceMismatch {
+                    node_id,
+                    port_id: None,
+                    exposure_id: Some(exposure.exposure_id()),
+                });
+            }
+        }
+        None
     }
 
     /// The nodes of `nodes` on some path from a node of role `source` to a node of role `sink`

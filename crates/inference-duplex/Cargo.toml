@@ -1,0 +1,20 @@
+[package]
+name = "inference-duplex"
+description = "Native speech contract of the inference framework: a session over one speech-to-speech model taking audio and control in and giving audio, transcripts and tool calls out on typed responses."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+inference-audio = { path = "../inference-audio" }
+inference-core = { path = "../inference-core" }
+inference-tools = { path = "../inference-tools" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

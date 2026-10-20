@@ -1,6 +1,7 @@
-//! `inference.graph`: the six declaration commands, `ValidatePipeline`, `PlanPipeline`, the eight
-//! Run commands, `DescribeNodeInstance` and the six node instance commands, the eight views and
-//! the twenty-three events of `ess/domains/graph.yaml`, answered by [`GraphDomain`].
+//! `inference.graph`: the seven declaration commands, `DeclareNodeDescriptor`, `ValidatePipeline`,
+//! `PlanPipeline`, the eight Run commands, `DescribeNodeInstance` and the six node instance
+//! commands, the ten views and the twenty-five events of `ess/domains/graph.yaml`, answered by
+//! [`GraphDomain`].
 //!
 //! Each request field is read on its own ([`Input`]); the outcome, the error and the event come
 //! from what the store returned. `DeclarePipeline`, `BindNode` and `PlanPipeline` read the
@@ -67,20 +68,23 @@ use ess_primitives::node::Node;
 use inference_core::model::{AdapterId, Capability, Locality};
 use inference_core::policy::ProfileId;
 use inference_pipeline::{
-    AddNode, AddNodeError, AddPort, AddPortError, BindNode, BindNodeError, Binding,
-    CapabilityMismatch, Catalog, ConnectPorts, ConnectPortsError, Declaration, DeclareFeedbackLoop,
-    DeclareFeedbackLoopError, DeclarePipeline, Edge, FeedbackLoop, FeedbackLoopDeclared,
-    GraphFinding, NodeAdded, NodeBound, NodeId, NodeUnbound, PipelineDeclared, PipelineId,
-    PipelineNotFound, PipelineNotReady, PipelinePlanned, PipelineValidated, PlanPipeline,
-    PlanPipelineError, Port, PortAdded, PortsConnected, ValidatePipeline, ValidatePipelineError,
+    AddNode, AddNodeError, AddPort, AddPortError, AddSubgraphNode, AddSubgraphNodeError, BindNode,
+    BindNodeError, Binding, CapabilityMismatch, Catalog, ConnectPorts, ConnectPortsError,
+    Declaration, DeclareFeedbackLoop, DeclareFeedbackLoopError, DeclareNodeDescriptor,
+    DeclarePipeline, Edge, ExposePort, ExposePortError, Exposure, FeedbackLoop,
+    FeedbackLoopDeclared, GraphFinding, NodeAdded, NodeBound, NodeDescriptor,
+    NodeDescriptorDeclared, NodeId, NodeUnbound, PipelineDeclared, PipelineId, PipelineNotFound,
+    PipelineNotReady, PipelinePlanned, PipelineValidated, PlanPipeline, PlanPipelineError, Port,
+    PortAdded, PortDescriptor, PortExposed, PortsConnected, SubgraphInterfaceMismatch,
+    SubgraphNodeAdded, ValidatePipeline, ValidatePipelineError,
 };
 use inference_runtime::RunId;
 use inference_runtime::run::{
     AdmissionRefusal, FailureReason, NodeInstance, NodeInstanceDescribed, NodeInstanceId, Run,
-    RunCreated, RunFailed, RunStateConflict,
+    RunCreated, RunFailed, RunNested, RunStateConflict,
 };
 use inference_testkit::graph::{
-    CreateRunError, DescribeNodeInstanceError, GraphCatalog, GraphDomain, GraphEvent,
+    CreateRunError, DescribeNodeInstanceError, GraphCatalog, GraphDomain, GraphEvent, NestRunError,
     NodeInstanceMoveError, RunMoveError,
 };
 use inference_testkit::stream::StreamDomain;
@@ -96,13 +100,17 @@ pub const DOMAIN: &str = "inference.graph";
 
 const DECLARE_PIPELINE: &str = "inference.graph.DeclarePipeline";
 const ADD_NODE: &str = "inference.graph.AddNode";
+const ADD_SUBGRAPH_NODE: &str = "inference.graph.AddSubgraphNode";
 const ADD_PORT: &str = "inference.graph.AddPort";
 const CONNECT_PORTS: &str = "inference.graph.ConnectPorts";
+const EXPOSE_PORT: &str = "inference.graph.ExposePort";
+const DECLARE_NODE_DESCRIPTOR: &str = "inference.graph.DeclareNodeDescriptor";
 const DECLARE_FEEDBACK_LOOP: &str = "inference.graph.DeclareFeedbackLoop";
 const BIND_NODE: &str = "inference.graph.BindNode";
 const VALIDATE_PIPELINE: &str = "inference.graph.ValidatePipeline";
 const PLAN_PIPELINE: &str = "inference.graph.PlanPipeline";
 const CREATE_RUN: &str = "inference.graph.CreateRun";
+const NEST_RUN: &str = "inference.graph.NestRun";
 const VALIDATE_RUN: &str = "inference.graph.ValidateRun";
 const PREPARE_RUN: &str = "inference.graph.PrepareRun";
 const ACTIVATE_RUN: &str = "inference.graph.ActivateRun";
@@ -125,17 +133,22 @@ const REFUSED: &str = "refused";
 /// The outcomes of `PlanPipeline` that `ess/domains/graph.yaml` declares external.
 const UNBOUND: &str = "unbound";
 const MISMATCH: &str = "mismatch";
+const INTERFACE_MISMATCH: &str = "interface-mismatch";
 const LOCALITY_DENIED: &str = "locality-denied";
 
 const PIPELINE_DECLARED: &str = "inference.graph.PipelineDeclared";
 const NODE_ADDED: &str = "inference.graph.NodeAdded";
+const SUBGRAPH_NODE_ADDED: &str = "inference.graph.SubgraphNodeAdded";
 const PORT_ADDED: &str = "inference.graph.PortAdded";
 const PORTS_CONNECTED: &str = "inference.graph.PortsConnected";
+const PORT_EXPOSED: &str = "inference.graph.PortExposed";
+const NODE_DESCRIPTOR_DECLARED: &str = "inference.graph.NodeDescriptorDeclared";
 const FEEDBACK_LOOP_DECLARED: &str = "inference.graph.FeedbackLoopDeclared";
 const NODE_BOUND: &str = "inference.graph.NodeBound";
 const PIPELINE_VALIDATED: &str = "inference.graph.PipelineValidated";
 const PIPELINE_PLANNED: &str = "inference.graph.PipelinePlanned";
 const RUN_CREATED: &str = "inference.graph.RunCreated";
+const RUN_NESTED: &str = "inference.graph.RunNested";
 const RUN_VALIDATING: &str = "inference.graph.RunValidating";
 const RUN_PREPARING: &str = "inference.graph.RunPreparing";
 const RUN_ACTIVATED: &str = "inference.graph.RunActivated";
@@ -152,16 +165,20 @@ const NODE_INSTANCE_STOPPED: &str = "inference.graph.NodeInstanceStopped";
 const NODE_INSTANCE_FAILED: &str = "inference.graph.NodeInstanceFailed";
 
 /// Every event this module observes.
-const EVENTS: [&str; 23] = [
+const EVENTS: [&str; 27] = [
     PIPELINE_DECLARED,
     NODE_ADDED,
+    SUBGRAPH_NODE_ADDED,
     PORT_ADDED,
     PORTS_CONNECTED,
+    PORT_EXPOSED,
+    NODE_DESCRIPTOR_DECLARED,
     FEEDBACK_LOOP_DECLARED,
     NODE_BOUND,
     PIPELINE_VALIDATED,
     PIPELINE_PLANNED,
     RUN_CREATED,
+    RUN_NESTED,
     RUN_VALIDATING,
     RUN_PREPARING,
     RUN_ACTIVATED,
@@ -188,14 +205,17 @@ const EDGE_NOT_FOUND: &str = "inference.graph.EdgeNotFound";
 const UNBOUNDED_FEEDBACK: &str = "inference.graph.UnboundedFeedback";
 const INCOMPATIBLE_EDGE: &str = "inference.graph.IncompatibleEdge";
 const ADAPTER_NOT_FOUND: &str = "inference.graph.AdapterNotFound";
+const NODE_DESCRIPTOR_EXISTS: &str = "inference.graph.NodeDescriptorExists";
 const INCOMPATIBLE_GRAPH: &str = "inference.graph.IncompatibleGraph";
 const NODE_UNBOUND: &str = "inference.graph.NodeUnbound";
 const CAPABILITY_MISMATCH: &str = "inference.graph.CapabilityMismatch";
+const SUBGRAPH_INTERFACE_MISMATCH: &str = "inference.graph.SubgraphInterfaceMismatch";
 const LOCALITY_DENIED_ERROR: &str = "inference.graph.LocalityDenied";
 const PIPELINE_STATE_CONFLICT: &str = "inference.graph.PipelineStateConflict";
 const RUN_STATE_CONFLICT: &str = "inference.graph.RunStateConflict";
 const NODE_INSTANCE_STATE_CONFLICT: &str = "inference.graph.NodeInstanceStateConflict";
 const RUN_NOT_FOUND: &str = "inference.graph.RunNotFound";
+const NODE_INSTANCE_NOT_FOUND: &str = "inference.graph.NodeInstanceNotFound";
 const RUN_NOT_RUNNING: &str = "inference.graph.RunNotRunning";
 const ADMISSION_DENIED: &str = "inference.graph.AdmissionDenied";
 
@@ -203,6 +223,8 @@ const PIPELINES: &str = "inference.graph.Pipelines";
 const NODES: &str = "inference.graph.Nodes";
 const PORTS: &str = "inference.graph.Ports";
 const EDGES: &str = "inference.graph.Edges";
+const EXPOSURES: &str = "inference.graph.Exposures";
+const NODE_DESCRIPTORS: &str = "inference.graph.NodeDescriptors";
 const FEEDBACK_LOOPS: &str = "inference.graph.FeedbackLoops";
 const BINDINGS: &str = "inference.graph.Bindings";
 const RUNS: &str = "inference.graph.Runs";
@@ -226,13 +248,17 @@ pub fn execute_command(
     let result = match name.as_str() {
         DECLARE_PIPELINE => declare_pipeline(domain, &catalog, request)?,
         ADD_NODE => add_node(domain, request)?,
+        ADD_SUBGRAPH_NODE => add_subgraph_node(domain, request)?,
         ADD_PORT => add_port(domain, request)?,
         CONNECT_PORTS => connect_ports(domain, request)?,
+        EXPOSE_PORT => expose_port(domain, request)?,
+        DECLARE_NODE_DESCRIPTOR => declare_node_descriptor(domain, request)?,
         DECLARE_FEEDBACK_LOOP => declare_feedback_loop(domain, request)?,
         BIND_NODE => bind_node(domain, &catalog, request)?,
         VALIDATE_PIPELINE => validate_pipeline(domain, forced.is_some(), request)?,
         PLAN_PIPELINE => plan_pipeline(domain, &catalog, forced.as_ref(), request)?,
         CREATE_RUN => create_run(domain, request)?,
+        NEST_RUN => nest_run(domain, request)?,
         VALIDATE_RUN => {
             let answer = domain.validate_run(run_id(request)?);
             run_moved(
@@ -406,6 +432,39 @@ fn create_run(
                 .with_error(pipeline_not_ready(error)?)
         }
     })
+}
+
+/// `NestRun` naming a run no record carries has no declared outcome, so it is an error here.
+fn nest_run(
+    domain: &mut GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let run_id = input.named("run_id")?;
+    let parent = input.named("parent")?;
+    input.finish()?;
+    let took = |branch| SemanticCommandResult::took(outcome(NEST_RUN, branch));
+    Ok(match domain.nest_run(run_id, parent) {
+        Ok(event) => {
+            took("nested").emitting(run_nested(&event)?.in_activity(request.correlation.clone()))
+        }
+        Err(NestRunError::UnknownParent(error)) => took("unknown-parent").with_error(
+            DeclaredErrorValue::new(parse::<ErrorRef>(NODE_INSTANCE_NOT_FOUND))
+                .with("instance_id", named_node(&error.instance_id)?),
+        ),
+        Err(NestRunError::UnknownRun(error)) => {
+            return Err(unreadable(
+                format!("answering `{NEST_RUN}`"),
+                format!("{error}, and the specification declares no outcome for it"),
+            ));
+        }
+    })
+}
+
+fn run_nested(event: &RunNested) -> Result<ObservedEvent, TargetError> {
+    Ok(ObservedEvent::new(parse::<EventRef>(RUN_NESTED))
+        .with("run_id", named_node(&event.run_id)?)
+        .with("parent", named_node(&event.parent)?))
 }
 
 fn fail_run(
@@ -584,7 +643,7 @@ pub fn configure_external_outcome(
     let command = request.force.command.to_string();
     let external: &[&str] = match command.as_str() {
         VALIDATE_PIPELINE => &[REJECTED],
-        PLAN_PIPELINE => &[UNBOUND, MISMATCH, LOCALITY_DENIED],
+        PLAN_PIPELINE => &[INTERFACE_MISMATCH, UNBOUND, MISMATCH, LOCALITY_DENIED],
         PREPARE_RUN => &[REFUSED],
         _ => return Err(unsupported(&request.force.to_string())),
     };
@@ -650,6 +709,45 @@ fn add_node(
                 .with_error(pipeline_not_ready(error)?)
         }
     })
+}
+
+fn add_subgraph_node(
+    domain: &mut GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let add = AddSubgraphNode {
+        pipeline_id: input.named("pipeline_id")?,
+        name: input.text("name")?,
+        role: input.named("role")?,
+        subgraph_id: input.named("subgraph_id")?,
+    };
+    input.finish()?;
+    let took = |branch| SemanticCommandResult::took(outcome(ADD_SUBGRAPH_NODE, branch));
+    Ok(match domain.add_subgraph_node(add) {
+        Ok(event) => took("added")
+            .emitting(subgraph_node_added(&event)?.in_activity(request.correlation.clone())),
+        Err(AddSubgraphNodeError::UnknownPipeline(error)) => {
+            took("unknown-pipeline").with_error(pipeline_not_found(error)?)
+        }
+        Err(AddSubgraphNodeError::UnknownSubgraph(error)) => {
+            took("unknown-subgraph").with_error(pipeline_not_found(error)?)
+        }
+        Err(AddSubgraphNodeError::NotDeclared(error)) => {
+            took("not-declared").with_error(pipeline_not_ready(error)?)
+        }
+        Err(AddSubgraphNodeError::SubgraphNotPlanned(error)) => {
+            took("subgraph-not-planned").with_error(pipeline_not_ready(error)?)
+        }
+    })
+}
+
+fn subgraph_node_added(event: &SubgraphNodeAdded) -> Result<ObservedEvent, TargetError> {
+    Ok(ObservedEvent::new(parse::<EventRef>(SUBGRAPH_NODE_ADDED))
+        .with("node_id", named_node(&event.node_id)?)
+        .with("pipeline_id", named_node(&event.pipeline_id)?)
+        .with("subgraph_id", named_node(&event.subgraph_id)?)
+        .with("name", text_node(&event.name)))
 }
 
 fn add_port(
@@ -735,6 +833,144 @@ fn connect_ports(
             )
         }
     })
+}
+
+fn expose_port(
+    domain: &mut GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let expose = ExposePort {
+        pipeline_id: input.named("pipeline_id")?,
+        port_id: input.named("port_id")?,
+        name: input.text("name")?,
+        capacity: input.integer("capacity")?,
+        overload: input.named("overload")?,
+    };
+    input.finish()?;
+    let took = |branch| SemanticCommandResult::took(outcome(EXPOSE_PORT, branch));
+    Ok(match domain.expose_port(expose) {
+        Ok(event) => {
+            took("exposed").emitting(port_exposed(&event)?.in_activity(request.correlation.clone()))
+        }
+        Err(ExposePortError::UnknownPipeline(error)) => {
+            took("unknown-pipeline").with_error(pipeline_not_found(error)?)
+        }
+        Err(ExposePortError::UnknownPort(error)) => took("unknown-port").with_error(
+            DeclaredErrorValue::new(parse::<ErrorRef>(PORT_NOT_FOUND))
+                .with("port_id", named_node(&error.port_id)?),
+        ),
+        Err(ExposePortError::Unbounded(error)) => took("unbounded").with_error(
+            DeclaredErrorValue::new(parse::<ErrorRef>(UNBOUNDED_EDGE))
+                .with("submitted", integer_node(error.submitted)),
+        ),
+        Err(ExposePortError::NotDeclared(error)) => {
+            took("not-declared").with_error(pipeline_not_ready(error)?)
+        }
+    })
+}
+
+fn declare_node_descriptor(
+    domain: &mut GraphDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let kind = input.named("kind")?;
+    let role = input.named("role")?;
+    let requires = input.named_list("requires")?;
+    let ports = port_descriptors(input.take("ports")?)?;
+    input.finish()?;
+    let declare = DeclareNodeDescriptor {
+        kind,
+        role,
+        requires,
+        ports,
+    };
+    let took = |branch| SemanticCommandResult::took(outcome(DECLARE_NODE_DESCRIPTOR, branch));
+    Ok(match domain.declare_node_descriptor(declare) {
+        Ok(event) => took("declared")
+            .emitting(node_descriptor_declared(&event)?.in_activity(request.correlation.clone())),
+        Err(error) => took("already-declared").with_error(
+            DeclaredErrorValue::new(parse::<ErrorRef>(NODE_DESCRIPTOR_EXISTS))
+                .with("kind", named_node(&error.kind)?),
+        ),
+    })
+}
+
+/// The eight fields of an `inference.graph.PortDescriptor`.
+const PORT_DESCRIPTOR_FIELDS: [&str; 8] = [
+    "name",
+    "direction",
+    "modality",
+    "essentiality",
+    "delivery",
+    "incremental",
+    "end_marker_required",
+    "provisional_allowed",
+];
+
+/// An ESS `List<inference.graph.PortDescriptor>`: each record carries the eight declared fields
+/// and no other, strings and booleans as declared.
+fn port_descriptors(node: &Node) -> Result<Vec<PortDescriptor>, TargetError> {
+    let refuse =
+        |detail: String| unreadable(format!("reading `{DECLARE_NODE_DESCRIPTOR}`"), detail);
+    let Node::Seq(items) = node else {
+        return Err(refuse(format!("`ports` is not a list: {node:?}")));
+    };
+    items
+        .iter()
+        .map(|item| {
+            let Node::Map(fields) = item else {
+                return Err(refuse(format!(
+                    "a port descriptor is not a record: {item:?}"
+                )));
+            };
+            let mut record = serde_json::Map::new();
+            for (field, value) in fields {
+                if !PORT_DESCRIPTOR_FIELDS.contains(&field.as_str()) {
+                    return Err(refuse(format!("`ports.{field}` is undeclared")));
+                }
+                let value = match value {
+                    Node::Text(text) => serde_json::Value::String(text.clone()),
+                    Node::Bool(flag) => serde_json::Value::Bool(*flag),
+                    other => {
+                        return Err(refuse(format!(
+                            "`ports.{field}` is not of its declared type: {other:?}"
+                        )));
+                    }
+                };
+                record.insert(field.clone(), value);
+            }
+            serde_json::from_value(serde_json::Value::Object(record))
+                .map_err(|error| refuse(format!("a port descriptor is not read: {error}")))
+        })
+        .collect()
+}
+
+/// The node of an ESS `List<inference.graph.PortDescriptor>`.
+fn port_descriptors_node(ports: &[PortDescriptor]) -> Result<Node, TargetError> {
+    ports
+        .iter()
+        .map(|port| {
+            Ok(Node::Map(BTreeMap::from([
+                ("name".to_owned(), text_node(&port.name)),
+                ("direction".to_owned(), named_node(&port.direction)?),
+                ("modality".to_owned(), named_node(&port.modality)?),
+                ("essentiality".to_owned(), named_node(&port.essentiality)?),
+                ("delivery".to_owned(), named_node(&port.delivery)?),
+                ("incremental".to_owned(), boolean_node(port.incremental)),
+                (
+                    "end_marker_required".to_owned(),
+                    boolean_node(port.end_marker_required),
+                ),
+                (
+                    "provisional_allowed".to_owned(),
+                    boolean_node(port.provisional_allowed),
+                ),
+            ])))
+        })
+        .collect::<Result<Vec<_>, TargetError>>()
+        .map(Node::Seq)
 }
 
 fn declare_feedback_loop(
@@ -892,6 +1128,10 @@ fn plan_pipeline(
                     .with("current", named_node(&conflict.current)?),
             )
         }
+        Err(PlanPipelineError::InterfaceMismatch(error)) => {
+            SemanticCommandResult::took(outcome(PLAN_PIPELINE, INTERFACE_MISMATCH))
+                .with_error(interface_mismatch(error)?)
+        }
         Err(PlanPipelineError::Unbound(error)) => {
             SemanticCommandResult::took(outcome(PLAN_PIPELINE, UNBOUND))
                 .with_error(node_unbound(error)?)
@@ -922,7 +1162,19 @@ fn forced_plan(
         .nodes()
         .find(|node| node.pipeline_id() == pipeline_id)
         .map_or_else(|| NodeId::from(Uuid::nil()), |node| node.node_id());
-    let error = if *forced == outcome(PLAN_PIPELINE, UNBOUND) {
+    let error = if *forced == outcome(PLAN_PIPELINE, INTERFACE_MISMATCH) {
+        interface_mismatch(match decided {
+            Err(PlanPipelineError::InterfaceMismatch(error)) => error,
+            _ => SubgraphInterfaceMismatch {
+                node_id: declaration
+                    .nodes()
+                    .find(|node| node.pipeline_id() == pipeline_id && node.subgraph_id().is_some())
+                    .map_or(first_node, |node| node.node_id()),
+                port_id: None,
+                exposure_id: None,
+            },
+        })?
+    } else if *forced == outcome(PLAN_PIPELINE, UNBOUND) {
         node_unbound(match decided {
             Err(PlanPipelineError::Unbound(error)) => error,
             _ => NodeUnbound {
@@ -970,6 +1222,16 @@ fn forced_plan(
             )
     };
     Ok(SemanticCommandResult::took(forced.clone()).with_error(error))
+}
+
+/// `SubgraphInterfaceMismatch`, naming the node and the port or exposure, null where none.
+fn interface_mismatch(error: SubgraphInterfaceMismatch) -> Result<DeclaredErrorValue, TargetError> {
+    Ok(
+        DeclaredErrorValue::new(parse::<ErrorRef>(SUBGRAPH_INTERFACE_MISMATCH))
+            .with("node_id", named_node(&error.node_id)?)
+            .with("port_id", optional_node(error.port_id.as_ref())?)
+            .with("exposure_id", optional_node(error.exposure_id.as_ref())?),
+    )
 }
 
 /// `NodeUnbound`, naming the node.
@@ -1066,6 +1328,16 @@ pub fn query_view(
             .edges()
             .map(edges_row)
             .collect::<Result<Vec<_>, _>>()?,
+        EXPOSURES => declaration
+            .exposures()
+            .map(exposures_row)
+            .collect::<Result<Vec<_>, _>>()?,
+        NODE_DESCRIPTORS => stores
+            .graph
+            .descriptors()
+            .iter()
+            .map(node_descriptors_row)
+            .collect::<Result<Vec<_>, _>>()?,
         FEEDBACK_LOOPS => declaration
             .feedback_loops()
             .map(feedback_loops_row)
@@ -1127,7 +1399,11 @@ fn graph_event(event: &GraphEvent) -> Result<ObservedEvent, TargetError> {
         GraphEvent::NodeAdded(event) => node_added(event),
         GraphEvent::PortAdded(event) => port_added(event),
         GraphEvent::PortsConnected(event) => ports_connected(event),
+        GraphEvent::PortExposed(event) => port_exposed(event),
+        GraphEvent::NodeDescriptorDeclared(event) => node_descriptor_declared(event),
         GraphEvent::NodeBound(event) => node_bound(event),
+        GraphEvent::RunNested(event) => run_nested(event),
+        GraphEvent::SubgraphNodeAdded(event) => subgraph_node_added(event),
         GraphEvent::FeedbackLoopDeclared(event) => feedback_loop_declared(event),
         GraphEvent::PipelineValidated(event) => pipeline_validated(event),
         GraphEvent::PipelinePlanned(event) => pipeline_planned(event),
@@ -1191,6 +1467,7 @@ fn runs_row(run: &Run) -> Result<ViewRow, TargetError> {
             "failure".to_owned(),
             run.failure().map_or(Ok(Node::Null), failure_node)?,
         ),
+        ("parent".to_owned(), optional_node(run.parent().as_ref())?),
         ("state".to_owned(), named_node(&run.state())?),
     ]))
 }
@@ -1232,6 +1509,37 @@ fn ports_connected(event: &PortsConnected) -> Result<ObservedEvent, TargetError>
         .with("edge_id", named_node(&event.edge_id)?)
         .with("from_port", named_node(&event.from_port)?)
         .with("to_port", named_node(&event.to_port)?))
+}
+
+fn node_descriptor_declared(event: &NodeDescriptorDeclared) -> Result<ObservedEvent, TargetError> {
+    Ok(
+        ObservedEvent::new(parse::<EventRef>(NODE_DESCRIPTOR_DECLARED))
+            .with("kind", named_node(&event.kind)?)
+            .with("role", named_node(&event.role)?),
+    )
+}
+
+fn node_descriptors_row(descriptor: &NodeDescriptor) -> Result<ViewRow, TargetError> {
+    Ok(BTreeMap::from([
+        ("kind".to_owned(), named_node(descriptor.kind())?),
+        ("role".to_owned(), named_node(&descriptor.role())?),
+        (
+            "requires".to_owned(),
+            named_list_node(descriptor.requires())?,
+        ),
+        (
+            "ports".to_owned(),
+            port_descriptors_node(descriptor.ports())?,
+        ),
+    ]))
+}
+
+fn port_exposed(event: &PortExposed) -> Result<ObservedEvent, TargetError> {
+    Ok(ObservedEvent::new(parse::<EventRef>(PORT_EXPOSED))
+        .with("exposure_id", named_node(&event.exposure_id)?)
+        .with("pipeline_id", named_node(&event.pipeline_id)?)
+        .with("port_id", named_node(&event.port_id)?)
+        .with("name", text_node(&event.name)))
 }
 
 fn feedback_loop_declared(event: &FeedbackLoopDeclared) -> Result<ObservedEvent, TargetError> {
@@ -1292,6 +1600,26 @@ fn edges_row(edge: &Edge) -> Result<ViewRow, TargetError> {
             integer_node(i64::try_from(edge.capacity().get()).unwrap_or(i64::MAX)),
         ),
         ("overload".to_owned(), named_node(&edge.overload())?),
+    ]))
+}
+
+fn exposures_row(exposure: &Exposure) -> Result<ViewRow, TargetError> {
+    Ok(BTreeMap::from([
+        (
+            "exposure_id".to_owned(),
+            named_node(&exposure.exposure_id())?,
+        ),
+        (
+            "pipeline_id".to_owned(),
+            named_node(&exposure.pipeline_id())?,
+        ),
+        ("port_id".to_owned(), named_node(&exposure.port_id())?),
+        ("name".to_owned(), text_node(exposure.name())),
+        (
+            "capacity".to_owned(),
+            integer_node(i64::try_from(exposure.capacity().get()).unwrap_or(i64::MAX)),
+        ),
+        ("overload".to_owned(), named_node(&exposure.overload())?),
     ]))
 }
 
@@ -1704,6 +2032,169 @@ mod tests {
     }
 
     #[test]
+    fn an_exposed_port_is_in_the_exposures_view_and_observed_and_a_refusal_emits_nothing() {
+        let mut stores = Stores::default();
+        let profile_id = profile(&mut stores);
+        let pipeline_id = pipeline(&mut stores, profile_id);
+        let node_id = node(&mut stores, pipeline_id.clone());
+        let input = port(&mut stores, pipeline_id.clone(), node_id, "input");
+        let expose = |port_id: Node, capacity: f64| {
+            vec![
+                ("pipeline_id", pipeline_id.clone()),
+                ("port_id", port_id),
+                ("name", text("user text")),
+                ("capacity", number(capacity)),
+                ("overload", text("pause")),
+            ]
+        };
+
+        let exposed = run(
+            &mut stores,
+            "inference.graph.ExposePort",
+            &expose(input.clone(), 4.0),
+        );
+        assert_eq!(branch(&exposed), "inference.graph.ExposePort/exposed");
+        assert_eq!(emitted(&exposed, "pipeline_id"), pipeline_id);
+        assert_eq!(emitted(&exposed, "port_id"), input);
+        assert_eq!(emitted(&exposed, "name"), text("user text"));
+        let exposure_id = emitted(&exposed, "exposure_id");
+
+        let unbounded = run(
+            &mut stores,
+            "inference.graph.ExposePort",
+            &expose(input.clone(), 0.0),
+        );
+        assert_eq!(branch(&unbounded), "inference.graph.ExposePort/unbounded");
+        let error = unbounded.error.as_ref().expect("an error");
+        assert_eq!(error.fields["submitted"], Node::Number(Number::from(0_i64)));
+        assert!(unbounded.direct_events.is_empty());
+        let unknown = run(
+            &mut stores,
+            "inference.graph.ExposePort",
+            &expose(text(UNKNOWN), 4.0),
+        );
+        assert_eq!(branch(&unknown), "inference.graph.ExposePort/unknown-port");
+        let error = unknown.error.as_ref().expect("an error");
+        assert_eq!(error.fields["port_id"], text(UNKNOWN));
+        assert_eq!(
+            unknown.consistency.as_ref().map(|token| token.as_str()),
+            Some("seq:5"),
+            "a refusal advances no token"
+        );
+
+        let exposures = rows(&mut stores, "inference.graph.Exposures");
+        assert_eq!(exposures.len(), 1);
+        assert_eq!(exposures[0]["exposure_id"], exposure_id);
+        assert_eq!(exposures[0]["pipeline_id"], pipeline_id);
+        assert_eq!(exposures[0]["port_id"], input);
+        assert_eq!(exposures[0]["name"], text("user text"));
+        assert_eq!(exposures[0]["capacity"], Node::Number(Number::from(4_i64)));
+        assert_eq!(exposures[0]["overload"], text("pause"));
+        assert_eq!(exposures[0].len(), 6);
+        let observed = observed(&mut stores, "inference.graph.PortExposed");
+        assert_eq!(
+            observed
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            [Some(5)]
+        );
+        assert_eq!(observed[0].payload["exposure_id"], exposure_id);
+        assert_eq!(observed[0].payload.len(), 4);
+    }
+
+    fn port_descriptor(name: &str) -> Node {
+        Node::Map(BTreeMap::from([
+            ("name".to_owned(), text(name)),
+            ("direction".to_owned(), text("input")),
+            ("modality".to_owned(), text("Audio")),
+            ("essentiality".to_owned(), text("essential")),
+            ("delivery".to_owned(), text("reliable")),
+            ("incremental".to_owned(), Node::Bool(true)),
+            ("end_marker_required".to_owned(), Node::Bool(true)),
+            ("provisional_allowed".to_owned(), Node::Bool(false)),
+        ]))
+    }
+
+    #[test]
+    fn a_node_descriptor_is_declared_once_per_kind_and_read_back_whole() {
+        let mut stores = Stores::default();
+        let ports = Node::Seq(vec![port_descriptor("audio")]);
+        let input = [
+            ("kind", text("vad")),
+            ("role", text("policy")),
+            ("requires", list(&["output_streaming"])),
+            ("ports", ports.clone()),
+        ];
+        let declared = run(&mut stores, "inference.graph.DeclareNodeDescriptor", &input);
+        assert_eq!(
+            branch(&declared),
+            "inference.graph.DeclareNodeDescriptor/declared"
+        );
+        assert_eq!(emitted(&declared, "kind"), text("vad"));
+        assert_eq!(emitted(&declared, "role"), text("policy"));
+
+        let again = run(&mut stores, "inference.graph.DeclareNodeDescriptor", &input);
+        assert_eq!(
+            branch(&again),
+            "inference.graph.DeclareNodeDescriptor/already-declared"
+        );
+        assert_eq!(
+            again.error.as_ref().expect("an error").fields["kind"],
+            text("vad")
+        );
+        assert!(again.direct_events.is_empty());
+        assert_eq!(
+            again.consistency.as_ref().map(|token| token.as_str()),
+            Some("seq:1"),
+            "a refusal advances no token"
+        );
+
+        let published = rows(&mut stores, "inference.graph.NodeDescriptors");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0]["kind"], text("vad"));
+        assert_eq!(published[0]["role"], text("policy"));
+        assert_eq!(published[0]["requires"], list(&["output_streaming"]));
+        assert_eq!(
+            published[0]["ports"], ports,
+            "every port descriptor field is read back"
+        );
+        assert_eq!(published[0].len(), 4);
+        assert_eq!(
+            observed(&mut stores, "inference.graph.NodeDescriptorDeclared")
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            [Some(1)]
+        );
+
+        let Node::Map(mut extra) = port_descriptor("other") else {
+            unreachable!("a record")
+        };
+        extra.insert("encoding".to_owned(), text("pcm"));
+        let undeclared = execute_command(
+            &mut stores,
+            &command(
+                "inference.graph.DeclareNodeDescriptor",
+                &[
+                    ("kind", text("other")),
+                    ("role", text("policy")),
+                    ("requires", list(&[])),
+                    ("ports", Node::Seq(vec![Node::Map(extra)])),
+                ],
+            ),
+        );
+        assert!(
+            undeclared.is_err(),
+            "an undeclared port descriptor field is an error"
+        );
+        assert_eq!(
+            rows(&mut stores, "inference.graph.NodeDescriptors").len(),
+            1
+        );
+    }
+
+    #[test]
     fn an_undeclared_field_or_a_flag_that_is_not_a_boolean_is_an_error_and_adds_nothing() {
         let mut stores = Stores::default();
         let profile_id = profile(&mut stores);
@@ -2050,6 +2541,168 @@ mod tests {
         runs[0].clone()
     }
 
+    /// A Planned pipeline with no node, as a subgraph's child, and a Declared parent.
+    fn child_and_parent(stores: &mut Stores) -> (Node, Node) {
+        let profile_id = profile(stores);
+        let child = emitted(
+            &run(
+                stores,
+                "inference.graph.DeclarePipeline",
+                &[
+                    ("name", text("child")),
+                    ("schema_revision", text("1")),
+                    ("mode", text("turn_based")),
+                    ("profile_id", profile_id.clone()),
+                    ("required_capabilities", list(&[])),
+                ],
+            ),
+            "pipeline_id",
+        );
+        assert_eq!(
+            branch(&validate(stores, child.clone())),
+            "inference.graph.ValidatePipeline/validated"
+        );
+        assert_eq!(
+            branch(&plan(stores, child.clone())),
+            "inference.graph.PlanPipeline/planned"
+        );
+        let parent = pipeline(stores, profile_id);
+        (child, parent)
+    }
+
+    fn add_subgraph(stores: &mut Stores, parent: Node, child: Node) -> SemanticCommandResult {
+        run(
+            stores,
+            "inference.graph.AddSubgraphNode",
+            &[
+                ("pipeline_id", parent),
+                ("name", text("frontend")),
+                ("role", text("transform")),
+                ("subgraph_id", child),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_subgraph_node_is_added_over_a_planned_child_and_read_back_with_its_child() {
+        let mut stores = Stores::default();
+        let (child, parent) = child_and_parent(&mut stores);
+        let refused = add_subgraph(&mut stores, parent.clone(), parent.clone());
+        assert_eq!(
+            branch(&refused),
+            "inference.graph.AddSubgraphNode/subgraph-not-planned"
+        );
+        let error = refused.error.as_ref().expect("an error");
+        assert_eq!(error.fields["pipeline_id"], parent);
+        assert_eq!(error.fields["required"], text("Planned"));
+        let added = add_subgraph(&mut stores, parent.clone(), child.clone());
+        assert_eq!(branch(&added), "inference.graph.AddSubgraphNode/added");
+        assert_eq!(emitted(&added, "subgraph_id"), child);
+        assert_eq!(emitted(&added, "pipeline_id"), parent);
+        let node_id = emitted(&added, "node_id");
+        let nodes = rows(&mut stores, "inference.graph.Nodes");
+        let row = nodes
+            .iter()
+            .find(|row| row["node_id"] == node_id)
+            .expect("the node is in the view");
+        assert_eq!(row["requires"], list(&[]));
+        assert_eq!(row["role"], text("transform"));
+        assert_eq!(
+            row.len(),
+            5,
+            "the Nodes view does not publish the subgraph reference"
+        );
+        assert_eq!(
+            observed(&mut stores, "inference.graph.SubgraphNodeAdded").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn planning_refuses_a_subgraph_node_whose_port_no_exposure_matches() {
+        let mut stores = Stores::default();
+        let (child, parent) = child_and_parent(&mut stores);
+        let node_id = emitted(&add_subgraph(&mut stores, parent.clone(), child), "node_id");
+        let port_id = port(&mut stores, parent.clone(), node_id.clone(), "input");
+        assert_eq!(
+            branch(&validate(&mut stores, parent.clone())),
+            "inference.graph.ValidatePipeline/validated"
+        );
+        let refused = plan(&mut stores, parent);
+        assert_eq!(
+            branch(&refused),
+            "inference.graph.PlanPipeline/interface-mismatch"
+        );
+        let error = refused.error.as_ref().expect("an error");
+        assert_eq!(
+            error.error.to_string(),
+            "inference.graph.SubgraphInterfaceMismatch"
+        );
+        assert_eq!(error.fields["node_id"], node_id);
+        assert_eq!(error.fields["port_id"], port_id);
+        assert_eq!(error.fields["exposure_id"], Node::Null);
+        assert!(refused.direct_events.is_empty());
+    }
+
+    #[test]
+    fn a_nested_run_records_its_parent_instance_and_a_run_never_nested_none() {
+        let mut stores = Stores::default();
+        let (pipeline_id, node_id) = planned(&mut stores);
+        let run_id = emitted(&create(&mut stores, pipeline_id.clone()), "run_id");
+        on_run(&mut stores, "ValidateRun", &run_id);
+        on_run(&mut stores, "PrepareRun", &run_id);
+        let instance_id = emitted(
+            &run(
+                &mut stores,
+                "inference.graph.DescribeNodeInstance",
+                &[("run_id", run_id.clone()), ("node_id", node_id)],
+            ),
+            "instance_id",
+        );
+        let child = emitted(&create(&mut stores, pipeline_id), "run_id");
+        let nest = |stores: &mut Stores, parent: Node| {
+            run(
+                stores,
+                "inference.graph.NestRun",
+                &[("run_id", child.clone()), ("parent", parent)],
+            )
+        };
+        let unknown = nest(&mut stores, text(UNKNOWN));
+        assert_eq!(branch(&unknown), "inference.graph.NestRun/unknown-parent");
+        assert_eq!(
+            unknown.error.as_ref().expect("an error").fields["instance_id"],
+            text(UNKNOWN)
+        );
+        assert!(unknown.direct_events.is_empty());
+        let nested = nest(&mut stores, instance_id.clone());
+        assert_eq!(branch(&nested), "inference.graph.NestRun/nested");
+        assert_eq!(emitted(&nested, "parent"), instance_id);
+        assert_eq!(emitted(&nested, "run_id"), child);
+        let runs = rows(&mut stores, "inference.graph.Runs");
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0]["run_id"], run_id);
+        assert_eq!(
+            runs[0]["parent"],
+            Node::Null,
+            "a run never nested has no parent"
+        );
+        assert_eq!(runs[1]["run_id"], child);
+        assert_eq!(runs[1]["parent"], instance_id);
+        assert_eq!(runs[1]["state"], text("Created"));
+        assert_eq!(observed(&mut stores, "inference.graph.RunNested").len(), 1);
+        let unknown_run = execute_command(
+            &mut stores,
+            &command(
+                "inference.graph.NestRun",
+                &[("run_id", text(UNKNOWN)), ("parent", instance_id)],
+            ),
+        );
+        assert!(
+            unknown_run.is_err(),
+            "an unknown run has no declared outcome"
+        );
+    }
+
     #[test]
     fn a_run_of_a_planned_pipeline_moves_to_completed_and_each_event_is_placed() {
         let mut stores = Stores::default();
@@ -2069,7 +2722,12 @@ mod tests {
         assert_eq!(row["pipeline_id"], pipeline_id);
         assert_eq!(row["failure"], Node::Null);
         assert_eq!(row["state"], text("Created"));
-        assert_eq!(row.len(), 4);
+        assert_eq!(
+            row["parent"],
+            Node::Null,
+            "a run created on its own has no parent"
+        );
+        assert_eq!(row.len(), 5);
 
         for (command, outcome, state, event) in [
             ("ValidateRun", "validating", "Validating", "RunValidating"),

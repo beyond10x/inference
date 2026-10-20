@@ -8,10 +8,15 @@
 //! control event of kind `stop`, it completes the generation, emits `GenerationCompleted` and
 //! passes the end of input on. Drained, it takes what its input edge still holds until the edge
 //! is closed and then completes the generation the same way. Cancelled, it cancels the
-//! generation, which discards its unplayed segments, and sends nothing more; scripted to emit
-//! after the cancel, it emits once into the cancelled generation, which refuses it as stale.
+//! generation, which discards its unplayed segments, and sends nothing more, a cancel taken while
+//! a send waits for room ending the wait; scripted to emit after the cancel, it emits once into
+//! the cancelled generation, which refuses it as stale.
 //! Every event it emits is recorded in the run's [`RunLog`] in its envelope, the
-//! `GenerationCancelled` that is not sent among them.
+//! `GenerationCancelled` that is not sent among them. Each envelope of a generation's event names
+//! the generation, a `TextSegmentCommitted`'s too, whose payload names only its segment, so that
+//! a reader of the envelope, such as a session cutting an interrupted generation, cuts the
+//! segment with it. The node runs one generation per run, and only that generation's events name
+//! it: its end of input names none.
 //!
 //! The node is generic over the payload of the run's edges ([`ModelPayload`]), the text
 //! pipeline's [`PipelinePayload`] by default. Given tools ([`ModelNode::with_tools`]), it has a
@@ -26,8 +31,8 @@
 //!   given is dropped, and the generation continues without it. The node generates from
 //!   committed spans only, so the provisional-input barrier never bars its proposals; a proposal
 //!   the state machine refuses all the same fails the node;
-//! * one call is awaited at a time: an input arriving while a call is awaited is deferred, and
-//!   answered, in arrival order, once the outcome is integrated and no call is awaited, so a
+//! * one round is awaited at a time: an input arriving while a call is awaited is deferred, and
+//!   answered, in arrival order, once the outcomes are integrated and no call is awaited, so a
 //!   tool result is integrated at the end of the model request that proposed and no outcome is
 //!   lost to a later proposal;
 //! * an outcome of the awaited call arriving on `tool_result`, a result, a failure or a rejection,
@@ -37,20 +42,44 @@
 //!   completes the generation at once, and drops every later proposal. The node runs one
 //!   generation per run, so an input that arrives once the generation is no longer Active is
 //!   dropped and recorded ([`ModelHandle::dropped_inputs`]), and the node does not fail;
+//! * a model request may end with several proposals, the calls of one round
+//!   ([`MockGenerator::proposing_round`](super::MockGenerator::proposing_round)): each is sent, in
+//!   order, and the generation awaits every one of them; each outcome is integrated as it arrives;
+//! * superseded through its handle ([`ModelHandle::supersede`]), the node runs
+//!   `inference.stream.SupersedeGeneration` on its generation, which then emits nothing more, and
+//!   sends its `GenerationSuperseded` on the text port and, given tools, on `tool_call`, so that
+//!   the tool authority rejects the calls of the generation it still holds and the executor is told
+//!   to cancel the one it runs. An outcome that arrives for a generation that is no longer Active,
+//!   superseded or completed, is not reinjected and issues no model request (design 376, 637); it
+//!   is recorded ([`ModelHandle::not_reinjected`]) and still ends the wait for its call;
 //! * the end of input, or a drain once the input edge is closed, completes the generation only
 //!   once no outcome is awaited and no input is deferred; the node then passes the end of input
 //!   on, on both output ports, and ends once every edge into `tool_result` has ended, so that what
 //!   the loop's other nodes send at their end still finds it.
 //!
 //! Every other step of a tool call that arrives, such as `inference.tools.ToolCallStarted`, is
-//! taken and ignored.
+//! taken and ignored. A node given tools offers them, in the order it was given them, to its
+//! generator when it starts its generation ([`MockGenerator::start_offering`]).
+//!
+//! Given a turns port ([`ModelNode::with_turns`]) at which an edge arrives, the node starts its
+//! generation for a turn at that turn's `inference.stream.TurnCompleted` (design 606, 778) rather
+//! than when it starts; without such an edge, as in a text-only pipeline, which has no turns, it
+//! starts as above. Inputs arriving before a turn's completion are held, and each
+//! `TurnCompleted` arriving at the turns port first takes what the node's input already holds,
+//! which its producer sent before the completion, then starts the generation if it has not
+//! started and answers the turn's inputs in arrival order, as deferred inputs are answered. The
+//! node still runs one generation per run: a later turn's inputs are answered on the same
+//! generation. The end of input completes the generation only once every edge into the turns
+//! port has ended; inputs of a turn that never completed are then dropped and recorded, and a
+//! node whose turn never completed ends without a generation. A supersede asked before the
+//! generation started does nothing.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future;
 use std::pin::pin;
 use std::sync::{Arc, Weak};
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
@@ -66,7 +95,7 @@ use inference_tools::{RejectionReason, Tool, ToolCall, ToolCallId, ToolId};
 
 use super::{MockGeneration, MockGenerator};
 use crate::graph::nodes::{
-    Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on, emit, started,
+    Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on, emit, send_unless, started,
 };
 use crate::stream::StreamEvent;
 
@@ -110,6 +139,9 @@ impl ModelPayload for PipelinePayload {
 struct Signal {
     drain: bool,
     cancel: bool,
+    /// The host asked for `SupersedeGeneration`: whether it did, and whether the node took it.
+    supersede: bool,
+    superseded: bool,
 }
 
 /// What the node's generation came to.
@@ -120,6 +152,9 @@ struct Record {
     late_refusal: Option<GenerationStateConflict>,
     failure: Option<String>,
     dropped: Vec<String>,
+    not_reinjected: Vec<ToolCallUpdate>,
+    supersede_refusal: Option<GenerationStateConflict>,
+    requests: usize,
 }
 
 impl fmt::Debug for Watched<Signal> {
@@ -144,6 +179,8 @@ enum Ended {
 /// The tools a [`ModelNode`] was given, and its two tool ports.
 struct Tools<P> {
     tools: Arc<HashMap<ToolId, Tool>>,
+    /// The tools in the order the node was given them, the order it offers them in.
+    offered: Arc<Vec<Tool>>,
     tool_call: PortId,
     tool_result: PortId,
     wrap: fn(ToolCallUpdate) -> P,
@@ -153,6 +190,7 @@ impl<P> Clone for Tools<P> {
     fn clone(&self) -> Self {
         Self {
             tools: Arc::clone(&self.tools),
+            offered: Arc::clone(&self.offered),
             tool_call: self.tool_call,
             tool_result: self.tool_result,
             wrap: self.wrap,
@@ -177,6 +215,7 @@ pub struct ModelNode<P = PipelinePayload> {
     reply: fn(&str) -> String,
     late: Option<String>,
     tools: Option<Tools<P>>,
+    turns: Option<PortId>,
     log: RunLog,
     node_id: Option<NodeId>,
     signal: Arc<Watched<Signal>>,
@@ -191,6 +230,7 @@ impl<P> fmt::Debug for ModelNode<P> {
             .field("generator", &self.generator)
             .field("late", &self.late)
             .field("tools", &self.tools)
+            .field("turns", &self.turns)
             .field("node_id", &self.node_id)
             .field("signal", &self.signal)
             .field("record", &self.record)
@@ -229,6 +269,7 @@ impl<P: ModelPayload> ModelNode<P> {
             reply,
             late: None,
             tools: None,
+            turns: None,
             log,
             node_id: None,
             signal: Arc::new(Watched::new(Signal::default())),
@@ -244,11 +285,21 @@ impl<P: ModelPayload> ModelNode<P> {
         self
     }
 
+    /// The same node given a turns port, `turns`: once an edge arrives there, the node starts its
+    /// generation at the first `inference.stream.TurnCompleted` that edge delivers, and answers
+    /// each input at the completion of the turn it arrived in; see the module documentation.
+    #[must_use]
+    pub const fn with_turns(mut self, turns: PortId) -> Self {
+        self.turns = Some(turns);
+        self
+    }
+
     /// The test's side of the node.
     #[must_use]
     pub fn handle(&self) -> ModelHandle {
         ModelHandle {
             record: Arc::clone(&self.record),
+            signal: Arc::clone(&self.signal),
             task: self.exchange.probe(),
         }
     }
@@ -272,13 +323,15 @@ impl<P: ModelPayload + ToolPayload> ModelNode<P> {
         tool_call: PortId,
         tool_result: PortId,
     ) -> Self {
+        let offered: Vec<Tool> = tools.into_iter().collect();
         self.tools = Some(Tools {
             tools: Arc::new(
-                tools
-                    .into_iter()
-                    .map(|tool| (tool.tool_id(), tool))
+                offered
+                    .iter()
+                    .map(|tool| (tool.tool_id(), tool.clone()))
                     .collect(),
             ),
+            offered: Arc::new(offered),
             tool_call,
             tool_result,
             wrap: P::from_tool_call,
@@ -296,11 +349,22 @@ type Shaped<P> = (
     Option<inference_pipeline::NodeOutput<P>>,
 );
 
+/// The port an input edge of a started node arrives at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arrives {
+    /// The node's input, which carries what it answers.
+    Input,
+    /// The `tool_result` port.
+    ToolResult,
+    /// The turns port.
+    Turns,
+}
+
 /// One input edge of a started node.
 struct Receiving<P> {
     endpoint: Box<dyn InputEndpoint<P>>,
-    /// Whether the edge arrives at the `tool_result` port.
-    tool_result: bool,
+    /// The port the edge arrives at.
+    port: Arrives,
     /// Whether the edge delivered its end of input or is closed.
     ended: bool,
 }
@@ -309,6 +373,8 @@ struct Receiving<P> {
 enum Step<P> {
     /// The runtime cancelled the node.
     Cancel,
+    /// The host asked for `SupersedeGeneration`.
+    Supersede,
     /// The runtime drains the node, whose input edge is closed.
     Drain,
     /// The input edge at this index delivered an envelope, or none once it is closed.
@@ -329,8 +395,8 @@ struct ToolLoop<P> {
     turn: Turn,
     /// The latest span the node generated from.
     basis: Option<Span>,
-    /// The call whose outcome the generation awaits.
-    awaiting: Option<ToolCallId>,
+    /// The calls whose outcomes the generation awaits, in the order they were proposed.
+    awaiting: Vec<ToolCallId>,
     /// Whether the loop's iteration rule is exhausted.
     exhausted: bool,
 }
@@ -384,7 +450,16 @@ impl<P: From<ControlKind>> ToolLoop<P> {
 /// One started exchange of a [`ModelNode`].
 struct Exchanging<P> {
     run_id: RunId,
-    generation: MockGeneration,
+    /// The node's generation, once it started.
+    generation: Option<MockGeneration>,
+    /// What starts the generation at the first `TurnCompleted`, for a node whose turns port is
+    /// wired, until it started.
+    starting: Option<Starting>,
+    /// Whether an edge arrives at the node's turns port.
+    gated: bool,
+    /// The inputs that arrived in the turn that is not yet complete, with the stream and sequence
+    /// they arrived on.
+    turn_inputs: VecDeque<(StreamId, i64, TranscriptCommitted)>,
     reply: fn(&str) -> String,
     late: Option<String>,
     signal: Arc<Watched<Signal>>,
@@ -398,6 +473,34 @@ struct Exchanging<P> {
     deferred: VecDeque<(StreamId, i64, TranscriptCommitted)>,
     /// The text of every input that arrived once the generation was no longer Active.
     dropped: Vec<String>,
+    /// Every outcome that arrived once the generation was no longer Active.
+    not_reinjected: Vec<ToolCallUpdate>,
+    /// The refusal of `SupersedeGeneration`, when the generation was no longer Active.
+    supersede_refusal: Option<GenerationStateConflict>,
+    /// How many model requests the node issued: inputs offered and outcomes integrated.
+    requests: usize,
+    /// Whether the node's input delivered its end of input.
+    input_ended: bool,
+    /// Whether the node's input edge is closed.
+    input_closed: bool,
+}
+
+/// What starts the generation of a node: its generator, the request and the tools it offers.
+struct Starting {
+    generator: MockGenerator,
+    request: GenerationRequest,
+    tools: Vec<Tool>,
+}
+
+impl Starting {
+    /// Starts the generation, offering the tools, if any.
+    fn start(mut self) -> Result<MockGeneration, inference_llm::ConcurrencyLimitReached> {
+        if self.tools.is_empty() {
+            self.generator.start(self.request)
+        } else {
+            self.generator.start_offering(self.request, &self.tools)
+        }
+    }
 }
 
 /// `envelope` carrying its payload as `P`.
@@ -440,8 +543,9 @@ fn carry<P: ModelPayload>(envelope: EventEnvelope<PipelinePayload>) -> EventEnve
 }
 
 /// An output edge of payload `P` taking the envelopes of the text pipeline's payload, each
-/// carried as `P`; a refused one is handed back as it was sent.
-struct Carrying<'a, P>(&'a dyn OutputEndpoint<P>);
+/// carried as `P`; a refused one is handed back as it was sent. A cancel of the node taken while
+/// a send waits for room ends the wait, and the envelope is not sent.
+struct Carrying<'a, P>(&'a dyn OutputEndpoint<P>, &'a Watched<Signal>);
 
 impl<P: ModelPayload> OutputEndpoint<PipelinePayload> for Carrying<'_, P> {
     fn send(
@@ -450,19 +554,23 @@ impl<P: ModelPayload> OutputEndpoint<PipelinePayload> for Carrying<'_, P> {
     ) -> EndpointFuture<'_, Result<(), SendError<PipelinePayload>>> {
         Box::pin(async move {
             let sent = envelope.clone();
-            self.0
-                .send(carry(envelope))
-                .await
-                .map_err(|refused| match refused {
-                    SendError::Full(_) => SendError::Full(sent),
-                    SendError::Closed(_) => SendError::Closed(sent),
-                    SendError::SequenceNotIncreasing { last, .. } => {
-                        SendError::SequenceNotIncreasing {
-                            envelope: sent,
-                            last,
-                        }
-                    }
-                })
+            let mut sending = self.0.send(carry(envelope));
+            future::poll_fn(|cx| {
+                let cancelled = pin!(self.1.until(|signal| signal.cancel.then_some(())));
+                if cancelled.poll(cx).is_ready() {
+                    return Poll::Ready(Ok(()));
+                }
+                sending.as_mut().poll(cx)
+            })
+            .await
+            .map_err(|refused| match refused {
+                SendError::Full(_) => SendError::Full(sent),
+                SendError::Closed(_) => SendError::Closed(sent),
+                SendError::SequenceNotIncreasing { last, .. } => SendError::SequenceNotIncreasing {
+                    envelope: sent,
+                    last,
+                },
+            })
         })
     }
 }
@@ -470,7 +578,10 @@ impl<P: ModelPayload> OutputEndpoint<PipelinePayload> for Carrying<'_, P> {
 impl<P: ModelPayload> Exchanging<P> {
     /// Emits the generation's events until `last` is delivered, or until none is.
     async fn deliver(&mut self, last: fn(&GenerationEvent) -> bool) -> Result<(), String> {
-        for event in self.generation.by_ref() {
+        let Some(generation) = self.generation.as_mut() else {
+            return Ok(());
+        };
+        for event in generation.by_ref() {
             let done = last(&event);
             let event = match event {
                 GenerationEvent::Started(started) => StreamEvent::GenerationStarted(started),
@@ -482,7 +593,12 @@ impl<P: ModelPayload> Exchanging<P> {
                     StreamEvent::GenerationCompleted(completed)
                 }
             };
-            emit(&Carrying(self.output.as_ref()), &mut self.emitter, event).await?;
+            emit(
+                &Carrying(self.output.as_ref(), &self.signal),
+                &mut self.emitter,
+                event,
+            )
+            .await?;
             if done {
                 break;
             }
@@ -507,35 +623,75 @@ impl<P: ModelPayload> Exchanging<P> {
     /// generation and sends it on `tool_call`, unless it is dropped; see the module
     /// documentation.
     async fn propose(&mut self) -> Result<(), String> {
-        let Some(tool_loop) = self.tool_loop.as_mut() else {
+        let (Some(tool_loop), Some(running)) = (self.tool_loop.as_mut(), self.generation.as_mut())
+        else {
             return Ok(());
         };
-        let Some(proposal) = self.generation.take_proposal() else {
-            return Ok(());
-        };
-        if tool_loop.exhausted {
-            return Ok(());
+        while let Some(proposal) = running.take_proposal() {
+            let generation = running.output().generation();
+            if tool_loop.exhausted || generation.state() != GenerationState::Active {
+                continue;
+            }
+            let Some(tool) = tool_loop.tools.get(&proposal.tool_id) else {
+                continue;
+            };
+            let basis = tool_loop.basis.as_ref().ok_or_else(|| {
+                "a proposal was made before any input it could rest on".to_owned()
+            })?;
+            let (call, event) = ToolCall::propose(tool, generation, basis, proposal.arguments)
+                .map_err(|refused| refused.to_string())?;
+            tool_loop.awaiting.push(call.call_id());
+            let envelope = tool_loop.envelope(ToolCallUpdate {
+                call,
+                event: ToolCallEvent::Proposed(event),
+            });
+            send_unless(
+                tool_loop.output.as_ref(),
+                &self.signal,
+                |signal| signal.cancel,
+                envelope,
+            )
+            .await?;
         }
-        let Some(tool) = tool_loop.tools.get(&proposal.tool_id) else {
+        Ok(())
+    }
+
+    /// Runs `inference.stream.SupersedeGeneration` on the generation and sends its
+    /// `GenerationSuperseded` on the text port and, given tools, on `tool_call`; a generation no
+    /// longer Active refuses it, and the refusal is recorded and nothing is sent.
+    async fn supersede(&mut self) -> Result<(), String> {
+        let Some(generation) = self.generation.as_mut() else {
             return Ok(());
         };
-        let basis = tool_loop
-            .basis
-            .as_ref()
-            .ok_or_else(|| "a proposal was made before any input it could rest on".to_owned())?;
-        let generation = self.generation.output().generation();
-        let (call, event) = ToolCall::propose(tool, generation, basis, proposal.arguments)
-            .map_err(|refused| refused.to_string())?;
-        tool_loop.awaiting = Some(call.call_id());
-        let envelope = tool_loop.envelope(ToolCallUpdate {
-            call,
-            event: ToolCallEvent::Proposed(event),
-        });
-        tool_loop
-            .output
-            .send(envelope)
-            .await
-            .map_err(|refused| refused.to_string())
+        let superseded = match generation.supersede() {
+            Ok(superseded) => superseded,
+            Err(refused) => {
+                self.supersede_refusal = Some(refused);
+                return Ok(());
+            }
+        };
+        let event = StreamEvent::GenerationSuperseded(superseded);
+        emit(
+            &Carrying(self.output.as_ref(), &self.signal),
+            &mut self.emitter,
+            event.clone(),
+        )
+        .await?;
+        if let Some(tool_loop) = self.tool_loop.as_mut() {
+            let envelope = tool_loop.next(
+                event.name().to_owned(),
+                Some(superseded.generation_id),
+                P::stream(event),
+            );
+            send_unless(
+                tool_loop.output.as_ref(),
+                &self.signal,
+                |signal| signal.cancel,
+                envelope,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Holds the span `committed` names as the latest the node generates from: a span of the
@@ -568,28 +724,39 @@ impl<P: ModelPayload> Exchanging<P> {
         let Some(tool_loop) = self.tool_loop.as_mut() else {
             return Ok(());
         };
-        if tool_loop.awaiting != Some(update.call.call_id()) {
+        let call_id = update.call.call_id();
+        let Some(awaited) = tool_loop.awaiting.iter().position(|id| *id == call_id) else {
+            return Ok(());
+        };
+        if matches!(
+            update.event,
+            ToolCallEvent::Proposed(_) | ToolCallEvent::Authorized(_) | ToolCallEvent::Started(_)
+        ) {
             return Ok(());
         }
+        tool_loop.awaiting.remove(awaited);
+        let Some(generation) = self.generation.as_mut().filter(|generation| {
+            generation.output().generation().state() == GenerationState::Active
+        }) else {
+            self.not_reinjected.push(update);
+            return Ok(());
+        };
         let outcome = match update.event {
             ToolCallEvent::Result(result) => ToolOutcome::Result(result.result),
             ToolCallEvent::Failed(failed) => ToolOutcome::Failed(failed.failure),
             ToolCallEvent::Rejected(rejected) if rejected.reason == RejectionReason::Exhausted => {
-                tool_loop.awaiting = None;
                 tool_loop.exhausted = true;
                 return self.complete().await;
             }
             ToolCallEvent::Rejected(rejected) => ToolOutcome::Rejected(rejected.reason),
             ToolCallEvent::Proposed(_)
             | ToolCallEvent::Authorized(_)
-            | ToolCallEvent::Started(_) => {
-                return Ok(());
-            }
+            | ToolCallEvent::Started(_) => return Ok(()),
         };
-        tool_loop.awaiting = None;
-        self.generation
+        generation
             .integrate(outcome)
             .map_err(|refused| refused.to_string())?;
+        self.requests += 1;
         self.answer().await
     }
 
@@ -602,6 +769,9 @@ impl<P: ModelPayload> Exchanging<P> {
             let wanted = pin!(signal.until(|signal| {
                 if signal.cancel {
                     Some(Step::Cancel)
+                } else if signal.supersede && !signal.superseded {
+                    signal.superseded = true;
+                    Some(Step::Supersede)
                 } else if input_closed && signal.drain {
                     Some(Step::Drain)
                 } else {
@@ -628,17 +798,22 @@ impl<P: ModelPayload> Exchanging<P> {
     /// Passes the end of input on, on the text port and, given tools, on `tool_call`.
     async fn end(&mut self) -> Result<(), String> {
         let end = carry(self.emitter.control(ControlKind::Stop));
-        self.output
-            .send(end)
-            .await
-            .map_err(|refused| refused.to_string())?;
+        send_unless(
+            self.output.as_ref(),
+            &self.signal,
+            |signal| signal.cancel,
+            end,
+        )
+        .await?;
         if let Some(tool_loop) = self.tool_loop.as_mut() {
             let end = tool_loop.end();
-            tool_loop
-                .output
-                .send(end)
-                .await
-                .map_err(|refused| refused.to_string())?;
+            send_unless(
+                tool_loop.output.as_ref(),
+                &self.signal,
+                |signal| signal.cancel,
+                end,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -650,11 +825,49 @@ impl<P: ModelPayload> Exchanging<P> {
         }
     }
 
+    /// Whether the generation started and is Active.
+    fn active(&self) -> bool {
+        self.generation.as_ref().is_some_and(|generation| {
+            generation.output().generation().state() == GenerationState::Active
+        })
+    }
+
+    /// Starts the generation, if it has not started, and emits its `GenerationStarted`.
+    async fn start_generation(&mut self) -> Result<(), String> {
+        let Some(starting) = self.starting.take() else {
+            return Ok(());
+        };
+        self.generation = Some(starting.start().map_err(|refused| refused.to_string())?);
+        self.deliver(|event| matches!(event, GenerationEvent::Started(_)))
+            .await
+    }
+
+    /// Acts on the end of the turn whose `TurnCompleted` arrived at the turns port: takes what
+    /// the node's input already holds, which its producer sent before the completion, then starts
+    /// the generation, if it has not started, and queues the turn's inputs to be answered.
+    async fn turn_completed(&mut self) -> Result<(), String> {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        for index in 0..self.inputs.len() {
+            while self.inputs[index].port == Arrives::Input && !self.inputs[index].ended {
+                let Poll::Ready(received) =
+                    self.inputs[index].endpoint.recv().as_mut().poll(&mut cx)
+                else {
+                    break;
+                };
+                self.received_input(index, received).await?;
+            }
+        }
+        self.start_generation().await?;
+        self.deferred.extend(self.turn_inputs.drain(..));
+        Ok(())
+    }
+
     /// Whether the generation awaits the outcome of a call.
     fn awaiting(&self) -> bool {
         self.tool_loop
             .as_ref()
-            .is_some_and(|tool_loop| tool_loop.awaiting.is_some())
+            .is_some_and(|tool_loop| !tool_loop.awaiting.is_empty())
     }
 
     /// Answers the input `committed`, which arrived on `stream_id` at `sequence`: the generator's
@@ -666,14 +879,17 @@ impl<P: ModelPayload> Exchanging<P> {
         sequence: i64,
         committed: TranscriptCommitted,
     ) -> Result<(), String> {
-        if self.generation.output().generation().state() != GenerationState::Active {
+        if !self.active() {
             self.dropped.push(committed.text);
             return Ok(());
         }
         self.generating_from(stream_id, sequence, &committed)?;
         self.generation
+            .as_mut()
+            .ok_or_else(|| "the generation was checked Active".to_owned())?
             .offer_input((self.reply)(&committed.text))
             .map_err(|refused| refused.to_string())?;
+        self.requests += 1;
         self.answer().await
     }
 
@@ -689,15 +905,84 @@ impl<P: ModelPayload> Exchanging<P> {
         Ok(())
     }
 
+    /// Whether every edge arriving at the turns port has ended, so that no turn completes later.
+    fn turns_ended(&self) -> bool {
+        self.inputs
+            .iter()
+            .all(|input| input.ended || input.port != Arrives::Turns)
+    }
+
+    /// Acts on what the input edge at `index`, arriving at the node's input, delivered: an
+    /// envelope, or none once it is closed.
+    async fn received_input(
+        &mut self,
+        index: usize,
+        received: Option<EventEnvelope<P>>,
+    ) -> Result<(), String> {
+        let Some(envelope) = received else {
+            self.inputs[index].ended = true;
+            self.input_closed = true;
+            return Ok(());
+        };
+        let (stream_id, sequence) = (envelope.stream_id, envelope.sequence);
+        match envelope.payload.carried() {
+            Carried::Control(ControlKind::Stop) => {
+                self.inputs[index].ended = true;
+                self.input_ended = true;
+            }
+            Carried::Stream(StreamEvent::TranscriptCommitted(committed)) if !self.input_ended => {
+                if self.gated {
+                    self.turn_inputs.push_back((stream_id, sequence, committed));
+                } else if self.awaiting() {
+                    self.deferred.push_back((stream_id, sequence, committed));
+                } else {
+                    self.input(stream_id, sequence, committed).await?;
+                }
+            }
+            Carried::Stream(_) | Carried::Tool(_) | Carried::Control(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Acts on what the input edge at `index` delivered: an envelope, or none once it is closed.
+    async fn received(
+        &mut self,
+        index: usize,
+        received: Option<EventEnvelope<P>>,
+    ) -> Result<(), String> {
+        let port = self.inputs[index].port;
+        if port == Arrives::Input {
+            return self.received_input(index, received).await;
+        }
+        let Some(envelope) = received else {
+            self.inputs[index].ended = true;
+            return Ok(());
+        };
+        match (port, envelope.payload.carried()) {
+            (_, Carried::Control(ControlKind::Stop)) => self.inputs[index].ended = true,
+            (Arrives::ToolResult, Carried::Tool(update)) => self.outcome(update).await?,
+            (Arrives::Turns, Carried::Stream(StreamEvent::TurnCompleted(_))) => {
+                self.turn_completed().await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     async fn exchanged(&mut self) -> Result<Ended, String> {
         self.deliver(|event| matches!(event, GenerationEvent::Started(_)))
             .await?;
-        let mut input_ended = false;
-        let mut input_closed = false;
         let mut ended = false;
         loop {
             self.deferred().await?;
-            if input_ended && !self.awaiting() && self.deferred.is_empty() && !ended {
+            if self.input_ended
+                && !self.awaiting()
+                && self.deferred.is_empty()
+                && self.turns_ended()
+                && !ended
+            {
+                self.dropped
+                    .extend(self.turn_inputs.drain(..).map(|(_, _, input)| input.text));
                 self.complete().await?;
                 self.end().await?;
                 ended = true;
@@ -706,46 +991,19 @@ impl<P: ModelPayload> Exchanging<P> {
                 && self
                     .inputs
                     .iter()
-                    .all(|input| input.ended || !input.tool_result)
+                    .all(|input| input.ended || input.port == Arrives::Input)
             {
                 return Ok(Ended::Completed);
             }
-            match self.step(input_closed && !input_ended).await {
+            match self.step(self.input_closed && !self.input_ended).await {
                 Step::Cancel => return Ok(Ended::Cancelled),
-                Step::Drain if self.tool_loop.is_some() => input_ended = true,
+                Step::Supersede => self.supersede().await?,
+                Step::Drain if self.tool_loop.is_some() || self.gated => self.input_ended = true,
                 Step::Drain => {
                     self.complete().await?;
                     return Ok(Ended::Completed);
                 }
-                Step::Input(index, None) => {
-                    self.inputs[index].ended = true;
-                    if !self.inputs[index].tool_result {
-                        input_closed = true;
-                    }
-                }
-                Step::Input(index, Some(envelope)) => {
-                    let tool_result = self.inputs[index].tool_result;
-                    let (stream_id, sequence) = (envelope.stream_id, envelope.sequence);
-                    match envelope.payload.carried() {
-                        Carried::Control(ControlKind::Stop) => {
-                            self.inputs[index].ended = true;
-                            if !tool_result {
-                                input_ended = true;
-                            }
-                        }
-                        Carried::Stream(StreamEvent::TranscriptCommitted(committed))
-                            if !tool_result && !input_ended =>
-                        {
-                            if self.awaiting() {
-                                self.deferred.push_back((stream_id, sequence, committed));
-                            } else {
-                                self.input(stream_id, sequence, committed).await?;
-                            }
-                        }
-                        Carried::Tool(update) if tool_result => self.outcome(update).await?,
-                        Carried::Stream(_) | Carried::Tool(_) | Carried::Control(_) => {}
-                    }
-                }
+                Step::Input(index, received) => self.received(index, received).await?,
             }
         }
     }
@@ -753,13 +1011,14 @@ impl<P: ModelPayload> Exchanging<P> {
     /// Cancels the generation, recording its `GenerationCancelled` unsent, and emits the late
     /// text into it if the node was scripted to.
     fn cancel(&mut self) -> Option<GenerationStateConflict> {
-        if let Ok(cancelled) = self.generation.cancel() {
+        let generation = self.generation.as_mut()?;
+        if let Ok(cancelled) = generation.cancel() {
             let _ = self
                 .emitter
                 .stream(StreamEvent::GenerationCancelled(cancelled));
         }
         let late = self.late.take()?;
-        self.generation.emit(late).err()
+        generation.emit(late).err()
     }
 
     fn run(mut self) {
@@ -770,15 +1029,22 @@ impl<P: ModelPayload> Exchanging<P> {
             Ended::Failed(failure) => (None, Some(failure)),
         };
         let dropped = std::mem::take(&mut self.dropped);
-        let output = self.generation.output();
-        let state = output.generation().state();
-        let segments = output.segments().iter().map(|s| s.snapshot()).collect();
+        let not_reinjected = std::mem::take(&mut self.not_reinjected);
+        let (supersede_refusal, requests) = (self.supersede_refusal, self.requests);
+        let output = self.generation.as_ref().map(GenerationHandle::output);
+        let state = output.map(|output| output.generation().state());
+        let segments = output.map_or_else(Vec::new, |output| {
+            output.segments().iter().map(|s| s.snapshot()).collect()
+        });
         self.record.update(|record| {
-            record.state = Some(state);
+            record.state = state;
             record.segments = segments;
             record.late_refusal = late_refusal;
             record.failure = failure;
             record.dropped = dropped;
+            record.not_reinjected = not_reinjected;
+            record.supersede_refusal = supersede_refusal;
+            record.requests = requests;
         });
     }
 }
@@ -791,15 +1057,36 @@ impl<P: ModelPayload> ModelNode<P> {
         node_id: Option<NodeId>,
         mut endpoints: NodeEndpoints<P>,
     ) -> Result<Shaped<P>, NodeError> {
+        let arrives = |port_id: PortId| {
+            if self
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.tool_result == port_id)
+            {
+                Arrives::ToolResult
+            } else if self.turns == Some(port_id) {
+                Arrives::Turns
+            } else {
+                Arrives::Input
+            }
+        };
+        let turns = endpoints
+            .inputs
+            .iter()
+            .filter(|input| arrives(input.port_id) == Arrives::Turns)
+            .count();
         let Some(tools) = &self.tools else {
-            let node_id = started(node_id, &endpoints, 1, 1)?;
-            let input = endpoints.inputs.remove(0);
-            let receiving = Receiving {
-                endpoint: input.endpoint,
-                tool_result: false,
-                ended: false,
-            };
-            return Ok((node_id, vec![receiving], endpoints.outputs.remove(0), None));
+            let node_id = started(node_id, &endpoints, 1 + turns, 1)?;
+            let inputs = endpoints
+                .inputs
+                .into_iter()
+                .map(|input| Receiving {
+                    port: arrives(input.port_id),
+                    endpoint: input.endpoint,
+                    ended: false,
+                })
+                .collect();
+            return Ok((node_id, inputs, endpoints.outputs.remove(0), None));
         };
         let node_id = node_id
             .ok_or_else(|| NodeError::new("the node was started before it was described"))?;
@@ -816,7 +1103,7 @@ impl<P: ModelPayload> ModelNode<P> {
             call,
             endpoints.outputs.len(),
             results >= 1,
-            endpoints.inputs.len() == results + 1,
+            endpoints.inputs.len() == results + turns + 1,
         ) else {
             return Err(NodeError::new(format!(
                 "the node takes 1 input edge besides those into its port {}, at least one of \
@@ -833,7 +1120,7 @@ impl<P: ModelPayload> ModelNode<P> {
             .inputs
             .into_iter()
             .map(|input| Receiving {
-                tool_result: input.port_id == tools.tool_result,
+                port: arrives(input.port_id),
                 endpoint: input.endpoint,
                 ended: false,
             })
@@ -855,15 +1142,29 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
     fn start(&mut self, endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
         let started = self.shaped(self.node_id, endpoints).and_then(
             |(node_id, inputs, output, tool_call)| {
-                let generation = self
-                    .generator
-                    .start(GenerationRequest {
+                let starting = Starting {
+                    generator: self.generator.clone(),
+                    request: GenerationRequest {
                         run_id: self.run_id,
                         node_id,
                         epoch: 1,
                         prompt: String::new(),
-                    })
-                    .map_err(|refused| NodeError::new(refused.to_string()))?;
+                    },
+                    tools: self
+                        .tools
+                        .as_ref()
+                        .map(|tools| tools.offered.to_vec())
+                        .unwrap_or_default(),
+                };
+                let gated = inputs.iter().any(|input| input.port == Arrives::Turns);
+                let (generation, starting) = if gated {
+                    (None, Some(starting))
+                } else {
+                    let generation = starting
+                        .start()
+                        .map_err(|refused| NodeError::new(refused.to_string()))?;
+                    (Some(generation), None)
+                };
                 let tool_loop = match (&self.tools, tool_call) {
                     (Some(tools), Some(tool_call)) => Some(ToolLoop {
                         tools: Arc::clone(&tools.tools),
@@ -879,7 +1180,7 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
                         })
                         .0,
                         basis: None,
-                        awaiting: None,
+                        awaiting: Vec::new(),
                         exhausted: false,
                     }),
                     _ => None,
@@ -887,6 +1188,9 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
                 let exchanging = Exchanging {
                     run_id: self.run_id,
                     generation,
+                    starting,
+                    gated,
+                    turn_inputs: VecDeque::new(),
                     reply: self.reply,
                     late: self.late.clone(),
                     signal: Arc::clone(&self.signal),
@@ -902,6 +1206,11 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
                     tool_loop,
                     deferred: VecDeque::new(),
                     dropped: Vec::new(),
+                    not_reinjected: Vec::new(),
+                    supersede_refusal: None,
+                    requests: 0,
+                    input_ended: false,
+                    input_closed: false,
                 };
                 self.exchange.spawn(move || exchanging.run());
                 Ok(())
@@ -933,11 +1242,13 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
 #[derive(Debug, Clone)]
 pub struct ModelHandle {
     record: Arc<Watched<Record>>,
+    signal: Arc<Watched<Signal>>,
     task: Weak<()>,
 }
 
 impl ModelHandle {
-    /// The state the generation ended in; none before the exchange ended.
+    /// The state the generation ended in; none before the exchange ended, or when the node, given
+    /// a turns input, saw no turn complete.
     #[must_use]
     pub fn generation_state(&self) -> Option<GenerationState> {
         self.record.read(|record| record.state)
@@ -973,5 +1284,40 @@ impl ModelHandle {
     #[must_use]
     pub fn task(&self) -> Weak<()> {
         Weak::clone(&self.task)
+    }
+
+    /// Asks the node for `inference.stream.SupersedeGeneration` on its generation, which it runs
+    /// at its next step; see the module documentation. False, asking nothing, once it was asked
+    /// or the node was cancelled.
+    #[must_use]
+    pub fn supersede(&self) -> bool {
+        self.signal.update(|signal| {
+            if signal.supersede || signal.cancel {
+                return false;
+            }
+            signal.supersede = true;
+            true
+        })
+    }
+
+    /// The refusal of the supersede the host asked for, when the generation was no longer
+    /// Active; none before the exchange ended.
+    #[must_use]
+    pub fn supersede_refusal(&self) -> Option<GenerationStateConflict> {
+        self.record.read(|record| record.supersede_refusal)
+    }
+
+    /// Every outcome of an awaited call that arrived once the generation was no longer Active, in
+    /// arrival order, none of them reinjected; empty before the exchange ended.
+    #[must_use]
+    pub fn not_reinjected(&self) -> Vec<ToolCallUpdate> {
+        self.record.read(|record| record.not_reinjected.clone())
+    }
+
+    /// How many model requests the node issued on its generation, each input offered and each
+    /// outcome integrated; zero before the exchange ended.
+    #[must_use]
+    pub fn model_requests(&self) -> usize {
+        self.record.read(|record| record.requests)
     }
 }

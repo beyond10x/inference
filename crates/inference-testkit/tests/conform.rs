@@ -101,6 +101,36 @@ const GRAPH_PLANNING_SCENARIOS: [&str; 9] = [
     "inference.graph.Pipeline/state/Planned/refuses/inference.graph.ValidatePipeline",
 ];
 
+/// The eight `inference.graph` scenarios of subgraph nodes this target answers: `AddSubgraphNode`,
+/// `NestRun` and the `interface-mismatch` refusal of `PlanPipeline`.
+const GRAPH_SUBGRAPH_SCENARIOS: [&str; 8] = [
+    "inference.graph.AddSubgraphNode/outcome/added",
+    "inference.graph.AddSubgraphNode/outcome/not-declared",
+    "inference.graph.AddSubgraphNode/outcome/subgraph-not-planned",
+    "inference.graph.AddSubgraphNode/outcome/unknown-pipeline",
+    "inference.graph.AddSubgraphNode/outcome/unknown-subgraph",
+    "inference.graph.NestRun/outcome/nested",
+    "inference.graph.NestRun/outcome/unknown-parent",
+    "inference.graph.PlanPipeline/outcome/interface-mismatch",
+];
+
+/// The two `inference.graph` scenarios of `DeclareNodeDescriptor` this target answers.
+const GRAPH_DESCRIPTOR_SCENARIOS: [&str; 2] = [
+    "inference.graph.DeclareNodeDescriptor/outcome/already-declared",
+    "inference.graph.DeclareNodeDescriptor/outcome/declared",
+];
+
+/// The six `inference.graph` scenarios of `ExposePort` this target answers: its outcome, its four
+/// refusals and the capacity invariant of the exposure it creates.
+const GRAPH_EXPOSURE_SCENARIOS: [&str; 6] = [
+    "inference.graph.ExposePort/outcome/exposed",
+    "inference.graph.ExposePort/outcome/not-declared",
+    "inference.graph.ExposePort/outcome/unbounded",
+    "inference.graph.ExposePort/outcome/unknown-pipeline",
+    "inference.graph.ExposePort/outcome/unknown-port",
+    "inference.graph.Exposure/invariant/after/inference.graph.ExposePort/exposed",
+];
+
 /// The 72 scenarios this target answers by running a pipeline: the 70 synthesized `inference.graph`
 /// scenarios of the eight Run commands and `DescribeNodeInstance`, the authored Draining-to-Failed
 /// one, and the authored `CancelRun` cascade over a run's generation and segments.
@@ -366,17 +396,25 @@ const TOOLS_SCENARIOS: [&str; 53] = [
     "inference.tools.ToolCall/transition/start/by/inference.tools.StartToolCall/started",
 ];
 
-/// Every `inference.session` scenario the suite synthesizes, 28: opening a session over a planned
+/// Every `inference.session` scenario the suite synthesizes, 62: opening a session over a planned
 /// pipeline, attaching a run with the forced pipeline mismatch, readiness with and without a
-/// current run, the drain and the close, their transitions and every state refusal.
-const SESSION_SCENARIOS: [&str; 28] = [
+/// current run, sending and committing input to a Ready session, interrupting it, recording
+/// history, switching its pipeline with the forced refusals, the drain, the close and the cancel,
+/// their transitions and every state refusal.
+const SESSION_SCENARIOS: [&str; 62] = [
     "inference.session.AttachRun/outcome/attached",
     "inference.session.AttachRun/outcome/no-such-session",
     "inference.session.AttachRun/outcome/pipeline-mismatch",
+    "inference.session.CancelSession/outcome/cancelled",
+    "inference.session.CancelSession/outcome/no-such-session",
     "inference.session.CloseSession/outcome/draining",
     "inference.session.CloseSession/outcome/no-such-session",
+    "inference.session.CommitInput/outcome/committed",
+    "inference.session.CommitInput/outcome/no-such-session",
     "inference.session.CompleteSessionClose/outcome/closed",
     "inference.session.CompleteSessionClose/outcome/no-such-session",
+    "inference.session.Interrupt/outcome/interrupted",
+    "inference.session.Interrupt/outcome/no-such-session",
     "inference.session.MarkSessionReady/outcome/no-current-run",
     "inference.session.MarkSessionReady/outcome/no-such-session",
     "inference.session.MarkSessionReady/outcome/ready",
@@ -384,20 +422,128 @@ const SESSION_SCENARIOS: [&str; 28] = [
     "inference.session.OpenSession/outcome/not-planned",
     "inference.session.OpenSession/outcome/opened",
     "inference.session.OpenSession/outcome/unknown-pipeline",
+    "inference.session.RecordHistory/outcome/closed",
+    "inference.session.RecordHistory/outcome/no-such-session",
+    "inference.session.RecordHistory/outcome/recorded",
+    "inference.session.SendInput/outcome/no-such-session",
+    "inference.session.SendInput/outcome/sent",
     "inference.session.Session/state/Closed/refuses/inference.session.AttachRun",
+    "inference.session.Session/state/Closed/refuses/inference.session.CancelSession",
     "inference.session.Session/state/Closed/refuses/inference.session.CloseSession",
+    "inference.session.Session/state/Closed/refuses/inference.session.CommitInput",
     "inference.session.Session/state/Closed/refuses/inference.session.CompleteSessionClose",
+    "inference.session.Session/state/Closed/refuses/inference.session.Interrupt",
     "inference.session.Session/state/Closed/refuses/inference.session.MarkSessionReady",
+    "inference.session.Session/state/Closed/refuses/inference.session.SendInput",
+    "inference.session.Session/state/Closed/refuses/inference.session.SwitchPipeline",
     "inference.session.Session/state/Draining/refuses/inference.session.AttachRun",
     "inference.session.Session/state/Draining/refuses/inference.session.CloseSession",
+    "inference.session.Session/state/Draining/refuses/inference.session.CommitInput",
+    "inference.session.Session/state/Draining/refuses/inference.session.Interrupt",
     "inference.session.Session/state/Draining/refuses/inference.session.MarkSessionReady",
+    "inference.session.Session/state/Draining/refuses/inference.session.SendInput",
+    "inference.session.Session/state/Draining/refuses/inference.session.SwitchPipeline",
+    "inference.session.Session/state/Opened/refuses/inference.session.CommitInput",
     "inference.session.Session/state/Opened/refuses/inference.session.CompleteSessionClose",
+    "inference.session.Session/state/Opened/refuses/inference.session.Interrupt",
+    "inference.session.Session/state/Opened/refuses/inference.session.SendInput",
+    "inference.session.Session/state/Opened/refuses/inference.session.SwitchPipeline",
     "inference.session.Session/state/Ready/refuses/inference.session.CompleteSessionClose",
     "inference.session.Session/state/Ready/refuses/inference.session.MarkSessionReady",
     "inference.session.Session/transition/attach/by/inference.session.AttachRun/attached",
+    "inference.session.Session/transition/cancel/by/inference.session.CancelSession/cancelled",
     "inference.session.Session/transition/close/by/inference.session.CompleteSessionClose/closed",
+    "inference.session.Session/transition/commit/by/inference.session.CommitInput/committed",
     "inference.session.Session/transition/drain/by/inference.session.CloseSession/draining",
+    "inference.session.Session/transition/interrupt/by/inference.session.Interrupt/interrupted",
     "inference.session.Session/transition/ready/by/inference.session.MarkSessionReady/ready",
+    "inference.session.Session/transition/send/by/inference.session.SendInput/sent",
+    "inference.session.Session/transition/switch/by/inference.session.SwitchPipeline/switched",
+    "inference.session.SwitchPipeline/outcome/mode-mismatch",
+    "inference.session.SwitchPipeline/outcome/no-such-session",
+    "inference.session.SwitchPipeline/outcome/not-planned",
+    "inference.session.SwitchPipeline/outcome/switched",
+    "inference.session.SwitchPipeline/outcome/unknown-pipeline",
+];
+
+/// Every `inference.duplex` scenario the suite synthesizes and the two authored ones, 74: the
+/// native speech session, its responses and tool calls, their transitions and state refusals,
+/// the format range, barge-in and the input-during-output evidence for `native_duplex`.
+const DUPLEX_SCENARIOS: [&str; 74] = [
+    "inference.duplex.AnswerSpeechToolCall/outcome/answered",
+    "inference.duplex.AnswerSpeechToolCall/outcome/wrong-state",
+    "inference.duplex.AppendInputAudio/outcome/accepted",
+    "inference.duplex.AppendInputAudio/outcome/format-out-of-range",
+    "inference.duplex.AppendInputAudio/outcome/session-not-open",
+    "inference.duplex.AppendInputAudio/outcome/unknown-session",
+    "inference.duplex.CancelResponse/outcome/cancelled",
+    "inference.duplex.CancelResponse/outcome/wrong-state",
+    "inference.duplex.CloseSpeechSession/outcome/closed",
+    "inference.duplex.CloseSpeechSession/outcome/wrong-state",
+    "inference.duplex.CommitInput/outcome/committed",
+    "inference.duplex.CommitInput/outcome/session-not-open",
+    "inference.duplex.CommitInput/outcome/unknown-session",
+    "inference.duplex.CompleteResponse/outcome/completed",
+    "inference.duplex.CompleteResponse/outcome/wrong-state",
+    "inference.duplex.CreateResponse/outcome/created",
+    "inference.duplex.CreateResponse/outcome/session-not-open",
+    "inference.duplex.CreateResponse/outcome/unknown-session",
+    "inference.duplex.EmitOutputAudio/outcome/emitted",
+    "inference.duplex.EmitOutputAudio/outcome/format-out-of-range",
+    "inference.duplex.EmitOutputAudio/outcome/not-in-progress",
+    "inference.duplex.EmitOutputAudio/outcome/unknown-response",
+    "inference.duplex.EmitOutputTranscript/outcome/emitted",
+    "inference.duplex.EmitOutputTranscript/outcome/not-in-progress",
+    "inference.duplex.EmitOutputTranscript/outcome/unknown-response",
+    "inference.duplex.FailResponse/outcome/failed",
+    "inference.duplex.FailResponse/outcome/wrong-state",
+    "inference.duplex.FailSpeechSession/outcome/failed",
+    "inference.duplex.FailSpeechSession/outcome/wrong-state",
+    "inference.duplex.ObserveSpeechStarted/outcome/observed",
+    "inference.duplex.ObserveSpeechStarted/outcome/session-not-open",
+    "inference.duplex.ObserveSpeechStarted/outcome/unknown-session",
+    "inference.duplex.ObserveSpeechStopped/outcome/observed",
+    "inference.duplex.ObserveSpeechStopped/outcome/session-not-open",
+    "inference.duplex.ObserveSpeechStopped/outcome/unknown-session",
+    "inference.duplex.OpenSpeechSession/outcome/format-out-of-range",
+    "inference.duplex.OpenSpeechSession/outcome/no-liveness-bound",
+    "inference.duplex.OpenSpeechSession/outcome/opened",
+    "inference.duplex.OpenSpeechSession/outcome/unknown-adapter",
+    "inference.duplex.ProposeSpeechToolCall/outcome/not-in-progress",
+    "inference.duplex.ProposeSpeechToolCall/outcome/proposed",
+    "inference.duplex.ProposeSpeechToolCall/outcome/unknown-response",
+    "inference.duplex.ProposeSpeechToolCall/outcome/unknown-tool",
+    "inference.duplex.RecordResponseUsage/outcome/recorded",
+    "inference.duplex.RecordResponseUsage/outcome/unknown-response",
+    "inference.duplex.RecordTranscriptionUsage/outcome/recorded",
+    "inference.duplex.RecordTranscriptionUsage/outcome/unknown-session",
+    "inference.duplex.Response/state/Cancelled/refuses/inference.duplex.CancelResponse",
+    "inference.duplex.Response/state/Cancelled/refuses/inference.duplex.CompleteResponse",
+    "inference.duplex.Response/state/Cancelled/refuses/inference.duplex.FailResponse",
+    "inference.duplex.Response/state/Completed/refuses/inference.duplex.CancelResponse",
+    "inference.duplex.Response/state/Completed/refuses/inference.duplex.CompleteResponse",
+    "inference.duplex.Response/state/Completed/refuses/inference.duplex.FailResponse",
+    "inference.duplex.Response/state/Failed/refuses/inference.duplex.CancelResponse",
+    "inference.duplex.Response/state/Failed/refuses/inference.duplex.CompleteResponse",
+    "inference.duplex.Response/state/Failed/refuses/inference.duplex.FailResponse",
+    "inference.duplex.Response/transition/cancel/by/inference.duplex.CancelResponse/cancelled",
+    "inference.duplex.Response/transition/complete/by/inference.duplex.CompleteResponse/completed",
+    "inference.duplex.Response/transition/fail/by/inference.duplex.FailResponse/failed",
+    "inference.duplex.SpeechSession/state/Closed/refuses/inference.duplex.CloseSpeechSession",
+    "inference.duplex.SpeechSession/state/Closed/refuses/inference.duplex.FailSpeechSession",
+    "inference.duplex.SpeechSession/state/Failed/refuses/inference.duplex.CloseSpeechSession",
+    "inference.duplex.SpeechSession/state/Failed/refuses/inference.duplex.FailSpeechSession",
+    "inference.duplex.SpeechSession/transition/close/by/inference.duplex.CloseSpeechSession/closed",
+    "inference.duplex.SpeechSession/transition/fail/by/inference.duplex.FailSpeechSession/failed",
+    "inference.duplex.SpeechToolCall/state/Answered/refuses/inference.duplex.AnswerSpeechToolCall",
+    "inference.duplex.SpeechToolCall/transition/answer/by/inference.duplex.AnswerSpeechToolCall/answered",
+    "inference.duplex.TranscribeInput/outcome/session-not-open",
+    "inference.duplex.TranscribeInput/outcome/transcribed",
+    "inference.duplex.TranscribeInput/outcome/unknown-session",
+    "inference.duplex.TruncateOutput/outcome/truncated",
+    "inference.duplex.TruncateOutput/outcome/unknown-response",
+    "inference.duplex/authored/barge-in-cancels-response",
+    "inference.duplex/authored/input-during-output-continues-response",
 ];
 
 fn repository_root() -> PathBuf {
@@ -578,11 +724,15 @@ fn the_suite_runs_against_the_testkit_target() {
         .chain(GRAPH_SCENARIOS)
         .chain(GRAPH_VALIDATION_SCENARIOS)
         .chain(GRAPH_PLANNING_SCENARIOS)
+        .chain(GRAPH_EXPOSURE_SCENARIOS)
+        .chain(GRAPH_DESCRIPTOR_SCENARIOS)
+        .chain(GRAPH_SUBGRAPH_SCENARIOS)
         .chain(RUN_SCENARIOS)
         .chain(RUN_ROUTED_SCENARIOS)
         .chain(NODE_INSTANCE_SCENARIOS)
         .chain(TOOLS_SCENARIOS)
         .chain(SESSION_SCENARIOS)
+        .chain(DUPLEX_SCENARIOS)
     {
         assert!(
             passed.contains(id),

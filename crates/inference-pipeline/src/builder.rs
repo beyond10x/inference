@@ -24,9 +24,9 @@ use inference_core::model::{AdapterId, Capability, Modality};
 use inference_core::policy::{ProfileId, ProfileNotFound};
 
 use crate::{
-    AdapterNotFound, AddNode, AddPort, BindingId, Catalog, Declaration, DeclarePipeline, Delivery,
-    EdgeId, Essentiality, FeedbackLoopId, InteractionMode, NodeId, NodeRole, OverloadPolicy,
-    PipelineId, PortDirection, PortId,
+    AdapterNotFound, AddNode, AddPort, AddSubgraphNodeError, BindingId, Catalog, Declaration,
+    DeclarePipeline, Delivery, EdgeId, Essentiality, ExposureId, FeedbackLoopId, InteractionMode,
+    NodeId, NodeRole, OverloadPolicy, PipelineId, PortDirection, PortId,
 };
 
 /// The lifetime that brands every handle of one builder; invariant, so no other lifetime stands
@@ -169,7 +169,46 @@ impl<D: PortDirectionType, M: PortModality> PortHandle<'_, D, M> {
     }
 }
 
-/// Declares the nodes, ports, edges and bindings of one Declared pipeline; see the module
+/// An exposure of the pipeline being built, of the direction `D` and modality `M` of its port: an
+/// ingress when `D` is [`direction::Input`], an egress when it is [`direction::Output`]. It names
+/// an entity the builder already declared and is used by no builder method, so unlike a
+/// [`PortHandle`] it carries no brand and may leave the closure, telling its holder what the
+/// interface carries.
+#[derive(Debug)]
+pub struct Exposed<D, M> {
+    exposure_id: ExposureId,
+    kind: PhantomData<fn() -> (D, M)>,
+}
+
+impl<D, M> Clone for Exposed<D, M> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<D, M> Copy for Exposed<D, M> {}
+
+impl<D: PortDirectionType, M: PortModality> Exposed<D, M> {
+    /// The exposure's identity.
+    #[must_use]
+    pub const fn id(&self) -> ExposureId {
+        self.exposure_id
+    }
+
+    /// The direction of the exposed port: input for an ingress, output for an egress.
+    #[must_use]
+    pub const fn direction(&self) -> PortDirection {
+        D::DIRECTION
+    }
+
+    /// The modality of the exposed port.
+    #[must_use]
+    pub const fn modality(&self) -> Modality {
+        M::MODALITY
+    }
+}
+
+/// Declares the nodes, ports, edges, exposures and bindings of one Declared pipeline; see the module
 /// documentation.
 pub struct PipelineBuilder<'d, 'b> {
     declaration: &'d mut Declaration,
@@ -211,6 +250,34 @@ impl<'b> PipelineBuilder<'_, 'b> {
             node_id: added.node_id,
             brand: PhantomData,
         }
+    }
+
+    /// Adds a node of role `role` standing for the Planned pipeline `subgraph_id`, as
+    /// `inference.graph.AddSubgraphNode`. Its ports are added with [`PipelineBuilder::input`] and
+    /// [`PipelineBuilder::output`]; planning holds them to the child's exposures.
+    ///
+    /// # Errors
+    ///
+    /// [`AddSubgraphNodeError::UnknownSubgraph`] when the declaration holds no pipeline carrying
+    /// `subgraph_id`, [`AddSubgraphNodeError::SubgraphNotPlanned`] when it is not Planned; nothing
+    /// is added and no identity is taken.
+    pub fn subgraph(
+        &mut self,
+        name: impl Into<String>,
+        role: NodeRole,
+        subgraph_id: PipelineId,
+    ) -> Result<NodeHandle<'b>, AddSubgraphNodeError> {
+        let child = self
+            .declaration
+            .subgraph_of(subgraph_id)
+            .map_err(crate::declaration::SubgraphRefusal::into_add_error)?;
+        let added =
+            self.declaration
+                .insert_subgraph_node(self.pipeline_id, name.into(), role, child);
+        Ok(NodeHandle {
+            node_id: added.node_id,
+            brand: PhantomData,
+        })
     }
 
     /// Adds an input port of modality `M` to `node`, as `inference.graph.AddPort`.
@@ -304,6 +371,33 @@ impl<'b> PipelineBuilder<'_, 'b> {
         (edge_id, feedback_id)
     }
 
+    /// Exposes `port` to the application under `name` with finite buffering, as
+    /// `inference.graph.ExposePort`: an input port becomes an ingress, an output port an egress,
+    /// and the answer carries the port's direction and modality as types. A capacity beyond
+    /// `i64::MAX` is held as `i64::MAX`, as [`PipelineBuilder::connect`] holds one.
+    pub fn expose<D: PortDirectionType, M: PortModality>(
+        &mut self,
+        port: &PortHandle<'b, D, M>,
+        name: impl Into<String>,
+        capacity: NonZeroUsize,
+        overload: OverloadPolicy,
+    ) -> Exposed<D, M> {
+        let exposure_id = self
+            .declaration
+            .insert_exposure(
+                self.pipeline_id,
+                port.port_id,
+                name.into(),
+                carried(capacity),
+                overload,
+            )
+            .exposure_id;
+        Exposed {
+            exposure_id,
+            kind: PhantomData,
+        }
+    }
+
     /// Binds `node` to the adapter carrying `adapter_id`, as `inference.graph.BindNode`.
     ///
     /// # Errors
@@ -327,7 +421,7 @@ impl<'b> PipelineBuilder<'_, 'b> {
 
 /// The value a `ConnectPorts` or `DeclareFeedbackLoop` input can carry: `value`, or `i64::MAX`
 /// when it is larger.
-fn carried(value: NonZeroUsize) -> NonZeroUsize {
+pub(crate) fn carried(value: NonZeroUsize) -> NonZeroUsize {
     let largest = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
     if value.get() <= largest {
         value

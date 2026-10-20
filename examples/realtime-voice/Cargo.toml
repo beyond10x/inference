@@ -1,0 +1,25 @@
+[package]
+name = "realtime-voice"
+description = "Example: a spoken conversation with a native speech model, microphone in and speaker out, with barge-in and one demo tool."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+inference-audio-device = { path = "../../adapters/inference-audio-device", default-features = false }
+inference-duplex = { path = "../../crates/inference-duplex" }
+serde_json.workspace = true
+
+[dev-dependencies]
+clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
+inference-audio-device = { path = "../../adapters/inference-audio-device" }
+inference-aws = { path = "../../adapters/inference-aws", features = ["duplex"] }
+inference-openai = { path = "../../adapters/inference-openai", features = ["live"] }
+inference-testkit = { path = "../../crates/inference-testkit", features = ["duplex"] }
+
+[lints]
+workspace = true
