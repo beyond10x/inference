@@ -39,7 +39,8 @@ use std::time::{Duration, Instant};
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 use inference_duplex::conformance::{NativeDuplexProbe, native_duplex_evidence};
 use inference_duplex::{
-    NativeSpeechModel, SessionConfig, SessionEvent, SpeechSessionHandle, TurnDetection, TurnTuning,
+    NativeSpeechModel, QuantityKind, SessionConfig, SessionEvent, SpeechSessionHandle,
+    TurnDetection, TurnTuning,
 };
 use inference_openai::live::{LIVE_MODEL, LiveClient, LiveEvent, LiveFormat, LiveSessionConfig};
 use inference_openai::live_duplex::{OpenAiLive, native_duplex_verdict};
@@ -395,6 +396,38 @@ fn one_spoken_exchange_through_the_duplex_contract() {
     assert!(
         session.final_usage().is_some(),
         "session.closed confirms the usage"
+    );
+    let records = session.ledger().usage_records();
+    for record in records {
+        println!(
+            "usage record: response {:?}, final {}, {:?}",
+            record.response_id(),
+            record.is_final(),
+            record.quantities()
+        );
+    }
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.response_id() == done)
+            .count(),
+        1,
+        "one usage record of the response"
+    );
+    let seconds = session.final_usage().map(|closed| closed.seconds);
+    let of_session: Vec<_> = records
+        .iter()
+        .filter(|record| record.response_id().is_none())
+        .collect();
+    assert_eq!(of_session.len(), 1, "one usage record of the session");
+    assert!(of_session[0].is_final());
+    assert_eq!(
+        of_session[0].quantities(),
+        [inference_duplex::reported(
+            QuantityKind::InputAudioMs,
+            seconds.map(|seconds| (seconds * 1_000.0).round() as u64)
+        )],
+        "the billed seconds session.closed confirmed"
     );
 }
 

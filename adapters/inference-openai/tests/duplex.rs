@@ -16,9 +16,9 @@ use futures_util::{SinkExt, StreamExt};
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 use inference_duplex::conformance::{NativeDuplexProbe, NoNativeDuplex, native_duplex_evidence};
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseId, ResponseUsage, SessionConfig, SessionEvent,
-    SessionFailureKind, SpeechSessionHandle, TokenCounts, TuningOption, TurnDetection,
-    TurnSensitivity, TurnTuning, Unsupported,
+    NativeSpeechModel, OpenError, QuantityKind, QuantitySource, ResponseId, ResponseUsage,
+    SessionConfig, SessionEvent, SessionFailureKind, SpeechSessionHandle, TokenCounts,
+    TuningOption, TurnDetection, TurnSensitivity, TurnTuning, Unsupported, UsageRecorded,
 };
 use inference_openai::duplex::{OpenAiRealtime, capabilities, claims, wire_format};
 use inference_openai::{
@@ -848,6 +848,219 @@ fn mulaw_at_8_khz_passes_both_ways_as_it_is() {
         SessionEvent::OutputAudio(audio)
             if audio.frame.format == mulaw && audio.frame.sample_count == 160 && audio.frame.data == vec![0xFF; 160]
     )));
+}
+
+fn records(events: &[SessionEvent]) -> Vec<&UsageRecorded> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::UsageRecorded(recorded) => Some(recorded),
+            _ => None,
+        })
+        .collect()
+}
+
+fn quantities(record: &UsageRecorded) -> Vec<(QuantityKind, Option<i64>)> {
+    record
+        .quantities
+        .iter()
+        .map(|quantity| {
+            let expected = match quantity.kind() {
+                QuantityKind::Requests => QuantitySource::Measured,
+                _ if quantity.value().is_none() => QuantitySource::Unknown,
+                _ => QuantitySource::ProviderReported,
+            };
+            assert_eq!(quantity.source(), expected, "{quantity:?}");
+            (quantity.kind(), quantity.value())
+        })
+        .collect()
+}
+
+/// One usage record per response and per reported transcription, over replayed server events:
+/// each count `response.done` or the transcription carries is `provider_reported`, each it leaves
+/// out `unknown`, never 0 or folded into text; a transcription in seconds is `input_audio_ms`; a
+/// response the provider cancelled with no usage is recorded with every count unknown.
+#[test]
+fn each_response_and_transcription_is_one_usage_record_with_absent_counts_unknown() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, speech_started("item_1", 0)).await;
+        send(&mut socket, speech_stopped("item_1", 900)).await;
+        send(&mut socket, committed("item_1")).await;
+        send(
+            &mut socket,
+            json!({"type": "conversation.item.input_audio_transcription.completed", "event_id": "event_t1", "item_id": "item_1", "content_index": 0, "transcript": "hi",
+                "usage": {"type": "tokens", "input_tokens": 13, "total_tokens": 13}}),
+        )
+        .await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, transcript_delta("resp_1", "item_o1", "Hello")).await;
+        send(
+            &mut socket,
+            json!({"type": "response.done", "event_id": "event_rd1", "response": {
+                "id": "resp_1", "object": "realtime.response", "status": "completed", "output": [],
+                "usage": {
+                    "total_tokens": 40, "input_tokens": 25, "output_tokens": 15,
+                    "input_token_details": {"text_tokens": 5, "audio_tokens": 20}
+                }
+            }}),
+        )
+        .await;
+        send(&mut socket, speech_started("item_2", 2_000)).await;
+        send(&mut socket, speech_stopped("item_2", 2_900)).await;
+        send(&mut socket, committed("item_2")).await;
+        send(
+            &mut socket,
+            json!({"type": "conversation.item.input_audio_transcription.completed", "event_id": "event_t2", "item_id": "item_2", "content_index": 0, "transcript": "stop",
+                "usage": {"type": "duration", "seconds": 2.5}}),
+        )
+        .await;
+        send(&mut socket, response_created("resp_2")).await;
+        send(&mut socket, speech_started("item_3", 3_000)).await;
+        send(
+            &mut socket,
+            json!({"type": "response.done", "event_id": "event_rd2", "response": {
+                "id": "resp_2", "object": "realtime.response", "status": "cancelled", "output": [], "usage": null
+            }}),
+        )
+        .await;
+        let _ = socket.next().await;
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::ResponseCancelled(_))
+    });
+    session.close().expect("open");
+    server.finish();
+
+    let responses = created(&events);
+    assert_eq!(responses.len(), 2, "{events:#?}");
+    let recorded = records(&events);
+    assert_eq!(recorded.len(), 4, "{events:#?}");
+    let session_id = session.ledger().session().session_id();
+    assert!(
+        recorded
+            .iter()
+            .all(|record| record.speech_session_id == Some(session_id)
+                && record.adapter_id == model.adapter().adapter_id()
+                && record.model_id == model.adapter().model_id())
+    );
+
+    assert_eq!(recorded[0].response_id, None);
+    assert_eq!(
+        quantities(recorded[0]),
+        [
+            (QuantityKind::InputAudioTokens, Some(13)),
+            (QuantityKind::OutputTextTokens, None),
+        ],
+        "a transcription in tokens; the output count it left out is unknown"
+    );
+
+    assert_eq!(recorded[1].response_id, Some(responses[0]));
+    assert_eq!(
+        quantities(recorded[1]),
+        [
+            (QuantityKind::InputTextTokens, Some(5)),
+            (QuantityKind::InputAudioTokens, Some(20)),
+            (QuantityKind::CachedInputTokens, None),
+            (QuantityKind::OutputTextTokens, None),
+            (QuantityKind::OutputAudioTokens, None),
+            (QuantityKind::Requests, Some(1)),
+        ],
+        "details left out are unknown, not 0 and not folded into text"
+    );
+    let first_done = events
+        .iter()
+        .position(|event| matches!(event, SessionEvent::ResponseCompleted(_)))
+        .expect("the first response completes");
+    assert!(
+        matches!(&events[first_done - 1], SessionEvent::UsageRecorded(record) if record.response_id == Some(responses[0])),
+        "the record of a response ending with its usage comes just before its end: {events:#?}"
+    );
+
+    assert_eq!(recorded[2].response_id, None);
+    assert_eq!(
+        quantities(recorded[2]),
+        [(QuantityKind::InputAudioMs, Some(2_500))],
+        "a transcription in seconds"
+    );
+
+    assert_eq!(recorded[3].response_id, Some(responses[1]));
+    assert_eq!(
+        quantities(recorded[3]),
+        [
+            (QuantityKind::InputTextTokens, None),
+            (QuantityKind::InputAudioTokens, None),
+            (QuantityKind::CachedInputTokens, None),
+            (QuantityKind::OutputTextTokens, None),
+            (QuantityKind::OutputAudioTokens, None),
+            (QuantityKind::Requests, Some(1)),
+        ],
+        "cancelled by barge-in before any usage arrived"
+    );
+    assert_eq!(
+        recorded[3]
+            .quantities
+            .iter()
+            .find(|quantity| quantity.kind() == QuantityKind::Requests)
+            .map(|quantity| quantity.source()),
+        Some(QuantitySource::Measured)
+    );
+    assert_eq!(session.ledger().usage_records().len(), 4);
+}
+
+/// A response the caller cancels is recorded once its `response.done` reports the usage of what
+/// it generated, not at the cancellation with that usage still to come.
+#[test]
+fn the_callers_cancellation_is_recorded_with_the_usage_its_response_done_reports() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, audio_delta("resp_1", "item_o1", &[4; 480])).await;
+        assert_eq!(
+            receive(&mut socket).await,
+            json!({"type": "response.cancel", "response_id": "resp_1"})
+        );
+        send(&mut socket, response_done("resp_1", "cancelled")).await;
+        let _ = socket.next().await;
+    });
+    let mut model = server.model();
+    let mut caller = config(TurnDetection::ServerVad, true);
+    caller.auto_interrupt = false;
+    let mut session = model.open(caller).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::OutputAudio(_))
+    });
+    let response = created(&events)[0];
+    session.cancel_response(response).expect("in progress");
+    let rest = until(&mut session, |event| {
+        matches!(event, SessionEvent::UsageRecorded(_))
+    });
+    session.close().expect("open");
+    server.finish();
+    let recorded = records(&rest);
+    assert_eq!(recorded.len(), 1, "{rest:#?}");
+    assert_eq!(recorded[0].response_id, Some(response));
+    assert_eq!(
+        quantities(recorded[0]),
+        [
+            (QuantityKind::InputTextTokens, Some(5)),
+            (QuantityKind::InputAudioTokens, Some(20)),
+            (QuantityKind::CachedInputTokens, Some(4)),
+            (QuantityKind::OutputTextTokens, Some(3)),
+            (QuantityKind::OutputAudioTokens, Some(12)),
+            (QuantityKind::Requests, Some(1)),
+        ]
+    );
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert!(
+        records(&closing).is_empty(),
+        "one record per response: {closing:#?}"
+    );
 }
 
 /// The evidence procedure run through the binding against a replay. The replay stages the
