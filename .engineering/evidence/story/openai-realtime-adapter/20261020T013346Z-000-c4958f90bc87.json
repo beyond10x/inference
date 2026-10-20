@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T01:33:46Z",
+  "actor": "human:timo",
+  "artifact": "story:openai-realtime-adapter",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "live: cargo test -p inference-openai --features live -- --ignored (3 passed, 0 failed, 2026-10-20): text in gives 153600 audio bytes and a transcript; a committed speech clip gives the input transcript 'What is the capital of France?' and the reply 'The capital of France is Paris.'; usage reported; the native_duplex evidence probe answers NotDependent, matching the claim (concurrent_input_output, not native_duplex)"
+  }
+}
