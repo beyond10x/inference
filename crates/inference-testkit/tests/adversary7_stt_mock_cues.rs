@@ -32,6 +32,7 @@ fn kind_of(event: &TranscriptEvent) -> &'static str {
         TranscriptEvent::Hypothesis(_) => "hypothesis",
         TranscriptEvent::Revision(_) => "revision",
         TranscriptEvent::Committed(_) => "committed",
+        TranscriptEvent::Usage(_) => "usage",
     }
 }
 
@@ -72,7 +73,12 @@ fn incremental_runs_each_cue_on_the_frame_that_reaches_its_count() {
         );
     }
     handle.end_input().expect("input ends once");
-    assert_eq!(handle.next(), None, "nothing is left for the end of input");
+    let left: Vec<&str> = handle.by_ref().map(|e| kind_of(&e.payload)).collect();
+    assert_eq!(
+        left,
+        ["usage"],
+        "no cue is left for the end of input, only the recognition's usage record"
+    );
 }
 
 #[test]
@@ -101,8 +107,9 @@ fn a_cue_past_the_offered_frames_runs_at_the_end_of_input() {
         let kinds: Vec<&str> = events.iter().map(|e| kind_of(&e.payload)).collect();
         assert_eq!(
             kinds,
-            ["hypothesis", "committed"],
-            "{configuration:?}: every cue left runs at the end of input, whatever its frame count"
+            ["hypothesis", "committed", "usage"],
+            "{configuration:?}: every cue left runs at the end of input, whatever its frame count, \
+             then the usage record"
         );
         assert_eq!(handle.output().spans()[0].state(), SpanState::Committed);
     }
@@ -123,7 +130,10 @@ fn a_revision_through_the_handle_is_delivered_in_sequence() {
         .offer_frame(frames.next().expect("six"))
         .expect("input has not ended");
     let mut events: Vec<_> = handle.by_ref().collect();
-    let span_id = events[0].payload.span_id();
+    let span_id = events[0]
+        .payload
+        .span_id()
+        .expect("the first event is a hypothesis");
 
     handle
         .revise(ReviseSpan {
@@ -150,10 +160,15 @@ fn a_revision_through_the_handle_is_delivered_in_sequence() {
     events.extend(handle.by_ref());
 
     let sequences: Vec<i64> = events.iter().map(|e| e.sequence).collect();
-    assert_eq!(sequences, (1..=7).collect::<Vec<i64>>());
+    assert_eq!(
+        sequences,
+        (1..=8).collect::<Vec<i64>>(),
+        "the script's six, the revision and the usage record"
+    );
+    assert_eq!(events.last().map(|e| kind_of(&e.payload)), Some("usage"));
     let mut log = EventLog::new();
-    for envelope in events {
-        log.record(stream_envelope(envelope))
+    for envelope in events.into_iter().filter_map(stream_envelope) {
+        log.record(envelope)
             .unwrap_or_else(|refusal| panic!("{refusal}"));
     }
 }
