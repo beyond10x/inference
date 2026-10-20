@@ -1,4 +1,5 @@
-//! The events a recognition emits from the text whisper.cpp transcribed, without weights.
+//! The events a recognition emits from the text whisper.cpp transcribed, and which segments are
+//! annotations rather than text, without weights.
 
 use std::collections::VecDeque;
 
@@ -7,7 +8,7 @@ use inference_stt::inference_core::id::{NodeId, RunId, StreamId};
 use inference_stt::inference_text::{SpanState, TurnId};
 use inference_stt::{RecognitionRequest, TranscriptEvent, TranscriptOutput};
 
-use super::{declare_adapter, declare_model, transcribed};
+use super::{declare_adapter, declare_model, is_annotation, transcribed};
 
 fn output(first_sequence: i64) -> TranscriptOutput {
     let (model, _) = declare_model();
@@ -79,4 +80,30 @@ fn an_exhausted_stream_emits_what_it_can_without_panicking() {
     assert_eq!(output.next_sequence(), None);
     assert_eq!(output.spans().len(), 1);
     assert_eq!(output.spans()[0].state(), SpanState::Hypothesis);
+}
+
+#[test]
+fn a_segment_of_bracketed_or_parenthesised_annotations_alone_is_not_text() {
+    for annotation in [
+        "[BLANK_AUDIO]",
+        " [BLANK_AUDIO]",
+        "(silence)",
+        " [Music] (wind blowing) ",
+        "[ Inaudible ]",
+    ] {
+        assert!(is_annotation(annotation), "{annotation:?}");
+    }
+    for text in [
+        "",
+        "  ",
+        " you",
+        " After early nightfall",
+        " [Music] hello",
+        " hello (laughs)",
+        "[unclosed",
+        "closed]",
+        "(mismatched]",
+    ] {
+        assert!(!is_annotation(text), "{text:?}");
+    }
 }
