@@ -71,15 +71,24 @@ fn committed(texts: &[&str]) -> Vec<OutputSegment> {
 fn state_of(handle: &MockSynthesis, event: &SynthesisEvent) -> SegmentState {
     handle
         .output()
-        .segment(event.segment_id())
+        .segment(event.segment_id().expect("an event of a segment names it"))
         .expect("every event names a segment the synthesis holds")
         .state()
 }
 
-/// Every event delivered so far, each with the state of its segment when the caller received it.
+/// Every event of a segment delivered so far, each with the state of its segment when the caller
+/// received it. The usage record, which names no segment, is left out; it is the last event
+/// (`tests/tts_usage.rs`), and nothing follows it.
 fn drain(handle: &mut MockSynthesis) -> Vec<(SynthesisEvent, SegmentState)> {
     let mut seen = Vec::new();
     while let Some(event) = handle.next() {
+        if matches!(event, SynthesisEvent::Usage(_)) {
+            assert!(
+                handle.next().is_none(),
+                "the usage record is the last event"
+            );
+            break;
+        }
         let state = state_of(handle, &event);
         seen.push((event, state));
     }
@@ -130,6 +139,10 @@ fn synthesise_with(mut synthesiser: MockSynthesiser) -> Synthesis {
     let taken_before_end = handle.output().segments_taken();
     handle.end_utterance().expect("the utterance ends once");
     let after_end = drain(&mut handle);
+    assert!(
+        handle.output().usage_recorded(),
+        "a synthesis whose utterance ended records its usage"
+    );
     Synthesis {
         handle,
         segments,
@@ -203,7 +216,7 @@ fn audio_is_emitted_before_synthesis_completes_exactly_when_output_streaming_is_
         for &id in &synthesis.segments {
             let events: Vec<&(SynthesisEvent, SegmentState)> = synthesis
                 .all()
-                .filter(|(event, _)| event.segment_id() == id)
+                .filter(|(event, _)| event.segment_id() == Some(id))
                 .collect();
             let completions: Vec<usize> = events
                 .iter()
@@ -473,7 +486,7 @@ fn without_output_streaming_a_segment_is_played_only_once_all_its_frames_are_giv
             .unwrap_or_else(|error| panic!("{configuration:?}: the sink acknowledges ({error:?})"));
         let after: Vec<SynthesisEvent> = handle.by_ref().collect();
         assert!(
-            after.iter().all(|event| event.segment_id() != id),
+            after.iter().all(|event| event.segment_id() != Some(id)),
             "{configuration:?}: no frame of a Played segment is emitted afterwards: {after:?}"
         );
         assert_eq!(handle.output().frames_emitted(id), Some(emitted));
