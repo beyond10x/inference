@@ -1,0 +1,12 @@
+{
+  "hardware": "any host of the test suite",
+  "languages": ["en"],
+  "audio_formats": [{"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1}],
+  "evidence": [],
+  "resource_profile": {
+    "peak_resident_memory_mib": 0,
+    "load_time_ms": 0,
+    "cpu_real_time_factor_milli": 0
+  },
+  "adapter_revision": "0.4.0"
+}

@@ -1777,6 +1777,7 @@ dependencies = [
 name = "inference-core"
 version = "0.4.0"
 dependencies = [
+ "inference-audio",
  "serde",
  "serde_json",
  "uuid",

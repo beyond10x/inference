@@ -13,6 +13,10 @@ pub mod id;
 pub mod model;
 pub mod policy;
 
+/// The audio vocabulary a [`model::CapabilityRecord`] names its audio formats in, re-exported so
+/// that a crate reading records needs no dependency of its own on `inference-audio`.
+pub use inference_audio;
+
 /// The crates [`uuid_newtype!`] expands to, so that a crate declaring an identifier with it needs
 /// neither as a dependency of its own. Not part of the API.
 #[doc(hidden)]
