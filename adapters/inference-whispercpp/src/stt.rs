@@ -18,7 +18,10 @@
 //! ([`mono_samples`]), resamples them to whisper.cpp's 16 kHz ([`samples_16k`]), runs `full` on
 //! the whole buffer in a whisper.cpp state of its own on the recogniser's shared context, and
 //! emits the transcribed text as a Hypothesis span that it commits at once, in the same step. An
-//! utterance with no text emits nothing.
+//! utterance with no text emits nothing, and audio without speech is not text: whisper.cpp
+//! suppresses its non-speech tokens, a segment whose probability of no speech is above
+//! [`NO_SPEECH_THRESHOLD`] is dropped, and so is a segment that is nothing but bracketed or
+//! parenthesised annotations such as `[BLANK_AUDIO]`.
 //!
 //! The crate's `stt_conformance` tests hold the recogniser to adapter conformance against the
 //! pinned checkpoint, with the claims of the sherpa-onnx recogniser's conformance inverted.
@@ -114,6 +117,12 @@ pub const SAMPLE_RATE: u32 = 16_000;
 /// The CPU threads one transcription runs on, whisper.cpp's own default on a machine with at
 /// least four.
 pub const THREADS: i32 = 4;
+
+/// The probability of no speech above which a segment is not text of the utterance: whisper.cpp's
+/// own default `no_speech_thold`, applied to each segment alone. whisper.cpp itself skips a
+/// window only when its average log probability is also low, and a confident hallucination such
+/// as "you" for silence is not.
+pub const NO_SPEECH_THRESHOLD: f32 = 0.6;
 
 /// The checksum of the pinned checkpoint, the `checksum` of its [`Model`]:
 /// `sha256:<hex> <file name>`.
@@ -586,17 +595,50 @@ fn transcribe(context: &WhisperContext, samples: &[f32]) -> Result<String, Recog
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+    params.set_suppress_nst(true);
+    params.set_no_speech_thold(NO_SPEECH_THRESHOLD);
     state
         .full(params, samples)
         .map_err(|error| failed("the transcription failed", error))?;
     let mut text = String::new();
     for segment in state.as_iter() {
+        if segment.no_speech_probability() > NO_SPEECH_THRESHOLD {
+            continue;
+        }
         let piece = segment
             .to_str_lossy()
             .map_err(|error| failed("a segment has no text", error))?;
+        if is_annotation(&piece) {
+            continue;
+        }
         text.push_str(&piece);
     }
     Ok(text)
+}
+
+/// Whether `segment` is nothing but whisper's non-speech annotations, such as `[BLANK_AUDIO]` or
+/// `(silence)`: one or more balanced bracketed or parenthesised groups with only whitespace
+/// between and around them.
+fn is_annotation(segment: &str) -> bool {
+    let mut open: Vec<char> = Vec::new();
+    let mut groups = 0_usize;
+    for character in segment.chars() {
+        match character {
+            '[' => open.push(']'),
+            '(' => open.push(')'),
+            ']' | ')' => {
+                if open.pop() != Some(character) {
+                    return false;
+                }
+                if open.is_empty() {
+                    groups += 1;
+                }
+            }
+            _ if open.is_empty() && !character.is_whitespace() => return false,
+            _ => {}
+        }
+    }
+    open.is_empty() && groups > 0
 }
 
 /// Emits `text`, trimmed, as a Hypothesis span and commits it at once; text that is empty once

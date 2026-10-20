@@ -1,4 +1,5 @@
-//! The events an utterance emits from the recogniser's successive results, without weights.
+//! The events an utterance emits from the recogniser's successive results, and the resampling of
+//! frames at a second sample rate, without weights.
 
 use std::collections::VecDeque;
 
@@ -7,7 +8,7 @@ use inference_stt::inference_core::id::{NodeId, RunId, StreamId};
 use inference_stt::inference_text::{SpanState, TurnId};
 use inference_stt::{RecognitionRequest, TranscriptEvent, TranscriptOutput};
 
-use super::{Utterance, declare_adapter, declare_model};
+use super::{Resampler, Utterance, declare_adapter, declare_model};
 
 fn output(first_sequence: i64) -> TranscriptOutput {
     let (model, _) = declare_model();
@@ -113,4 +114,36 @@ fn an_exhausted_stream_stops_the_utterance_without_panicking() {
     assert_eq!(kinds(&delivered), vec![("hypothesis", "WHAT".to_owned())]);
     assert_eq!(output.next_sequence(), None);
     assert_eq!(output.spans().len(), 1);
+}
+
+/// A ramp of `count` samples, `0.0, 1.0, 2.0, …`, so that linear interpolation is exact.
+fn ramp(count: u16) -> Vec<f32> {
+    (0..count).map(f32::from).collect()
+}
+
+#[test]
+fn a_run_resampled_in_frames_equals_the_run_resampled_whole() {
+    let input = ramp(1_000);
+    let whole = Resampler::new(16_000, 8_000).push(&input);
+    let mut split = Resampler::new(16_000, 8_000);
+    let pieces: Vec<f32> = input
+        .chunks(37)
+        .flat_map(|chunk| split.push(chunk))
+        .collect();
+    assert_eq!(pieces, whole);
+    assert_eq!(whole.len(), 500);
+    assert!(
+        whole
+            .iter()
+            .enumerate()
+            .all(|(index, sample)| (sample - 2.0 * index as f32).abs() < 1e-3)
+    );
+}
+
+#[test]
+fn upsampling_interpolates_between_neighbours_across_frames() {
+    let mut resampler = Resampler::new(8_000, 16_000);
+    let mut output = resampler.push(&ramp(3));
+    output.extend(resampler.push(&[3.0, 4.0]));
+    assert_eq!(output, vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);
 }

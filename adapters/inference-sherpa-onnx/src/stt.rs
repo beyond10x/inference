@@ -13,9 +13,12 @@
 //!
 //! Each recognition is one sherpa-onnx online stream on the recogniser's shared online
 //! recogniser. Iterating its handle takes the frames offered so far through
-//! [`TranscriptOutput::take_input`], decodes each to mono f32 ([`mono_samples`]), passes it with
-//! its sample rate to the stream, which resamples what is not at 16 kHz, and decodes while the
-//! stream is ready. The first non-empty partial result emits a Hypothesis span, a changed result
+//! [`TranscriptOutput::take_input`], decodes each to mono f32 ([`mono_samples`]), passes it to the
+//! stream, which resamples what is not at 16 kHz, and decodes while the stream is ready. A stream
+//! is given one sample rate only, that of its first frame, because sherpa-onnx ends the process
+//! when one stream is given a second: a later frame at another rate is resampled to the first
+//! by linear interpolation, each run of consecutive frames at one rate as one signal, with no
+//! low-pass filter. The first non-empty partial result emits a Hypothesis span, a changed result
 //! revises it, and an endpoint, by sherpa-onnx's endpoint rules, commits it and resets the
 //! stream for the next utterance; an utterance with no text emits nothing. At the end of input
 //! the stream is flushed and the last span committed.
@@ -560,7 +563,8 @@ impl Recogniser for SherpaOnnxRecogniser {
             output: TranscriptOutput::start(&self.adapter, request),
             utterance: Utterance::default(),
             delivered: VecDeque::new(),
-            last_sample_rate: None,
+            stream_rate: None,
+            resampler: None,
             finished: false,
             _slot: slot,
         })
@@ -639,9 +643,76 @@ pub struct SherpaOnnxRecognition {
     output: TranscriptOutput,
     utterance: Utterance,
     delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
-    last_sample_rate: Option<i32>,
+    /// The sample rate of the first frame the stream took, the only rate it is ever given:
+    /// sherpa-onnx ends the process when one stream is given a second rate.
+    stream_rate: Option<u32>,
+    /// The resampler of the current run of frames at another rate than `stream_rate`.
+    resampler: Option<Resampler>,
     finished: bool,
     _slot: Slot,
+}
+
+/// A sample rate as sherpa-onnx takes it.
+fn native_rate(rate: u32) -> i32 {
+    i32::try_from(rate).unwrap_or(i32::MAX)
+}
+
+/// Linear interpolation of one run of consecutive frames at the rate `from` to the rate `to`,
+/// carried across the frames so that the run is resampled as one signal: output sample `i` of
+/// the run is read at input position `i * from / to`, between its two neighbours, once both have
+/// arrived. No low-pass filter is applied.
+#[derive(Debug)]
+struct Resampler {
+    from: u64,
+    to: u64,
+    /// The last input sample taken, the left neighbour of the next output sample.
+    previous: Option<f32>,
+    /// How many input samples the run has taken.
+    taken: u64,
+    /// How many output samples the run has emitted.
+    emitted: u64,
+}
+
+impl Resampler {
+    fn new(from: u32, to: u32) -> Self {
+        Self {
+            from: u64::from(from.max(1)),
+            to: u64::from(to.max(1)),
+            previous: None,
+            taken: 0,
+            emitted: 0,
+        }
+    }
+
+    /// The output samples `samples`, the run's next input, completes.
+    fn push(&mut self, samples: &[f32]) -> Vec<f32> {
+        let end = self.taken + samples.len() as u64;
+        let sample = |index: u64| {
+            if index < self.taken {
+                self.previous.unwrap_or(0.0)
+            } else {
+                samples[usize::try_from(index - self.taken).expect("within the frame")]
+            }
+        };
+        let mut output = Vec::new();
+        loop {
+            let numerator = self.emitted * self.from;
+            let below = numerator / self.to;
+            if below + 1 >= end {
+                break;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let fraction = (numerator % self.to) as f32 / self.to as f32;
+            let (left, right) = (sample(below), sample(below + 1));
+            output.push(left + (right - left) * fraction);
+            self.emitted += 1;
+        }
+        if let Some(last) = samples.last() {
+            self.previous = Some(*last);
+        }
+        self.taken = end;
+        output
+    }
 }
 
 impl fmt::Debug for SherpaOnnxRecognition {
@@ -671,17 +742,32 @@ impl SherpaOnnxRecognition {
             if samples.is_empty() {
                 continue;
             }
-            let sample_rate = i32::try_from(frame.format.sample_rate.get()).unwrap_or(i32::MAX);
-            self.stream.accept_waveform(sample_rate, &samples);
-            self.last_sample_rate = Some(sample_rate);
+            let frame_rate = frame.format.sample_rate.get();
+            let stream_rate = *self.stream_rate.get_or_insert(frame_rate);
+            let samples = if frame_rate == stream_rate {
+                self.resampler = None;
+                samples
+            } else {
+                let resampler = self
+                    .resampler
+                    .take()
+                    .filter(|resampler| resampler.from == u64::from(frame_rate))
+                    .unwrap_or_else(|| Resampler::new(frame_rate, stream_rate));
+                self.resampler.insert(resampler).push(&samples)
+            };
+            if samples.is_empty() {
+                continue;
+            }
+            self.stream
+                .accept_waveform(native_rate(stream_rate), &samples);
         }
         let ended = self.output.input_ended();
         if ended {
-            if let Some(sample_rate) = self.last_sample_rate {
+            if let Some(stream_rate) = self.stream_rate {
                 let padding =
-                    usize::try_from(sample_rate).unwrap_or(0) * TAIL_PADDING_HUNDREDTHS / 100;
+                    usize::try_from(stream_rate).unwrap_or(0) * TAIL_PADDING_HUNDREDTHS / 100;
                 self.stream
-                    .accept_waveform(sample_rate, &vec![0.0; padding]);
+                    .accept_waveform(native_rate(stream_rate), &vec![0.0; padding]);
             }
             self.stream.input_finished();
         }
