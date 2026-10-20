@@ -1,6 +1,8 @@
-//! The mock STT node of a voice pipeline: a node of role `model` whose implementation is a
-//! [`MockRecogniser`], with two input ports, the frames of the utterance on `audio` and the turn
-//! events of the turn policy on `turns`, and the output ports [`SttPorts`] names.
+//! The STT node of a voice pipeline: a node of role `model` whose implementation is an
+//! `inference-stt` [`Recogniser`], the [`MockRecogniser`] by default and a local adapter's such as
+//! the sherpa-onnx recogniser otherwise, with two input ports, the frames of the utterance on
+//! `audio` and the turn events of the turn policy on `turns`, and the output ports [`SttPorts`]
+//! names.
 //!
 //! It recognises one turn at a time, under the turn the turn policy opened, on one transcript
 //! stream of its own whose sequence each recognition continues:
@@ -40,7 +42,7 @@ use inference_stt::inference_audio::AudioFrame;
 use inference_stt::{Recogniser, RecognitionHandle, RecognitionRequest, TranscriptEvent};
 use inference_text::{Span, TurnId};
 
-use super::{MockRecogniser, MockRecognition, stream_envelope};
+use super::{MockRecogniser, stream_envelope};
 use crate::graph::nodes::{
     Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on, send_unless,
 };
@@ -94,10 +96,10 @@ impl fmt::Debug for Watched<State> {
     }
 }
 
-/// The mock STT node; see the module documentation.
-pub struct SttNode {
+/// The STT node over the recogniser `R`; see the module documentation.
+pub struct SttNode<R = MockRecogniser> {
     run_id: RunId,
-    recogniser: MockRecogniser,
+    recogniser: R,
     ports: SttPorts,
     log: RunLog,
     node_id: Option<NodeId>,
@@ -105,7 +107,7 @@ pub struct SttNode {
     exchange: Exchange,
 }
 
-impl fmt::Debug for SttNode {
+impl<R: fmt::Debug> fmt::Debug for SttNode<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SttNode")
             .field("run_id", &self.run_id)
@@ -118,12 +120,12 @@ impl fmt::Debug for SttNode {
     }
 }
 
-impl SttNode {
+impl<R: Recogniser> SttNode<R> {
     /// An STT node of the run `run_id` recognising on `recogniser` through `ports`, recording
     /// what it emits in `log`. The recogniser is to claim `incremental_input`, so that a turn's
     /// frames reach its recognition before the turn completes.
     #[must_use]
-    pub fn new(run_id: RunId, recogniser: MockRecogniser, ports: SttPorts, log: RunLog) -> Self {
+    pub fn new(run_id: RunId, recogniser: R, ports: SttPorts, log: RunLog) -> Self {
         Self {
             run_id,
             recogniser,
@@ -266,10 +268,10 @@ enum Ended {
 }
 
 /// One started exchange of an [`SttNode`].
-struct Exchanging<P> {
+struct Exchanging<P, R: Recogniser> {
     run_id: RunId,
     node_id: NodeId,
-    recogniser: MockRecogniser,
+    recogniser: R,
     log: RunLog,
     state: Arc<Watched<State>>,
     audio: Box<dyn InputEndpoint<P>>,
@@ -286,10 +288,10 @@ struct Exchanging<P> {
     heard: VecDeque<AudioFrame>,
     /// The sample clock position just past the last frame that arrived.
     heard_until: i64,
-    recognition: Option<MockRecognition>,
+    recognition: Option<R::Handle>,
 }
 
-impl<P: SttPayload> Exchanging<P> {
+impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
     /// The next thing to act on: a cancel first, then an envelope of the audio edge and, unless
     /// `audio_only`, of the turns edge.
     async fn step(&mut self, audio_only: bool) -> Step<P> {
@@ -498,14 +500,14 @@ impl<P: SttPayload> Exchanging<P> {
     }
 }
 
-impl SttNode {
+impl<R: Recogniser + Clone> SttNode<R> {
     /// The node's exchange over `endpoints`, once it was handed one edge at each of its input
     /// ports and at each of its output ports, `transcript` optional; otherwise the error saying
     /// what it was handed.
     fn exchanging<P: SttPayload>(
         &self,
         endpoints: NodeEndpoints<P>,
-    ) -> Result<Exchanging<P>, NodeError> {
+    ) -> Result<Exchanging<P, R>, NodeError> {
         let node_id = self
             .node_id
             .ok_or_else(|| NodeError::new("the node was started before it was described"))?;
@@ -591,7 +593,14 @@ impl SttNode {
     }
 }
 
-impl<P: SttPayload> NodeImplementation<P> for SttNode {
+/// A recogniser's clones are the same adapter, so each exchange recognises on a clone of it;
+/// it and its recognitions run on the exchange's thread.
+impl<P, R> NodeImplementation<P> for SttNode<R>
+where
+    P: SttPayload,
+    R: Recogniser + Clone + Send + 'static,
+    R::Handle: Send + 'static,
+{
     fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
         self.node_id = Some(node.node_id());
         Box::pin(future::ready(()))
@@ -623,5 +632,95 @@ impl<P: SttPayload> NodeImplementation<P> for SttNode {
 
     fn stop(&mut self) -> NodeFuture<'_, ()> {
         Box::pin(self.exchange.finished())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use inference_core::model::{Adapter, ModelId};
+    use inference_stt::ConcurrencyLimitReached;
+
+    use super::*;
+    use crate::stt::MockConfiguration;
+
+    /// A payload of frames, stream events and control events.
+    #[derive(Debug, Clone)]
+    enum Payload {
+        Stream(StreamEvent),
+        Control(ControlKind),
+    }
+
+    impl From<ControlKind> for Payload {
+        fn from(kind: ControlKind) -> Self {
+            Self::Control(kind)
+        }
+    }
+
+    impl SttPayload for Payload {
+        fn stream(event: StreamEvent) -> Self {
+            Self::Stream(event)
+        }
+
+        fn heard(self) -> Heard {
+            match self {
+                Self::Stream(event) => Heard::Stream(event),
+                Self::Control(kind) => Heard::Control(kind),
+            }
+        }
+    }
+
+    /// A recogniser that is not the mock: the mock behind a type of its own, as an adapter's
+    /// recogniser is.
+    #[derive(Debug, Clone)]
+    struct Other(MockRecogniser);
+
+    impl Recogniser for Other {
+        type Handle = <MockRecogniser as Recogniser>::Handle;
+
+        fn adapter(&self) -> &Adapter {
+            self.0.adapter()
+        }
+
+        fn start(
+            &mut self,
+            request: RecognitionRequest,
+        ) -> Result<Self::Handle, ConcurrencyLimitReached> {
+            self.0.start(request)
+        }
+    }
+
+    fn implementation<P, N: NodeImplementation<P>>(node: N) -> N {
+        node
+    }
+
+    #[test]
+    fn the_node_recognises_on_any_recogniser_and_on_the_mock_by_default() {
+        let ports = SttPorts {
+            audio: PortId::generate(),
+            turns: PortId::generate(),
+            committed_text: PortId::generate(),
+            turns_out: PortId::generate(),
+            transcript: None,
+        };
+        let mock = MockRecogniser::new(
+            MockConfiguration::Incremental,
+            ModelId::generate(),
+            Vec::new(),
+        );
+        let other: SttNode<Other> = implementation::<Payload, _>(SttNode::new(
+            RunId::generate(),
+            Other(mock.clone()),
+            ports,
+            RunLog::new(),
+        ));
+        let default: SttNode = implementation::<Payload, _>(SttNode::new(
+            RunId::generate(),
+            mock,
+            ports,
+            RunLog::new(),
+        ));
+        assert!(other.handle().spans().is_empty());
+        assert!(default.handle().spans().is_empty());
+        assert_eq!(other.recogniser.adapter(), default.recogniser.adapter());
     }
 }

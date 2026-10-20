@@ -1,6 +1,7 @@
-//! The mock TTS node of a voice pipeline: a node of role `model` whose implementation is a
-//! [`MockSynthesiser`], with one input edge carrying the output of an LLM node, as the testkit's
-//! model node emits it, and one output edge carrying audio.
+//! The TTS node of a voice pipeline: a node of role `model` whose implementation is an
+//! `inference-tts` [`Synthesiser`], the [`MockSynthesiser`] by default and a local adapter's
+//! otherwise, with one input edge carrying the output of an LLM node, as the testkit's model node
+//! emits it, and one output edge carrying audio.
 //!
 //! When it starts, the node starts one synthesis on its synthesiser, which runs until the end of
 //! input. It rebuilds each output segment from the events that name it: a `GenerationStarted`
@@ -40,7 +41,7 @@ use inference_text::{OutputSegment, SegmentId, SegmentSnapshot};
 use inference_tts::inference_audio::AudioFrame;
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
 
-use super::{MockSink, MockSynthesis, MockSynthesiser};
+use super::{MockSink, MockSynthesiser};
 use crate::graph::nodes::{
     Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on, recv_unless, send_unless,
     started,
@@ -85,10 +86,10 @@ impl fmt::Debug for Watched<State> {
     }
 }
 
-/// The mock TTS node; see the module documentation.
-pub struct TtsNode {
+/// The TTS node over the synthesiser `S`; see the module documentation.
+pub struct TtsNode<S = MockSynthesiser> {
     run_id: RunId,
-    synthesiser: MockSynthesiser,
+    synthesiser: S,
     playing: bool,
     log: RunLog,
     node_id: Option<NodeId>,
@@ -96,7 +97,7 @@ pub struct TtsNode {
     exchange: Exchange,
 }
 
-impl fmt::Debug for TtsNode {
+impl<S: fmt::Debug> fmt::Debug for TtsNode<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TtsNode")
             .field("run_id", &self.run_id)
@@ -109,11 +110,11 @@ impl fmt::Debug for TtsNode {
     }
 }
 
-impl TtsNode {
+impl<S: Synthesiser> TtsNode<S> {
     /// A TTS node of the run `run_id` synthesising on `synthesiser`, recording what it emits in
     /// `log`.
     #[must_use]
-    pub fn new(run_id: RunId, synthesiser: MockSynthesiser, log: RunLog) -> Self {
+    pub fn new(run_id: RunId, synthesiser: S, log: RunLog) -> Self {
         Self {
             run_id,
             synthesiser,
@@ -217,11 +218,11 @@ fn carry<P: TtsPayload>(envelope: EventEnvelope<PipelinePayload>) -> EventEnvelo
 }
 
 /// One started exchange of a [`TtsNode`].
-struct Exchanging<P> {
+struct Exchanging<P, H> {
     run_id: RunId,
     producer: NodeId,
     port: String,
-    synthesis: MockSynthesis,
+    synthesis: H,
     sink: Option<MockSink>,
     input: Box<dyn InputEndpoint<P>>,
     output: Box<dyn OutputEndpoint<P>>,
@@ -236,7 +237,7 @@ struct Exchanging<P> {
     state: Arc<Watched<State>>,
 }
 
-impl<P: TtsPayload> Exchanging<P> {
+impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
     /// Sends `envelope`, unless the node is cancelled first or while the send waits for room.
     async fn send(&self, envelope: EventEnvelope<P>) -> Result<(), String> {
         send_unless(
@@ -382,7 +383,13 @@ impl<P: TtsPayload> Exchanging<P> {
     }
 }
 
-impl<P: TtsPayload> NodeImplementation<P> for TtsNode {
+/// The synthesis runs on the exchange's thread.
+impl<P, S> NodeImplementation<P> for TtsNode<S>
+where
+    P: TtsPayload,
+    S: Synthesiser + Send,
+    S::Handle: Send + 'static,
+{
     fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
         self.node_id = Some(node.node_id());
         Box::pin(future::ready(()))
@@ -438,5 +445,91 @@ impl<P: TtsPayload> NodeImplementation<P> for TtsNode {
 
     fn stop(&mut self) -> NodeFuture<'_, ()> {
         Box::pin(self.exchange.finished())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::{NonZeroU16, NonZeroU32};
+
+    use inference_core::model::{Adapter, ModelId};
+    use inference_tts::ConcurrencyLimitReached;
+    use inference_tts::inference_audio::{AudioEncoding, AudioFormat};
+
+    use super::*;
+    use crate::tts::MockConfiguration;
+
+    /// A payload of stream events, frames and control events.
+    #[derive(Debug, Clone)]
+    enum Payload {
+        Stream(StreamEvent),
+        Audio,
+        Control(ControlKind),
+    }
+
+    impl From<ControlKind> for Payload {
+        fn from(kind: ControlKind) -> Self {
+            Self::Control(kind)
+        }
+    }
+
+    impl TtsPayload for Payload {
+        fn stream(event: StreamEvent) -> Self {
+            Self::Stream(event)
+        }
+
+        fn audio(_frame: AudioFrame) -> Self {
+            Self::Audio
+        }
+
+        fn spoken(self) -> Spoken {
+            match self {
+                Self::Stream(event) => Spoken::Stream(event),
+                Self::Control(kind) => Spoken::Control(kind),
+                Self::Audio => Spoken::Other,
+            }
+        }
+    }
+
+    /// A synthesiser that is not the mock: the mock behind a type of its own, as an adapter's
+    /// synthesiser is.
+    #[derive(Debug, Clone)]
+    struct Other(MockSynthesiser);
+
+    impl Synthesiser for Other {
+        type Handle = <MockSynthesiser as Synthesiser>::Handle;
+
+        fn adapter(&self) -> &Adapter {
+            self.0.adapter()
+        }
+
+        fn start(&mut self) -> Result<Self::Handle, ConcurrencyLimitReached> {
+            self.0.start()
+        }
+    }
+
+    fn implementation<P, N: NodeImplementation<P>>(node: N) -> N {
+        node
+    }
+
+    #[test]
+    fn the_node_synthesises_on_any_synthesiser_and_on_the_mock_by_default() {
+        let mock = MockSynthesiser::new(
+            MockConfiguration::IncrementalStreaming,
+            ModelId::generate(),
+            AudioFormat {
+                encoding: AudioEncoding::PcmS16le,
+                sample_rate: NonZeroU32::new(16_000).expect("16000"),
+                channels: NonZeroU16::new(1).expect("1"),
+            },
+        );
+        let other: TtsNode<Other> = implementation::<Payload, _>(
+            TtsNode::new(RunId::generate(), Other(mock.clone()), RunLog::new()).playing(),
+        );
+        let default: TtsNode =
+            implementation::<Payload, _>(TtsNode::new(RunId::generate(), mock, RunLog::new()));
+        assert!(other.handle().played().is_empty());
+        assert!(default.handle().played().is_empty());
+        assert_eq!(other.synthesiser.adapter(), default.synthesiser.adapter());
     }
 }

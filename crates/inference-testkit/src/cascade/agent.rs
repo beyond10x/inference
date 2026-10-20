@@ -10,8 +10,12 @@
 //!   sent before the completion, then starts the turn's generation, numbered with the turn's
 //!   ordinal among the turns opened in the run as its epoch, emits its `GenerationStarted` and
 //!   answers each span in arrival order with the generator's reply to its text, emitting the
-//!   `TextDelta` and the `TextSegmentCommitted` of each segment. A turn whose completion finds no
-//!   span starts no generation;
+//!   `TextDelta` and the `TextSegmentCommitted` of each segment. A generator that claims
+//!   `concurrent_input_output` is offered each reply as input to the running generation, which
+//!   answers it in a turn of its own; one that does not, such as an adapter claiming output
+//!   streaming only, refuses such input, and is asked every reply of the turn, in arrival order,
+//!   as the user text of the request the generation starts with, answered in its first turn. A
+//!   turn whose completion finds no span starts no generation;
 //! * the generation stays Active, the turn's current epoch, until the next turn opens. At the
 //!   next `TurnOpened`, the interruption (632-641), the node runs
 //!   `inference.stream.SupersedeGeneration` on it, which discards every segment of it not yet
@@ -50,7 +54,8 @@ use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope};
 use inference_core::generation::GenerationState;
 use inference_core::id::{GenerationId, NodeId, RunId};
-use inference_llm::llm_core::TurnRequest;
+use inference_core::model::Capability;
+use inference_llm::llm_core::{Item, TurnRequest};
 use inference_llm::{GenerationEvent, GenerationHandle, GenerationRequest, Generator};
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
 use inference_text::{SegmentSnapshot, TurnId};
@@ -128,7 +133,9 @@ impl fmt::Debug for AgentNode {
 impl AgentNode {
     /// The node of the run `run_id` answering on `generator`, whose reply to an input text is
     /// `reply` of it, taking the turn events at its port `turns` and recording what it emits in
-    /// `log`. The generator is to claim `concurrent_input_output`.
+    /// `log`. The generator is to claim `output_streaming`; whether it claims
+    /// `concurrent_input_output` decides how a turn's replies reach it (see the module
+    /// documentation).
     #[must_use]
     pub fn new(
         run_id: RunId,
@@ -473,14 +480,24 @@ impl<P: ModelPayload> Exchanging<P> {
         }
         self.complete().await?;
         self.current = None;
+        let concurrent = self
+            .generator
+            .adapter()
+            .capabilities()
+            .contains(&Capability::ConcurrentInputOutput);
+        let asked: Vec<Item> = if concurrent {
+            Vec::new()
+        } else {
+            self.held
+                .drain(..)
+                .map(|text| Item::user((self.reply)(&text)))
+                .collect()
+        };
         let request = GenerationRequest {
             run_id: self.run_id,
             node_id: self.node_id,
             epoch,
-            turn: TurnRequest::new(
-                self.generator.model().provenance().model.as_str(),
-                Vec::new(),
-            ),
+            turn: TurnRequest::new(self.generator.model().provenance().model.as_str(), asked),
         };
         let handle = self
             .generator
