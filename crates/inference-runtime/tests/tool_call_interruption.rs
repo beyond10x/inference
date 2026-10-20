@@ -41,8 +41,6 @@ use inference_core::generation::{Generation, StartGeneration};
 use inference_core::id::{GenerationId, RunId, StreamId};
 use inference_core::model::{Adapter, AdapterId, Capability, ModelId};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
-use inference_llm::Generator;
-use inference_llm::tools::ToolProposal;
 use inference_pipeline::nodes::{
     AuthorityHandle, AuthorityOutcome, ExecutorHandle, ToolAuthority, ToolCallEvent,
     ToolCallUpdate, ToolExecutorNode, ToolPayload,
@@ -56,7 +54,7 @@ use inference_runtime::run::{NodeInstanceState, RunState};
 use inference_runtime::{NodeId, RunController, RunError, RunRequests};
 use inference_testkit::graph::{RunLog, SinkHandle, SourceHandle, TextSink, TextSource};
 use inference_testkit::llm::{
-    Carried, MockConfiguration, MockGenerator, ModelHandle, ModelNode, ModelPayload,
+    Carried, MockConfiguration, MockGenerator, ModelHandle, ModelNode, ModelPayload, ToolProposal,
 };
 use inference_testkit::stream::StreamEvent;
 use inference_testkit::tools::{Entry, MockToolExecutor, Script, ToolCallsRow};

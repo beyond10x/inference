@@ -23,7 +23,8 @@ use inference_facade::live::LiveSessions;
 use inference_facade::session::{
     SessionClosed, SessionInterrupted, SessionMoveError, SessionState, SessionStateConflict,
 };
-use inference_llm::{GenerationEvent, GenerationRequest, Generator};
+use inference_llm::llm_core::{Item, TurnRequest};
+use inference_llm::{GenerationEvent, GenerationRequest};
 use inference_pipeline::{
     InteractionMode, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation,
 };
@@ -123,7 +124,7 @@ impl NodeImplementation<PipelinePayload> for Streamer {
                                 run_id,
                                 node_id,
                                 epoch,
-                                prompt: committed.text,
+                                turn: TurnRequest::new("mock", vec![Item::user(committed.text)]),
                             })
                             .expect("one generation at a time");
                         let mut generation_id = None;
@@ -139,6 +140,9 @@ impl NodeImplementation<PipelinePayload> for Streamer {
                                 }
                                 GenerationEvent::Completed(completed) => {
                                     StreamEvent::GenerationCompleted(completed)
+                                }
+                                GenerationEvent::Cancelled(cancelled, _) => {
+                                    StreamEvent::GenerationCancelled(cancelled)
                                 }
                             };
                             if !send(event, generation_id) {

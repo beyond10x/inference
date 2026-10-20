@@ -20,7 +20,6 @@ use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::model::{Adapter, AdapterId, Capability, ModelId};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
-use inference_llm::Generator;
 use inference_pipeline::{
     Catalog, Declaration, Delivery, Essentiality, InteractionMode, Node, NodeRole, OverloadPolicy,
     PipelineSpec, PlannedPipeline, PortTraits, modality,

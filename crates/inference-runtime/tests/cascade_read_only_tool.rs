@@ -34,7 +34,7 @@ use inference_core::generation::GenerationState;
 use inference_core::id::{GenerationId, RunId};
 use inference_core::model::{Adapter, AdapterId, Capability, ModelId};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
-use inference_llm::Generator;
+use inference_llm::tools::tool_id;
 use inference_pipeline::nodes::turn_policy::{
     CompleteTurnRefused, TurnCommands, TurnEvent, TurnOutcome, TurnPayload, TurnPolicy,
 };
@@ -728,7 +728,7 @@ fn the_cascade_on_mocks_executes_the_read_only_tool_and_speaks_its_result() {
     let offered: Vec<Vec<_>> = generator
         .offered()
         .iter()
-        .map(|set| set.iter().map(Tool::tool_id).collect())
+        .map(|set| set.iter().filter_map(|spec| tool_id(&spec.name)).collect())
         .collect();
     assert_eq!(
         offered,

@@ -9,7 +9,7 @@ design is [docs/design/inference.md](docs/design/inference.md) (v0.2, 2026-10-16
 [docs/design/review-2026-10-18.md](docs/design/review-2026-10-18.md).
 The plan is the AEP planning store under `.engineering/planning/`.
 
-Build with `cargo build --workspace` (Rust stable, 1.88 or later). Check with `task check`
+Build with `cargo build --workspace` (Rust stable, 1.98 or later). Check with `task check`
 ([go-task](https://taskfile.dev)), which also needs the `ess` and `aep` command-line tools.
 
 Apache-2.0.

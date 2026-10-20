@@ -10,6 +10,7 @@ use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
+use inference_llm::llm_core::{Item, TurnRequest};
 use inference_llm::{
     AdmittedByAnotherGeneration, CONTRACT_REVISION, CapabilityNotClaimed, GenerationOutput,
     GenerationRequest, InputRefused,
@@ -35,7 +36,7 @@ fn request() -> GenerationRequest {
         run_id: RunId::generate(),
         node_id: NodeId::generate(),
         epoch: 2,
-        prompt: "prompt".to_owned(),
+        turn: TurnRequest::new("model", vec![Item::user("prompt")]),
     }
 }
 

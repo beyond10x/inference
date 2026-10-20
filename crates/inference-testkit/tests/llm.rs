@@ -12,9 +12,9 @@ use std::collections::HashSet;
 use inference_core::generation::GenerationState;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Capability, ModelId};
+use inference_llm::llm_core::{Item, TurnRequest};
 use inference_llm::{
-    CapabilityNotClaimed, ConcurrencyLimitReached, GenerationEvent, GenerationHandle,
-    GenerationRequest, Generator, InputRefused, OfferInput,
+    CapabilityNotClaimed, ConcurrencyLimitReached, GenerationEvent, GenerationRequest, InputRefused,
 };
 use inference_testkit::llm::{MockConfiguration, MockGenerator};
 
@@ -30,7 +30,7 @@ fn request() -> GenerationRequest {
         run_id: RunId::generate(),
         node_id: NodeId::generate(),
         epoch: 1,
-        prompt: "Greet the user.".to_owned(),
+        turn: TurnRequest::new("mock", vec![Item::user("Greet the user.")]),
     }
 }
 

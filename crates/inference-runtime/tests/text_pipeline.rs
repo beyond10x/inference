@@ -22,7 +22,6 @@ use inference_core::generation::{GenerationState, GenerationStateConflict};
 use inference_core::id::{GenerationId, RunId, StreamId};
 use inference_core::model::{Adapter, AdapterId, Capability, ModelId};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
-use inference_llm::Generator;
 use inference_pipeline::{
     Catalog, Declaration, Delivery, Essentiality, InteractionMode, Node, NodeEndpoints, NodeError,
     NodeFuture, NodeImplementation, NodeRole, OverloadPolicy, PipelineSpec, PlannedPipeline,

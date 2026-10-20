@@ -8,6 +8,7 @@ use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
+use inference_llm::llm_core::{Item, TurnRequest};
 use inference_llm::{CONTRACT_REVISION, GenerationOutput, GenerationRequest};
 use inference_text::SegmentState;
 
@@ -27,7 +28,7 @@ fn started() -> GenerationOutput {
         run_id: RunId::generate(),
         node_id: NodeId::generate(),
         epoch: 1,
-        prompt: "prompt".to_owned(),
+        turn: TurnRequest::new("model", vec![Item::user("prompt")]),
     };
     GenerationOutput::start(&adapter, &request).0
 }
