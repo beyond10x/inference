@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:openai-realtime-client
 kind: story
-status: active
+status: implemented
 title: OpenAI Realtime client with offline and live tests
 summary: adapters/inference-openai speaks the Realtime WebSocket API; offline replay tests and an ignored live test.
 relations:
@@ -13,10 +13,11 @@ scope:
   path: Cargo.toml
 - confidence: cited
   path: adapters/inference-openai
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T20:56:23Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T20:56:23Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-20T01:33:46Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

@@ -185,13 +185,28 @@ fn failure_kind<E, R>(error: &SdkError<E, R>) -> &'static str {
     }
 }
 
-/// An error code the service sent, passed through [`redact`]; never its message.
+/// An error code the service sent, passed through [`redact`].
 fn code(error: &impl ProvideErrorMetadata) -> String {
     redact(error.code().unwrap_or("Unhandled"))
 }
 
+/// The message the service itself sent with an error, passed through [`redact`] and prefixed with
+/// `: `, or nothing. Text the service sends names no local profile or file (those come only from
+/// failures raised on this side, which never carry their text); ARNs and account ids are redacted.
+fn said_by_service(error: &(impl ProvideErrorMetadata + std::fmt::Display)) -> String {
+    let message = error
+        .message()
+        .map(str::to_owned)
+        .unwrap_or_else(|| error.to_string());
+    if message.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", redact(&message))
+    }
+}
+
 /// The message of a failed stream start: the failure's kind and, for an error the service
-/// returned, its error code.
+/// returned, its error code and the service's own message.
 fn connect_message<R>(error: &SdkError<InvokeModelWithBidirectionalStreamError, R>) -> String {
     use InvokeModelWithBidirectionalStreamError as E;
     let SdkError::ServiceError(context) = error else {
@@ -211,11 +226,16 @@ fn connect_message<R>(error: &SdkError<InvokeModelWithBidirectionalStreamError, 
         E::ValidationException(_) => "ValidationException".to_owned(),
         other => code(other),
     };
-    format!("{}: {code}", failure_kind(error))
+    format!(
+        "{}: {code}{}",
+        failure_kind(error),
+        said_by_service(context.err())
+    )
 }
 
 /// The service error a failed read of the output stream reports: its kind, and as its message the
-/// error code or the kind of failure, never the text of the error.
+/// error code with the service's own message, or the kind of a failure raised on this side, never
+/// that failure's text.
 fn service_error<R>(
     error: SdkError<InvokeModelWithBidirectionalStreamOutputError, R>,
 ) -> ServiceError {
@@ -256,7 +276,7 @@ fn service_error<R>(
             (ServiceErrorKind::Other(code.clone()), code)
         }
     };
-    ServiceError::new(kind, code)
+    ServiceError::new(kind, format!("{code}{}", said_by_service(context.err())))
 }
 
 #[cfg(test)]
@@ -292,14 +312,19 @@ mod tests {
     fn connect_messages_carry_no_text_of_the_error_chain() {
         let service = InvokeModelWithBidirectionalStreamError::AccessDeniedException(
             AccessDeniedException::builder()
-                .message(format!("{SECRET} is not authorized"))
+                .message("arn:aws:sts::123456789012:assumed-role/r/s is not authorized")
                 .build(),
         );
         for (case, error) in failures(service) {
             let message = connect_message(&error);
             assert!(!message.contains(SECRET), "{case}: {message}");
             assert!(!message.contains("somewhere"), "{case}: {message}");
+            assert!(!message.contains("123456789012"), "{case}: {message}");
             assert!(!message.is_empty(), "{case}");
+            if case == "service" {
+                assert!(message.contains("AccessDeniedException"), "{message}");
+                assert!(message.contains("is not authorized"), "{message}");
+            }
         }
         let service = InvokeModelWithBidirectionalStreamError::AccessDeniedException(
             AccessDeniedException::builder().build(),
@@ -312,7 +337,7 @@ mod tests {
     fn stream_errors_carry_no_text_of_the_error_chain() {
         let service = InvokeModelWithBidirectionalStreamOutputError::ValidationException(
             ValidationException::builder()
-                .message(format!("{SECRET} is not valid"))
+                .message("model arn:aws:bedrock:us-east-1:123456789012:x is not valid")
                 .build(),
         );
         for (case, error) in failures(service) {
@@ -320,9 +345,11 @@ mod tests {
             assert!(!error.message.contains(SECRET), "{case}: {error}");
             assert!(!error.to_string().contains(SECRET), "{case}: {error}");
             assert!(!error.message.contains("somewhere"), "{case}: {error}");
+            assert!(!error.message.contains("123456789012"), "{case}: {error}");
             if case == "service" {
                 assert_eq!(error.kind, ServiceErrorKind::Validation);
                 assert!(error.message.contains("ValidationException"), "{error}");
+                assert!(error.message.contains("is not valid"), "{error}");
             }
         }
     }
