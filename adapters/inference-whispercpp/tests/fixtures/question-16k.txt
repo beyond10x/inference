@@ -1,0 +1,7 @@
+question-16k.wav: "What is the capital of France?", 16000 Hz, mono, 16-bit signed PCM, 34484 samples.
+
+Generated with eSpeak NG 1.52.0 and SoX 14.8.0.1:
+
+espeak-ng -v en-us -s 150 --stdout "What is the capital of France?" | sox -D -t wav - -r 16000 -c 1 -b 16 -e signed-integer question-16k.wav
+
+sha256 8078d9213c90a6c0b7e4e848089161b1ef7e54d79de952d917b1c19c14e4f2ec
