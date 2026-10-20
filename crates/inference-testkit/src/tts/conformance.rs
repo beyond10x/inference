@@ -5,7 +5,8 @@
 //! `docs/design/inference.md` (line 1107), the scenarios
 //! `inference.stream.OutputSegment/state/Tentative/refuses/inference.stream.QueueForSynthesis` and
 //! `inference.stream.OutputSegment/transition/play/by/inference.stream.AcknowledgePlayback/played`,
-//! and §23.2 (lines 1114-1117). There is one check per exit [`Item`]; each starts its own
+//! and §23.2 (lines 1114-1117), and the one usage record of a completed utterance
+//! (`ess/domains/usage.yaml`). There is one check per exit [`Item`]; each starts its own
 //! syntheses, drops them before it returns, and answers with what it observed or a [`Failure`]
 //! naming the item and the [`Fault`].
 //!
@@ -36,6 +37,7 @@
 //! assert!(observed.output_streaming && !observed.incremental_input);
 //! ```
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
@@ -43,6 +45,7 @@ use inference_tts::inference_audio::AudioFormat;
 use inference_tts::inference_core::generation::{Generation, StartGeneration};
 use inference_tts::inference_core::id::{NodeId, RunId};
 use inference_tts::inference_core::model::Capability;
+use inference_tts::inference_core::usage::{Quantity, QuantityKind};
 use inference_tts::inference_text::{OutputSegment, SegmentId, SegmentState, SegmentStateConflict};
 use inference_tts::{
     ConcurrencyLimitReached, DiscardRefused, OfferRefused, PlaybackReceipt, PlaybackRefused,
@@ -134,6 +137,9 @@ pub enum Item {
     /// [`cancellation`]: a discarded segment yields no further frame, and a dropped handle
     /// releases its slot and revives nothing.
     Cancellation,
+    /// [`usage_recorded`]: a completed utterance yields exactly one usage record, its last event,
+    /// whose characters and audio milliseconds match what was offered and emitted.
+    UsageRecorded,
 }
 
 /// What a check observed that the exit item does not allow.
@@ -230,6 +236,24 @@ pub enum Fault {
     SlotNotReleased(ConcurrencyLimitReached),
     /// A fresh synthesis, offered nothing, delivered an event of a segment.
     StaleOutput { segment_id: SegmentId },
+    /// Once the utterance was drained, no usage record had been delivered.
+    UsageMissing,
+    /// A second usage record was delivered.
+    UsageRepeated,
+    /// An event followed the usage record, of the segment named if it names one.
+    UsageNotLast { segment_id: Option<SegmentId> },
+    /// The usage record carries `actual` of `kind`, none when it carries not exactly one, where
+    /// the check expected `expected`; `expected` is none for `local_compute_ms`, of which any one
+    /// quantity, measured or unknown, is accepted.
+    UsageQuantity {
+        kind: QuantityKind,
+        expected: Option<Quantity>,
+        actual: Option<Quantity>,
+    },
+    /// The usage record names another adapter or model than the synthesiser's adapter record.
+    UsageOfAnotherAdapter,
+    /// The usage record of a completed utterance is not final.
+    UsageNotFinal,
 }
 
 impl fmt::Display for Fault {
@@ -301,6 +325,162 @@ pub struct CancellationObserved {
     pub max_concurrency: i64,
 }
 
+/// What [`usage_recorded`] observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageObserved {
+    /// The `input_characters` of the record, the Unicode scalar values of the utterance.
+    pub characters: i64,
+    /// The `output_audio_ms` of the record, the audio of the frames delivered.
+    pub audio_ms: i64,
+    /// The frames delivered.
+    pub frames: usize,
+    /// The `local_compute_ms` of the record, as the synthesiser reported it.
+    pub local_compute: Quantity,
+}
+
+/// Checks [`Item::UsageRecorded`]: the whole utterance is offered and ended, and once every event
+/// has been delivered exactly one of them was a usage record, the last. It names the adapter and
+/// the model of the synthesiser's adapter record and is final; it carries exactly one quantity of
+/// each kind it reports: `input_characters`, `measured`, the Unicode scalar values of the
+/// utterance's sentences; `output_audio_ms`, `measured`, the samples per channel of every frame
+/// delivered at each sample rate over that rate, summed and rounded down to the millisecond once;
+/// `requests`, `measured` 1; and `local_compute_ms`, measured or unknown as the synthesiser
+/// reports it.
+///
+/// # Errors
+///
+/// A [`Failure`] naming [`Item::UsageRecorded`].
+pub fn usage_recorded<S: Synthesiser>(
+    synthesiser: &mut S,
+    utterance: &Utterance,
+) -> Result<UsageObserved, Failure> {
+    let adapter = synthesiser.adapter().clone();
+    let mut driver = Driver::start(synthesiser, Item::UsageRecorded)?;
+    let mut segments = Vec::new();
+    for segment in utterance.committed() {
+        segments.push(driver.offer(segment)?);
+    }
+    driver.end()?;
+    let mut frames = 0;
+    let mut samples: BTreeMap<u32, u128> = BTreeMap::new();
+    let mut record = None;
+    while let Some((event, _)) = driver.next()? {
+        if record.is_some() {
+            if matches!(event, SynthesisEvent::Usage(_)) {
+                return Err(driver.fail(Fault::UsageRepeated));
+            }
+            return Err(driver.fail(Fault::UsageNotLast {
+                segment_id: event.segment_id(),
+            }));
+        }
+        match event {
+            SynthesisEvent::Usage(recorded) => record = Some(recorded),
+            SynthesisEvent::Audio(audio) => {
+                if !segments.contains(&audio.segment_id()) {
+                    return Err(driver.fail(Fault::UnheldSegment {
+                        segment_id: audio.segment_id(),
+                    }));
+                }
+                let frame = audio.frame();
+                *samples.entry(frame.format.sample_rate.get()).or_default() +=
+                    u128::from(frame.sample_count);
+                frames += 1;
+            }
+            SynthesisEvent::Completed(_) => {}
+        }
+    }
+    let Some(record) = record else {
+        return Err(driver.fail(Fault::UsageMissing));
+    };
+    if record.adapter_id != adapter.adapter_id() || record.model_id != adapter.model_id() {
+        return Err(driver.fail(Fault::UsageOfAnotherAdapter));
+    }
+    if !record.r#final {
+        return Err(driver.fail(Fault::UsageNotFinal));
+    }
+    let characters = utterance
+        .sentences()
+        .iter()
+        .map(|sentence| sentence.chars().count())
+        .sum::<usize>();
+    let characters = i64::try_from(characters).unwrap_or(i64::MAX);
+    let audio_ms = audio_ms(&samples);
+    let one = |kind: QuantityKind| {
+        let mut found = record
+            .quantities
+            .iter()
+            .filter(|quantity| quantity.kind() == kind);
+        match (found.next(), found.next()) {
+            (Some(&quantity), None) => Some(quantity),
+            _ => None,
+        }
+    };
+    for expected in [
+        Quantity::measured(QuantityKind::InputCharacters, characters),
+        Quantity::measured(QuantityKind::OutputAudioMs, audio_ms),
+        Quantity::measured(QuantityKind::Requests, 1),
+    ] {
+        let actual = one(expected.kind());
+        if actual != Some(expected) {
+            return Err(driver.fail(Fault::UsageQuantity {
+                kind: expected.kind(),
+                expected: Some(expected),
+                actual,
+            }));
+        }
+    }
+    let Some(local_compute) = one(QuantityKind::LocalComputeMs) else {
+        return Err(driver.fail(Fault::UsageQuantity {
+            kind: QuantityKind::LocalComputeMs,
+            expected: None,
+            actual: None,
+        }));
+    };
+    Ok(UsageObserved {
+        characters,
+        audio_ms,
+        frames,
+        local_compute,
+    })
+}
+
+/// The milliseconds of `samples`, samples per channel by sample rate: each rate's samples over
+/// that rate, summed exactly and rounded down once; should the sum not fit `u128`, each rate's
+/// milliseconds rounded down on their own and summed.
+fn audio_ms(samples: &BTreeMap<u32, u128>) -> i64 {
+    let rates = samples
+        .keys()
+        .try_fold(1_u128, |common, &rate| lcm(common, u128::from(rate)));
+    let exact = rates.and_then(|common| {
+        samples
+            .iter()
+            .try_fold(0_u128, |sum, (&rate, &count)| {
+                sum.checked_add(
+                    count
+                        .checked_mul(1_000)?
+                        .checked_mul(common / u128::from(rate))?,
+                )
+            })
+            .map(|sum| sum / common)
+    });
+    let ms = exact.unwrap_or_else(|| {
+        samples
+            .iter()
+            .map(|(&rate, &count)| count.saturating_mul(1_000) / u128::from(rate))
+            .fold(0, u128::saturating_add)
+    });
+    i64::try_from(ms).unwrap_or(i64::MAX)
+}
+
+/// The least common multiple of `a` and `b`, both above 0; none when it does not fit `u128`.
+fn lcm(a: u128, b: u128) -> Option<u128> {
+    let (mut x, mut y) = (a, b);
+    while y != 0 {
+        (x, y) = (y, x % y);
+    }
+    a.checked_mul(b / x)
+}
+
 /// Checks [`Item::TentativeRefused`]: a Tentative segment of the first sentence offered to a
 /// synthesis is refused with the `wrong-state` [`SegmentStateConflict`] naming Tentative, the
 /// record does not hold it, and once a Committed segment of the same text has been offered and
@@ -338,7 +518,9 @@ pub fn tentative_refused<S: Synthesiser>(
     driver.end()?;
     let mut frames_spoken = 0;
     while let Some((event, _)) = driver.next()? {
-        let segment_id = event.segment_id();
+        let Some(segment_id) = event.segment_id() else {
+            continue;
+        };
         if segment_id == refused {
             return Err(driver.fail(Fault::RefusedSegmentSpoken { segment_id }));
         }
@@ -394,7 +576,9 @@ pub fn played_only_by_sink<S: Synthesiser>(
     let mut sink = MockSink::new();
     let mut completions = vec![0_usize; segments.len()];
     while let Some((event, state)) = driver.next()? {
-        let segment_id = event.segment_id();
+        let Some(segment_id) = event.segment_id() else {
+            continue;
+        };
         let Some(index) = segments.iter().position(|&id| id == segment_id) else {
             return Err(driver.fail(Fault::UnheldSegment { segment_id }));
         };
@@ -404,6 +588,7 @@ pub fn played_only_by_sink<S: Synthesiser>(
         match event {
             SynthesisEvent::Completed(_) => completions[index] += 1,
             SynthesisEvent::Audio(audio) => sink.give(audio),
+            SynthesisEvent::Usage(_) => {}
         }
     }
     for (&segment_id, &completions) in segments.iter().zip(&completions) {
@@ -481,7 +666,9 @@ pub fn claims_observed<S: Synthesiser>(
                        event: &SynthesisEvent,
                        state: Option<SegmentState>,
                        before_end: bool| {
-        let segment_id = event.segment_id();
+        let Some(segment_id) = event.segment_id() else {
+            return Ok(());
+        };
         if !segments.contains(&segment_id) {
             return Err(driver.fail(Fault::UnheldSegment { segment_id }));
         }
@@ -545,7 +732,9 @@ pub fn audio_valid<S: Synthesiser>(
     let mut samples = 0_u64;
     let mut next_position = None;
     while let Some((event, _)) = driver.next()? {
-        let segment_id = event.segment_id();
+        let Some(segment_id) = event.segment_id() else {
+            continue;
+        };
         if !segments.contains(&segment_id) {
             return Err(driver.fail(Fault::UnheldSegment { segment_id }));
         }
@@ -632,7 +821,9 @@ pub fn cancellation<S: Synthesiser>(
         discarded.push(segments[0]);
         driver.end()?;
         while let Some((event, state)) = driver.next()? {
-            let segment_id = event.segment_id();
+            let Some(segment_id) = event.segment_id() else {
+                continue;
+            };
             if !segments.contains(&segment_id) {
                 return Err(driver.fail(Fault::UnheldSegment { segment_id }));
             }
@@ -681,10 +872,10 @@ pub fn cancellation<S: Synthesiser>(
         events: 0,
     };
     driver.end()?;
-    if let Some((event, _)) = driver.next()? {
-        return Err(driver.fail(Fault::StaleOutput {
-            segment_id: event.segment_id(),
-        }));
+    while let Some((event, _)) = driver.next()? {
+        if let Some(segment_id) = event.segment_id() {
+            return Err(driver.fail(Fault::StaleOutput { segment_id }));
+        }
     }
     drop(running);
     Ok(CancellationObserved {
@@ -728,7 +919,8 @@ impl<H: SynthesisHandle> Driver<H> {
             .map(OutputSegment::state)
     }
 
-    /// The next event delivered, with the state of its segment when it was received.
+    /// The next event delivered, with the state of its segment when it was received; none for a
+    /// usage record, which names no segment.
     fn next(&mut self) -> Result<Option<(SynthesisEvent, Option<SegmentState>)>, Failure> {
         let Some(event) = self.handle.next() else {
             return Ok(None);
@@ -737,7 +929,9 @@ impl<H: SynthesisHandle> Driver<H> {
         if self.events > EVENT_LIMIT {
             return Err(self.fail(Fault::EventsUnbounded));
         }
-        let state = self.state(event.segment_id());
+        let state = event
+            .segment_id()
+            .and_then(|segment_id| self.state(segment_id));
         Ok(Some((event, state)))
     }
 

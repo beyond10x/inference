@@ -17,15 +17,23 @@
 //!   then completes its synthesis; otherwise it completes the synthesis with the whole audio of
 //!   the segment, delivered after `SynthesisCompleted`.
 //!
+//! Once the utterance has ended and every segment it took was synthesised and delivered, the
+//! synthesis's usage record, [`SynthesisEvent::Usage`], is its last event: the characters taken
+//! and the audio emitted, as the contract measures them, one request, and its local compute
+//! `unknown`, since the mock computes nothing of its own. A synthesis dropped before its
+//! utterance ended records none.
+//!
 //! A segment discarded through the handle is not synthesised, and its frames not yet delivered
-//! are dropped. [`MockSink`] is the media sink: it is given frames and acknowledges playback of a
+//! are dropped; whatever of it was taken and emitted still counts in the usage record.
+//! [`MockSink`] is the media sink: it is given frames and acknowledges playback of a
 //! Synthesized segment once it has been given every frame of it, through
 //! [`SynthesisHandle::acknowledge_playback`] with the [`PlaybackReceipt`] it makes by consuming
 //! them.
 //!
 //! Behind the `run` feature, `TtsNode` is the graph node of a voice pipeline over any
 //! synthesiser, the mock by default: it synthesises every committed segment an LLM node emits
-//! and, playing, acknowledges its playback through the sink double.
+//! and, playing, acknowledges its playback through the sink double; given a `usage` port, it
+//! sends the synthesis's usage record there.
 //!
 //! It declares a maximum concurrency of one and holds to it: while one synthesis of a
 //! synthesiser, or of a clone of it, runs, a second start is refused with
@@ -267,10 +275,13 @@ impl Iterator for MockSynthesis {
                     frames_left: segment.text().split_whitespace().count().max(1),
                 }));
             }
-            let (segment_id, frames_left) = self
+            let Some((segment_id, frames_left)) = self
                 .pending
                 .front()
-                .map(|job| (job.segment_id, job.frames_left))?;
+                .map(|job| (job.segment_id, job.frames_left))
+            else {
+                return self.output.usage().ok();
+            };
             let state = self
                 .output
                 .segment(segment_id)
@@ -349,7 +360,7 @@ impl SynthesisHandle for MockSynthesis {
     fn discard(&mut self, segment_id: SegmentId) -> Result<SegmentDiscarded, DiscardRefused> {
         let event = self.output.discard(segment_id)?;
         self.delivered
-            .retain(|event| event.segment_id() != segment_id);
+            .retain(|event| event.segment_id() != Some(segment_id));
         Ok(event)
     }
 }
