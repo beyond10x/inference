@@ -17,9 +17,9 @@ use inference_pipeline::{
     Catalog, Declaration, InteractionMode, Node, NodeImplementation, NodeRole, OverloadPolicy,
     PipelineSpec, PortTraits, modality,
 };
-use inference_runtime::run::{NodeInstanceState, RunState, RunStateConflict};
+use inference_runtime::run::{FailureReason, NodeInstanceState, RunState, RunStateConflict};
 use inference_runtime::{NodeId, RunController, RunError};
-use inference_testkit::graph::{NodeCall, NodeCalls, RecordingNode};
+use inference_testkit::graph::{LifecycleStep, NodeCall, NodeCalls, RecordingNode};
 
 struct Profiles(DeploymentProfile);
 
@@ -55,6 +55,13 @@ fn block_on<F: Future>(future: F) -> F::Output {
 /// A Created run of a source feeding a sink, both recording mocks, and their records. A
 /// recording source drops its endpoints when it starts, so it never sends an end of input.
 fn created() -> (RunController<String>, HashMap<NodeId, NodeCalls>) {
+    created_stalling(None)
+}
+
+/// [`created`], each node stalling at `stall`, if given.
+fn created_stalling(
+    stall: Option<LifecycleStep>,
+) -> (RunController<String>, HashMap<NodeId, NodeCalls>) {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
@@ -91,7 +98,10 @@ fn created() -> (RunController<String>, HashMap<NodeId, NodeCalls>) {
         &declaration,
         HashMap::<GenerationId, i64>::new(),
         |node: &Node| -> Box<dyn NodeImplementation<String>> {
-            let mock = RecordingNode::new();
+            let mock = match stall {
+                Some(step) => RecordingNode::new().stalling_at(step),
+                None => RecordingNode::new(),
+            };
             calls.insert(node.node_id(), mock.calls());
             Box::new(mock)
         },
@@ -101,7 +111,14 @@ fn created() -> (RunController<String>, HashMap<NodeId, NodeCalls>) {
 }
 
 fn active() -> (RunController<String>, HashMap<NodeId, NodeCalls>) {
-    let (mut controller, calls) = created();
+    active_stalling(None)
+}
+
+/// [`active`], each node stalling at `stall`, if given.
+fn active_stalling(
+    stall: Option<LifecycleStep>,
+) -> (RunController<String>, HashMap<NodeId, NodeCalls>) {
+    let (mut controller, calls) = created_stalling(stall);
     controller.validate().expect("a Created run validates");
     block_on(controller.prepare()).expect("both nodes prepare");
     block_on(controller.activate()).expect("both nodes start");
@@ -195,4 +212,85 @@ fn a_terminal_run_is_left_as_it_is_and_a_late_request_is_dropped() {
     assert_eq!(controller.run().state(), RunState::Cancelled);
     let after: Vec<Vec<NodeCall>> = calls.values().map(NodeCalls::calls).collect();
     assert_eq!(before, after, "no node is called again");
+}
+
+/// A failure the caller reports, naming no node.
+fn reported(detail: &str) -> FailureReason {
+    FailureReason {
+        node_id: None,
+        detail: detail.to_owned(),
+    }
+}
+
+#[test]
+fn a_fail_request_is_taken_before_a_cancel_and_a_drain_and_fails_the_run_with_its_reason() {
+    let (mut controller, calls) = active();
+    let requests = controller.requests();
+    requests.drain();
+    requests.cancel();
+    requests.fail(reported("first"));
+    requests.fail(reported("second"));
+    block_on(controller.drive()).expect("the loop ends the run");
+
+    assert_eq!(controller.run().state(), RunState::Failed);
+    assert_eq!(
+        controller.run().failure(),
+        Some(&reported("first")),
+        "the first failure asked for is kept"
+    );
+    assert!(stopped(&controller));
+    for record in calls.values() {
+        assert_eq!(record.calls()[3..], [NodeCall::Cancel, NodeCall::Stop]);
+    }
+}
+
+#[test]
+fn a_fail_request_abandons_a_drain_that_never_returns() {
+    let (mut controller, calls) = active_stalling(Some(LifecycleStep::Drain));
+    let requests = controller.requests();
+    requests.drain();
+    {
+        let mut drive = pin!(controller.drive());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(
+            drive.as_mut().poll(&mut context).is_pending(),
+            "the nodes drain"
+        );
+        requests.fail(reported("seen while draining"));
+        assert_eq!(drive.as_mut().poll(&mut context), Poll::Ready(Ok(())));
+    }
+
+    assert_eq!(controller.run().state(), RunState::Failed);
+    assert_eq!(
+        controller.run().failure(),
+        Some(&reported("seen while draining"))
+    );
+    assert!(stopped(&controller));
+    let mut drained = 0;
+    for record in calls.values() {
+        let after_start = record.calls()[3..].to_vec();
+        if after_start.first() == Some(&NodeCall::Drain) {
+            drained += 1;
+        }
+        assert!(
+            after_start.ends_with(&[NodeCall::Cancel, NodeCall::Stop]),
+            "every node is cancelled, then stopped: {after_start:?}"
+        );
+    }
+    assert_eq!(
+        drained, 1,
+        "the source drains first and never returns, so the sink is never asked to drain"
+    );
+}
+
+#[test]
+fn a_fail_request_on_a_terminal_run_is_dropped() {
+    let (mut controller, _) = active();
+    controller.requests().drain();
+    block_on(controller.drive()).expect("the loop ends the run");
+
+    controller.requests().fail(reported("late"));
+    block_on(controller.drive()).expect("a terminal run is left as it is");
+    assert_eq!(controller.run().state(), RunState::Completed);
+    assert_eq!(controller.run().failure(), None);
 }

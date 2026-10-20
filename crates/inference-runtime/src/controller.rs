@@ -53,7 +53,7 @@ use inference_pipeline::{
     PortDirection,
 };
 
-use crate::drive::{Feed, GuardedSender, Next, RunRequests, SequenceNotIncreasing, Signals};
+use crate::drive::{Feed, GuardedSender, Halt, Next, RunRequests, SequenceNotIncreasing, Signals};
 use crate::queue::{
     self, Channel, EdgeQueue, EpochLookup, ExposureWatch, QueueWatch, Room,
     UnsupportedExposureOverload, UnsupportedOverload,
@@ -888,8 +888,8 @@ impl<P: Send + 'static> RunController<P> {
         Ok(())
     }
 
-    /// The handle through which a caller asks [`RunController::drive`] to cancel or drain the run
-    /// while the loop holds the controller.
+    /// The handle through which a caller asks [`RunController::drive`] to cancel, drain or fail
+    /// the run while the loop holds the controller.
     #[must_use]
     pub fn requests(&self) -> RunRequests {
         RunRequests {
@@ -931,13 +931,17 @@ impl<P: Send + 'static> RunController<P> {
     /// issues no command the state machine would refuse; a run already Draining is completed,
     /// and a terminal run is left as it is.
     ///
+    /// A failure the caller reports ([`RunRequests::fail`]) is taken as a cancel is, before it:
+    /// it issues `inference.graph.FailRun` with the caller's reason ([`RunController::fail`]),
+    /// from Active or abandoning a drain, and the loop returns once the run is Failed.
+    ///
     /// From Active it also wakes when an edge refused an envelope as closed: the node it arrives
     /// at ended its exchange while a producer still sends to it, as a node whose exchange failed
-    /// does. The loop takes that node's drain at once, abandoned if a cancel is asked for
-    /// meanwhile. A node that answers an error is failed through [`RunController::fail_node`],
-    /// which winds every other instance down and fails the run, and the loop returns
-    /// [`RunError::NodeFailed`]; a node that answers `Ok` ended its exchange as it should, its
-    /// answer is kept for the run's drain, and the loop goes on waiting.
+    /// does. The loop takes that node's drain at once, abandoned if a cancel or a failure is
+    /// asked for meanwhile. A node that answers an error is failed through
+    /// [`RunController::fail_node`], which winds every other instance down and fails the run, and
+    /// the loop returns [`RunError::NodeFailed`]; a node that answers `Ok` ended its exchange as
+    /// it should, its answer is kept for the run's drain, and the loop goes on waiting.
     ///
     /// # Errors
     ///
@@ -948,23 +952,17 @@ impl<P: Send + 'static> RunController<P> {
         loop {
             match self.run.state() {
                 RunState::Active => match self.signals.next_from_active().await {
-                    Next::Cancel => self.cancel().await?,
-                    Next::Drain => {
-                        if let Some(drained) = self.drain_unless_cancelled().await {
-                            drained?;
-                        } else {
-                            self.cancel().await?;
-                        }
-                    }
+                    Next::Halt(halt) => self.halt(halt).await?,
+                    Next::Drain => match self.drain_unless_halted().await {
+                        Ok(drained) => drained?,
+                        Err(halt) => self.halt(halt).await?,
+                    },
                     Next::ConsumerGone(node_id) => self.consumer_gone(node_id).await?,
                 },
-                RunState::Draining => {
-                    if self.signals.take_cancel() {
-                        self.cancel().await?;
-                    } else {
-                        self.complete().await?;
-                    }
-                }
+                RunState::Draining => match self.signals.take_halt() {
+                    Some(halt) => self.halt(halt).await?,
+                    None => self.complete().await?,
+                },
                 RunState::Completed | RunState::Failed | RunState::Cancelled => return Ok(()),
                 current @ (RunState::Created | RunState::Validating | RunState::Preparing) => {
                     return Err(RunError::Conflict(RunStateConflict { current }));
@@ -973,17 +971,26 @@ impl<P: Send + 'static> RunController<P> {
         }
     }
 
-    /// [`RunController::drain`], abandoned as soon as a cancel is asked for: none then, and the
-    /// run is left as the "Abandoned steps" table of [`RunController`] says, for
-    /// [`RunController::cancel`] to wind down.
-    async fn drain_unless_cancelled(&mut self) -> Option<Result<(), RunError>> {
+    /// Issues what the caller asked for: `CancelRun` ([`RunController::cancel`]), or `FailRun`
+    /// with its reason ([`RunController::fail`]).
+    async fn halt(&mut self, halt: Halt) -> Result<(), RunError> {
+        match halt {
+            Halt::Cancel => self.cancel().await,
+            Halt::Fail(failure) => self.fail(failure).await,
+        }
+    }
+
+    /// [`RunController::drain`], abandoned as soon as a cancel or a failure is asked for: that
+    /// request then, and the run is left as the "Abandoned steps" table of [`RunController`]
+    /// says, for [`RunController::cancel`] or [`RunController::fail`] to wind down.
+    async fn drain_unless_halted(&mut self) -> Result<Result<(), RunError>, Halt> {
         let signals = Arc::clone(&self.signals);
         let mut drain = pin!(self.drain());
         future::poll_fn(|cx| {
-            if signals.poll_cancel(cx) {
-                return Poll::Ready(None);
+            if let Some(halt) = signals.poll_halt(cx) {
+                return Poll::Ready(Err(halt));
             }
-            drain.as_mut().poll(cx).map(Some)
+            drain.as_mut().poll(cx).map(Ok)
         })
         .await
     }
@@ -1003,20 +1010,20 @@ impl<P: Send + 'static> RunController<P> {
         let answer = {
             let mut drain = self.nodes[index].implementation.drain();
             future::poll_fn(|cx| {
-                if signals.poll_cancel(cx) {
-                    return Poll::Ready(None);
+                if let Some(halt) = signals.poll_halt(cx) {
+                    return Poll::Ready(Err(halt));
                 }
-                drain.as_mut().poll(cx).map(Some)
+                drain.as_mut().poll(cx).map(Ok)
             })
             .await
         };
         match answer {
-            None => self.cancel().await,
-            Some(Ok(())) => {
+            Err(halt) => self.halt(halt).await,
+            Ok(Ok(())) => {
                 self.nodes[index].drained = true;
                 Ok(())
             }
-            Some(Err(error)) => {
+            Ok(Err(error)) => {
                 let failure = Self::failure(node_id, &error);
                 self.fail_node(node_id, &error)
                     .await
