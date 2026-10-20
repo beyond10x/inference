@@ -4,6 +4,9 @@
 //! one request, so every recogniser reports both without code of its own; the local compute is
 //! what the implementation added, `measured`, or `unknown` when it added none. The record names
 //! the adapter and the model and no run, node or session, which the node placing it fills.
+//! It is the last event of the recognition: refused while a span is not committed, and once it
+//! is made every later move is refused. A failed backend call is recorded with its counts not
+//! final.
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;
@@ -15,9 +18,10 @@ use inference_stt::inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_stt::inference_core::usage::{Quantity, QuantityKind, UsageRecorded};
-use inference_stt::inference_text::TurnId;
+use inference_stt::inference_text::{ReviseSpan, SpanId, TurnId};
 use inference_stt::{
-    CONTRACT_REVISION, InputNotEnded, RecognitionRequest, SequenceExhausted, TranscriptEvent,
+    CONTRACT_REVISION, CommitRefused, HypothesisRefused, InputNotEnded, RecognitionEnded,
+    RecognitionRequest, RevisionRefused, SequenceExhausted, SpanNotCommitted, TranscriptEvent,
     TranscriptOutput, UsageAlreadyRecorded, UsageRefused,
 };
 
@@ -226,15 +230,17 @@ fn past_the_last_sequence_no_usage_is_recorded() {
         RunId::generate(),
         TurnId::generate(),
         StreamId::generate(),
-        i64::MAX,
+        i64::MAX - 1,
         NodeId::generate(),
         "text_out",
     )
-    .expect("i64::MAX is a sequence");
+    .expect("i64::MAX - 1 is a sequence");
     let mut output = TranscriptOutput::start(&adapter(Vec::new()), request.clone());
     output.end_input().expect("input ends once");
-    let hypothesis = output.hypothesis("last".to_owned()).expect("one is left");
-    assert_eq!(hypothesis.sequence, i64::MAX);
+    let hypothesis = output.hypothesis("last".to_owned()).expect("two are left");
+    let span_id = hypothesis.payload.span_id().expect("a span event");
+    let committed = output.commit(span_id).expect("one is left");
+    assert_eq!(committed.sequence, i64::MAX);
 
     assert_eq!(
         output.usage().map(|_| ()),
@@ -243,4 +249,105 @@ fn past_the_last_sequence_no_usage_is_recorded() {
         }))
     );
     assert!(!output.usage_recorded());
+}
+
+#[test]
+fn no_usage_is_recorded_while_a_span_is_not_committed() {
+    let mut output = TranscriptOutput::start(&adapter(Vec::new()), request());
+    output.end_input().expect("input ends once");
+    let first = output.hypothesis("one".to_owned()).expect("a span");
+    let first = first.payload.span_id().expect("a span event");
+    output.commit(first).expect("the hypothesis commits");
+    let last = output.hypothesis("two".to_owned()).expect("a span");
+    let last = last.payload.span_id().expect("a span event");
+
+    assert_eq!(
+        output.usage().map(|_| ()),
+        Err(UsageRefused::SpanNotCommitted(SpanNotCommitted {
+            span_id: last
+        })),
+        "the last span is not committed"
+    );
+    assert!(!output.usage_recorded());
+    assert_eq!(output.next_sequence(), Some(4), "no sequence used");
+
+    output.commit(last).expect("the last hypothesis commits");
+    let envelope = output.usage().expect("every span is committed");
+    assert_eq!(envelope.sequence, 5, "right after the last commit");
+}
+
+#[test]
+fn after_the_usage_record_the_recognition_emits_nothing_more() {
+    let mut output = TranscriptOutput::start(&adapter(Vec::new()), request());
+    output.end_input().expect("input ends once");
+    let hypothesis = output.hypothesis("hello".to_owned()).expect("a span");
+    let span_id = hypothesis.payload.span_id().expect("a span event");
+    output.commit(span_id).expect("the hypothesis commits");
+    let usage = output.usage().expect("every span is committed");
+    assert_eq!(usage.sequence, 3);
+
+    assert_eq!(
+        output.hypothesis("more".to_owned()).map(|_| ()),
+        Err(HypothesisRefused::RecognitionEnded(RecognitionEnded))
+    );
+    assert_eq!(
+        output
+            .revise(ReviseSpan {
+                span_id,
+                text: "rewritten".to_owned(),
+            })
+            .map(|_| ()),
+        Err(RevisionRefused::RecognitionEnded(RecognitionEnded))
+    );
+    assert_eq!(
+        output
+            .revise(ReviseSpan {
+                span_id: SpanId::generate(),
+                text: "unknown".to_owned(),
+            })
+            .map(|_| ()),
+        Err(RevisionRefused::RecognitionEnded(RecognitionEnded)),
+        "the end is refused first, whatever the span"
+    );
+    assert_eq!(
+        output.commit(span_id).map(|_| ()),
+        Err(CommitRefused::RecognitionEnded(RecognitionEnded))
+    );
+    assert_eq!(
+        output.usage().map(|_| ()),
+        Err(UsageRefused::UsageAlreadyRecorded(UsageAlreadyRecorded))
+    );
+    assert_eq!(output.next_sequence(), Some(4), "no sequence used");
+    assert_eq!(output.spans().len(), 1, "no span added");
+    assert_eq!(output.spans()[0].text(), "hello", "its text unchanged");
+}
+
+#[test]
+fn a_failed_backend_call_records_what_was_measured_with_counts_not_final() {
+    let mut output = TranscriptOutput::start(&adapter(Vec::new()), request());
+    output
+        .offer(frame(0, 16_000, 16_000, 1))
+        .expect("input has not ended");
+    output.end_input().expect("input ends once");
+    output.add_local_compute(Duration::from_millis(12));
+    assert!(!output.failed());
+    output.mark_failed();
+    assert!(output.failed());
+
+    let envelope = output.usage().expect("a failed call is still counted");
+
+    let record = recorded(&envelope.payload);
+    assert!(!record.r#final, "the counts of a failed call are not final");
+    assert_eq!(
+        quantity(record, QuantityKind::InputAudioMs),
+        Quantity::measured(QuantityKind::InputAudioMs, 1_000)
+    );
+    assert_eq!(
+        quantity(record, QuantityKind::LocalComputeMs),
+        Quantity::measured(QuantityKind::LocalComputeMs, 12)
+    );
+    assert_eq!(
+        quantity(record, QuantityKind::Requests),
+        Quantity::measured(QuantityKind::Requests, 1)
+    );
 }

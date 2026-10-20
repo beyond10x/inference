@@ -28,7 +28,9 @@
 //! whisper.cpp transcribed it: the audio offered and one request, as the contract measures them,
 //! and `local_compute_ms` `measured`, the wall time of the `full` call and the reading of its
 //! segments, or `unknown` when there was no audio to transcribe and whisper.cpp was not called.
-//! whisper.cpp reports no quantity of its own.
+//! A transcription that failed is recorded with what was measured and its counts not final
+//! (`final` false), as `inference-llm` records a failed turn. whisper.cpp reports no quantity of
+//! its own.
 //!
 //! The crate's `stt_conformance` tests hold the recogniser to adapter conformance against the
 //! pinned checkpoint, with the claims of the sherpa-onnx recogniser's conformance inverted.
@@ -49,7 +51,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -576,19 +578,50 @@ impl WhisperCppRecognition {
         };
         self.finished = true;
         let samples = samples_16k(&frames);
-        if !samples.is_empty() {
+        let transcription = (!samples.is_empty()).then(|| {
             let computing = Instant::now();
-            let transcription = transcribe(&self.context, &samples);
-            self.output.add_local_compute(computing.elapsed());
-            match transcription {
-                Ok(text) => transcribed(&mut self.output, &text, &mut self.delivered),
-                Err(failed) => self.failure = Some(failed),
+            let result = transcribe(&self.context, &samples);
+            Transcription {
+                result,
+                spent: computing.elapsed(),
+            }
+        });
+        self.failure = settle(&mut self.output, transcription, &mut self.delivered);
+    }
+}
+
+/// What one `full` call came to, and the wall time it and the reading of its segments took.
+struct Transcription {
+    result: Result<String, RecognitionFailed>,
+    spent: Duration,
+}
+
+/// Settles a recognition whose input has ended on its `transcription`, none when there was no
+/// audio and whisper.cpp was not called: adds the time it took to the local compute, emits the
+/// text, or marks the call failed, and then records the usage, the last event. Returns the
+/// failure, if the call failed.
+fn settle(
+    output: &mut TranscriptOutput,
+    transcription: Option<Transcription>,
+    delivered: &mut VecDeque<EventEnvelope<TranscriptEvent>>,
+) -> Option<RecognitionFailed> {
+    let failure = transcription.and_then(|Transcription { result, spent }| {
+        output.add_local_compute(spent);
+        match result {
+            Ok(text) => {
+                transcribed(output, &text, delivered);
+                None
+            }
+            Err(failed) => {
+                output.mark_failed();
+                Some(failed)
             }
         }
-        if let Ok(usage) = self.output.usage() {
-            self.delivered.push_back(usage);
-        }
+    });
+    if let Ok(usage) = output.usage() {
+        delivered.push_back(usage);
     }
+    failure
 }
 
 /// The text whisper.cpp transcribes from `samples`, 16 kHz mono, in a new state on `context`:

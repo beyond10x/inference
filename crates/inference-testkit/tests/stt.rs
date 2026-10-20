@@ -74,20 +74,24 @@ fn recognise(configuration: MockConfiguration) -> Recognition {
 #[test]
 fn a_revision_of_a_committed_span_is_refused_and_its_text_is_unchanged() {
     for configuration in MockConfiguration::ALL {
-        let Recognition {
-            mut handle,
-            before_end,
-            after_end,
-            ..
-        } = recognise(configuration);
-        let committed = before_end
-            .iter()
-            .chain(&after_end)
-            .find_map(|envelope| match &envelope.payload {
-                TranscriptEvent::Committed(event) => Some(event.clone()),
+        let mut handle = recogniser(configuration)
+            .start(request())
+            .expect("a fresh recogniser runs nothing else");
+        for frame in frames(FRAMES) {
+            handle.offer_frame(frame).expect("input has not ended");
+        }
+        handle.end_input().expect("input ends once");
+        let committed = handle
+            .by_ref()
+            .find_map(|envelope| match envelope.payload {
+                TranscriptEvent::Committed(event) => Some(event),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("{configuration:?} commits a span"));
+        assert!(
+            !handle.output().usage_recorded(),
+            "{configuration:?}: the recognition still runs, its usage not yet recorded"
+        );
 
         let answer = handle.revise(ReviseSpan {
             span_id: committed.span_id,
@@ -113,10 +117,28 @@ fn a_revision_of_a_committed_span_is_refused_and_its_text_is_unchanged() {
             "{configuration:?}: the committed text is unchanged"
         );
         assert_eq!(span.state(), SpanState::Committed);
+        let rest: Vec<EventEnvelope<TranscriptEvent>> = handle.by_ref().collect();
+        assert!(
+            rest.iter().all(|envelope| !matches!(
+                &envelope.payload,
+                TranscriptEvent::Revision(event) if event.span_id == committed.span_id
+            )),
+            "{configuration:?}: a refused revision delivers no event: {rest:?}"
+        );
+        assert!(
+            matches!(
+                rest.last().map(|envelope| &envelope.payload),
+                Some(TranscriptEvent::Usage(_))
+            ),
+            "{configuration:?}: the recognition ends with its usage record: {rest:?}"
+        );
         assert_eq!(
-            handle.next(),
-            None,
-            "{configuration:?}: a refused revision delivers no event"
+            handle
+                .output()
+                .span(committed.span_id)
+                .map(|span| span.text().to_owned()),
+            Some(committed.text.clone()),
+            "{configuration:?}: still unchanged at the end"
         );
     }
 }

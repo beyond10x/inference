@@ -27,12 +27,16 @@ use inference_pipeline::{
 use inference_runtime::RunController;
 use inference_runtime::run::RunState;
 use inference_stt::inference_audio::AudioFrame;
-use inference_stt::{Recogniser, RecognitionHandle, RecognitionRequest, TranscriptEvent};
+use inference_stt::inference_text::ReviseSpan;
+use inference_stt::{
+    Recogniser, RecognitionEnded, RecognitionHandle, RecognitionRequest, RevisionRefused,
+    TranscriptEvent,
+};
 use inference_testkit::graph::RunLog;
 use inference_testkit::stream::StreamEvent;
 use inference_testkit::stt::{
-    FRAME_SAMPLES, Heard, MockConfiguration, MockRecogniser, SttNode, SttPayload, SttPorts, frames,
-    script,
+    Cue, FRAME_SAMPLES, Heard, MockConfiguration, MockRecogniser, ScriptStep, SttNode, SttPayload,
+    SttPorts, frames, script,
 };
 use inference_text::{TurnCompleted, TurnId, TurnOpened};
 
@@ -132,6 +136,79 @@ fn a_recognition_of_one_and_a_half_seconds_on_the_mock_ends_with_its_usage() {
             handle.next().is_none(),
             "{configuration:?}: nothing follows the record"
         );
+    }
+}
+
+#[test]
+fn after_its_usage_record_a_recognition_refuses_a_revision_through_its_handle() {
+    for configuration in MockConfiguration::ALL {
+        let mut recogniser = MockRecogniser::new(configuration, ModelId::generate(), script());
+        let mut handle = recogniser
+            .start(request())
+            .expect("a fresh recogniser runs nothing else");
+        for frame in frames(6) {
+            handle.offer_frame(frame).expect("input has not ended");
+        }
+        handle.end_input().expect("input ends once");
+        let events: Vec<EventEnvelope<TranscriptEvent>> = handle.by_ref().collect();
+        assert!(
+            matches!(
+                events.last().map(|envelope| &envelope.payload),
+                Some(TranscriptEvent::Usage(_))
+            ),
+            "{configuration:?}: {events:?}"
+        );
+        let span_id = handle.output().spans()[0].span_id();
+
+        assert_eq!(
+            handle.revise(ReviseSpan {
+                span_id,
+                text: "a correction".to_owned(),
+            }),
+            Err(RevisionRefused::RecognitionEnded(RecognitionEnded)),
+            "{configuration:?}: the usage record is the last event"
+        );
+        assert_eq!(handle.next(), None, "{configuration:?}: nothing follows it");
+    }
+}
+
+#[test]
+fn a_script_that_leaves_a_span_uncommitted_records_no_usage() {
+    for configuration in MockConfiguration::ALL {
+        let cues = vec![
+            Cue {
+                after_frames: 1,
+                step: ScriptStep::Hypothesis("one".to_owned()),
+            },
+            Cue {
+                after_frames: 2,
+                step: ScriptStep::Commit { span: 0 },
+            },
+            Cue {
+                after_frames: 3,
+                step: ScriptStep::Hypothesis("left open".to_owned()),
+            },
+        ];
+        let mut handle = MockRecogniser::new(configuration, ModelId::generate(), cues)
+            .start(request())
+            .expect("a fresh recogniser runs nothing else");
+        for frame in frames(3) {
+            handle.offer_frame(frame).expect("input has not ended");
+        }
+        handle.end_input().expect("input ends once");
+        let events: Vec<EventEnvelope<TranscriptEvent>> = handle.by_ref().collect();
+        assert_eq!(
+            events.len(),
+            3,
+            "{configuration:?}: the three cues: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|envelope| !matches!(envelope.payload, TranscriptEvent::Usage(_))),
+            "{configuration:?}: the last span is not committed, so no usage is recorded"
+        );
+        assert!(!handle.output().usage_recorded());
     }
 }
 
