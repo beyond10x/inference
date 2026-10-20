@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.7.0] — 2026-10-21
+
+### Added
+
+- `inference-duplex`: the session ledger records one usage record per native speech response once
+  its usage is settled, one per reported transcription, and holds usage no response owns yet as a
+  session record before the session closes or fails, so billed usage is not lost at the end.
+  OpenAI Realtime, GPT-Live (billed session seconds) and Nova Sonic report through it; a count the
+  provider leaves out is unknown, never 0.
+- `inference-stt`: a recognition ends with `TranscriptEvent::Usage`, after its last committed span:
+  input audio counted exactly from the frames offered, one request, and the backend's local compute
+  where the adapter measures it (sherpa-onnx and whisper.cpp do); a failed call is recorded with
+  `final: false`. The testkit STT node sends it on a `usage` port.
+- `inference-tts`: a synthesis ends with `SynthesisEvent::Usage`: characters taken, output audio,
+  one request and local compute where measured; the backend-neutral TTS checks check it, and the
+  testkit TTS node sends it on a `usage` port.
+- `inference-openai`: `SessionConfig::speed` sets the Realtime output speed (0.25 to 1.5).
+- `examples/repo-podcast`: Claude distils a repository, two voice models discuss it over the
+  speaker in a terminal UI with running token and cost counters.
+- `examples/local-voice-cascade`: `INFERENCE_CASCADE_STT` (or `talk --stt`) selects the sherpa-onnx
+  or the whisper.cpp recogniser by configuration; the same cascade tests pass under both.
+
+### Changed
+
+- Breaking: `TranscriptEvent::span_id` and `SynthesisEvent::segment_id` return an `Option`, since
+  the usage event names no span or segment; after a recognition's or synthesis's usage record,
+  further moves are refused (`RecognitionEnded`, `SynthesisEnded`), and the record is refused while
+  a span is uncommitted or a segment is not synthesized, unless the call failed.
+- The local cascade's `stt` node requires no capability, so a batch recogniser binds to it;
+  `STREAMING_STT_REQUIRES` keeps the stricter declaration.
+- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.60.0 to 0.66.0; the
+  specification is unchanged and the synthesized suite stays at 460 scenarios, all answered; the
+  testkit target reads the inputs 0.66.0 synthesizes with optional fields left out.
+
 ## [0.6.0] — 2026-10-20
 
 ### Added
