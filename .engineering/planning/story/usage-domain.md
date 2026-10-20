@@ -2,16 +2,17 @@
 format: aep.planning-md/3
 id: story:usage-domain
 kind: story
-status: active
+status: implemented
 title: Usage records declared in ess/ as inference.usage and carried by inference-core
 summary: A UsageRecord with quantity kinds and sources, related to run, node, session, speech session, response, adapter and model, validated and answered by the testkit.
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T11:06:26Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-20T11:06:27Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:25Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:local-voice-cascade-example
 kind: story
-status: active
+status: implemented
 title: 'The local voice cascade over the local STT, LLM and TTS adapters, microphone and speaker: an offline spoken answer'
 relations:
 - decomposes: epic:local-voice-cascade
@@ -12,10 +12,11 @@ relations:
 - depends_on: story:cascade-offline-profile
 - depends_on: story:sherpa-onnx-recogniser
 - depends_on: story:llama-server-adapter
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T10:21:04Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-10-20T10:21:04Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:24Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

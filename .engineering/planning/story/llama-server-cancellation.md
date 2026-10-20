@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:llama-server-cancellation
 kind: story
-status: active
+status: implemented
 title: 'llama-server adapter: cancellation, failures, deadlines and disconnects'
 summary: Delivery and computation cancellation reported apart; 503, disconnect and idle deadline cancel the generation with the llm error kept; no leaked slot.
 relations:
 - decomposes: epic:local-llm-adapter
 - serves: vision:inference
 - depends_on: story:llama-server-adapter
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T09:03:44Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-10-20T09:03:44Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:21Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

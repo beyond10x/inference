@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:openai-gpt-live-adapter
 kind: story
-status: active
+status: implemented
 title: OpenAI GPT-Live (v1/live/sessions) as an inference-duplex native speech model
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T11:40:52Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-20T11:40:52Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:27Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

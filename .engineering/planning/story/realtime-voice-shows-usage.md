@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:realtime-voice-shows-usage
 kind: story
-status: active
+status: implemented
 title: realtime-voice prints usage per response and session totals
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T11:38:34Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-20T11:38:34Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:26Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

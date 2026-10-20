@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:llama-server-adapter
 kind: story
-status: active
+status: implemented
 title: 'llama-server adapter: an output-streaming generator over the llm Chat Completions client'
 summary: Binding, runtime bridge and capability record for a local llama-server; streaming verified, input during output refused, A-02 on it, live test from env.
 relations:
 - decomposes: epic:local-llm-adapter
 - serves: vision:inference
 - depends_on: story:capability-record
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T08:29:10Z", actor: "human:timo", revision: 5}
 - {from: "proposed", to: "active", at: "2026-10-20T08:29:10Z", actor: "human:timo", revision: 6}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:18Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

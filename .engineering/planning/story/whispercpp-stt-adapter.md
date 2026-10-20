@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:whispercpp-stt-adapter
 kind: story
-status: active
+status: implemented
 title: whisper.cpp STT adapter over whisper-rs, batch-only claims
 summary: 'adapters/inference-whispercpp over whisper-rs 0.16.0 (Unlicense; whisper.cpp MIT): pinned ggml-base.en checkpoint (MIT) behind INFERENCE_WHISPERCPP_STT_MODEL, no incremental_input or output_streaming claimed, the sherpa-onnx conformance list mirrored, no crates/ change.'
 relations:
@@ -10,10 +10,11 @@ relations:
 - serves: vision:inference
 - depends_on: story:sherpa-onnx-stt-conformance
 - depends_on: story:capability-record
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T09:11:17Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-20T09:11:17Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:23Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:voice-provider-comparison
 kind: story
-status: active
+status: implemented
 title: Pick the voice provider by configuration and compare latency and usage across them
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
 - depends_on: story:openai-gpt-live-adapter
 - depends_on: story:realtime-voice-shows-usage
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T13:23:36Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-20T13:23:36Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:28Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

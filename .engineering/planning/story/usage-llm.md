@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:usage-llm
 kind: story
-status: active
+status: implemented
 title: 'LLM usage: one usage record per llm turn, on the run event path'
 summary: inference-llm turns the usage observation of every turn into a usage record; the LLM node sends it on a usage port; llama-server shows its counts.
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
 - depends_on: story:usage-domain
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T11:47:53Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-20T11:47:53Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-20T13:52:28Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
