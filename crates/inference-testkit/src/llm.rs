@@ -6,9 +6,12 @@
 //! handles; it records nothing in any store of this crate. With a script, the model answers the
 //! first turn of a conversation with it, one delta per piece; every other turn, and the first of
 //! a model without a script, it answers with the text of each caller item after its last answer,
-//! one delta each: the user text of an input, or the text of a tool result. Each turn answered so
-//! is a model request. What a generation delivers follows from what its configuration claims, as
-//! the wrapper decides it:
+//! one delta each: the user text of an input, or the text of a tool result. A model that does not
+//! stream shows no delta and returns that text in the turn's outcome only, as `llm` defines one.
+//! Each turn answered so is a model request. The model declares to `llm` that it streams exactly
+//! when its configuration claims `output_streaming` ([`MockConfiguration::declared`]), so the
+//! wrapper accepts the claims. What a generation
+//! delivers follows from what its configuration claims, as the wrapper decides it:
 //!
 //! * claiming `output_streaming`, each piece is one segment, emitted and committed while the
 //!   generation is Active, and the generation completes once nothing is left to answer;
@@ -92,6 +95,16 @@ impl MockConfiguration {
                 Capability::ConcurrentInputOutput,
             ],
         }
+    }
+
+    /// The `llm` declaration of the mock model of a generator in this configuration: `llm`'s
+    /// text model, which takes no input during output, streaming its output only when the
+    /// configuration claims `output_streaming`. `concurrent_input_output` needs no declaration:
+    /// the wrapper takes the input as the next turn's text.
+    #[must_use]
+    pub fn declared(self) -> Capabilities {
+        Capabilities::text(1 << 20, 1 << 16)
+            .with_output_streaming(self.capabilities().contains(&Capability::OutputStreaming))
     }
 }
 
@@ -188,7 +201,7 @@ impl MockGenerator {
                 model: id("mock"),
                 binding_revision: id("1"),
             },
-            capabilities: Capabilities::text(1 << 20, 1 << 16),
+            capabilities: configuration.declared(),
             script: script.into_iter().map(Into::into).collect(),
             tools: None,
             offered: Offered::default(),
@@ -247,7 +260,8 @@ impl MockGenerator {
 
     fn over(adapter: Adapter, model: MockModel) -> Self {
         let model = Arc::new(model);
-        let generator = Generator::new(adapter, Arc::clone(&model) as Arc<dyn llm_core::Model>);
+        let generator = Generator::new(adapter, Arc::clone(&model) as Arc<dyn llm_core::Model>)
+            .expect("the mock model declares what its configuration claims");
         Self { generator, model }
     }
 
@@ -380,11 +394,13 @@ impl llm_core::Model for MockModel {
     ) -> BoxFuture<'a, Result<TurnOutcome, llm_core::Error>> {
         Box::pin(async move {
             let (pieces, calls) = self.answer(request);
-            for piece in &pieces {
-                sink.emit(StreamEvent::TextDelta {
-                    text: piece.clone(),
-                })
-                .await?;
+            if self.capabilities.output_streaming {
+                for piece in &pieces {
+                    sink.emit(StreamEvent::TextDelta {
+                        text: piece.clone(),
+                    })
+                    .await?;
+                }
             }
             let stop_reason = if calls.is_empty() {
                 StopReason::EndTurn

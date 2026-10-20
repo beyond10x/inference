@@ -236,7 +236,8 @@ fn a_model_node_answers_each_input_on_one_generation_of_an_llm_model() {
     })
     .expect("one is positive");
     let (declaration, planned, [source_id, model_id, sink_id]) = planned(&adapter);
-    let generator = Generator::new(adapter, Arc::new(shouting.clone()));
+    let generator = Generator::new(adapter, Arc::new(shouting.clone()))
+        .expect("the model declares what the adapter claims");
 
     let run_id = RunId::generate();
     let log = RunLog::new();
