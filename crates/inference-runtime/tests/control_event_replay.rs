@@ -3,11 +3,15 @@
 //! 1217).
 //!
 //! The voice cascade with a read-only tool, on the testkit mocks: topology B, its audio entering
-//! by an ingress, the tool loop through the authority and the executor, the TTS node playing into
-//! a sink. The host speaks a question, the LLM node proposes the read-only call, the authority
-//! authorizes it, the executor answers and the LLM node commits its reply and the result. The user
-//! then speaks again over the answer: the host interrupts, superseding the generation (a
-//! barge-in), and ends the input.
+//! by an ingress, the tool loop through the authority and the executor, the TTS node of a cascade
+//! whose sink acknowledges playback sending its audio to a speaker whose device is held, so that
+//! nothing of the answer is played. The host speaks a question, the LLM node proposes the
+//! read-only call, the authority authorizes it, the executor answers and the LLM node commits its
+//! reply and the result. The user then speaks again over the answer: the host interrupts,
+//! superseding the generation (a barge-in), or, in one case, cancelling it, and the TTS node
+//! discards every segment of it, none Played; then the host ends the input. So every kind of
+//! decision the recorder reads, commit, supersede, cancel, discard and tool authorization, is
+//! recorded and compared.
 //!
 //! The [`Recorder`] wraps every node and the ingress, so it records every envelope on the run's
 //! event path with the merge order it assigns, and the host's barge-in among them. A [`Replay`]
@@ -17,6 +21,8 @@
 //! | case | acceptance |
 //! |---|---|
 //! | [`replaying_a_recorded_barge_in_and_tool_call_reproduces_its_control_decisions_in_order`] | the replay under the same policy version gets the same decisions in the same order |
+//! | [`replaying_a_recorded_cancel_reproduces_the_cancel_and_the_discards_in_order`] | the same, the host cancelling the answer: its cancel and discards are reproduced |
+//! | [`every_kind_of_decision_is_made_by_the_runs_the_cases_compare`] | no kind of decision is compared vacuously |
 //! | [`replaying_under_another_policy_version_reports_the_first_diverging_decision`] | the replay under another version reports the first decision that diverged |
 //! | [`a_telemetry_consumer_that_never_reads_delays_no_node_and_its_drops_are_counted`] | the run completes within its deadline and the drop counter is above zero |
 
@@ -50,7 +56,8 @@ use inference_runtime::replay::{Replay, ReplayReport};
 use inference_runtime::run::RunState;
 use inference_runtime::telemetry::{self, TelemetrySink};
 use inference_runtime::{ExposedEnds, NodeId, RunController, RunError, RunRequests};
-use inference_testkit::graph::{RunLog, TextSink};
+use inference_testkit::cascade::speech::{Said, SpeechNode, SpeechPayload, SpeechPorts};
+use inference_testkit::graph::RunLog;
 use inference_testkit::llm::{
     Carried, MockConfiguration as LlmConfiguration, MockGenerator, ModelHandle, ModelNode,
     ModelPayload,
@@ -66,10 +73,8 @@ use inference_testkit::stt::{
     SttPayload, SttPorts,
 };
 use inference_testkit::tools::{MockToolExecutor, Script, ToolsDomain};
-use inference_testkit::tts::inference_tts::Synthesiser;
-use inference_testkit::tts::{
-    MockConfiguration as TtsConfiguration, MockSynthesiser, Spoken, TtsNode, TtsPayload,
-};
+use inference_testkit::tts::inference_tts::{SegmentAudio, Synthesiser};
+use inference_testkit::tts::{MockConfiguration as TtsConfiguration, MockSynthesiser};
 use inference_text::{OpenTurn, TurnCompleted, TurnId, TurnOpened};
 use inference_tools::{DeclareTool, Json, SideEffectClass, Tool};
 use serde_json::json;
@@ -81,8 +86,49 @@ const PATIENCE: Duration = Duration::from_secs(10);
 /// The name of the ingress the microphone's frames enter by.
 const AUDIO: &str = "audio";
 
-/// The host action the recorder notes when the user speaks over the answer.
+/// The host action the recorder notes when the user speaks over the answer and the host
+/// supersedes it.
 const BARGE_IN: &str = "barge-in";
+
+/// The host action the recorder notes when the user speaks over the answer and the host cancels
+/// it instead.
+const CANCEL: &str = "cancel";
+
+/// How the host interrupts the answer when the user speaks over it (design 716: cancel or
+/// supersede the active generation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interrupt {
+    /// `inference.stream.SupersedeGeneration`, through [`ModelHandle::supersede`].
+    Supersede,
+    /// `inference.stream.CancelGeneration`, through [`ModelHandle::cancel_generation`].
+    Cancel,
+}
+
+impl Interrupt {
+    /// The host action the recorder notes.
+    const fn action(self) -> &'static str {
+        match self {
+            Self::Supersede => BARGE_IN,
+            Self::Cancel => CANCEL,
+        }
+    }
+
+    /// The decision the LLM node makes of it.
+    const fn decision(self) -> DecisionKind {
+        match self {
+            Self::Supersede => DecisionKind::Supersede,
+            Self::Cancel => DecisionKind::Cancel,
+        }
+    }
+
+    /// Asks it of the LLM node through `llm`; whether the node took the request.
+    fn ask(self, llm: &ModelHandle) -> bool {
+        match self {
+            Self::Supersede => llm.supersede(),
+            Self::Cancel => llm.cancel_generation(),
+        }
+    }
+}
 
 /// What the user asks: the recogniser's scripted span.
 const QUESTION: &str = "what is the code word of the day";
@@ -200,20 +246,22 @@ impl ToolPayload for Payload {
     }
 }
 
-impl TtsPayload for Payload {
+impl SpeechPayload for Payload {
     fn stream(event: StreamEvent) -> Self {
         Self::Stream(event)
     }
 
-    fn audio(frame: AudioFrame) -> Self {
-        Self::Audio(frame)
+    /// The frame the synthesis emitted, copied: the held speaker plays nothing, so no receipt is
+    /// ever made of the synthesis's own frames.
+    fn speech(audio: SegmentAudio) -> Self {
+        Self::Audio(audio.frame().clone())
     }
 
-    fn spoken(self) -> Spoken {
+    fn said(self) -> Said {
         match self {
-            Self::Stream(event) => Spoken::Stream(event),
-            Self::Control(kind) => Spoken::Control(kind),
-            Self::Audio(_) | Self::Activity(_) | Self::Tool(_) => Spoken::Other,
+            Self::Stream(event) => Said::Stream(event),
+            Self::Control(kind) => Said::Control(kind),
+            Self::Audio(_) | Self::Activity(_) | Self::Tool(_) => Said::Other,
         }
     }
 }
@@ -269,6 +317,7 @@ struct Ids {
     tts: NodeId,
     speaker: NodeId,
     stt_ports: SttPorts,
+    speech_ports: SpeechPorts,
     llm_turns: PortId,
     tool_call: PortId,
     tool_result: PortId,
@@ -477,8 +526,10 @@ fn cascade() -> Cascade {
             let calls = pipeline.input::<modality::Structured>(&executor, "call", structured);
             let results = pipeline.output::<modality::Structured>(&executor, "result", structured);
             let speak = pipeline.input::<modality::Text>(&tts, "text", text);
+            let tts_played = pipeline.input::<modality::Control>(&tts, "played", control);
             let spoken = pipeline.output::<modality::Audio>(&tts, "audio", audio);
             let played = pipeline.input::<modality::Audio>(&speaker, "audio", audio);
+            let played_back = pipeline.output::<modality::Control>(&speaker, "played", control);
 
             pipeline.expose(&split_in, AUDIO, wide, OverloadPolicy::Pause);
             pipeline.connect(&to_vad, &heard, wide, OverloadPolicy::Pause);
@@ -489,6 +540,7 @@ fn cascade() -> Cascade {
             pipeline.connect(&stt_turns_out, &llm_turns, wide, OverloadPolicy::Pause);
             pipeline.connect(&answer, &speak, wide, OverloadPolicy::Pause);
             pipeline.connect(&spoken, &played, wide, OverloadPolicy::Pause);
+            pipeline.connect_feedback(&played_back, &tts_played, wide, OverloadPolicy::Pause, wide);
             pipeline.connect_feedback(
                 &tool_call,
                 &proposed,
@@ -525,6 +577,11 @@ fn cascade() -> Cascade {
                     turns_out: stt_turns_out.id(),
                     transcript: None,
                 },
+                speech_ports: SpeechPorts {
+                    text: speak.id(),
+                    played: tts_played.id(),
+                    audio: spoken.id(),
+                },
                 llm_turns: llm_turns.id(),
                 tool_call: tool_call.id(),
                 tool_result: tool_result.id(),
@@ -534,7 +591,7 @@ fn cascade() -> Cascade {
         .expect("the profile is declared");
     let validated = declaration
         .validate(pipeline_id)
-        .expect("the cascade is valid, its one cycle through a bounded feedback edge");
+        .expect("the cascade is valid, each of its cycles through a bounded feedback edge");
     let planned = declaration
         .plan(validated, &catalog)
         .expect("every model node is bound to an adapter claiming what it requires");
@@ -716,9 +773,18 @@ fn start(cascade: &Cascade, policy: Policy, recorder: &Recorder<Payload>) -> Run
             (ids.executor, Box::new(executor)),
             (
                 ids.tts,
-                Box::new(TtsNode::new(run_id, bindings.synthesiser, log).playing()),
+                Box::new(SpeechNode::new(
+                    run_id,
+                    bindings.synthesiser,
+                    ids.speech_ports,
+                    log,
+                )),
             ),
-            (ids.speaker, Box::new(TextSink::<Payload>::default())),
+            // The speaker holds its device: it plays nothing and makes no receipt, so the whole
+            // answer is unplayed when the host interrupts it. A fan-out stands in for it, its one
+            // output the feedback edge into the TTS node's `played` port: of what it hands back
+            // the TTS node takes only the end of input, which ends its wait for receipts.
+            (ids.speaker, Box::new(FanOut::new())),
         ]);
     let mut controller = RunController::create_as(
         run_id,
@@ -783,13 +849,24 @@ fn count(decisions: &[ControlDecision], node_id: NodeId, kind: DecisionKind) -> 
 }
 
 /// Records one run of `cascade` under `policy`: the host asks the question and waits for the LLM
-/// node to commit its reply and the tool's result, speaks over the answer and interrupts it,
-/// noting the barge-in, waits for the supersede, then lets the silence and the end of input
-/// follow. `telemetry` is offered every envelope the recorder takes.
+/// node to commit its reply and the tool's result, speaks over the answer and interrupts it by
+/// supersede, noting the barge-in, waits for the supersede, then lets the silence and the end of
+/// input follow. `telemetry` is offered every envelope the recorder takes.
 fn record(
     cascade: &Cascade,
     policy: Policy,
     telemetry: Option<Arc<dyn TelemetrySink>>,
+) -> (Recording<Payload>, RunState) {
+    record_interrupted(cascade, policy, telemetry, Interrupt::Supersede)
+}
+
+/// Records one run of `cascade` under `policy` as [`record`] does, the host interrupting the
+/// answer by `interrupt`.
+fn record_interrupted(
+    cascade: &Cascade,
+    policy: Policy,
+    telemetry: Option<Arc<dyn TelemetrySink>>,
+    interrupt: Interrupt,
 ) -> (Recording<Payload>, RunState) {
     let deadline = Instant::now() + PATIENCE;
     let mut recorder = Recorder::new(policy.version());
@@ -819,16 +896,16 @@ fn record(
         recorder.decisions()
     );
     microphone.speak(ingress.as_ref(), barge_in);
-    recorder.host(BARGE_IN);
+    recorder.host(interrupt.action());
     assert!(
-        running.llm.supersede(),
+        interrupt.ask(&running.llm),
         "the host interrupts the generation"
     );
     assert!(
         recorder.wait_until(PATIENCE, |decisions| {
-            count(decisions, llm, DecisionKind::Supersede) >= 1
+            count(decisions, llm, interrupt.decision()) >= 1
         }),
-        "the LLM node superseded its generation: {:?}",
+        "the LLM node took the interrupt {interrupt:?}: {:?}",
         recorder.decisions()
     );
     microphone.speak(ingress.as_ref(), silence);
@@ -838,8 +915,8 @@ fn record(
     (recorder.recording(), state)
 }
 
-/// Replays `recording` into a new run of `cascade` under `policy`, the barge-in redone through
-/// the LLM node's handle.
+/// Replays `recording` into a new run of `cascade` under `policy`, the host's interrupt redone
+/// through the LLM node's handle.
 fn replay(cascade: &Cascade, recording: &Recording<Payload>, policy: Policy) -> ReplayReport {
     let deadline = Instant::now() + PATIENCE * 2;
     let recorder = Recorder::new(policy.version());
@@ -850,8 +927,11 @@ fn replay(cascade: &Cascade, recording: &Recording<Payload>, policy: Policy) -> 
         running.run_id,
         &mut running.ends,
         |action| {
-            assert_eq!(action, BARGE_IN, "the one host action recorded");
-            let _ = llm.supersede();
+            let interrupt = [Interrupt::Supersede, Interrupt::Cancel]
+                .into_iter()
+                .find(|interrupt| interrupt.action() == action)
+                .expect("the one host action recorded is an interrupt");
+            let _ = interrupt.ask(&llm);
         },
         PATIENCE,
     );
@@ -944,6 +1024,11 @@ fn replaying_a_recorded_barge_in_and_tool_call_reproduces_its_control_decisions_
     );
     assert_eq!(count(&recorded, ids.llm, DecisionKind::Commit), 2);
     assert!(count(&recorded, ids.llm, DecisionKind::Supersede) >= 1);
+    let discards = count(&recorded, ids.tts, DecisionKind::Discard);
+    assert!(
+        discards >= 1,
+        "the TTS node discarded the superseded generation's unplayed segments: {recorded:#?}"
+    );
     assert!(count(&recorded, ids.stt, DecisionKind::Commit) >= 1);
     assert!(count(&recorded, ids.policy, DecisionKind::Commit) >= 2);
     let position = |node_id, kind| {
@@ -966,6 +1051,78 @@ fn replaying_a_recorded_barge_in_and_tool_call_reproduces_its_control_decisions_
     assert_eq!(keys(&report.recorded), keys(&recorded));
     assert_eq!(report.replayed.len(), report.recorded.len());
     assert_eq!(by_node(&report.replayed), by_node(&report.recorded));
+    assert_eq!(
+        count(&report.replayed, ids.tts, DecisionKind::Discard),
+        discards,
+        "the replay discarded what the recorded run discarded"
+    );
+}
+
+#[test]
+fn replaying_a_recorded_cancel_reproduces_the_cancel_and_the_discards_in_order() {
+    let cascade = cascade();
+    let ids = cascade.ids;
+    let (recording, state) =
+        record_interrupted(&cascade, Policy::AdmitsTools, None, Interrupt::Cancel);
+    assert_eq!(state, RunState::Completed);
+    let host: Vec<&str> = recording
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            Entry::Host { action } => Some(action.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(host, [CANCEL]);
+
+    // The recording: the call authorized, then the generation cancelled by the LLM node, then
+    // its unplayed segments discarded by the TTS node.
+    let recorded = recording.decisions();
+    let cancels = count(&recorded, ids.llm, DecisionKind::Cancel);
+    let discards = count(&recorded, ids.tts, DecisionKind::Discard);
+    assert!(
+        cancels >= 1,
+        "the LLM node cancelled its generation: {recorded:#?}"
+    );
+    assert!(
+        discards >= 1,
+        "the TTS node discarded the cancelled generation's unplayed segments: {recorded:#?}"
+    );
+    assert_eq!(
+        count(&recorded, ids.llm, DecisionKind::Supersede),
+        0,
+        "the host cancelled the generation and superseded nothing"
+    );
+    let position = |node_id, kind| {
+        recorded
+            .iter()
+            .position(|decision| decision.node_id == node_id && decision.kind == kind)
+            .expect("the decision was recorded")
+    };
+    assert!(
+        position(ids.authority, DecisionKind::ToolAuthorized)
+            < position(ids.llm, DecisionKind::Cancel),
+        "the call was authorized before the generation was cancelled"
+    );
+    assert!(
+        position(ids.llm, DecisionKind::Cancel) < position(ids.tts, DecisionKind::Discard),
+        "the discards follow the cancel"
+    );
+
+    // The replay, under the same policy version: the same cancel and the same discards, each
+    // node's decisions in the same order, and no divergence.
+    let report = replay(&cascade, &recording, Policy::AdmitsTools);
+    assert_eq!(report.divergence, None, "{report:#?}");
+    assert_eq!(keys(&report.recorded), keys(&recorded));
+    assert_eq!(by_node(&report.replayed), by_node(&report.recorded));
+    assert_eq!(
+        count(&report.replayed, ids.llm, DecisionKind::Cancel),
+        cancels
+    );
+    assert_eq!(
+        count(&report.replayed, ids.tts, DecisionKind::Discard),
+        discards
+    );
 }
 
 #[test]
@@ -1014,6 +1171,59 @@ fn replaying_under_another_policy_version_reports_the_first_diverging_decision()
             "node {node_id} made the same decisions up to the divergence"
         );
     }
+}
+
+/// Every kind of decision the recorder reads.
+const KINDS: [DecisionKind; 6] = [
+    DecisionKind::Commit,
+    DecisionKind::Supersede,
+    DecisionKind::Cancel,
+    DecisionKind::Discard,
+    DecisionKind::ToolAuthorized,
+    DecisionKind::ToolRejected,
+];
+
+/// The place of `kind` in [`KINDS`]: a kind the recorder comes to read fails to compile here
+/// until it is listed, and so until a case of this file is shown to record it.
+const fn listed(kind: DecisionKind) -> usize {
+    match kind {
+        DecisionKind::Commit => 0,
+        DecisionKind::Supersede => 1,
+        DecisionKind::Cancel => 2,
+        DecisionKind::Discard => 3,
+        DecisionKind::ToolAuthorized => 4,
+        DecisionKind::ToolRejected => 5,
+    }
+}
+
+#[test]
+fn every_kind_of_decision_is_made_by_the_runs_the_cases_compare() {
+    assert!(
+        KINDS
+            .iter()
+            .enumerate()
+            .all(|(place, kind)| listed(*kind) == place),
+        "every kind is listed once"
+    );
+    let cascade = cascade();
+    let (superseded, _) = record(&cascade, Policy::AdmitsTools, None);
+    let (cancelled, _) = record_interrupted(&cascade, Policy::AdmitsTools, None, Interrupt::Cancel);
+    let rejecting = replay(&cascade, &superseded, Policy::AdmitsNoTool);
+    let decisions: Vec<ControlDecision> = superseded
+        .decisions()
+        .into_iter()
+        .chain(cancelled.decisions())
+        .chain(rejecting.replayed)
+        .collect();
+    let missing: Vec<DecisionKind> = KINDS
+        .into_iter()
+        .filter(|kind| !decisions.iter().any(|decision| decision.kind == *kind))
+        .collect();
+    assert_eq!(
+        missing,
+        [],
+        "a kind of decision no compared run makes is compared vacuously"
+    );
 }
 
 #[test]

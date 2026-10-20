@@ -25,16 +25,21 @@
 //! segment to the TTS node only with its commit, so the TTS node never queues a Tentative one. The
 //! TTS node sends the synthesis's own frames to the sink, and the sink sends the receipt of each
 //! segment it played back to the TTS node over a feedback edge, the only way a segment reaches
-//! Played.
+//! Played. The TTS node sends the `AudioPlayed` of each segment on to the LLM over a second
+//! feedback edge, so that the LLM knows what of its answer was played.
 //!
-//! A turn that opens while the answer of an earlier one plays is a barge-in (632-641). The turn
-//! events reach the speaker as well as the LLM. The sink stops the speaker at the `TurnOpened`,
-//! clearing its queue and reading the played position, and from then on drops every frame of a
-//! generation it took frames of before, making no receipt of it. The LLM supersedes its current
-//! generation at the same `TurnOpened` and sends its `GenerationSuperseded` on; the output gate
-//! drops what it holds of that generation, and the TTS node discards each of its segments not yet
-//! Played and passes the `GenerationSuperseded` on to the sink, which takes it the same way. No
-//! node instance changes state.
+//! A turn that opens while the answer of an earlier one is not all Played is a barge-in
+//! (632-641). The turn events reach the speaker as well as the LLM. The sink stops the speaker at
+//! the `TurnOpened`, clearing its queue and reading the played position, and from then on drops
+//! every frame of a generation that began before it, making no receipt of it: one it took frames
+//! of, or one whose `GenerationStarted`, which the TTS node passes on ahead of the generation's
+//! frames, names the epoch of an earlier turn, even before its first frame arrives. The LLM
+//! supersedes its current generation at the same `TurnOpened` and sends its
+//! `GenerationSuperseded` on; the output gate drops what it holds of that generation, and the TTS
+//! node discards each of its segments not yet Played and passes the `GenerationSuperseded` on to
+//! the sink, which takes it the same way and records the interruption then if no audio was left
+//! to stop at the opening. A turn that opens once the answer was all Played interrupts nothing:
+//! the LLM completes that generation. No node instance changes state.
 //!
 //! The cascade has no source node: the application feeds the ingress [`AUDIO_INGRESS`] at the
 //! input of `split`, and reads the egresses [`TRANSCRIPT_EGRESS`], the committed spans of the STT
@@ -326,6 +331,10 @@ impl PlaybackPayload for VoicePayload {
             Self::Stream(StreamEvent::GenerationSuperseded(superseded)) => {
                 Playable::Superseded(superseded.generation_id)
             }
+            Self::Stream(StreamEvent::GenerationStarted(started)) => Playable::Started {
+                generation_id: started.generation_id,
+                epoch: started.epoch,
+            },
             Self::Audio(_) | Self::Stream(_) | Self::Receipt(_) | Self::Control(_) => {
                 Playable::Other
             }
@@ -361,6 +370,8 @@ pub struct CascadeIds {
     pub output_lane: GateLane,
     pub speech_ports: SpeechPorts,
     pub sink_turns: PortId,
+    pub llm_played: PortId,
+    pub tts_playback: PortId,
 }
 
 impl CascadeIds {
@@ -513,6 +524,8 @@ pub fn declare(
             let turns_to_sink =
                 pipeline.output::<modality::Control>(&turn_split, "speaker", control);
             let sink_turns = pipeline.input::<modality::Control>(&sink, "turns", control);
+            let tts_playback = pipeline.output::<modality::Control>(&tts, "playback", control);
+            let llm_played = pipeline.input::<modality::Control>(&llm, "played", control);
 
             pipeline.connect(&to_vad, &heard, capacity, pause);
             pipeline.connect(&to_stt, &stt_audio, capacity, pause);
@@ -529,6 +542,7 @@ pub fn declare(
             pipeline.connect(&passed, &speak, capacity, pause);
             pipeline.connect(&spoken, &playing, capacity, pause);
             pipeline.connect_feedback(&receipts, &played_back, capacity, pause, capacity);
+            pipeline.connect_feedback(&tts_playback, &llm_played, capacity, pause, capacity);
             pipeline.expose(&microphone, AUDIO_INGRESS, capacity, pause);
             pipeline.expose(&committed, TRANSCRIPT_EGRESS, capacity, pause);
             pipeline.expose(&to_app, TEXT_EGRESS, capacity, pause);
@@ -568,6 +582,8 @@ pub fn declare(
                 ],
                 llm_turns: llm_turns.id(),
                 sink_turns: sink_turns.id(),
+                llm_played: llm_played.id(),
+                tts_playback: tts_playback.id(),
                 output_lane: GateLane {
                     input: held.id(),
                     output: passed.id(),
@@ -722,14 +738,16 @@ impl LocalCascade {
             mocks.reply,
             ids.llm_turns,
             log.clone(),
-        );
+        )
+        .with_playback(ids.llm_played);
         let output_gate = CommitGate::new([ids.output_lane]);
         let tts = SpeechNode::new(
             run_id,
             speak(mocks.synthesiser),
             ids.speech_ports,
             log.clone(),
-        );
+        )
+        .with_playback(ids.tts_playback);
         let sink = AcknowledgingSink::new(run_id, speaker).with_turns(ids.sink_turns);
         let handles = CascadeHandles {
             policy: policy.handle(),

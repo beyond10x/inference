@@ -6,7 +6,9 @@
 //! sockets of this process while the testkit's voice cascade runs: the cascade completes under
 //! it, a node connected to 127.0.0.1 leaves the run alone, and a node that connects a UDP socket to
 //! 192.0.2.1 (TEST-NET-1, RFC 5737; connecting a UDP socket sends nothing) fails the run with a
-//! reason naming the address.
+//! reason naming the address. A UDP socket connected to nothing fails the run, naming its local
+//! address, when it is bound to the unspecified address, and leaves it alone when it is bound to
+//! 127.0.0.1.
 //!
 //! The watch reads every socket of the process, so the cases that run the cascade hold one lock
 //! and never overlap: a socket another case opened would trip this case's watch.
@@ -39,7 +41,9 @@ use inference_pipeline::{
     PipelineState, PlanPipelineError, PortTraits, modality,
 };
 use inference_runtime::RunController;
-use inference_runtime::egress::{EgressWatch, connected_sockets, is_egress};
+use inference_runtime::egress::{
+    EgressWatch, connected_sockets, is_egress, unconnected_datagram_sockets,
+};
 use inference_runtime::run::{NodeInstanceState, RunState};
 use inference_testkit::cascade::{
     AUDIO_INGRESS, CascadePayload, Mocks, SPEECH_EGRESS, TEXT_EGRESS, TRANSCRIPT_EGRESS, TurnStore,
@@ -274,13 +278,43 @@ fn a_node_connected_to_loopback_leaves_the_run_unaffected() {
 #[test]
 fn a_node_connecting_to_test_net_1_fails_the_run_naming_the_address() {
     let _watched = watched();
+    let remote = SocketAddr::from((TEST_NET_1, 9));
+    failed_by_the_watch(test_net_1, |opened| {
+        assert_eq!(opened, [remote], "the node connected its socket");
+        remote
+    });
+}
+
+#[test]
+fn a_node_holding_an_unconnected_udp_socket_not_bound_to_loopback_fails_the_run_naming_it() {
+    let _watched = watched();
+    failed_by_the_watch(unconnected, |opened| {
+        let [local] = opened[..] else {
+            panic!("the node bound one socket: {opened:?}");
+        };
+        assert!(
+            local.ip().is_unspecified(),
+            "{local} is bound to any address"
+        );
+        assert!(
+            unconnected_datagram_sockets()
+                .expect("the sockets of this process are readable")
+                .contains(&local),
+            "the watch's reading sees {local}"
+        );
+        local
+    });
+}
+
+/// Runs the cascade with its `split` node opening sockets by `open` under the egress watch, and
+/// checks the watch fails the run naming the address `named` answers from what the node opened,
+/// winding every node down.
+fn failed_by_the_watch(open: Open, named: impl FnOnce(Vec<SocketAddr>) -> SocketAddr) {
     let mocks = mocks();
     let mut declaration = Declaration::new();
     let cascade = declare(&mut declaration, &mocks).expect("the cascade validates and plans");
-    let started = Started::new(&cascade, &declaration, mocks, Some(test_net_1));
-    let opened = started.opened();
-    let remote = SocketAddr::from((TEST_NET_1, 9));
-    assert_eq!(opened, [remote], "the node connected its socket");
+    let started = Started::new(&cascade, &declaration, mocks, Some(open));
+    let address = named(started.opened());
     let requests = started.controller.requests();
     let watch = EgressWatch::start(Egress::Denied, requests.clone())
         .expect("the watch thread starts")
@@ -313,10 +347,10 @@ fn a_node_connecting_to_test_net_1_fails_the_run_naming_the_address() {
         .expect("a Failed run has a reason");
     assert_eq!(failure.node_id, None, "a socket names no node");
     assert!(
-        failure.detail.contains("192.0.2.1"),
-        "the reason names the address: {failure:?}"
+        failure.detail.contains(&address.to_string()),
+        "the reason names {address}: {failure:?}"
     );
-    assert_eq!(watch.tripped(), Some(remote));
+    assert_eq!(watch.tripped(), Some(address));
     for node_id in cascade.ids.nodes() {
         assert_eq!(
             controller
@@ -364,7 +398,8 @@ fn mocks() -> Mocks {
     }
 }
 
-/// What a connecting node holds open until it stops, and the remote address of each connection.
+/// What a connecting node holds open until it stops, and the addresses the case checks: the
+/// remote address of each connection, or the local address of a socket connected to nothing.
 struct Opened {
     held: Vec<Box<dyn Any + Send>>,
     remotes: Vec<SocketAddr>,
@@ -373,7 +408,8 @@ struct Opened {
 /// Opens the sockets a node holds while it runs.
 type Open = fn() -> io::Result<Opened>;
 
-/// A TCP connection to a listener on 127.0.0.1 and a UDP socket connected to 127.0.0.1:9.
+/// A TCP connection to a listener on 127.0.0.1, a UDP socket connected to 127.0.0.1:9, and a UDP
+/// socket bound to 127.0.0.1 and connected to nothing, which has sent a datagram to the other.
 fn loopback() -> io::Result<Opened> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let client = TcpStream::connect(listener.local_addr()?)?;
@@ -381,6 +417,8 @@ fn loopback() -> io::Result<Opened> {
     let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
     let target = SocketAddr::from((Ipv4Addr::LOCALHOST, 9));
     udp.connect(target)?;
+    let unconnected = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+    unconnected.send_to(b"x", udp.local_addr()?)?;
     Ok(Opened {
         remotes: vec![client.peer_addr()?, server.peer_addr()?, target],
         held: vec![
@@ -388,7 +426,21 @@ fn loopback() -> io::Result<Opened> {
             Box::new(client),
             Box::new(server),
             Box::new(udp),
+            Box::new(unconnected),
         ],
+    })
+}
+
+/// A UDP socket bound to the unspecified address and connected to nothing, which has sent a
+/// datagram to a loopback socket of its own: it could have sent one anywhere, unseen. Its local
+/// address is the one the node names.
+fn unconnected() -> io::Result<Opened> {
+    let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let sender = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    sender.send_to(b"x", receiver.local_addr()?)?;
+    Ok(Opened {
+        remotes: vec![sender.local_addr()?],
+        held: vec![Box::new(receiver), Box::new(sender)],
     })
 }
 

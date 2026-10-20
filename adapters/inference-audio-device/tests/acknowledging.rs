@@ -51,6 +51,7 @@ enum Payload {
     Receipt(SegmentId, PlaybackReceipt),
     TurnOpened(TurnId),
     Superseded(GenerationId),
+    Started(GenerationId, i64),
     Control(ControlKind),
     Other,
 }
@@ -62,6 +63,10 @@ impl PlaybackPayload for Payload {
             Self::Completed(segment_id) => Playable::Completed(segment_id),
             Self::TurnOpened(turn_id) => Playable::TurnOpened(turn_id),
             Self::Superseded(generation_id) => Playable::Superseded(generation_id),
+            Self::Started(generation_id, epoch) => Playable::Started {
+                generation_id,
+                epoch,
+            },
             Self::Receipt(..) | Self::Control(_) | Self::Other => Playable::Other,
         }
     }
@@ -358,6 +363,7 @@ impl Feed {
             Payload::Control(kind) => kind.as_str().to_owned(),
             Payload::Completed(_) => "inference.stream.SynthesisCompleted".to_owned(),
             Payload::Superseded(_) => "inference.stream.GenerationSuperseded".to_owned(),
+            Payload::Started(..) => "inference.stream.GenerationStarted".to_owned(),
             _ => "inference.audio.AudioFrame".to_owned(),
         };
         self.edge.put(EventEnvelope {
@@ -796,6 +802,95 @@ fn a_superseded_generation_is_stopped_and_its_later_frames_dropped() {
         [],
         "an interruption is a turn's opening"
     );
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    block_on(node.cancel());
+    block_on(node.stop());
+}
+
+#[test]
+fn a_generation_started_before_a_turn_opened_has_its_first_frames_dropped_and_its_supersede_records_the_interruption()
+ {
+    let (mut run, turns) = started_with_turns();
+    let handle = run.sink.handle();
+    let old = run.synthesis.generation_id();
+    open_turn(&turns, TurnId::generate());
+    run.feed.send(Payload::Started(old, 1));
+
+    // The user speaks again before any frame of the first turn's answer reached the sink.
+    let second = TurnId::generate();
+    open_turn(&turns, second);
+    let segment = run.synthesis.segment("rendered too late");
+    for _ in 0..2 {
+        let frame = run.synthesis.frame(segment);
+        run.feed.send(frame);
+    }
+    let completed = run.synthesis.complete(segment);
+    run.feed.send(completed);
+    assert!(
+        eventually(|| handle.stale_frames().len() == 2),
+        "every frame of the generation that began before the turn is dropped: {:?}",
+        handle.stale_frames()
+    );
+    assert_eq!(handle.pushed(), 0, "no frame of it reached the speaker");
+    assert_eq!(
+        handle.interruptions(),
+        [],
+        "the interruption waits for the generation's supersede"
+    );
+
+    run.feed.send(Payload::Superseded(old));
+    assert!(eventually(|| handle.interruptions().len() == 1));
+    let interruption = handle.interruptions()[0];
+    assert_eq!(interruption.turn_id, second);
+    assert_eq!(interruption.cleared, 0, "nothing of it was queued");
+    let _ = run.host.pull(8 * DEVICE_FRAME);
+    assert_eq!(settled(&run.receipts), 0, "no receipt is made of it");
+
+    // The second turn's answer, epoch 2, plays.
+    let mut next = Synthesis::new();
+    run.feed.generation_id = next.generation_id();
+    run.feed.send(Payload::Started(next.generation_id(), 2));
+    let answer = next.segment("hello again");
+    let frame = next.frame(answer);
+    run.feed.send(frame);
+    let completed = next.complete(answer);
+    run.feed.send(completed);
+    assert!(played_until(&run, 1), "the second turn's answer plays");
+    let (named, receipt) = receipt(run.receipts.taken().remove(0));
+    assert_eq!((named, receipt.frames()), (answer, 1));
+    assert_eq!(handle.interruptions().len(), 1);
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    block_on(node.cancel());
+    block_on(node.stop());
+}
+
+#[test]
+fn a_generation_of_the_turn_before_that_is_never_superseded_makes_no_interruption() {
+    let (mut run, turns) = started_with_turns();
+    let handle = run.sink.handle();
+    open_turn(&turns, TurnId::generate());
+    run.feed
+        .send(Payload::Started(run.synthesis.generation_id(), 1));
+    let segment = run.synthesis.segment("all of it played");
+    let frame = run.synthesis.frame(segment);
+    run.feed.send(frame);
+    let completed = run.synthesis.complete(segment);
+    run.feed.send(completed);
+    assert!(played_until(&run, 1), "the first answer plays to the end");
+
+    open_turn(&turns, TurnId::generate());
+    let mut next = Synthesis::new();
+    next.next_sample = run.synthesis.next_sample;
+    run.feed.generation_id = next.generation_id();
+    run.feed.send(Payload::Started(next.generation_id(), 2));
+    let answer = next.segment("the next answer");
+    let frame = next.frame(answer);
+    run.feed.send(frame);
+    let completed = next.complete(answer);
+    run.feed.send(completed);
+    assert!(played_until(&run, 2), "the second answer plays");
+    assert_eq!(handle.interruptions(), []);
+    assert_eq!(handle.stale_frames(), []);
     let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
     block_on(node.cancel());
     block_on(node.stop());

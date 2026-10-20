@@ -21,19 +21,28 @@
 //! Given a turns port ([`AcknowledgingSink::with_turns`]), it takes the turn events of the turn
 //! policy on a second input edge, ahead of its audio and while a frame waits for room, and acts on
 //! each `inference.stream.TurnOpened`, the barge-in of `docs/design/inference.md` 632-641: every
-//! generation it took a frame of is stale from then on, and every segment it holds is forgotten,
-//! never acknowledged. If audio was still to play, a frame waiting for room or samples queued, it
-//! stops the speaker at once, clearing its queue, and records the [`Interruption`]: the turn, the
-//! samples cleared, the played position the stop answered and the one read after it, and the time
-//! from taking the `TurnOpened` to the stop returning, the design's "interruption to playback
-//! stop" (1023). An `inference.stream.GenerationSuperseded` on the audio edge makes its generation
-//! stale the same way, and stops the speaker if the sink holds a segment of it. A frame of a stale
-//! generation that reaches the sink later is dropped and recorded ([`StaleFrame`], with the played
-//! position when it was), never pushed, and the completion of a segment whose frames were dropped
-//! is ignored, so no receipt is ever made of it (step 4: stale results are rejected at the
-//! irreversible sink). A frame whose envelope names no generation is never stale. A generation
-//! whose first frame reaches the sink only after the `TurnOpened` is not known stale until its
-//! `GenerationSuperseded` arrives.
+//! generation that began before it is stale from then on, and every segment it holds is
+//! forgotten, never acknowledged. A generation began before the opening of a turn when the sink
+//! took a frame of it before that opening, or when its `inference.stream.GenerationStarted`
+//! ([`Playable::Started`]), which reaches the sink on the audio edge ahead of the generation's
+//! frames, names an epoch below the turn's ordinal: the sink numbers the turns it saw open from 1,
+//! and the epoch of a generation answering a turn is that turn's ordinal among the turns opened in
+//! the run, as the cascade's model node numbers it. So a generation the user spoke over before
+//! the first frame of it arrived is stale before that frame arrives. If audio was still to play,
+//! a frame waiting for room or samples queued, it stops the speaker at once, clearing its queue,
+//! and records the [`Interruption`]: the turn, the samples cleared, the played position the stop
+//! answered and the one read after it, and the time from taking the `TurnOpened` to the stop
+//! returning, the design's "interruption to playback stop" (1023). If none was, nothing is
+//! stopped: the interruption of that turn, nothing cleared and the played position read at the
+//! opening, is recorded once a generation that began before it is superseded, its output cut
+//! before any of it played; a generation that began before it and is never superseded, its output
+//! all played, makes no interruption. An `inference.stream.GenerationSuperseded` on the audio
+//! edge makes its generation stale the same way, and stops the speaker if the sink holds a segment
+//! of it. A frame of a stale generation that reaches the sink later is dropped and recorded
+//! ([`StaleFrame`], with the played position when it was), never pushed, and the completion of a
+//! segment whose frames were dropped is ignored, so no receipt is ever made of it (step 4: stale
+//! results are rejected at the irreversible sink). A frame whose envelope names no generation is
+//! never stale.
 //!
 //! At each `SynthesisCompleted` it [finishes](Speaker::finish) the audio pushed so far, so that
 //! the segment's last sample plays and the wait for the next segment is no underrun. While a
@@ -86,6 +95,11 @@ pub enum Playable {
     Completed(SegmentId),
     /// `inference.stream.TurnOpened` of the turn, on the turns port.
     TurnOpened(TurnId),
+    /// `inference.stream.GenerationStarted` of the generation, and its epoch.
+    Started {
+        generation_id: GenerationId,
+        epoch: i64,
+    },
     /// `inference.stream.GenerationSuperseded` of the generation.
     Superseded(GenerationId),
     /// Anything else.
@@ -255,6 +269,13 @@ struct Playing<P> {
     /// The generations of the frames taken, and those whose frames are stale.
     seen: HashSet<GenerationId>,
     stale: HashSet<GenerationId>,
+    /// The epoch of each generation whose `GenerationStarted` the sink took.
+    epochs: HashMap<GenerationId, i64>,
+    /// How many turns the sink saw open.
+    opened: i64,
+    /// The interruption of the turn opened last when no audio was left to stop, recorded once a
+    /// generation that began before it is superseded.
+    awaiting: Option<Interruption>,
     /// The segments whose frames the sink dropped, which it never acknowledges.
     dropped: HashSet<SegmentId>,
     input_ended: bool,
@@ -367,14 +388,37 @@ impl<P: PlaybackPayload> Playing<P> {
         self.held.clear();
     }
 
-    /// The opening of the turn `turn_id`: every generation the sink took a frame of is stale;
-    /// audio still to play is stopped at once and its segments forgotten.
+    /// Whether the generation `generation_id` began before the opening of the turn opened last:
+    /// its `GenerationStarted` named an epoch below that turn's ordinal.
+    fn began_before_turn(&self, generation_id: GenerationId) -> bool {
+        self.epochs
+            .get(&generation_id)
+            .is_some_and(|epoch| *epoch < self.opened)
+    }
+
+    /// Whether a frame of the generation `generation_id` is stale.
+    fn is_stale(&self, generation_id: Option<GenerationId>) -> bool {
+        generation_id.is_some_and(|generation| {
+            self.stale.contains(&generation) || self.began_before_turn(generation)
+        })
+    }
+
+    /// The opening of the turn `turn_id`: every generation that began before it is stale; audio
+    /// still to play is stopped at once and its segments forgotten.
     fn turn_opened(&mut self, turn_id: TurnId) {
         let at = Instant::now();
+        self.opened += 1;
         self.stale.extend(self.seen.iter().copied());
+        let opened = self.opened;
+        self.stale.extend(
+            self.epochs
+                .iter()
+                .filter(|(_, epoch)| **epoch < opened)
+                .map(|(generation_id, _)| *generation_id),
+        );
         let unplayed = self.pending.is_some() || self.speaker.queued() > 0;
         if let Some((audio, generation_id)) = self.pending.take() {
-            if generation_id.is_some_and(|generation| self.stale.contains(&generation)) {
+            if self.is_stale(generation_id) {
                 self.drop_stale(&audio, generation_id);
             } else {
                 self.pending = Some((audio, generation_id));
@@ -382,8 +426,18 @@ impl<P: PlaybackPayload> Playing<P> {
         }
         self.forget_held();
         if !unplayed {
+            let played = self.speaker.played();
+            self.awaiting = Some(Interruption {
+                turn_id,
+                at,
+                stop: at.elapsed(),
+                cleared: 0,
+                position: played,
+                played_after: played,
+            });
             return;
         }
+        self.awaiting = None;
         let cleared = self.speaker.queued();
         let position = self.speaker.stop();
         let stop = at.elapsed();
@@ -401,8 +455,11 @@ impl<P: PlaybackPayload> Playing<P> {
     }
 
     /// The generation `generation_id` was superseded: its frames are stale, and audio of it still
-    /// to play is stopped at once.
+    /// to play is stopped at once. A generation that began before the turn opened last, which
+    /// found no audio to stop, was cut before it played: the interruption of that turn is
+    /// recorded.
     fn superseded(&mut self, generation_id: GenerationId) {
+        let by_turn = self.is_stale(Some(generation_id));
         self.stale.insert(generation_id);
         let holds = self
             .held
@@ -411,6 +468,10 @@ impl<P: PlaybackPayload> Playing<P> {
         if holds {
             let _unplayed_is_dropped = self.speaker.stop();
             self.forget_held();
+        }
+        if by_turn && let Some(interruption) = self.awaiting.take() {
+            self.shared
+                .update(|state| state.interruptions.push(interruption));
         }
     }
 
@@ -472,8 +533,7 @@ impl<P: PlaybackPayload> Playing<P> {
             Some(_) => {}
             None => {
                 let generation_id = envelope.generation_id;
-                let stale =
-                    generation_id.is_some_and(|generation| self.stale.contains(&generation));
+                let stale = self.is_stale(generation_id);
                 match envelope.payload.playable() {
                     Playable::Audio(audio) if stale => self.drop_stale(&audio, generation_id),
                     Playable::Audio(audio) => {
@@ -488,6 +548,12 @@ impl<P: PlaybackPayload> Playing<P> {
                         }
                     }
                     Playable::Superseded(generation) => self.superseded(generation),
+                    Playable::Started {
+                        generation_id,
+                        epoch,
+                    } => {
+                        self.epochs.insert(generation_id, epoch);
+                    }
                     Playable::TurnOpened(_) | Playable::Other => {}
                 }
             }
@@ -738,6 +804,9 @@ impl<P: PlaybackPayload> NodeImplementation<P> for AcknowledgingSink {
                 pending: None,
                 seen: HashSet::new(),
                 stale: HashSet::new(),
+                epochs: HashMap::new(),
+                opened: 0,
+                awaiting: None,
                 dropped: HashSet::new(),
                 input_ended: false,
             };
