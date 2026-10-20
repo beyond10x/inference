@@ -254,7 +254,7 @@ impl TurnDetection {
 }
 
 impl FunctionTool {
-    fn to_json(&self) -> Value {
+    pub(crate) fn to_json(&self) -> Value {
         json!({
             "type": "function",
             "name": self.name,

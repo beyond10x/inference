@@ -31,6 +31,12 @@
 //! With feature `duplex` ([`duplex`]), the client is an `inference-duplex` native speech model:
 //! [`duplex::OpenAiRealtime`] opens sessions through the contract and records every server
 //! event through its `SessionLedger`.
+//!
+//! With feature `gpt-live`, `live` is a client for GPT-Live (`v1/live/sessions`, model
+//! `gpt-live-1`), OpenAI's full-duplex voice model that delegates reasoning and tools to a
+//! backend; it shares the credential sources and the transport. With `gpt-live` and `duplex`,
+//! `live_duplex::OpenAiLive` binds it to the same duplex contract, so the two can be swapped and
+//! compared.
 
 mod audio;
 mod client;
@@ -40,6 +46,10 @@ mod credential;
 pub mod duplex;
 mod error;
 mod event;
+#[cfg(feature = "gpt-live")]
+pub mod live;
+#[cfg(all(feature = "gpt-live", feature = "duplex"))]
+pub mod live_duplex;
 
 pub use audio::encode_pcm16_24k;
 pub use client::RealtimeClient;
