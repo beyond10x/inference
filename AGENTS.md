@@ -57,7 +57,7 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   implementation. A concrete integration is an adapter crate that depends on the contracts, never
   the reverse. The repository ships libraries: no binary, server or CLI.
 - `inference-llm` is a thin wrapper over the `llm` repository's model contract
-  (`b10x-llm-core`, `llm_core::Model`) at a release tag, 0.7.0 now, and the workspace's
+  (`b10x-llm-core`, `llm_core::Model`) at a release tag, 0.8.0 now, and the workspace's
   `rust-version` is what that tag requires, 1.98 (owner decision, 2026-10-20, reversing the
   2026-10-18 rule for `llm` only). Its request, items, tool calls and usage are `llm`'s; the
   wrapper adds only graph concerns, and `llm`'s wire crates, being provider implementations, stay

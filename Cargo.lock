@@ -665,8 +665,8 @@ dependencies = [
 
 [[package]]
 name = "b10x-llm-core"
-version = "0.7.0"
-source = "git+https://github.com/beyond10x/llm?tag=0.7.0#75455f32a2a2ad728f307daf943b12a42a29e114"
+version = "0.8.0"
+source = "git+https://github.com/beyond10x/llm?tag=0.8.0#7873aa63e37db33716e946cd206c3656a76676a9"
 dependencies = [
  "serde",
  "serde_json",

@@ -94,6 +94,7 @@ fn an_adapter_not_claiming_concurrent_input_output_takes_no_input_through_offer_
         turn: TurnRequest::new("model", vec![Item::user("prompt")]),
     };
     let mut handle = Generator::new(adapter, Arc::new(model))
+        .expect("the model declares what the adapter claims")
         .start(request)
         .expect("a fresh generator runs nothing else");
     let offered = handle.offer_input("input during output".to_owned());
