@@ -82,7 +82,7 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
 - A release is a bare annotated version tag (`0.1.0`) on gated `main`, pushed through the bot
   route, then `b10x-gates gh -- release create <tag> --verify-tag --notes-file <file>` with a
   notes file that passed `b10x-gates scan-text`. The `CHANGELOG.md` entry lands in the commit
-  the tag points at. No binary is published: this repository ships libraries.
+  the tag points at, and so does the version in `Cargo.toml` and the `adapter_revision` of every capability record under `adapters/`. No binary is published: this repository ships libraries.
 - The CI pins (`ess`, `aep`, go-task, the actions' commits, the `common.yml` commit) move only by
   a commit here that names the new version and its checksum.
 - This repository is public. Committed text names no private repository, session or decision id,
