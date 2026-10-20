@@ -1,7 +1,8 @@
 //! The backend-neutral TTS adapter checks of `inference_testkit::tts::conformance`: every check
 //! accepts the mock synthesiser in each of its four configurations, and the claims check rejects
 //! two doubles that claim more than they do, naming the capability it did not observe, while each
-//! double passes every other check.
+//! double passes every other check. The usage check rejects a double that records no usage, a
+//! record that misstates the characters offered and a second record.
 
 #![cfg(feature = "tts")]
 
@@ -13,10 +14,11 @@ use std::rc::Rc;
 use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
+use inference_core::usage::{Quantity, QuantityKind};
 use inference_testkit::tts::conformance::{
     self, DEFAULT_SENTENCES, Failure, Fault, Item, ObservedClaims, Utterance,
 };
-use inference_testkit::tts::{MockConfiguration, MockSynthesiser};
+use inference_testkit::tts::{MockConfiguration, MockSynthesis, MockSynthesiser};
 use inference_text::{
     AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentState,
 };
@@ -159,6 +161,198 @@ fn the_cancellation_check_accepts_the_mock_in_every_configuration() {
 }
 
 #[test]
+fn the_usage_check_accepts_the_mock_in_every_configuration_and_observes_what_it_offered_and_emitted()
+ {
+    let characters: usize = DEFAULT_SENTENCES
+        .iter()
+        .map(|sentence| sentence.chars().count())
+        .sum();
+    for configuration in MockConfiguration::ALL {
+        let observed = conformance::usage_recorded(&mut mock(configuration), &Utterance::default())
+            .unwrap_or_else(|failure| panic!("{configuration:?}: {failure}"));
+        assert_eq!(
+            observed.characters,
+            i64::try_from(characters).expect("short"),
+            "{configuration:?}"
+        );
+        let samples = observed.frames as u64 * u64::from(inference_testkit::tts::FRAME_SAMPLES);
+        assert_eq!(
+            observed.audio_ms,
+            i64::try_from(samples * 1_000 / 16_000).expect("short"),
+            "{configuration:?}"
+        );
+        assert!(observed.frames > 0, "{configuration:?}");
+        assert_eq!(
+            observed.local_compute,
+            Quantity::unknown(QuantityKind::LocalComputeMs),
+            "{configuration:?}: the mock computes nothing of its own"
+        );
+    }
+}
+
+#[test]
+fn the_usage_check_rejects_a_double_that_records_no_usage() {
+    let mut double = Double::new(
+        MockConfiguration::Neither,
+        Behaviour {
+            records_usage: false,
+            ..Behaviour::NEITHER
+        },
+    );
+    let failure = conformance::usage_recorded(&mut double, &Utterance::default())
+        .expect_err("the double records no usage");
+    assert_eq!(
+        failure,
+        Failure {
+            item: Item::UsageRecorded,
+            fault: Fault::UsageMissing,
+        }
+    );
+}
+
+#[test]
+fn the_usage_check_rejects_a_record_that_misstates_the_characters_and_a_second_record() {
+    let characters: usize = DEFAULT_SENTENCES
+        .iter()
+        .map(|sentence| sentence.chars().count())
+        .sum();
+    let characters = i64::try_from(characters).expect("short");
+    let mut misstating = Forging::new(Forgery::Characters(characters + 1));
+    let failure = conformance::usage_recorded(&mut misstating, &Utterance::default())
+        .expect_err("the record misstates the characters");
+    assert_eq!(
+        failure,
+        Failure {
+            item: Item::UsageRecorded,
+            fault: Fault::UsageQuantity {
+                kind: QuantityKind::InputCharacters,
+                expected: Some(Quantity::measured(
+                    QuantityKind::InputCharacters,
+                    characters
+                )),
+                actual: Some(Quantity::measured(
+                    QuantityKind::InputCharacters,
+                    characters + 1
+                )),
+            },
+        }
+    );
+
+    let mut twice = Forging::new(Forgery::Twice);
+    let failure = conformance::usage_recorded(&mut twice, &Utterance::default())
+        .expect_err("the synthesis records its usage twice");
+    assert_eq!(
+        failure,
+        Failure {
+            item: Item::UsageRecorded,
+            fault: Fault::UsageRepeated,
+        }
+    );
+}
+
+/// How a [`Forging`] synthesis falsifies the usage record of the mock it wraps.
+#[derive(Debug, Clone, Copy)]
+enum Forgery {
+    /// Delivers the record with `input_characters` replaced by this many, `measured`.
+    Characters(i64),
+    /// Delivers the record twice.
+    Twice,
+}
+
+/// The mock synthesiser behind a handle that falsifies its usage record, as an implementation
+/// that builds its own [`SynthesisEvent::Usage`] could.
+struct Forging {
+    inner: MockSynthesiser,
+    forgery: Forgery,
+}
+
+impl Forging {
+    fn new(forgery: Forgery) -> Self {
+        Self {
+            inner: mock(MockConfiguration::Neither),
+            forgery,
+        }
+    }
+}
+
+impl Synthesiser for Forging {
+    type Handle = ForgingSynthesis;
+
+    fn adapter(&self) -> &Adapter {
+        self.inner.adapter()
+    }
+
+    fn start(&mut self) -> Result<ForgingSynthesis, ConcurrencyLimitReached> {
+        Ok(ForgingSynthesis {
+            inner: self.inner.start()?,
+            forgery: self.forgery,
+            again: None,
+        })
+    }
+}
+
+struct ForgingSynthesis {
+    inner: MockSynthesis,
+    forgery: Forgery,
+    again: Option<SynthesisEvent>,
+}
+
+impl Iterator for ForgingSynthesis {
+    type Item = SynthesisEvent;
+
+    fn next(&mut self) -> Option<SynthesisEvent> {
+        if let Some(event) = self.again.take() {
+            return Some(event);
+        }
+        match self.inner.next()? {
+            SynthesisEvent::Usage(mut recorded) => {
+                match self.forgery {
+                    Forgery::Characters(characters) => {
+                        for quantity in &mut recorded.quantities {
+                            if quantity.kind() == QuantityKind::InputCharacters {
+                                *quantity =
+                                    Quantity::measured(QuantityKind::InputCharacters, characters);
+                            }
+                        }
+                    }
+                    Forgery::Twice => {
+                        self.again = Some(SynthesisEvent::Usage(recorded.clone()));
+                    }
+                }
+                Some(SynthesisEvent::Usage(recorded))
+            }
+            event => Some(event),
+        }
+    }
+}
+
+impl SynthesisHandle for ForgingSynthesis {
+    fn output(&self) -> &SynthesisOutput {
+        self.inner.output()
+    }
+
+    fn offer_segment(&mut self, segment: OutputSegment) -> Result<SegmentQueued, OfferRefused> {
+        self.inner.offer_segment(segment)
+    }
+
+    fn end_utterance(&mut self) -> Result<(), UtteranceEnded> {
+        self.inner.end_utterance()
+    }
+
+    fn acknowledge_playback(
+        &mut self,
+        segment_id: SegmentId,
+        receipt: PlaybackReceipt,
+    ) -> Result<AudioPlayed, PlaybackRefused> {
+        self.inner.acknowledge_playback(segment_id, receipt)
+    }
+
+    fn discard(&mut self, segment_id: SegmentId) -> Result<SegmentDiscarded, DiscardRefused> {
+        self.inner.discard(segment_id)
+    }
+}
+
+#[test]
 fn the_claims_check_rejects_a_double_that_claims_output_streaming_but_emits_audio_only_at_completion()
  {
     let mut double = Double::new(MockConfiguration::OutputStreamingOnly, Behaviour::NEITHER);
@@ -206,6 +400,7 @@ fn the_double_is_accepted_when_it_claims_what_it_does() {
         let behaviour = Behaviour {
             takes_early: claims(configuration, Capability::IncrementalInput),
             streams: claims(configuration, Capability::OutputStreaming),
+            records_usage: true,
         };
         let mut double = Double::new(configuration, behaviour);
         conformance::claims_observed(&mut double, &Utterance::default())
@@ -229,6 +424,8 @@ fn each_lying_double_passes_every_other_check() {
             .unwrap_or_else(|failure| panic!("{claimed:?}: {failure}"));
         conformance::cancellation(&mut double, &utterance)
             .unwrap_or_else(|failure| panic!("{claimed:?}: {failure}"));
+        conformance::usage_recorded(&mut double, &utterance)
+            .unwrap_or_else(|failure| panic!("{claimed:?}: {failure}"));
     }
 }
 
@@ -239,12 +436,16 @@ struct Behaviour {
     takes_early: bool,
     /// Emits frames while a segment is Queued, when the contract lets it.
     streams: bool,
+    /// Delivers the synthesis's usage record once it has nothing else left, when the contract
+    /// lets it.
+    records_usage: bool,
 }
 
 impl Behaviour {
     const NEITHER: Self = Self {
         takes_early: false,
         streams: false,
+        records_usage: true,
     };
 }
 
@@ -347,7 +548,13 @@ impl Iterator for DoubleSynthesis {
                     )
                 }));
             }
-            let &(segment_id, frames_left) = self.pending.front()?;
+            let Some(&(segment_id, frames_left)) = self.pending.front() else {
+                return if self.behaviour.records_usage {
+                    self.output.usage().ok()
+                } else {
+                    None
+                };
+            };
             if self.output.segment(segment_id).map(OutputSegment::state)
                 != Some(SegmentState::Queued)
             {
@@ -400,7 +607,7 @@ impl SynthesisHandle for DoubleSynthesis {
     fn discard(&mut self, segment_id: SegmentId) -> Result<SegmentDiscarded, DiscardRefused> {
         let event = self.output.discard(segment_id)?;
         self.delivered
-            .retain(|event| event.segment_id() != segment_id);
+            .retain(|event| event.segment_id() != Some(segment_id));
         Ok(event)
     }
 }

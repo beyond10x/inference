@@ -48,8 +48,8 @@ pub mod duplex;
 /// declared adapter and model.
 pub mod usage;
 
-/// The scripted mock recogniser of the STT contract, in two capability configurations, and
-/// synthetic audio of tone and silence.
+/// The scripted mock recogniser of the STT contract, in two capability configurations, each
+/// recognition ending with its usage record, and synthetic audio of tone and silence.
 #[cfg(feature = "stt")]
 pub mod stt;
 
@@ -59,9 +59,10 @@ pub mod stt;
 #[cfg(feature = "llm")]
 pub mod llm;
 
-/// The scripted mock synthesiser of the TTS contract, in four capability configurations, a sink
-/// double that acknowledges playback, and the backend-neutral checks of the TTS adapter exit
-/// criteria that an adapter crate runs against its own synthesiser.
+/// The scripted mock synthesiser of the TTS contract, in four capability configurations, each
+/// synthesis ending with its usage record, a sink double that acknowledges playback, and the
+/// backend-neutral checks of the TTS adapter exit criteria, the usage record among them, that an
+/// adapter crate runs against its own synthesiser.
 #[cfg(feature = "tts")]
 pub mod tts;
 

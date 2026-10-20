@@ -1,6 +1,7 @@
-//! Talk to the local voice cascade from a laptop, offline: the microphone, the sherpa-onnx
-//! recogniser, a `llama-server` on loopback, the mock synthesiser and the speaker. Use a headset:
-//! there is no echo cancellation, and a laptop's own speaker feeds back into its microphone.
+//! Talk to the local voice cascade from a laptop, offline: the microphone, a local recogniser,
+//! sherpa-onnx's streaming one or whisper.cpp's batch one, a `llama-server` on loopback, the mock
+//! synthesiser and the speaker. Use a headset: there is no echo cancellation, and a laptop's own
+//! speaker feeds back into its microphone.
 //!
 //! ```text
 //! llama-server --host 127.0.0.1 --port 8080 -m qwen2.5-1.5b-instruct-q4_k_m.gguf \
@@ -11,7 +12,11 @@
 //!     cargo run -p local-voice-cascade --features local --example talk
 //! ```
 //!
-//! Each location is an option as well as a variable; `--input` and `--output` name a device, the
+//! `--stt whispercpp`, or `INFERENCE_CASCADE_STT=whispercpp`, binds the whisper.cpp recogniser
+//! over the checkpoint file `--whispercpp-model` or `INFERENCE_WHISPERCPP_STT_MODEL` names
+//! instead; it transcribes each turn once the turn completes, so its line appears after the
+//! pause that ends the question. Each location is an option as well as a variable, and only the
+//! selected recogniser's checkpoint is needed; `--input` and `--output` name a device, the
 //! default device otherwise. A server URL whose host is not loopback is refused before anything
 //! opens, and the run fails if a socket of the process connects anywhere but loopback.
 //!
@@ -22,6 +27,7 @@
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::ffi::OsString;
 use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
@@ -45,8 +51,9 @@ use inference_testkit::cascade::TurnStore;
 use inference_testkit::graph::RunLog;
 use inference_testkit::stream::StreamEvent;
 use local_voice_cascade::local::{
-    LocalConfig, LocalModels, MAX_OUTPUT_TOKENS, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE,
-    STT_DIR_VARIABLE, declare_local,
+    LocalConfig, LocalModels, LocalRefused, MAX_OUTPUT_TOKENS, SERVER_MODEL_VARIABLE,
+    SERVER_URL_VARIABLE, STT_DIR_VARIABLE, STT_VARIABLE, SttBackend, SttConfig,
+    WHISPERCPP_MODEL_VARIABLE, declare_local,
 };
 use local_voice_cascade::{
     AUDIO_INGRESS, CascadeHandles, TEXT_EGRESS, TRANSCRIPT_EGRESS, VoicePayload,
@@ -55,9 +62,17 @@ use local_voice_cascade::{
 /// Talk to the local voice cascade through a microphone and a speaker.
 #[derive(Debug, Parser)]
 struct Args {
-    /// The directory of the unpacked pinned checkpoint of the sherpa-onnx recogniser.
-    #[arg(long, env = STT_DIR_VARIABLE)]
-    stt_dir: PathBuf,
+    /// The recogniser: sherpa-onnx or whispercpp.
+    #[arg(long, env = STT_VARIABLE, default_value_t = SttBackend::SherpaOnnx)]
+    stt: SttBackend,
+    /// The directory of the unpacked pinned checkpoint of the sherpa-onnx recogniser, for
+    /// --stt sherpa-onnx. Read as given, so that an empty value of the recogniser not selected is
+    /// ignored rather than refused.
+    #[arg(long, env = STT_DIR_VARIABLE, value_parser = clap::value_parser!(OsString))]
+    stt_dir: Option<OsString>,
+    /// The pinned checkpoint file of the whisper.cpp recogniser, for --stt whispercpp.
+    #[arg(long, env = WHISPERCPP_MODEL_VARIABLE, value_parser = clap::value_parser!(OsString))]
+    whispercpp_model: Option<OsString>,
     /// The base URL of the llama-server's API, on loopback.
     #[arg(long, env = SERVER_URL_VARIABLE)]
     server_url: String,
@@ -112,8 +127,15 @@ fn main() -> ExitCode {
 
 /// Holds the conversation until the run ends or the process is interrupted.
 fn talk(args: Args) -> Result<(), Box<dyn Error>> {
+    let checkpoint = match args.stt {
+        SttBackend::SherpaOnnx => args.stt_dir,
+        SttBackend::WhisperCpp => args.whispercpp_model,
+    }
+    .filter(|location| !location.is_empty())
+    .map(PathBuf::from)
+    .ok_or(LocalRefused::Missing(args.stt.variable()))?;
     let config = LocalConfig {
-        stt_dir: args.stt_dir,
+        stt: SttConfig::new(args.stt, checkpoint),
         server_url: args.server_url,
         server_model: args.server_model,
         max_output_tokens: args.max_output_tokens,

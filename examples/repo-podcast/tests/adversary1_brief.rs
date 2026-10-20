@@ -26,7 +26,20 @@ fn a_directory_named_like_an_option_is_only_the_working_directory() {
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("executable");
     let dir = root.join("--dangerously-skip-permissions --tools Bash");
     std::fs::create_dir_all(&dir).expect("made");
-    let printed = distil(&fake, &dir).expect("the stand-in prints");
+    // A test that forks while the stand-in is open for writing makes exec fail with ETXTBSY
+    // until that child execs; such a start is retried.
+    let mut attempt = 0;
+    let printed = loop {
+        match distil(&fake, &dir) {
+            Err(repo_podcast::DistilError::Start { error, .. })
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 50 =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => break other.expect("the stand-in prints"),
+        }
+    };
     let mut lines = printed.lines();
     assert_eq!(
         lines.next().map(Path::new),

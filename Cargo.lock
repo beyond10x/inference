@@ -2646,6 +2646,7 @@ dependencies = [
  "inference-testkit",
  "inference-text",
  "inference-tts",
+ "inference-whispercpp",
 ]
 
 [[package]]

@@ -20,9 +20,22 @@
 //! Played, and emits its `AudioPlayed`. The Played segments are read from the node's handle
 //! ([`TtsHandle::played`]).
 //!
+//! Given a usage port ([`TtsNode::with_usage`]), the output port its pipeline declares under the
+//! name `usage`, the node sends on the edge or exposure leaving it the usage record of its
+//! synthesis, as `inference-tts` delivers it once the utterance has ended, after the synthesis's
+//! last segment: an envelope of kind `inference.usage.UsageRecorded` on a stream of its own,
+//! whose record the node places on the run, itself as the node and the session its envelopes
+//! name, none. The record is neither recorded in the [`RunLog`], which holds `inference.stream`
+//! events, nor sent on the audio port. The port convention is the model node's
+//! (`story:usage-llm`, design 684-688): the edge or exposure leaving it uses an overload policy
+//! that never drops (`pause` or `fail`). A node with no edge leaving its usage port, or given
+//! none, or on a payload that carries no usage ([`TtsPayload::usage`]), sends no record. A
+//! synthesis the node drops before its utterance ended, as a cancel does, yields none.
+//!
 //! Every `inference.stream` event it emits is recorded in the run's [`RunLog`] in its envelope. On
 //! the end of input, a control event of kind `stop`, or once its input edge is closed, it ends the
-//! utterance, delivers what the synthesis has left and passes the end of input on. Cancelled, it
+//! utterance, delivers what the synthesis has left, its usage record last, and passes the end of
+//! input on, on every output port, `usage` among them. Cancelled, it
 //! sends nothing more: a cancel taken while a send waits for room ends the wait. Every other
 //! event, such as `GenerationCompleted`, is taken and ignored; a segment the synthesis refuses
 //! fails the node.
@@ -31,12 +44,14 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future;
 use std::sync::{Arc, Weak};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{Generation, StartGeneration};
-use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
-use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
+use inference_core::id::{GenerationId, NodeId, RunId, SessionId, StreamId};
+use inference_core::usage::UsageRecorded;
+use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
 use inference_text::{OutputSegment, SegmentId, SegmentSnapshot};
 use inference_tts::inference_audio::AudioFrame;
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
@@ -68,6 +83,13 @@ pub trait TtsPayload: From<ControlKind> + Send + 'static {
     /// The payload carrying `frame`.
     fn audio(frame: AudioFrame) -> Self;
 
+    /// The payload carrying the usage record `recorded`; none, the default, for a payload that
+    /// carries no usage, on whose edges the node sends no record.
+    fn usage(recorded: UsageRecorded) -> Option<Self> {
+        let _ = recorded;
+        None
+    }
+
     /// What the payload carries.
     fn spoken(self) -> Spoken;
 }
@@ -91,6 +113,7 @@ pub struct TtsNode<S = MockSynthesiser> {
     run_id: RunId,
     synthesiser: S,
     playing: bool,
+    usage: Option<PortId>,
     log: RunLog,
     node_id: Option<NodeId>,
     state: Arc<Watched<State>>,
@@ -103,6 +126,7 @@ impl<S: fmt::Debug> fmt::Debug for TtsNode<S> {
             .field("run_id", &self.run_id)
             .field("synthesiser", &self.synthesiser)
             .field("playing", &self.playing)
+            .field("usage", &self.usage)
             .field("node_id", &self.node_id)
             .field("state", &self.state)
             .field("exchange", &self.exchange)
@@ -119,6 +143,7 @@ impl<S: Synthesiser> TtsNode<S> {
             run_id,
             synthesiser,
             playing: false,
+            usage: None,
             log,
             node_id: None,
             state: Arc::new(Watched::new(State::default())),
@@ -131,6 +156,15 @@ impl<S: Synthesiser> TtsNode<S> {
     #[must_use]
     pub const fn playing(mut self) -> Self {
         self.playing = true;
+        self
+    }
+
+    /// The same node given a usage port, `usage`, the output port its pipeline declares under the
+    /// name `usage`: once an edge or exposure leaves it, the node sends there the usage record of
+    /// its synthesis; see the module documentation.
+    #[must_use]
+    pub const fn with_usage(mut self, usage: PortId) -> Self {
+        self.usage = Some(usage);
         self
     }
 
@@ -220,6 +254,57 @@ fn carry<P: TtsPayload>(envelope: EventEnvelope<PipelinePayload>) -> EventEnvelo
     }
 }
 
+/// The `usage` port of a started node given one: the edge or exposure leaving it, on which the
+/// node sends the usage record of its synthesis as one stream of its own, numbered from 1.
+struct UsageOut<P> {
+    output: Box<dyn OutputEndpoint<P>>,
+    run_id: RunId,
+    producer: NodeId,
+    /// The session the node's envelopes name: none, as every envelope of the node names none.
+    session_id: Option<SessionId>,
+    port: String,
+    stream_id: StreamId,
+    sequence: i64,
+}
+
+impl<P: TtsPayload> UsageOut<P> {
+    /// The envelope of `recorded`, placed on the run, node and session the envelope names; none
+    /// when the payload carries no usage.
+    fn envelope(&mut self, mut recorded: UsageRecorded) -> Option<EventEnvelope<P>> {
+        recorded.run_id = Some(self.run_id);
+        recorded.node_id = Some(self.producer);
+        recorded.session_id = self.session_id;
+        let payload = P::usage(recorded)?;
+        Some(self.next(UsageRecorded::KIND.to_owned(), payload))
+    }
+
+    /// The next envelope on the node's `usage` stream, stamped on the wall clock.
+    fn next(&mut self, kind: String, payload: P) -> EventEnvelope<P> {
+        self.sequence += 1;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_micros()).unwrap_or(i64::MAX)
+            });
+        EventEnvelope {
+            schema_version: 1,
+            event_id: EventId::generate(),
+            run_id: self.run_id,
+            session_id: self.session_id,
+            stream_id: self.stream_id,
+            sequence: self.sequence,
+            producer: self.producer,
+            port: self.port.clone(),
+            kind,
+            generation_id: None,
+            timestamp,
+            timebase: Timebase::WallTime,
+            causation_id: None,
+            payload,
+        }
+    }
+}
+
 /// One started exchange of a [`TtsNode`].
 struct Exchanging<P, H> {
     run_id: RunId,
@@ -229,6 +314,8 @@ struct Exchanging<P, H> {
     sink: Option<MockSink>,
     input: Box<dyn InputEndpoint<P>>,
     output: Box<dyn OutputEndpoint<P>>,
+    /// The node's `usage` port, given one with an edge or exposure leaving it.
+    usage: Option<UsageOut<P>>,
     emitter: Emitter,
     /// The node's audio stream and the last sequence sent on it.
     audio_stream: StreamId,
@@ -307,9 +394,47 @@ impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
                         self.emit(StreamEvent::AudioPlayed(event)).await?;
                     }
                 }
+                SynthesisEvent::Usage(recorded) => self.send_usage(recorded).await?,
             }
         }
         Ok(())
+    }
+
+    /// Sends `recorded`, the usage of the synthesis, on the `usage` port, placed on the run, the
+    /// node and the session of its envelope; a node with no edge leaving its `usage` port sends
+    /// nothing.
+    async fn send_usage(&mut self, recorded: UsageRecorded) -> Result<(), String> {
+        let Some(usage) = self.usage.as_mut() else {
+            return Ok(());
+        };
+        let Some(envelope) = usage.envelope(recorded) else {
+            return Ok(());
+        };
+        send_unless(
+            usage.output.as_ref(),
+            &self.state,
+            |state| state.cancel,
+            envelope,
+        )
+        .await
+    }
+
+    /// Passes the end of input on, on the `usage` port, given one with an edge leaving it.
+    async fn end_usage(&mut self) -> Result<(), String> {
+        let Some(usage) = self.usage.as_mut() else {
+            return Ok(());
+        };
+        let end = usage.next(
+            ControlKind::Stop.as_str().to_owned(),
+            P::from(ControlKind::Stop),
+        );
+        send_unless(
+            usage.output.as_ref(),
+            &self.state,
+            |state| state.cancel,
+            end,
+        )
+        .await
     }
 
     /// Acts on `event`, which arrived from `producer`.
@@ -377,7 +502,7 @@ impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
         self.pump().await?;
         let end = self.emitter.control(ControlKind::Stop);
         self.send(end).await?;
-        Ok(())
+        self.end_usage().await
     }
 
     fn run(mut self) {
@@ -403,6 +528,15 @@ where
     }
 
     fn start(&mut self, mut endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
+        let usage = self
+            .usage
+            .and_then(|port| {
+                endpoints
+                    .outputs
+                    .iter()
+                    .position(|output| output.port_id == port)
+            })
+            .map(|at| endpoints.outputs.remove(at));
         let started = started(self.node_id, &endpoints, 1, 1).and_then(|producer| {
             let synthesis = self
                 .synthesiser
@@ -420,6 +554,15 @@ where
                 sink: self.playing.then(MockSink::new),
                 input,
                 output: output.endpoint,
+                usage: usage.map(|usage| UsageOut {
+                    run_id: self.run_id,
+                    producer,
+                    session_id: None,
+                    port: usage.port_id.to_string(),
+                    output: usage.endpoint,
+                    stream_id: StreamId::generate(),
+                    sequence: 0,
+                }),
                 audio_stream: StreamId::generate(),
                 audio_sequence: 0,
                 generations: HashMap::new(),

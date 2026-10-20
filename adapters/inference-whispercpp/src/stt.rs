@@ -23,6 +23,15 @@
 //! [`NO_SPEECH_THRESHOLD`] is dropped, and so is a segment that is nothing but bracketed or
 //! parenthesised annotations such as `[BLANK_AUDIO]`.
 //!
+//! The recognition's usage record, the contract's [`TranscriptOutput::usage`], is its last event,
+//! delivered once input has ended, after the commit if there is text and whether or not
+//! whisper.cpp transcribed it: the audio offered and one request, as the contract measures them,
+//! and `local_compute_ms` `measured`, the wall time of the `full` call and the reading of its
+//! segments, or `unknown` when there was no audio to transcribe and whisper.cpp was not called.
+//! A transcription that failed is recorded with what was measured and its counts not final
+//! (`final` false), as `inference-llm` records a failed turn. whisper.cpp reports no quantity of
+//! its own.
+//!
 //! The crate's `stt_conformance` tests hold the recogniser to adapter conformance against the
 //! pinned checkpoint, with the claims of the sherpa-onnx recogniser's conformance inverted.
 //! Its capability record on the reference machine is `records/stt-i9-10900k-cpu.json`.
@@ -42,6 +51,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -555,9 +565,10 @@ impl WhisperCppRecognition {
         self.failure.as_ref()
     }
 
-    /// Once input has ended, takes every frame offered, transcribes them and emits the text. Before
-    /// that the contract refuses to give up any frame, as the adapter does not claim incremental
-    /// input, and nothing happens; after it, nothing more is transcribed.
+    /// Once input has ended, takes every frame offered, transcribes them, adding the time that
+    /// took to the recognition's local compute, emits the text and records the recognition's
+    /// usage. Before that the contract refuses to give up any frame, as the adapter does not claim
+    /// incremental input, and nothing happens; after it, nothing more is transcribed.
     fn advance(&mut self) {
         if self.finished {
             return;
@@ -567,14 +578,50 @@ impl WhisperCppRecognition {
         };
         self.finished = true;
         let samples = samples_16k(&frames);
-        if samples.is_empty() {
-            return;
-        }
-        match transcribe(&self.context, &samples) {
-            Ok(text) => transcribed(&mut self.output, &text, &mut self.delivered),
-            Err(failed) => self.failure = Some(failed),
-        }
+        let transcription = (!samples.is_empty()).then(|| {
+            let computing = Instant::now();
+            let result = transcribe(&self.context, &samples);
+            Transcription {
+                result,
+                spent: computing.elapsed(),
+            }
+        });
+        self.failure = settle(&mut self.output, transcription, &mut self.delivered);
     }
+}
+
+/// What one `full` call came to, and the wall time it and the reading of its segments took.
+struct Transcription {
+    result: Result<String, RecognitionFailed>,
+    spent: Duration,
+}
+
+/// Settles a recognition whose input has ended on its `transcription`, none when there was no
+/// audio and whisper.cpp was not called: adds the time it took to the local compute, emits the
+/// text, or marks the call failed, and then records the usage, the last event. Returns the
+/// failure, if the call failed.
+fn settle(
+    output: &mut TranscriptOutput,
+    transcription: Option<Transcription>,
+    delivered: &mut VecDeque<EventEnvelope<TranscriptEvent>>,
+) -> Option<RecognitionFailed> {
+    let failure = transcription.and_then(|Transcription { result, spent }| {
+        output.add_local_compute(spent);
+        match result {
+            Ok(text) => {
+                transcribed(output, &text, delivered);
+                None
+            }
+            Err(failed) => {
+                output.mark_failed();
+                Some(failed)
+            }
+        }
+    });
+    if let Ok(usage) = output.usage() {
+        delivered.push_back(usage);
+    }
+    failure
 }
 
 /// The text whisper.cpp transcribes from `samples`, 16 kHz mono, in a new state on `context`:
@@ -656,7 +703,10 @@ fn transcribed(
     let Ok(hypothesis) = output.hypothesis(text.to_owned()) else {
         return;
     };
-    let span_id = hypothesis.payload.span_id();
+    let span_id = hypothesis
+        .payload
+        .span_id()
+        .expect("a hypothesis is about its span");
     delivered.push_back(hypothesis);
     if let Ok(committed) = output.commit(span_id) {
         delivered.push_back(committed);
