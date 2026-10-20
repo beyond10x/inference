@@ -23,9 +23,9 @@
 //! [`SynthesisHandle::acknowledge_playback`] with the [`PlaybackReceipt`] it makes by consuming
 //! them.
 //!
-//! Behind the `run` feature, `TtsNode` is the graph node of a voice pipeline over the mock: it
-//! synthesises every committed segment an LLM node emits and, playing, acknowledges its playback
-//! through the sink double.
+//! Behind the `run` feature, `TtsNode` is the graph node of a voice pipeline over any
+//! synthesiser, the mock by default: it synthesises every committed segment an LLM node emits
+//! and, playing, acknowledges its playback through the sink double.
 //!
 //! It declares a maximum concurrency of one and holds to it: while one synthesis of a
 //! synthesiser, or of a clone of it, runs, a second start is refused with
@@ -91,8 +91,9 @@ pub use inference_tts;
 /// synthesiser.
 pub mod conformance;
 
-/// The mock TTS node of a voice pipeline, behind the `run` feature: a [`TtsNode`] synthesises the
-/// committed segments of an LLM node on one synthesis of a [`MockSynthesiser`].
+/// The TTS node of a voice pipeline, behind the `run` feature: a [`TtsNode`] synthesises the
+/// committed segments of an LLM node on one synthesis of its synthesiser, a [`MockSynthesiser`]
+/// by default.
 #[cfg(feature = "run")]
 mod node;
 

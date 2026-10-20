@@ -7,7 +7,8 @@
 //! `inference-runtime`; and behind the `stt`, `llm`, `tts` and `duplex` features, the mocks of
 //! the contract crates, with the graph nodes over them behind each of those features and `run`
 //! together: the mock model node, the STT node and the fan-out of a voice pipeline, and the TTS
-//! node. Its test tree carries the
+//! node, the STT and TTS nodes generic over the recogniser and the synthesiser, the mock by
+//! default, so that a local adapter can take the mock's place. Its test tree carries the
 //! conformance target that answers the synthesized suite of `ess/` (`tests/conform.rs`), which
 //! needs the `run` feature; the library itself pulls no ESS crate, so a crate depending on the
 //! stores or the mocks carries no test tooling, and one that leaves `run` off carries no runtime.
