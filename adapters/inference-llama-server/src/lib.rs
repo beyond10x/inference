@@ -277,6 +277,8 @@ pub struct LlamaServer {
     blocking: BlockingModel,
     /// Held by the thread of every turn until it let go of everything else it held.
     turns: Arc<()>,
+    /// [`Config::max_output_tokens`]: the output limit of a turn that names none.
+    max_output_tokens: u64,
 }
 
 impl fmt::Debug for LlamaServer {
@@ -303,6 +305,7 @@ impl LlamaServer {
         Ok(Self {
             blocking: BlockingModel::new(Arc::new(client))?,
             turns: Arc::new(()),
+            max_output_tokens: config.max_output_tokens,
         })
     }
 
@@ -335,8 +338,10 @@ impl Model for LlamaServer {
     }
 
     /// Runs the turn on a thread of its own and hands each event to `sink` as the thread decodes
-    /// it. The request is sent once, when the turn is first polled. A refusal of `sink`, or
-    /// dropping the turn, cancels the request still running.
+    /// it. The request is sent once, when the turn is first polled. A turn that names no output
+    /// limit is sent with [`Config::max_output_tokens`], so the server stops there instead of at
+    /// the end of its context. A refusal of `sink`, or dropping the turn, cancels the request
+    /// still running.
     fn turn<'a>(
         &'a self,
         request: &'a TurnRequest,
@@ -347,9 +352,11 @@ impl Model for LlamaServer {
             let cancel = cancel.child_token();
             let _cancel_on_drop = cancel.clone().drop_guard();
             let shared = Arc::new(Shared::default());
+            let mut request = request.clone();
+            request.max_output_tokens = request.max_output_tokens.or(Some(self.max_output_tokens));
             spawn_turn(
                 self.blocking.fork(),
-                request.clone(),
+                request,
                 cancel,
                 Arc::clone(&shared),
                 Arc::clone(&self.turns),

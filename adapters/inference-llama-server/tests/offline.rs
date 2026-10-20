@@ -1,9 +1,11 @@
 //! The adapter against the loopback fixture of `common`, which replays a stream recorded from a
 //! running `llama-server`. No server is started and no weights are read.
 //!
-//! The capability record committed in `capability/` is checked here against the declaration of
-//! the adapter with its `tools` option on; its `output_streaming` evidence names the tests of this
-//! file that observe it, its `tool_calling` evidence those of `tool_proposals`.
+//! The capability records committed in `capability/` are checked here, each against the
+//! declaration of the adapter it is the record of: [`RECORD`] against the default adapter, tools
+//! off, and [`TOOLS_RECORD`] against the adapter with its `tools` option on. Their
+//! `output_streaming` evidence names the tests of this file that observe it, the `tool_calling`
+//! evidence of [`TOOLS_RECORD`] those of `tool_proposals`.
 
 mod common;
 
@@ -26,8 +28,12 @@ use inference_testkit::model::capability;
 
 const PROMPT: &str = "Say hello in three words.";
 
-/// The record committed for the reference machine, CPU only.
+/// The record committed for the default adapter, tools off, on the reference machine, CPU only.
 const RECORD: &str = "capability/reference-machine-cpu.json";
+
+/// The record committed for the adapter with tools on, on the reference machine, CPU only, the
+/// server started with `--jinja`.
+const TOOLS_RECORD: &str = "capability/reference-machine-cpu-tools.json";
 
 /// The model and adapter declared for a server configured by `config`.
 fn declared(config: &Config) -> (Model, Adapter) {
@@ -226,29 +232,53 @@ fn the_model_declaration_names_the_pinned_checkpoint_its_licences_and_checksum()
 }
 
 #[test]
-fn the_committed_capability_record_checks_against_the_adapter_declaration() {
-    let mut config = Config::new("http://127.0.0.1:8080/v1", SERVED_MODEL);
-    config.tools = true;
-    let (_, adapter) = declared(&config);
+fn each_committed_capability_record_checks_against_the_declaration_of_its_adapter() {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let record = capability::load(crate_dir.join(RECORD), &adapter)
-        .unwrap_or_else(|refused| panic!("{refused}"));
-    assert_eq!(record.adapter_id, adapter.adapter_id());
-    assert_eq!(record.resource_profile.gpu_memory_mib, None, "CPU only");
-    assert!(record.audio_formats.is_empty(), "a text model");
+    let default = Config::new("http://127.0.0.1:8080/v1", SERVED_MODEL);
+    let mut tools = default.clone();
+    tools.tools = true;
+    let records = [(RECORD, &default), (TOOLS_RECORD, &tools)];
 
-    for evidence in &record.evidence {
-        for test in &evidence.tests {
-            let (file, name) = test
-                .split_once("::")
-                .unwrap_or_else(|| panic!("`{test}` names no test file"));
-            let source =
-                std::fs::read_to_string(crate_dir.join("tests").join(format!("{file}.rs")))
-                    .unwrap_or_else(|error| panic!("`{test}`: {error}"));
-            assert!(
-                source.contains(&format!("fn {name}()")),
-                "the record names `{test}`, which is not a test of this crate"
-            );
+    let mut committed: Vec<String> = std::fs::read_dir(crate_dir.join("capability"))
+        .expect("the record directory")
+        .map(|entry| {
+            format!(
+                "capability/{}",
+                entry.expect("an entry").file_name().display()
+            )
+        })
+        .collect();
+    committed.sort_unstable();
+    let mut checked: Vec<String> = records.iter().map(|(path, _)| (*path).to_owned()).collect();
+    checked.sort_unstable();
+    assert_eq!(committed, checked, "every committed record is checked here");
+
+    for (path, config) in records {
+        let (_, adapter) = declared(config);
+        let record = capability::load(crate_dir.join(path), &adapter)
+            .unwrap_or_else(|refused| panic!("{path}: {refused}"));
+        assert_eq!(record.adapter_id, adapter.adapter_id());
+        assert_eq!(record.resource_profile.gpu_memory_mib, None, "CPU only");
+        assert!(record.audio_formats.is_empty(), "a text model");
+        assert_eq!(
+            record.hardware.contains("--jinja"),
+            config.tools,
+            "{path}: the server runs with --jinja exactly when the adapter offers tools"
+        );
+
+        for evidence in &record.evidence {
+            for test in &evidence.tests {
+                let (file, name) = test
+                    .split_once("::")
+                    .unwrap_or_else(|| panic!("{path}: `{test}` names no test file"));
+                let source =
+                    std::fs::read_to_string(crate_dir.join("tests").join(format!("{file}.rs")))
+                        .unwrap_or_else(|error| panic!("{path}: `{test}`: {error}"));
+                assert!(
+                    source.contains(&format!("fn {name}()")),
+                    "{path} names `{test}`, which is not a test of this crate"
+                );
+            }
         }
     }
 }
