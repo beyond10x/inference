@@ -5,7 +5,8 @@
 //! Each request field is read on its own ([`Input`]); an `Optional` field left out or sent as
 //! null is none. A quantity is read field by field, `kind`, `source` and `value`, every other
 //! field refused, and built by [`Quantity::new`]: a value and a source that disagree are an error,
-//! never a pass, since the specification declares no outcome for them. The outcome, the error
+//! never a pass, since the specification declares no outcome for them; an unknown adapter or model
+//! is answered first, as the store refuses on either before it reads a quantity. The outcome, the error
 //! and the event come from what the store returned. A command's consistency token is the
 //! target's ([`Stores::token`]), and an observed event's position is its place in the target's
 //! one publication order ([`Stores::usage_position`]).
@@ -58,7 +59,7 @@ fn record_usage(
     request: &SemanticCommandRequest,
 ) -> Result<SemanticCommandResult, TargetError> {
     let mut input = Input::of(request);
-    let record = RecordUsage {
+    let mut record = RecordUsage {
         run_id: optional_named(&mut input, "run_id")?,
         node_id: optional_named(&mut input, "node_id")?,
         session_id: optional_named(&mut input, "session_id")?,
@@ -70,9 +71,20 @@ fn record_usage(
         started_at_ms: input.integer("started_at_ms")?,
         ended_at_ms: input.integer("ended_at_ms")?,
         r#final: input.boolean("final")?,
-        quantities: quantities(input.node("quantities")?)?,
+        quantities: Vec::new(),
     };
+    let built = quantities(input.node("quantities")?)?;
     input.finish()?;
+    // The declared outcomes turn on the adapter and the model alone, so an unknown one is answered
+    // before a quantity whose value and source disagree is refused: the store refuses the command
+    // on either before it reads a quantity.
+    let declared = stores.model.adapters().get(record.adapter_id).is_some()
+        && stores.model.models().get(record.model_id).is_some();
+    match built.into_iter().collect::<Result<Vec<_>, _>>() {
+        Ok(built) => record.quantities = built,
+        Err(error) if declared => return Err(error),
+        Err(_) => {}
+    }
     Ok(match stores.usage.record_usage(&stores.model, record) {
         Ok(event) => SemanticCommandResult::took(outcome(RECORD_USAGE, "recorded"))
             .emitting(usage_recorded(&event)?.in_activity(request.correlation.clone())),
@@ -119,15 +131,16 @@ fn optional_text(input: &mut Input<'_>, field: &str) -> Result<Option<String>, T
 }
 
 /// A `List<inference.usage.Quantity>`, each item read field by field and built by
-/// [`Quantity::new`].
-fn quantities(node: &Node) -> Result<Vec<Quantity>, TargetError> {
+/// [`Quantity::new`]. An item the specification's shape does not allow is an error at once; the
+/// inner result is what [`Quantity::new`] made of an item of the declared shape.
+fn quantities(node: &Node) -> Result<Vec<Result<Quantity, TargetError>>, TargetError> {
     let Node::Seq(items) = node else {
         return Err(refused("quantities", &format!("not a list: {node:?}")));
     };
     items.iter().map(quantity).collect()
 }
 
-fn quantity(node: &Node) -> Result<Quantity, TargetError> {
+fn quantity(node: &Node) -> Result<Result<Quantity, TargetError>, TargetError> {
     let Node::Map(fields) = node else {
         return Err(refused("quantities", &format!("not a struct: {node:?}")));
     };
@@ -149,8 +162,10 @@ fn quantity(node: &Node) -> Result<Quantity, TargetError> {
             )
         })?),
     };
-    Quantity::new(variant(fields, "kind")?, variant(fields, "source")?, value)
-        .map_err(|error| refused("quantities", &error.to_string()))
+    Ok(
+        Quantity::new(variant(fields, "kind")?, variant(fields, "source")?, value)
+            .map_err(|error| refused("quantities", &error.to_string())),
+    )
 }
 
 /// The enum variant a quantity carries in its field `name`.
@@ -281,6 +296,7 @@ mod tests {
     use ess_primitives::facts::Number;
     use ess_primitives::ids::CorrelationId;
     use ess_primitives::node::Node;
+    use inference_core::model::{DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality};
 
     use super::{RECORD_USAGE, Stores, execute_command};
 
@@ -317,9 +333,39 @@ mod tests {
             .collect()
     }
 
+    /// Stores holding the model and the adapter [`request`] names, the first of each the model
+    /// store issues.
+    fn declared() -> Stores {
+        let mut stores = Stores::default();
+        let model = stores.model.declare_model(DeclareModel {
+            family: "family".to_owned(),
+            checkpoint: "checkpoint".to_owned(),
+            code_license: "MIT".to_owned(),
+            weight_license: "MIT".to_owned(),
+            checksum: "checksum".to_owned(),
+            input_modalities: vec![Modality::Text],
+            output_modalities: vec![Modality::Text],
+            provenance: "provenance".to_owned(),
+            source_revision: "revision".to_owned(),
+        });
+        stores
+            .model
+            .declare_adapter(DeclareAdapter {
+                model_id: model.model_id,
+                backend: "backend".to_owned(),
+                contract_revision: "1".to_owned(),
+                execution_form: ExecutionForm::InProcess,
+                locality: Locality::SameProcess,
+                capabilities: Vec::new(),
+                max_concurrency: 1,
+            })
+            .expect("the model is declared");
+        stores
+    }
+
     #[test]
     fn a_quantity_whose_value_and_source_disagree_is_an_error_not_an_outcome() {
-        let mut stores = Stores::default();
+        let mut stores = declared();
         let answer = execute_command(
             &mut stores,
             &request(quantity(&[
@@ -329,6 +375,24 @@ mod tests {
             ])),
         );
         assert!(answer.is_err(), "{answer:?}");
+        assert!(stores.usage.events().is_empty());
+    }
+
+    #[test]
+    fn an_unknown_adapter_is_answered_before_a_quantity_whose_value_and_source_disagree() {
+        let mut stores = Stores::default();
+        let answer = execute_command(
+            &mut stores,
+            &request(quantity(&[
+                ("kind", Node::Text("input_text_tokens".to_owned())),
+                ("source", Node::Text("provider_reported".to_owned())),
+            ])),
+        )
+        .expect("the request is read");
+        assert_eq!(
+            answer.outcome.map(|outcome| outcome.to_string()),
+            Some("inference.usage.RecordUsage/unknown-adapter".to_owned())
+        );
         assert!(stores.usage.events().is_empty());
     }
 
