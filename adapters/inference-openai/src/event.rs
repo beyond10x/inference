@@ -330,12 +330,14 @@ impl<'a> Fields<'a> {
                 .ok_or_else(|| self.missing("seconds", "the number"))?;
             return Ok(Some(TranscriptionUsage::Duration { seconds }));
         }
-        let input_tokens = usage.optional_unsigned("input_tokens").unwrap_or(0);
-        let output_tokens = usage.optional_unsigned("output_tokens").unwrap_or(0);
+        let input_tokens = usage.optional_unsigned("input_tokens");
+        let output_tokens = usage.optional_unsigned("output_tokens");
         Ok(Some(TranscriptionUsage::Tokens {
-            total_tokens: usage
-                .optional_unsigned("total_tokens")
-                .unwrap_or(input_tokens + output_tokens),
+            total_tokens: usage.optional_unsigned("total_tokens").or_else(|| {
+                input_tokens
+                    .zip(output_tokens)
+                    .map(|(input, output)| input + output)
+            }),
             input_tokens,
             output_tokens,
         }))
@@ -343,13 +345,15 @@ impl<'a> Fields<'a> {
 }
 
 /// The usage of a completed input transcription: tokens of the transcription model, or, for a
-/// model billed by time, the seconds of audio it transcribed.
+/// model billed by time, the seconds of audio it transcribed. A count the server left out is
+/// `None`, never 0; the total is the sum of the two when the server sent none and both are
+/// known.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TranscriptionUsage {
     Tokens {
-        total_tokens: u64,
-        input_tokens: u64,
-        output_tokens: u64,
+        total_tokens: Option<u64>,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
     },
     Duration {
         seconds: f64,

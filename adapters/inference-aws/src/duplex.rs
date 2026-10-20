@@ -33,7 +33,11 @@
 //!   else the turn's first user transcript, just before its commit; no end of speech is recorded;
 //! - a tool use is a call under the provider's `toolUseId`;
 //! - usage deltas are summed per response: what is reported while a response is in progress counts
-//!   toward it; between responses, input counts toward the next and output toward the last;
+//!   toward it; between responses, input counts toward the next and output toward the last. The
+//!   response's usage record holds those sums, text and speech tokens each way as reported once a
+//!   delta counted toward that direction, unknown before, and cached tokens, which Nova Sonic does
+//!   not report, unknown. Since output may be reported after a response ended, the record waits
+//!   for the next response or the session's end;
 //! - a service error fails the session, a closed stream fails it as `transport_closed`.
 //!
 //! The response boundaries are inferred from the order of content blocks the Nova 2 user guide
@@ -59,10 +63,10 @@ use inference_duplex::inference_core::model::{
 };
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseId, ResponseUsage, SessionConfig, SessionError,
-    SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
+    NativeSpeechModel, OpenError, QuantityKind, ResponseId, ResponseUsage, SessionConfig,
+    SessionError, SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
     SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TokenCounts, TuningSupport,
-    TurnDetection, TurnSensitivity,
+    TurnDetection, TurnSensitivity, UsageTotal,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -478,6 +482,31 @@ impl Block {
     }
 }
 
+/// The directions of a response's usage that a usage delta counted toward.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Directions {
+    input: bool,
+    output: bool,
+}
+
+impl Directions {
+    const BOTH: Self = Self {
+        input: true,
+        output: true,
+    };
+    const OUTPUT: Self = Self {
+        input: false,
+        output: true,
+    };
+
+    fn or(self, other: Self) -> Self {
+        Self {
+            input: self.input || other.input,
+            output: self.output || other.output,
+        }
+    }
+}
+
 /// The provider's turns as the binding follows them: its content blocks, the responses issued
 /// for them, and the usage summed per response.
 #[derive(Debug, Default)]
@@ -491,7 +520,11 @@ struct Turns {
     emitted: u64,
     /// Usage reported before the next response began.
     pending: ResponseUsage,
+    /// Which directions of `pending` a delta counted toward.
+    pending_reported: Directions,
     totals: HashMap<ResponseId, ResponseUsage>,
+    /// Which directions of each response's total a delta counted toward.
+    reported: HashMap<ResponseId, Directions>,
     /// Whether the user's speech of the current turn was reported.
     speech_reported: bool,
     /// The sample after the last input frame accepted.
@@ -625,8 +658,9 @@ impl NovaSonicSpeechSession {
         self.turns.last = Some(response);
         self.turns.emitted = 0;
         let pending = std::mem::take(&mut self.turns.pending);
-        if pending != ResponseUsage::default() {
-            self.add_usage(response, pending, at);
+        let pending_reported = std::mem::take(&mut self.turns.pending_reported);
+        if pending_reported != Directions::default() {
+            self.add_usage(response, pending, pending_reported, at);
         }
         Some(response)
     }
@@ -733,10 +767,11 @@ impl NovaSonicSpeechSession {
             output: counts(usage.delta.output),
         };
         if let Some(response) = self.ledger.in_progress() {
-            self.add_usage(response, delta, at);
+            self.add_usage(response, delta, Directions::BOTH, at);
             return;
         }
         add_counts(&mut self.turns.pending.input, delta.input);
+        self.turns.pending_reported.input = true;
         if delta.output == TokenCounts::default() {
             return;
         }
@@ -747,21 +782,58 @@ impl NovaSonicSpeechSession {
                     input: TokenCounts::default(),
                     output: delta.output,
                 },
+                Directions::OUTPUT,
                 at,
             ),
-            None => add_counts(&mut self.turns.pending.output, delta.output),
+            None => {
+                add_counts(&mut self.turns.pending.output, delta.output);
+                self.turns.pending_reported.output = true;
+            }
         }
     }
 
-    fn add_usage(&mut self, response: ResponseId, delta: ResponseUsage, at: Instant) {
-        if delta == ResponseUsage::default() {
-            return;
-        }
+    /// Adds `delta`, counted toward the directions `counted`, to the response's total, and
+    /// reports the total: as the contract's `ResponseUsage` when the delta changed it, and as the
+    /// quantities of its usage record, a running total.
+    fn add_usage(
+        &mut self,
+        response: ResponseId,
+        delta: ResponseUsage,
+        counted: Directions,
+        at: Instant,
+    ) {
         let total = self.turns.totals.entry(response).or_default();
         add_counts(&mut total.input, delta.input);
         add_counts(&mut total.output, delta.output);
         let total = *total;
-        let _ = self.ledger.response_usage(response, total, at);
+        let reported = self.turns.reported.entry(response).or_default();
+        *reported = reported.or(counted);
+        let directions = *reported;
+        let known = |reported: bool, count: u64| reported.then_some(count);
+        let _ = self.ledger.response_usage_reported(
+            response,
+            (delta != ResponseUsage::default()).then_some(total),
+            vec![
+                inference_duplex::reported(
+                    QuantityKind::InputTextTokens,
+                    known(directions.input, total.input.text_tokens),
+                ),
+                inference_duplex::reported(
+                    QuantityKind::InputAudioTokens,
+                    known(directions.input, total.input.audio_tokens),
+                ),
+                inference_duplex::reported(
+                    QuantityKind::OutputTextTokens,
+                    known(directions.output, total.output.text_tokens),
+                ),
+                inference_duplex::reported(
+                    QuantityKind::OutputAudioTokens,
+                    known(directions.output, total.output.audio_tokens),
+                ),
+            ],
+            UsageTotal::Running,
+            at,
+        );
     }
 }
 
