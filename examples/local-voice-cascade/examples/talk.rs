@@ -27,6 +27,7 @@
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::ffi::OsString;
 use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
@@ -65,12 +66,13 @@ struct Args {
     #[arg(long, env = STT_VARIABLE, default_value_t = SttBackend::SherpaOnnx)]
     stt: SttBackend,
     /// The directory of the unpacked pinned checkpoint of the sherpa-onnx recogniser, for
-    /// --stt sherpa-onnx.
-    #[arg(long, env = STT_DIR_VARIABLE)]
-    stt_dir: Option<PathBuf>,
+    /// --stt sherpa-onnx. Read as given, so that an empty value of the recogniser not selected is
+    /// ignored rather than refused.
+    #[arg(long, env = STT_DIR_VARIABLE, value_parser = clap::value_parser!(OsString))]
+    stt_dir: Option<OsString>,
     /// The pinned checkpoint file of the whisper.cpp recogniser, for --stt whispercpp.
-    #[arg(long, env = WHISPERCPP_MODEL_VARIABLE)]
-    whispercpp_model: Option<PathBuf>,
+    #[arg(long, env = WHISPERCPP_MODEL_VARIABLE, value_parser = clap::value_parser!(OsString))]
+    whispercpp_model: Option<OsString>,
     /// The base URL of the llama-server's API, on loopback.
     #[arg(long, env = SERVER_URL_VARIABLE)]
     server_url: String,
@@ -129,6 +131,8 @@ fn talk(args: Args) -> Result<(), Box<dyn Error>> {
         SttBackend::SherpaOnnx => args.stt_dir,
         SttBackend::WhisperCpp => args.whispercpp_model,
     }
+    .filter(|location| !location.is_empty())
+    .map(PathBuf::from)
     .ok_or(LocalRefused::Missing(args.stt.variable()))?;
     let config = LocalConfig {
         stt: SttConfig::new(args.stt, checkpoint),
