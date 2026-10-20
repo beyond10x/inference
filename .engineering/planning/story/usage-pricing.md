@@ -2,14 +2,27 @@
 format: aep.planning-md/3
 id: story:usage-pricing
 kind: story
-status: draft
+status: active
 title: Cost records from a caller price document behind the facade cost feature, over llm-cost
 summary: CostRecord declared in ess; usage priced with llm-cost PriceBook per record and per session, unknowns kept; AGENTS.md admits llm-cost for pricing.
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
 - depends_on: story:usage-session-totals
-revision: 2
+- depends_on: story:llm-0-8-3
+scope:
+- confidence: cited
+  path: AGENTS.md
+- confidence: cited
+  path: crates/inference-facade
+- confidence: cited
+  path: crates/inference-testkit/src/usage.rs
+- confidence: cited
+  path: ess/domains/usage.yaml
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T22:57:59Z", actor: "human:timo", revision: 4}
+- {from: "proposed", to: "active", at: "2026-10-20T22:57:59Z", actor: "human:timo", revision: 5}
 ---
 ## Context
 

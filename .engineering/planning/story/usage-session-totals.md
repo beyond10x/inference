@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:usage-session-totals
 kind: story
-status: draft
+status: active
 title: Run and session usage totals in the facade, recorded by the replay recorder and never dropped with telemetry
 summary: SessionEvent::UsageRecorded, per-run and per-session totals with unknowns kept, usage in recordings and not compared on replay.
 relations:
@@ -11,7 +11,19 @@ relations:
 - depends_on: story:usage-llm
 - depends_on: story:usage-stt
 - depends_on: story:usage-tts
-revision: 1
+scope:
+- confidence: cited
+  path: crates/inference-core/src/usage.rs
+- confidence: cited
+  path: crates/inference-facade
+- confidence: cited
+  path: crates/inference-runtime/src/replay.rs
+- confidence: cited
+  path: crates/inference-testkit/src/cascade.rs
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T22:57:59Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-20T22:57:59Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 
