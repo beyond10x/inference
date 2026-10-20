@@ -9,7 +9,7 @@ use std::process::Command;
 #[test]
 fn stt_only_depends_on_the_stt_contract_and_the_mock_alone() {
     let output = Command::new(env!("CARGO"))
-        .args(["tree", "-p", "stt-only", "-e", "normal", "--locked"])
+        .args(["tree", "-p", "stt-only", "-e", "normal", "--locked", "--color", "never"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("cargo runs");
