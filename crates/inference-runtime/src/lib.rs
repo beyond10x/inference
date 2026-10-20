@@ -23,14 +23,24 @@
 //! ([`SequenceNotIncreasing`]). A [`SubgraphNode`] ([`subgraph`]) is the implementation of a
 //! subgraph node: it runs its child pipeline as a child run nested under its own instance
 //! ([`RunController::create_child`]), bridges its ports to the child's exposures and keeps the run
-//! boundary as the cancellation and tracing boundary. No public signature commits a caller to one
-//! asynchronous executor.
+//! boundary as the cancellation and tracing boundary. A [`Recorder`](record::Recorder)
+//! ([`record`]) sits on a run's event path, wrapping its nodes and its ingresses, and records every
+//! envelope with the merge order it assigns, and the control decisions among them; a
+//! [`Replay`](replay::Replay) ([`replay`]) feeds a recording's inputs into a new run of the same
+//! pipeline and reports the first control decision that diverged; a
+//! [`TelemetrySink`](telemetry::TelemetrySink) ([`telemetry`]) takes telemetry on a bounded, lossy
+//! channel that drops and counts what a slow consumer has no room for. No public signature
+//! commits a caller to one asynchronous executor; [`Replay::feed`](replay::Replay::feed) blocks
+//! the calling thread.
 
 pub mod controller;
 mod drive;
 pub mod queue;
+pub mod record;
+pub mod replay;
 pub mod run;
 pub mod subgraph;
+pub mod telemetry;
 
 pub use controller::{
     CreateControllerError, Egress, ExposedEnds, FailNodeError, Ingress, InstanceConflict,
