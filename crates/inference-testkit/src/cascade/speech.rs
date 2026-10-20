@@ -437,6 +437,7 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
                         self.completing.push(completed);
                     }
                 }
+                SynthesisEvent::Usage(_) => {}
             }
             self.complete().await?;
         }

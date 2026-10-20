@@ -65,7 +65,7 @@ fn frames_of(events: Vec<SynthesisEvent>) -> Vec<SegmentAudio> {
         .into_iter()
         .filter_map(|event| match event {
             SynthesisEvent::Audio(audio) => Some(audio),
-            SynthesisEvent::Completed(_) => None,
+            SynthesisEvent::Completed(_) | SynthesisEvent::Usage(_) => None,
         })
         .collect()
 }
