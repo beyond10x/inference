@@ -5,7 +5,9 @@
 //! activity detector ([`vad::VoiceActivityDetector`]) and the turn policy
 //! ([`turn_policy::TurnPolicy`]), both policy nodes of §9.1 (466), between which audio frames
 //! become speech activity and speech activity becomes the turns of `inference.stream` (§11.1,
-//! 606), with the turn policy as their single authority (§12.5, 699).
+//! 606), with the turn policy as their single authority (§12.5, 699); and the commit gate
+//! ([`commit_gate::CommitGate`]), a policy node that passes committed content and holds back what
+//! is not committed, between STT and LLM and between LLM and TTS (§11.3, 624-628).
 //!
 //! A tool call travels along the edges as a [`ToolCallUpdate`], a Structured payload: the call as
 //! the last command left it and the event that command emitted. A run carries one payload type on
@@ -35,6 +37,8 @@ use inference_tools::{
 
 use crate::{NodeEndpoints, NodeError, NodeInput, NodeOutput};
 
+/// The commit gate: committed spans, segments and turn events through, the rest held back.
+pub mod commit_gate;
 pub mod descriptors;
 mod tool_authority;
 mod tool_executor;
