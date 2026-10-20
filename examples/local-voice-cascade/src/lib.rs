@@ -13,7 +13,8 @@
 //! | `turn policy` | policy | `inference-pipeline`'s turn policy, answered by a [`TurnStore`] |
 //! | `stt` | model | the testkit's `SttNode` over its mock recogniser |
 //! | `input gate` | policy | a [`CommitGate`] of two lanes: the transcript, and the turn events |
-//! | `agent` | model | the testkit's `ModelNode` over its mock generator, given the gate's turns |
+//! | `turn split` | fan_out | `FanOut`: the gate's turn events to the LLM and the speaker |
+//! | `agent` | model | the testkit's [`AgentNode`] over its mock generator: one generation per turn |
 //! | `text split` | fan_out | `FanOut`: the LLM's output to the output gate and the egress |
 //! | `output gate` | policy | a [`CommitGate`] of one lane: the LLM's output |
 //! | `tts` | model | the testkit's [`SpeechNode`] over its mock synthesiser |
@@ -25,6 +26,15 @@
 //! TTS node sends the synthesis's own frames to the sink, and the sink sends the receipt of each
 //! segment it played back to the TTS node over a feedback edge, the only way a segment reaches
 //! Played.
+//!
+//! A turn that opens while the answer of an earlier one plays is a barge-in (632-641). The turn
+//! events reach the speaker as well as the LLM. The sink stops the speaker at the `TurnOpened`,
+//! clearing its queue and reading the played position, and from then on drops every frame of a
+//! generation it took frames of before, making no receipt of it. The LLM supersedes its current
+//! generation at the same `TurnOpened` and sends its `GenerationSuperseded` on; the output gate
+//! drops what it holds of that generation, and the TTS node discards each of its segments not yet
+//! Played and passes the `GenerationSuperseded` on to the sink, which takes it the same way. No
+//! node instance changes state.
 //!
 //! The cascade has no source node: the application feeds the ingress [`AUDIO_INGRESS`] at the
 //! input of `split`, and reads the egresses [`TRANSCRIPT_EGRESS`], the committed spans of the STT
@@ -40,8 +50,12 @@
 //! host the speaker is opened on, and the handles a caller reads them through. Through them the
 //! wiring records, per turn, the time from the input gate passing the turn's completion to the
 //! sink handing the first frame after it to the speaker, the design's "committed input to first
-//! playable audio" (1022): [`CascadeHandles::committed_input_to_first_audio`]. It is a value
-//! recorded, not a target asserted.
+//! playable audio" (1022): [`CascadeHandles::committed_input_to_first_audio`]; and, per
+//! interruption, the time from the sink taking the `TurnOpened` to the speaker's stop returning,
+//! the design's "interruption to playback stop" (1023):
+//! [`CascadeHandles::interruption_to_playback_stop`]. Each is a value recorded, not a target
+//! asserted. [`LocalCascade::nodes_with`] makes the same nodes over another synthesiser made of
+//! the mock, such as one scripted to emit late.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -71,15 +85,17 @@ use inference_pipeline::{
     Catalog, Declaration, Delivery, Essentiality, InteractionMode, NodeImplementation, NodeRole,
     OverloadPolicy, PipelineId, PipelineSpec, PlannedPipeline, PortId, PortTraits, modality,
 };
+use inference_testkit::cascade::agent::{AgentHandle, AgentNode};
 use inference_testkit::cascade::speech::{
     Said, SpeechHandle, SpeechNode, SpeechPayload, SpeechPorts,
 };
 use inference_testkit::cascade::{CascadeRefused, Mocks, TurnStore};
 use inference_testkit::graph::RunLog;
-use inference_testkit::llm::{Carried, ModelHandle, ModelNode, ModelPayload};
+use inference_testkit::llm::{Carried, ModelPayload};
 use inference_testkit::stream::StreamEvent;
 use inference_testkit::stt::inference_stt::Recogniser;
 use inference_testkit::stt::{FanOut, Heard, SttHandle, SttNode, SttPayload, SttPorts};
+use inference_testkit::tts::MockSynthesiser;
 use inference_text::{SegmentId, TurnId};
 use inference_tts::{PlaybackReceipt, SegmentAudio, Synthesiser};
 
@@ -306,6 +322,10 @@ impl PlaybackPayload for VoicePayload {
             Self::Stream(StreamEvent::SynthesisCompleted(completed)) => {
                 Playable::Completed(completed.segment_id)
             }
+            Self::Stream(StreamEvent::TurnOpened(opened)) => Playable::TurnOpened(opened.turn_id),
+            Self::Stream(StreamEvent::GenerationSuperseded(superseded)) => {
+                Playable::Superseded(superseded.generation_id)
+            }
             Self::Audio(_) | Self::Stream(_) | Self::Receipt(_) | Self::Control(_) => {
                 Playable::Other
             }
@@ -329,6 +349,7 @@ pub struct CascadeIds {
     pub policy: NodeId,
     pub stt: NodeId,
     pub input_gate: NodeId,
+    pub turn_split: NodeId,
     pub llm: NodeId,
     pub text_split: NodeId,
     pub output_gate: NodeId,
@@ -339,18 +360,20 @@ pub struct CascadeIds {
     pub llm_turns: PortId,
     pub output_lane: GateLane,
     pub speech_ports: SpeechPorts,
+    pub sink_turns: PortId,
 }
 
 impl CascadeIds {
     /// Every node, in the order of the module documentation's table.
     #[must_use]
-    pub const fn nodes(&self) -> [NodeId; 10] {
+    pub const fn nodes(&self) -> [NodeId; 11] {
         [
             self.split,
             self.vad,
             self.policy,
             self.stt,
             self.input_gate,
+            self.turn_split,
             self.llm,
             self.text_split,
             self.output_gate,
@@ -448,6 +471,7 @@ pub fn declare(
             let policy = pipeline.node("turn policy", NodeRole::Policy, Vec::new());
             let stt = pipeline.node("stt", NodeRole::Model, streaming.clone());
             let input_gate = pipeline.node("input gate", NodeRole::Policy, Vec::new());
+            let turn_split = pipeline.node("turn split", NodeRole::FanOut, Vec::new());
             let llm = pipeline.node("agent", NodeRole::Model, vec![Capability::OutputStreaming]);
             let text_split = pipeline.node("text split", NodeRole::FanOut, Vec::new());
             let output_gate = pipeline.node("output gate", NodeRole::Policy, Vec::new());
@@ -484,6 +508,11 @@ pub fn declare(
             let spoken = pipeline.output::<modality::Audio>(&tts, "audio", audio);
             let playing = pipeline.input::<modality::Audio>(&sink, "audio", audio);
             let receipts = pipeline.output::<modality::Control>(&sink, "played", control);
+            let split_turns = pipeline.input::<modality::Control>(&turn_split, "turns", control);
+            let turns_to_llm = pipeline.output::<modality::Control>(&turn_split, "llm", control);
+            let turns_to_sink =
+                pipeline.output::<modality::Control>(&turn_split, "speaker", control);
+            let sink_turns = pipeline.input::<modality::Control>(&sink, "turns", control);
 
             pipeline.connect(&to_vad, &heard, capacity, pause);
             pipeline.connect(&to_stt, &stt_audio, capacity, pause);
@@ -492,7 +521,9 @@ pub fn declare(
             pipeline.connect(&transcript, &gate_in, capacity, pause);
             pipeline.connect(&turns_out, &gate_turns, capacity, pause);
             pipeline.connect(&gate_out, &user_input, capacity, pause);
-            pipeline.connect(&gate_turns_out, &llm_turns, capacity, pause);
+            pipeline.connect(&gate_turns_out, &split_turns, capacity, pause);
+            pipeline.connect(&turns_to_llm, &llm_turns, capacity, pause);
+            pipeline.connect(&turns_to_sink, &sink_turns, capacity, pause);
             pipeline.connect(&answer, &answered, capacity, pause);
             pipeline.connect(&to_gate, &held, capacity, pause);
             pipeline.connect(&passed, &speak, capacity, pause);
@@ -512,6 +543,7 @@ pub fn declare(
                 policy: policy.id(),
                 stt: stt.id(),
                 input_gate: input_gate.id(),
+                turn_split: turn_split.id(),
                 llm: llm.id(),
                 text_split: text_split.id(),
                 output_gate: output_gate.id(),
@@ -535,6 +567,7 @@ pub fn declare(
                     },
                 ],
                 llm_turns: llm_turns.id(),
+                sink_turns: sink_turns.id(),
                 output_lane: GateLane {
                     input: held.id(),
                     output: passed.id(),
@@ -566,7 +599,7 @@ pub struct CascadeHandles {
     pub policy: TurnPolicyHandle,
     pub stt: SttHandle,
     pub input_gate: CommitGateHandle,
-    pub llm: ModelHandle,
+    pub llm: AgentHandle,
     pub output_gate: CommitGateHandle,
     pub tts: SpeechHandle,
     pub sink: AcknowledgingHandle,
@@ -579,6 +612,14 @@ pub struct CascadeHandles {
 pub struct TurnMeasure {
     pub turn_id: TurnId,
     pub first_audio: Option<Duration>,
+}
+
+/// The "interruption to playback stop" of one interruption: the time from the sink taking the
+/// opening of the turn `turn_id` to the speaker's stop returning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptionMeasure {
+    pub turn_id: TurnId,
+    pub stop: Duration,
 }
 
 impl CascadeHandles {
@@ -595,6 +636,19 @@ impl CascadeHandles {
                     .iter()
                     .find(|first| first.at >= passed.at)
                     .map(|first| first.at.duration_since(passed.at)),
+            })
+            .collect()
+    }
+
+    /// The measure of every interruption, in the order the turns opened.
+    #[must_use]
+    pub fn interruption_to_playback_stop(&self) -> Vec<InterruptionMeasure> {
+        self.sink
+            .interruptions()
+            .into_iter()
+            .map(|interruption| InterruptionMeasure {
+                turn_id: interruption.turn_id,
+                stop: interruption.stop,
             })
             .collect()
     }
@@ -632,16 +686,51 @@ impl LocalCascade {
         host: &dyn AudioHost,
         playout: PlayoutConfig,
     ) -> Result<CascadeRun, DeviceError> {
+        self.nodes_with(run_id, mocks, |mock| mock, turns, log, host, playout)
+    }
+
+    /// As [`LocalCascade::nodes`], the TTS node synthesising on what `speak` makes of the mock
+    /// synthesiser, such as a
+    /// [`LateSynthesiser`](inference_testkit::cascade::late::LateSynthesiser) over it.
+    ///
+    /// # Errors
+    ///
+    /// The [`DeviceError`] of opening the speaker; no node is made.
+    #[allow(clippy::too_many_arguments)]
+    pub fn nodes_with<S>(
+        &self,
+        run_id: RunId,
+        mocks: Mocks,
+        speak: impl FnOnce(MockSynthesiser) -> S,
+        turns: TurnStore,
+        log: &RunLog,
+        host: &dyn AudioHost,
+        playout: PlayoutConfig,
+    ) -> Result<CascadeRun, DeviceError>
+    where
+        S: Synthesiser + Send + 'static,
+        S::Handle: Send + 'static,
+    {
         let speaker = Speaker::open(host, &DeviceSelector::Default, playout)?;
         let ids = self.ids;
         let policy = TurnPolicy::new(run_id, turns);
         let stt = SttNode::new(run_id, mocks.recogniser, ids.stt_ports, log.clone());
         let input_gate = CommitGate::new(ids.input_lanes);
-        let llm = ModelNode::carrying(run_id, mocks.generator, mocks.reply, log.clone())
-            .with_turns(ids.llm_turns);
+        let llm = AgentNode::new(
+            run_id,
+            mocks.generator,
+            mocks.reply,
+            ids.llm_turns,
+            log.clone(),
+        );
         let output_gate = CommitGate::new([ids.output_lane]);
-        let tts = SpeechNode::new(run_id, mocks.synthesiser, ids.speech_ports, log.clone());
-        let sink = AcknowledgingSink::new(run_id, speaker);
+        let tts = SpeechNode::new(
+            run_id,
+            speak(mocks.synthesiser),
+            ids.speech_ports,
+            log.clone(),
+        );
+        let sink = AcknowledgingSink::new(run_id, speaker).with_turns(ids.sink_turns);
         let handles = CascadeHandles {
             policy: policy.handle(),
             stt: stt.handle(),
@@ -661,6 +750,7 @@ impl LocalCascade {
                 (ids.policy, Box::new(policy)),
                 (ids.stt, Box::new(stt)),
                 (ids.input_gate, Box::new(input_gate)),
+                (ids.turn_split, Box::new(FanOut::new())),
                 (ids.llm, Box::new(llm)),
                 (ids.text_split, Box::new(FanOut::new())),
                 (ids.output_gate, Box::new(output_gate)),

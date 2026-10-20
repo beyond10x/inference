@@ -19,7 +19,10 @@
 //!   Tentative segment and `inference.stream.QueueForSynthesis` is never asked of one. The deltas
 //!   still held when their generation ends, by `GenerationCompleted`, `GenerationCancelled` or
 //!   `GenerationSuperseded`, or when the lane ends, are dropped and recorded
-//!   ([`CommitGateHandle::dropped_segments`]).
+//!   ([`CommitGateHandle::dropped_segments`]). What arrives of a generation after it ended, as of
+//!   a generation superseded by an interruption (632-641), is stale: a delta of it is dropped and
+//!   recorded the same way, and the commit of a dropped segment is dropped too, so that no
+//!   segment of an older generation reaches the TTS node once its end passed the gate.
 //!
 //! The rules are the same in both places, since a transcript carries no delta and an LLM's output
 //! no hypothesis. What a lane passes keeps the order it arrived in: an envelope behind a held
@@ -142,6 +145,9 @@ struct Gate<P> {
     lanes: Vec<VecDeque<Queued<P>>>,
     /// The spans passed as Committed.
     passed: HashSet<SpanId>,
+    /// The generations that ended, and the segments whose deltas were dropped.
+    ended: HashSet<GenerationId>,
+    stale: HashSet<SegmentId>,
 }
 
 impl<P: GatePayload> Gate<P> {
@@ -149,6 +155,8 @@ impl<P: GatePayload> Gate<P> {
         Self {
             lanes: (0..lanes).map(|_| VecDeque::new()).collect(),
             passed: HashSet::new(),
+            ended: HashSet::new(),
+            stale: HashSet::new(),
         }
     }
 
@@ -167,7 +175,7 @@ impl<P: GatePayload> Gate<P> {
         let queue = &mut self.lanes[lane];
         match ControlKind::of(&envelope.kind) {
             Some(ControlKind::Stop) => {
-                Self::drop_waiting(queue, record, |_| true);
+                Self::drop_waiting(queue, &mut self.stale, record, |_| true);
                 queue.push_back(ready(envelope));
             }
             Some(_) => queue.push_back(ready(envelope)),
@@ -190,10 +198,20 @@ impl<P: GatePayload> Gate<P> {
                 Gated::Delta {
                     segment_id,
                     generation_id,
+                } if self.ended.contains(&generation_id) => {
+                    self.stale.insert(segment_id);
+                    if !record.dropped.contains(&segment_id) {
+                        record.dropped.push(segment_id);
+                    }
+                }
+                Gated::Delta {
+                    segment_id,
+                    generation_id,
                 } => queue.push_back(Queued {
                     envelope,
                     waiting: Some((segment_id, generation_id)),
                 }),
+                Gated::SegmentCommitted { segment_id } if self.stale.contains(&segment_id) => {}
                 Gated::SegmentCommitted { segment_id } => {
                     for queued in queue.iter_mut() {
                         if queued
@@ -207,7 +225,10 @@ impl<P: GatePayload> Gate<P> {
                     queue.push_back(ready(envelope));
                 }
                 Gated::GenerationEnded { generation_id } => {
-                    Self::drop_waiting(queue, record, |generation| generation == generation_id);
+                    self.ended.insert(generation_id);
+                    Self::drop_waiting(queue, &mut self.stale, record, |generation| {
+                        generation == generation_id
+                    });
                     queue.push_back(ready(envelope));
                 }
                 Gated::Turn(_) | Gated::Other => queue.push_back(ready(envelope)),
@@ -219,18 +240,21 @@ impl<P: GatePayload> Gate<P> {
     /// The lane `lane` ended without a `stop`: drops its held deltas and answers the rest.
     fn close(&mut self, lane: usize, record: &mut GateRecord) -> Vec<EventEnvelope<P>> {
         let queue = &mut self.lanes[lane];
-        Self::drop_waiting(queue, record, |_| true);
+        Self::drop_waiting(queue, &mut self.stale, record, |_| true);
         Self::release(queue)
     }
 
-    /// Drops every delta `queue` holds whose generation `ends`, recording its segment once.
+    /// Drops every delta `queue` holds whose generation `ends`, recording its segment once and
+    /// among the `stale`, whose later commit is dropped too.
     fn drop_waiting(
         queue: &mut VecDeque<Queued<P>>,
+        stale: &mut HashSet<SegmentId>,
         record: &mut GateRecord,
         ends: impl Fn(GenerationId) -> bool,
     ) {
         queue.retain(|queued| match queued.waiting {
             Some((segment_id, generation_id)) if ends(generation_id) => {
+                stale.insert(segment_id);
                 if !record.dropped.contains(&segment_id) {
                     record.dropped.push(segment_id);
                 }
@@ -800,6 +824,61 @@ mod tests {
         );
         assert_eq!(record.dropped, [tentative]);
         assert_eq!(record.committed, [first]);
+    }
+
+    #[test]
+    fn content_of_a_generation_that_ended_is_dropped_and_never_passed() {
+        let mut gate = Gate::new(1);
+        let mut record = GateRecord::default();
+        let mut text = Stream::new();
+        let (old, new) = (GenerationId::generate(), GenerationId::generate());
+        let (held, late, current) = (
+            SegmentId::generate(),
+            SegmentId::generate(),
+            SegmentId::generate(),
+        );
+        let delta = |segment_id, generation_id| Gated::Delta {
+            segment_id,
+            generation_id,
+        };
+        let commit = |segment_id| Gated::SegmentCommitted { segment_id };
+        assert_eq!(
+            gate.take(0, text.content(delta(held, old)), &mut record),
+            []
+        );
+        let superseded = Gated::GenerationEnded { generation_id: old };
+        assert_eq!(
+            payloads(gate.take(0, text.content(superseded), &mut record)),
+            [Payload::Content(superseded)],
+            "the held delta is dropped at the end of its generation"
+        );
+        assert_eq!(
+            gate.take(0, text.content(commit(held)), &mut record),
+            [],
+            "and so is its commit arriving after the end"
+        );
+        assert_eq!(
+            gate.take(0, text.content(delta(late, old)), &mut record),
+            [],
+            "a delta of the ended generation is stale"
+        );
+        assert_eq!(gate.take(0, text.content(commit(late)), &mut record), []);
+        assert_eq!(record.dropped, [held, late]);
+        assert_eq!(record.committed, [], "no segment of it was passed");
+
+        assert_eq!(
+            gate.take(0, text.content(delta(current, new)), &mut record),
+            []
+        );
+        assert_eq!(
+            payloads(gate.take(0, text.content(commit(current)), &mut record)),
+            [
+                Payload::Content(delta(current, new)),
+                Payload::Content(commit(current))
+            ],
+            "the next generation passes as before"
+        );
+        assert_eq!(record.committed, [current]);
     }
 
     #[test]

@@ -32,7 +32,7 @@ use inference_pipeline::{
     Catalog, Declaration, InteractionMode, Node, NodeEndpoints, NodeImplementation, NodeInput,
     NodeOutput, NodeRole, OverloadPolicy, PipelineSpec, PortId, PortTraits, modality,
 };
-use inference_tts::inference_text::{OutputSegment, SegmentId, SegmentState};
+use inference_tts::inference_text::{OutputSegment, SegmentId, SegmentState, TurnId};
 use inference_tts::{CONTRACT_REVISION, PlaybackReceipt, SynthesisEvent, SynthesisOutput};
 
 const PATIENCE: Duration = Duration::from_secs(5);
@@ -49,6 +49,8 @@ enum Payload {
     Audio(inference_tts::SegmentAudio),
     Completed(SegmentId),
     Receipt(SegmentId, PlaybackReceipt),
+    TurnOpened(TurnId),
+    Superseded(GenerationId),
     Control(ControlKind),
     Other,
 }
@@ -58,6 +60,8 @@ impl PlaybackPayload for Payload {
         match self {
             Self::Audio(audio) => Playable::Audio(audio),
             Self::Completed(segment_id) => Playable::Completed(segment_id),
+            Self::TurnOpened(turn_id) => Playable::TurnOpened(turn_id),
+            Self::Superseded(generation_id) => Playable::Superseded(generation_id),
             Self::Receipt(..) | Self::Control(_) | Self::Other => Playable::Other,
         }
     }
@@ -172,6 +176,7 @@ struct Declared {
     sink: Node,
     speech: PortId,
     played: PortId,
+    turns: PortId,
 }
 
 fn declared() -> Declared {
@@ -190,7 +195,7 @@ fn declared() -> Declared {
         required_capabilities: Vec::new(),
     };
     let mut declaration = Declaration::new();
-    let (_, (sink, speech, played)) = declaration
+    let (_, (sink, speech, played, turns)) = declaration
         .build(&catalog, profile_id, spec, |pipeline| {
             let tts = pipeline.node("tts", NodeRole::Model, Vec::new());
             let sink = pipeline.node("speaker", NodeRole::Sink, Vec::new());
@@ -207,13 +212,19 @@ fn declared() -> Declared {
                 OverloadPolicy::Pause,
                 NonZeroUsize::MIN,
             );
-            (sink.id(), speech.id(), played.id())
+            let policy = pipeline.node("turn policy", NodeRole::Policy, Vec::new());
+            let opened =
+                pipeline.output::<modality::Control>(&policy, "turns", PortTraits::default());
+            let turns = pipeline.input::<modality::Control>(&sink, "turns", PortTraits::default());
+            pipeline.connect(&opened, &turns, NonZeroUsize::MIN, OverloadPolicy::Pause);
+            (sink.id(), speech.id(), played.id(), turns.id())
         })
         .expect("the profile is declared");
     Declared {
         sink: declaration.node(sink).expect("a declared node").clone(),
         speech,
         played,
+        turns,
     }
 }
 
@@ -346,6 +357,7 @@ impl Feed {
         let kind = match &payload {
             Payload::Control(kind) => kind.as_str().to_owned(),
             Payload::Completed(_) => "inference.stream.SynthesisCompleted".to_owned(),
+            Payload::Superseded(_) => "inference.stream.GenerationSuperseded".to_owned(),
             _ => "inference.audio.AudioFrame".to_owned(),
         };
         self.edge.put(EventEnvelope {
@@ -605,4 +617,186 @@ fn cancelled_the_sink_acknowledges_nothing_more_and_closes_the_speaker() {
         run.synthesis.state(segment),
         Some(SegmentState::Synthesized)
     );
+}
+
+/// A started sink given a turns port, and the edge into that port.
+fn started_with_turns() -> (Started, Edge) {
+    let nodes = declared();
+    let host = FakeHost::laptop();
+    let speaker = Speaker::open(&host, &DeviceSelector::Default, PlayoutConfig::default())
+        .expect("the default output opens");
+    let mut sink = AcknowledgingSink::new(RunId::generate(), speaker).with_turns(nodes.turns);
+    let (speech, receipts, turns) = (Edge::default(), Edge::default(), Edge::default());
+    let node: &mut dyn NodeImplementation<Payload> = &mut sink;
+    block_on(node.describe(&nodes.sink));
+    block_on(node.prepare()).expect("the sink prepares");
+    block_on(node.start(NodeEndpoints {
+        inputs: vec![
+            NodeInput {
+                port_id: nodes.turns,
+                endpoint: Box::new(turns.clone()),
+            },
+            NodeInput {
+                port_id: nodes.speech,
+                endpoint: Box::new(speech.clone()),
+            },
+        ],
+        outputs: vec![NodeOutput {
+            port_id: nodes.played,
+            endpoint: Box::new(receipts.clone()),
+        }],
+    }))
+    .expect("the sink starts");
+    let synthesis = Synthesis::new();
+    let run = Started {
+        host,
+        sink,
+        feed: Feed {
+            edge: speech,
+            stream_id: StreamId::generate(),
+            sequence: 0,
+            generation_id: synthesis.generation_id(),
+        },
+        receipts,
+        synthesis,
+    };
+    (run, turns)
+}
+
+/// Sends the opening of `turn_id` on `turns`.
+fn open_turn(turns: &Edge, turn_id: TurnId) {
+    turns.put(EventEnvelope {
+        schema_version: 1,
+        event_id: EventId::generate(),
+        run_id: RunId::generate(),
+        session_id: None,
+        stream_id: StreamId::generate(),
+        sequence: 1,
+        producer: NodeId::generate(),
+        port: "turns".to_owned(),
+        kind: "inference.stream.TurnOpened".to_owned(),
+        generation_id: None,
+        timestamp: 0,
+        timebase: Timebase::WallTime,
+        causation_id: None,
+        payload: Payload::TurnOpened(turn_id),
+    });
+}
+
+#[test]
+fn a_turn_opened_while_audio_waits_stops_the_speaker_and_drops_the_older_generation() {
+    let (mut run, turns) = started_with_turns();
+    let handle = run.sink.handle();
+    let segment = run.synthesis.segment("one two three four");
+    for _ in 0..3 {
+        let frame = run.synthesis.frame(segment);
+        run.feed.send(frame);
+    }
+    assert!(eventually(|| handle.pushed() == 3));
+    let _ = run.host.pull(DEVICE_FRAME);
+
+    let turn_id = TurnId::generate();
+    open_turn(&turns, turn_id);
+    assert!(
+        eventually(|| handle.interruptions().len() == 1),
+        "the speaker is stopped at once"
+    );
+    let interruption = handle.interruptions()[0];
+    assert_eq!(interruption.turn_id, turn_id);
+    assert!(interruption.cleared > 0, "unplayed samples were cleared");
+    assert!(
+        interruption.position.is_some(),
+        "the played position was read"
+    );
+    assert_eq!(
+        interruption.played_after, None,
+        "nothing is queued after the stop"
+    );
+
+    let late = run.synthesis.frame(segment);
+    run.feed.send(late);
+    let completed = run.synthesis.complete(segment);
+    run.feed.send(completed);
+    assert!(eventually(|| handle.stale_frames().len() == 1));
+    let stale = handle.stale_frames()[0];
+    assert_eq!(stale.segment_id, segment);
+    assert_eq!(stale.generation_id, Some(run.synthesis.generation_id()));
+    assert_eq!(
+        stale.played, interruption.played_after,
+        "the played position is unchanged"
+    );
+    assert_eq!(
+        handle.pushed(),
+        3,
+        "the stale frame never reached the speaker"
+    );
+    let _ = run.host.pull(8 * DEVICE_FRAME);
+    assert_eq!(
+        settled(&run.receipts),
+        0,
+        "no receipt is made of the older generation"
+    );
+
+    let mut next = Synthesis::new();
+    run.feed.generation_id = next.generation_id();
+    let answer = next.segment("hello");
+    let frame = next.frame(answer);
+    run.feed.send(frame);
+    let completed = next.complete(answer);
+    run.feed.send(completed);
+    assert!(played_until(&run, 1), "the next generation plays");
+    let (named, receipt) = receipt(run.receipts.taken().remove(0));
+    assert_eq!((named, receipt.frames()), (answer, 1));
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    block_on(node.cancel());
+    block_on(node.stop());
+}
+
+#[test]
+fn a_turn_opened_with_nothing_to_play_stops_nothing() {
+    let (mut run, turns) = started_with_turns();
+    let handle = run.sink.handle();
+    open_turn(&turns, TurnId::generate());
+    let segment = run.synthesis.segment("first answer");
+    let frame = run.synthesis.frame(segment);
+    run.feed.send(frame);
+    let completed = run.synthesis.complete(segment);
+    run.feed.send(completed);
+    assert!(
+        played_until(&run, 1),
+        "a generation first seen after the turn opened plays"
+    );
+    assert_eq!(handle.interruptions(), []);
+    assert_eq!(handle.stale_frames(), []);
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    block_on(node.cancel());
+    block_on(node.stop());
+}
+
+#[test]
+fn a_superseded_generation_is_stopped_and_its_later_frames_dropped() {
+    let (mut run, _turns) = started_with_turns();
+    let handle = run.sink.handle();
+    let segment = run.synthesis.segment("cut off here");
+    for _ in 0..2 {
+        let frame = run.synthesis.frame(segment);
+        run.feed.send(frame);
+    }
+    assert!(eventually(|| handle.pushed() == 2));
+    run.feed
+        .send(Payload::Superseded(run.synthesis.generation_id()));
+    let late = run.synthesis.frame(segment);
+    run.feed.send(late);
+    assert!(eventually(|| handle.stale_frames().len() == 1));
+    assert_eq!(handle.pushed(), 2);
+    let _ = run.host.pull(8 * DEVICE_FRAME);
+    assert_eq!(settled(&run.receipts), 0);
+    assert_eq!(
+        handle.interruptions(),
+        [],
+        "an interruption is a turn's opening"
+    );
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    block_on(node.cancel());
+    block_on(node.stop());
 }
