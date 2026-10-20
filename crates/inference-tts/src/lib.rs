@@ -159,7 +159,10 @@
 //! through [`SynthesisOutput::add_local_compute`], reported as `local_compute_ms`, `measured`, and
 //! `unknown` when it adds none. A backend call that failed is still recorded, with what was
 //! measured, its counts not final (`final` false) once the implementation marks it with
-//! [`SynthesisOutput::mark_failed`]. The record names the adapter and the model, starts when the
+//! [`SynthesisOutput::mark_failed`]; a failed call will not synthesize the segments it took and
+//! left Queued, so the record no longer waits for them: their text counts as taken and nothing of
+//! them is emitted after it. A segment the failed call never took is still waited for. The record
+//! names the adapter and the model, starts when the
 //! synthesis started and ends when it is made, on the wall clock, and is placed on no run, node or
 //! session: the node that places it fills those. A synthesis dropped before its utterance ended
 //! completed no call and yields no record.
@@ -506,7 +509,8 @@ impl fmt::Display for UsageAlreadyRecorded {
 impl Error for UsageAlreadyRecorded {}
 
 /// The segment `segment_id` of the synthesis is still Queued, taken or not, so the synthesis's
-/// last segment is not synthesized and its usage is not recorded; nothing changed.
+/// last segment is not synthesized and its usage is not recorded; nothing changed. Once the
+/// backend call is marked failed, a taken segment no longer refuses the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentNotSynthesized {
     pub segment_id: SegmentId,
@@ -949,7 +953,8 @@ impl SynthesisOutput {
 
     /// Marks the implementation's backend call for this synthesis failed: its usage record is
     /// still made, with what was measured, and its counts are not final (`final` false), as
-    /// `inference-llm` records a failed turn.
+    /// `inference-llm` records a failed turn, without waiting for the segments the call took and
+    /// left Queued.
     pub const fn mark_failed(&mut self) {
         self.failed = true;
     }
@@ -1004,7 +1009,7 @@ impl SynthesisOutput {
     /// [`UsageRefused::UtteranceNotEnded`] before the end of the utterance,
     /// [`UsageRefused::UsageAlreadyRecorded`] once the record was made, and
     /// [`UsageRefused::SegmentNotSynthesized`] naming the first segment still Queued, taken or
-    /// not; nothing is recorded.
+    /// not, or, once the call is marked failed, the first not taken; nothing is recorded.
     pub fn usage(&mut self) -> Result<SynthesisEvent, UsageRefused> {
         if !self.utterance_ended {
             return Err(UtteranceNotEnded.into());
@@ -1012,8 +1017,8 @@ impl SynthesisOutput {
         if self.usage_recorded {
             return Err(UsageAlreadyRecorded.into());
         }
-        if let Some(queued) = self
-            .segments
+        let failed_taken = if self.failed { self.taken } else { 0 };
+        if let Some(queued) = self.segments[failed_taken..]
             .iter()
             .find(|segment| segment.state() == SegmentState::Queued)
         {
