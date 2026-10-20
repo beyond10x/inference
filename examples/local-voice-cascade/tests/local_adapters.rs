@@ -1,20 +1,28 @@
-//! The local voice cascade over the local adapters: the sherpa-onnx recogniser, the generator of
-//! a loopback `llama-server` and the testkit's mock synthesiser, behind the TTS binding until a
-//! local TTS adapter exists (`story:local-voice-cascade-example`; P2's exit at
-//! `docs/design/inference.md` 1160, A-04, A-05, A-08 and A-10 at 1140-1146, the measures at
-//! 1022-1023).
+//! The local voice cascade over the local adapters: the recogniser `INFERENCE_CASCADE_STT`
+//! selects, sherpa-onnx's streaming one or whisper.cpp's batch one, the generator of a loopback
+//! `llama-server` and the testkit's mock synthesiser, behind the TTS binding until a local TTS
+//! adapter exists (`story:local-voice-cascade-example`, `story:stt-swap-by-configuration`; P2's
+//! exit at `docs/design/inference.md` 1160, A-04, A-05, A-08 and A-10 at 1140-1146, demonstrator
+//! step 6 at 1175, the measures at 1022-1023).
 //!
-//! The three cases that need the adapters are ignored. They read the checkpoint directory from
-//! `INFERENCE_SHERPA_ONNX_STT_DIR` and the server from `INFERENCE_LLAMA_SERVER_URL` and
+//! The three cases that need the adapters are ignored, and the same three run under either
+//! recogniser: run them once with `INFERENCE_CASCADE_STT` unset or `sherpa-onnx` and once with
+//! it `whispercpp`. They read the recogniser's checkpoint from `INFERENCE_SHERPA_ONNX_STT_DIR` or
+//! `INFERENCE_WHISPERCPP_STT_MODEL` and the server from `INFERENCE_LLAMA_SERVER_URL` and
 //! `INFERENCE_LLAMA_SERVER_MODEL`, and with `--ignored` fail naming the variable that is missing.
-//! The spoken question is the checkpoint's own LibriSpeech clip `test_wavs/0.wav` ("after early
-//! nightfall the yellow lamps would light up here and there the squalid quarter of the
-//! brothels"), followed by a second of silence. The speaker is the fake audio host's, which the
-//! test pulls at the real-time rate, 10 ms of device audio every 10 ms, while the run goes:
+//! The spoken question is the sherpa-onnx checkpoint's own LibriSpeech clip `test_wavs/0.wav`
+//! ("after early nightfall the yellow lamps would light up here and there the squalid quarter of
+//! the brothels"), read from `INFERENCE_SHERPA_ONNX_STT_DIR` under either recogniser, followed by
+//! a second of silence. No case asserts what only a streaming recogniser shows, a hypothesis
+//! before the turn completes, so none is conditional on the recogniser's claims. The speaker is
+//! the fake audio host's, which the test pulls at the real-time rate, 10 ms of device audio every
+//! 10 ms, while the run goes:
 //!
 //! * offline answer: the clip, under the egress watch, yields a committed span containing
 //!   "nightfall", committed assistant text, each segment Played through the sink's receipts, and
-//!   a run that reaches Completed after `stop` with no failure and the watch not tripped;
+//!   a run that reaches Completed after `stop` with no failure and the watch not tripped; the
+//!   cascade's effective capabilities, read from its row of the `Pipelines` view, are
+//!   `output_streaming` under sherpa-onnx and none under whisper.cpp;
 //! * A-08: a revision naming a Committed span the recogniser produced, injected at the input
 //!   gate, is refused there (`inference.stream.Span/state/Committed/refuses/
 //!   inference.stream.ReviseSpan`), and a Tentative delta of the server's generation, injected at
@@ -24,8 +32,13 @@
 //!   generation is Superseded, and no frame of it is played after the stop.
 //!
 //! The cases that need nothing run always: a server URL whose host is not loopback is refused
-//! before anything is opened, a missing variable is named, and the cascade answers on a mock
-//! generator that, as the server's adapter, claims output streaming only.
+//! before anything is opened, a missing variable is named, `INFERENCE_CASCADE_STT` selects the
+//! recogniser and the variable of its checkpoint, the cascade planned over each recogniser's
+//! adapter record has under whisper.cpp the effective capabilities it has under sherpa-onnx less
+//! `incremental_input` and `output_streaming`, an `stt` node declared requiring both refuses the
+//! whisper.cpp record naming the node, and the cascade answers on a mock generator that, as the
+//! server's adapter, claims output streaming only, over the mock recogniser claiming both
+//! capabilities and over the one claiming neither.
 //!
 //! The watch reads every socket of the process and the server answers one request at a time, so
 //! the cases that run the cascade hold one lock and never overlap.
@@ -35,7 +48,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::num::{NonZeroU16, NonZeroU32};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
@@ -49,16 +62,16 @@ use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, Se
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::GenerationState;
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
-use inference_core::model::{Locality, ModelId};
+use inference_core::model::{Capability, Locality, ModelId};
 use inference_core::policy::Egress;
 use inference_pipeline::{
-    Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInput,
-    NodeInstanceId, NodeOutput, PortId,
+    CapabilityMismatch, Declaration, Node, NodeEndpoints, NodeError, NodeFuture,
+    NodeImplementation, NodeInput, NodeInstanceId, NodeOutput, PlanPipelineError, PortId,
 };
 use inference_runtime::RunController;
 use inference_runtime::egress::EgressWatch;
 use inference_runtime::run::{NodeInstanceState, RunState};
-use inference_testkit::cascade::{Mocks, TurnStore};
+use inference_testkit::cascade::{CascadeRefused, Mocks, TurnStore};
 use inference_testkit::graph::RunLog;
 use inference_testkit::llm::{MockConfiguration as LlmConfiguration, MockGenerator};
 use inference_testkit::stream::StreamEvent;
@@ -68,17 +81,23 @@ use inference_testkit::stt::{
 };
 use inference_testkit::tts::{MockConfiguration as TtsConfiguration, MockSynthesiser};
 use inference_text::{SegmentId, SegmentState, SpanId, TextDelta, TranscriptRevision};
+use inference_tts::Synthesiser;
 use local_voice_cascade::local::{
-    LocalConfig, LocalModels, LocalRefused, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE,
-    STT_DIR_VARIABLE, declare_local, loopback,
+    ADMITTED, LocalConfig, LocalModels, LocalRefused, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE,
+    STT_DIR_VARIABLE, STT_VARIABLE, SttBackend, SttConfig, WHISPERCPP_MODEL_VARIABLE,
+    declare_local, declare_local_adapters, loopback, server_adapter, synthesiser,
 };
 use local_voice_cascade::{
-    AUDIO_INGRESS, CascadeHandles, CascadeIds, LocalCascade, TEXT_EGRESS, TRANSCRIPT_EGRESS,
-    VoicePayload, declare,
+    AUDIO_INGRESS, CascadeHandles, CascadeIds, LocalCascade, STREAMING_STT_REQUIRES, TEXT_EGRESS,
+    TRANSCRIPT_EGRESS, VoicePayload, declare, declare_requiring,
 };
 
-/// The checkpoint's LibriSpeech clip, relative to the checkpoint directory.
+/// The sherpa-onnx checkpoint's LibriSpeech clip, relative to the checkpoint directory.
 const CLIP: &str = "test_wavs/0.wav";
+
+/// The capabilities the cascade's effective capabilities lose when whisper.cpp replaces
+/// sherpa-onnx at `stt`.
+const STREAMING: [Capability; 2] = [Capability::IncrementalInput, Capability::OutputStreaming];
 
 /// The word of the clip the committed span is to contain.
 const HEARD: &str = "nightfall";
@@ -122,7 +141,35 @@ fn block_on<F: Future>(future: F) -> F::Output {
 
 /// The configuration the variables name; a missing one fails the case, naming it.
 fn configured() -> LocalConfig {
-    LocalConfig::from_env().unwrap_or_else(|refused| panic!("{refused}"))
+    let config = LocalConfig::from_env().unwrap_or_else(|refused| panic!("{refused}"));
+    println!("recogniser: {}", config.stt.backend());
+    config
+}
+
+/// The clip in the sherpa-onnx checkpoint directory `INFERENCE_SHERPA_ONNX_STT_DIR` names, under
+/// either recogniser; a missing variable fails the case, naming it.
+fn clip() -> PathBuf {
+    std::env::var_os(STT_DIR_VARIABLE)
+        .map(|dir| PathBuf::from(dir).join(CLIP))
+        .unwrap_or_else(|| panic!("{STT_DIR_VARIABLE} is not set: the clip is its {CLIP}"))
+}
+
+/// The effective capabilities of `cascade`, read from its row of the `Pipelines` view.
+fn effective(declaration: &Declaration, cascade: &LocalCascade) -> Vec<Capability> {
+    declaration
+        .pipeline(cascade.pipeline_id)
+        .and_then(|pipeline| pipeline.effective_capabilities())
+        .expect("the cascade is planned")
+        .to_vec()
+}
+
+/// The effective capabilities of the local cascade with `backend` bound at `stt`: what the
+/// recogniser, the server's generator and the mock synthesiser all claim.
+fn expected_effective(backend: SttBackend) -> Vec<Capability> {
+    match backend {
+        SttBackend::SherpaOnnx => vec![Capability::OutputStreaming],
+        SttBackend::WhisperCpp => Vec::new(),
+    }
 }
 
 /// The samples of the 16 kHz mono 16-bit PCM WAV file at `path`.
@@ -738,15 +785,19 @@ fn print_measures(handles: &CascadeHandles) {
 }
 
 #[test]
-#[ignore = "needs the STT checkpoint in INFERENCE_SHERPA_ONNX_STT_DIR and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
 fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
     let _serial = serial();
     let config = configured();
     let models = LocalModels::open(&config).unwrap_or_else(|refused| panic!("{refused}"));
+    assert_eq!(models.recogniser.backend(), config.stt.backend());
     let host = FakeHost::laptop();
     let mut declaration = Declaration::new();
     let cascade =
         declare_local(&mut declaration, &models).expect("the cascade validates and plans");
+    let effective = effective(&declaration, &cascade);
+    println!("effective capabilities: {effective:?}");
+    assert_eq!(effective, expected_effective(config.stt.backend()));
     let run_id = RunId::generate();
     let turns = TurnStore::default();
     let log = RunLog::new();
@@ -765,7 +816,7 @@ fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
     let running = Running::start(run_id, &cascade, &declaration, run.implementations);
 
     let mut microphone = Microphone::new(running.run_id);
-    running.send(microphone.say(&config.stt_dir.join(CLIP)));
+    running.send(microphone.say(&clip()));
     running.send(vec![microphone.stop()]);
     let finished = running.finish(&host, &handles);
     print_measures(&handles);
@@ -836,7 +887,7 @@ fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
 }
 
 #[test]
-#[ignore = "needs the STT checkpoint in INFERENCE_SHERPA_ONNX_STT_DIR and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
 fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_the_gates() {
     let _serial = serial();
     let config = configured();
@@ -889,7 +940,7 @@ fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_t
     }
     let running = Running::start(run_id, &cascade, &declaration, watched);
     let mut microphone = Microphone::new(running.run_id);
-    running.send(microphone.say(&config.stt_dir.join(CLIP)));
+    running.send(microphone.say(&clip()));
     running.send(vec![microphone.stop()]);
     let finished = running.finish(&host, &handles);
     print_measures(&handles);
@@ -963,7 +1014,7 @@ fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_t
 }
 
 #[test]
-#[ignore = "needs the STT checkpoint in INFERENCE_SHERPA_ONNX_STT_DIR and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
 #[allow(clippy::too_many_lines)]
 fn the_clip_said_again_while_the_answer_plays_stops_it_and_supersedes_its_generation() {
     let _serial = serial();
@@ -989,7 +1040,7 @@ fn the_clip_said_again_while_the_answer_plays_stops_it_and_supersedes_its_genera
         .expect("the fake speaker opens");
     let handles = run.handles.clone();
     let running = Running::start(run_id, &cascade, &declaration, run.implementations);
-    let clip = config.stt_dir.join(CLIP);
+    let clip = clip();
     let mut microphone = Microphone::new(running.run_id);
 
     // The first question; the device plays at the real-time rate until the first segment of the
@@ -1168,7 +1219,9 @@ fn a_server_whose_host_is_not_loopback_is_refused_before_anything_opens() {
             "{url} is refused"
         );
         let config = LocalConfig {
-            stt_dir: "no such directory".into(),
+            stt: SttConfig::SherpaOnnx {
+                dir: "no such directory".into(),
+            },
             server_url: url.to_owned(),
             server_model: "qwen".to_owned(),
             max_output_tokens: 32,
@@ -1194,25 +1247,189 @@ fn a_server_whose_host_is_not_loopback_is_refused_before_anything_opens() {
 #[test]
 fn a_missing_variable_is_named() {
     let all = |name: &str| Some(format!("value of {name}"));
-    let config = LocalConfig::from_lookup(all).expect("every variable is set");
+    let unset = |name: &str| (name != STT_VARIABLE).then(|| all(name))?;
+    let config = LocalConfig::from_lookup(unset).expect("every variable is set");
     assert_eq!(
-        config.stt_dir,
-        Path::new("value of INFERENCE_SHERPA_ONNX_STT_DIR")
+        config.stt,
+        SttConfig::SherpaOnnx {
+            dir: PathBuf::from("value of INFERENCE_SHERPA_ONNX_STT_DIR")
+        }
     );
     assert_eq!(config.server_url, "value of INFERENCE_LLAMA_SERVER_URL");
     assert_eq!(config.server_model, "value of INFERENCE_LLAMA_SERVER_MODEL");
     for missing in [STT_DIR_VARIABLE, SERVER_URL_VARIABLE, SERVER_MODEL_VARIABLE] {
         let refused =
-            LocalConfig::from_lookup(|name: &str| (name != missing).then(|| all(name))?)
+            LocalConfig::from_lookup(|name: &str| (name != missing).then(|| unset(name))?)
                 .expect_err("a variable is missing");
         assert_eq!(refused, LocalRefused::Missing(missing));
         assert!(refused.to_string().contains(missing), "{refused}");
     }
 }
 
+/// `lookup` answering `value` for [`STT_VARIABLE`] and every other variable but `unset`.
+fn selecting(value: &str, unset: &str) -> impl Fn(&str) -> Option<String> {
+    let (value, unset) = (value.to_owned(), unset.to_owned());
+    move |name: &str| {
+        if name == STT_VARIABLE {
+            Some(value.clone())
+        } else {
+            (name != unset).then(|| format!("value of {name}"))
+        }
+    }
+}
+
+#[test]
+fn the_stt_variable_selects_the_recogniser_and_the_variable_of_its_checkpoint() {
+    let sherpa = LocalConfig::from_lookup(selecting("sherpa-onnx", WHISPERCPP_MODEL_VARIABLE))
+        .expect("sherpa-onnx needs no whisper.cpp checkpoint");
+    assert_eq!(
+        sherpa.stt,
+        SttConfig::SherpaOnnx {
+            dir: PathBuf::from("value of INFERENCE_SHERPA_ONNX_STT_DIR")
+        }
+    );
+    let whisper = LocalConfig::from_lookup(selecting("whispercpp", STT_DIR_VARIABLE))
+        .expect("whisper.cpp needs no sherpa-onnx checkpoint");
+    assert_eq!(
+        whisper.stt,
+        SttConfig::WhisperCpp {
+            model: PathBuf::from("value of INFERENCE_WHISPERCPP_STT_MODEL")
+        }
+    );
+    assert_eq!(
+        (whisper.server_url, whisper.server_model),
+        (sherpa.server_url, sherpa.server_model),
+        "nothing else changes with the recogniser"
+    );
+    for backend in SttBackend::ALL {
+        let refused = LocalConfig::from_lookup(selecting(backend.name(), backend.variable()))
+            .expect_err("the checkpoint variable is missing");
+        assert_eq!(refused, LocalRefused::Missing(backend.variable()));
+        assert_eq!(backend.name().parse::<SttBackend>(), Ok(backend));
+    }
+    let refused = LocalConfig::from_lookup(selecting("whisper", ""))
+        .expect_err("whisper names no recogniser");
+    assert_eq!(
+        refused,
+        LocalRefused::UnknownBackend {
+            value: "whisper".to_owned()
+        }
+    );
+    assert!(
+        refused.to_string().contains(STT_VARIABLE) && refused.to_string().contains("whispercpp"),
+        "{refused}"
+    );
+}
+
+/// The cascade planned with the adapter records of the configuration `lookup` answers: the
+/// recogniser's, the server's and the mock synthesiser's; no checkpoint is opened and no request
+/// sent.
+fn planned_records(lookup: impl Fn(&str) -> Option<String>) -> (SttBackend, Vec<Capability>) {
+    let config = LocalConfig::from_lookup(lookup).expect("every variable is set");
+    let backend = config.stt.backend();
+    let mut declaration = Declaration::new();
+    let cascade = declare_local_adapters(
+        &mut declaration,
+        [
+            backend.adapter(),
+            server_adapter(&config.server()).expect("the server's adapter is declared"),
+            synthesiser().adapter().clone(),
+        ],
+    )
+    .unwrap_or_else(|refused| panic!("the cascade plans over {backend}: {refused}"));
+    (backend, effective(&declaration, &cascade))
+}
+
+#[test]
+fn under_whispercpp_the_effective_capabilities_lose_incremental_input_and_output_streaming() {
+    let localhost = |name: &str| match name {
+        SERVER_URL_VARIABLE => Some("http://127.0.0.1:8080/v1".to_owned()),
+        _ => Some(format!("value of {name}")),
+    };
+    let (sherpa, streaming) = planned_records(|name: &str| match name {
+        STT_VARIABLE => Some("sherpa-onnx".to_owned()),
+        _ => localhost(name),
+    });
+    let (whisper, batch) = planned_records(|name: &str| match name {
+        STT_VARIABLE => Some("whispercpp".to_owned()),
+        _ => localhost(name),
+    });
+    println!("effective capabilities, {sherpa}: {streaming:?}");
+    println!("effective capabilities, {whisper}: {batch:?}");
+    assert_eq!(
+        (sherpa, whisper),
+        (SttBackend::SherpaOnnx, SttBackend::WhisperCpp)
+    );
+    assert_eq!(
+        batch,
+        streaming
+            .iter()
+            .copied()
+            .filter(|capability| !STREAMING.contains(capability))
+            .collect::<Vec<_>>(),
+        "whisper.cpp's set is sherpa-onnx's less incremental_input and output_streaming"
+    );
+    assert!(
+        streaming
+            .iter()
+            .any(|capability| STREAMING.contains(capability)),
+        "the difference shows in the view: {streaming:?}"
+    );
+    assert_eq!(streaming, expected_effective(sherpa));
+    assert_eq!(batch, expected_effective(whisper));
+}
+
+#[test]
+fn an_stt_node_requiring_streaming_refuses_the_whispercpp_recogniser_naming_the_node() {
+    let server = server_adapter(
+        &LocalConfig {
+            stt: SttConfig::WhisperCpp {
+                model: PathBuf::new(),
+            },
+            server_url: "http://127.0.0.1:8080/v1".to_owned(),
+            server_model: "qwen".to_owned(),
+            max_output_tokens: 32,
+        }
+        .server(),
+    )
+    .expect("the server's adapter is declared");
+    let strict = |backend: SttBackend, declaration: &mut Declaration| {
+        declare_requiring(
+            declaration,
+            [
+                backend.adapter(),
+                server.clone(),
+                synthesiser().adapter().clone(),
+            ],
+            ADMITTED.to_vec(),
+            &STREAMING_STT_REQUIRES,
+        )
+    };
+    strict(SttBackend::SherpaOnnx, &mut Declaration::new())
+        .expect("sherpa-onnx claims what the stricter node requires");
+    let mut declaration = Declaration::new();
+    let refused =
+        strict(SttBackend::WhisperCpp, &mut declaration).expect_err("whisper.cpp claims neither");
+    let stt = declaration
+        .nodes()
+        .find(|node| node.name() == "stt")
+        .expect("the stt node is declared")
+        .node_id();
+    assert!(
+        matches!(
+            refused,
+            CascadeRefused::Unplannable(PlanPipelineError::Mismatch(CapabilityMismatch {
+                node_id: Some(node_id),
+                capability,
+            })) if node_id == stt && STREAMING.contains(&capability)
+        ),
+        "the stt node and a capability it requires and whisper.cpp lacks: {refused:?}"
+    );
+}
+
 #[test]
 fn the_local_profile_admits_the_server_s_locality_and_the_mock_profile_does_not() {
-    let mocks = streaming_only_mocks(Vec::new());
+    let mocks = streaming_only_mocks(SttConfiguration::Incremental, Vec::new());
     let mut declaration = Declaration::new();
     let cascade = declare(&mut declaration, &mocks).expect("the mocks run in the process");
     assert_eq!(cascade.admitted(), [Locality::SameProcess]);
@@ -1223,8 +1440,9 @@ fn the_local_profile_admits_the_server_s_locality_and_the_mock_profile_does_not(
 }
 
 /// The mocks of a cascade whose generator claims output streaming only, as the adapter of
-/// `llama-server` does; the recogniser commits `questions`, one span each.
-fn streaming_only_mocks(questions: Vec<&str>) -> Mocks {
+/// `llama-server` does; the recogniser, claiming what `recogniser` claims, commits `questions`,
+/// one span each.
+fn streaming_only_mocks(recogniser: SttConfiguration, questions: Vec<&str>) -> Mocks {
     let cue = |after_frames, step| Cue { after_frames, step };
     let mut script = Vec::new();
     for (span, question) in questions.into_iter().enumerate() {
@@ -1233,7 +1451,7 @@ fn streaming_only_mocks(questions: Vec<&str>) -> Mocks {
         script.push(cue(frame + 1, ScriptStep::Commit { span }));
     }
     Mocks {
-        recogniser: MockRecogniser::new(SttConfiguration::Incremental, ModelId::generate(), script),
+        recogniser: MockRecogniser::new(recogniser, ModelId::generate(), script),
         generator: MockGenerator::new(
             LlmConfiguration::StreamingOnly,
             ModelId::generate(),
@@ -1254,8 +1472,16 @@ fn streaming_only_mocks(questions: Vec<&str>) -> Mocks {
 
 #[test]
 fn a_generator_claiming_output_streaming_only_answers_each_turn_from_its_request() {
+    for recogniser in SttConfiguration::ALL {
+        answers_each_turn_over(recogniser);
+    }
+}
+
+/// The cascade over the recogniser claiming what `recogniser` claims, both capabilities or
+/// neither, answers a turn of two committed spans with one segment each.
+fn answers_each_turn_over(recogniser: SttConfiguration) {
     let questions = ["how warm is it outside", "and will it rain"];
-    let mocks = streaming_only_mocks(questions.to_vec());
+    let mocks = streaming_only_mocks(recogniser, questions.to_vec());
     let host = FakeHost::laptop();
     let mut declaration = Declaration::new();
     let cascade = declare(&mut declaration, &mocks).expect("the cascade validates and plans");
@@ -1291,7 +1517,10 @@ fn a_generator_claiming_output_streaming_only_answers_each_turn_from_its_request
         .into_iter()
         .map(|(_, text)| text)
         .collect();
-    assert_eq!(answers, questions, "one segment per span, the span's text");
+    assert_eq!(
+        answers, questions,
+        "one segment per span, the span's text, over {recogniser:?}"
+    );
     let generations = handles.llm.generations();
     assert_eq!(generations.len(), 1, "one turn, one generation");
     assert_eq!(generations[0].state, GenerationState::Completed);

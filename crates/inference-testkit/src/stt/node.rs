@@ -146,8 +146,9 @@ impl<R: fmt::Debug> fmt::Debug for SttNode<R> {
 
 impl<R: Recogniser> SttNode<R> {
     /// An STT node of the run `run_id` recognising on `recogniser` through `ports`, recording
-    /// what it emits in `log`. The recogniser is to claim `incremental_input`, so that a turn's
-    /// frames reach its recognition before the turn completes.
+    /// what it emits in `log`. A recogniser claiming `incremental_input` takes a turn's frames
+    /// as they arrive; one claiming neither capability, a batch recogniser, takes them all once
+    /// the node ends the recognition's input at the turn's completion.
     #[must_use]
     pub fn new(run_id: RunId, recogniser: R, ports: SttPorts, log: RunLog) -> Self {
         Self {
