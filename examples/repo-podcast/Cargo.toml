@@ -1,0 +1,25 @@
+[package]
+name = "repo-podcast"
+description = "Example: Claude distils a repository into a brief, and two voice models discuss it as a podcast over the speaker, in a terminal UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+inference-audio-device = { path = "../../adapters/inference-audio-device", default-features = false }
+inference-duplex = { path = "../../crates/inference-duplex" }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+realtime-voice = { path = "../realtime-voice" }
+serde_json.workspace = true
+
+[dev-dependencies]
+clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
+inference-audio-device = { path = "../../adapters/inference-audio-device" }
+inference-openai = { path = "../../adapters/inference-openai", features = ["gpt-live", "live"] }
+inference-testkit = { path = "../../crates/inference-testkit", features = ["duplex"] }
+
+[lints]
+workspace = true
