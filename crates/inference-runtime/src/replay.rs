@@ -177,7 +177,7 @@ pub struct Replay<'a, P> {
     recorder: Recorder<P>,
 }
 
-impl<'a, P: Clone + Send + 'static> Replay<'a, P> {
+impl<'a, P: Clone + Send + std::fmt::Debug + 'static> Replay<'a, P> {
     /// The replay of `recording` into the run whose nodes `recorder` wraps.
     #[must_use]
     pub fn new(recording: &'a Recording<P>, recorder: &Recorder<P>) -> Self {
@@ -311,6 +311,7 @@ mod tests {
             port_id: *PORT.get_or_init(PortId::generate),
             kind,
             event: format!("{kind:?}"),
+            subject: None,
         }
     }
 

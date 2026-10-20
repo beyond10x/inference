@@ -23,8 +23,14 @@
 //! supersede, a cancel, a discard, a tool call authorized or rejected. An envelope a node passes on
 //! unchanged, carrying an event identity the recorder has already taken, such as a fan-out's copy,
 //! is the same decision and is not counted again. A decision is compared by the node that made
-//! it, the port it left by, its kind and its event's name, never by its payload: a replay
-//! reproduces the framework's control decisions, not identical model output (line 1217).
+//! it, the port it left by, its kind and its event's name, and, for a tool call authorized or
+//! rejected, by its subject: the call, read off the payload's `Debug` rendering with every Uuid in
+//! it written as `<id>`, so that authorizing another tool or other arguments diverges while the
+//! identities a run generates afresh do not. The payload of any other decision is not compared: a
+//! span's or a segment's identity is generated afresh by every run and its text is model output,
+//! and a replay reproduces the framework's control decisions, not identical model output (line
+//! 1217); which span or segment is meant is compared by position, a node's decisions being
+//! compared in the order it made them.
 //!
 //! [`RunController::create`]: crate::RunController::create
 
@@ -134,8 +140,18 @@ impl DecisionKind {
     }
 }
 
+impl DecisionKind {
+    /// Whether a decision of this kind is compared by its subject as well: a tool call authorized
+    /// or rejected, whose subject is the call.
+    #[must_use]
+    pub const fn has_subject(self) -> bool {
+        matches!(self, Self::ToolAuthorized | Self::ToolRejected)
+    }
+}
+
 /// One control decision of a run: the node `node_id` sent an envelope of `event`, carrying a
-/// decision of `kind`, on its port `port_id`, recorded at `merge_order`.
+/// decision of `kind`, on its port `port_id`, recorded at `merge_order`, about `subject` when its
+/// kind has one ([`DecisionKind::has_subject`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlDecision {
     pub merge_order: u64,
@@ -143,23 +159,65 @@ pub struct ControlDecision {
     pub port_id: PortId,
     pub kind: DecisionKind,
     pub event: String,
+    pub subject: Option<String>,
 }
 
 impl ControlDecision {
     /// Whether `other` is the same decision: made by the same node, on the same port, of the
-    /// same kind and event, whatever its merge order.
+    /// same kind and event, about the same subject, whatever its merge order.
     #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
         self.node_id == other.node_id
             && self.port_id == other.port_id
             && self.kind == other.kind
             && self.event == other.event
+            && self.subject == other.subject
     }
+}
+
+/// The subject of a decision whose envelope carries `payload`: the payload's `Debug` rendering
+/// with every identity in it, a Uuid in its hyphenated form, written as `<id>`. Identities are
+/// generated afresh by every run, so a replay cannot reproduce them; the rest of the payload, such
+/// as a tool call's arguments and side-effect class, it does.
+fn subject(payload: &impl fmt::Debug) -> String {
+    without_identities(&format!("{payload:?}"))
+}
+
+/// `text` with every hyphenated Uuid that stands alone, not inside a longer run of letters and
+/// digits, written as `<id>`.
+fn without_identities(text: &str) -> String {
+    const LENGTH: usize = 36;
+    let bytes = text.as_bytes();
+    let standalone = |at: usize| at >= bytes.len() || !bytes[at].is_ascii_alphanumeric();
+    let is_uuid = |start: usize| {
+        bytes.get(start..start + LENGTH).is_some_and(|window| {
+            window.iter().enumerate().all(|(at, byte)| match at {
+                8 | 13 | 18 | 23 => *byte == b'-',
+                _ => byte.is_ascii_hexdigit(),
+            })
+        }) && (start == 0 || standalone(start - 1))
+            && standalone(start + LENGTH)
+    };
+    let mut kept = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some(next) = text[at..].chars().next() {
+        if is_uuid(at) {
+            kept.push_str("<id>");
+            at += LENGTH;
+        } else {
+            kept.push(next);
+            at += next.len_utf8();
+        }
+    }
+    kept
 }
 
 /// The decision `recorded` carries, when a node emitted it and its event identity is not among
 /// `seen`; every envelope's identity is added to `seen`.
-fn decision<P>(recorded: &Recorded<P>, seen: &mut HashSet<EventId>) -> Option<ControlDecision> {
+fn decision<P: fmt::Debug>(
+    recorded: &Recorded<P>,
+    seen: &mut HashSet<EventId>,
+) -> Option<ControlDecision> {
     let envelope = recorded.envelope()?;
     if !seen.insert(envelope.event_id) {
         return None;
@@ -170,12 +228,14 @@ fn decision<P>(recorded: &Recorded<P>, seen: &mut HashSet<EventId>) -> Option<Co
     else {
         return None;
     };
+    let kind = DecisionKind::of(&envelope.kind)?;
     Some(ControlDecision {
         merge_order: recorded.merge_order,
         node_id: *node_id,
         port_id: *port_id,
-        kind: DecisionKind::of(&envelope.kind)?,
+        kind,
         event: envelope.kind.clone(),
+        subject: kind.has_subject().then(|| subject(&envelope.payload)),
     })
 }
 
@@ -187,7 +247,7 @@ pub struct Recording<P> {
     pub entries: Vec<Recorded<P>>,
 }
 
-impl<P> Recording<P> {
+impl<P: fmt::Debug> Recording<P> {
     /// The control decisions of the run, in merge order.
     #[must_use]
     pub fn decisions(&self) -> Vec<ControlDecision> {
@@ -197,7 +257,9 @@ impl<P> Recording<P> {
             .filter_map(|recorded| decision(recorded, &mut seen))
             .collect()
     }
+}
 
+impl<P> Recording<P> {
     /// The inputs of the run, in merge order: what the caller sent on an ingress and the host
     /// actions it noted.
     pub fn inputs(&self) -> impl Iterator<Item = &Recorded<P>> {
@@ -265,7 +327,7 @@ impl<P> Clone for Recorder<P> {
     }
 }
 
-impl<P: Clone + Send + 'static> Recorder<P> {
+impl<P: Clone + Send + fmt::Debug + 'static> Recorder<P> {
     /// A recorder of a run driven under `policy_version`, holding nothing yet.
     #[must_use]
     pub fn new(policy_version: impl Into<String>) -> Self {
@@ -452,7 +514,7 @@ struct RecordingSender<P> {
     recorder: Recorder<P>,
 }
 
-impl<P: Clone + Send + 'static> OutputEndpoint<P> for RecordingSender<P> {
+impl<P: Clone + Send + fmt::Debug + 'static> OutputEndpoint<P> for RecordingSender<P> {
     fn send(&self, envelope: EventEnvelope<P>) -> EndpointFuture<'_, Result<(), SendError<P>>> {
         let entry = match &self.tap {
             Tap::Node { node_id, port_id } => Entry::Emitted {
@@ -477,7 +539,7 @@ struct RecordingNode<P> {
     recorder: Recorder<P>,
 }
 
-impl<P: Clone + Send + 'static> NodeImplementation<P> for RecordingNode<P> {
+impl<P: Clone + Send + fmt::Debug + 'static> NodeImplementation<P> for RecordingNode<P> {
     fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
         self.inner.describe(node)
     }
@@ -534,7 +596,9 @@ mod tests {
     use inference_core::envelope::{EventEnvelope, EventId, Timebase};
     use inference_core::id::{NodeId, RunId, StreamId};
 
-    use super::{DecisionKind, Entry, Recorded, Recorder};
+    use inference_pipeline::PortId;
+
+    use super::{DecisionKind, Entry, Recorded, Recorder, Recording, without_identities};
 
     /// An ingress that takes everything at once.
     struct Taking;
@@ -652,5 +716,97 @@ mod tests {
             "what the caller sends is an input, not a decision of the run"
         );
         assert!(!recorder.wait_until(Duration::ZERO, |decisions| !decisions.is_empty()));
+    }
+
+    #[test]
+    fn a_standalone_uuid_is_written_as_an_id_and_nothing_else_is() {
+        let id = NodeId::generate();
+        assert_eq!(
+            without_identities(&format!("Call {{ id: NodeId({id}), tool: \"lookup\" }}")),
+            "Call { id: NodeId(<id>), tool: \"lookup\" }"
+        );
+        let embedded = format!("x{id}");
+        assert_eq!(without_identities(&embedded), embedded);
+        assert_eq!(
+            without_identities(&format!("{id}{id}")),
+            format!("{id}{id}"),
+            "two Uuids run together are no standalone Uuid"
+        );
+        assert_eq!(without_identities("ä 1234"), "ä 1234");
+    }
+
+    /// A tool call as a payload carries it: a fresh identity, the tool and the arguments.
+    type Call = (NodeId, &'static str, &'static str);
+
+    /// A recording of `node_id` emitting one envelope of `kind` carrying `payload` on `port_id`.
+    fn emitted(node_id: NodeId, port_id: PortId, kind: &str, payload: Call) -> Recording<Call> {
+        let envelope = EventEnvelope {
+            schema_version: 1,
+            event_id: EventId::generate(),
+            run_id: RunId::generate(),
+            session_id: None,
+            stream_id: StreamId::generate(),
+            sequence: 1,
+            producer: node_id,
+            port: "decisions".to_owned(),
+            kind: kind.to_owned(),
+            generation_id: None,
+            timestamp: 0,
+            timebase: Timebase::WallTime,
+            causation_id: None,
+            payload,
+        };
+        Recording {
+            policy_version: String::new(),
+            entries: vec![Recorded {
+                merge_order: 0,
+                entry: Entry::Emitted {
+                    node_id,
+                    port_id,
+                    envelope,
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn a_tool_decision_is_compared_by_its_call_but_not_by_the_calls_fresh_identity() {
+        let (node_id, port_id) = (NodeId::generate(), PortId::generate());
+        let call = |tool, arguments| -> Call { (NodeId::generate(), tool, arguments) };
+        let decided = |kind, payload| {
+            let decisions = emitted(node_id, port_id, kind, payload).decisions();
+            assert_eq!(decisions.len(), 1, "{kind} is a decision");
+            decisions[0].clone()
+        };
+        for kind in [
+            "inference.tools.ToolCallAuthorized",
+            "inference.tools.ToolCallRejected",
+        ] {
+            let lookup = decided(kind, call("lookup", "{day: monday}"));
+            assert!(
+                lookup.same_as(&decided(kind, call("lookup", "{day: monday}"))),
+                "{kind}: the same call under another identity is the same decision"
+            );
+            assert!(
+                !lookup.same_as(&decided(kind, call("delete", "{day: monday}"))),
+                "{kind}: another tool is another decision"
+            );
+            assert!(
+                !lookup.same_as(&decided(kind, call("lookup", "{day: friday}"))),
+                "{kind}: other arguments are another decision"
+            );
+        }
+        let committed = decided(
+            "inference.stream.TextSegmentCommitted",
+            call("lookup", "{day: monday}"),
+        );
+        assert_eq!(
+            committed.subject, None,
+            "a commit's payload is model output"
+        );
+        assert!(committed.same_as(&decided(
+            "inference.stream.TextSegmentCommitted",
+            call("delete", "{day: friday}")
+        )));
     }
 }

@@ -12,24 +12,32 @@
 //!   answers each span in arrival order with the generator's reply to its text, emitting the
 //!   `TextDelta` and the `TextSegmentCommitted` of each segment. A turn whose completion finds no
 //!   span starts no generation;
-//! * the generation stays Active, the turn's current epoch, until the next turn opens. At the
-//!   next `TurnOpened`, the interruption (632-641), the node runs
-//!   `inference.stream.SupersedeGeneration` on it, which discards every segment of it not yet
-//!   Played in the generation's own record and stops its running turn, sends its
+//! * the generation stays Active, the turn's current epoch, until the next turn opens. A
+//!   `TurnOpened` while output of the generation is not all Played is the interruption (632-641):
+//!   the node runs `inference.stream.SupersedeGeneration` on it, which discards every segment of
+//!   it not yet Played in the generation's own record and stops its running turn, sends its
 //!   `GenerationSuperseded` on, so that every node downstream drops and discards what it holds of
 //!   it, and then drops the generation's handle, so that the backend's turn is dropped and its
 //!   place among the generator's running generations given back. It records the two apart
 //!   ([`Superseded`]): the cancellation of delivery, when the `GenerationSuperseded` was sent, and
 //!   the cancellation of computation, when the handle was dropped (641). No node instance changes
-//!   state: the supersede is an event of the stream, not the `cancel` of the instance;
+//!   state: the supersede is an event of the stream, not the `cancel` of the instance. A
+//!   `TurnOpened` once every segment of the generation was Played interrupts nothing: the node
+//!   completes the generation and emits its `GenerationCompleted`. The node learns what was
+//!   Played on its playback port ([`AgentNode::with_playback`]), an input edge carrying the
+//!   `AudioPlayed` of each segment from the node that acknowledges playback, which it takes ahead
+//!   of the turn events; a node given no playback port learns nothing played, and supersedes its
+//!   generation at every `TurnOpened`;
 //! * a span may arrive before the `TurnOpened` of its turn, which reaches the node on another
 //!   edge: every span of a turn is taken at the turn's completion, so a span held when a turn
 //!   opens is the new turn's and is kept for it. Spans still held at the end of input belong to a
 //!   turn that never completed: they are dropped and recorded ([`AgentHandle::dropped_inputs`]).
 //!
 //! Once both inputs ended, each by a control event of kind `stop` or by its edge closing, as on a
-//! drain, the node completes the Active generation, emits `GenerationCompleted`, passes the end of
-//! input on and ends. Cancelled, it cancels the Active generation, recording its
+//! drain, the node completes the Active generation, emits `GenerationCompleted` and passes the end
+//! of input on; given a playback port, it then goes on taking what arrives there until the end of
+//! input there, or until that edge is closed, so that the node sending it is never held; and it
+//! ends. Cancelled, it cancels the Active generation, recording its
 //! `GenerationCancelled` unsent, and sends nothing more; a cancel taken while a send waits for
 //! room ends the wait. A turn of the model that fails cancels the generation: the node emits its
 //! `GenerationCancelled` and fails with the `llm` error.
@@ -38,7 +46,7 @@
 //! event's generation. [`AgentHandle`] reads every generation, the turn it answered and its
 //! state, as the node goes.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::future;
 use std::pin::pin;
@@ -53,7 +61,7 @@ use inference_core::id::{GenerationId, NodeId, RunId};
 use inference_llm::llm_core::TurnRequest;
 use inference_llm::{GenerationEvent, GenerationHandle, GenerationRequest, Generator};
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
-use inference_text::{SegmentSnapshot, TurnId};
+use inference_text::{SegmentId, SegmentSnapshot, TurnId};
 
 use crate::graph::RunLog;
 use crate::graph::nodes::{
@@ -106,6 +114,7 @@ pub struct AgentNode {
     generator: Generator,
     reply: fn(&str) -> String,
     turns: PortId,
+    playback: Option<PortId>,
     log: RunLog,
     node_id: Option<NodeId>,
     state: Arc<Watched<State>>,
@@ -118,6 +127,7 @@ impl fmt::Debug for AgentNode {
             .field("run_id", &self.run_id)
             .field("generator", &self.generator)
             .field("turns", &self.turns)
+            .field("playback", &self.playback)
             .field("node_id", &self.node_id)
             .field("state", &self.state)
             .field("exchange", &self.exchange)
@@ -142,11 +152,20 @@ impl AgentNode {
             generator: generator.into(),
             reply,
             turns,
+            playback: None,
             log,
             node_id: None,
             state: Arc::new(Watched::new(State::default())),
             exchange: Exchange::new(),
         }
+    }
+
+    /// The same node given a playback port, `playback`: an edge arriving there carries the
+    /// `AudioPlayed` of each segment played; see the module documentation.
+    #[must_use]
+    pub const fn with_playback(mut self, playback: PortId) -> Self {
+        self.playback = Some(playback);
+        self
     }
 
     /// The test's side of the node.
@@ -246,6 +265,7 @@ fn carry<P: ModelPayload>(envelope: EventEnvelope<PipelinePayload>) -> EventEnve
 /// What the exchange acts on next.
 enum Step<P> {
     Cancel,
+    Played(Option<EventEnvelope<P>>),
     Turns(Option<EventEnvelope<P>>),
     Input(Option<EventEnvelope<P>>),
 }
@@ -275,18 +295,30 @@ struct Exchanging<P> {
     held: VecDeque<String>,
     input_ended: bool,
     turns_ended: bool,
+    /// The edge at the playback port, if the node was given one, until it ended, and every
+    /// segment it said was Played.
+    playback: Option<Box<dyn InputEndpoint<P>>>,
+    played: HashSet<SegmentId>,
+    /// Whether the node was given a playback port.
+    watches_playback: bool,
 }
 
 impl<P: ModelPayload> Exchanging<P> {
-    /// The next thing to act on: a cancel first, then the turn events, then the input.
+    /// The next thing to act on: a cancel first, then what was played, then the turn events, then
+    /// the input.
     async fn step(&mut self) -> Step<P> {
         let state = Arc::clone(&self.state);
         let (input_ended, turns_ended) = (self.input_ended, self.turns_ended);
-        let (input, turns) = (&mut self.input, &mut self.turns);
+        let (input, turns, playback) = (&mut self.input, &mut self.turns, &mut self.playback);
         future::poll_fn(|cx| {
             let cancelled = pin!(state.until(|state| state.cancel.then_some(())));
             if cancelled.poll(cx).is_ready() {
                 return Poll::Ready(Step::Cancel);
+            }
+            if let Some(playback) = playback.as_mut()
+                && let Poll::Ready(received) = playback.recv().as_mut().poll(cx)
+            {
+                return Poll::Ready(Step::Played(received));
             }
             if !turns_ended && let Poll::Ready(received) = turns.recv().as_mut().poll(cx) {
                 return Poll::Ready(Step::Turns(received));
@@ -454,11 +486,46 @@ impl<P: ModelPayload> Exchanging<P> {
         }
     }
 
-    /// The opening of `turn_id`: the interruption of the current generation. The spans held are
-    /// the new turn's: every span of the turn before was taken at its completion.
+    /// Acts on what the playback edge delivered: an envelope, or none once it is closed.
+    fn played(&mut self, received: Option<EventEnvelope<P>>) {
+        let Some(envelope) = received else {
+            self.playback = None;
+            return;
+        };
+        match envelope.payload.carried() {
+            Carried::Stream(StreamEvent::AudioPlayed(played)) => {
+                self.played.insert(played.segment_id);
+            }
+            Carried::Control(ControlKind::Stop) => self.playback = None,
+            Carried::Stream(_) | Carried::Tool(_) | Carried::Control(_) => {}
+        }
+    }
+
+    /// Whether every segment of the current generation was Played, as the playback port said;
+    /// never without a playback port.
+    fn all_played(&self) -> bool {
+        let (Some(current), true) = (&self.current, self.watches_playback) else {
+            return false;
+        };
+        current
+            .handle
+            .output()
+            .segments()
+            .iter()
+            .all(|segment| self.played.contains(&segment.segment_id()))
+    }
+
+    /// The opening of `turn_id`: the interruption of the current generation while output of it is
+    /// not all Played, and otherwise its completion. The spans held are the new turn's: every span
+    /// of the turn before was taken at its completion.
     async fn turn_opened(&mut self, turn_id: TurnId) -> Result<(), String> {
         self.opened += 1;
         self.open = Some((turn_id, self.opened));
+        if self.all_played() {
+            self.complete().await?;
+            self.current = None;
+            return Ok(());
+        }
         self.supersede(turn_id).await
     }
 
@@ -529,6 +596,7 @@ impl<P: ModelPayload> Exchanging<P> {
                     Carried::Stream(_) | Carried::Tool(_) | Carried::Control(_) => {}
                 },
                 Step::Input(received) => self.received(received),
+                Step::Played(received) => self.played(received),
             }
         }
         let dropped: Vec<String> = self.held.drain(..).collect();
@@ -539,6 +607,13 @@ impl<P: ModelPayload> Exchanging<P> {
         self.current = None;
         let end = carry(self.emitter.control(ControlKind::Stop));
         send_unless(self.output.as_ref(), &self.state, |state| state.cancel, end).await?;
+        while self.playback.is_some() {
+            match self.step().await {
+                Step::Cancel => return Ok(false),
+                Step::Played(received) => self.played(received),
+                Step::Turns(_) | Step::Input(_) => {}
+            }
+        }
         Ok(true)
     }
 
@@ -579,22 +654,28 @@ impl<P: ModelPayload> NodeImplementation<P> for AgentNode {
     }
 
     fn start(&mut self, endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
-        let started = started(self.node_id, &endpoints, 2, 1).and_then(|node_id| {
+        let inputs_wanted = 2 + usize::from(self.playback.is_some());
+        let started = started(self.node_id, &endpoints, inputs_wanted, 1).and_then(|node_id| {
             let NodeEndpoints {
                 inputs,
                 mut outputs,
             } = endpoints;
-            let (mut input, mut turns) = (None, None);
+            let (mut input, mut turns, mut playback) = (None, None, None);
             for edge in inputs {
                 if edge.port_id == self.turns {
                     turns = Some(edge.endpoint);
+                } else if Some(edge.port_id) == self.playback {
+                    playback = Some(edge.endpoint);
                 } else {
                     input = Some(edge.endpoint);
                 }
             }
-            let (Some(input), Some(turns)) = (input, turns) else {
+            let (Some(input), Some(turns), true) =
+                (input, turns, playback.is_some() == self.playback.is_some())
+            else {
                 return Err(NodeError::new(format!(
-                    "the node takes one edge at its turns port {} and one at its input",
+                    "the node takes one edge at its turns port {}, one at its playback port if it \
+                     was given one, and one at its input",
                     self.turns
                 )));
             };
@@ -620,6 +701,9 @@ impl<P: ModelPayload> NodeImplementation<P> for AgentNode {
                 held: VecDeque::new(),
                 input_ended: false,
                 turns_ended: false,
+                watches_playback: playback.is_some(),
+                playback,
+                played: HashSet::new(),
             };
             self.exchange.spawn(move || exchanging.run());
             Ok(())
