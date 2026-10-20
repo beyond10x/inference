@@ -1,12 +1,18 @@
-//! The mock model node of a text-only pipeline: a node of role `model` whose implementation is a
-//! [`MockGenerator`] claiming `output_streaming` and `concurrent_input_output`.
+//! The mock model node of a text-only pipeline: a node of role `model` whose implementation is an
+//! `inference-llm` [`Generator`] over an `llm` model, such as the
+//! [`MockGenerator`](super::MockGenerator)'s, claiming `output_streaming` and
+//! `concurrent_input_output`.
 //!
 //! When it starts, the node starts one `inference.stream.Generation` of the run on its generator
-//! and emits its `GenerationStarted`. For each `inference.stream.TranscriptCommitted` its input
-//! edge delivers it offers the generator its reply to the text and emits the `TextDelta` and the
-//! `TextSegmentCommitted` of the one segment the generator answers with. On the end of input, a
-//! control event of kind `stop`, it completes the generation, emits `GenerationCompleted` and
-//! passes the end of input on. Drained, it takes what its input edge still holds until the edge
+//! and emits its `GenerationStarted`, on a request carrying no items and the tools it was given,
+//! if any; no turn runs before the first input. For each `inference.stream.TranscriptCommitted`
+//! its input edge delivers it offers the generation its reply to the text, which the next turn
+//! asks as user text, and emits the `TextDelta` and the `TextSegmentCommitted` of every segment
+//! the model answers with in that turn. A turn that fails cancels the generation: the node emits
+//! its `GenerationCancelled` and fails with the `llm` error, since its one generation of the run
+//! can answer nothing more, and downstream learns that the segments it holds are cut. On the end
+//! of input, a control event of kind `stop`, it completes the generation, emits
+//! `GenerationCompleted` and passes the end of input on. Drained, it takes what its input edge still holds until the edge
 //! is closed and then completes the generation the same way. Cancelled, it cancels the
 //! generation, which discards its unplayed segments, and sends nothing more, a cancel taken while
 //! a send waits for room ending the wait; scripted to emit after the cancel, it emits once into
@@ -23,34 +29,38 @@
 //! `tool_call` output port and a `tool_result` input port, both Structured (design 581-584), and
 //! runs the tool loop of its generation:
 //!
-//! * once the model request an input or an outcome issued has delivered its segment, the
-//!   generator's proposal, if it made one, becomes `inference.tools.ProposeToolCall` of the
-//!   generation, resting on the latest span the node generated from: the span of the last
-//!   `TranscriptCommitted`, which that event says is Committed. The proposal is sent on
-//!   `tool_call` and the generation awaits its outcome. A proposal naming a tool the node was not
-//!   given is dropped, and the generation continues without it. The node generates from
-//!   committed spans only, so the provisional-input barrier never bars its proposals; a proposal
-//!   the state machine refuses all the same fails the node;
+//! * once the turn an input or a round of outcomes ran has delivered its segment, each `llm`
+//!   tool call it ended with becomes `inference.tools.ProposeToolCall` of the generation, of the
+//!   tool [`tool_id`] names, resting on the latest span the node generated from: the span of the
+//!   last `TranscriptCommitted`, which that event says is Committed. The proposal is sent on
+//!   `tool_call` and the generation awaits its outcome. A call naming a tool the node was not
+//!   given is dropped: the node answers it at once as rejected `denied`, as `llm` requires every
+//!   call of a round answered before the next turn, and the generation continues without it. The
+//!   node generates from committed spans only, so the provisional-input barrier never bars its
+//!   proposals; a proposal the state machine refuses all the same fails the node;
 //! * one round is awaited at a time: an input arriving while a call is awaited is deferred, and
 //!   answered, in arrival order, once the outcomes are integrated and no call is awaited, so a
-//!   tool result is integrated at the end of the model request that proposed and no outcome is
-//!   lost to a later proposal;
-//! * an outcome of the awaited call arriving on `tool_result`, a result, a failure or a rejection,
-//!   is integrated into the same generation as its next model request (design 402, 721), so every
-//!   segment after it carries the generation's identity;
+//!   tool result is integrated at the end of the turn that proposed and no outcome is lost to a
+//!   later proposal;
+//! * an outcome of an awaited call arriving on `tool_result`, a result, a failure or a rejection,
+//!   is integrated into the same generation as an `llm` tool result
+//!   ([`ToolOutcome`](inference_llm::tools::ToolOutcome)), and once the last call of the round is
+//!   answered, the next turn runs on them (design 402, 721), so every segment after it carries
+//!   the generation's identity;
 //! * a rejection `exhausted` is the loop's termination rule: the node integrates nothing more and
 //!   completes the generation at once, and drops every later proposal. The node runs one
 //!   generation per run, so an input that arrives once the generation is no longer Active is
 //!   dropped and recorded ([`ModelHandle::dropped_inputs`]), and the node does not fail;
-//! * a model request may end with several proposals, the calls of one round
+//! * a turn may end with several calls, the calls of one round
 //!   ([`MockGenerator::proposing_round`](super::MockGenerator::proposing_round)): each is sent, in
-//!   order, and the generation awaits every one of them; each outcome is integrated as it arrives;
+//!   order, and the generation awaits every one of them; each outcome is integrated as it arrives,
+//!   and the next turn runs once the last of them did;
 //! * superseded through its handle ([`ModelHandle::supersede`]), the node runs
 //!   `inference.stream.SupersedeGeneration` on its generation, which then emits nothing more, and
 //!   sends its `GenerationSuperseded` on the text port and, given tools, on `tool_call`, so that
 //!   the tool authority rejects the calls of the generation it still holds and the executor is told
 //!   to cancel the one it runs. An outcome that arrives for a generation that is no longer Active,
-//!   superseded or completed, is not reinjected and issues no model request (design 376, 637); it
+//!   superseded or completed, is not reinjected and runs no turn (design 376, 637); it
 //!   is recorded ([`ModelHandle::not_reinjected`]) and still ends the wait for its call;
 //! * the end of input, or a drain once the input edge is closed, completes the generation only
 //!   once no outcome is awaited and no input is deferred; the node then passes the end of input
@@ -58,8 +68,8 @@
 //!   the loop's other nodes send at their end still finds it.
 //!
 //! Every other step of a tool call that arrives, such as `inference.tools.ToolCallStarted`, is
-//! taken and ignored. A node given tools offers them, in the order it was given them, to its
-//! generator when it starts its generation ([`MockGenerator::start_offering`]).
+//! taken and ignored. A node given tools offers them, in the order it was given them, on the
+//! request it starts its generation with, as `llm` tool specifications ([`tool_spec`]).
 //!
 //! Given a turns port ([`ModelNode::with_turns`]) at which an edge arrives, the node starts its
 //! generation for a turn at that turn's `inference.stream.TurnCompleted` (design 606, 778) rather
@@ -86,14 +96,14 @@ use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, Se
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{GenerationState, GenerationStateConflict};
 use inference_core::id::{NodeId, RunId, StreamId};
-use inference_llm::tools::{ToolCalling, ToolOutcome};
-use inference_llm::{GenerationEvent, GenerationHandle, GenerationRequest, Generator, OfferInput};
+use inference_llm::llm_core::{CallId, TurnRequest};
+use inference_llm::tools::{ToolOutcome, tool_id, tool_spec};
+use inference_llm::{GenerationEvent, GenerationHandle, GenerationRequest, Generator};
 use inference_pipeline::nodes::{ToolCallEvent, ToolCallUpdate, ToolPayload};
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
 use inference_text::{OpenTurn, SegmentSnapshot, Span, TranscriptCommitted, Turn};
 use inference_tools::{RejectionReason, Tool, ToolCall, ToolCallId, ToolId};
 
-use super::{MockGeneration, MockGenerator};
 use crate::graph::nodes::{
     Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on, emit, send_unless, started,
 };
@@ -211,7 +221,7 @@ impl<P> fmt::Debug for Tools<P> {
 /// The mock model node; see the module documentation.
 pub struct ModelNode<P = PipelinePayload> {
     run_id: RunId,
-    generator: MockGenerator,
+    generator: Generator,
     reply: fn(&str) -> String,
     late: Option<String>,
     tools: Option<Tools<P>>,
@@ -240,13 +250,14 @@ impl<P> fmt::Debug for ModelNode<P> {
 }
 
 impl ModelNode {
-    /// A model node of the run `run_id` answering on `generator`, whose reply to an input text is
-    /// `reply` of it, recording what it emits in `log`. The generator is to claim
-    /// `concurrent_input_output`: input reaches its running generation only through admission.
+    /// A model node of the run `run_id` answering on `generator`, the mock's or any other
+    /// `inference-llm` [`Generator`], whose reply to an input text is `reply` of it, recording
+    /// what it emits in `log`. The generator is to claim `concurrent_input_output`: input reaches
+    /// its running generation only through admission.
     #[must_use]
     pub fn new(
         run_id: RunId,
-        generator: MockGenerator,
+        generator: impl Into<Generator>,
         reply: fn(&str) -> String,
         log: RunLog,
     ) -> Self {
@@ -259,13 +270,13 @@ impl<P: ModelPayload> ModelNode<P> {
     #[must_use]
     pub fn carrying(
         run_id: RunId,
-        generator: MockGenerator,
+        generator: impl Into<Generator>,
         reply: fn(&str) -> String,
         log: RunLog,
     ) -> Self {
         Self {
             run_id,
-            generator,
+            generator: generator.into(),
             reply,
             late: None,
             tools: None,
@@ -395,8 +406,9 @@ struct ToolLoop<P> {
     turn: Turn,
     /// The latest span the node generated from.
     basis: Option<Span>,
-    /// The calls whose outcomes the generation awaits, in the order they were proposed.
-    awaiting: Vec<ToolCallId>,
+    /// The calls whose outcomes the generation awaits, in the order they were proposed, each
+    /// with the `llm` call it proposes.
+    awaiting: Vec<(ToolCallId, CallId)>,
     /// Whether the loop's iteration rule is exhausted.
     exhausted: bool,
 }
@@ -451,7 +463,7 @@ impl<P: From<ControlKind>> ToolLoop<P> {
 struct Exchanging<P> {
     run_id: RunId,
     /// The node's generation, once it started.
-    generation: Option<MockGeneration>,
+    generation: Option<GenerationHandle>,
     /// What starts the generation at the first `TurnCompleted`, for a node whose turns port is
     /// wired, until it started.
     starting: Option<Starting>,
@@ -477,7 +489,7 @@ struct Exchanging<P> {
     not_reinjected: Vec<ToolCallUpdate>,
     /// The refusal of `SupersedeGeneration`, when the generation was no longer Active.
     supersede_refusal: Option<GenerationStateConflict>,
-    /// How many model requests the node issued: inputs offered and outcomes integrated.
+    /// How many model requests the node issued: inputs offered and rounds of outcomes answered.
     requests: usize,
     /// Whether the node's input delivered its end of input.
     input_ended: bool,
@@ -485,21 +497,16 @@ struct Exchanging<P> {
     input_closed: bool,
 }
 
-/// What starts the generation of a node: its generator, the request and the tools it offers.
+/// What starts the generation of a node: its generator and the request, which carries the tools
+/// it offers.
 struct Starting {
-    generator: MockGenerator,
+    generator: Generator,
     request: GenerationRequest,
-    tools: Vec<Tool>,
 }
 
 impl Starting {
-    /// Starts the generation, offering the tools, if any.
-    fn start(mut self) -> Result<MockGeneration, inference_llm::ConcurrencyLimitReached> {
-        if self.tools.is_empty() {
-            self.generator.start(self.request)
-        } else {
-            self.generator.start_offering(self.request, &self.tools)
-        }
+    fn start(mut self) -> Result<GenerationHandle, inference_llm::ConcurrencyLimitReached> {
+        self.generator.start(self.request)
     }
 }
 
@@ -578,48 +585,85 @@ impl<P: ModelPayload> OutputEndpoint<PipelinePayload> for Carrying<'_, P> {
 impl<P: ModelPayload> Exchanging<P> {
     /// Emits the generation's events until `last` is delivered, or until none is.
     async fn deliver(&mut self, last: fn(&GenerationEvent) -> bool) -> Result<(), String> {
-        let Some(generation) = self.generation.as_mut() else {
-            return Ok(());
-        };
-        for event in generation.by_ref() {
-            let done = last(&event);
-            let event = match event {
-                GenerationEvent::Started(started) => StreamEvent::GenerationStarted(started),
-                GenerationEvent::TextDelta(delta) => StreamEvent::TextDelta(delta),
-                GenerationEvent::SegmentCommitted(committed) => {
-                    StreamEvent::TextSegmentCommitted(committed)
-                }
-                GenerationEvent::Completed(completed) => {
-                    StreamEvent::GenerationCompleted(completed)
-                }
+        loop {
+            let Some(generation) = self.generation.as_mut() else {
+                return Ok(());
             };
-            emit(
-                &Carrying(self.output.as_ref(), &self.signal),
-                &mut self.emitter,
-                event,
-            )
-            .await?;
+            let Some(event) = generation.next_event().await else {
+                return Ok(());
+            };
+            let done = last(&event);
+            self.send(event).await?;
             if done {
-                break;
+                return Ok(());
             }
         }
-        Ok(())
     }
 
-    /// Completes the generation and emits `GenerationCompleted`.
+    /// Emits every event of the turns that can run now, until none is left to deliver.
+    async fn deliver_turn(&mut self) -> Result<(), String> {
+        loop {
+            let Some(generation) = self.generation.as_mut() else {
+                return Ok(());
+            };
+            let Some(event) = generation.next_turn_event().await else {
+                return Ok(());
+            };
+            self.send(event).await?;
+        }
+    }
+
+    /// Emits `event` on the text port. The cancellation of a generation whose turn failed is
+    /// emitted as `GenerationCancelled`, and then fails the node with the `llm` error.
+    async fn send(&mut self, event: GenerationEvent) -> Result<(), String> {
+        let (event, failed) = match event {
+            GenerationEvent::Started(started) => (StreamEvent::GenerationStarted(started), false),
+            GenerationEvent::TextDelta(delta) => (StreamEvent::TextDelta(delta), false),
+            GenerationEvent::SegmentCommitted(committed) => {
+                (StreamEvent::TextSegmentCommitted(committed), false)
+            }
+            GenerationEvent::Completed(completed) => {
+                (StreamEvent::GenerationCompleted(completed), false)
+            }
+            GenerationEvent::Cancelled(cancelled, _) => {
+                (StreamEvent::GenerationCancelled(cancelled), true)
+            }
+        };
+        emit(
+            &Carrying(self.output.as_ref(), &self.signal),
+            &mut self.emitter,
+            event,
+        )
+        .await?;
+        if !failed {
+            return Ok(());
+        }
+        Err(self
+            .generation
+            .as_ref()
+            .and_then(GenerationHandle::failure)
+            .map_or_else(
+                || "the model's turn failed".to_owned(),
+                |error| format!("the model's turn failed: {error}"),
+            ))
+    }
+
+    /// Completes the generation, whatever call is unanswered, and emits `GenerationCompleted`.
     async fn complete(&mut self) -> Result<(), String> {
+        if let Some(generation) = self.generation.as_mut() {
+            let _ = generation.complete();
+        }
         self.deliver(|event| matches!(event, GenerationEvent::Completed(_)))
             .await
     }
 
-    /// Emits the segment of the model request just issued, then sends the proposal it ended with.
+    /// Emits every event of the turn just run, then sends the tool calls it ended with.
     async fn answer(&mut self) -> Result<(), String> {
-        self.deliver(|event| matches!(event, GenerationEvent::SegmentCommitted(_)))
-            .await?;
+        self.deliver_turn().await?;
         self.propose().await
     }
 
-    /// Turns the proposal the latest model request ended with into `ProposeToolCall` of the
+    /// Turns each `llm` tool call the latest turn ended with into `ProposeToolCall` of the
     /// generation and sends it on `tool_call`, unless it is dropped; see the module
     /// documentation.
     async fn propose(&mut self) -> Result<(), String> {
@@ -628,19 +672,25 @@ impl<P: ModelPayload> Exchanging<P> {
             return Ok(());
         };
         while let Some(proposal) = running.take_proposal() {
-            let generation = running.output().generation();
-            if tool_loop.exhausted || generation.state() != GenerationState::Active {
+            if tool_loop.exhausted
+                || running.output().generation().state() != GenerationState::Active
+            {
                 continue;
             }
-            let Some(tool) = tool_loop.tools.get(&proposal.tool_id) else {
+            let Some(tool) = tool_id(&proposal.name).and_then(|id| tool_loop.tools.get(&id)) else {
+                let denied = ToolOutcome::Rejected(RejectionReason::Denied);
+                running
+                    .integrate(&proposal.call_id, denied.output(), denied.failed())
+                    .map_err(|refused| refused.to_string())?;
                 continue;
             };
             let basis = tool_loop.basis.as_ref().ok_or_else(|| {
                 "a proposal was made before any input it could rest on".to_owned()
             })?;
+            let generation = running.output().generation();
             let (call, event) = ToolCall::propose(tool, generation, basis, proposal.arguments)
                 .map_err(|refused| refused.to_string())?;
-            tool_loop.awaiting.push(call.call_id());
+            tool_loop.awaiting.push((call.call_id(), proposal.call_id));
             let envelope = tool_loop.envelope(ToolCallUpdate {
                 call,
                 event: ToolCallEvent::Proposed(event),
@@ -725,7 +775,7 @@ impl<P: ModelPayload> Exchanging<P> {
             return Ok(());
         };
         let call_id = update.call.call_id();
-        let Some(awaited) = tool_loop.awaiting.iter().position(|id| *id == call_id) else {
+        let Some(awaited) = tool_loop.awaiting.iter().position(|(id, _)| *id == call_id) else {
             return Ok(());
         };
         if matches!(
@@ -734,7 +784,7 @@ impl<P: ModelPayload> Exchanging<P> {
         ) {
             return Ok(());
         }
-        tool_loop.awaiting.remove(awaited);
+        let (_, proposed) = tool_loop.awaiting.remove(awaited);
         let Some(generation) = self.generation.as_mut().filter(|generation| {
             generation.output().generation().state() == GenerationState::Active
         }) else {
@@ -754,8 +804,11 @@ impl<P: ModelPayload> Exchanging<P> {
             | ToolCallEvent::Started(_) => return Ok(()),
         };
         generation
-            .integrate(outcome)
+            .integrate(&proposed, outcome.output(), outcome.failed())
             .map_err(|refused| refused.to_string())?;
+        if !tool_loop.awaiting.is_empty() {
+            return Ok(());
+        }
         self.requests += 1;
         self.answer().await
     }
@@ -1142,19 +1195,21 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
     fn start(&mut self, endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
         let started = self.shaped(self.node_id, endpoints).and_then(
             |(node_id, inputs, output, tool_call)| {
+                let mut turn = TurnRequest::new(
+                    self.generator.model().provenance().model.as_str(),
+                    Vec::new(),
+                );
+                if let Some(tools) = &self.tools {
+                    turn.tools = tools.offered.iter().map(tool_spec).collect();
+                }
                 let starting = Starting {
                     generator: self.generator.clone(),
                     request: GenerationRequest {
                         run_id: self.run_id,
                         node_id,
                         epoch: 1,
-                        prompt: String::new(),
+                        turn,
                     },
-                    tools: self
-                        .tools
-                        .as_ref()
-                        .map(|tools| tools.offered.to_vec())
-                        .unwrap_or_default(),
                 };
                 let gated = inputs.iter().any(|input| input.port == Arrives::Turns);
                 let (generation, starting) = if gated {
@@ -1315,7 +1370,7 @@ impl ModelHandle {
     }
 
     /// How many model requests the node issued on its generation, each input offered and each
-    /// outcome integrated; zero before the exchange ended.
+    /// round of outcomes answered, its turn run; zero before the exchange ended.
     #[must_use]
     pub fn model_requests(&self) -> usize {
         self.record.read(|record| record.requests)

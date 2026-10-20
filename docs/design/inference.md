@@ -234,7 +234,7 @@ inference/
 | `inference-text` | Text deltas, spans, revisions, commitments | `core`. |
 | `inference-audio` | Audio media descriptors, frames, clocks, formats | `core`. |
 | `inference-stt` | Speech recognition domain contract | `core`, `audio`, `text`. |
-| `inference-llm` | Text generation, context, structured calls | `core`, `text`; optional `tools`. |
+| `inference-llm` | Text generation, context, structured calls | `core`, `text`, `llm` (`b10x-llm-core`); optional `tools`. |
 | `inference-tts` | Speech synthesis domain contract | `core`, `text`, `audio`. |
 | `inference-duplex` | Explicit simultaneous input/output semantics | `core`, relevant media contracts. |
 | `inference-tools` | Tool schemas, execution contracts, outcomes | `core`, optionally `text`. |
@@ -363,17 +363,16 @@ Required contract concepts:
 
 ### 7.2 LLM contract — `inference-llm`
 
-**Input:** text/structured context, generation instructions, optional supported multimodal parts.  
-**Output:** text deltas or complete text, structured tool proposals, structured result, status and usage metadata.
+**Contract:** `llm_core::Model` of the beyond10x `llm` repository (`b10x-llm-core`, at a release tag). One asynchronous `Model::turn` takes a `TurnRequest` (instructions, conversation items, tool specifications, sampling and controls), streams `StreamEvent`s into a sink, and returns a `TurnOutcome` (stop reason, output items and tool calls, usage observation) or a typed `Error`; a `Cancel` token stops a running turn. Request, items, tool calls and usage are `llm`'s types. `llm`'s wires (Responses, Messages, Chat Completions) are provider implementations and belong to adapters, not to the contract crate.
 
-Required contract concepts:
+**What `inference-llm` adds:** only what a graph node needs, and no second text-model vocabulary.
 
-- Explicit input/context semantics: stateless request, adapter-managed history, or opaque model session.
-- Output streaming vs incremental input vs input-during-output MUST be distinct capabilities.
-- Context limits, token accounting, and truncation/summarization policies MUST NOT be universally assumed identical.
-- Structured tool proposals MUST be distinguishable from user-visible prose.
-- A model MAY support constrained decoding, structured output, embeddings, or multimodal input via additional capability interfaces.
-- The framework MUST preserve generation IDs and cancellation status across tool round trips.
+- A generation: its identity (run, producing node, epoch) and the events of §6.4 (`GenerationStarted`, `TextDelta`, `TextSegmentCommitted`, `GenerationCompleted`), with supersede, cancel and complete as control that reaches the running turn. A turn that fails cancels the generation and delivers `GenerationCancelled` with the segments it discarded, `llm`'s error kept. A generation is a conversation of turns and no turn asks an empty request: the first on the request it was started with when that carries items, otherwise on the first input; each later one on the conversation so far, once input or the results of a whole tool round arrive, so every turn is a request `llm` accepts. While calls of a round are unanswered, the generation waits for them and does not complete by itself.
+- Commit points: each delta is one segment, committed as it is emitted. This rests on `llm` never revising a delta it streamed: its stream has no event that revises one, but `llm` does not state the guarantee yet, an `llm` gap.
+- Capabilities: output streaming, incremental input and input during output MUST be distinct capabilities of the adapter record (§8.1). Input during output is admitted only where it is claimed; an adapter that does not stream delivers each turn's text as one segment, at completion. The maximum concurrency the adapter record declares is held.
+- Tool calls are `llm`'s, taken from a turn's outcome as structured proposals, never as user-visible prose. Behind the `tools` feature, declared tools map onto `llm` tool specifications and the outcomes of the tools domain onto `llm` tool results. The framework MUST preserve generation IDs and cancellation status across tool round trips.
+
+Context semantics (stateless request, history carried in the items, opaque state bound to the binding that produced it), context limits and token accounting are `llm`'s, and MUST NOT be universally assumed identical. Where `llm` lacks something a graph node needs, it is an `llm` gap, reported there and not re-created here.
 
 ### 7.3 TTS contract — `inference-tts`
 

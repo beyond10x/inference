@@ -8,10 +8,9 @@
 
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Capability, ModelId};
-use inference_llm::{
-    GenerationEvent, GenerationHandle, GenerationRequest, Generator, InputRefused,
-};
-use inference_testkit::llm::{MockConfiguration, MockGenerator};
+use inference_llm::llm_core::{Item, TurnRequest};
+use inference_llm::{GenerationEvent, GenerationRequest, InputRefused};
+use inference_testkit::llm::{MockConfiguration, MockGeneration, MockGenerator};
 
 const INPUT: &str = "smuggled input";
 
@@ -20,11 +19,11 @@ fn request() -> GenerationRequest {
         run_id: RunId::generate(),
         node_id: NodeId::generate(),
         epoch: 1,
-        prompt: "prompt".to_owned(),
+        turn: TurnRequest::new("mock", vec![Item::user("prompt")]),
     }
 }
 
-fn start(configuration: MockConfiguration) -> <MockGenerator as Generator>::Handle {
+fn start(configuration: MockConfiguration) -> MockGeneration {
     MockGenerator::new(configuration, ModelId::generate(), ["a", "b"])
         .start(request())
         .expect("a fresh generator runs nothing else")

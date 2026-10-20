@@ -9,7 +9,8 @@
 use inference_core::generation::GenerationState;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::ModelId;
-use inference_llm::{GenerationEvent, GenerationHandle, GenerationRequest, Generator};
+use inference_llm::llm_core::{Item, TurnRequest};
+use inference_llm::{GenerationEvent, GenerationRequest};
 use inference_testkit::llm::{MockConfiguration, MockGenerator};
 use inference_text::SegmentState;
 
@@ -23,7 +24,7 @@ fn interrupted(supersede: bool) {
         run_id: RunId::generate(),
         node_id: NodeId::generate(),
         epoch: 1,
-        prompt: "prompt".to_owned(),
+        turn: TurnRequest::new("mock", vec![Item::user("prompt")]),
     })
     .expect("a fresh generator runs nothing else");
     assert!(matches!(handle.next(), Some(GenerationEvent::Started(_))));

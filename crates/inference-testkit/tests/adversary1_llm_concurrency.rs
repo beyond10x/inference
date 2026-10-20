@@ -11,7 +11,8 @@ use std::thread;
 use inference_core::generation::GenerationState;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::ModelId;
-use inference_llm::{ConcurrencyLimitReached, GenerationHandle, GenerationRequest, Generator};
+use inference_llm::llm_core::{Item, TurnRequest};
+use inference_llm::{ConcurrencyLimitReached, GenerationRequest};
 use inference_testkit::llm::{MockConfiguration, MockGenerator};
 
 const REFUSED: ConcurrencyLimitReached = ConcurrencyLimitReached { max_concurrency: 1 };
@@ -21,7 +22,7 @@ fn request() -> GenerationRequest {
         run_id: RunId::generate(),
         node_id: NodeId::generate(),
         epoch: 1,
-        prompt: "prompt".to_owned(),
+        turn: TurnRequest::new("mock", vec![Item::user("prompt")]),
     }
 }
 
