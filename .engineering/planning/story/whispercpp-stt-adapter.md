@@ -10,7 +10,7 @@ relations:
 - serves: vision:inference
 - depends_on: story:sherpa-onnx-stt-conformance
 - depends_on: story:capability-record
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T09:11:17Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-20T09:11:17Z", actor: "human:timo", revision: 3}
@@ -106,16 +106,16 @@ hosting repository's file metadata, not from a downloaded file:
 
 ## Acceptance
 
-`task check` passes on a machine with no checkpoint, and
-`INFERENCE_WHISPERCPP_STT_MODEL=<pinned ggml-base.en.bin> cargo test -p inference-whispercpp -- --ignored`
-passes on the reference machine on CPU, committing the fixture's text with "capital" and "france"
-after the end of input and nothing before it, while `git diff --stat main...HEAD` of the story lists
-no path under `crates/` (A-05, `docs/design/inference.md:1140`).
+`task check` passes with no checkpoint, and with `INFERENCE_WHISPERCPP_STT_MODEL=<pinned ggml-base.en.bin>`
+and `INFERENCE_WHISPERCPP_STT_CLIP=<the LibriSpeech clip test_wavs/0.wav of the pinned sherpa-onnx
+checkpoint>` set, `cargo test -p inference-whispercpp --all-features -- --ignored` passes on the
+reference machine on CPU: the question fixture's committed text contains "capital" and "france"
+only after the end of input, silence and near-silent noise commit no span, and no path under
+`crates/` changes.
 
-- At adoption the checkpoint's licence, source URL, revision and sha256 are re-read from the source
-  and pinned; a mismatch with the table above stops the story for a per-checkpoint decision.
-- The vendored build needs `cmake`, a C++ compiler and `libclang` on every builder; if CI needs a
-  step for them, that file is outside `crates/` and is named in the closing note.
+Amended on 2026-10-20 after the final review: the dropped-recognition and concurrency tests need
+two utterances with no words in common, so they read the clip as well; silence and noise were
+added after the review found "you" and "[BLANK_AUDIO]" committed.
 
 ## Out of scope
 
