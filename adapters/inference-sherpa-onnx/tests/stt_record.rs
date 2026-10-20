@@ -101,7 +101,9 @@ fn the_resource_profile_is_a_measured_cpu_profile() {
     assert!(profile.peak_resident_memory_mib > 0, "{profile:?}");
     assert!(profile.load_time_ms > 0, "{profile:?}");
     assert!(
-        (1..1_000).contains(&profile.cpu_real_time_factor_milli),
+        profile
+            .cpu_real_time_factor_milli
+            .is_some_and(|milli| (1..1_000).contains(&milli)),
         "a streaming recogniser keeps up with real time on CPU: {profile:?}"
     );
     assert_eq!(profile.gpu_memory_mib, None, "no GPU is used: {profile:?}");
