@@ -20,9 +20,10 @@
 //!
 //! Once both inputs ended, each by a control event of kind `stop` or by its edge closing, a
 //! recognition still running has its input ended and its events delivered, and the node passes
-//! the end of input on, on every output port. Cancelled, it sends nothing more. Content other than
-//! a frame on `audio` fails the node; on `turns` every event but the two turn events is taken and
-//! ignored. The spans each recognition emitted are read from its handle ([`SttHandle::spans`]).
+//! the end of input on, on every output port. Cancelled, it sends nothing more: a cancel taken
+//! while a send waits for room ends the wait. Content other than a frame on `audio` fails the
+//! node; on `turns` every event but the two turn events is taken and ignored. The spans each
+//! recognition emitted are read from its handle ([`SttHandle::spans`]).
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -40,7 +41,9 @@ use inference_stt::{Recogniser, RecognitionHandle, RecognitionRequest, Transcrip
 use inference_text::{Span, TurnId};
 
 use super::{MockRecogniser, MockRecognition, stream_envelope};
-use crate::graph::nodes::{Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on};
+use crate::graph::nodes::{
+    Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on, send_unless,
+};
 use crate::stream::StreamEvent;
 
 /// What a payload of the edges around an [`SttNode`] carries, as the node reads it.
@@ -214,18 +217,24 @@ fn carry<P: SttPayload>(envelope: EventEnvelope<PipelinePayload>) -> EventEnvelo
     }
 }
 
-/// One output edge of the node, with the emitter of its port.
+/// One output edge of the node, with the emitter of its port and the node's state, whose cancel
+/// ends a send waiting for room.
 struct Out<P> {
     endpoint: Box<dyn OutputEndpoint<P>>,
     emitter: Emitter,
+    state: Arc<Watched<State>>,
 }
 
 impl<P: SttPayload> Out<P> {
+    /// Sends `envelope`, unless the node is cancelled first or while the send waits for room.
     async fn send(&self, envelope: EventEnvelope<P>) -> Result<(), String> {
-        self.endpoint
-            .send(envelope)
-            .await
-            .map_err(|refused| refused.to_string())
+        send_unless(
+            self.endpoint.as_ref(),
+            &self.state,
+            |state| state.cancel,
+            envelope,
+        )
+        .await
     }
 
     /// Sends `event` in an envelope of the port's own stream, recorded in the run's log.
@@ -531,6 +540,7 @@ impl SttNode {
         let out = |endpoint, port: PortId| Out {
             endpoint,
             emitter: Emitter::new(self.run_id, node_id, port.to_string(), self.log.clone()),
+            state: Arc::clone(&self.state),
         };
         let (mut committed_text, mut turns_out, mut transcript) = (None, None, None);
         for output in outputs {

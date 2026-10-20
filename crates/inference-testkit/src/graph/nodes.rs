@@ -173,6 +173,29 @@ pub(crate) async fn recv_unless<P, S>(
     .await
 }
 
+/// Sends `envelope` along `output`, unless `stop` holds of `watched` first or while the send
+/// waits for room: the send is then abandoned, the envelope not sent, and the answer is `Ok`, as
+/// a node cancelled sends nothing more. Otherwise what the edge answered, a refusal described.
+pub(crate) async fn send_unless<P, S>(
+    output: &dyn OutputEndpoint<P>,
+    watched: &Watched<S>,
+    stop: impl Fn(&S) -> bool,
+    envelope: EventEnvelope<P>,
+) -> Result<(), String> {
+    let mut send = output.send(envelope);
+    future::poll_fn(|cx| {
+        let mut guard = watched.lock();
+        if stop(&guard.0) {
+            return Poll::Ready(Ok(()));
+        }
+        guard.1 = Some(cx.waker().clone());
+        send.as_mut()
+            .poll(cx)
+            .map(|sent| sent.map_err(|refused| refused.to_string()))
+    })
+    .await
+}
+
 struct Unpark(Thread);
 
 impl Wake for Unpark {
