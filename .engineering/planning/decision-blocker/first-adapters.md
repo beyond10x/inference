@@ -2,14 +2,16 @@
 format: aep.planning-md/3
 id: decision-blocker:first-adapters
 kind: decision-blocker
-status: open
+status: cleared
 title: Nobody has decided the first two adapters and the swap backend (Q11)
 relations:
 - blocks: epic:local-stt-adapter
 - blocks: epic:local-llm-adapter
 - blocks: epic:local-tts-adapter
 - blocks: epic:backend-replacement
-revision: 2
+revision: 4
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-20T07:48:51Z", actor: "human:timo", revision: 4}
 ---
 ## Question
 
@@ -41,3 +43,17 @@ The recommendation above, subject to `decision-blocker:reference-hardware`.
 
 The owner names the backends, or accepts the recommendation, and the answer is written into this
 body and into the adapter epics.
+
+## Decision
+
+The owner took the recommendation on 2026-10-20:
+
+| role | first | swap (backend-replacement) |
+|---|---|---|
+| STT | sherpa-onnx streaming recogniser | whisper.cpp |
+| TTS | sherpa-onnx offline TTS | Piper |
+| VAD | sherpa-onnx (Silero VAD model) | none |
+| LLM | llama.cpp `llama-server` over its local HTTP API | vLLM |
+
+backend-replacement swaps STT (sherpa-onnx to whisper.cpp) first. Each adapter epic's story names
+the checkpoint it pins under `decision-blocker:weight-licenses`.

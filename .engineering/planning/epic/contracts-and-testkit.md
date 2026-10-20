@@ -2,13 +2,17 @@
 format: aep.planning-md/3
 id: epic:contracts-and-testkit
 kind: epic
-status: draft
+status: implemented
 title: Contracts and testkit (P0)
 summary: Core, text, audio, STT, LLM and TTS contracts plus mock nodes; the testkit answers the model and stream scenarios.
 relations:
 - derived_from: architecture-design:inference
 - serves: vision:inference
-revision: 3
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T07:56:15Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
+- {from: "proposed", to: "active", at: "2026-10-20T07:56:16Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
+- {from: "active", to: "implemented", at: "2026-10-20T07:56:18Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 ## Context
 

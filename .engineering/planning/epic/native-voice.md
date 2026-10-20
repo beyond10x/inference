@@ -2,14 +2,17 @@
 format: aep.planning-md/3
 id: epic:native-voice
 kind: epic
-status: draft
+status: active
 title: Native and hybrid voice modalities (P5)
 summary: A native speech model as one multiport node; hybrid audio-understanding composition; capabilities declared directly.
 relations:
 - derived_from: architecture-design:inference
 - depends_on: epic:local-voice-cascade
 - serves: vision:inference
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T07:56:23Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-20T07:56:23Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 

@@ -2,13 +2,15 @@
 format: aep.planning-md/3
 id: decision-blocker:weight-licenses
 kind: decision-blocker
-status: open
+status: cleared
 title: Nobody has decided which weight licences the reference profile permits (Q10)
 relations:
 - blocks: epic:local-stt-adapter
 - blocks: epic:local-llm-adapter
 - blocks: epic:local-tts-adapter
-revision: 2
+revision: 4
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-20T07:48:51Z", actor: "human:timo", revision: 4}
 ---
 ## Question
 
@@ -33,3 +35,18 @@ decision for the owner.
 
 The owner states the policy, or accepts the default, and it is written into this body and into
 `AGENTS.md`.
+
+## Decision
+
+The owner took the default on 2026-10-20:
+
+- Backend code: Apache-2.0 or MIT (BSD-2/BSD-3 count as more permissive).
+- Weights: CC BY 4.0 or more permissive (CC0, Apache-2.0, MIT).
+- Each pinned checkpoint is verified at adoption: its licence and its source URL and hash go in the
+  adapter's capability record.
+- A checkpoint under any other licence (non-commercial, research-only, a model-specific licence
+  with use restrictions) is a per-checkpoint decision for the owner and is not pinned without one.
+- Tests download no weights: a test that needs a checkpoint reads its path from an environment
+  variable and is ignored without it, as the live provider tests are.
+
+The policy is also stated in `AGENTS.md`.

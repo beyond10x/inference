@@ -2,14 +2,17 @@
 format: aep.planning-md/3
 id: epic:session-facade
 kind: epic
-status: draft
+status: active
 title: Session facade and reusable subgraphs (P4)
 summary: One session interface over text-only and voice topologies; subgraphs compose without losing cancellation or tracing.
 relations:
 - derived_from: architecture-design:inference
 - depends_on: epic:tools-and-turns
 - serves: vision:inference
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T07:56:17Z", actor: "human:timo", revision: 3, decided_on: {"recorded":{"test_result":1}}}
+- {from: "proposed", to: "active", at: "2026-10-20T07:56:18Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
