@@ -1,0 +1,16 @@
+llama-server-b11752-text.sse is the response body of one streamed Chat Completions request,
+recorded byte for byte on 2026-10-20 from a running llama-server, not written by hand:
+
+- server: llama.cpp prebuilt release b11752 (version 0.7.0-dev, build 11752, commit 7879491cf),
+  linux x64, CPU only, started with `--alias qwen2.5-1.5b-instruct -c 4096 -np 1 -ngl 0`;
+- checkpoint: qwen2.5-1.5b-instruct-q4_k_m.gguf, SHA-256
+  6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e, from
+  https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF at revision
+  91cad51170dc346986eccefdc2dd33a9da36ead9 (Apache-2.0);
+- request: POST /v1/chat/completions with
+  {"model":"qwen2.5-1.5b-instruct","messages":[{"role":"user","content":"Say hello in three words."}],"stream":true,"stream_options":{"include_usage":true},"max_completion_tokens":16,"seed":7,"temperature":0}
+
+The server answered with chunked transfer encoding and Content-Type text/event-stream. It sends
+a role-only first chunk with `"content":null`, `system_fingerprint` on every chunk, a final
+usage chunk with an empty `choices` and a `timings` object, then `[DONE]`. The loopback fixture
+of the tests replays the body with `Connection: close` instead of chunked encoding.

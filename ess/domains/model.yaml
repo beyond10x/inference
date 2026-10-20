@@ -82,9 +82,9 @@ types:
 
   # What an adapter needs on one hardware target, measured there and promised nowhere else: peak
   # resident memory in MiB, model load time in milliseconds, the real-time factor on CPU in
-  # thousandths (250: one second of input takes a quarter of a second), and GPU memory in MiB,
-  # none when it runs without a GPU. The parts and their units are this specification's choice,
-  # not the design's.
+  # thousandths (250: one second of input takes a quarter of a second), none for a model whose
+  # input has no duration, such as a text model, and GPU memory in MiB, none when it runs without
+  # a GPU. The parts and their units are this specification's choice, not the design's.
   # read from: docs/design/inference.md:434
   # read from: docs/design/inference.md:950
   - name: inference.model.ResourceProfile
@@ -95,7 +95,7 @@ types:
       - name: load_time_ms
         type: Integer
       - name: cpu_real_time_factor_milli
-        type: Integer
+        type: Optional<Integer>
       - name: gpu_memory_mib
         type: Optional<Integer>
 
