@@ -1,0 +1,2 @@
+[env]
+SHERPA_ONNX_LIB_DIR = { value = "target/sherpa-onnx/sherpa-onnx-v1.13.8-linux-x64-shared-no-tts-lib/lib", relative = true, force = true }
