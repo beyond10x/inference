@@ -8,14 +8,16 @@
 //! evidence of [`TOOLS_RECORD`] those of `tool_proposals`.
 //!
 //! The usage record of a turn reads the counts of the recorded `usage` chunk, and counts every
-//! token unknown for the same stream with that chunk removed (`story:usage-llm`).
+//! token unknown for the same stream with that chunk removed (`story:usage-llm`). A recorded
+//! stream without a usage chunk whose finish chunk carries llama-server's `timings` object reports
+//! the counts of that object as provider-reported (`story:llm-0-8-3`).
 
 mod common;
 
 use std::path::Path;
 use std::sync::Arc;
 
-use common::scripted::{Scripted, TEXT_NO_USAGE};
+use common::scripted::{Scripted, TEXT_NO_USAGE, TEXT_TIMINGS_ONLY};
 use common::{DELTAS, Fixture, SERVED_MODEL};
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Adapter, Capability, ExecutionForm, Locality, Model};
@@ -380,5 +382,22 @@ fn a_recorded_response_without_usage_yields_the_record_with_every_token_count_un
     let fixture = Scripted::new(vec![TEXT_NO_USAGE]);
     let record = the_record(&mut generator_at(fixture.base_url()));
     assert_eq!(tokens(&record), TOKEN_KINDS.map(Quantity::unknown));
+    assert_eq!(fixture.requests().len(), 1);
+}
+
+#[test]
+fn a_recorded_response_with_timings_and_no_usage_yields_the_record_with_its_counts() {
+    let fixture = Scripted::new(vec![TEXT_TIMINGS_ONLY]);
+    let record = the_record(&mut generator_at(fixture.base_url()));
+    assert_eq!(
+        tokens(&record),
+        [
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 35),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 4),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 0),
+            Quantity::unknown(QuantityKind::CacheCreationInputTokens),
+        ],
+        "prompt_n plus cache_n, predicted_n and cache_n of the recorded timings object"
+    );
     assert_eq!(fixture.requests().len(), 1);
 }
