@@ -127,6 +127,16 @@ uuid_newtype!(
     /// `inference.session.SessionId`: identifies a session, stable while the runs below it come and go.
     SessionId
 );
+uuid_newtype!(
+    /// `inference.duplex.SpeechSessionId`: identifies a native speech session, which a usage
+    /// record of `inference.usage` names as well as `inference-duplex`.
+    SpeechSessionId
+);
+uuid_newtype!(
+    /// `inference.duplex.ResponseId`: identifies a response of a native speech session, which a
+    /// usage record of `inference.usage` names as well as `inference-duplex`.
+    ResponseId
+);
 
 #[cfg(test)]
 mod tests {
@@ -136,7 +146,7 @@ mod tests {
     use serde::de::DeserializeOwned;
     use serde_json::json;
 
-    use super::{GenerationId, NodeId, RunId, SessionId, StreamId};
+    use super::{GenerationId, NodeId, ResponseId, RunId, SessionId, SpeechSessionId, StreamId};
     use crate::model::{AdapterId, ModelId};
 
     const LOWER: &str = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
@@ -166,5 +176,7 @@ mod tests {
         assert_uppercase_accepted::<StreamId>("StreamId");
         assert_uppercase_accepted::<GenerationId>("GenerationId");
         assert_uppercase_accepted::<SessionId>("SessionId");
+        assert_uppercase_accepted::<SpeechSessionId>("SpeechSessionId");
+        assert_uppercase_accepted::<ResponseId>("ResponseId");
     }
 }

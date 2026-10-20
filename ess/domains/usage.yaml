@@ -1,0 +1,303 @@
+# The usage of one model call: what an STT, LLM, TTS or native speech call consumed, who made it
+# and when, for a meter or a price document to read. Every declaration cites the design line it
+# was read from; the record references nouns of the graph, session, duplex and model layers and
+# belongs to none of them.
+# read from: docs/design/inference.md:303-320
+# read from: docs/design/inference.md:439
+# UNMAPPED: durable retention of usage records. The design asks which event classes need durable
+# logs and which in-memory delivery (open question 7); a record is delivered on the run's reliable
+# event path, never on the best-effort telemetry channel (688), and nothing here stores it beyond
+# delivery. Open question for the owner.
+# read from: docs/design/inference.md:688
+# read from: docs/design/inference.md:1231
+domain: inference.usage
+
+summary: >-
+  A UsageRecord is the usage of one model call: the adapter and model that served it, the model
+  the provider reported serving, the run, node, session, native speech session and response it was
+  made for where there is one, when it started and ended on the wall clock, whether the provider
+  marked its counts final, and its quantities. Each quantity names its kind (text tokens in and
+  out, cached and cache-creation input tokens, audio tokens and audio milliseconds in and out,
+  input characters, requests, local compute milliseconds), its source (reported by the provider,
+  measured locally, or unknown) and its value, none exactly when the source is unknown. A record
+  is created once, when its call ends, and never changes.
+
+naming:
+  wire: usage
+  display: Usage
+
+types:
+  - name: inference.usage.UsageRecordId
+    kind: newtype
+    of: Uuid
+
+  # What a quantity counts. Cached and cache-creation input tokens are a subset of the input
+  # tokens, never added to them. The native speech usage types map onto these kinds:
+  # inference.duplex.ResponseUsage input text_tokens to input_text_tokens, input audio_tokens to
+  # input_audio_tokens, input cached_tokens to cached_input_tokens, output text_tokens to
+  # output_text_tokens and output audio_tokens to output_audio_tokens (output cached_tokens has no
+  # kind: no provider caches output); inference.duplex.TranscriptionUsage input_tokens to
+  # input_audio_tokens and output_tokens to output_text_tokens.
+  # read from: docs/design/inference.md:367
+  # read from: docs/design/inference.md:373
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.QuantityKind
+    kind: enum
+    variants:
+      - input_text_tokens
+      - output_text_tokens
+      - cached_input_tokens
+      - cache_creation_input_tokens
+      - input_audio_tokens
+      - output_audio_tokens
+      - input_audio_ms
+      - output_audio_ms
+      - input_characters
+      - requests
+      - local_compute_ms
+
+  # Who counted a quantity: the provider in its response, the adapter by measuring, or nobody, in
+  # which case the quantity is kept unknown and never read as zero.
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.QuantitySource
+    kind: enum
+    variants: [provider_reported, measured, unknown]
+
+  # One counted quantity. `value` is none exactly when `source` is unknown; the contract crate
+  # refuses a quantity whose value and source disagree.
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.Quantity
+    kind: struct
+    fields:
+      - name: kind
+        type: inference.usage.QuantityKind
+      - name: source
+        type: inference.usage.QuantitySource
+      - name: value
+        type: Optional<Integer>
+
+entities:
+  # The usage of one model call. The contract crate of the call fills its adapter, model, timing
+  # and quantities; the node that places it on a run fills the run, node and session. A native
+  # speech record names its speech session and, for a response, the response, and no run.
+  # read from: docs/design/inference.md:303-320
+  # read from: docs/design/inference.md:367
+  # read from: docs/design/inference.md:373
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.UsageRecord
+    naming:
+      summary: The usage of one model call.
+    identity:
+      name: usage_record_id
+      type: inference.usage.UsageRecordId
+    fields:
+      # The run the call was made in. A call inside a subgraph names the child run it was made
+      # in; a parent run's total rolls its child runs up.
+      # read from: docs/design/inference.md:309
+      - name: run_id
+        type: Optional<inference.graph.RunId>
+      # read from: docs/design/inference.md:313
+      - name: node_id
+        type: Optional<inference.graph.NodeId>
+      # read from: docs/design/inference.md:310
+      - name: session_id
+        type: Optional<inference.session.SessionId>
+      - name: speech_session_id
+        type: Optional<inference.duplex.SpeechSessionId>
+      - name: response_id
+        type: Optional<inference.duplex.ResponseId>
+      # The adapter that served the call; the provider is its backend, so a record names no
+      # provider of its own.
+      # read from: docs/design/inference.md:439
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: model_id
+        type: inference.model.ModelId
+      # The model the provider reported serving, which routing may make differ from the declared
+      # model; none when it reported none.
+      - name: upstream_model
+        type: Optional<String>
+      # Unix epoch milliseconds on the wall_time timebase of inference.stream.Timebase.
+      # read from: docs/design/inference.md:645
+      - name: started_at_ms
+        type: Integer
+      - name: ended_at_ms
+        type: Integer
+      # False when the provider marked its counts partial, as a turn cut short may.
+      - name: final
+        type: Boolean
+      - name: quantities
+        type: List<inference.usage.Quantity>
+    relations:
+      # Zero or one: a native speech record names no run.
+      # read from: docs/design/inference.md:309
+      - name: run
+        kind: references
+        target: inference.graph.Run
+        cardinality: one
+        via: run_id
+      # Zero or one: the node that made the call, the envelope's producer.
+      # read from: docs/design/inference.md:313
+      - name: node
+        kind: references
+        target: inference.graph.Node
+        cardinality: one
+        via: node_id
+      # Zero or one: the envelope's session, the only run-side trace of a session.
+      # read from: docs/design/inference.md:310
+      - name: session
+        kind: references
+        target: inference.session.Session
+        cardinality: one
+        via: session_id
+      # Zero or one: the native speech session a transcription was metered in.
+      # read from: docs/design/inference.md:373
+      - name: speech_session
+        kind: references
+        target: inference.duplex.SpeechSession
+        cardinality: one
+        via: speech_session_id
+      # Zero or one: the native speech response metered; its session is the response's.
+      # read from: docs/design/inference.md:373
+      - name: response
+        kind: references
+        target: inference.duplex.Response
+        cardinality: one
+        via: response_id
+      # One: a call is served by the one adapter its session or bound node references.
+      # read from: docs/design/inference.md:439
+      - name: adapter
+        kind: references
+        target: inference.model.Adapter
+        cardinality: one
+        via: adapter_id
+      # One: the adapter's model.
+      # read from: docs/design/inference.md:439
+      - name: model
+        kind: references
+        target: inference.model.Model
+        cardinality: one
+        via: model_id
+    # A single Declared state: ESS requires a lifecycle on every entity; a record is created when
+    # its call ends and never changes.
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
+commands:
+  # Records the usage of one ended call. The adapter and the model must be declared; that the
+  # model is the adapter's is the contract crate's rule, as for a capability record. The run,
+  # node, session, speech session and response are not checked here: each lives in a store of
+  # its own layer, and the node or session that places the record holds it already.
+  # read from: docs/design/inference.md:303-320
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.RecordUsage
+    input:
+      - name: run_id
+        type: Optional<inference.graph.RunId>
+      - name: node_id
+        type: Optional<inference.graph.NodeId>
+      - name: session_id
+        type: Optional<inference.session.SessionId>
+      - name: speech_session_id
+        type: Optional<inference.duplex.SpeechSessionId>
+      - name: response_id
+        type: Optional<inference.duplex.ResponseId>
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: model_id
+        type: inference.model.ModelId
+      - name: upstream_model
+        type: Optional<String>
+      - name: started_at_ms
+        type: Integer
+      - name: ended_at_ms
+        type: Integer
+      - name: final
+        type: Boolean
+      - name: quantities
+        type: List<inference.usage.Quantity>
+    outcomes:
+      - name: unknown-adapter
+        when_related: {via: input.adapter_id, exists: false}
+        error: inference.model.AdapterNotFound
+        payload:
+          inference.model.AdapterNotFound:
+            adapter_id: input.adapter_id
+        summary: No adapter carries this identity, and nothing was recorded.
+
+      - name: unknown-model
+        when_related: {via: input.model_id, exists: false}
+        error: inference.model.ModelNotFound
+        payload:
+          inference.model.ModelNotFound:
+            model_id: input.model_id
+        summary: No model carries this identity, and nothing was recorded.
+
+      - name: recorded
+        creates: inference.usage.UsageRecord
+        instance: usage_record_id
+        sets:
+          run_id: input.run_id
+          node_id: input.node_id
+          session_id: input.session_id
+          speech_session_id: input.speech_session_id
+          response_id: input.response_id
+          adapter_id: input.adapter_id
+          model_id: input.model_id
+          upstream_model: input.upstream_model
+          started_at_ms: input.started_at_ms
+          ended_at_ms: input.ended_at_ms
+          final: input.final
+          quantities: input.quantities
+        emits:
+          - inference.usage.UsageRecorded
+        payload:
+          inference.usage.UsageRecorded:
+            usage_record_id: {generated: true}
+            run_id: input.run_id
+            node_id: input.node_id
+            session_id: input.session_id
+            speech_session_id: input.speech_session_id
+            response_id: input.response_id
+            adapter_id: input.adapter_id
+            model_id: input.model_id
+            upstream_model: input.upstream_model
+            started_at_ms: input.started_at_ms
+            ended_at_ms: input.ended_at_ms
+            final: input.final
+            quantities: input.quantities
+        summary: The call's usage is recorded and published for a meter.
+
+events:
+  # The whole record, so that a meter or a price document needs nothing else to read it.
+  # read from: docs/design/inference.md:688
+  - name: inference.usage.UsageRecorded
+    fields:
+      - name: usage_record_id
+        type: inference.usage.UsageRecordId
+      - name: run_id
+        type: Optional<inference.graph.RunId>
+      - name: node_id
+        type: Optional<inference.graph.NodeId>
+      - name: session_id
+        type: Optional<inference.session.SessionId>
+      - name: speech_session_id
+        type: Optional<inference.duplex.SpeechSessionId>
+      - name: response_id
+        type: Optional<inference.duplex.ResponseId>
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: model_id
+        type: inference.model.ModelId
+      - name: upstream_model
+        type: Optional<String>
+      - name: started_at_ms
+        type: Integer
+      - name: ended_at_ms
+        type: Integer
+      - name: final
+        type: Boolean
+      - name: quantities
+        type: List<inference.usage.Quantity>
