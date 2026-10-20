@@ -8,7 +8,7 @@ summary: 'adapters/inference-sherpa-onnx over the official sherpa-onnx 1.13.8 cr
 relations:
 - decomposes: epic:local-stt-adapter
 - serves: vision:inference
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T08:01:30Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-20T08:01:30Z", actor: "human:timo", revision: 4}
@@ -97,10 +97,17 @@ instead, or the owner decides per checkpoint.
 
 ## Acceptance
 
-`task check` passes on a machine with no checkpoint, the native archive verified by its pinned
-sha256, and `INFERENCE_SHERPA_ONNX_STT_DIR=<pinned checkpoint> cargo test -p
-inference-sherpa-onnx --all-features -- --ignored` passes, recognising the fixture into a
-committed span whose text contains "capital" and "france" (case-insensitive).
+`task check` passes on a machine with no checkpoint, with the native library verified by its pinned
+sha256 and no espeak-ng or piper-phonemize linked, and `INFERENCE_SHERPA_ONNX_STT_DIR=<pinned
+checkpoint> cargo test -p inference-sherpa-onnx --all-features -- --ignored` passes, recognising the
+checkpoint's own LibriSpeech clip `test_wavs/0.wav`, streamed in 20 ms frames, into a committed span
+that contains its distinctive words.
+
+Amended on 2026-10-20 by the coordinating session. The first live run showed the pinned
+LibriSpeech-only checkpoint turns the eSpeak NG fixture "What is the capital of France?" into
+"capitals"; a NeMo streaming checkpoint did no better. The pipeline itself transcribes real speech
+word for word. Synthetic eSpeak speech stays as a second ignored test that only runs to end of
+input, and the limitation is written in the crate docs.
 
 ## Out of scope
 

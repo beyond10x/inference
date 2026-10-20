@@ -2,13 +2,16 @@
 format: aep.planning-md/3
 id: story:cascade-barge-in
 kind: story
-status: draft
+status: active
 title: 'Barge-in in the local voice cascade: supersede the generation, discard unplayed audio, refuse stale frames at the sink'
 relations:
 - decomposes: epic:local-voice-cascade
 - serves: vision:inference
 - depends_on: story:cascade-commit-gates
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T08:43:26Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-20T08:43:26Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 
