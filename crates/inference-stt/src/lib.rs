@@ -59,7 +59,9 @@
 //! computed through [`TranscriptOutput::add_local_compute`], reported as `local_compute_ms`,
 //! `measured`, and `unknown` when it adds none. A backend call that failed is still recorded,
 //! with what was measured, its counts not final (`final` false) once the implementation marks it
-//! with [`TranscriptOutput::mark_failed`], as `inference-llm` records a failed turn. The record
+//! with [`TranscriptOutput::mark_failed`], as `inference-llm` records a failed turn; a failed
+//! call will not commit the spans it left open, so the record no longer waits for them, and
+//! after it they stay uncommitted. The record
 //! names the adapter and the model, starts when the recognition started and ends when it is made,
 //! on the wall clock, and is placed on no run, node or session: the node that places it fills
 //! those. A recognition dropped before its input ended completed no call and yields no record,
@@ -350,7 +352,8 @@ impl fmt::Display for UsageAlreadyRecorded {
 impl Error for UsageAlreadyRecorded {}
 
 /// The span `span_id` of the recognition is not committed, so the recognition's last span is not
-/// committed and its usage is not recorded; nothing changed.
+/// committed and its usage is not recorded; nothing changed. Once the backend call is marked
+/// failed, an uncommitted span no longer refuses the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpanNotCommitted {
     pub span_id: SpanId,
@@ -689,7 +692,8 @@ impl TranscriptOutput {
 
     /// Marks the implementation's backend call for this recognition failed: its usage record is
     /// still made, with what was measured, and its counts are not final (`final` false), as
-    /// `inference-llm` records a failed turn.
+    /// `inference-llm` records a failed turn, without waiting for a span the call left
+    /// uncommitted, which stays so.
     pub const fn mark_failed(&mut self) {
         self.failed = true;
     }
@@ -734,9 +738,10 @@ impl TranscriptOutput {
     /// # Errors
     ///
     /// [`UsageRefused::InputNotEnded`] before the end of input,
-    /// [`UsageRefused::UsageAlreadyRecorded`] once the record was made, and
-    /// [`UsageRefused::SequenceExhausted`] when the stream has issued its last sequence; nothing
-    /// is recorded and no sequence is used.
+    /// [`UsageRefused::UsageAlreadyRecorded`] once the record was made,
+    /// [`UsageRefused::SpanNotCommitted`] while a span is not committed, unless the call is
+    /// marked failed, and [`UsageRefused::SequenceExhausted`] when the stream has issued its last
+    /// sequence; nothing is recorded and no sequence is used.
     pub fn usage(&mut self) -> Result<EventEnvelope<TranscriptEvent>, UsageRefused> {
         if !self.input_ended {
             return Err(InputNotEnded.into());
@@ -744,10 +749,11 @@ impl TranscriptOutput {
         if self.usage_recorded {
             return Err(UsageAlreadyRecorded.into());
         }
-        if let Some(open) = self
-            .spans
-            .iter()
-            .find(|span| span.state() != SpanState::Committed)
+        if !self.failed
+            && let Some(open) = self
+                .spans
+                .iter()
+                .find(|span| span.state() != SpanState::Committed)
         {
             return Err(SpanNotCommitted {
                 span_id: open.span_id(),
