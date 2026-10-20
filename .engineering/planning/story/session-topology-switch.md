@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:session-topology-switch
 kind: story
-status: active
+status: implemented
 title: One session switches between the text-only pipeline and the voice cascade with one event vocabulary (A-12), and describe reports what runs
 summary: Declares SwitchPipeline in session.yaml; the live session drains its run, attaches the other pipeline's run and keeps its history and vocabulary; describe reports pipeline, bindings, capabilities and downgrades.
 relations:
@@ -34,10 +34,11 @@ scope:
   path: crates/inference-testkit/tests/target/session.rs
 - confidence: cited
   path: ess/domains/session.yaml
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:34Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:34Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:55Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

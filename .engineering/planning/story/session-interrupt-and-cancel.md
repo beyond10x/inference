@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:session-interrupt-and-cancel
 kind: story
-status: active
+status: implemented
 title: Session interrupt and the cancel branch of close
 summary: interrupt cuts the active generation at the session boundary and sends cancel into the run; CancelSession closes from Opened, Ready or Draining by cancelling the run.
 relations:
@@ -22,10 +22,11 @@ scope:
   path: crates/inference-testkit/tests/target/session.rs
 - confidence: cited
   path: ess/domains/session.yaml
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:33Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:34Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:55Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

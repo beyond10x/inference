@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:tool-call-interruption
 kind: story
-status: active
+status: implemented
 title: Interruption during a tool round trip
 summary: Superseding a generation rejects its pending calls, cancels a started one without reinjection and leaves a completed write completed and audited; nothing is rolled back.
 relations:
@@ -25,10 +25,11 @@ scope:
   path: crates/inference-testkit/src/mock_tool_executor.rs
 - confidence: cited
   path: crates/inference-tools
-revision: 16
+revision: 17
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T21:23:38Z", actor: "human:timo", revision: 15, decided_on: {"recorded":{"review_outcome":2}}}
 - {from: "proposed", to: "active", at: "2026-10-19T21:23:38Z", actor: "human:timo", revision: 16, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:53Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 ## Context
 

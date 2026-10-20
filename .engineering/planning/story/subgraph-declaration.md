@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:subgraph-declaration
 kind: story
-status: active
+status: implemented
 title: 'Subgraph nodes: a planned pipeline declared as a node of another, its ports checked against the child''s exposures'
 summary: Declares a node's subgraph reference and a run's parent in graph.yaml; planning refuses a subgraph node whose ports do not match the child pipeline's exposures.
 relations:
@@ -28,10 +28,11 @@ scope:
   path: crates/inference-testkit/tests/target/graph.rs
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:32Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:32Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:54Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

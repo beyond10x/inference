@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:53Z",
+  "actor": "human:timo",
+  "artifact": "story:tool-call-interruption",
+  "kind": "story",
+  "revision": 16,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --all-features --test tool_call_interruption (VERIFIED, new behaviour: on base f355b3c with stubs 7 of 7 cases fail on their assertions; treatment passes the four supersede states, Check 1 and the failed-consumer run; final review: the executor's cancel order fixed, cascade sends end on cancel, a Draining failure names its node; its cases kept)"
+  }
+}

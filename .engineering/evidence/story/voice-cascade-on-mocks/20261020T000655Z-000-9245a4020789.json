@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:55Z",
+  "actor": "human:timo",
+  "artifact": "story:voice-cascade-on-mocks",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --all-features --test voice_cascade_mocks (VERIFIED, new behaviour: the test does not compile before the cascade fixture exists, and fails when the fan-out feeds only its first output; treatment reads transcript, reply and audio from the exposed ends and completes)"
+  }
+}

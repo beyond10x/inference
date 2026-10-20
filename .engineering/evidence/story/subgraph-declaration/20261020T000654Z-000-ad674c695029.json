@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:54Z",
+  "actor": "human:timo",
+  "artifact": "story:subgraph-declaration",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-pipeline --all-features --test subgraph (VERIFIED, new behaviour: subgraph cases fail 7 of 8 and the target answers none of the 3 new ids before the change; treatment declares subgraph nodes, nests runs and refuses interface mismatches at planning)"
+  }
+}

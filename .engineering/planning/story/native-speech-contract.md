@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:native-speech-contract
 kind: story
-status: active
+status: implemented
 title: Native speech session contract and its mock
 summary: ess declares the native speech session, inference-duplex carries the contract, the testkit mocks it.
 relations:
@@ -27,10 +27,11 @@ scope:
   path: ess/domains/duplex.yaml
 - confidence: cited
   path: ess/system.yaml
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T20:56:22Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-10-19T20:56:23Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:53Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":12,"verification":1}}}
 ---
 ## Context
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:voice-cascade-on-mocks
 kind: story
-status: active
+status: implemented
 title: 'The voice cascade on the testkit mocks: STT and TTS nodes and one cascade declaration with exposed ends'
 summary: Graph nodes over the mock recogniser and synthesiser, and a testkit fixture declaring topology B with an audio ingress and transcript, text and audio egresses; a runtime test runs it offline.
 relations:
@@ -28,10 +28,11 @@ scope:
   path: crates/inference-testkit/src/tts.rs
 - confidence: cited
   path: crates/inference-testkit/src/tts/node.rs
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:34Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:34Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:55Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:55Z",
+  "actor": "human:timo",
+  "artifact": "story:session-interrupt-and-cancel",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check (5 steps, each exit 0; cargo test 1519 passed, 0 failed) (wave/18 d8d9fe7)"
+  }
+}

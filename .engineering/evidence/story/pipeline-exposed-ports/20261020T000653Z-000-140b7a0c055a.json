@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:53Z",
+  "actor": "human:timo",
+  "artifact": "story:pipeline-exposed-ports",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --all-features --test exposed_ports (VERIFIED, new behaviour: on base 9550fcc the exposure cases fail 8 of 9 and 2 of 2, conform reports the 6 ExposePort and Exposure ids unsupported; treatment answers them; a run with only exposed ends completes)"
+  }
+}

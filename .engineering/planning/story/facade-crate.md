@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:facade-crate
 kind: story
-status: active
+status: implemented
 title: inference-facade crate holds the session domain, and the testkit store calls it
 summary: The session state machine of ess/domains/session.yaml moves from the testkit into a new inference-facade crate; every inference.session scenario still passes.
 relations:
@@ -23,10 +23,11 @@ scope:
   path: crates/inference-testkit/Cargo.toml
 - confidence: cited
   path: crates/inference-testkit/src/session.rs
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:32Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:33Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:54Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

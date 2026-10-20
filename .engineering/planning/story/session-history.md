@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:session-history
 kind: story
-status: active
+status: implemented
 title: 'Session history: committed user turns, assistant segments and tool results kept across runs'
 summary: Declares HistoryEntry in session.yaml and records it from what the session commits and delivers; history outlives the run that produced it.
 relations:
@@ -26,10 +26,11 @@ scope:
   path: crates/inference-testkit/tests/target/session.rs
 - confidence: cited
   path: ess/domains/session.yaml
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:33Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:33Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:55Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

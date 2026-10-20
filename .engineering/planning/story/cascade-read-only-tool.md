@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:cascade-read-only-tool
 kind: story
-status: active
+status: implemented
 title: The voice cascade executes a read-only tool and speaks the result
 summary: The cascade declaration executes one read-only tool through the barrier and speaks the result; the acceptance runs it mock-bound, the real-model run is a pinned demonstration.
 relations:
@@ -19,10 +19,11 @@ scope:
   path: crates/inference-runtime/tests/cascade_read_only_tool.rs
 - confidence: inferred
   path: crates/inference-testkit/src/llm.rs
-revision: 16
+revision: 17
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:35Z", actor: "human:timo", revision: 14, decided_on: {"recorded":{"review_outcome":3}}}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:35Z", actor: "human:timo", revision: 15, decided_on: {"recorded":{"review_outcome":3}}}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:55Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"test_result":1,"review_outcome":3,"verification":1}}}
 ---
 ## Context
 

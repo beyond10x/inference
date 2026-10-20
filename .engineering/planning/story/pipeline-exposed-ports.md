@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:pipeline-exposed-ports
 kind: story
-status: active
+status: implemented
 title: A pipeline exposes named ingress and egress ports, and its run hands their outer ends to the caller
 summary: Declares the named source and sink interfaces of design line 511 as exposures; validation counts them as connected and the run controller builds a bounded queue for each, whose far end its caller holds.
 relations:
@@ -33,10 +33,11 @@ scope:
   path: crates/inference-testkit/tests/target/graph.rs
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:31Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:31Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:54Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

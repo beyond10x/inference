@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:declarative-graph-definitions
 kind: story
-status: active
+status: implemented
 title: Declarative graph definitions checked against runtime node descriptors before anything is declared
 summary: Declares NodeDescriptor in the graph domain; a JSON definition is checked against the descriptors, then declared through the commands the builder uses, so validation is shared.
 relations:
@@ -32,10 +32,11 @@ scope:
   path: crates/inference-testkit/tests/target/graph.rs
 - confidence: cited
   path: ess/domains/graph.yaml
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:31Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:31Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:54Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

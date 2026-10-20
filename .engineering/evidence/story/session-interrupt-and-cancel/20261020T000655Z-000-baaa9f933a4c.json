@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:55Z",
+  "actor": "human:timo",
+  "artifact": "story:session-interrupt-and-cancel",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-facade --all-features --test interrupt_and_cancel (VERIFIED, new behaviour: 5 cases fail before the change; treatment cuts the current generation at the session and cancels from every state; final review: segments of a cut generation are cut too)"
+  }
+}

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:subgraph-execution
 kind: story
-status: active
+status: implemented
 title: A subgraph node runs its child pipeline with cancellation and tracing boundaries kept (A-14)
 summary: A runtime node implementation drives a nested child run from its instance's lifecycle; cancel and failure cross the boundary and every envelope stays attributable to the run that produced it.
 relations:
@@ -18,10 +18,11 @@ scope:
   path: crates/inference-runtime/src/subgraph.rs
 - confidence: cited
   path: crates/inference-runtime/tests/subgraph.rs
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:32Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:32Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:54Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

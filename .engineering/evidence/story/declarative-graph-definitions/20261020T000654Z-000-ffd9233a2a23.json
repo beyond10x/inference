@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:54Z",
+  "actor": "human:timo",
+  "artifact": "story:declarative-graph-definitions",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-pipeline --all-features --test definition (VERIFIED, new behaviour: definition cases fail 7 of 10 before the check exists; treatment checks a JSON definition against node descriptors and declares it through the builder's commands; final review: capacities clamped as the builder does, ports resolved by name and direction)"
+  }
+}

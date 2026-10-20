@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:session-live-text
 kind: story
-status: active
+status: implemented
 title: 'A live session over the text-only pipeline: open, send, receive, commit_input and a draining close'
 summary: inference-facade binds a session to a run through the pipeline's exposures and delivers one session event vocabulary; send and commit_input are declared in session.yaml with their Ready guard.
 relations:
@@ -31,10 +31,11 @@ scope:
   path: crates/inference-testkit/tests/target/session.rs
 - confidence: cited
   path: ess/domains/session.yaml
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:56:33Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-10-19T22:56:33Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:55Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 
