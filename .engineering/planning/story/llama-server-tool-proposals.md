@@ -2,14 +2,17 @@
 format: aep.planning-md/3
 id: story:llama-server-tool-proposals
 kind: story
-status: draft
+status: active
 title: 'llama-server adapter: tool proposals as structured events across a round trip'
 summary: tool_calling claimed behind an option; streamed tool calls become ProposeToolCall on the generation id, and the result returns on the same generation.
 relations:
 - decomposes: epic:local-llm-adapter
 - serves: vision:inference
 - depends_on: story:llama-server-adapter
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T09:03:44Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-20T09:03:44Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 
