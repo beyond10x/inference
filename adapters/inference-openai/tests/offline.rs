@@ -236,6 +236,7 @@ fn telephony_session() -> SessionConfig {
                 "required": ["location"]
             }),
         }],
+        speed: None,
     }
 }
 
@@ -955,6 +956,25 @@ fn the_default_session_is_pcm16_at_24_khz_with_turn_detection_off() {
             }
         })
     );
+}
+
+#[test]
+fn an_output_speed_is_sent_under_audio_output_only_when_set() {
+    // `audio.output.speed` of the session configuration on the realtime reference
+    // (`https://developers.openai.com/api/reference/resources/realtime`, model
+    // `realtime_audio_config_output`): a multiple of the original speed, 0.25 to 1.5, 1.0 the
+    // default, changed only between model turns.
+    let session = SessionConfig {
+        voice: Some("marin".to_owned()),
+        speed: Some(0.9),
+        ..SessionConfig::default()
+    };
+    assert_eq!(
+        session.to_session_json()["audio"]["output"],
+        json!({"format": {"type": "audio/pcm", "rate": 24000}, "voice": "marin", "speed": 0.9})
+    );
+    let unset = SessionConfig::default().to_session_json();
+    assert!(unset["audio"]["output"].get("speed").is_none(), "{unset}");
 }
 
 #[test]
