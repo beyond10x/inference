@@ -97,7 +97,7 @@ pub fn planned_with_egress(
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
-        admitted: Vec::new(),
+        admitted: vec![inference_core::model::Locality::SameProcess],
     })
     .expect("a row of the table");
     let profile_id = profile.profile_id();
@@ -152,7 +152,7 @@ pub fn sink_planned(generator: &MockGenerator) -> (Declaration, PlannedPipeline)
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
-        admitted: Vec::new(),
+        admitted: vec![inference_core::model::Locality::SameProcess],
     })
     .expect("a row of the table");
     let profile_id = profile.profile_id();
@@ -202,7 +202,7 @@ pub fn echo_planned(generator: &MockGenerator) -> (Declaration, PlannedPipeline)
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
-        admitted: Vec::new(),
+        admitted: vec![inference_core::model::Locality::SameProcess],
     })
     .expect("a row of the table");
     let profile_id = profile.profile_id();

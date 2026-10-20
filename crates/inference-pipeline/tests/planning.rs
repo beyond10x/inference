@@ -1,8 +1,9 @@
 //! `inference.graph.PlanPipeline`: check 4 of §10.2 and the rule of §8.3 (A-13). A node requiring
 //! a capability its bound adapter lacks is refused naming the node and the capability, a node
-//! whose requirements need an adapter and has none is refused as unbound, an unbound transform is
-//! transparent, and over random acyclic graphs the effective capabilities are the intersection
-//! over the bound nodes on every required path.
+//! whose requirements need an adapter and has none is refused as unbound, an adapter running at a
+//! locality the pipeline's profile does not admit is refused before either (A-04), an unbound
+//! transform is transparent, and over random acyclic graphs the effective capabilities are the
+//! intersection over the bound nodes on every required path.
 
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -12,10 +13,10 @@ use inference_core::model::{
 };
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
-    CapabilityMismatch, Catalog, Declaration, Essentiality, InteractionMode, NodeHandle, NodeId,
-    NodeRole, NodeUnbound, OverloadPolicy, PipelineBuilder, PipelineId, PipelineNotFound,
-    PipelinePlanned, PipelineSpec, PipelineState, PipelineStateConflict, PlanPipeline,
-    PlanPipelineError, PortTraits, ValidatePipeline, ValidatePipelineError, modality,
+    CapabilityMismatch, Catalog, Declaration, Essentiality, InteractionMode, LocalityDenied,
+    NodeHandle, NodeId, NodeRole, NodeUnbound, OverloadPolicy, PipelineBuilder, PipelineId,
+    PipelineNotFound, PipelinePlanned, PipelineSpec, PipelineState, PipelineStateConflict,
+    PlanPipeline, PlanPipelineError, PortTraits, ValidatePipeline, ValidatePipelineError, modality,
 };
 use proptest::prelude::*;
 use uuid::Uuid;
@@ -42,10 +43,19 @@ impl Catalog for Known {
 
 impl Known {
     fn new(adapters: Vec<Adapter>) -> Self {
+        Self::under(
+            ProfileKind::OfflineStrict,
+            vec![Locality::SameProcess],
+            adapters,
+        )
+    }
+
+    /// A profile of `kind`, with the table's egress for it, admitting `admitted`.
+    fn under(kind: ProfileKind, admitted: Vec<Locality>, adapters: Vec<Adapter>) -> Self {
         let (profile, _) = DeploymentProfile::declare(DeclareProfile {
-            kind: ProfileKind::OfflineStrict,
-            egress: Egress::Denied,
-            admitted: vec![Locality::SameProcess],
+            kind,
+            egress: kind.egress(),
+            admitted,
         })
         .expect("a row of the table");
         Self { profile, adapters }
@@ -54,12 +64,21 @@ impl Known {
 
 /// A mock adapter claiming `capabilities`.
 fn adapter(capabilities: Vec<Capability>) -> Adapter {
+    adapter_at(Locality::SameProcess, capabilities)
+}
+
+/// A mock adapter running at `locality` and claiming `capabilities`.
+fn adapter_at(locality: Locality, capabilities: Vec<Capability>) -> Adapter {
     Adapter::declare(DeclareAdapter {
         model_id: ModelId::from(Uuid::from_u128(9)),
         backend: "mock".to_owned(),
         contract_revision: "llm/1".to_owned(),
-        execution_form: ExecutionForm::InProcess,
-        locality: Locality::SameProcess,
+        execution_form: match locality {
+            Locality::SameProcess => ExecutionForm::InProcess,
+            Locality::LocalWorker | Locality::SelfHostedCluster => ExecutionForm::LocalService,
+            Locality::ExternalProvider => ExecutionForm::HostedService,
+        },
+        locality,
         capabilities,
         max_concurrency: 1,
     })
@@ -514,6 +533,170 @@ fn with_no_required_path_every_bound_node_contributes() {
             capability: ToolCalling,
         })),
         "one bound adapter lacks what the pipeline requires"
+    );
+}
+
+#[test]
+fn an_external_provider_under_offline_strict_is_refused_naming_node_adapter_locality_and_profile() {
+    let known = Known::new(vec![adapter_at(
+        Locality::ExternalProvider,
+        vec![ToolCalling],
+    )]);
+    let (mut declaration, pipeline_id, model) =
+        source_model_sink(&known, Vec::new(), vec![ToolCalling], Some(0));
+    let validated = declaration
+        .validate(pipeline_id)
+        .expect("the graph is valid");
+
+    let denied = LocalityDenied {
+        node_id: model,
+        adapter_id: known.adapters[0].adapter_id(),
+        locality: Locality::ExternalProvider,
+        profile_id: known.profile.profile_id(),
+    };
+    assert_eq!(
+        declaration.plan(validated, &known),
+        Err(PlanPipelineError::LocalityDenied(denied))
+    );
+    assert_eq!(
+        declaration.plan_pipeline(PlanPipeline { pipeline_id }, &known),
+        Err(PlanPipelineError::LocalityDenied(denied)),
+        "the command by identity refuses the same"
+    );
+    let pipeline = declaration.pipeline(pipeline_id).expect("declared");
+    assert_eq!(pipeline.state(), PipelineState::Validated, "nothing moved");
+    assert_eq!(pipeline.effective_capabilities(), None);
+    assert_eq!(pipeline.downgrades(), None);
+}
+
+#[test]
+fn the_admitted_list_is_read_as_declared() {
+    for (kind, admitted, locality, plans) in [
+        (
+            ProfileKind::OfflineStrict,
+            vec![Locality::SameProcess],
+            Locality::LocalWorker,
+            false,
+        ),
+        (
+            ProfileKind::OfflineStrict,
+            vec![Locality::SameProcess, Locality::LocalWorker],
+            Locality::LocalWorker,
+            true,
+        ),
+        (
+            ProfileKind::OfflineStrict,
+            Vec::new(),
+            Locality::SameProcess,
+            false,
+        ),
+        (
+            ProfileKind::HybridOptIn,
+            vec![Locality::ExternalProvider],
+            Locality::ExternalProvider,
+            true,
+        ),
+        (
+            ProfileKind::HybridOptIn,
+            vec![Locality::ExternalProvider],
+            Locality::SameProcess,
+            false,
+        ),
+    ] {
+        let known = Known::under(kind, admitted.clone(), vec![adapter_at(locality, vec![])]);
+        let (declaration, pipeline_id, model) =
+            source_model_sink(&known, Vec::new(), Vec::new(), Some(0));
+        let decided = declaration.plan_of(pipeline_id, &known);
+        if plans {
+            assert!(
+                decided.is_ok(),
+                "{kind:?} admitting {admitted:?}: {decided:?}"
+            );
+        } else {
+            assert_eq!(
+                decided,
+                Err(PlanPipelineError::LocalityDenied(LocalityDenied {
+                    node_id: model,
+                    adapter_id: known.adapters[0].adapter_id(),
+                    locality,
+                    profile_id: known.profile.profile_id(),
+                })),
+                "{kind:?} admitting {admitted:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_denied_locality_is_refused_before_an_unbound_node_and_a_mismatch() {
+    let known = Known::new(vec![
+        adapter(vec![OutputStreaming]),
+        adapter_at(Locality::ExternalProvider, vec![OutputStreaming]),
+    ]);
+    let mut declaration = Declaration::counted();
+    let (pipeline_id, remote) = declaration
+        .build(
+            &known,
+            known.profile.profile_id(),
+            spec(Vec::new()),
+            |pipeline| {
+                let source = pipeline.node("source", NodeRole::Source, Vec::new());
+                let short = pipeline.node("short", NodeRole::Model, vec![ToolCalling]);
+                let unbound = pipeline.node("unbound", NodeRole::Model, vec![RevisableInput]);
+                let remote = pipeline.node("remote", NodeRole::Model, Vec::new());
+                let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
+                chain(
+                    pipeline,
+                    &[&source, &short, &unbound, &remote, &sink],
+                    PortTraits::default(),
+                );
+                pipeline
+                    .bind(&short, known.adapters[0].adapter_id())
+                    .expect("the adapter is declared");
+                pipeline
+                    .bind(&remote, known.adapters[1].adapter_id())
+                    .expect("the adapter is declared");
+                remote.id()
+            },
+        )
+        .expect("the profile is declared");
+    let validated = declaration
+        .validate(pipeline_id)
+        .expect("the graph is valid");
+    assert_eq!(
+        declaration.plan(validated, &known),
+        Err(PlanPipelineError::LocalityDenied(LocalityDenied {
+            node_id: remote,
+            adapter_id: known.adapters[1].adapter_id(),
+            locality: Locality::ExternalProvider,
+            profile_id: known.profile.profile_id(),
+        }))
+    );
+}
+
+#[test]
+fn a_profile_the_catalog_does_not_hold_admits_nothing() {
+    let known = Known::new(vec![adapter(Vec::new())]);
+    let (declaration, pipeline_id, model) =
+        source_model_sink(&known, Vec::new(), Vec::new(), Some(0));
+    let elsewhere = Known {
+        profile: DeploymentProfile::declare(DeclareProfile {
+            kind: ProfileKind::OfflineStrict,
+            egress: Egress::Denied,
+            admitted: vec![Locality::SameProcess],
+        })
+        .expect("a row of the table")
+        .0,
+        adapters: known.adapters.clone(),
+    };
+    assert_eq!(
+        declaration.plan_of(pipeline_id, &elsewhere),
+        Err(PlanPipelineError::LocalityDenied(LocalityDenied {
+            node_id: model,
+            adapter_id: known.adapters[0].adapter_id(),
+            locality: Locality::SameProcess,
+            profile_id: known.profile.profile_id(),
+        }))
     );
 }
 
