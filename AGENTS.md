@@ -24,7 +24,7 @@ on this repository. `README.md` is for people.
 | `adapters/inference-whispercpp` | a local batch speech recogniser over whisper.cpp through `whisper-rs` as native FFI, claiming neither incremental input nor output streaming, over one pinned, hash-checked `ggml-base.en.bin`; its conformance and live tests are ignored and read the checkpoint file from `INFERENCE_WHISPERCPP_STT_MODEL` (two conformance tests, the live and the resource test also a recorded speech clip from `INFERENCE_WHISPERCPP_STT_CLIP`), its capability record on the reference machine in `records/`; whisper.cpp is compiled from the sources `whisper-rs-sys` ships, CPU only, so every builder needs `cmake`, a C++ compiler and `libclang` |
 | `docs/design/` | design documents and their reviews |
 | `docs/brand/` | the banner and the pitch slide as hand-written SVG |
-| `site/` | the documentation website, an mdBook (`mdbook build site`, output `site/book`, git-ignored); `pages.yml` builds and deploys it to GitHub Pages on every release tag; a status label on it (`0.5.0`, `0.6.0`, `planned`) changes with the release that ships the thing |
+| `site/` | the documentation website, an mdBook (`mdbook build site`, output `site/book`, git-ignored); `pages.yml` builds and deploys it to GitHub Pages on every release tag; a status label on it (`0.5.0`, `0.6.0`, `0.7.0`, `planned`) changes with the release that ships the thing |
 | `ess/` | the ESS specification: `system.yaml`, `ess-inputs.yaml` and one domain document per layer of the design under `domains/` (model, policy, graph, stream, tools, session); every declaration carries a `read from:` line naming the design line it was read from; `scenarios/` holds authored scenarios for what synthesis cannot witness |
 | `.engineering/planning` | the AEP planning store; change it only through `aep plan artifact` verbs |
 | `.engineering/drafts` | scratch bodies for `aep plan artifact … --from`; git-ignored |
@@ -85,6 +85,10 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   the tag points at, and so does the version in `Cargo.toml` and the `adapter_revision` of every capability record under `adapters/`. No binary is published: this repository ships libraries.
 - The CI pins (`ess`, `aep`, go-task, the actions' commits, the `common.yml` commit) move only by
   a commit here that names the new version and its checksum.
+- Each release moves the `ess` pin (CI's `ESS_VERSION` and `ESS_SHA256`, and the testkit's
+  `ess-conformance` and `ess-primitives` tags) to the newest `ess` release in its release
+  commit, with one `CHANGELOG.md` line; anything beyond the pin, regeneration and small fixes
+  is reported before the release goes out.
 - This repository is public. Committed text names no private repository, session or decision id,
   host detail or person.
 - No comments in `Taskfile.yml`, `Cargo.toml` or any other config or manifest file.

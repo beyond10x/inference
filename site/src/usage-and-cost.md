@@ -54,10 +54,10 @@ no cost is estimated from a count that is not known.
 
 | What | Status |
 |---|---|
-| LLM usage: one record per turn, from the `llm` project's usage | <span class="st st-plan">planned</span> |
-| Native speech usage as usage records (OpenAI Realtime, Nova Sonic) | <span class="st st-plan">planned</span> |
-| STT usage: input audio and local compute per recognition | <span class="st st-plan">planned</span> |
-| TTS usage: characters, output audio and compute per synthesis | <span class="st st-plan">planned</span> |
+| LLM usage: one record per turn, from the `llm` project's usage | <span class="st st-rel">0.6.0</span> |
+| Native speech usage as usage records (OpenAI Realtime, GPT-Live, Nova Sonic), billed usage kept at session end | <span class="st st-rel">0.7.0</span> |
+| STT usage: input audio and local compute per recognition (mock, sherpa-onnx, whisper.cpp) | <span class="st st-rel">0.7.0</span> |
+| TTS usage: characters, output audio and compute per synthesis, checked by the backend-neutral TTS checks | <span class="st st-rel">0.7.0</span> |
 | Run and session totals in the facade, kept by the replay recorder, never dropped with telemetry | <span class="st st-plan">planned</span> |
 | Cost records from a caller price document, behind a facade `cost` feature | <span class="st st-plan">planned</span> |
 | Picking the voice provider by configuration (`talk --provider openai\|openai-live\|nova`) and comparing latency and usage across providers (`cargo run -p realtime-voice --example compare`) | <span class="st st-rel">0.6.0</span> |
