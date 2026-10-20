@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T01:08:00Z",
+  "actor": "human:timo",
+  "artifact": "story:llm-over-b10x-llm",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "workspace gate (fmt, clippy -D warnings, ess validate each exit 0; cargo test --workspace --all-features 1538 passed, 0 failed; conform 454/454)"
+  }
+}

@@ -30,7 +30,6 @@ use inference_core::generation::GenerationState;
 use inference_core::id::{GenerationId, RunId};
 use inference_core::model::{Adapter, AdapterId, Capability, ModelId};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
-use inference_llm::Generator;
 use inference_pipeline::nodes::{
     AuthorityHandle, AuthorityOutcome, IterationRuleNotDeclared, ToolAuthority, ToolCallUpdate,
     ToolExecutorNode, ToolPayload,

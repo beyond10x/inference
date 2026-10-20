@@ -1,42 +1,74 @@
-//! The LLM contract of the inference framework.
+//! The LLM contract of the inference framework, over the `llm` model contract.
 //!
-//! `inference-llm` is the generation contract over `inference-core`'s [`Generation`] and
-//! `inference-text`'s [`OutputSegment`]. A [`Generator`] is an `inference.model.Adapter`: it
-//! carries the [`Adapter`] record it was declared with, and [`Generator::start`] begins one
-//! generation for a [`GenerationRequest`] under the run and producing node the caller names. The
-//! returned [`GenerationHandle`] yields the generation's [`GenerationEvent`]s, the outbound
-//! commands of `ess/domains/stream.yaml`: `StartGeneration`, then `EmitTextDelta` and
-//! `CommitSegment` for each segment, then `CompleteGeneration`. `CancelGeneration` and
-//! `SupersedeGeneration` are control, called on the handle.
+//! A text model is an [`llm_core::Model`]: its request, conversation items, tool calls, stream
+//! events, usage and failures are `llm`'s types, re-exported here as [`llm_core`]. This crate
+//! defines no model of its own. It adds what a graph node needs on top: the identity of a
+//! generation (run, producing node, epoch), the generation's events as `ess/domains/stream.yaml`
+//! declares them, the commit point of each segment, input offered while a generation runs, and the
+//! maximum concurrency the adapter record declares.
 //!
-//! [`Generator::start`] refuses a start past the maximum concurrency the adapter record declares
-//! with [`ConcurrencyLimitReached`]; a generation runs until its handle is dropped.
+//! A [`Generator`] pairs an `inference.model.Adapter` record with the [`llm_core::Model`] that
+//! implements it. [`Generator::start`] begins one generation for a [`GenerationRequest`], whose
+//! `turn` is the `llm` request the generation's turns build on, and refuses a start past the
+//! adapter's maximum concurrency with [`ConcurrencyLimitReached`]; a generation runs until its
+//! [`GenerationHandle`] is dropped. The handle yields the generation's [`GenerationEvent`]s, the
+//! outbound commands of `ess/domains/stream.yaml`: `StartGeneration`, then `EmitTextDelta` and
+//! `CommitSegment` for each segment, then `CompleteGeneration`, or `CancelGeneration` when a turn
+//! fails. `CancelGeneration`, `SupersedeGeneration` and `CompleteGeneration` are also control,
+//! called on the handle, and a cancel reaches the running turn through `llm`'s
+//! [`llm_core::Cancel`].
+//!
+//! A generation is a conversation of turns, and no turn asks an empty request. The first
+//! [`llm_core::Model::turn`] runs on the request as it was given when it carries items, and
+//! otherwise on the first input; each later one runs on the conversation so far, the items every
+//! earlier turn returned included, once there is something new to answer: input offered while it
+//! runs, as user text, or the results of every tool call the latest turn ended with. A turn that
+//! fails cancels the generation: [`GenerationEvent::Cancelled`] is delivered with the segments it
+//! discarded, and [`GenerationHandle::failure`] keeps the `llm` error. Text a turn streams is the
+//! generation's output, and the commit point is the delta: `llm`'s stream has no event that
+//! revises a delta it streamed, so each becomes one segment, committed as it is emitted. That
+//! `llm` never revises one is not stated in `llm` itself, an `llm` gap.
 //!
 //! Output streaming, incremental input and input during output are distinct capabilities
 //! (`inference.model.Capability`), and a persistent connection proves none of them. What the
 //! contract can observe, it decides here:
 //!
-//! * A generator streams output when a [`TextDelta`] reaches the caller while the generation is
-//!   still Active. One that does not stream delivers its segments only once the generation is
-//!   Completed; both emit every segment into the Active generation, as `EmitTextDelta` requires.
+//! * An adapter claiming [`Capability::OutputStreaming`] delivers each delta of a turn as a
+//!   [`TextDelta`] while the generation is still Active, and the turn may still be running. One
+//!   that does not delivers each turn's text as one segment, held until the generation completes
+//!   or until a turn ends with tool calls, the safe boundary at which the caller must see them;
+//!   both emit every segment into the Active generation, as `EmitTextDelta` requires.
 //! * Input offered while a generation is Active is admitted by [`GenerationOutput::admit_input`]
 //!   only when the adapter claims [`Capability::ConcurrentInputOutput`], and refused otherwise
 //!   with [`CapabilityNotClaimed`] naming it. A handle takes input only as the [`AdmittedInput`]
 //!   that admission returns, and the text inside is reachable only through
 //!   [`GenerationOutput::release`] of the generation that admitted it, while that generation is
 //!   still Active; input admitted elsewhere is refused with [`AdmittedByAnotherGeneration`]. So no
-//!   implementation accepts input its adapter does not claim, and an admission is taken once.
+//!   input the adapter does not claim reaches the model, and an admission is taken once.
+//! * A turn ending with tool calls stages them as proposals, which never reach the caller as
+//!   [`TextDelta`]s: structured proposals stay distinguishable from prose. The caller takes each
+//!   with [`GenerationHandle::take_proposal`] once the turn's text is delivered and answers it
+//!   with [`GenerationHandle::integrate`]; the next turn runs once every call of the round is
+//!   answered, so every turn is a request `llm` validates. While a call is unanswered the
+//!   generation waits for it and does not complete by itself; [`GenerationHandle::complete`]
+//!   ends it regardless. The generation stays Active from the proposal to its completion, so
+//!   every segment after a result carries its identity.
 //!
-//! [`GenerationOutput`] is the bookkeeping every implementation shares: the generation and the
-//! segments it owns, moved only through the transitions of `inference-core` and
-//! `inference-text`. The crate carries no concrete model, backend or provider; the scripted mock
-//! generator is `inference-testkit`'s, behind its `llm` feature. Behind the `tools` feature, which
-//! takes the optional dependency on `inference-tools`, [`tools`] adds structured tool proposals
-//! and the integration of their outcomes into the generation that proposed. Context semantics and
-//! token accounting are not part of the contract yet.
+//! [`GenerationOutput`] is the bookkeeping of one generation: the generation and the segments it
+//! owns, moved only through the transitions of `inference-core` and `inference-text`. The crate
+//! carries no concrete model, backend or provider; the scripted mock model is
+//! `inference-testkit`'s, behind its `llm` feature. Behind the `tools` feature, which takes the
+//! optional dependency on `inference-tools`, [`tools`] maps declared tools onto `llm`'s tool
+//! specifications and the outcomes of the tools domain onto `llm`'s tool results.
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
+use std::future::{self, Future};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll, Wake, Waker};
+use std::thread::{self, Thread};
 
 use inference_core::generation::{
     Generation, GenerationCancelled, GenerationCompleted, GenerationStarted, GenerationState,
@@ -48,8 +80,15 @@ use inference_text::{
     OutputSegment, SegmentDiscarded, SegmentState, SegmentStateConflict, TextDelta,
     TextSegmentCommitted,
 };
+pub use llm_core;
+use llm_core::{
+    BoxFuture, CallId, Cancel, Item, Model, StreamEvent, StreamSink, ToolCall, TurnOutcome,
+    TurnRequest,
+};
+use serde_json::Value;
 
-/// Structured tool proposals and their outcomes, behind the `tools` feature.
+/// Declared tools as `llm` tool specifications, and tool outcomes as `llm` tool results, behind
+/// the `tools` feature.
 #[cfg(feature = "tools")]
 pub mod tools;
 
@@ -57,14 +96,14 @@ pub mod tools;
 /// declares.
 pub const CONTRACT_REVISION: &str = env!("CARGO_PKG_VERSION");
 
-/// A request for one generation: the committed `prompt` text, and the run, producing node and
-/// epoch the generation is started under.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A request for one generation: the run, producing node and epoch it is started under, and the
+/// `llm` request its first turn asks the model.
+#[derive(Debug, Clone, PartialEq)]
 pub struct GenerationRequest {
     pub run_id: RunId,
     pub node_id: NodeId,
     pub epoch: i64,
-    pub prompt: String,
+    pub turn: TurnRequest,
 }
 
 impl GenerationRequest {
@@ -90,6 +129,11 @@ pub enum GenerationEvent {
     SegmentCommitted(TextSegmentCommitted),
     /// `inference.stream.GenerationCompleted`, always the last of a generation that completes.
     Completed(GenerationCompleted),
+    /// `inference.stream.GenerationCancelled` of a generation whose turn failed, with the
+    /// `SegmentDiscarded` of each segment the cancel discarded, in emission order; always the
+    /// last. [`GenerationHandle::failure`] holds the `llm` error. A cancel the caller asks for
+    /// returns its event instead.
+    Cancelled(GenerationCancelled, Vec<SegmentDiscarded>),
 }
 
 /// The adapter does not claim `capability`, so the input offered while its generation is Active
@@ -447,167 +491,653 @@ impl GenerationOutput {
     }
 }
 
-/// An implementation of the LLM contract: an `inference.model.Adapter` that generates text.
-pub trait Generator {
-    /// The handle of one running generation.
-    type Handle: GenerationHandle;
+/// Why a tool result was not integrated into a generation; nothing changed either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutcomeRefused {
+    /// The generation is not Active: the result rejoins the generation that proposed and no
+    /// other, and no turn runs.
+    GenerationStateConflict(GenerationStateConflict),
+    /// The call is not one of the latest turn that is still unanswered.
+    NotAwaited(CallNotAwaited),
+}
+
+impl fmt::Display for OutcomeRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::GenerationStateConflict(error) => fmt::Display::fmt(error, f),
+            Self::NotAwaited(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for OutcomeRefused {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::GenerationStateConflict(error) => Some(error),
+            Self::NotAwaited(error) => Some(error),
+        }
+    }
+}
+
+impl From<GenerationStateConflict> for OutcomeRefused {
+    fn from(error: GenerationStateConflict) -> Self {
+        Self::GenerationStateConflict(error)
+    }
+}
+
+impl From<CallNotAwaited> for OutcomeRefused {
+    fn from(error: CallNotAwaited) -> Self {
+        Self::NotAwaited(error)
+    }
+}
+
+/// A result named `call_id`, which no unanswered call of the generation's latest turn carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallNotAwaited {
+    pub call_id: CallId,
+}
+
+impl fmt::Display for CallNotAwaited {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "no unanswered call of the latest turn is {}, so its result is refused",
+            self.call_id
+        )
+    }
+}
+
+impl Error for CallNotAwaited {}
+
+/// The generations of one generator that run, shared by its clones, which are the same adapter.
+#[derive(Debug, Clone, Default)]
+struct Running(Arc<AtomicUsize>);
+
+impl Running {
+    /// Counts one more running generation, if fewer than `max_concurrency` run.
+    fn admit(&self, max_concurrency: i64) -> Result<Slot, ConcurrencyLimitReached> {
+        let limit = usize::try_from(max_concurrency).unwrap_or(usize::MAX);
+        let slot = Slot(Arc::clone(&self.0));
+        if self.0.fetch_add(1, Ordering::AcqRel) < limit {
+            Ok(slot)
+        } else {
+            drop(slot);
+            Err(ConcurrencyLimitReached { max_concurrency })
+        }
+    }
+}
+
+/// The place of one running generation among [`Running`], given back when it is dropped.
+#[derive(Debug)]
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// An `inference.model.Adapter` of a text model: the adapter record it was declared with, the
+/// capabilities it claims among it, and the [`llm_core::Model`] that implements it. A clone is
+/// the same adapter: it shares the model and the count of running generations, so the maximum
+/// concurrency holds across clones.
+#[derive(Clone)]
+pub struct Generator {
+    adapter: Adapter,
+    model: Arc<dyn Model>,
+    running: Running,
+}
+
+impl fmt::Debug for Generator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Generator")
+            .field("adapter", &self.adapter)
+            .field("model", self.model.provenance())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Generator {
+    /// The adapter `adapter` implemented by `model`.
+    #[must_use]
+    pub fn new(adapter: Adapter, model: Arc<dyn Model>) -> Self {
+        Self {
+            adapter,
+            model,
+            running: Running::default(),
+        }
+    }
 
     /// The adapter record this generator was declared with, the capabilities it claims among it.
-    fn adapter(&self) -> &Adapter;
+    #[must_use]
+    pub const fn adapter(&self) -> &Adapter {
+        &self.adapter
+    }
+
+    /// The `llm` model that runs the generations' turns.
+    #[must_use]
+    pub fn model(&self) -> &dyn Model {
+        self.model.as_ref()
+    }
 
     /// Starts one generation for `request`; the handle yields its events, the first
-    /// [`GenerationEvent::Started`]. A generation runs until its handle is dropped.
+    /// [`GenerationEvent::Started`]. The first turn runs once the handle is asked for the next
+    /// event after that. A generation runs until its handle is dropped.
     ///
     /// # Errors
     ///
     /// [`ConcurrencyLimitReached`] carrying the adapter's `max_concurrency` when that many
-    /// generations of this generator already run; nothing starts.
-    fn start(
+    /// generations of this generator, or of a clone of it, already run; nothing starts.
+    pub fn start(
         &mut self,
         request: GenerationRequest,
-    ) -> Result<Self::Handle, ConcurrencyLimitReached>;
+    ) -> Result<GenerationHandle, ConcurrencyLimitReached> {
+        let slot = self.running.admit(self.adapter.max_concurrency())?;
+        let (output, started) = GenerationOutput::start(&self.adapter, &request);
+        Ok(GenerationHandle {
+            model: Arc::clone(&self.model),
+            streams: output.capabilities().contains(&Capability::OutputStreaming),
+            output,
+            conversation: request.turn,
+            first: true,
+            inputs: VecDeque::new(),
+            answered: false,
+            awaited: Vec::new(),
+            staged: VecDeque::new(),
+            turn: None,
+            cancel: Cancel::new(),
+            waker: None,
+            delivered: VecDeque::from([GenerationEvent::Started(started)]),
+            held: VecDeque::new(),
+            text: String::new(),
+            outcomes: Vec::new(),
+            failure: None,
+            _slot: slot,
+        })
+    }
 }
 
-/// One running generation. Iterating it yields the generation's events as the implementation
-/// delivers them, and [`GenerationHandle::output`] shows where the generation stands at each.
-/// Iteration ends after [`GenerationEvent::Completed`], or once the generation is superseded or
-/// cancelled.
+/// The stream events of one running turn, as its sink accepted them and the handle has not yet
+/// taken them.
+type Accepted = Arc<Mutex<VecDeque<StreamEvent>>>;
+
+/// The sink a turn streams into: it accepts every event, and the handle takes them at its next
+/// poll.
+struct Queue(Accepted);
+
+impl StreamSink for Queue {
+    fn emit(&mut self, event: StreamEvent) -> BoxFuture<'_, Result<(), llm_core::Error>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push_back(event);
+        Box::pin(future::ready(Ok(())))
+    }
+}
+
+/// One turn of a generation, running.
+struct Turn {
+    future: BoxFuture<'static, Result<TurnOutcome, llm_core::Error>>,
+    accepted: Accepted,
+}
+
+/// One running generation over an [`llm_core::Model`]; see the crate documentation.
 ///
-/// Input reaches an implementation only through [`GenerationHandle::accept_input`], as an
-/// [`AdmittedInput`]; a caller offers text through [`OfferInput::offer_input`], which every
-/// handle has and none defines. An implementation:
+/// It is polled for its events. [`GenerationHandle::poll_turn_event`] yields the events of the
+/// turns that can run now and is ready with none once they are delivered and no turn runs: the
+/// generation then awaits input or the results of its latest round, or has ended. It never
+/// completes the generation. [`GenerationHandle::poll_event`] yields the same events and, asked
+/// when no turn runs, none can start and no call is unanswered, completes the generation; while
+/// calls of the latest turn are unanswered it is pending, and [`GenerationHandle::integrate`]
+/// wakes it. [`GenerationHandle::complete`] completes the generation whatever is unanswered.
+/// Iterating the handle blocks the calling thread until the next event of
+/// [`GenerationHandle::poll_event`], and yields none while the generation awaits results, which
+/// only the caller can give; it ends after [`GenerationEvent::Completed`] or
+/// [`GenerationEvent::Cancelled`], or once the generation is superseded or cancelled.
 ///
-/// ```
-/// # use inference_core::generation::{GenerationCancelled, GenerationStateConflict, GenerationSuperseded};
-/// # use inference_llm::{AdmittedInput, GenerationEvent, GenerationHandle, GenerationOutput, InputRefused};
-/// struct Handle {
-///     output: GenerationOutput,
-///     taken: Vec<String>,
-/// }
-///
-/// impl Iterator for Handle {
-///     type Item = GenerationEvent;
-///     fn next(&mut self) -> Option<GenerationEvent> {
-///         None
-///     }
-/// }
-///
-/// impl GenerationHandle for Handle {
-///     fn output(&self) -> &GenerationOutput {
-///         &self.output
-///     }
-///     fn accept_input(&mut self, input: AdmittedInput) -> Result<(), InputRefused> {
-///         let text = self.output.release(input)?;
-///         self.taken.push(text);
-///         Ok(())
-///     }
-///     fn supersede(&mut self) -> Result<GenerationSuperseded, GenerationStateConflict> {
-///         Ok(self.output.supersede()?.0)
-///     }
-///     fn cancel(&mut self) -> Result<GenerationCancelled, GenerationStateConflict> {
-///         Ok(self.output.cancel()?.0)
-///     }
-/// }
-/// ```
-///
-/// The same implementation defining an `offer_input` that takes raw text does not compile:
+/// It is not `Clone`: a copy taken while the generation is Active would deliver output for it
+/// after it was superseded or cancelled.
 ///
 /// ```compile_fail
-/// # use inference_core::generation::{GenerationCancelled, GenerationStateConflict, GenerationSuperseded};
-/// # use inference_llm::{AdmittedInput, GenerationEvent, GenerationHandle, GenerationOutput, InputRefused};
-/// # struct Handle {
-/// #     output: GenerationOutput,
-/// #     taken: Vec<String>,
-/// # }
-/// # impl Iterator for Handle {
-/// #     type Item = GenerationEvent;
-/// #     fn next(&mut self) -> Option<GenerationEvent> {
-/// #         None
-/// #     }
-/// # }
-/// impl GenerationHandle for Handle {
-///     fn output(&self) -> &GenerationOutput {
-///         &self.output
-///     }
-///     fn accept_input(&mut self, input: AdmittedInput) -> Result<(), InputRefused> {
-///         let text = self.output.release(input)?;
-///         self.taken.push(text);
-///         Ok(())
-///     }
-///     fn supersede(&mut self) -> Result<GenerationSuperseded, GenerationStateConflict> {
-///         Ok(self.output.supersede()?.0)
-///     }
-///     fn cancel(&mut self) -> Result<GenerationCancelled, GenerationStateConflict> {
-///         Ok(self.output.cancel()?.0)
-///     }
-///     fn offer_input(&mut self, text: String) -> Result<(), InputRefused> {
-///         self.taken.push(text);
-///         Ok(())
-///     }
-/// }
+/// fn cloneable<T: Clone>() {}
+/// cloneable::<inference_llm::GenerationHandle>();
 /// ```
-pub trait GenerationHandle: Iterator<Item = GenerationEvent> {
+pub struct GenerationHandle {
+    model: Arc<dyn Model>,
+    streams: bool,
+    output: GenerationOutput,
+    /// The conversation so far: the request's items and every item a turn returned or a result
+    /// answered; the next turn asks it, with the inputs still waiting appended.
+    conversation: TurnRequest,
+    /// Whether no turn ran yet.
+    first: bool,
+    /// Input taken while the generation runs, the next turn's user text.
+    inputs: VecDeque<String>,
+    /// Whether a result was integrated since the latest turn ran.
+    answered: bool,
+    /// The calls of the latest turn whose results are still to come.
+    awaited: Vec<CallId>,
+    /// The calls of the latest turn not yet taken as proposals.
+    staged: VecDeque<ToolCall>,
+    turn: Option<Turn>,
+    cancel: Cancel,
+    /// The waker of the latest poll, woken by an integration and used to drive the running turn
+    /// from [`GenerationHandle::take_proposal`].
+    waker: Option<Waker>,
+    delivered: VecDeque<GenerationEvent>,
+    /// The events of an adapter that does not stream, held until the generation completes or a
+    /// turn ends with calls.
+    held: VecDeque<GenerationEvent>,
+    /// The text of the running turn of an adapter that does not stream.
+    text: String,
+    outcomes: Vec<TurnOutcome>,
+    failure: Option<llm_core::Error>,
+    _slot: Slot,
+}
+
+impl fmt::Debug for GenerationHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GenerationHandle")
+            .field("output", &self.output)
+            .field("conversation", &self.conversation)
+            .field("inputs", &self.inputs)
+            .field("awaited", &self.awaited)
+            .field("staged", &self.staged)
+            .field("running", &self.turn.is_some())
+            .field("delivered", &self.delivered)
+            .field("failure", &self.failure)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GenerationHandle {
     /// The generation and its segments, as they stand now.
-    fn output(&self) -> &GenerationOutput;
+    #[must_use]
+    pub const fn output(&self) -> &GenerationOutput {
+        &self.output
+    }
+
+    /// The conversation the next turn asks: the request's items and every item a turn returned
+    /// or a result answered, in order.
+    #[must_use]
+    pub const fn conversation(&self) -> &TurnRequest {
+        &self.conversation
+    }
+
+    /// The outcome of every turn that ended, in order: its stop reason, items and usage.
+    #[must_use]
+    pub fn outcomes(&self) -> &[TurnOutcome] {
+        &self.outcomes
+    }
+
+    /// The `llm` failure of the turn that ended the generation, if one did; the generation was
+    /// then cancelled, and [`GenerationEvent::Cancelled`] delivered.
+    #[must_use]
+    pub const fn failure(&self) -> Option<&llm_core::Error> {
+        self.failure.as_ref()
+    }
+
+    /// Whether calls of the latest turn are still unanswered.
+    #[must_use]
+    pub fn awaits_results(&self) -> bool {
+        !self.awaited.is_empty()
+    }
+
+    /// Polls for the next event of the turns that can run now: ready with it; pending while a
+    /// turn runs and delivered nothing new; ready with none once every event is delivered and no
+    /// turn runs or can start. It never completes the generation.
+    pub fn poll_turn_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<GenerationEvent>> {
+        self.waker = Some(cx.waker().clone());
+        self.progress(cx);
+        if let Some(event) = self.delivered.pop_front() {
+            return Poll::Ready(Some(event));
+        }
+        if self.turn.is_some() {
+            Poll::Pending
+        } else {
+            Poll::Ready(None)
+        }
+    }
+
+    /// The next event of the turns that can run now, as [`GenerationHandle::poll_turn_event`]
+    /// yields it: none once they are all delivered.
+    pub fn next_turn_event(&mut self) -> impl Future<Output = Option<GenerationEvent>> + '_ {
+        future::poll_fn(|cx| self.poll_turn_event(cx))
+    }
+
+    /// Polls for the generation's next event: as [`GenerationHandle::poll_turn_event`], and once
+    /// that has none, pending while calls of the latest turn are unanswered, ready with none once
+    /// the generation ended, and otherwise completing the generation and ready with
+    /// [`GenerationEvent::Completed`] after anything an adapter that does not stream held.
+    pub fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<GenerationEvent>> {
+        match self.poll_turn_event(cx) {
+            Poll::Ready(None) => {}
+            polled => return polled,
+        }
+        if self.output.generation().state() != GenerationState::Active {
+            return Poll::Ready(None);
+        }
+        if self.awaits_results() {
+            return Poll::Pending;
+        }
+        self.finish();
+        Poll::Ready(self.delivered.pop_front())
+    }
+
+    /// The generation's next event, as [`GenerationHandle::poll_event`] yields it.
+    pub fn next_event(&mut self) -> impl Future<Output = Option<GenerationEvent>> + '_ {
+        future::poll_fn(|cx| self.poll_event(cx))
+    }
+
+    /// Offers `text` to the running generation: admitted by [`GenerationOutput::admit_input`],
+    /// then accepted as by [`GenerationHandle::accept_input`].
+    ///
+    /// # Errors
+    ///
+    /// The [`InputRefused`] of admission or acceptance; nothing is accepted.
+    pub fn offer_input(&mut self, text: String) -> Result<(), InputRefused> {
+        let input = self.output.admit_input(text)?;
+        self.accept_input(input)
+    }
 
     /// Takes input admitted into the running generation, through [`GenerationOutput::release`],
-    /// and reflects it in later output; [`OfferInput::offer_input`] is how a caller reaches it.
+    /// as the user text of its next turn.
     ///
     /// # Errors
     ///
     /// The [`InputRefused`] of [`GenerationOutput::release`]: input admitted by another
     /// generation, or a generation no longer Active; nothing is accepted.
-    fn accept_input(&mut self, input: AdmittedInput) -> Result<(), InputRefused>;
+    pub fn accept_input(&mut self, input: AdmittedInput) -> Result<(), InputRefused> {
+        let text = self.output.release(input)?;
+        self.inputs.push_back(text);
+        Ok(())
+    }
 
-    /// Runs `inference.stream.SupersedeGeneration`; nothing more is delivered.
+    /// Runs `inference.stream.EmitTextDelta` for `text` produced outside the model's turns and
+    /// queues the `TextDelta` for delivery; the segment stays Tentative.
+    ///
+    /// # Errors
+    ///
+    /// [`GenerationStateConflict`] carrying the generation's state when it is not Active, the
+    /// `stale-generation` outcome of `EmitTextDelta`: no segment is created and nothing is
+    /// delivered.
+    pub fn emit(&mut self, text: impl Into<String>) -> Result<TextDelta, GenerationStateConflict> {
+        let delta = self.output.emit(text.into())?;
+        self.delivered
+            .push_back(GenerationEvent::TextDelta(delta.clone()));
+        Ok(delta)
+    }
+
+    /// Takes the next tool call the latest turn ended with, once that turn ended and its text was
+    /// delivered; a turn may end with several, the calls of one round, taken one by one in order.
+    /// It first drives the generation as a poll does, without delivering, so a turn that ended
+    /// since the last poll is seen. None while a turn runs or its text is still to be delivered,
+    /// when it ended in prose only, or when every call of it was taken already.
+    pub fn take_proposal(&mut self) -> Option<ToolCall> {
+        let waker = self.waker.clone().unwrap_or_else(|| Waker::noop().clone());
+        self.progress(&mut Context::from_waker(&waker));
+        if self.turn.is_none() && self.delivered.is_empty() {
+            self.staged.pop_front()
+        } else {
+            None
+        }
+    }
+
+    /// Answers the call `call_id` of the latest turn with `output`, `failed` when it is a
+    /// failure, as `llm`'s tool result, and wakes the latest poll. Once every call of the round
+    /// is answered, the next turn runs on the conversation with the results appended; its text
+    /// and any calls it ends with are delivered as for any turn.
+    ///
+    /// # Errors
+    ///
+    /// [`OutcomeRefused::GenerationStateConflict`] carrying the generation's state when it is not
+    /// Active, and otherwise [`OutcomeRefused::NotAwaited`] when no unanswered call of the latest
+    /// turn is `call_id`; nothing is integrated.
+    pub fn integrate(
+        &mut self,
+        call_id: &CallId,
+        output: Value,
+        failed: bool,
+    ) -> Result<(), OutcomeRefused> {
+        self.output.require_active()?;
+        let Some(position) = self.awaited.iter().position(|awaited| awaited == call_id) else {
+            return Err(CallNotAwaited {
+                call_id: call_id.clone(),
+            }
+            .into());
+        };
+        let call_id = self.awaited.remove(position);
+        self.conversation.items.push(Item::ToolResult {
+            call_id,
+            output,
+            failed,
+        });
+        self.answered = true;
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    /// Runs `inference.stream.CompleteGeneration` now, whatever is unanswered: the running turn
+    /// is cancelled, unanswered calls and waiting input are dropped, and what an adapter that
+    /// does not stream held is delivered, then [`GenerationEvent::Completed`].
     ///
     /// # Errors
     ///
     /// [`GenerationStateConflict`] carrying the held state when the generation is not Active.
-    fn supersede(&mut self) -> Result<GenerationSuperseded, GenerationStateConflict>;
+    pub fn complete(&mut self) -> Result<(), GenerationStateConflict> {
+        self.output.require_active()?;
+        self.finish();
+        Ok(())
+    }
 
-    /// Runs `inference.stream.CancelGeneration`; nothing more is delivered.
+    /// Runs `inference.stream.SupersedeGeneration`; the running turn is cancelled and nothing
+    /// more is delivered.
     ///
     /// # Errors
     ///
     /// [`GenerationStateConflict`] carrying the held state when the generation is not Active.
-    fn cancel(&mut self) -> Result<GenerationCancelled, GenerationStateConflict>;
-}
+    pub fn supersede(&mut self) -> Result<GenerationSuperseded, GenerationStateConflict> {
+        let (event, _) = self.output.supersede()?;
+        self.stop();
+        self.delivered.clear();
+        self.held.clear();
+        Ok(event)
+    }
 
-mod sealed {
-    /// Implemented for every [`GenerationHandle`](super::GenerationHandle) and nothing else, so
-    /// that [`OfferInput`](super::OfferInput) has one implementation.
-    pub trait Sealed {}
-
-    impl<T: super::GenerationHandle + ?Sized> Sealed for T {}
-}
-
-/// How a caller offers text to a running generation: admitted by
-/// [`GenerationOutput::admit_input`], then accepted by [`GenerationHandle::accept_input`]. It is
-/// implemented once, for every [`GenerationHandle`], and sealed, so no implementation replaces
-/// the path:
-///
-/// ```compile_fail
-/// struct Elsewhere;
-///
-/// impl inference_llm::OfferInput for Elsewhere {
-///     fn offer_input(&mut self, _text: String) -> Result<(), inference_llm::InputRefused> {
-///         Ok(())
-///     }
-/// }
-/// ```
-pub trait OfferInput: sealed::Sealed {
-    /// Offers `text` to the running generation.
+    /// Runs `inference.stream.CancelGeneration`; the running turn is cancelled and nothing more
+    /// is delivered.
     ///
     /// # Errors
     ///
-    /// The [`InputRefused`] of admission or acceptance; nothing is accepted.
-    fn offer_input(&mut self, text: String) -> Result<(), InputRefused>;
+    /// [`GenerationStateConflict`] carrying the held state when the generation is not Active.
+    pub fn cancel(&mut self) -> Result<GenerationCancelled, GenerationStateConflict> {
+        let (event, _) = self.output.cancel()?;
+        self.stop();
+        self.delivered.clear();
+        self.held.clear();
+        Ok(event)
+    }
+
+    /// Drives the generation without delivering: polls the running turn and starts the next one
+    /// while one can start, until a turn is pending or none can start.
+    fn progress(&mut self, cx: &mut Context<'_>) {
+        while self.output.generation().state() == GenerationState::Active {
+            if let Some(turn) = self.turn.as_mut() {
+                let polled = turn.future.as_mut().poll(cx);
+                self.take_accepted();
+                match polled {
+                    Poll::Ready(Ok(outcome)) => self.turn_ended(outcome),
+                    Poll::Ready(Err(error)) => self.turn_failed(error),
+                    Poll::Pending => return,
+                }
+            } else if self.can_start() {
+                self.start_turn();
+            } else {
+                return;
+            }
+        }
+    }
+
+    /// Whether a turn can start: no call is unanswered, and there is something to ask: the
+    /// request's own items before the first turn, waiting input, or results.
+    fn can_start(&self) -> bool {
+        self.awaited.is_empty()
+            && ((self.first && !self.conversation.items.is_empty())
+                || self.answered
+                || !self.inputs.is_empty())
+    }
+
+    /// Starts the next turn on the conversation: the request as it was given when it carries
+    /// items and no turn ran yet, the waiting inputs appended as user text otherwise.
+    fn start_turn(&mut self) {
+        let as_given = self.first && !self.conversation.items.is_empty();
+        self.first = false;
+        if !as_given {
+            self.conversation
+                .items
+                .extend(self.inputs.drain(..).map(Item::user));
+        }
+        self.answered = false;
+        let request = self.conversation.clone();
+        let model = Arc::clone(&self.model);
+        let cancel = self.cancel.clone();
+        let accepted = Accepted::default();
+        let mut sink = Queue(Arc::clone(&accepted));
+        let future = Box::pin(async move { model.turn(&request, &mut sink, &cancel).await });
+        self.turn = Some(Turn { future, accepted });
+    }
+
+    /// Takes the text the running turn streamed since the last poll.
+    fn take_accepted(&mut self) {
+        let Some(turn) = self.turn.as_ref() else {
+            return;
+        };
+        let accepted: Vec<StreamEvent> = turn
+            .accepted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+            .collect();
+        for event in accepted {
+            if let StreamEvent::TextDelta { text } = event
+                && !text.is_empty()
+            {
+                if self.streams {
+                    self.segment(text);
+                } else {
+                    self.text.push_str(&text);
+                }
+            }
+        }
+    }
+
+    /// Emits `text` as one segment and commits it, queueing both events for delivery, or, for
+    /// an adapter that does not stream, holding them.
+    fn segment(&mut self, text: String) {
+        let Ok(delta) = self.output.emit(text) else {
+            return;
+        };
+        let queue = if self.streams {
+            &mut self.delivered
+        } else {
+            &mut self.held
+        };
+        queue.push_back(GenerationEvent::TextDelta(delta));
+        if let Ok(committed) = self.output.commit_tentative() {
+            queue.extend(committed.into_iter().map(GenerationEvent::SegmentCommitted));
+        }
+    }
+
+    /// Takes the outcome of the turn that ended: its items join the conversation and its calls
+    /// are staged. A turn ending with calls is the safe boundary at which an adapter that does
+    /// not stream delivers what it held, so the caller can take the calls while the generation
+    /// is Active.
+    fn turn_ended(&mut self, outcome: TurnOutcome) {
+        self.turn = None;
+        if !self.text.is_empty() {
+            let text = std::mem::take(&mut self.text);
+            self.segment(text);
+        }
+        self.conversation
+            .items
+            .extend(outcome.items.iter().cloned());
+        self.staged = outcome.tool_calls().cloned().collect();
+        self.awaited = self
+            .staged
+            .iter()
+            .map(|call| call.call_id.clone())
+            .collect();
+        if !self.staged.is_empty() {
+            self.delivered.extend(self.held.drain(..));
+        }
+        self.outcomes.push(outcome);
+    }
+
+    /// Cancels the generation of a turn that failed, keeping `error`: what was delivered stays
+    /// queued, and [`GenerationEvent::Cancelled`] follows it with the segments discarded.
+    fn turn_failed(&mut self, error: llm_core::Error) {
+        if let Ok((cancelled, discarded)) = self.output.cancel() {
+            self.stop();
+            self.held.clear();
+            self.delivered
+                .push_back(GenerationEvent::Cancelled(cancelled, discarded));
+        }
+        self.failure = Some(error);
+    }
+
+    /// Completes the generation, delivering what an adapter that does not stream held.
+    fn finish(&mut self) {
+        if let Ok(completed) = self.output.complete() {
+            self.stop();
+            self.delivered.extend(self.held.drain(..));
+            self.delivered
+                .push_back(GenerationEvent::Completed(completed));
+        }
+    }
+
+    /// Cancels the running turn and drops what no later turn or delivery will take.
+    fn stop(&mut self) {
+        self.cancel.cancel();
+        self.turn = None;
+        self.text.clear();
+        self.inputs.clear();
+        self.staged.clear();
+        self.awaited.clear();
+    }
 }
 
-impl<T: GenerationHandle + ?Sized> OfferInput for T {
-    fn offer_input(&mut self, text: String) -> Result<(), InputRefused> {
-        let input = self.output().admit_input(text)?;
-        self.accept_input(input)
+impl Drop for GenerationHandle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+/// Wakes the thread that blocks on a generation's next event.
+struct Unpark(Thread);
+
+impl Wake for Unpark {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+impl Iterator for GenerationHandle {
+    type Item = GenerationEvent;
+
+    /// Blocks the calling thread until the next event of [`GenerationHandle::poll_event`]; none
+    /// while the generation awaits results, which only the caller can give. In an asynchronous
+    /// task, await [`GenerationHandle::next_event`] instead.
+    fn next(&mut self) -> Option<GenerationEvent> {
+        let waker = Waker::from(Arc::new(Unpark(thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            if let Poll::Ready(event) = self.poll_event(&mut cx) {
+                return event;
+            }
+            self.turn.as_ref()?;
+            thread::park();
+        }
     }
 }
