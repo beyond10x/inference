@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T19:15:53Z",
+  "actor": "human:timo",
+  "artifact": "story:usage-duplex",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0: 280 suites, 1923 passed, 0 failed, 46 ignored (wave/22 35451d3)"
+  }
+}

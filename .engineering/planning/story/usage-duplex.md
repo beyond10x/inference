@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:usage-duplex
 kind: story
-status: active
+status: implemented
 title: 'Native speech usage: OpenAI Realtime and Nova Sonic responses and transcriptions as usage records'
 summary: One usage record per response and per reported transcription, absent provider counts kept unknown.
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
 - depends_on: story:usage-domain
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T13:23:35Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-20T13:23:36Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-20T19:15:53Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

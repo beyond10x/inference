@@ -18,9 +18,9 @@ use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPositio
 use inference_core::model::Capability;
 use inference_duplex::conformance::{NativeDuplexProbe, NoNativeDuplex, native_duplex_evidence};
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseId, ResponseUsage, SessionConfig, SessionError,
-    SessionEvent, SessionFailureKind, SpeechSessionHandle, TokenCounts, TuningOption,
-    TuningSupport, TurnDetection, TurnSensitivity, TurnTuning, Unsupported,
+    NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage, SessionConfig,
+    SessionError, SessionEvent, SessionFailureKind, SpeechSessionHandle, TokenCounts, TuningOption,
+    TuningSupport, TurnDetection, TurnSensitivity, TurnTuning, Unsupported, UsageRecorded,
 };
 use inference_openai::live::{LIVE_MODEL, LiveClosed, LiveFormat};
 use inference_openai::live_duplex::{
@@ -681,6 +681,36 @@ fn a_function_call_of_the_responses_backend_is_proposed_answered_and_its_usage_r
     assert_ne!(spoken[0], call.response_id);
     assert_eq!(transcript(&answered, spoken[0]), " It is clear in Lisbon.");
     assert_eq!(session.backend_usage().len(), 2);
+
+    let created_at = answered
+        .iter()
+        .position(|event| matches!(event, SessionEvent::ResponseCreated(_)))
+        .expect("the spoken response");
+    assert!(
+        matches!(
+            &answered[created_at - 1],
+            SessionEvent::UsageRecorded(record) if record.response_id == Some(call.response_id)
+        ),
+        "backend usage may follow a response's end, so the next response settles it: {answered:?}"
+    );
+    let recorded = records(&proposed)
+        .into_iter()
+        .chain(records(&answered))
+        .filter(|record| record.response_id == Some(call.response_id))
+        .collect::<Vec<_>>();
+    assert_eq!(recorded.len(), 1, "one record per response");
+    assert_eq!(
+        recorded[0].quantities,
+        vec![
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 320),
+            Quantity::unknown(QuantityKind::InputAudioTokens),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 64),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 50),
+            Quantity::unknown(QuantityKind::OutputAudioTokens),
+            Quantity::measured(QuantityKind::Requests, 1),
+        ],
+        "the backend's tokens summed as text tokens; the voice model reports no audio tokens"
+    );
 }
 
 #[test]
@@ -721,17 +751,108 @@ fn voice_seconds_are_the_running_total_and_close_confirms_the_final_usage() {
     );
     assert_eq!(session.voice_seconds(), Some(4.5));
     let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    let response = created(&events)[0];
     assert!(
         matches!(
             closing.as_slice(),
             [
+                SessionEvent::UsageRecorded(of_response),
                 SessionEvent::ResponseCancelled(_),
-                SessionEvent::SpeechSessionClosed(_)
-            ]
+                SessionEvent::SpeechSessionClosed(_),
+                SessionEvent::UsageRecorded(of_session),
+            ] if of_response.response_id == Some(response) && of_session.response_id.is_none()
         ),
         "{closing:?}"
     );
     assert_eq!(created(&events).len(), 1);
+    let recorded = records(&closing);
+    assert!(
+        recorded[0]
+            .quantities
+            .iter()
+            .filter(|quantity| quantity.kind() != QuantityKind::Requests)
+            .all(|quantity| quantity.value().is_none()),
+        "a response without backend work reported no tokens: {:?}",
+        recorded[0]
+    );
+    let of_session = recorded[1];
+    assert_eq!(
+        of_session.quantities,
+        vec![Quantity::provider_reported(
+            QuantityKind::InputAudioMs,
+            4_500
+        )],
+        "the billed voice seconds that session.closed confirmed"
+    );
+    assert!(of_session.r#final);
+    assert_eq!(
+        of_session.speech_session_id,
+        Some(session.ledger().session().session_id())
+    );
+}
+
+/// A backend response that completes before the model has spoken has no response to count
+/// toward; its tokens are billed all the same, so the session's end records them as usage of the
+/// session, naming no response, before `SpeechSessionClosed`.
+#[test]
+fn backend_usage_before_any_response_is_recorded_for_the_session_at_its_end() {
+    let server = Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        send(
+            &mut socket,
+            backend("del_1", backend_completed("resp_1", 12, 4, 3)),
+        )
+        .await;
+        send(&mut socket, heard(" Bye.", 0)).await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::InputTranscribed(_))
+    });
+    assert!(created(&events).is_empty(), "{events:?}");
+    assert_eq!(session.backend_usage().len(), 1);
+    session.close().expect("open");
+    server.finish();
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert!(
+        matches!(
+            closing.as_slice(),
+            [
+                SessionEvent::UsageRecorded(held),
+                SessionEvent::SpeechSessionClosed(_),
+                SessionEvent::UsageRecorded(seconds),
+            ] if held.response_id.is_none() && seconds.response_id.is_none()
+        ),
+        "{closing:?}"
+    );
+    assert_eq!(
+        records(&closing)[0].quantities,
+        vec![
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 12),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 4),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 3),
+        ]
+    );
+    assert_eq!(session.ledger().usage_records().len(), 2);
+}
+
+fn records(events: &[SessionEvent]) -> Vec<&UsageRecorded> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::UsageRecorded(recorded) => Some(recorded),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -759,6 +880,17 @@ fn a_session_the_server_ends_or_drops_fails() {
         session.final_usage().map(|closed| closed.seconds),
         Some(1800.0)
     );
+    let after: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert!(
+        matches!(
+            after.as_slice(),
+            [SessionEvent::UsageRecorded(record)]
+                if record.response_id.is_none()
+                    && record.r#final
+                    && record.quantities == [Quantity::provider_reported(QuantityKind::InputAudioMs, 1_800_000)]
+        ),
+        "{after:?}"
+    );
 
     let dropped = Server::start(|mut socket| async move {
         accept_start(&mut socket).await;
@@ -775,6 +907,17 @@ fn a_session_the_server_ends_or_drops_fails() {
         "{events:?}"
     );
     assert_eq!(session.final_usage(), None, "final usage unconfirmed");
+    let after: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert!(
+        matches!(
+            after.as_slice(),
+            [SessionEvent::UsageRecorded(record)]
+                if record.response_id.is_none()
+                    && !record.r#final
+                    && record.quantities == [Quantity::unknown(QuantityKind::InputAudioMs)]
+        ),
+        "no seconds reported, none confirmed: {after:?}"
+    );
 }
 
 #[test]

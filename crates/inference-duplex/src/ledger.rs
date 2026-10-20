@@ -1,20 +1,21 @@
 //! The record every implementation keeps of one open session.
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
-use inference_core::model::Adapter;
+use inference_core::model::{Adapter, ModelId};
+use inference_core::usage::{Quantity, QuantityKind, RecordUsage, UsageRecord};
 use inference_tools::{Json, Tool};
 
 use crate::{
     InputAccepted, InputCommitted, InputTranscribed, OpenError, OpenSpeechSession, OutputAudio,
     OutputTranscriptDelta, OutputTruncated, ProposeSpeechToolCall, Response, ResponseId,
-    ResponseIdReused, ResponseNotFound, ResponseUsage, ResponseUsageRecorded, SessionConfig,
-    SessionError, SessionEvent, SessionFailure, SessionFailureKind, SpeechCallId,
-    SpeechCallIdReused, SpeechCapabilities, SpeechSession, SpeechSessionId, SpeechSessionOpened,
-    SpeechStarted, SpeechStopped, SpeechToolCall, TranscriptionUsage, TranscriptionUsageRecorded,
-    Unsupported,
+    ResponseIdReused, ResponseNotFound, ResponseStateConflict, ResponseUsage,
+    ResponseUsageRecorded, SessionConfig, SessionError, SessionEvent, SessionFailure,
+    SessionFailureKind, SpeechCallId, SpeechCallIdReused, SpeechCapabilities, SpeechSession,
+    SpeechSessionId, SpeechSessionOpened, SpeechStarted, SpeechStopped, SpeechToolCall,
+    TranscriptionUsage, TranscriptionUsageRecorded, Unsupported, UsageTotal,
 };
 
 /// The liveness bound of a session: when the provider was last heard from, and how long it may
@@ -70,20 +71,103 @@ impl Liveness {
 /// from a commit of the input when `auto_response` is on, or, when the model creates every
 /// response, from the answer to a call, until the response ends. A session nobody awaits
 /// anything of is idle, not stalled.
+///
+/// Usage is recorded as `inference.usage` records, [`SessionEvent::UsageRecorded`], each naming
+/// the session's speech session, adapter and the adapter's model, and no run, node or session
+/// of a graph: a native speech session runs in none.
+///
+/// * Each response is recorded once, from the last quantities its provider reported, with every
+///   token kind it left out `unknown`, and `requests` 1 as `measured`. The record is due when the
+///   response has ended (completed, cancelled or failed) and its usage is settled: by a report of
+///   its [`UsageTotal::Final`] total, or else by the creation of the next response or the end of
+///   the session, since a provider whose reports are running totals may report after a response
+///   ended. A response that ends settled is recorded just before its end event, and the session's
+///   end settles the response it cancels or fails; one settled later is recorded by its final
+///   report at once, by the next response just before that response's `ResponseCreated`, by the
+///   session's end before the end events it records. A response with no usage reported is
+///   recorded with every token count unknown.
+/// * A transcription's usage is recorded when reported, and so is usage of the whole session
+///   ([`SessionLedger::session_usage`]); neither names a response.
+/// * Usage no response holds yet ([`SessionLedger::hold_usage`]) is recorded at the session's
+///   end, before its end events, as usage of the session naming no response.
+///
+/// Records carry wall-clock times: the ledger reads the system clock once, at opening, and
+/// places every instant it is given relative to it, so a mock running a clock of its own records
+/// consistent times. A response starts when it is created and ends at the instant it ended; one
+/// the caller cancelled, or a close or failure ended, ends at the latest instant the ledger was
+/// given.
 #[derive(Debug, Clone)]
 pub struct SessionLedger {
     session: SpeechSession,
+    model_id: ModelId,
     capabilities: SpeechCapabilities,
     tools: Vec<Tool>,
     responses: Vec<Response>,
     emitted: Vec<u64>,
     usage: Vec<Option<ResponseUsage>>,
+    meters: Vec<Meter>,
+    records: Vec<UsageRecord>,
+    /// Usage the provider reported that no response holds yet ([`SessionLedger::hold_usage`]).
+    held: Vec<Quantity>,
     calls: Vec<SpeechToolCall>,
     liveness: Liveness,
     requested: bool,
     /// The bound was armed without an instant: it starts at the next liveness check.
     clock_pending: bool,
+    /// The instant the session opened, and the wall clock then in Unix epoch milliseconds.
+    opened: (Instant, i64),
+    /// The latest instant the ledger was given.
+    latest: Instant,
     outbox: VecDeque<SessionEvent>,
+}
+
+/// What the ledger keeps to record one response's usage.
+#[derive(Debug, Clone)]
+struct Meter {
+    started: Instant,
+    ended: Option<Instant>,
+    /// The quantities the provider reported last.
+    quantities: Vec<Quantity>,
+    /// Whether no later report changes them.
+    settled: bool,
+    recorded: bool,
+}
+
+/// The token kinds every response record carries, in this order, `unknown` where the provider
+/// left a count out.
+const RESPONSE_TOKENS: [QuantityKind; 5] = [
+    QuantityKind::InputTextTokens,
+    QuantityKind::InputAudioTokens,
+    QuantityKind::CachedInputTokens,
+    QuantityKind::OutputTextTokens,
+    QuantityKind::OutputAudioTokens,
+];
+
+/// The quantities of a response record: the token kinds of [`RESPONSE_TOKENS`], each as reported
+/// or `unknown`, then any other kind reported, then `requests` 1 as measured unless reported.
+fn response_quantities(reported: Vec<Quantity>) -> Vec<Quantity> {
+    let mut quantities: Vec<Quantity> = RESPONSE_TOKENS.map(Quantity::unknown).to_vec();
+    for quantity in reported {
+        match quantities
+            .iter_mut()
+            .find(|known| known.kind() == quantity.kind())
+        {
+            Some(slot) => *slot = quantity,
+            None => quantities.push(quantity),
+        }
+    }
+    if !quantities
+        .iter()
+        .any(|quantity| quantity.kind() == QuantityKind::Requests)
+    {
+        quantities.push(Quantity::measured(QuantityKind::Requests, 1));
+    }
+    quantities
+}
+
+/// Milliseconds as the ESS `Integer`, saturated.
+fn millis(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 impl SessionLedger {
@@ -104,7 +188,6 @@ impl SessionLedger {
         capabilities
             .admit(&config)
             .map_err(OpenError::Unsupported)?;
-        let millis = |duration: Duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
         let record = OpenSpeechSession {
             adapter_id: adapter.adapter_id(),
             voice: config.voice.clone(),
@@ -122,17 +205,26 @@ impl SessionLedger {
         };
         let (session, opened) =
             SpeechSession::open_as(session_id, record).map_err(OpenError::NoLivenessBound)?;
+        let wall = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, millis);
         let ledger = Self {
             session,
+            model_id: adapter.model_id(),
             capabilities: capabilities.clone(),
             tools: config.tools,
             responses: Vec::new(),
             emitted: Vec::new(),
             usage: Vec::new(),
+            meters: Vec::new(),
+            records: Vec::new(),
+            held: Vec::new(),
             calls: Vec::new(),
             liveness: Liveness::new(config.idle_limit, now),
             requested: false,
             clock_pending: false,
+            opened: (now, wall),
+            latest: now,
             outbox: VecDeque::new(),
         };
         Ok((ledger, opened))
@@ -245,6 +337,7 @@ impl SessionLedger {
         if !self.capabilities.manual_commit {
             return Err(SessionError::Unsupported(Unsupported::ManualCommit));
         }
+        self.tick(now);
         self.record_commit(now);
         Ok(())
     }
@@ -263,6 +356,7 @@ impl SessionLedger {
             return Err(SessionError::Unsupported(Unsupported::ManualResponse));
         }
         self.require_none_in_progress()?;
+        self.tick(now);
         self.await_response(now);
         Ok(())
     }
@@ -280,7 +374,7 @@ impl SessionLedger {
         if !self.capabilities.client_cancel {
             return Err(SessionError::Unsupported(Unsupported::ClientCancel));
         }
-        self.cancel_response(response_id)
+        self.cancel_response(response_id, self.latest)
     }
 
     /// The provider cancelled the response by its own interruption:
@@ -296,7 +390,7 @@ impl SessionLedger {
         now: Instant,
     ) -> Result<(), SessionError> {
         self.require_open()?;
-        self.cancel_response(response_id)?;
+        self.cancel_response(response_id, now)?;
         self.heard(now);
         Ok(())
     }
@@ -364,15 +458,18 @@ impl SessionLedger {
     }
 
     /// The caller closes the session: `inference.duplex.CloseSpeechSession`. The response in
-    /// progress is cancelled first, its `ResponseCancelled` before `SpeechSessionClosed`.
+    /// progress is cancelled first, its `ResponseCancelled` just before `SpeechSessionClosed`;
+    /// every response not yet recorded, and any usage held for no response, is recorded before
+    /// both.
     ///
     /// # Errors
     ///
     /// [`SessionError::NotOpen`].
     pub fn close(&mut self) -> Result<(), SessionError> {
         let (moved, event) = self.session.close().map_err(SessionError::NotOpen)?;
+        self.settle_for_end();
         if let Some(response_id) = self.in_progress() {
-            self.cancel_response(response_id)?;
+            self.cancel_response(response_id, self.latest)?;
         }
         self.session = moved;
         self.requested = false;
@@ -383,7 +480,8 @@ impl SessionLedger {
 
     /// The session fails with `failure`: `inference.duplex.FailSpeechSession`, for a closed
     /// transport, an error the provider reported or a stall. The response in progress fails with
-    /// it first, its `ResponseFailed` before `SpeechSessionFailed`.
+    /// it first, its `ResponseFailed` just before `SpeechSessionFailed`; every response not yet
+    /// recorded, and any usage held for no response, is recorded before both.
     ///
     /// # Errors
     ///
@@ -393,8 +491,9 @@ impl SessionLedger {
             .session
             .fail(failure.clone())
             .map_err(SessionError::NotOpen)?;
+        self.settle_for_end();
         if let Some(response_id) = self.in_progress() {
-            self.fail_response(response_id, failure)?;
+            self.fail_response(response_id, failure, self.latest)?;
         }
         self.session = moved;
         self.requested = false;
@@ -406,6 +505,7 @@ impl SessionLedger {
     /// Fails an open session as stalled when the caller awaits the provider and it has been
     /// silent for the whole bound at `now`; returns whether it did.
     pub fn check_liveness(&mut self, now: Instant) -> bool {
+        self.tick(now);
         if self.session.require_open().is_err() || !self.awaiting() {
             return false;
         }
@@ -430,6 +530,7 @@ impl SessionLedger {
 
     /// The provider was heard from at `now`, whatever it sent.
     pub fn heard(&mut self, now: Instant) {
+        self.tick(now);
         self.liveness.heard(now);
         self.clock_pending = false;
     }
@@ -506,7 +607,8 @@ impl SessionLedger {
         Ok(())
     }
 
-    /// The provider reported the usage of transcribing the input, in any state of the session.
+    /// The provider reported the usage of transcribing the input, in any state of the session:
+    /// its `TranscriptionUsageRecorded` and its usage record, each count as reported.
     ///
     /// # Errors
     ///
@@ -516,13 +618,7 @@ impl SessionLedger {
         usage: TranscriptionUsage,
         now: Instant,
     ) -> Result<(), SessionError> {
-        self.heard(now);
-        let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::TranscriptionUsageRecorded(
-                TranscriptionUsageRecorded { session_id, usage },
-            ));
-        Ok(())
+        self.transcription_usage_reported(Some(usage), usage.quantities(), now)
     }
 
     /// The provider started a response, which the adapter identifies by `response_id`, an
@@ -548,9 +644,17 @@ impl SessionLedger {
             Response::create_as(response_id, &self.session).map_err(SessionError::NotOpen)?;
         self.heard(now);
         self.requested = false;
+        self.settle_ended();
         self.responses.push(response);
         self.emitted.push(0);
         self.usage.push(None);
+        self.meters.push(Meter {
+            started: now,
+            ended: None,
+            quantities: Vec::new(),
+            settled: false,
+            recorded: false,
+        });
         self.outbox.push_back(SessionEvent::ResponseCreated(event));
         Ok(())
     }
@@ -620,6 +724,7 @@ impl SessionLedger {
             .map_err(SessionError::ResponseNotInProgress)?;
         self.heard(now);
         self.responses[index] = moved;
+        self.ended(index, now);
         self.outbox
             .push_back(SessionEvent::ResponseCompleted(event));
         Ok(())
@@ -638,14 +743,16 @@ impl SessionLedger {
         now: Instant,
     ) -> Result<(), SessionError> {
         self.require_open()?;
-        self.fail_response(response_id, failure)?;
+        self.fail_response(response_id, failure, now)?;
         self.heard(now);
         Ok(())
     }
 
     /// The provider reported the usage of a response, in any state of the response or the
     /// session: the running total of the response so far, which replaces the one recorded
-    /// before.
+    /// before. It is for a provider that reports every count and whose report is the final
+    /// total: until the response's usage is recorded, its record takes every count as
+    /// reported ([`ResponseUsage::quantities`]), [`UsageTotal::Final`].
     ///
     /// # Errors
     ///
@@ -657,14 +764,222 @@ impl SessionLedger {
         now: Instant,
     ) -> Result<(), SessionError> {
         let index = self.index_of(response_id)?;
+        self.record_response_usage(index, usage, now);
+        if !self.meters[index].recorded {
+            self.count(index, usage.quantities(), UsageTotal::Final);
+        }
+        Ok(())
+    }
+
+    /// Records `ResponseUsageRecorded` for the response at `index`.
+    fn record_response_usage(&mut self, index: usize, usage: ResponseUsage, now: Instant) {
         self.heard(now);
         self.usage[index] = Some(usage);
+        let response_id = self.responses[index].response_id();
         self.outbox
             .push_back(SessionEvent::ResponseUsageRecorded(ResponseUsageRecorded {
                 response_id,
                 usage,
             }));
+    }
+
+    /// The provider reported the usage of a response as `quantities`, built from its own fields
+    /// so that a count it left out is unknown, and, where the contract's form can carry it, as
+    /// `usage`, recorded as [`SessionLedger::response_usage`] records it. `total` says whether
+    /// a later report may still replace it.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::UnknownResponse`], then [`SessionError::ResponseNotInProgress`] when the
+    /// response's usage was already recorded; `usage` is recorded all the same.
+    pub fn response_usage_reported(
+        &mut self,
+        response_id: ResponseId,
+        usage: Option<ResponseUsage>,
+        quantities: Vec<Quantity>,
+        total: UsageTotal,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        let index = self.index_of(response_id)?;
+        match usage {
+            Some(usage) => self.record_response_usage(index, usage, now),
+            None => self.heard(now),
+        }
+        if self.meters[index].recorded {
+            return Err(SessionError::ResponseNotInProgress(ResponseStateConflict {
+                current: self.responses[index].state(),
+            }));
+        }
+        self.count(index, quantities, total);
         Ok(())
+    }
+
+    /// The provider reported the usage of transcribing the input as `quantities`, and, where the
+    /// contract's form can carry it, as `usage`, recorded as
+    /// [`SessionLedger::transcription_usage`] records it; in any state of the session.
+    ///
+    /// # Errors
+    ///
+    /// None: the session record exists for as long as the ledger does.
+    pub fn transcription_usage_reported(
+        &mut self,
+        usage: Option<TranscriptionUsage>,
+        quantities: Vec<Quantity>,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        self.heard(now);
+        let session_id = self.session.session_id();
+        if let Some(usage) = usage {
+            self.outbox
+                .push_back(SessionEvent::TranscriptionUsageRecorded(
+                    TranscriptionUsageRecorded { session_id, usage },
+                ));
+        }
+        self.record_of_session(quantities, true, now, now);
+        Ok(())
+    }
+
+    /// The provider reported usage of the session as a whole, not of one response, such as the
+    /// seconds a provider bills per session; in any state of the session. `confirmed` is false
+    /// when the provider has not confirmed the counts final.
+    ///
+    /// # Errors
+    ///
+    /// None: the session record exists for as long as the ledger does.
+    pub fn session_usage(
+        &mut self,
+        quantities: Vec<Quantity>,
+        confirmed: bool,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        self.heard(now);
+        self.record_of_session(quantities, confirmed, self.opened.0, now);
+        Ok(())
+    }
+
+    /// The provider reported usage that no response holds yet, as `quantities`, built from its
+    /// own fields: input reported before the response it counts toward begins, for one. They
+    /// replace what was held before, and an empty list holds nothing; an adapter releases them
+    /// so once a response takes them. What is held when the session ends, by a close, a failure
+    /// or a stall, is recorded as usage of the session, naming no response, before the end
+    /// events; held after the end, it is recorded at once.
+    pub fn hold_usage(&mut self, quantities: Vec<Quantity>) {
+        if self.session.require_open().is_err() {
+            if !quantities.is_empty() {
+                self.record_of_session(quantities, true, self.opened.0, self.latest);
+            }
+            return;
+        }
+        self.held = quantities;
+    }
+
+    /// Every usage record of the session, in the order they were recorded.
+    #[must_use]
+    pub fn usage_records(&self) -> &[UsageRecord] {
+        &self.records
+    }
+
+    /// The response at `index` reported `quantities` as its usage: they replace the ones
+    /// before, and it is recorded at once when it ended and they settle it.
+    fn count(&mut self, index: usize, quantities: Vec<Quantity>, total: UsageTotal) {
+        let meter = &mut self.meters[index];
+        meter.quantities = quantities;
+        meter.settled |= total == UsageTotal::Final;
+        if meter.settled && meter.ended.is_some() {
+            self.record_response(index);
+        }
+    }
+
+    /// The response at `index` ended at `at`; settled, it is recorded now, before its end event.
+    fn ended(&mut self, index: usize, at: Instant) {
+        self.meters[index].ended = Some(at);
+        if self.meters[index].settled {
+            self.record_response(index);
+        }
+    }
+
+    /// Records every response that ended and is not recorded yet: the next response, or the
+    /// session's end, settles them.
+    fn settle_ended(&mut self) {
+        for index in 0..self.meters.len() {
+            if self.meters[index].ended.is_some() {
+                self.record_response(index);
+            }
+        }
+    }
+
+    /// The session ends: every response that ended is recorded, and the one in progress is
+    /// settled, so that its end records it just before its end event.
+    fn settle_for_end(&mut self) {
+        self.settle_ended();
+        for meter in &mut self.meters {
+            meter.settled = true;
+        }
+        let held = std::mem::take(&mut self.held);
+        if !held.is_empty() {
+            self.record_of_session(held, true, self.opened.0, self.latest);
+        }
+    }
+
+    /// Records the usage of the response at `index`, once.
+    fn record_response(&mut self, index: usize) {
+        let meter = &mut self.meters[index];
+        if meter.recorded {
+            return;
+        }
+        meter.recorded = true;
+        let quantities = response_quantities(std::mem::take(&mut meter.quantities));
+        let (started, ended) = (meter.started, meter.ended.unwrap_or(self.latest));
+        let mut usage = RecordUsage::new(
+            self.session.adapter_id(),
+            self.model_id,
+            self.wall_ms(started),
+            self.wall_ms(ended),
+            quantities,
+        );
+        usage.speech_session_id = Some(self.session.session_id());
+        usage.response_id = Some(self.responses[index].response_id());
+        self.push_record(usage);
+    }
+
+    /// Records usage of the session that names no response, from `started` to `ended`.
+    fn record_of_session(
+        &mut self,
+        quantities: Vec<Quantity>,
+        confirmed: bool,
+        started: Instant,
+        ended: Instant,
+    ) {
+        let mut usage = RecordUsage::new(
+            self.session.adapter_id(),
+            self.model_id,
+            self.wall_ms(started),
+            self.wall_ms(ended),
+            quantities,
+        );
+        usage.speech_session_id = Some(self.session.session_id());
+        usage.r#final = confirmed;
+        self.push_record(usage);
+    }
+
+    fn push_record(&mut self, usage: RecordUsage) {
+        let (record, event) = UsageRecord::record(usage);
+        self.records.push(record);
+        self.outbox.push_back(SessionEvent::UsageRecorded(event));
+    }
+
+    /// `at` on the wall clock, in Unix epoch milliseconds, placed relative to the opening.
+    fn wall_ms(&self, at: Instant) -> i64 {
+        let (opened, wall) = self.opened;
+        match at.checked_duration_since(opened) {
+            Some(after) => wall.saturating_add(millis(after)),
+            None => wall.saturating_sub(millis(opened.duration_since(at))),
+        }
+    }
+
+    /// The ledger was given `now`.
+    fn tick(&mut self, now: Instant) {
+        self.latest = self.latest.max(now);
     }
 
     /// A response proposed a call of the session's tool named `tool`, with JSON arguments, under
@@ -734,12 +1049,17 @@ impl SessionLedger {
             .push_back(SessionEvent::InputCommitted(InputCommitted { session_id }));
     }
 
-    fn cancel_response(&mut self, response_id: ResponseId) -> Result<(), SessionError> {
+    fn cancel_response(
+        &mut self,
+        response_id: ResponseId,
+        at: Instant,
+    ) -> Result<(), SessionError> {
         let index = self.index_of(response_id)?;
         let (moved, event) = self.responses[index]
             .cancel()
             .map_err(SessionError::ResponseNotInProgress)?;
         self.responses[index] = moved;
+        self.ended(index, at);
         self.outbox
             .push_back(SessionEvent::ResponseCancelled(event));
         Ok(())
@@ -749,12 +1069,14 @@ impl SessionLedger {
         &mut self,
         response_id: ResponseId,
         failure: SessionFailure,
+        at: Instant,
     ) -> Result<(), SessionError> {
         let index = self.index_of(response_id)?;
         let (moved, event) = self.responses[index]
             .fail(failure)
             .map_err(SessionError::ResponseNotInProgress)?;
         self.responses[index] = moved;
+        self.ended(index, at);
         self.outbox.push_back(SessionEvent::ResponseFailed(event));
         Ok(())
     }

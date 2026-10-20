@@ -2,12 +2,16 @@
 format: aep.planning-md/3
 id: story:repo-podcast-example
 kind: story
-status: draft
+status: implemented
 title: 'A podcast example: Claude distils a repository, two voice models discuss it over the speaker'
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 1
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T16:23:02Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-20T16:23:02Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-20T19:15:54Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
@@ -45,3 +49,22 @@ And I just want to listen to that, and it shall be played out over the speaker. 
 `cargo test -p repo-podcast` passes on the mocks; `cargo run -p repo-podcast --example podcast`
 on a machine with the OpenAI key in the keychain and `claude` on the path distils this repository
 and plays a two-host conversation about it over the speaker for the given minutes.
+
+## Terminal UI
+
+Added on the owner's words, 2026-10-20: "some sort of running counter for the costs and the tokens
+and so on [...] some fancy TUI which animates both sides speaking and you see the text"; "this TUI
+app to be recorded [...] maybe 2 minutes"; "while you record it [...] play it out at the same time".
+
+- The `podcast` example is a terminal UI (ratatui over crossterm, both MIT): two panels, one per
+  host, each with its name, voice and an animated level meter driven by the audio it is playing
+  (idle when the other host speaks); the live transcript of the current turn under the speaker;
+  a footer with running counters per host and in total: input and output text and audio tokens,
+  turns, elapsed and remaining time, and the estimated cost so far.
+- Cost: from a price table file (`--prices`, the `realtime-voice` format). The example ships one
+  table per supported model under `examples/repo-podcast/prices/`, each naming its source URL and
+  the date it was read; the TUI shows the table's name and date beside the cost. GPT-Live is
+  priced per session second.
+- Plain mode (`--plain`) prints the same events as lines, for logs and tests.
+- The TUI renders against ratatui's test backend in the tests: both panels, the meter of the
+  speaking host active and the other idle, counters equal to the sums of the usage events.
