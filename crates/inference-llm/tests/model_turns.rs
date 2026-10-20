@@ -22,8 +22,8 @@ use inference_llm::llm_core::{
     TurnOutcome, TurnRequest, Usage,
 };
 use inference_llm::{
-    CONTRACT_REVISION, CallNotAwaited, GenerationEvent, GenerationHandle, GenerationRequest,
-    Generator, OutcomeRefused,
+    CONTRACT_REVISION, CallNotAwaited, CapabilityNotDeclared, GenerationEvent, GenerationHandle,
+    GenerationRequest, Generator, OutcomeRefused,
 };
 use serde_json::json;
 
@@ -73,6 +73,12 @@ impl Scripted {
                 ..Script::default()
             })),
         }
+    }
+
+    /// The same model, its declaration changed by `declare`.
+    fn declaring(mut self, declare: impl FnOnce(Capabilities) -> Capabilities) -> Self {
+        self.capabilities = declare(self.capabilities);
+        self
     }
 
     fn with<T>(&self, read: impl FnOnce(&mut Script) -> T) -> T {
@@ -147,8 +153,8 @@ impl Model for Scripted {
     }
 }
 
-fn generator(capabilities: Vec<Capability>, model: &Scripted) -> Generator {
-    let (adapter, _) = Adapter::declare(DeclareAdapter {
+fn adapter(capabilities: Vec<Capability>) -> Adapter {
+    Adapter::declare(DeclareAdapter {
         model_id: ModelId::generate(),
         backend: "a scripted llm model".to_owned(),
         contract_revision: CONTRACT_REVISION.to_owned(),
@@ -157,8 +163,13 @@ fn generator(capabilities: Vec<Capability>, model: &Scripted) -> Generator {
         capabilities,
         max_concurrency: 1,
     })
-    .expect("one is positive");
-    Generator::new(adapter, Arc::new(model.clone()))
+    .expect("one is positive")
+    .0
+}
+
+fn generator(capabilities: Vec<Capability>, model: &Scripted) -> Generator {
+    Generator::new(adapter(capabilities), Arc::new(model.clone()))
+        .expect("the model declares what the adapter claims")
 }
 
 fn request() -> GenerationRequest {
@@ -255,6 +266,60 @@ fn a_streaming_adapter_delivers_each_delta_as_a_committed_segment_while_active()
 #[test]
 fn a_non_streaming_adapter_delivers_the_text_as_one_segment_at_completion() {
     let model = Scripted::new([Answer::Text(vec!["Hel", "lo"], Vec::new())]);
+    let mut handle = generator(Vec::new(), &model)
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+    let seen = drain(&mut handle);
+    assert_eq!(
+        texts(&seen),
+        [("Hello".to_owned(), GenerationState::Completed)]
+    );
+}
+
+#[test]
+fn an_adapter_claiming_output_streaming_its_model_does_not_declare_is_refused() {
+    let model = Scripted::new([Answer::Text(vec!["Hel", "lo"], Vec::new())])
+        .declaring(|declared| declared.with_output_streaming(false));
+    assert_eq!(
+        Generator::new(adapter(vec![Capability::OutputStreaming]), Arc::new(model)).err(),
+        Some(CapabilityNotDeclared {
+            capability: Capability::OutputStreaming
+        })
+    );
+}
+
+#[test]
+fn a_concurrent_input_output_claim_needs_no_input_during_output_declaration() {
+    let model = Scripted::new([Answer::Text(vec!["Hi"], Vec::new())]);
+    assert!(
+        !model.capabilities().input_during_output,
+        "llm's text declaration takes no input during output"
+    );
+    let claims = vec![
+        Capability::OutputStreaming,
+        Capability::ConcurrentInputOutput,
+        Capability::ToolCalling,
+    ];
+    let generator = Generator::new(adapter(claims.clone()), Arc::new(model))
+        .expect("the wrapper takes input during output as the next turn's text");
+    assert_eq!(generator.adapter().capabilities(), claims);
+}
+
+#[test]
+fn an_adapter_claiming_native_duplex_its_model_does_not_declare_is_refused() {
+    let model = Scripted::new([Answer::Text(vec!["Hi"], Vec::new())]);
+    assert_eq!(
+        Generator::new(adapter(vec![Capability::NativeDuplex]), Arc::new(model)).err(),
+        Some(CapabilityNotDeclared {
+            capability: Capability::NativeDuplex
+        })
+    );
+}
+
+#[test]
+fn a_model_that_does_not_stream_gives_one_segment_per_turn() {
+    let model = Scripted::new([Answer::Text(vec!["Hel", "lo"], Vec::new())])
+        .declaring(|declared| declared.with_output_streaming(false));
     let mut handle = generator(Vec::new(), &model)
         .start(request())
         .expect("a fresh generator runs nothing else");

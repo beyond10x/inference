@@ -179,6 +179,7 @@ fn handle(capabilities: Vec<Capability>, model: &Feeding) -> GenerationHandle {
     })
     .expect("one is positive");
     Generator::new(adapter, Arc::new(model.clone()))
+        .expect("the model declares what the adapter claims")
         .start(GenerationRequest {
             run_id: RunId::generate(),
             node_id: NodeId::generate(),
