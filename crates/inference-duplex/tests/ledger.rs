@@ -1036,6 +1036,95 @@ fn a_transcription_in_seconds_and_a_session_total_are_records_of_the_session() {
     assert_eq!(ledger.usage_records().len(), 2);
 }
 
+/// Usage a provider reported before the response it counts toward began, such as input billed
+/// before a response the session never reaches: the latest quantities held are recorded once, as
+/// usage of the session, before the end event of a close, a failure or a stall.
+#[test]
+fn usage_held_for_no_response_is_recorded_before_any_end_of_the_session() {
+    let held = |input_audio| {
+        vec![
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
+            Quantity::provider_reported(QuantityKind::InputAudioTokens, input_audio),
+        ]
+    };
+    let start = Instant::now();
+    let limit = Duration::from_secs(10);
+
+    let mut closed = open(&server_turns(), server_config(), start);
+    closed.input_committed(start).expect("open");
+    closed.hold_usage(held(20));
+    closed.hold_usage(held(50));
+    let _ = drain(&mut closed);
+    closed.close().expect("open");
+    let mut failed = open(&server_turns(), server_config(), start);
+    failed.input_committed(start).expect("open");
+    failed.hold_usage(held(50));
+    let _ = drain(&mut failed);
+    failed
+        .fail(SessionFailure {
+            kind: SessionFailureKind::TransportClosed,
+            detail: "gone".to_owned(),
+        })
+        .expect("open");
+    let mut stalled = open(&server_turns(), server_config(), start);
+    stalled.input_committed(start).expect("open");
+    stalled.hold_usage(held(50));
+    let _ = drain(&mut stalled);
+    assert!(stalled.check_liveness(start + limit));
+
+    for (ledger, end) in [
+        (&mut closed, "SpeechSessionClosed"),
+        (&mut failed, "SpeechSessionFailed"),
+        (&mut stalled, "SpeechSessionFailed"),
+    ] {
+        let events = drain(ledger);
+        assert_eq!(kinds(&events), ["UsageRecorded", end], "{events:#?}");
+        let recorded = records(&events)[0];
+        assert_eq!(recorded.response_id, None);
+        assert_eq!(
+            recorded.speech_session_id,
+            Some(ledger.session().session_id())
+        );
+        assert_eq!(
+            recorded.quantities,
+            held(50),
+            "the latest held replaces the rest"
+        );
+        assert_eq!(ledger.usage_records().len(), 1);
+    }
+}
+
+#[test]
+fn usage_held_and_then_released_is_recorded_by_nobody_at_the_end() {
+    let start = Instant::now();
+    let mut ledger = open(&server_turns(), server_config(), start);
+    ledger.hold_usage(vec![Quantity::provider_reported(
+        QuantityKind::InputAudioTokens,
+        50,
+    )]);
+    ledger.hold_usage(Vec::new());
+    ledger.close().expect("open");
+    assert_eq!(kinds(&drain(&mut ledger)), ["SpeechSessionClosed"]);
+    assert!(ledger.usage_records().is_empty());
+}
+
+#[test]
+fn usage_held_after_the_session_ended_is_recorded_at_once() {
+    let start = Instant::now();
+    let mut ledger = open(&server_turns(), server_config(), start);
+    ledger.close().expect("open");
+    ledger.hold_usage(vec![Quantity::provider_reported(
+        QuantityKind::InputAudioTokens,
+        50,
+    )]);
+    assert_eq!(
+        kinds(&drain(&mut ledger)),
+        ["SpeechSessionClosed", "UsageRecorded"]
+    );
+    ledger.hold_usage(Vec::new());
+    assert_eq!(ledger.usage_records().len(), 1);
+}
+
 fn server_config() -> SessionConfig {
     SessionConfig {
         turn_detection: TurnDetection::ServerVad,
