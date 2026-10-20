@@ -34,6 +34,7 @@ fn kinds(delivered: &VecDeque<EventEnvelope<TranscriptEvent>>) -> Vec<(&'static 
             TranscriptEvent::Hypothesis(event) => ("hypothesis", event.text.clone()),
             TranscriptEvent::Revision(event) => ("revision", event.text.clone()),
             TranscriptEvent::Committed(event) => ("committed", event.text.clone()),
+            TranscriptEvent::Usage(_) => ("usage", String::new()),
         })
         .collect()
 }

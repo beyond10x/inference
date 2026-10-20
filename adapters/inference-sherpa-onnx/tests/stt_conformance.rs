@@ -149,14 +149,31 @@ fn the_stream_is_ordered_revises_only_open_hypotheses_and_is_finalized_at_the_en
     let mut open_spans = HashSet::new();
     let mut committed_spans = HashSet::new();
     let mut revisions = 0;
-    for delivery in &feed.deliveries {
+    let mut usage = 0;
+    for (index, delivery) in feed.deliveries.iter().enumerate() {
         let payload = &delivery.envelope.payload;
         assert_eq!(
             delivery.envelope.kind,
             payload.name(),
             "the envelope's kind"
         );
-        let span_id = payload.span_id();
+        let Some(span_id) = payload.span_id() else {
+            assert!(
+                matches!(payload, TranscriptEvent::Usage(_)),
+                "only a usage record has no span: {payload:?}"
+            );
+            assert_eq!(
+                index + 1,
+                feed.deliveries.len(),
+                "the usage record is the last event"
+            );
+            assert!(
+                open_spans.is_empty(),
+                "the usage record follows the last commit"
+            );
+            usage += 1;
+            continue;
+        };
         match payload {
             TranscriptEvent::Hypothesis(_) => {
                 assert!(
@@ -183,6 +200,7 @@ fn the_stream_is_ordered_revises_only_open_hypotheses_and_is_finalized_at_the_en
                 );
                 committed_spans.insert(span_id);
             }
+            TranscriptEvent::Usage(_) => unreachable!("a usage record has no span"),
         }
     }
     eprintln!(
@@ -190,6 +208,7 @@ fn the_stream_is_ordered_revises_only_open_hypotheses_and_is_finalized_at_the_en
         feed.deliveries.len(),
         committed_spans.len()
     );
+    assert_eq!(usage, 1, "the recognition records its usage once");
     assert!(
         revisions > 0,
         "the clip's hypotheses are revised as it goes"

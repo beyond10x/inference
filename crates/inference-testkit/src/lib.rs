@@ -48,8 +48,8 @@ pub mod duplex;
 /// declared adapter and model.
 pub mod usage;
 
-/// The scripted mock recogniser of the STT contract, in two capability configurations, and
-/// synthetic audio of tone and silence.
+/// The scripted mock recogniser of the STT contract, in two capability configurations, each
+/// recognition ending with its usage record, and synthetic audio of tone and silence.
 #[cfg(feature = "stt")]
 pub mod stt;
 
