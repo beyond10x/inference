@@ -2,13 +2,16 @@
 format: aep.planning-md/3
 id: story:tts-adapter-conformance
 kind: story
-status: draft
+status: active
 title: Backend-neutral TTS adapter checks in the testkit
 summary: inference-testkit checks any Synthesiser with a sink in the loop against the TTS adapter exit criteria; shown on the mock and on two doubles that over-claim.
 relations:
 - decomposes: epic:local-tts-adapter
 - serves: vision:inference
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T08:23:42Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-10-20T08:23:42Z", actor: "human:timo", revision: 3}
 ---
 ## Context
 
