@@ -2,13 +2,16 @@
 format: aep.planning-md/3
 id: story:sherpa-onnx-recogniser
 kind: story
-status: draft
+status: active
 title: sherpa-onnx streaming recogniser as an STT adapter
 summary: 'adapters/inference-sherpa-onnx over the official sherpa-onnx 1.13.8 crate: a pinned, hash-checked checkpoint, IncrementalInput and OutputStreaming claimed, a verified native archive, an ignored checkpoint test.'
 relations:
 - decomposes: epic:local-stt-adapter
 - serves: vision:inference
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T08:01:30Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-20T08:01:30Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 
