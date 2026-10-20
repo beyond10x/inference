@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T22:31:21Z",
+  "actor": "human:timo",
+  "artifact": "story:usage-tts",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0: 290 suites, 1987 passed, 0 failed, 49 ignored (wave/23 1e440b9)"
+  }
+}
