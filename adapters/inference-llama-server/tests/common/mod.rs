@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+pub mod scripted;
+
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};

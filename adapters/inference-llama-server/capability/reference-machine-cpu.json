@@ -1,5 +1,5 @@
 {
-  "hardware": "reference machine: Intel Core i9-10900K (10 cores, 20 threads), 62 GiB, Linux x86_64; CPU only, no layer offloaded (-ngl 0); llama.cpp prebuilt release b11752 (commit 7879491cf), linux x64 CPU build, -c 4096 -np 1",
+  "hardware": "reference machine: Intel Core i9-10900K (10 cores, 20 threads), 62 GiB, Linux x86_64; CPU only, no layer offloaded (-ngl 0); llama.cpp prebuilt release b11752 (commit 7879491cf), linux x64 CPU build, -c 4096 -np 1, --jinja for tool calling",
   "languages": ["en"],
   "audio_formats": [],
   "evidence": [
@@ -9,6 +9,16 @@
         "offline::a_delta_reaches_the_caller_while_the_server_still_holds_the_rest_of_the_stream",
         "text_pipeline::a_text_only_pipeline_over_the_adapter_runs_to_completed",
         "live::a_running_server_streams_a_generation_and_refuses_input_during_output"
+      ]
+    },
+    {
+      "capability": "tool_calling",
+      "tests": [
+        "tool_proposals::prose_then_a_call_in_one_turn_arrive_as_segments_and_one_structured_proposal",
+        "tool_proposals::the_call_is_proposed_through_propose_tool_call_on_the_generation_that_made_it",
+        "tool_proposals::a_result_integrated_on_the_handle_runs_the_next_turn_on_the_same_generation",
+        "tool_proposals::a_call_with_no_name_in_any_fragment_cancels_the_generation_and_proposes_nothing",
+        "live_tools::a_running_server_proposes_a_tool_call_and_completes_after_its_result_on_one_generation"
       ]
     }
   ],
