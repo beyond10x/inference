@@ -21,6 +21,22 @@
 //! running request through a child of the caller's [`llm_core::Cancel`]. The bridge goes when
 //! `llm` offers a client that can be polled outside a runtime.
 //!
+//! # Cancellation and failures
+//!
+//! Cancelling delivery and stopping computation are distinct. `GenerationHandle::cancel` of
+//! `inference-llm` cancels delivery: `GenerationCancelled`, and no later delta, though more of
+//! the stream may already have arrived. The same cancel reaches the turn's thread, and `llm`
+//! drops the response, which closes the connection; `llama-server` stops a task whose connection
+//! is gone. That close is all the adapter can do to stop computation, and the adapter claims no
+//! [`Capability::Interruptible`]: whether the server stopped is observed only on the server, in
+//! its slot state (`GET /slots`). Dropping the handle does the same.
+//!
+//! A failed turn cancels the generation with the segments it discarded and keeps `llm`'s error
+//! unchanged: a 503 of a server still loading its model is `Transport` and dispatch `Unknown`, a
+//! stream that ends without a finish reason or `[DONE]` is `Protocol`, and a server silent past
+//! [`Config::limits`] is `Deadline`; each closes the connection. The adapter retries nothing.
+//! [`LlamaServer::running_turns`] counts the turns whose thread has not yet let go.
+//!
 //! # Running the server by hand
 //!
 //! Tests start no server and download no weights. The live test, ignored and behind the `live`
@@ -228,6 +244,8 @@ impl SecretResolver for Anonymous {
 /// turn can be polled outside a tokio runtime; see the crate documentation.
 pub struct LlamaServer {
     blocking: BlockingModel,
+    /// Held by the thread of every turn until it let go of everything else it held.
+    turns: Arc<()>,
 }
 
 impl fmt::Debug for LlamaServer {
@@ -253,6 +271,7 @@ impl LlamaServer {
         );
         Ok(Self {
             blocking: BlockingModel::new(Arc::new(client))?,
+            turns: Arc::new(()),
         })
     }
 
@@ -263,6 +282,15 @@ impl LlamaServer {
     /// [`CapabilityNotDeclared`] when `adapter` claims what the binding does not declare.
     pub fn generator(self, adapter: Adapter) -> Result<Generator, CapabilityNotDeclared> {
         Generator::new(adapter, Arc::new(self))
+    }
+
+    /// The turns of this model whose thread still runs. A turn that ended, failed or was
+    /// cancelled, or whose future was dropped, leaves the count once its thread has handed over
+    /// its end and let go of its connection and of everything it shared with the poller; a
+    /// count that stays above zero after every generation ended is a leaked task.
+    #[must_use]
+    pub fn running_turns(&self) -> usize {
+        Arc::strong_count(&self.turns) - 1
     }
 }
 
@@ -293,6 +321,7 @@ impl Model for LlamaServer {
                 request.clone(),
                 cancel,
                 Arc::clone(&shared),
+                Arc::clone(&self.turns),
             )?;
             loop {
                 match future::poll_fn(|cx| shared.poll_step(cx)).await {
@@ -305,12 +334,13 @@ impl Model for LlamaServer {
 }
 
 /// Starts the thread that runs one turn of `blocking` on `request`, handing its events and its
-/// end to `shared`.
+/// end to `shared`, and holding `running` until it let go of everything else.
 fn spawn_turn(
     blocking: BlockingModel,
     request: TurnRequest,
     cancel: Cancel,
     shared: Arc<Shared>,
+    running: Arc<()>,
 ) -> Result<(), Error> {
     let ending = Ending(Some(Arc::clone(&shared)));
     thread::Builder::new()
@@ -322,6 +352,8 @@ fn spawn_turn(
             };
             let ended = blocking.turn(&request, &mut sink, &cancel);
             ending.end(ended);
+            drop((blocking, request, cancel, shared));
+            drop(running);
         })
         .map(drop)
         .map_err(|error| {
