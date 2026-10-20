@@ -180,6 +180,7 @@ impl TurnNode {
                                 StreamEvent::GenerationStarted(started)
                             }
                             GenerationEvent::TextDelta(delta) => StreamEvent::TextDelta(delta),
+                            GenerationEvent::Usage(_) => continue,
                             GenerationEvent::SegmentCommitted(committed) => {
                                 StreamEvent::TextSegmentCommitted(committed)
                             }
@@ -215,7 +216,9 @@ impl TurnNode {
                         .await
                         .map_err(|refused| refused.to_string());
                 }
-                PipelinePayload::Stream(_) | PipelinePayload::Control(_) => {}
+                PipelinePayload::Stream(_)
+                | PipelinePayload::Usage(_)
+                | PipelinePayload::Control(_) => {}
             }
         }
         Ok(())

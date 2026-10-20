@@ -15,8 +15,9 @@ use std::task::{Context, Poll, Waker};
 use inference_core::generation::GenerationState;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Capability, ModelId};
+use inference_core::usage::{Quantity, QuantityKind, UsageRecorded};
 use inference_llm::llm_core::{
-    Cancel, Item, Model, StreamEvent, TurnOutcome, TurnRequest, VecSink,
+    Cancel, Item, Model, StreamEvent, TurnOutcome, TurnRequest, Usage, VecSink,
 };
 use inference_llm::{
     CapabilityNotClaimed, ConcurrencyLimitReached, GenerationEvent, GenerationRequest, InputRefused,
@@ -302,6 +303,122 @@ fn a_second_concurrent_generation_is_refused_with_the_concurrency_limit() {
         assert!(
             generator.start(request()).is_ok(),
             "{configuration:?}: once the first generation ends, another starts"
+        );
+    }
+}
+
+/// The quantity of `kind` in `recorded`; panics unless it carries exactly one.
+fn quantity(recorded: &UsageRecorded, kind: QuantityKind) -> Quantity {
+    let found: Vec<&Quantity> = recorded
+        .quantities
+        .iter()
+        .filter(|quantity| quantity.kind() == kind)
+        .collect();
+    assert_eq!(found.len(), 1, "one {kind:?} quantity: {recorded:?}");
+    *found[0]
+}
+
+const TOKEN_KINDS: [QuantityKind; 4] = [
+    QuantityKind::InputTextTokens,
+    QuantityKind::OutputTextTokens,
+    QuantityKind::CachedInputTokens,
+    QuantityKind::CacheCreationInputTokens,
+];
+
+#[test]
+fn a_generation_of_two_turns_records_the_reported_counts_and_the_missing_ones_as_unknown() {
+    let reported = Usage {
+        input_tokens: Some(12),
+        output_tokens: Some(3),
+        cached_input_tokens: Some(4),
+        ..Usage::default()
+    };
+    let mut generator =
+        generator(MockConfiguration::StreamingAndConcurrentInput).reporting([Some(reported), None]);
+    let adapter = generator.adapter().clone();
+    let mut handle = generator
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+    let mut events = Vec::new();
+    for event in handle.by_ref() {
+        let ended = matches!(event, GenerationEvent::Usage(_));
+        events.push(event);
+        if ended {
+            break;
+        }
+    }
+    handle
+        .offer_input(INPUT.to_owned())
+        .expect("the configuration claims concurrent input");
+    events.extend(handle.by_ref());
+
+    let records: Vec<(usize, UsageRecorded)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, event)| match event {
+            GenerationEvent::Usage(recorded) => Some((at, recorded.clone())),
+            _ => None,
+        })
+        .collect();
+    let [(first_at, first), (second_at, second)] = records.as_slice() else {
+        panic!("one record per turn: {events:?}")
+    };
+    let texts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, event)| matches!(event, GenerationEvent::TextDelta(_)).then_some(at))
+        .collect();
+    assert!(
+        texts[..SCRIPT.len()].iter().all(|at| at < first_at)
+            && texts[SCRIPT.len()..]
+                .iter()
+                .all(|at| first_at < at && at < second_at),
+        "each record follows the events of its turn: {events:?}"
+    );
+    assert!(matches!(events.last(), Some(GenerationEvent::Completed(_))));
+
+    assert_eq!(
+        TOKEN_KINDS.map(|kind| quantity(first, kind)),
+        [
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 12),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 3),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 4),
+            Quantity::unknown(QuantityKind::CacheCreationInputTokens),
+        ]
+    );
+    assert_eq!(
+        TOKEN_KINDS.map(|kind| quantity(second, kind)),
+        TOKEN_KINDS.map(Quantity::unknown),
+        "the turn reporting no usage counts every token unknown"
+    );
+    for record in [first, second] {
+        assert_eq!(
+            quantity(record, QuantityKind::Requests),
+            Quantity::measured(QuantityKind::Requests, 1)
+        );
+        assert_eq!(record.adapter_id, adapter.adapter_id());
+        assert_eq!(record.model_id, adapter.model_id());
+        assert!(record.r#final);
+    }
+}
+
+#[test]
+fn the_mock_reports_no_usage_by_default() {
+    for configuration in MockConfiguration::ALL {
+        let records: Vec<UsageRecorded> = deliveries(configuration)
+            .into_iter()
+            .filter_map(|(event, _)| match event {
+                GenerationEvent::Usage(recorded) => Some(recorded),
+                _ => None,
+            })
+            .collect();
+        let [record] = records.as_slice() else {
+            panic!("{configuration:?}: one turn, one record: {records:?}")
+        };
+        assert_eq!(
+            TOKEN_KINDS.map(|kind| quantity(record, kind)),
+            TOKEN_KINDS.map(Quantity::unknown),
+            "{configuration:?}"
         );
     }
 }

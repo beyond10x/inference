@@ -25,17 +25,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
+use inference_core::usage::UsageRecorded;
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
 use inference_text::{SegmentId, SpanId, TranscriptCommitted};
 
 use crate::stream::{EnvelopeRefusal, EventLog, StreamEvent};
 
-/// What the edges of the text pipeline carry: an `inference.stream` event, or a control event,
-/// which carries no payload of its own and whose envelope's `kind` is the control kind's word.
+/// What the edges of the text pipeline carry: an `inference.stream` event, the usage record of a
+/// model call, or a control event, which carries no payload of its own and whose envelope's
+/// `kind` is the control kind's word.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelinePayload {
     /// An `inference.stream` event; its envelope's `kind` is the event's declared name.
     Stream(StreamEvent),
+    /// The usage of one model call, sent on a model node's `usage` port; its envelope's `kind`
+    /// is [`UsageRecorded::KIND`].
+    Usage(UsageRecorded),
     /// A control event; its envelope's `kind` is [`ControlKind::as_str`].
     Control(ControlKind),
 }
