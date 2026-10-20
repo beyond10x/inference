@@ -29,7 +29,9 @@
 //! the acknowledging audio sink and the real adapters are not here: they belong to a local voice
 //! cascade, whose adapters replace the mocks. [`speech`] holds the TTS node of such a cascade,
 //! over any synthesiser, which sends the synthesis's own frames to the sink and acknowledges
-//! playback only with the sink's receipts.
+//! playback only with the sink's receipts. [`agent`] holds the model node of a cascade that can be
+//! interrupted, one generation per turn, superseded at the next turn's opening, and [`late`] a
+//! synthesiser scripted to deliver the frames of one segment only once it was discarded.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -67,6 +69,13 @@ use crate::tts::{MockSynthesiser, Spoken, TtsHandle, TtsNode, TtsPayload};
 /// The TTS node of a cascade whose playback an acknowledging sink confirms: the synthesis's
 /// frames out, the sink's receipts in.
 pub mod speech;
+
+/// The model node of a cascade that can be interrupted: one generation per turn, superseded at
+/// the opening of the next.
+pub mod agent;
+
+/// A synthesiser scripted to deliver the frames of one segment late, once it was discarded.
+pub mod late;
 
 /// The name of the ingress the utterance's frames enter by.
 pub const AUDIO_INGRESS: &str = "audio";

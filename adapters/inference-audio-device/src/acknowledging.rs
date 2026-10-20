@@ -8,7 +8,8 @@
 //! feedback edge.
 //!
 //! It pushes each frame to its [`Speaker`], waiting for room while the queue is full, and keeps
-//! the [`SegmentAudio`] it was given. Once a segment's `SynthesisCompleted` arrived and the
+//! the [`SegmentAudio`] it was given; a frame is taken from the edge only once the one before it
+//! is queued. Once a segment's `SynthesisCompleted` arrived and the
 //! speaker's played position has passed the segment's last frame, it makes the segment's
 //! [`PlaybackReceipt`] by consuming those frames, and sends it on, in an envelope of kind
 //! [`ACKNOWLEDGE_PLAYBACK`] naming the generation of the segment's frames: the TTS node runs
@@ -17,21 +18,40 @@
 //! one synthesis are taken to lie on one sample clock, in order, as the speaker's played position
 //! is read on the clock of the frames pushed.
 //!
+//! Given a turns port ([`AcknowledgingSink::with_turns`]), it takes the turn events of the turn
+//! policy on a second input edge, ahead of its audio and while a frame waits for room, and acts on
+//! each `inference.stream.TurnOpened`, the barge-in of `docs/design/inference.md` 632-641: every
+//! generation it took a frame of is stale from then on, and every segment it holds is forgotten,
+//! never acknowledged. If audio was still to play, a frame waiting for room or samples queued, it
+//! stops the speaker at once, clearing its queue, and records the [`Interruption`]: the turn, the
+//! samples cleared, the played position the stop answered and the one read after it, and the time
+//! from taking the `TurnOpened` to the stop returning, the design's "interruption to playback
+//! stop" (1023). An `inference.stream.GenerationSuperseded` on the audio edge makes its generation
+//! stale the same way, and stops the speaker if the sink holds a segment of it. A frame of a stale
+//! generation that reaches the sink later is dropped and recorded ([`StaleFrame`], with the played
+//! position when it was), never pushed, and the completion of a segment whose frames were dropped
+//! is ignored, so no receipt is ever made of it (step 4: stale results are rejected at the
+//! irreversible sink). A frame whose envelope names no generation is never stale. A generation
+//! whose first frame reaches the sink only after the `TurnOpened` is not known stale until its
+//! `GenerationSuperseded` arrives.
+//!
 //! At each `SynthesisCompleted` it [finishes](Speaker::finish) the audio pushed so far, so that
 //! the segment's last sample plays and the wait for the next segment is no underrun. While a
 //! segment waits for its playback the sink reads the played position every few milliseconds.
 //!
 //! On the end of input, a control event of kind `stop`, or once its input edge is closed, it
 //! finishes the audio and goes on until every completed segment it holds was played and
-//! acknowledged; it then sends the end of input on, a control event of kind `stop`, and ends.
+//! acknowledged and, given a turns port, that edge ended too; it then sends the end of input on, a
+//! control event of kind `stop`, and ends.
 //! Cancelled, or stopped, it sends nothing more and stops the speaker at once. The speaker is
 //! closed, its device stream released, when the exchange ends, or at the node's stop if it never
 //! started. Content other than a frame, a completion or a control event is taken and ignored.
 //!
 //! [`AcknowledgingHandle`] reads what the sink has done: the frames it pushed, the first frame of
-//! each segment handed to the speaker and when, and each receipt it sent.
+//! each segment handed to the speaker and when, each receipt it sent, each interruption and each
+//! stale frame it dropped.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::{self, Future};
 use std::pin::pin;
@@ -40,11 +60,12 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use inference_audio::SampleClockPosition;
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
-use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
-use inference_tts::inference_text::SegmentId;
+use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
+use inference_tts::inference_text::{SegmentId, TurnId};
 use inference_tts::{PlaybackReceipt, SegmentAudio};
 
 use crate::playout::{PushError, Speaker};
@@ -63,8 +84,37 @@ pub enum Playable {
     Audio(SegmentAudio),
     /// `inference.stream.SynthesisCompleted` of the segment: every frame of it was sent.
     Completed(SegmentId),
+    /// `inference.stream.TurnOpened` of the turn, on the turns port.
+    TurnOpened(TurnId),
+    /// `inference.stream.GenerationSuperseded` of the generation.
+    Superseded(GenerationId),
     /// Anything else.
     Other,
+}
+
+/// An interruption: the speaker stopped at the opening of the turn `turn_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interruption {
+    pub turn_id: TurnId,
+    /// When the sink took the `TurnOpened`.
+    pub at: Instant,
+    /// The time from taking the `TurnOpened` to the speaker's stop returning, the design's
+    /// "interruption to playback stop" (1023).
+    pub stop: Duration,
+    /// The samples queued and not yet played that the stop cleared.
+    pub cleared: usize,
+    /// The played position the stop answered.
+    pub position: Option<SampleClockPosition>,
+    /// The played position read right after the stop.
+    pub played_after: Option<SampleClockPosition>,
+}
+
+/// A frame of a stale generation the sink dropped, and the played position when it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleFrame {
+    pub segment_id: SegmentId,
+    pub generation_id: Option<GenerationId>,
+    pub played: Option<SampleClockPosition>,
 }
 
 /// The payload of the edges around an [`AcknowledgingSink`]: the sink reads frames and
@@ -104,6 +154,8 @@ struct State {
     pushed: u64,
     first_frames: Vec<FirstFrame>,
     receipts: Vec<SentReceipt>,
+    interruptions: Vec<Interruption>,
+    stale: Vec<StaleFrame>,
     failure: Option<String>,
     finished: Option<Waker>,
 }
@@ -191,11 +243,20 @@ struct Playing<P> {
     sequence: i64,
     speaker: Speaker,
     input: Box<dyn InputEndpoint<P>>,
+    /// The edge at the turns port, if the sink was given one, until it ended.
+    turns: Option<Box<dyn InputEndpoint<P>>>,
     output: Box<dyn OutputEndpoint<P>>,
     shared: Arc<Shared>,
     /// The segments not yet acknowledged, in arrival order, and what the sink holds of each.
     order: VecDeque<SegmentId>,
     held: HashMap<SegmentId, Held>,
+    /// The frame taken and waiting for room in the speaker's queue, with its generation.
+    pending: Option<(SegmentAudio, Option<GenerationId>)>,
+    /// The generations of the frames taken, and those whose frames are stale.
+    seen: HashSet<GenerationId>,
+    stale: HashSet<GenerationId>,
+    /// The segments whose frames the sink dropped, which it never acknowledges.
+    dropped: HashSet<SegmentId>,
     input_ended: bool,
 }
 
@@ -247,24 +308,24 @@ impl<P: PlaybackPayload> Playing<P> {
         }
     }
 
-    /// Pushes the frame of `audio`, waiting for room unless the sink is cancelled or ended, and
-    /// keeps it.
-    fn push(
-        &mut self,
-        audio: SegmentAudio,
-        generation_id: Option<GenerationId>,
-    ) -> Result<(), String> {
-        loop {
-            if self.shared.over() {
-                return Ok(());
+    /// Pushes the frame waiting for room, if the queue has room for it now, and keeps it; true
+    /// while it still waits.
+    fn push_pending(&mut self) -> Result<bool, String> {
+        let Some((audio, _)) = &self.pending else {
+            return Ok(false);
+        };
+        match self.speaker.try_push(audio.frame()) {
+            Ok(()) => {}
+            Err(PushError::Full) => return Ok(true),
+            Err(PushError::Stopped) => {
+                self.pending = None;
+                return Ok(false);
             }
-            match self.speaker.push(audio.frame(), POLL) {
-                Ok(()) => break,
-                Err(PushError::Full) => {}
-                Err(PushError::Stopped) => return Ok(()),
-                Err(refused) => return Err(format!("the speaker refused a frame: {refused}")),
-            }
+            Err(refused) => return Err(format!("the speaker refused a frame: {refused}")),
         }
+        let Some((audio, generation_id)) = self.pending.take() else {
+            return Ok(false);
+        };
         let segment_id = audio.segment_id();
         let frame = audio.frame();
         let end = frame.position.get() + u64::from(frame.sample_count);
@@ -283,7 +344,74 @@ impl<P: PlaybackPayload> Playing<P> {
                 state.first_frames.push(FirstFrame { segment_id, at });
             }
         });
-        Ok(())
+        Ok(false)
+    }
+
+    /// Drops `audio`, a frame of a stale generation: no receipt is ever made of its segment.
+    fn drop_stale(&mut self, audio: &SegmentAudio, generation_id: Option<GenerationId>) {
+        let segment_id = audio.segment_id();
+        self.dropped.insert(segment_id);
+        let played = self.speaker.played();
+        self.shared.update(|state| {
+            state.stale.push(StaleFrame {
+                segment_id,
+                generation_id,
+                played,
+            });
+        });
+    }
+
+    /// Forgets every segment the sink holds, none of which it acknowledges.
+    fn forget_held(&mut self) {
+        self.dropped.extend(self.order.drain(..));
+        self.held.clear();
+    }
+
+    /// The opening of the turn `turn_id`: every generation the sink took a frame of is stale;
+    /// audio still to play is stopped at once and its segments forgotten.
+    fn turn_opened(&mut self, turn_id: TurnId) {
+        let at = Instant::now();
+        self.stale.extend(self.seen.iter().copied());
+        let unplayed = self.pending.is_some() || self.speaker.queued() > 0;
+        if let Some((audio, generation_id)) = self.pending.take() {
+            if generation_id.is_some_and(|generation| self.stale.contains(&generation)) {
+                self.drop_stale(&audio, generation_id);
+            } else {
+                self.pending = Some((audio, generation_id));
+            }
+        }
+        self.forget_held();
+        if !unplayed {
+            return;
+        }
+        let cleared = self.speaker.queued();
+        let position = self.speaker.stop();
+        let stop = at.elapsed();
+        let played_after = self.speaker.played();
+        self.shared.update(|state| {
+            state.interruptions.push(Interruption {
+                turn_id,
+                at,
+                stop,
+                cleared,
+                position,
+                played_after,
+            });
+        });
+    }
+
+    /// The generation `generation_id` was superseded: its frames are stale, and audio of it still
+    /// to play is stopped at once.
+    fn superseded(&mut self, generation_id: GenerationId) {
+        self.stale.insert(generation_id);
+        let holds = self
+            .held
+            .values()
+            .any(|held| held.generation_id == Some(generation_id));
+        if holds {
+            let _unplayed_is_dropped = self.speaker.stop();
+            self.forget_held();
+        }
     }
 
     /// The segment `segment_id` is complete: every frame of it was given.
@@ -334,8 +462,8 @@ impl<P: PlaybackPayload> Playing<P> {
         Ok(())
     }
 
-    /// Acts on `envelope`.
-    fn take(&mut self, envelope: EventEnvelope<P>) -> Result<(), String> {
+    /// Acts on `envelope`, from the audio input.
+    fn take(&mut self, envelope: EventEnvelope<P>) {
         match ControlKind::of(&envelope.kind) {
             Some(ControlKind::Stop) => {
                 self.input_ended = true;
@@ -344,14 +472,37 @@ impl<P: PlaybackPayload> Playing<P> {
             Some(_) => {}
             None => {
                 let generation_id = envelope.generation_id;
+                let stale =
+                    generation_id.is_some_and(|generation| self.stale.contains(&generation));
                 match envelope.payload.playable() {
-                    Playable::Audio(audio) => self.push(audio, generation_id)?,
-                    Playable::Completed(segment_id) => self.completed(segment_id),
-                    Playable::Other => {}
+                    Playable::Audio(audio) if stale => self.drop_stale(&audio, generation_id),
+                    Playable::Audio(audio) => {
+                        if let Some(generation) = generation_id {
+                            self.seen.insert(generation);
+                        }
+                        self.pending = Some((audio, generation_id));
+                    }
+                    Playable::Completed(segment_id) => {
+                        if !stale && !self.dropped.contains(&segment_id) {
+                            self.completed(segment_id);
+                        }
+                    }
+                    Playable::Superseded(generation) => self.superseded(generation),
+                    Playable::TurnOpened(_) | Playable::Other => {}
                 }
             }
         }
-        Ok(())
+    }
+
+    /// Acts on `envelope`, from the turns input.
+    fn take_turn(&mut self, envelope: EventEnvelope<P>) {
+        if ControlKind::of(&envelope.kind) == Some(ControlKind::Stop) {
+            self.turns = None;
+            return;
+        }
+        if let Playable::TurnOpened(turn_id) = envelope.payload.playable() {
+            self.turn_opened(turn_id);
+        }
     }
 
     fn exchange(&mut self) -> Result<(), String> {
@@ -362,22 +513,40 @@ impl<P: PlaybackPayload> Playing<P> {
                 let _unplayed_is_dropped = self.speaker.stop();
                 return Ok(());
             }
-            let received = if self.input_ended {
+            let turn = self
+                .turns
+                .as_mut()
+                .map(|turns| turns.recv().as_mut().poll(&mut context));
+            match turn {
+                Some(Poll::Ready(Some(envelope))) => {
+                    self.take_turn(envelope);
+                    continue;
+                }
+                Some(Poll::Ready(None)) => self.turns = None,
+                Some(Poll::Pending) | None => {}
+            }
+            let waiting = self.push_pending()?;
+            let received = if self.input_ended || waiting {
                 Poll::Pending
             } else {
                 self.input.recv().as_mut().poll(&mut context)
             };
             let idle = received.is_pending();
             match received {
-                Poll::Ready(Some(envelope)) => self.take(envelope)?,
+                Poll::Ready(Some(envelope)) => self.take(envelope),
                 Poll::Ready(None) => {
                     self.input_ended = true;
                     self.speaker.finish();
                 }
                 Poll::Pending => {}
             }
+            self.push_pending()?;
             self.acknowledge()?;
-            if self.input_ended && self.order.is_empty() {
+            if self.input_ended
+                && self.order.is_empty()
+                && self.pending.is_none()
+                && self.turns.is_none()
+            {
                 let stop = ControlKind::Stop;
                 let end = self.envelope(stop.as_str(), None, P::control(stop));
                 return self.send(end);
@@ -392,6 +561,7 @@ impl<P: PlaybackPayload> Playing<P> {
 /// The speaker as a sink node that acknowledges playback; see the module documentation.
 pub struct AcknowledgingSink {
     run_id: RunId,
+    turns: Option<PortId>,
     node_id: Option<NodeId>,
     speaker: Option<Speaker>,
     shared: Arc<Shared>,
@@ -416,11 +586,20 @@ impl AcknowledgingSink {
     pub fn new(run_id: RunId, speaker: Speaker) -> Self {
         Self {
             run_id,
+            turns: None,
             node_id: None,
             speaker: Some(speaker),
             shared: Arc::default(),
             thread: None,
         }
+    }
+
+    /// The same sink given a turns port, `turns`: an edge arriving there carries the turn
+    /// events of the turn policy; see the module documentation.
+    #[must_use]
+    pub const fn with_turns(mut self, turns: PortId) -> Self {
+        self.turns = Some(turns);
+        self
     }
 
     /// The caller's side of the sink.
@@ -470,6 +649,18 @@ impl AcknowledgingHandle {
         self.shared.read(|state| state.receipts.clone())
     }
 
+    /// Every interruption, in the order the turns opened.
+    #[must_use]
+    pub fn interruptions(&self) -> Vec<Interruption> {
+        self.shared.read(|state| state.interruptions.clone())
+    }
+
+    /// Every frame of a stale generation the sink dropped, in the order dropped.
+    #[must_use]
+    pub fn stale_frames(&self) -> Vec<StaleFrame> {
+        self.shared.read(|state| state.stale.clone())
+    }
+
     /// Whether the sink's exchange ended.
     #[must_use]
     pub fn ended(&self) -> bool {
@@ -501,12 +692,24 @@ impl<P: PlaybackPayload> NodeImplementation<P> for AcknowledgingSink {
     }
 
     fn start(&mut self, mut endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
-        let shaped = if endpoints.inputs.len() == 1 && endpoints.outputs.len() == 1 {
+        let turns_port = self.turns;
+        let at_turns = endpoints
+            .inputs
+            .iter()
+            .position(|input| Some(input.port_id) == turns_port);
+        let turns = at_turns.map(|index| endpoints.inputs.remove(index).endpoint);
+        let shaped = if endpoints.inputs.len() == 1
+            && endpoints.outputs.len() == 1
+            && turns.is_some() == turns_port.is_some()
+        {
             Ok(())
         } else {
             Err(NodeError::new(format!(
-                "the sink takes 1 input and 1 output edge and was handed {} and {}",
+                "the sink takes 1 input edge, 1 more at its turns port if it was given one, and 1 \
+                 output edge, and was handed {} input edge(s) besides {} at its turns port and {} \
+                 output edge(s)",
                 endpoints.inputs.len(),
+                usize::from(turns.is_some()),
                 endpoints.outputs.len()
             )))
         };
@@ -527,10 +730,15 @@ impl<P: PlaybackPayload> NodeImplementation<P> for AcknowledgingSink {
                 sequence: 0,
                 speaker,
                 input: endpoints.inputs.remove(0).endpoint,
+                turns,
                 output: output.endpoint,
                 shared: Arc::clone(&self.shared),
                 order: VecDeque::new(),
                 held: HashMap::new(),
+                pending: None,
+                seen: HashSet::new(),
+                stale: HashSet::new(),
+                dropped: HashSet::new(),
                 input_ended: false,
             };
             let done = Done(Arc::clone(&self.shared));

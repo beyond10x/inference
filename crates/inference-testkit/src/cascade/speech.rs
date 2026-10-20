@@ -21,7 +21,20 @@
 //! `inference.stream.AcknowledgePlayback` with it through its synthesis handle, which moves the
 //! segment from Synthesized to Played; the node records the segment as the acknowledgement left
 //! it ([`SpeechHandle::played`]) and its `AudioPlayed` in the run's [`RunLog`]. A receipt the
-//! synthesis refuses fails the node.
+//! synthesis refuses fails the node, but for the receipt of a segment the node discarded, which
+//! the sink made before it learnt of the discard: it is recorded
+//! ([`SpeechHandle::receipts_of_discarded`]) and moves nothing.
+//!
+//! A `GenerationSuperseded` on `text` is the interruption of that generation
+//! (`docs/design/inference.md` 632-641): the node marks the generation Superseded, so that it
+//! takes no further delta of it, sends the `GenerationSuperseded` on, on `audio`, and discards
+//! every segment of the generation not yet Played, `inference.stream.DiscardSegment`, a Tentative
+//! one it holds and each one in its synthesis, through the synthesis handle; it sends each
+//! `SegmentDiscarded` on and records the segment as the discard left it
+//! ([`SpeechHandle::discarded`]). A discarded segment is never offered again, and its
+//! `SynthesisCompleted` is not sent. The node does not judge frames: one the synthesis delivers
+//! after the discard, of a discarded segment, is sent like any other, and the sink, the
+//! irreversible end of the output, refuses it as stale.
 //!
 //! Every `inference.stream` event it emits is recorded in the run's log in its envelope. On the
 //! end of input on `text`, a control event of kind `stop`, or once that edge is closed, it ends
@@ -40,10 +53,12 @@ use std::task::Poll;
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
-use inference_core::generation::{Generation, StartGeneration};
+use inference_core::generation::{
+    Generation, GenerationState, GenerationSuperseded, StartGeneration,
+};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
-use inference_text::{OutputSegment, SegmentId, SegmentSnapshot, SynthesisCompleted};
+use inference_text::{OutputSegment, SegmentId, SegmentSnapshot, SegmentState, SynthesisCompleted};
 use inference_tts::{PlaybackReceipt, SegmentAudio, SynthesisEvent, SynthesisHandle, Synthesiser};
 
 use crate::graph::nodes::{
@@ -103,6 +118,8 @@ struct State {
     queued: Vec<SegmentId>,
     acknowledged: Vec<Acknowledged>,
     played: Vec<SegmentSnapshot>,
+    discarded: Vec<SegmentSnapshot>,
+    receipts_of_discarded: Vec<SegmentId>,
     failure: Option<String>,
 }
 
@@ -194,6 +211,20 @@ impl SpeechHandle {
     #[must_use]
     pub fn played(&self) -> Vec<SegmentSnapshot> {
         self.state.read(|state| state.played.clone())
+    }
+
+    /// Every segment the node discarded on a supersede, as the discard left it, in the order
+    /// discarded.
+    #[must_use]
+    pub fn discarded(&self) -> Vec<SegmentSnapshot> {
+        self.state.read(|state| state.discarded.clone())
+    }
+
+    /// Every segment a receipt named after the node discarded it, in the order taken; such a
+    /// receipt moves nothing.
+    #[must_use]
+    pub fn receipts_of_discarded(&self) -> Vec<SegmentId> {
+        self.state.read(|state| state.receipts_of_discarded.clone())
     }
 
     /// The failure that ended the node's exchange, if one did.
@@ -374,7 +405,16 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
         while let Some(event) = self.synthesis.next() {
             match event {
                 SynthesisEvent::Audio(audio) => self.frame(audio).await?,
-                SynthesisEvent::Completed(completed) => self.completing.push(completed),
+                SynthesisEvent::Completed(completed) => {
+                    let discarded = self
+                        .synthesis
+                        .output()
+                        .segment(completed.segment_id)
+                        .is_some_and(|segment| segment.state() == SegmentState::Discarded);
+                    if !discarded {
+                        self.completing.push(completed);
+                    }
+                }
             }
             self.complete().await?;
         }
@@ -395,8 +435,13 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
                 );
                 self.generations.insert(started.generation_id, generation);
             }
+            StreamEvent::GenerationSuperseded(superseded) => self.superseded(superseded).await?,
             StreamEvent::TextDelta(delta) => {
-                if let Some(generation) = self.generations.get(&delta.generation_id) {
+                if let Some(generation) = self
+                    .generations
+                    .get(&delta.generation_id)
+                    .filter(|generation| generation.state() == GenerationState::Active)
+                {
                     let (segment, _) = OutputSegment::emit_as(
                         delta.segment_id,
                         generation,
@@ -427,12 +472,89 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
         Ok(())
     }
 
-    /// Runs `inference.stream.AcknowledgePlayback` on `segment_id` with the sink's `receipt`.
+    /// The generation `superseded` was superseded: marks it so, discards every segment of it not
+    /// yet Played, sends the `GenerationSuperseded` on and then each `SegmentDiscarded`, and sends
+    /// what the synthesis delivers after the discards.
+    async fn superseded(&mut self, superseded: GenerationSuperseded) -> Result<(), String> {
+        let generation_id = superseded.generation_id;
+        if let Some(generation) = self.generations.get_mut(&generation_id)
+            && let Ok((moved, _)) = generation.supersede()
+        {
+            *generation = moved;
+        }
+        self.emit(StreamEvent::GenerationSuperseded(superseded))
+            .await?;
+        let mut tentative: Vec<SegmentId> = self
+            .tentative
+            .iter()
+            .filter(|(_, segment)| segment.snapshot().generation_id() == generation_id)
+            .map(|(segment_id, _)| *segment_id)
+            .collect();
+        tentative.sort_by_key(|segment_id| {
+            self.tentative
+                .get(segment_id)
+                .map(|segment| segment.snapshot().sequence())
+        });
+        for segment_id in tentative {
+            let Some(segment) = self.tentative.remove(&segment_id) else {
+                continue;
+            };
+            let (segment, event) = segment.discard().map_err(|refused| refused.to_string())?;
+            self.state
+                .update(|state| state.discarded.push(segment.snapshot()));
+            self.emit(StreamEvent::SegmentDiscarded(event)).await?;
+        }
+        let offered: Vec<SegmentId> = self
+            .synthesis
+            .output()
+            .segments()
+            .iter()
+            .filter(|segment| self.offered.get(&segment.segment_id()) == Some(&generation_id))
+            .filter(|segment| {
+                !matches!(
+                    segment.state(),
+                    SegmentState::Played | SegmentState::Discarded
+                )
+            })
+            .map(OutputSegment::segment_id)
+            .collect();
+        for segment_id in offered {
+            let event = self
+                .synthesis
+                .discard(segment_id)
+                .map_err(|refused| format!("{refused:?}"))?;
+            let discarded = self
+                .synthesis
+                .output()
+                .segment(segment_id)
+                .map(OutputSegment::snapshot)
+                .ok_or_else(|| format!("the synthesis no longer holds segment {segment_id}"))?;
+            self.completing
+                .retain(|completed| completed.segment_id != segment_id);
+            self.state.update(|state| state.discarded.push(discarded));
+            self.emit(StreamEvent::SegmentDiscarded(event)).await?;
+        }
+        self.pump().await
+    }
+
+    /// Runs `inference.stream.AcknowledgePlayback` on `segment_id` with the sink's `receipt`. A
+    /// receipt of a segment the node discarded, made before the sink learnt of the discard, is
+    /// recorded and moves nothing.
     fn acknowledge(
         &mut self,
         segment_id: SegmentId,
         receipt: PlaybackReceipt,
     ) -> Result<(), String> {
+        if self
+            .synthesis
+            .output()
+            .segment(segment_id)
+            .is_some_and(|segment| segment.state() == SegmentState::Discarded)
+        {
+            self.state
+                .update(|state| state.receipts_of_discarded.push(segment_id));
+            return Ok(());
+        }
         let frames = receipt.frames();
         let event = self
             .synthesis
