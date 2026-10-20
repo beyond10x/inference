@@ -1756,6 +1756,7 @@ dependencies = [
  "inference-audio",
  "inference-core",
  "inference-pipeline",
+ "inference-tts",
 ]
 
 [[package]]
@@ -2055,6 +2056,20 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "local-voice-cascade"
+version = "0.4.0"
+dependencies = [
+ "inference-audio",
+ "inference-audio-device",
+ "inference-core",
+ "inference-pipeline",
+ "inference-runtime",
+ "inference-testkit",
+ "inference-text",
+ "inference-tts",
+]
 
 [[package]]
 name = "log"

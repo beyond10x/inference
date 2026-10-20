@@ -1,0 +1,24 @@
+[package]
+name = "local-voice-cascade"
+description = "Example: the local voice cascade, STT, LLM and TTS through commit gates to a speaker that acknowledges playback, on the testkit mocks and an audio host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+inference-audio = { path = "../../crates/inference-audio" }
+inference-audio-device = { path = "../../adapters/inference-audio-device", default-features = false, features = ["pipeline"] }
+inference-core = { path = "../../crates/inference-core" }
+inference-pipeline = { path = "../../crates/inference-pipeline" }
+inference-testkit = { path = "../../crates/inference-testkit", features = ["llm", "run", "stt", "tts"] }
+inference-text = { path = "../../crates/inference-text" }
+inference-tts = { path = "../../crates/inference-tts" }
+
+[dev-dependencies]
+inference-runtime = { path = "../../crates/inference-runtime" }
+
+[lints]
+workspace = true
