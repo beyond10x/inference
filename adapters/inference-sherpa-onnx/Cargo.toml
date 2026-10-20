@@ -15,5 +15,8 @@ inference-stt = { path = "../../crates/inference-stt", optional = true }
 sha2 = { version = "0.11", optional = true }
 sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"], optional = true }
 
+[dev-dependencies]
+inference-testkit = { path = "../../crates/inference-testkit" }
+
 [lints]
 workspace = true
