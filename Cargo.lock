@@ -2093,7 +2093,7 @@ dependencies = [
 
 [[package]]
 name = "inference-llama-server"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "b10x-llm-blocking",
  "b10x-llm-chat",
@@ -2173,7 +2173,7 @@ dependencies = [
 
 [[package]]
 name = "inference-sherpa-onnx"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -2241,7 +2241,7 @@ dependencies = [
 
 [[package]]
 name = "inference-whispercpp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -2407,7 +2407,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "local-voice-cascade"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "clap",
  "inference-audio",
@@ -3570,7 +3570,7 @@ dependencies = [
 
 [[package]]
 name = "stt-sherpa-onnx"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "clap",
  "inference-sherpa-onnx",

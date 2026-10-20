@@ -1,0 +1,158 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-labelledby="title desc">
+  <title id="title">inference: Swap the model. Keep the product.</title>
+  <desc id="desc">Pitch slide. Your application talks to a session facade over a graph of typed nodes, built on contracts for speech-to-text, language models, text-to-speech, tools and native speech, with local and hosted adapters underneath.</desc>
+  <defs>
+    <style>
+      .sans { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Noto Sans Mono", "DejaVu Sans Mono", monospace; }
+      .fg { fill: #E6EDF3; }
+      .muted { fill: #8B949E; }
+      .accent { fill: #FFB224; }
+      .band { fill: #161B22; stroke: #30363D; stroke-width: 1.5; }
+      .band-app { fill: none; stroke: #6E7681; stroke-width: 1.5; stroke-dasharray: 6 5; }
+      .node { fill: #0D1117; stroke: #E6EDF3; stroke-width: 1.5; }
+      .gate { fill: #FFB224; fill-opacity: 0.10; stroke: #FFB224; stroke-width: 1.5; }
+      .io { fill: none; stroke: #30363D; stroke-width: 1.5; }
+      .pill { fill: #0D1117; stroke: #30363D; stroke-width: 1.5; }
+      .wire { stroke: #6E7681; stroke-width: 1.5; fill: none; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8B949E"/>
+    </marker>
+  </defs>
+
+  <rect width="1920" height="1080" fill="#0D1117"/>
+  <rect x="0" y="0" width="1920" height="6" fill="#FFB224"/>
+
+  <text x="120" y="118" class="sans"><tspan class="fg" font-size="40" font-weight="700" letter-spacing="-0.5">inference</tspan><tspan class="muted" font-size="24" dx="22">open-source Rust framework for speech and language AI · Apache-2.0</tspan></text>
+  <text x="116" y="222" class="sans" font-size="84" font-weight="700" letter-spacing="-1.5"><tspan class="fg">Swap the model.</tspan><tspan class="accent" dx="24">Keep the product.</tspan></text>
+  <text x="120" y="292" class="sans" font-size="30"><tspan class="fg" font-weight="700">The problem:</tspan><tspan class="muted" dx="9">every voice or language product is wired to the models it launched with.</tspan></text>
+
+  <rect class="band-app" x="120" y="360" width="940" height="60" rx="10"/>
+  <text x="148" y="398" class="sans fg" font-size="22" font-weight="700">Your application</text>
+  <text x="430" y="397" class="sans muted" font-size="19">talks to one session, whatever model answers</text>
+
+  <rect class="band" x="120" y="432" width="940" height="60" rx="10"/>
+  <text x="148" y="470" class="sans fg" font-size="22" font-weight="700">Session facade</text>
+  <text x="430" y="469" class="sans muted" font-size="19">one interface over any pipeline: cascade or native model</text>
+
+  <rect class="band" x="120" y="504" width="940" height="200" rx="10"/>
+  <text x="148" y="540" class="sans fg" font-size="22" font-weight="700">Graph of typed nodes</text>
+  <text x="1036" y="539" class="sans muted" font-size="17" text-anchor="end">run by a bounded, cancellable runtime with replay</text>
+
+  <g class="mono" font-size="16" text-anchor="middle">
+    <rect class="io" x="150" y="556" width="100" height="42" rx="21"/>
+    <text x="200" y="582" class="muted">audio</text>
+    <rect class="node" x="280" y="556" width="100" height="42" rx="7"/>
+    <text x="330" y="583" class="fg" font-weight="700">STT</text>
+    <rect class="gate" x="410" y="556" width="100" height="42" rx="7"/>
+    <text x="460" y="582" class="accent">commit</text>
+    <rect class="node" x="540" y="556" width="100" height="42" rx="7"/>
+    <text x="590" y="583" class="fg" font-weight="700">LLM</text>
+    <rect class="gate" x="670" y="556" width="100" height="42" rx="7"/>
+    <text x="720" y="582" class="accent">commit</text>
+    <rect class="node" x="800" y="556" width="100" height="42" rx="7"/>
+    <text x="850" y="583" class="fg" font-weight="700">TTS</text>
+    <rect class="io" x="930" y="556" width="100" height="42" rx="21"/>
+    <text x="980" y="582" class="muted">audio</text>
+  </g>
+  <path class="wire" d="M250 577 H276" marker-end="url(#arrow)"/>
+  <path class="wire" d="M380 577 H406" marker-end="url(#arrow)"/>
+  <path class="wire" d="M510 577 H536" marker-end="url(#arrow)"/>
+  <path class="wire" d="M640 577 H666" marker-end="url(#arrow)"/>
+  <path class="wire" d="M770 577 H796" marker-end="url(#arrow)"/>
+  <path class="wire" d="M900 577 H926" marker-end="url(#arrow)"/>
+
+  <path d="M150 610 H560 M620 610 H1030" stroke="#30363D" stroke-width="1" stroke-dasharray="2 4"/>
+  <text x="590" y="615" class="sans muted" font-size="15" font-style="italic" text-anchor="middle">or</text>
+
+  <g class="mono" font-size="16" text-anchor="middle">
+    <rect class="io" x="150" y="622" width="100" height="42" rx="21"/>
+    <text x="200" y="648" class="muted">audio</text>
+    <rect class="node" x="280" y="622" width="620" height="42" rx="7"/>
+    <text x="590" y="649" class="sans" font-size="18"><tspan class="fg" font-weight="700">native speech model</tspan><tspan class="muted" dx="8">· one node, full duplex</tspan></text>
+    <rect class="io" x="930" y="622" width="100" height="42" rx="21"/>
+    <text x="980" y="648" class="muted">audio</text>
+  </g>
+  <path class="wire" d="M254 643 H276" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <path class="wire" d="M904 643 H926" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+
+  <text x="148" y="690" class="sans muted" font-size="17">typed ports · bounded edges · commit gates · checked before it runs</text>
+
+  <rect class="band" x="120" y="716" width="940" height="60" rx="10"/>
+  <text x="148" y="754" class="sans fg" font-size="22" font-weight="700">Contracts</text>
+  <g class="mono" font-size="17" text-anchor="middle">
+    <rect class="pill" x="430" y="730" width="60" height="32" rx="16"/>
+    <text x="460" y="752" class="fg">STT</text>
+    <rect class="pill" x="502" y="730" width="60" height="32" rx="16"/>
+    <text x="532" y="752" class="fg">LLM</text>
+    <rect class="pill" x="574" y="730" width="60" height="32" rx="16"/>
+    <text x="604" y="752" class="fg">TTS</text>
+    <rect class="pill" x="646" y="730" width="80" height="32" rx="16"/>
+    <text x="686" y="752" class="fg">tools</text>
+    <rect class="pill" x="738" y="730" width="164" height="32" rx="16"/>
+    <text x="820" y="752" class="fg">native speech</text>
+  </g>
+
+  <text x="590" y="799" class="sans accent" font-size="16" text-anchor="middle">bound per node by configuration · each adapter carries a capability record: licence, measured resources</text>
+
+  <rect class="band" x="120" y="810" width="460" height="120" rx="10"/>
+  <text x="144" y="844" class="sans fg" font-size="20" font-weight="700">Local adapters</text>
+  <text x="556" y="843" class="sans muted" font-size="15" text-anchor="end">offline, egress denied</text>
+  <g class="mono" font-size="15" text-anchor="middle">
+    <rect class="pill" x="144" y="858" width="159" height="28" rx="14"/>
+    <text x="223.5" y="877" class="fg">sherpa-onnx STT</text>
+    <rect class="pill" x="315" y="858" width="159" height="28" rx="14"/>
+    <text x="394.5" y="877" class="fg">whisper.cpp STT</text>
+    <rect class="pill" x="144" y="894" width="168" height="28" rx="14"/>
+    <text x="228" y="913" class="fg">llama.cpp server</text>
+    <rect class="pill" x="324" y="894" width="159" height="28" rx="14"/>
+    <text x="403.5" y="913" class="fg">sherpa-onnx TTS</text>
+  </g>
+
+  <rect class="band" x="600" y="810" width="460" height="120" rx="10"/>
+  <text x="624" y="844" class="sans fg" font-size="20" font-weight="700">Hosted adapters</text>
+  <text x="1036" y="843" class="sans muted" font-size="15" text-anchor="end">opt-in</text>
+  <g class="mono" font-size="15" text-anchor="middle">
+    <rect class="pill" x="624" y="858" width="159" height="28" rx="14"/>
+    <text x="703.5" y="877" class="fg">OpenAI Realtime</text>
+    <rect class="pill" x="795" y="858" width="159" height="28" rx="14"/>
+    <text x="874.5" y="877" class="fg">OpenAI GPT-Live</text>
+    <rect class="pill" x="624" y="894" width="177" height="28" rx="14"/>
+    <text x="712.5" y="913" class="fg">Amazon Nova Sonic</text>
+  </g>
+
+  <text x="1180" y="388" class="mono accent" font-size="18" letter-spacing="2">WHY IT MATTERS</text>
+
+  <rect x="1180" y="424" width="4" height="96" fill="#FFB224"/>
+  <text x="1204" y="450" class="sans fg" font-size="30" font-weight="700">No lock-in</text>
+  <text class="sans muted" font-size="22">
+    <tspan x="1204" y="486">Changing provider changes a binding, not the</tspan>
+    <tspan x="1204" y="516">application. Compare providers on latency and usage.</tspan>
+  </text>
+
+  <rect x="1180" y="554" width="4" height="96" fill="#FFB224"/>
+  <text x="1204" y="580" class="sans fg" font-size="30" font-weight="700">Honest capabilities</text>
+  <text class="sans muted" font-size="22">
+    <tspan x="1204" y="616">Each adapter declares what it can do. A pipeline</tspan>
+    <tspan x="1204" y="646">that needs more is refused before it runs.</tspan>
+  </text>
+
+  <rect x="1180" y="684" width="4" height="96" fill="#FFB224"/>
+  <text x="1204" y="710" class="sans fg" font-size="30" font-weight="700">Conversations that behave</text>
+  <text class="sans muted" font-size="22">
+    <tspan x="1204" y="746">Barge-in stops unplayed speech. Provisional words</tspan>
+    <tspan x="1204" y="776">stay provisional. Tools run once, on committed input.</tspan>
+  </text>
+
+  <rect x="1180" y="814" width="4" height="96" fill="#FFB224"/>
+  <text x="1204" y="840" class="sans fg" font-size="30" font-weight="700">Runs where you need it</text>
+  <text class="sans muted" font-size="22">
+    <tspan x="1204" y="876">Offline with egress denied, or hosted when you opt in.</tspan>
+    <tspan x="1204" y="906">Usage and cost recorded for every model call.</tspan>
+  </text>
+
+  <path d="M120 972 H1800" stroke="#30363D" stroke-width="1.5"/>
+  <text x="120" y="1024" class="sans" font-size="22"><tspan class="fg" font-weight="700">What it is not:</tspan><tspan class="muted" dx="7">a model, a training framework or a hosted service. You run it.</tspan></text>
+  <text x="1800" y="1025" class="mono accent" font-size="26" text-anchor="end">github.com/beyond10x/inference</text>
+</svg>

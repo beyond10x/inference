@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="500" viewBox="0 0 1500 500" role="img" aria-labelledby="title desc">
+  <title id="title">inference: Swap the model. Keep the product.</title>
+  <desc id="desc">Open-source Rust library. A pipeline of microphone, speech-to-text, language model, text-to-speech and speaker, or one native speech model, with local and hosted adapters swapped under each node.</desc>
+  <defs>
+    <style>
+      .sans { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Noto Sans Mono", "DejaVu Sans Mono", monospace; }
+      .fg { fill: #E6EDF3; }
+      .muted { fill: #8B949E; }
+      .accent { fill: #FFB224; }
+      .node { fill: #161B22; stroke: #E6EDF3; stroke-width: 1.5; }
+      .io { fill: none; stroke: #30363D; stroke-width: 1.5; }
+      .slot { fill: none; stroke: #6E7681; stroke-width: 1.2; stroke-dasharray: 4 3; }
+      .slot-on { fill: #FFB224; fill-opacity: 0.10; stroke: #FFB224; stroke-width: 1.5; }
+      .wire { stroke: #6E7681; stroke-width: 1.5; fill: none; }
+      .chip { fill: #161B22; stroke: #30363D; stroke-width: 1.5; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8B949E"/>
+    </marker>
+  </defs>
+
+  <rect width="1500" height="500" fill="#0D1117"/>
+  <rect x="0" y="0" width="1500" height="4" fill="#FFB224"/>
+
+  <text x="80" y="84" class="mono muted" font-size="16" letter-spacing="1">open-source · Rust · Apache-2.0</text>
+  <text x="76" y="156" class="sans fg" font-size="72" font-weight="700" letter-spacing="-1.5">inference</text>
+  <text x="80" y="226" class="sans fg" font-size="44" font-weight="700" letter-spacing="-0.5">Swap the model.</text>
+  <text x="80" y="280" class="sans accent" font-size="44" font-weight="700" letter-spacing="-0.5">Keep the product.</text>
+  <text class="sans muted" font-size="20">
+    <tspan x="80" y="328">Speech-to-text, LLMs, text-to-speech and native speech</tspan>
+    <tspan x="80" y="356">models behind one set of Rust contracts.</tspan>
+  </text>
+
+  <g class="mono" font-size="14" text-anchor="middle">
+    <rect class="io" x="804" y="96" width="64" height="52" rx="26"/>
+    <text x="836" y="127" class="muted">mic</text>
+    <rect class="io" x="1340" y="96" width="80" height="52" rx="26"/>
+    <text x="1380" y="127" class="muted">speaker</text>
+  </g>
+  <g class="sans" font-size="22" font-weight="700" text-anchor="middle">
+    <rect class="node" x="894" y="96" width="120" height="52" rx="8"/>
+    <text x="954" y="130" class="fg">STT</text>
+    <rect class="node" x="1044" y="96" width="120" height="52" rx="8"/>
+    <text x="1104" y="130" class="fg">LLM</text>
+    <rect class="node" x="1194" y="96" width="120" height="52" rx="8"/>
+    <text x="1254" y="130" class="fg">TTS</text>
+  </g>
+  <path class="wire" d="M868 122 H890" marker-end="url(#arrow)"/>
+  <path class="wire" d="M1014 122 H1040" marker-end="url(#arrow)"/>
+  <path class="wire" d="M1164 122 H1190" marker-end="url(#arrow)"/>
+  <path class="wire" d="M1314 122 H1336" marker-end="url(#arrow)"/>
+
+  <path class="wire" d="M954 148 V160 M1104 148 V160 M1254 148 V160"/>
+  <text x="836" y="178" class="mono muted" font-size="13" text-anchor="middle">local</text>
+  <g class="mono" font-size="13" text-anchor="middle">
+    <rect class="slot-on" x="894" y="160" width="120" height="26" rx="5"/>
+    <text x="954" y="178" class="fg">sherpa-onnx</text>
+    <rect class="slot" x="894" y="194" width="120" height="26" rx="5"/>
+    <text x="954" y="212" class="muted">whisper.cpp</text>
+    <rect class="slot-on" x="1044" y="160" width="120" height="26" rx="5"/>
+    <text x="1104" y="178" class="fg">llama-server</text>
+    <rect class="slot-on" x="1194" y="160" width="120" height="26" rx="5"/>
+    <text x="1254" y="178" class="fg">sherpa-onnx</text>
+  </g>
+
+  <text x="836" y="244" class="sans muted" font-size="15" font-style="italic" text-anchor="middle">or</text>
+  <path d="M894 236 H1420" stroke="#30363D" stroke-width="1" stroke-dasharray="2 4"/>
+
+  <g class="mono" font-size="14" text-anchor="middle">
+    <rect class="io" x="804" y="256" width="64" height="48" rx="24"/>
+    <text x="836" y="285" class="muted">mic</text>
+    <rect class="io" x="1340" y="256" width="80" height="48" rx="24"/>
+    <text x="1380" y="285" class="muted">speaker</text>
+  </g>
+  <rect class="node" x="894" y="256" width="420" height="48" rx="8"/>
+  <text x="1104" y="287" class="sans fg" font-size="20" font-weight="700" text-anchor="middle">native speech model</text>
+  <path class="wire" d="M872 280 H890" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <path class="wire" d="M1318 280 H1336" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+
+  <path class="wire" d="M960 304 V316 M1104 304 V316 M1248 304 V316"/>
+  <text x="836" y="334" class="mono muted" font-size="13" text-anchor="middle">hosted</text>
+  <g class="mono" font-size="12" text-anchor="middle">
+    <rect class="slot-on" x="894" y="316" width="132" height="26" rx="5"/>
+    <text x="960" y="333" class="fg">OpenAI Realtime</text>
+    <rect class="slot" x="1038" y="316" width="132" height="26" rx="5"/>
+    <text x="1104" y="333" class="muted">OpenAI GPT-Live</text>
+    <rect class="slot" x="1182" y="316" width="132" height="26" rx="5"/>
+    <text x="1248" y="333" class="muted">Amazon Nova Sonic</text>
+  </g>
+
+  <g class="sans" font-size="19">
+    <rect class="chip" x="80" y="404" width="317" height="48" rx="24"/>
+    <circle cx="106" cy="428" r="5" fill="#FFB224"/>
+    <text x="122" y="434" class="fg">runs fully offline</text>
+    <rect class="chip" x="421" y="404" width="317" height="48" rx="24"/>
+    <circle cx="447" cy="428" r="5" fill="#FFB224"/>
+    <text x="463" y="434" class="fg">swap providers by config</text>
+    <rect class="chip" x="762" y="404" width="317" height="48" rx="24"/>
+    <circle cx="788" cy="428" r="5" fill="#FFB224"/>
+    <text x="804" y="434" class="fg">usage + cost per model call</text>
+    <rect class="chip" x="1103" y="404" width="317" height="48" rx="24"/>
+    <circle cx="1129" cy="428" r="5" fill="#FFB224"/>
+    <text x="1145" y="434" class="fg">barge-in built in</text>
+  </g>
+</svg>
