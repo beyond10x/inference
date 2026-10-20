@@ -72,7 +72,7 @@ fn a_declaration_reads_every_ess_field_by_its_ess_name() {
         ResourceProfile {
             peak_resident_memory_mib: 512,
             load_time_ms: 1200,
-            cpu_real_time_factor_milli: 250,
+            cpu_real_time_factor_milli: Some(250),
             gpu_memory_mib: None,
         }
     );

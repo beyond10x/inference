@@ -1,0 +1,21 @@
+{
+  "hardware": "reference machine: Intel Core i9-10900K (10 cores, 20 threads), 62 GiB, Linux x86_64; CPU only, no layer offloaded (-ngl 0); llama.cpp prebuilt release b11752 (commit 7879491cf), linux x64 CPU build, -c 4096 -np 1",
+  "languages": ["en"],
+  "audio_formats": [],
+  "evidence": [
+    {
+      "capability": "output_streaming",
+      "tests": [
+        "offline::a_delta_reaches_the_caller_while_the_server_still_holds_the_rest_of_the_stream",
+        "text_pipeline::a_text_only_pipeline_over_the_adapter_runs_to_completed",
+        "live::a_running_server_streams_a_generation_and_refuses_input_during_output"
+      ]
+    }
+  ],
+  "resource_profile": {
+    "peak_resident_memory_mib": 1839,
+    "load_time_ms": 13911,
+    "gpu_memory_mib": null
+  },
+  "adapter_revision": "0.4.0"
+}
