@@ -29,3 +29,4 @@ domains:
   - inference.session
   - inference.audio
   - inference.duplex
+  - inference.usage

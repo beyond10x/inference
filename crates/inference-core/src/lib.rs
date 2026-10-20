@@ -3,8 +3,9 @@
 //! `inference-core` holds the minimal primitives every other crate of the workspace builds on: the
 //! `inference.model` vocabulary of `ess/domains/model.yaml` ([`model`]), the
 //! `inference.stream.Generation` of `ess/domains/stream.yaml`, one output epoch of a node within a
-//! run ([`generation`]), and the identifiers shared across the graph, stream and session layers
-//! ([`id`]). It carries no concrete model, backend or provider implementation.
+//! run ([`generation`]), the `inference.usage` vocabulary of `ess/domains/usage.yaml`, the usage
+//! of one model call ([`usage`]), and the identifiers shared across the graph, stream, session
+//! and duplex layers ([`id`]). It carries no concrete model, backend or provider implementation.
 
 pub mod endpoint;
 pub mod envelope;
@@ -12,6 +13,7 @@ pub mod generation;
 pub mod id;
 pub mod model;
 pub mod policy;
+pub mod usage;
 
 /// The audio vocabulary a [`model::CapabilityRecord`] names its audio formats in, re-exported so
 /// that a crate reading records needs no dependency of its own on `inference-audio`.

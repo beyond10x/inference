@@ -43,6 +43,10 @@ pub mod session;
 /// tool calls, their views, and behind `duplex` the scripted mock native speech model.
 pub mod duplex;
 
+/// `inference.usage`: the in-memory store of the usage records of model calls, each of a
+/// declared adapter and model.
+pub mod usage;
+
 /// The scripted mock recogniser of the STT contract, in two capability configurations, and
 /// synthetic audio of tone and silence.
 #[cfg(feature = "stt")]
