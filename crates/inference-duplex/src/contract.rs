@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
 use inference_core::model::Adapter;
+use inference_core::usage::UsageRecorded;
 use inference_tools::{Json, Tool, ToolId};
 
 use crate::{
@@ -328,6 +329,9 @@ pub enum SessionEvent {
     SpeechToolCallAnswered(SpeechToolCallAnswered),
     SpeechSessionClosed(SpeechSessionClosed),
     SpeechSessionFailed(SpeechSessionFailed),
+    /// `inference.usage.UsageRecorded`: the usage record of a response, of a transcription or of
+    /// the session as a whole, as [`SessionLedger`] decides when.
+    UsageRecorded(UsageRecorded),
 }
 
 /// A native speech model: one multiport node that opens sessions.

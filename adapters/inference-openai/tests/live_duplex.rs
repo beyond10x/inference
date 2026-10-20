@@ -171,6 +171,9 @@ fn one_audio_in_audio_out_session_through_the_contract() {
             Some(SessionEvent::ResponseUsageRecorded(usage)) => {
                 println!("usage: {:?}", usage.usage);
             }
+            Some(SessionEvent::UsageRecorded(record)) => {
+                println!("usage record: {:?}", record.quantities);
+            }
             Some(SessionEvent::ResponseCompleted(done)) => break Some(done.response_id),
             Some(SessionEvent::SpeechSessionFailed(failed)) => panic!("failed: {}", failed.failure),
             Some(_) => {}
@@ -189,6 +192,15 @@ fn one_audio_in_audio_out_session_through_the_contract() {
     assert!(done.is_some());
     assert!(audio > 0, "audio out");
     assert!(!transcript.is_empty(), "a transcript of the audio");
+    let records = session.ledger().usage_records();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.response_id() == done)
+            .count(),
+        1,
+        "one usage record of the response: {records:?}"
+    );
 }
 
 #[test]
