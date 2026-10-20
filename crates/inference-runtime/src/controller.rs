@@ -731,17 +731,45 @@ impl<P: Send + 'static> RunController<P> {
     ///
     /// [`RunError::Conflict`] when the run is not Active, [`RunError::Instance`] when an instance
     /// is not Started; nothing moves. [`RunError::NodeFailed`] when a node's drain returned an
-    /// error: the run is Failed.
+    /// error: the run is Failed. When an edge refused an envelope as closed meanwhile, the node it
+    /// arrives at is asked for its drain first, and the run names it with its own error if it has
+    /// one, rather than the producer whose error is the closed edge.
     pub async fn drain(&mut self) -> Result<(), RunError> {
         let draining = self.run.drain().map_err(RunError::Conflict)?.0;
         self.require(&[NodeInstanceState::Started])?;
         self.set_run(draining);
         for layer in self.layers.clone() {
             for (index, answer) in self.drain_layer(&layer).await {
+                if answer.is_err()
+                    && let Some((gone, error)) = self.failed_consumer().await
+                {
+                    return self.answered(gone, Err(error), NodeInstance::drain).await;
+                }
                 self.answered(index, answer, NodeInstance::drain).await?;
             }
         }
         Ok(())
+    }
+
+    /// The first node an edge into which refused an envelope as closed, Started and not yet
+    /// drained, whose drain answers an error, with that error: the node whose exchange failed,
+    /// which a producer's drain names only as a closed edge. A node whose drain answers `Ok` is
+    /// kept drained.
+    async fn failed_consumer(&mut self) -> Option<(usize, NodeError)> {
+        for node_id in self.signals.take_gone() {
+            let Some(index) = self.nodes.iter().position(|driven| {
+                driven.node.node_id() == node_id
+                    && !driven.drained
+                    && driven.state() == Some(NodeInstanceState::Started)
+            }) else {
+                continue;
+            };
+            match self.nodes[index].implementation.drain().await {
+                Ok(()) => self.nodes[index].drained = true,
+                Err(error) => return Some((index, error)),
+            }
+        }
+        None
     }
 
     /// Drains the nodes of `layer` together and answers each one's answer, in the order of

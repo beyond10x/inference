@@ -8,8 +8,9 @@
 //! control event of kind `stop`, it completes the generation, emits `GenerationCompleted` and
 //! passes the end of input on. Drained, it takes what its input edge still holds until the edge
 //! is closed and then completes the generation the same way. Cancelled, it cancels the
-//! generation, which discards its unplayed segments, and sends nothing more; scripted to emit
-//! after the cancel, it emits once into the cancelled generation, which refuses it as stale.
+//! generation, which discards its unplayed segments, and sends nothing more, a cancel taken while
+//! a send waits for room ending the wait; scripted to emit after the cancel, it emits once into
+//! the cancelled generation, which refuses it as stale.
 //! Every event it emits is recorded in the run's [`RunLog`] in its envelope, the
 //! `GenerationCancelled` that is not sent among them. Each envelope of a generation's event names
 //! the generation, a `TextSegmentCommitted`'s too, whose payload names only its segment, so that
@@ -94,7 +95,7 @@ use inference_tools::{RejectionReason, Tool, ToolCall, ToolCallId, ToolId};
 
 use super::{MockGeneration, MockGenerator};
 use crate::graph::nodes::{
-    Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on, emit, started,
+    Emitter, Exchange, PipelinePayload, RunLog, Watched, block_on, emit, send_unless, started,
 };
 use crate::stream::StreamEvent;
 
@@ -542,8 +543,9 @@ fn carry<P: ModelPayload>(envelope: EventEnvelope<PipelinePayload>) -> EventEnve
 }
 
 /// An output edge of payload `P` taking the envelopes of the text pipeline's payload, each
-/// carried as `P`; a refused one is handed back as it was sent.
-struct Carrying<'a, P>(&'a dyn OutputEndpoint<P>);
+/// carried as `P`; a refused one is handed back as it was sent. A cancel of the node taken while
+/// a send waits for room ends the wait, and the envelope is not sent.
+struct Carrying<'a, P>(&'a dyn OutputEndpoint<P>, &'a Watched<Signal>);
 
 impl<P: ModelPayload> OutputEndpoint<PipelinePayload> for Carrying<'_, P> {
     fn send(
@@ -552,19 +554,23 @@ impl<P: ModelPayload> OutputEndpoint<PipelinePayload> for Carrying<'_, P> {
     ) -> EndpointFuture<'_, Result<(), SendError<PipelinePayload>>> {
         Box::pin(async move {
             let sent = envelope.clone();
-            self.0
-                .send(carry(envelope))
-                .await
-                .map_err(|refused| match refused {
-                    SendError::Full(_) => SendError::Full(sent),
-                    SendError::Closed(_) => SendError::Closed(sent),
-                    SendError::SequenceNotIncreasing { last, .. } => {
-                        SendError::SequenceNotIncreasing {
-                            envelope: sent,
-                            last,
-                        }
-                    }
-                })
+            let mut sending = self.0.send(carry(envelope));
+            future::poll_fn(|cx| {
+                let cancelled = pin!(self.1.until(|signal| signal.cancel.then_some(())));
+                if cancelled.poll(cx).is_ready() {
+                    return Poll::Ready(Ok(()));
+                }
+                sending.as_mut().poll(cx)
+            })
+            .await
+            .map_err(|refused| match refused {
+                SendError::Full(_) => SendError::Full(sent),
+                SendError::Closed(_) => SendError::Closed(sent),
+                SendError::SequenceNotIncreasing { last, .. } => SendError::SequenceNotIncreasing {
+                    envelope: sent,
+                    last,
+                },
+            })
         })
     }
 }
@@ -587,7 +593,12 @@ impl<P: ModelPayload> Exchanging<P> {
                     StreamEvent::GenerationCompleted(completed)
                 }
             };
-            emit(&Carrying(self.output.as_ref()), &mut self.emitter, event).await?;
+            emit(
+                &Carrying(self.output.as_ref(), &self.signal),
+                &mut self.emitter,
+                event,
+            )
+            .await?;
             if done {
                 break;
             }
@@ -634,11 +645,13 @@ impl<P: ModelPayload> Exchanging<P> {
                 call,
                 event: ToolCallEvent::Proposed(event),
             });
-            tool_loop
-                .output
-                .send(envelope)
-                .await
-                .map_err(|refused| refused.to_string())?;
+            send_unless(
+                tool_loop.output.as_ref(),
+                &self.signal,
+                |signal| signal.cancel,
+                envelope,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -659,7 +672,7 @@ impl<P: ModelPayload> Exchanging<P> {
         };
         let event = StreamEvent::GenerationSuperseded(superseded);
         emit(
-            &Carrying(self.output.as_ref()),
+            &Carrying(self.output.as_ref(), &self.signal),
             &mut self.emitter,
             event.clone(),
         )
@@ -670,11 +683,13 @@ impl<P: ModelPayload> Exchanging<P> {
                 Some(superseded.generation_id),
                 P::stream(event),
             );
-            tool_loop
-                .output
-                .send(envelope)
-                .await
-                .map_err(|refused| refused.to_string())?;
+            send_unless(
+                tool_loop.output.as_ref(),
+                &self.signal,
+                |signal| signal.cancel,
+                envelope,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -783,17 +798,22 @@ impl<P: ModelPayload> Exchanging<P> {
     /// Passes the end of input on, on the text port and, given tools, on `tool_call`.
     async fn end(&mut self) -> Result<(), String> {
         let end = carry(self.emitter.control(ControlKind::Stop));
-        self.output
-            .send(end)
-            .await
-            .map_err(|refused| refused.to_string())?;
+        send_unless(
+            self.output.as_ref(),
+            &self.signal,
+            |signal| signal.cancel,
+            end,
+        )
+        .await?;
         if let Some(tool_loop) = self.tool_loop.as_mut() {
             let end = tool_loop.end();
-            tool_loop
-                .output
-                .send(end)
-                .await
-                .map_err(|refused| refused.to_string())?;
+            send_unless(
+                tool_loop.output.as_ref(),
+                &self.signal,
+                |signal| signal.cancel,
+                end,
+            )
+            .await?;
         }
         Ok(())
     }
