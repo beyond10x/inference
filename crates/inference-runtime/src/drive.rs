@@ -5,16 +5,29 @@
 //! through [`RunRequests`]. A source node's end of input is the control event of kind `stop`
 //! ([`ControlKind::Stop`]) it sends on each of its output edges: the source has ended once every
 //! edge it feeds has taken that event, and the run's input has ended once every source that feeds
-//! an edge has ended. Two gaps follow from reading the end of input off the edges and nothing
-//! else:
+//! an edge has ended. The caller of a run whose pipeline exposes an input port is the source of
+//! that ingress (`inference.graph.Exposure`): its end of input is the `stop` it sends on the
+//! ingress, which counts as a source edge's. Two gaps follow from reading the end of input off the
+//! edges and nothing else:
 //!
-//! - a source that drops its senders without sending `stop` has not ended its input, so the loop
-//!   never drains its run on its own; only a request ends it;
+//! - a source or caller that drops its senders without sending `stop` has not ended its input, so
+//!   the loop never drains its run on its own; only a request ends it;
 //! - a `stop` the edge took counts as sent even when the edge's overload policy then discarded
 //!   it (`drop`, `coalesce`, `drop_stale_epochs`), so the loop may drain a run whose consumer
 //!   never sees the end of input.
 //!
-//! Every sender the run controller hands a node is a [`GuardedSender`]: it refuses an envelope
+//! The loop also wakes when a node's exchange ended while the run is Active and a producer still
+//! sends to it: the edge into the node refused an envelope as closed ([`SendError::Closed`]),
+//! its receiver gone with the exchange. That is how a consumer whose exchange failed shows, and
+//! its producers' end of input, refused the same way, would never end the run's input; the loop
+//! takes the node's drain at once and, when it answers an error, fails the node and with it the
+//! run ([`RunController::fail_node`](crate::RunController::fail_node)). While the run is Draining
+//! the refusal is kept too: a producer whose drain then answers the closed edge as its error is
+//! not the node that failed, so the drain asks the node the edge arrives at for its own answer
+//! first and fails the run naming it with its own error.
+//!
+//! Every sender the run controller hands a node, and the sender of every ingress it hands its
+//! caller, is a [`GuardedSender`]: it refuses an envelope
 //! of user content whose `sequence` is not greater than the last one that edge took on the same
 //! `stream_id` (`docs/design/inference.md:312` and §23.1 test 6), so a repeated or decreasing
 //! sequence never reaches the edge, and the run records the refusal
@@ -24,7 +37,7 @@
 //! [`SendError::SequenceNotIncreasing`], and the run records the refusal, read from
 //! [`RunController::refusals`](crate::RunController::refusals).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::future;
@@ -35,9 +48,18 @@ use std::task::{Context, Poll, Waker};
 use inference_core::endpoint::{EndpointFuture, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, is_control_kind};
 use inference_core::id::{NodeId, StreamId};
-use inference_pipeline::EdgeId;
+use inference_pipeline::ExposureId;
 
+use crate::queue::Channel;
 use crate::run::RunState;
+
+/// What feeds the run's input: a source node, over each of its output edges, or the caller, over
+/// an ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Feed {
+    Node(NodeId),
+    Ingress(ExposureId),
+}
 
 /// What the run loop acts on next while the run is Active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,13 +68,16 @@ pub(crate) enum Next {
     Cancel,
     /// `DrainRun`: the caller asked for it, or every source ended its input.
     Drain,
+    /// An edge into this node refused an envelope as closed while the run was Active.
+    ConsumerGone(NodeId),
 }
 
-/// A node sent an envelope of user content whose `sequence` is not greater than `last`, the
-/// last one the edge `edge_id` took on `stream_id`; the envelope did not reach the edge.
+/// A node, or the caller on an ingress, sent an envelope of user content whose `sequence` is not
+/// greater than `last`, the last one the edge or exposure `channel` took on `stream_id`; the
+/// envelope did not reach its queue. `producer` is the envelope's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceNotIncreasing {
-    pub edge_id: EdgeId,
+    pub channel: Channel,
     pub producer: NodeId,
     pub stream_id: StreamId,
     pub last: i64,
@@ -63,8 +88,8 @@ impl fmt::Display for SequenceNotIncreasing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "node {} sent sequence {} on the stream {} along edge {}, not greater than its last, {}",
-            self.producer, self.sequence, self.stream_id, self.edge_id, self.last
+            "node {} sent sequence {} on the stream {} along {}, not greater than its last, {}",
+            self.producer, self.sequence, self.stream_id, self.channel, self.last
         )
     }
 }
@@ -73,12 +98,16 @@ impl Error for SequenceNotIncreasing {}
 
 struct State {
     run: RunState,
-    /// The output edges of each source node that have not yet taken its end of input.
-    open_sources: HashMap<NodeId, usize>,
-    /// Whether any source node feeds an edge.
+    /// The output edges of each source node, and each ingress, that have not yet taken its end of
+    /// input.
+    open_sources: HashMap<Feed, usize>,
+    /// Whether any source node feeds an edge, or the caller an ingress.
     has_sources: bool,
     cancel: bool,
     drain: bool,
+    /// The nodes an edge into which refused an envelope as closed while the run was Active, in
+    /// the order the refusals happened.
+    gone: VecDeque<NodeId>,
     refusals: Vec<SequenceNotIncreasing>,
     waker: Option<Waker>,
 }
@@ -110,6 +139,7 @@ impl Default for Signals {
                 has_sources: false,
                 cancel: false,
                 drain: false,
+                gone: VecDeque::new(),
                 refusals: Vec::new(),
                 waker: None,
             }),
@@ -122,7 +152,8 @@ impl Signals {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The run is now `run`: a drain asked for is dropped once the run left Active, and every
+    /// The run is now `run`: a drain asked for is dropped once the run left Active, a node an edge
+    /// into which refused an envelope as closed once it left Active and Draining, and every
     /// request once it is terminal.
     pub(crate) fn run_moved(&self, run: RunState) {
         let mut state = self.state();
@@ -130,27 +161,49 @@ impl Signals {
         if run != RunState::Active {
             state.drain = false;
         }
+        if !matches!(run, RunState::Active | RunState::Draining) {
+            state.gone.clear();
+        }
         if run.is_terminal() {
             state.cancel = false;
         }
     }
 
-    /// Counts one more output edge of the source node `node_id`.
-    pub(crate) fn source_edge(&self, node_id: NodeId) {
+    /// Counts one more output edge of a source node, or one more ingress.
+    pub(crate) fn source_edge(&self, feed: Feed) {
         let mut state = self.state();
         state.has_sources = true;
-        *state.open_sources.entry(node_id).or_default() += 1;
+        *state.open_sources.entry(feed).or_default() += 1;
     }
 
-    /// One output edge of the source node `node_id` took its end of input.
-    fn source_edge_ended(&self, node_id: NodeId) {
+    /// One output edge of a source node, or an ingress, took its end of input.
+    fn source_edge_ended(&self, feed: Feed) {
         let mut state = self.state();
-        if let Some(open) = state.open_sources.get_mut(&node_id) {
+        if let Some(open) = state.open_sources.get_mut(&feed) {
             *open = open.saturating_sub(1);
         }
         if state.input_ended() {
             state.wake();
         }
+    }
+
+    /// An edge into the node `node_id` refused an envelope as closed: kept while the run is
+    /// Active, for the loop to act on, and while it is Draining, for the drain to name the node
+    /// whose exchange failed rather than the producer the closed edge then failed.
+    fn consumer_gone(&self, node_id: NodeId) {
+        let mut state = self.state();
+        if matches!(state.run, RunState::Active | RunState::Draining)
+            && !state.gone.contains(&node_id)
+        {
+            state.gone.push_back(node_id);
+            state.wake();
+        }
+    }
+
+    /// Takes every node an edge into which refused an envelope as closed and that the loop has
+    /// not acted on, in the order they were recorded.
+    pub(crate) fn take_gone(&self) -> Vec<NodeId> {
+        std::mem::take(&mut self.state().gone).into()
     }
 
     fn refused(&self, refusal: SequenceNotIncreasing) {
@@ -163,8 +216,8 @@ impl Signals {
     }
 
     /// What to do next from Active, once there is something: a cancel the caller asked for comes
-    /// first, then a drain it asked for or the end of every source's input. Each request is
-    /// taken once.
+    /// first, then a drain it asked for or the end of every source's input, then a node an edge
+    /// into which refused an envelope as closed. Each is taken once.
     pub(crate) async fn next_from_active(&self) -> Next {
         future::poll_fn(|cx| {
             let mut state = self.state();
@@ -173,6 +226,9 @@ impl Signals {
             }
             if std::mem::take(&mut state.drain) || state.input_ended() {
                 return Poll::Ready(Next::Drain);
+            }
+            if let Some(node_id) = state.gone.pop_front() {
+                return Poll::Ready(Next::ConsumerGone(node_id));
             }
             state.waker = Some(cx.waker().clone());
             Poll::Pending
@@ -201,7 +257,7 @@ impl Signals {
         match request {
             Next::Cancel if !state.run.is_terminal() => state.cancel = true,
             Next::Drain if state.run == RunState::Active => state.drain = true,
-            Next::Cancel | Next::Drain => return,
+            Next::Cancel | Next::Drain | Next::ConsumerGone(_) => return,
         }
         state.wake();
     }
@@ -235,31 +291,37 @@ impl fmt::Debug for RunRequests {
     }
 }
 
-/// The sender of one output edge as the run controller hands it to a node: it refuses user
-/// content whose sequence does not increase on its stream, and, on an edge of a source node,
-/// tells the run's [`Signals`] once the edge took the node's end of input.
+/// The sender of one output edge as the run controller hands it to a node, or of one exposure as
+/// it hands it to a node (an egress) or to its caller (an ingress): it refuses user content whose
+/// sequence does not increase on its stream, tells the run's [`Signals`] when the queue refuses an
+/// envelope as closed, naming the node it arrives at, and, on an edge of a source node or an
+/// ingress, once the queue took the end of input.
 pub(crate) struct GuardedSender<E> {
     pub(crate) inner: E,
-    pub(crate) edge_id: EdgeId,
-    /// The source node the edge leaves from, if it leaves from one.
-    pub(crate) source: Option<NodeId>,
+    pub(crate) channel: Channel,
+    /// What the queue feeds the run's input from, if it is a source node's edge or an ingress.
+    pub(crate) source: Option<Feed>,
+    /// The node the queue arrives at, if it arrives at one.
+    pub(crate) consumer: Option<NodeId>,
     pub(crate) signals: Arc<Signals>,
     pub(crate) ended: AtomicBool,
-    /// The last sequence the edge took on each stream.
+    /// The last sequence the queue took on each stream.
     pub(crate) sequences: Mutex<HashMap<StreamId, i64>>,
 }
 
 impl<E> GuardedSender<E> {
     pub(crate) fn new(
         inner: E,
-        edge_id: EdgeId,
-        source: Option<NodeId>,
+        channel: Channel,
+        source: Option<Feed>,
+        consumer: Option<NodeId>,
         signals: Arc<Signals>,
     ) -> Self {
         Self {
             inner,
-            edge_id,
+            channel,
             source,
+            consumer,
             signals,
             ended: AtomicBool::new(false),
             sequences: Mutex::new(HashMap::new()),
@@ -313,7 +375,7 @@ impl<P: Send + 'static, E: OutputEndpoint<P>> OutputEndpoint<P> for GuardedSende
                     Ok(previous) => taken = Some((stream_id, sequence, previous)),
                     Err(last) => {
                         self.signals.refused(SequenceNotIncreasing {
-                            edge_id: self.edge_id,
+                            channel: self.channel,
                             producer,
                             stream_id,
                             last,
@@ -327,13 +389,16 @@ impl<P: Send + 'static, E: OutputEndpoint<P>> OutputEndpoint<P> for GuardedSende
                 if let Some((stream_id, sequence, previous)) = taken {
                     self.restore(stream_id, sequence, previous);
                 }
+                if let (SendError::Closed(_), Some(node_id)) = (&refused, self.consumer) {
+                    self.signals.consumer_gone(node_id);
+                }
                 return Err(refused);
             }
             if end
                 && !self.ended.swap(true, Ordering::AcqRel)
-                && let Some(node_id) = self.source
+                && let Some(feed) = self.source
             {
-                self.signals.source_edge_ended(node_id);
+                self.signals.source_edge_ended(feed);
             }
             Ok(())
         })

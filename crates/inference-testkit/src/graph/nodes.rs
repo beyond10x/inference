@@ -13,7 +13,7 @@
 //! the log took it; a control event is told from user content by its envelope's `kind` alone and
 //! is not recorded, as the log records `inference.stream` events only.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::{self, Future};
 use std::pin::pin;
@@ -26,7 +26,7 @@ use inference_core::endpoint::{InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
-use inference_text::{SpanId, TranscriptCommitted};
+use inference_text::{SegmentId, SpanId, TranscriptCommitted};
 
 use crate::stream::{EnvelopeRefusal, EventLog, StreamEvent};
 
@@ -173,6 +173,29 @@ pub(crate) async fn recv_unless<P, S>(
     .await
 }
 
+/// Sends `envelope` along `output`, unless `stop` holds of `watched` first or while the send
+/// waits for room: the send is then abandoned, the envelope not sent, and the answer is `Ok`, as
+/// a node cancelled sends nothing more. Otherwise what the edge answered, a refusal described.
+pub(crate) async fn send_unless<P, S>(
+    output: &dyn OutputEndpoint<P>,
+    watched: &Watched<S>,
+    stop: impl Fn(&S) -> bool,
+    envelope: EventEnvelope<P>,
+) -> Result<(), String> {
+    let mut send = output.send(envelope);
+    future::poll_fn(|cx| {
+        let mut guard = watched.lock();
+        if stop(&guard.0) {
+            return Poll::Ready(Ok(()));
+        }
+        guard.1 = Some(cx.waker().clone());
+        send.as_mut()
+            .poll(cx)
+            .map(|sent| sent.map_err(|refused| refused.to_string()))
+    })
+    .await
+}
+
 struct Unpark(Thread);
 
 impl Wake for Unpark {
@@ -275,7 +298,9 @@ impl fmt::Debug for Exchange {
 }
 
 /// Wraps what one node emits on one output port in envelopes: one stream of its own, numbered
-/// from 1.
+/// from 1. An envelope names the generation its event names; an event naming only its segment,
+/// such as `TextSegmentCommitted`, is enveloped under the generation of the deltas this emitter
+/// sent of that segment, and under none when it sent none.
 pub(crate) struct Emitter {
     run_id: RunId,
     producer: NodeId,
@@ -283,6 +308,8 @@ pub(crate) struct Emitter {
     stream_id: StreamId,
     sequence: i64,
     log: RunLog,
+    /// The generation of each segment a delta this emitter sent named.
+    segments: HashMap<SegmentId, GenerationId>,
 }
 
 impl Emitter {
@@ -294,7 +321,26 @@ impl Emitter {
             stream_id: StreamId::generate(),
             sequence: 0,
             log,
+            segments: HashMap::new(),
         }
+    }
+
+    /// The generation the envelope of `event` names: the one the event names, or the one of the
+    /// deltas sent of the segment the event names.
+    fn generation(&mut self, event: &StreamEvent) -> Option<GenerationId> {
+        let segment_id = match event {
+            StreamEvent::TextDelta(delta) => {
+                self.segments.insert(delta.segment_id, delta.generation_id);
+                return Some(delta.generation_id);
+            }
+            StreamEvent::TextSegmentCommitted(event) => event.segment_id,
+            StreamEvent::SegmentQueued(event) => event.segment_id,
+            StreamEvent::SynthesisCompleted(event) => event.segment_id,
+            StreamEvent::AudioPlayed(event) => event.segment_id,
+            StreamEvent::SegmentDiscarded(event) => event.segment_id,
+            event => return event.generation_id(),
+        };
+        self.segments.get(&segment_id).copied()
     }
 
     fn envelope<Q>(&mut self, kind: String, payload: Q) -> EventEnvelope<Q> {
@@ -331,8 +377,9 @@ impl Emitter {
         &mut self,
         event: StreamEvent,
     ) -> Result<EventEnvelope<PipelinePayload>, EnvelopeRefusal> {
+        let generation_id = self.generation(&event);
         let mut envelope = self.envelope(event.name().to_owned(), event);
-        envelope.generation_id = envelope.payload.generation_id();
+        envelope.generation_id = generation_id;
         self.log.record(envelope.clone())?;
         let EventEnvelope {
             schema_version,

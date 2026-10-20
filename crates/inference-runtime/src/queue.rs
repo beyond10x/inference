@@ -1,5 +1,7 @@
-//! The queue of one `inference.graph.Edge` in one run: finite buffering with the overload
-//! behaviour the edge declares (`docs/design/inference.md` §12.3).
+//! The queue of one `inference.graph.Edge`, or of one `inference.graph.Exposure`, in one run:
+//! finite buffering with the overload behaviour the edge or exposure declares
+//! (`docs/design/inference.md` §12.3). An exposure's queue behaves as an edge's; its far end is
+//! the run's caller, and an [`ExposureWatch`] shows it dropped.
 //!
 //! An [`EdgeQueue`] is built from an [`Edge`] and holds at most [`Edge::capacity`] envelopes
 //! under every policy. Its [`QueueSender`] implements [`OutputEndpoint`] and its
@@ -45,7 +47,7 @@ use std::task::{Context, Poll, Waker};
 use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::EventEnvelope;
 use inference_core::id::{GenerationId, NodeId};
-use inference_pipeline::{Edge, EdgeId, OverloadPolicy};
+use inference_pipeline::{Edge, EdgeId, Exposure, ExposureId, OverloadPolicy};
 
 /// Reads the epoch of the `inference.stream.Generation` an identity names, for the policy
 /// `drop_stale_epochs`. A run hands the queue the generations its nodes started; a lookup that
@@ -87,6 +89,102 @@ impl fmt::Display for UnsupportedOverload {
 
 impl Error for UnsupportedOverload {}
 
+/// The exposure's overload policy is one the queue does not implement: `cancel` or `supersede`.
+/// `exposure_id` names the exposure and `overload` its policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsupportedExposureOverload {
+    pub exposure_id: ExposureId,
+    pub overload: OverloadPolicy,
+}
+
+impl fmt::Display for UnsupportedExposureOverload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "exposure {} declares the overload policy {:?}, which no queue implements",
+            self.exposure_id, self.overload
+        )
+    }
+}
+
+impl Error for UnsupportedExposureOverload {}
+
+/// What a queue of a run carries for: an edge of the pipeline, or an exposure, whose far end the
+/// run's caller holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Channel {
+    Edge(EdgeId),
+    Exposure(ExposureId),
+}
+
+impl fmt::Display for Channel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Edge(edge_id) => write!(f, "edge {edge_id}"),
+            Self::Exposure(exposure_id) => write!(f, "exposure {exposure_id}"),
+        }
+    }
+}
+
+/// The queue of one exposure in one run: its sender side, its receiver side and a weak reference
+/// to it.
+pub(crate) struct ExposureQueue<P> {
+    pub(crate) sender: QueueSender<P>,
+    pub(crate) receiver: QueueReceiver<P>,
+    pub(crate) watch: ExposureWatch<P>,
+    pub(crate) room: Room<P>,
+}
+
+/// A weak handle on a queue's room, for the holder of a sender whose full queue answered
+/// [`SendError::Full`] under `fail`: it waits for the receiver to take an envelope, without
+/// holding the queue alive.
+pub(crate) struct Room<P> {
+    shared: Weak<Shared<P>>,
+}
+
+impl<P> Room<P> {
+    /// Ready once the queue has room, or once it is gone or closed, when a send answers at once;
+    /// otherwise the task of `cx` is woken when the receiver next takes an envelope.
+    pub(crate) fn poll_room(&self, cx: &Context<'_>) -> Poll<()> {
+        let Some(shared) = self.shared.upgrade() else {
+            return Poll::Ready(());
+        };
+        let mut state = shared.state();
+        if !state.receiver || state.items.len() < shared.capacity.get() {
+            return Poll::Ready(());
+        }
+        register(&mut state.waiting_senders, cx.waker());
+        Poll::Pending
+    }
+}
+
+/// The queue of `exposure` in one run, as [`EdgeQueue::new`] builds an edge's.
+pub(crate) fn exposure_queue<P>(
+    exposure: &Exposure,
+    epochs: impl EpochLookup + 'static,
+) -> Result<ExposureQueue<P>, UnsupportedExposureOverload> {
+    let shared = Shared::bounded(exposure.capacity(), exposure.overload(), epochs).ok_or(
+        UnsupportedExposureOverload {
+            exposure_id: exposure.exposure_id(),
+            overload: exposure.overload(),
+        },
+    )?;
+    let watch = ExposureWatch {
+        exposure_id: exposure.exposure_id(),
+        shared: Arc::downgrade(&shared),
+    };
+    Ok(ExposureQueue {
+        sender: QueueSender {
+            shared: Arc::clone(&shared),
+        },
+        room: Room {
+            shared: Arc::downgrade(&shared),
+        },
+        receiver: QueueReceiver { shared },
+        watch,
+    })
+}
+
 /// The overload policies the queue implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Policy {
@@ -114,7 +212,6 @@ struct State<P> {
 }
 
 struct Shared<P> {
-    edge_id: EdgeId,
     capacity: NonZeroUsize,
     overload: OverloadPolicy,
     policy: Policy,
@@ -256,8 +353,44 @@ impl<P> Shared<P> {
     }
 }
 
+impl<P> Shared<P> {
+    /// An empty queue holding at most `capacity` under `overload`; none when the queue does not
+    /// implement `overload`.
+    fn bounded(
+        capacity: NonZeroUsize,
+        overload: OverloadPolicy,
+        epochs: impl EpochLookup + 'static,
+    ) -> Option<Arc<Self>> {
+        let policy = match overload {
+            OverloadPolicy::Pause => Policy::Pause,
+            OverloadPolicy::Fail => Policy::Fail,
+            OverloadPolicy::Drop => Policy::Drop,
+            OverloadPolicy::Coalesce => Policy::Coalesce,
+            OverloadPolicy::DropStaleEpochs => Policy::DropStaleEpochs,
+            OverloadPolicy::Cancel | OverloadPolicy::Supersede => return None,
+        };
+        let state = State {
+            items: VecDeque::new(),
+            discarded: 0,
+            newest_epochs: HashMap::new(),
+            senders: 1,
+            receiver: true,
+            waiting_senders: Vec::new(),
+            waiting_receiver: None,
+        };
+        Some(Arc::new(Self {
+            capacity,
+            overload,
+            policy,
+            epochs: Box::new(epochs),
+            state: Mutex::new(state),
+        }))
+    }
+}
+
 /// The queue of one edge in one run, before its two sides are handed out.
 pub struct EdgeQueue<P> {
+    edge_id: EdgeId,
     shared: Arc<Shared<P>>,
 }
 
@@ -272,45 +405,22 @@ impl<P> EdgeQueue<P> {
         edge: &Edge,
         epochs: impl EpochLookup + 'static,
     ) -> Result<Self, UnsupportedOverload> {
-        let overload = edge.overload();
-        let policy = match overload {
-            OverloadPolicy::Pause => Policy::Pause,
-            OverloadPolicy::Fail => Policy::Fail,
-            OverloadPolicy::Drop => Policy::Drop,
-            OverloadPolicy::Coalesce => Policy::Coalesce,
-            OverloadPolicy::DropStaleEpochs => Policy::DropStaleEpochs,
-            OverloadPolicy::Cancel | OverloadPolicy::Supersede => {
-                return Err(UnsupportedOverload {
-                    edge_id: edge.edge_id(),
-                    overload,
-                });
-            }
-        };
-        let state = State {
-            items: VecDeque::new(),
-            discarded: 0,
-            newest_epochs: HashMap::new(),
-            senders: 1,
-            receiver: true,
-            waiting_senders: Vec::new(),
-            waiting_receiver: None,
-        };
-        Ok(Self {
-            shared: Arc::new(Shared {
+        let shared = Shared::bounded(edge.capacity(), edge.overload(), epochs).ok_or(
+            UnsupportedOverload {
                 edge_id: edge.edge_id(),
-                capacity: edge.capacity(),
-                overload,
-                policy,
-                epochs: Box::new(epochs),
-                state: Mutex::new(state),
-            }),
+                overload: edge.overload(),
+            },
+        )?;
+        Ok(Self {
+            edge_id: edge.edge_id(),
+            shared,
         })
     }
 
     /// The edge this queue was built for.
     #[must_use]
     pub fn edge_id(&self) -> EdgeId {
-        self.shared.edge_id
+        self.edge_id
     }
 
     /// The most envelopes the queue holds.
@@ -330,7 +440,7 @@ impl<P> EdgeQueue<P> {
     #[must_use]
     pub fn watch(&self) -> QueueWatch<P> {
         QueueWatch {
-            edge_id: self.shared.edge_id,
+            edge_id: self.edge_id,
             shared: Arc::downgrade(&self.shared),
         }
     }
@@ -384,6 +494,46 @@ impl<P> fmt::Debug for QueueWatch<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QueueWatch")
             .field("edge_id", &self.edge_id)
+            .field("dropped", &self.is_dropped())
+            .finish()
+    }
+}
+
+/// A weak reference to the queue of one `inference.graph.Exposure` in one run, as [`QueueWatch`]
+/// is to the queue of an edge: it keeps neither side alive and tells whether the queue was
+/// dropped, which it is once the node's end and the caller's end are both gone.
+pub struct ExposureWatch<P> {
+    exposure_id: ExposureId,
+    shared: Weak<Shared<P>>,
+}
+
+impl<P> ExposureWatch<P> {
+    /// The exposure the queue was built for.
+    #[must_use]
+    pub const fn exposure_id(&self) -> ExposureId {
+        self.exposure_id
+    }
+
+    /// Whether the queue was dropped: no sender and no receiver of it is left.
+    #[must_use]
+    pub fn is_dropped(&self) -> bool {
+        self.shared.strong_count() == 0
+    }
+}
+
+impl<P> Clone for ExposureWatch<P> {
+    fn clone(&self) -> Self {
+        Self {
+            exposure_id: self.exposure_id,
+            shared: Weak::clone(&self.shared),
+        }
+    }
+}
+
+impl<P> fmt::Debug for ExposureWatch<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExposureWatch")
+            .field("exposure_id", &self.exposure_id)
             .field("dropped", &self.is_dropped())
             .finish()
     }

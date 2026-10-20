@@ -26,7 +26,12 @@
 //!
 //! The controller builds one [`EdgeQueue`] per edge of the pipeline when it is created and hands
 //! each node, when it starts, the sender side of every edge leaving one of its ports and the
-//! receiver side of every edge arriving at one. Its public methods are `async` over the boxed
+//! receiver side of every edge arriving at one. It builds one queue per exposure of the pipeline
+//! too (`inference.graph.Exposure`): the node whose port is exposed is handed the inner end, the
+//! receiver of an ingress or the sender of an egress, after its edges', and the caller takes the
+//! outer ends by exposure name through [`RunController::exposed`]. The caller is an ingress's
+//! source: the `stop` it sends there ends the run's input as a source node's does. An end the
+//! caller never took is dropped with the run's end. Its public methods are `async` over the boxed
 //! futures of the node trait and commit no caller to one asynchronous executor (line 665).
 //!
 //! Admission is not decided here: `PrepareRun`'s `refused` outcome, which leaves the run
@@ -40,15 +45,19 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::task::Poll;
 
-use inference_core::endpoint::OutputEndpoint;
+use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::id::{NodeId, RunId};
 use inference_pipeline::{
-    Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInput,
-    NodeNotFound, NodeOutput, NodeRole, PipelineNotFound, PlannedPipeline,
+    Declaration, ExposureId, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation,
+    NodeInput, NodeNotFound, NodeOutput, NodeRole, PipelineNotFound, PlannedPipeline,
+    PortDirection,
 };
 
-use crate::drive::{GuardedSender, Next, RunRequests, SequenceNotIncreasing, Signals};
-use crate::queue::{EdgeQueue, EpochLookup, QueueWatch, UnsupportedOverload};
+use crate::drive::{Feed, GuardedSender, Next, RunRequests, SequenceNotIncreasing, Signals};
+use crate::queue::{
+    self, Channel, EdgeQueue, EpochLookup, ExposureWatch, QueueWatch, Room,
+    UnsupportedExposureOverload, UnsupportedOverload,
+};
 use crate::run::{
     FailureReason, NodeInstance, NodeInstanceId, NodeInstanceState, NodeInstanceStateConflict, Run,
     RunState, RunStateConflict,
@@ -141,6 +150,8 @@ pub enum CreateControllerError {
     UnknownPipeline(PipelineNotFound),
     /// An edge of the pipeline declares an overload policy no edge queue implements.
     UnsupportedOverload(UnsupportedOverload),
+    /// An exposure of the pipeline declares an overload policy no queue implements.
+    UnsupportedExposureOverload(UnsupportedExposureOverload),
 }
 
 impl fmt::Display for CreateControllerError {
@@ -148,6 +159,7 @@ impl fmt::Display for CreateControllerError {
         match self {
             Self::UnknownPipeline(error) => fmt::Display::fmt(error, f),
             Self::UnsupportedOverload(error) => fmt::Display::fmt(error, f),
+            Self::UnsupportedExposureOverload(error) => fmt::Display::fmt(error, f),
         }
     }
 }
@@ -157,6 +169,7 @@ impl Error for CreateControllerError {
         match self {
             Self::UnknownPipeline(error) => Some(error),
             Self::UnsupportedOverload(error) => Some(error),
+            Self::UnsupportedExposureOverload(error) => Some(error),
         }
     }
 }
@@ -193,6 +206,93 @@ impl Error for FailNodeError {
     }
 }
 
+/// The caller's end of an ingress of the run: where it sends what the exposed input port of
+/// `exposure_id` receives. The caller is the ingress's source: its end of input is the control
+/// event of kind `stop` it sends here.
+pub struct Ingress<P> {
+    pub exposure_id: ExposureId,
+    /// The name the pipeline exposes the port under.
+    pub name: String,
+    pub endpoint: Box<dyn OutputEndpoint<P>>,
+    /// The room of the ingress's queue, for a sender that waits under `fail`; none for an
+    /// ingress no queue of this run carries.
+    pub(crate) room: Option<Room<P>>,
+}
+
+/// The caller's end of an egress of the run: where it receives what the exposed output port of
+/// `exposure_id` sends, until the node's end is gone.
+pub struct Egress<P> {
+    pub exposure_id: ExposureId,
+    /// The name the pipeline exposes the port under.
+    pub name: String,
+    pub endpoint: Box<dyn InputEndpoint<P>>,
+}
+
+/// The caller's ends of every exposure of the run, in the declaration order of the exposures.
+pub struct ExposedEnds<P> {
+    pub ingresses: Vec<Ingress<P>>,
+    pub egresses: Vec<Egress<P>>,
+}
+
+impl<P> Default for ExposedEnds<P> {
+    fn default() -> Self {
+        Self {
+            ingresses: Vec::new(),
+            egresses: Vec::new(),
+        }
+    }
+}
+
+impl<P> ExposedEnds<P> {
+    /// Takes the end of the ingress exposed under `name`; none when no ingress carries it or it
+    /// was taken.
+    pub fn ingress(&mut self, name: &str) -> Option<Box<dyn OutputEndpoint<P>>> {
+        self.take_ingress(name).map(|ingress| ingress.endpoint)
+    }
+
+    /// Takes the end of the ingress exposed under `name` with the handle on its queue's room.
+    pub(crate) fn take_ingress(&mut self, name: &str) -> Option<Ingress<P>> {
+        let index = self
+            .ingresses
+            .iter()
+            .position(|ingress| ingress.name == name)?;
+        Some(self.ingresses.remove(index))
+    }
+
+    /// Takes the end of the egress exposed under `name`; none when no egress carries it or it
+    /// was taken.
+    pub fn egress(&mut self, name: &str) -> Option<Box<dyn InputEndpoint<P>>> {
+        let index = self
+            .egresses
+            .iter()
+            .position(|egress| egress.name == name)?;
+        Some(self.egresses.remove(index).endpoint)
+    }
+}
+
+impl<P> fmt::Debug for ExposedEnds<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExposedEnds")
+            .field(
+                "ingresses",
+                &self
+                    .ingresses
+                    .iter()
+                    .map(|ingress| ingress.name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "egresses",
+                &self
+                    .egresses
+                    .iter()
+                    .map(|egress| egress.name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
 /// One node of the run: its declaration, its implementation, its instance once described, and
 /// the endpoints it is handed when it starts.
 struct Driven<P> {
@@ -200,6 +300,9 @@ struct Driven<P> {
     implementation: Box<dyn NodeImplementation<P>>,
     instance: Option<NodeInstance>,
     endpoints: Option<NodeEndpoints<P>>,
+    /// Whether the node answered a drain the run loop took early, once its exchange ended while
+    /// the run was Active, so that the run's drain does not call it again.
+    drained: bool,
 }
 
 impl<P> Driven<P> {
@@ -261,6 +364,9 @@ pub struct RunController<P> {
     layers: Vec<Vec<usize>>,
     signals: Arc<Signals>,
     watches: Vec<QueueWatch<P>>,
+    exposure_watches: Vec<ExposureWatch<P>>,
+    /// The caller's ends of the exposures, until it takes them or the run ends.
+    exposed: Option<ExposedEnds<P>>,
 }
 
 impl<P: Send + 'static> RunController<P> {
@@ -317,6 +423,22 @@ impl<P: Send + 'static> RunController<P> {
             let to = declaration.port(edge.to_port()).map(|port| port.node_id());
             queues.push((edge.from_port(), from, edge.to_port(), to, queue));
         }
+        let mut exposed = Vec::new();
+        for exposure in declaration
+            .exposures()
+            .filter(|exposure| exposure.pipeline_id() == pipeline_id)
+        {
+            let queue = queue::exposure_queue(exposure, Arc::clone(&epochs))
+                .map_err(CreateControllerError::UnsupportedExposureOverload)?;
+            let port = declaration.port(exposure.port_id());
+            exposed.push((
+                exposure.exposure_id(),
+                exposure.name().to_owned(),
+                exposure.port_id(),
+                port.map(|port| (port.node_id(), port.direction())),
+                queue,
+            ));
+        }
         let mut nodes: Vec<Driven<P>> = declaration
             .nodes()
             .filter(|node| node.pipeline_id() == pipeline_id)
@@ -325,6 +447,7 @@ impl<P: Send + 'static> RunController<P> {
                 implementation: implement(node),
                 instance: None,
                 endpoints: Some(NodeEndpoints::default()),
+                drained: false,
             })
             .collect();
         let signals = Arc::new(Signals::default());
@@ -337,18 +460,15 @@ impl<P: Send + 'static> RunController<P> {
             watches.push(queue.watch());
             let edge_id = queue.edge_id();
             let (sender, receiver) = queue.split();
-            let source = from.filter(|node_id| {
-                nodes.iter().any(|driven| {
-                    driven.node.node_id() == *node_id && driven.node.role() == NodeRole::Source
-                })
-            });
-            if let Some(node_id) = source {
-                signals.source_edge(node_id);
+            let source = Self::source_feed(&nodes, from);
+            if let Some(feed) = source {
+                signals.source_edge(feed);
             }
             let endpoint: Box<dyn OutputEndpoint<P>> = Box::new(GuardedSender::new(
                 sender,
-                edge_id,
+                Channel::Edge(edge_id),
                 source,
+                to,
                 Arc::clone(&signals),
             ));
             if let Some(endpoints) = Self::endpoints_of(&mut nodes, from) {
@@ -364,6 +484,67 @@ impl<P: Send + 'static> RunController<P> {
                 });
             }
         }
+        let mut ends = ExposedEnds::default();
+        let mut exposure_watches = Vec::new();
+        for (exposure_id, name, port_id, port, queue) in exposed {
+            let queue::ExposureQueue {
+                sender,
+                receiver,
+                watch,
+                room,
+            } = queue;
+            exposure_watches.push(watch);
+            let channel = Channel::Exposure(exposure_id);
+            let node_id = port.map(|(node_id, _)| node_id);
+            match port.map(|(_, direction)| direction) {
+                Some(PortDirection::Input) => {
+                    let feed = Feed::Ingress(exposure_id);
+                    signals.source_edge(feed);
+                    ends.ingresses.push(Ingress {
+                        exposure_id,
+                        name,
+                        endpoint: Box::new(GuardedSender::new(
+                            sender,
+                            channel,
+                            Some(feed),
+                            node_id,
+                            Arc::clone(&signals),
+                        )),
+                        room: Some(room),
+                    });
+                    if let Some(endpoints) = Self::endpoints_of(&mut nodes, node_id) {
+                        endpoints.inputs.push(NodeInput {
+                            port_id,
+                            endpoint: Box::new(receiver),
+                        });
+                    }
+                }
+                Some(PortDirection::Output) => {
+                    let source = Self::source_feed(&nodes, node_id);
+                    if let Some(feed) = source {
+                        signals.source_edge(feed);
+                    }
+                    if let Some(endpoints) = Self::endpoints_of(&mut nodes, node_id) {
+                        endpoints.outputs.push(NodeOutput {
+                            port_id,
+                            endpoint: Box::new(GuardedSender::new(
+                                sender,
+                                channel,
+                                source,
+                                None,
+                                Arc::clone(&signals),
+                            )),
+                        });
+                    }
+                    ends.egresses.push(Egress {
+                        exposure_id,
+                        name,
+                        endpoint: Box::new(receiver),
+                    });
+                }
+                None => {}
+            }
+        }
         let (run, _) = Run::create_as(run_id, planned);
         Ok(Self {
             run,
@@ -371,7 +552,47 @@ impl<P: Send + 'static> RunController<P> {
             layers,
             signals,
             watches,
+            exposure_watches,
+            exposed: Some(ends),
         })
+    }
+
+    /// The feed of an edge or egress leaving the node carrying `node_id`, when that node is a
+    /// source node of the run.
+    fn source_feed(nodes: &[Driven<P>], node_id: Option<NodeId>) -> Option<Feed> {
+        node_id
+            .filter(|node_id| {
+                nodes.iter().any(|driven| {
+                    driven.node.node_id() == *node_id && driven.node.role() == NodeRole::Source
+                })
+            })
+            .map(Feed::Node)
+    }
+
+    /// As [`RunController::create_as`], with the run nested under the subgraph node instance
+    /// `parent` (`inference.graph.NestRun`): the child run a subgraph node runs its child pipeline
+    /// as ([`crate::subgraph::SubgraphNode`]). [`RunController::parent`] reads it back.
+    ///
+    /// # Errors
+    ///
+    /// As [`RunController::create`].
+    pub fn create_child(
+        run_id: RunId,
+        planned: &PlannedPipeline,
+        declaration: &Declaration,
+        parent: NodeInstanceId,
+        epochs: impl EpochLookup + 'static,
+        implement: impl FnMut(&Node) -> Box<dyn NodeImplementation<P>>,
+    ) -> Result<Self, CreateControllerError> {
+        let mut controller = Self::create_as(run_id, planned, declaration, epochs, implement)?;
+        controller.run = controller.run.nest(parent).0;
+        Ok(controller)
+    }
+
+    /// The subgraph node instance the run is the child run of; none for a run created on its own.
+    #[must_use]
+    pub const fn parent(&self) -> Option<NodeInstanceId> {
+        self.run.parent()
     }
 
     /// The nodes in drain order: layers of indices into `nodes`, each layer fed only by edges
@@ -416,8 +637,8 @@ impl<P: Send + 'static> RunController<P> {
     }
 
     /// Moves the run to `run`. A request the run no longer admits is dropped, and once the run is
-    /// terminal no node holds endpoints it was never handed, so every edge queue nobody took is
-    /// dropped with the run's end.
+    /// terminal no node holds endpoints it was never handed and the run holds no exposure end its
+    /// caller never took, so every queue nobody took is dropped with the run's end.
     fn set_run(&mut self, run: Run) {
         let state = run.state();
         self.run = run;
@@ -426,6 +647,7 @@ impl<P: Send + 'static> RunController<P> {
             for driven in &mut self.nodes {
                 driven.endpoints = None;
             }
+            self.exposed = None;
         }
     }
 
@@ -463,6 +685,9 @@ impl<P: Send + 'static> RunController<P> {
                         current: self.run.state(),
                     })
                 })?;
+            self.nodes[index]
+                .implementation
+                .described(instance.instance_id());
             self.nodes[index].instance = Some(instance);
         }
         for index in 0..self.nodes.len() {
@@ -506,17 +731,45 @@ impl<P: Send + 'static> RunController<P> {
     ///
     /// [`RunError::Conflict`] when the run is not Active, [`RunError::Instance`] when an instance
     /// is not Started; nothing moves. [`RunError::NodeFailed`] when a node's drain returned an
-    /// error: the run is Failed.
+    /// error: the run is Failed. When an edge refused an envelope as closed meanwhile, the node it
+    /// arrives at is asked for its drain first, and the run names it with its own error if it has
+    /// one, rather than the producer whose error is the closed edge.
     pub async fn drain(&mut self) -> Result<(), RunError> {
         let draining = self.run.drain().map_err(RunError::Conflict)?.0;
         self.require(&[NodeInstanceState::Started])?;
         self.set_run(draining);
         for layer in self.layers.clone() {
             for (index, answer) in self.drain_layer(&layer).await {
+                if answer.is_err()
+                    && let Some((gone, error)) = self.failed_consumer().await
+                {
+                    return self.answered(gone, Err(error), NodeInstance::drain).await;
+                }
                 self.answered(index, answer, NodeInstance::drain).await?;
             }
         }
         Ok(())
+    }
+
+    /// The first node an edge into which refused an envelope as closed, Started and not yet
+    /// drained, whose drain answers an error, with that error: the node whose exchange failed,
+    /// which a producer's drain names only as a closed edge. A node whose drain answers `Ok` is
+    /// kept drained.
+    async fn failed_consumer(&mut self) -> Option<(usize, NodeError)> {
+        for node_id in self.signals.take_gone() {
+            let Some(index) = self.nodes.iter().position(|driven| {
+                driven.node.node_id() == node_id
+                    && !driven.drained
+                    && driven.state() == Some(NodeInstanceState::Started)
+            }) else {
+                continue;
+            };
+            match self.nodes[index].implementation.drain().await {
+                Ok(()) => self.nodes[index].drained = true,
+                Err(error) => return Some((index, error)),
+            }
+        }
+        None
     }
 
     /// Drains the nodes of `layer` together and answers each one's answer, in the order of
@@ -525,7 +778,12 @@ impl<P: Send + 'static> RunController<P> {
         let mut draining: Vec<(usize, NodeFuture<'_, Result<(), NodeError>>)> = Vec::new();
         for (index, driven) in self.nodes.iter_mut().enumerate() {
             if layer.contains(&index) {
-                draining.push((index, driven.implementation.drain()));
+                let drain = if driven.drained {
+                    Box::pin(future::ready(Ok(())))
+                } else {
+                    driven.implementation.drain()
+                };
+                draining.push((index, drain));
             }
         }
         let mut answers: Vec<(usize, Option<Result<(), NodeError>>)> =
@@ -646,6 +904,20 @@ impl<P: Send + 'static> RunController<P> {
         self.watches.clone()
     }
 
+    /// A weak reference to the queue of each exposure of the run, in the declaration order of the
+    /// exposures; none keeps a queue alive.
+    #[must_use]
+    pub fn exposure_queues(&self) -> Vec<ExposureWatch<P>> {
+        self.exposure_watches.clone()
+    }
+
+    /// Takes the caller's ends of the run's exposures: the sender of each ingress and the
+    /// receiver of each egress. The first call takes them all; a later one, or one after the run
+    /// ended, answers none.
+    pub fn exposed(&mut self) -> ExposedEnds<P> {
+        self.exposed.take().unwrap_or_default()
+    }
+
     /// The run loop: drives an Active run to its end and returns once it is terminal.
     ///
     /// From Active it waits until a request arrives through [`RunController::requests`] or every
@@ -658,6 +930,14 @@ impl<P: Send + 'static> RunController<P> {
     /// Draining run takes. A request the run's state does not admit is dropped, so the loop
     /// issues no command the state machine would refuse; a run already Draining is completed,
     /// and a terminal run is left as it is.
+    ///
+    /// From Active it also wakes when an edge refused an envelope as closed: the node it arrives
+    /// at ended its exchange while a producer still sends to it, as a node whose exchange failed
+    /// does. The loop takes that node's drain at once, abandoned if a cancel is asked for
+    /// meanwhile. A node that answers an error is failed through [`RunController::fail_node`],
+    /// which winds every other instance down and fails the run, and the loop returns
+    /// [`RunError::NodeFailed`]; a node that answers `Ok` ended its exchange as it should, its
+    /// answer is kept for the run's drain, and the loop goes on waiting.
     ///
     /// # Errors
     ///
@@ -676,6 +956,7 @@ impl<P: Send + 'static> RunController<P> {
                             self.cancel().await?;
                         }
                     }
+                    Next::ConsumerGone(node_id) => self.consumer_gone(node_id).await?,
                 },
                 RunState::Draining => {
                     if self.signals.take_cancel() {
@@ -705,6 +986,50 @@ impl<P: Send + 'static> RunController<P> {
             drain.as_mut().poll(cx).map(Some)
         })
         .await
+    }
+
+    /// Takes the drain of the Started node carrying `node_id`, whose exchange ended while the run
+    /// was Active, and fails it through [`RunController::fail_node`] when it answers an error; see
+    /// [`RunController::drive`]. A node not Started, or drained already, is left alone.
+    async fn consumer_gone(&mut self, node_id: NodeId) -> Result<(), RunError> {
+        let Some(index) = self.nodes.iter().position(|driven| {
+            driven.node.node_id() == node_id
+                && !driven.drained
+                && driven.state() == Some(NodeInstanceState::Started)
+        }) else {
+            return Ok(());
+        };
+        let signals = Arc::clone(&self.signals);
+        let answer = {
+            let mut drain = self.nodes[index].implementation.drain();
+            future::poll_fn(|cx| {
+                if signals.poll_cancel(cx) {
+                    return Poll::Ready(None);
+                }
+                drain.as_mut().poll(cx).map(Some)
+            })
+            .await
+        };
+        match answer {
+            None => self.cancel().await,
+            Some(Ok(())) => {
+                self.nodes[index].drained = true;
+                Ok(())
+            }
+            Some(Err(error)) => {
+                let failure = Self::failure(node_id, &error);
+                self.fail_node(node_id, &error)
+                    .await
+                    .map_err(|refused| match refused {
+                        FailNodeError::Instance(conflict) => RunError::Instance(conflict),
+                        FailNodeError::Run(conflict) => RunError::Conflict(conflict),
+                        FailNodeError::UnknownNode(_) => {
+                            RunError::Instance(InstanceConflict::of(node_id, None))
+                        }
+                    })?;
+                Err(RunError::NodeFailed(failure))
+            }
+        }
     }
 
     /// Every envelope of user content the run refused because its sequence did not increase on

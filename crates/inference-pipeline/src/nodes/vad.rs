@@ -135,12 +135,47 @@ fn level(frame: &AudioFrame) -> f64 {
             .map(|bytes| f64::from(f32::from_le_bytes(*bytes)))
             .map(|sample| sample * sample)
             .collect(),
+        AudioEncoding::PcmMulaw => frame
+            .data
+            .iter()
+            .map(|byte| f64::from(mulaw(*byte)) / 32_768.0)
+            .map(|sample| sample * sample)
+            .collect(),
+        AudioEncoding::PcmAlaw => frame
+            .data
+            .iter()
+            .map(|byte| f64::from(alaw(*byte)) / 32_768.0)
+            .map(|sample| sample * sample)
+            .collect(),
     };
     if squares.is_empty() {
         return 0.0;
     }
     let count = u32::try_from(squares.len()).map_or(f64::from(u32::MAX), f64::from);
     (squares.iter().sum::<f64>() / count).sqrt()
+}
+
+/// The linear sample a G.711 mu-law byte encodes, within `-32_124..=32_124`.
+fn mulaw(byte: u8) -> i16 {
+    let byte = !byte;
+    let exponent = (byte >> 4) & 0x07;
+    let magnitude = ((i32::from(byte & 0x0F) << 3) + 0x84) << exponent;
+    let sample = i16::try_from(magnitude - 0x84).unwrap_or(i16::MAX);
+    if byte & 0x80 == 0 { sample } else { -sample }
+}
+
+/// The linear sample a G.711 A-law byte encodes, within `-32_256..=32_256`; silence, 0xD5,
+/// decodes to 8, the smallest step A-law has.
+fn alaw(byte: u8) -> i16 {
+    let byte = byte ^ 0x55;
+    let segment = (byte >> 4) & 0x07;
+    let step = i32::from(byte & 0x0F) << 4;
+    let magnitude = match segment {
+        0 => step + 8,
+        _ => (step + 0x108) << (segment - 1),
+    };
+    let sample = i16::try_from(magnitude).unwrap_or(i16::MAX);
+    if byte & 0x80 == 0 { -sample } else { sample }
 }
 
 /// A run of frames of one loudness: the position of its first sample and the samples it holds.
@@ -424,6 +459,73 @@ mod tests {
         hold: Duration::from_millis(50),
     };
 
+    /// The G.711 mu-law byte of `sample`: bias 0x84, clip 32_635, the bits inverted.
+    fn mulaw_of(sample: i16) -> u8 {
+        let magnitude = i32::from(sample).abs().min(32_635) + 0x84;
+        let exponent = (0..8)
+            .rev()
+            .find(|exponent| magnitude & (0x80 << exponent) != 0)
+            .unwrap_or(0);
+        let mantissa = (magnitude >> (exponent + 3)) & 0x0F;
+        let sign = if sample < 0 { 0x80 } else { 0 };
+        !u8::try_from(sign | (exponent << 4) | mantissa).expect("a byte")
+    }
+
+    /// The G.711 A-law byte of `sample`: 13 bits, eight segments, the even bits inverted.
+    fn alaw_of(sample: i16) -> u8 {
+        const SEGMENT_ENDS: [i32; 8] = [0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF];
+        let pcm = i32::from(sample) >> 3;
+        let (mask, pcm) = if pcm >= 0 {
+            (0xD5, pcm)
+        } else {
+            (0x55, -pcm - 1)
+        };
+        let value = match SEGMENT_ENDS.iter().position(|end| pcm <= *end) {
+            None => 0x7F,
+            Some(segment) => {
+                let segment = i32::try_from(segment).expect("below eight");
+                let shift = if segment < 2 { 1 } else { segment };
+                (segment << 4) | ((pcm >> shift) & 0x0F)
+            }
+        };
+        u8::try_from(value ^ mask).expect("a byte")
+    }
+
+    #[test]
+    fn alaw_bytes_decode_to_the_linear_samples_g711_gives() {
+        assert_eq!(
+            super::alaw(0xD5),
+            8,
+            "A-law silence, its smallest positive step"
+        );
+        assert_eq!(super::alaw(0x55), -8);
+        assert_eq!(super::alaw(0xAA), 32_256, "the loudest positive byte");
+        assert_eq!(super::alaw(0x2A), -32_256, "the loudest negative byte");
+        assert_eq!(alaw_of(0), 0xD5);
+        for sample in [-16_384_i16, -1_000, 0, 1_000, 16_384] {
+            let decoded = i32::from(super::alaw(alaw_of(sample)));
+            assert!(
+                (decoded - i32::from(sample)).abs() <= i32::from(sample).abs() / 16 + 16,
+                "{sample} round-trips to {decoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn mulaw_bytes_decode_to_the_linear_samples_g711_gives() {
+        assert_eq!(super::mulaw(0xFF), 0, "mu-law silence");
+        assert_eq!(super::mulaw(0x7F), 0);
+        assert_eq!(super::mulaw(0x80), 32_124, "the loudest positive byte");
+        assert_eq!(super::mulaw(0x00), -32_124, "the loudest negative byte");
+        for sample in [-16_384_i16, -1_000, 0, 1_000, 16_384] {
+            let decoded = i32::from(super::mulaw(mulaw_of(sample)));
+            assert!(
+                (decoded - i32::from(sample)).abs() <= i32::from(sample).abs() / 16 + 8,
+                "{sample} round-trips to {decoded}"
+            );
+        }
+    }
+
     fn at(sample: u64) -> SampleClockPosition {
         SampleClockPosition::new(sample).expect("small")
     }
@@ -444,6 +546,8 @@ mod tests {
                         (16_384_i16 * i16::from(loud)).to_le_bytes().to_vec()
                     }
                     AudioEncoding::PcmF32le => (level as f32).to_le_bytes().to_vec(),
+                    AudioEncoding::PcmMulaw => vec![mulaw_of(16_384 * i16::from(loud))],
+                    AudioEncoding::PcmAlaw => vec![alaw_of(16_384 * i16::from(loud))],
                 };
                 AudioFrame {
                     format,

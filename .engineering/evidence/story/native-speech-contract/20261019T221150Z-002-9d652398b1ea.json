@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-19T22:11:50Z",
+  "actor": "human:timo",
+  "artifact": "story:native-speech-contract",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-native-speech-contract-pass-1",
+    "reference": "F3 inference-duplex ledger.rs with auto_response on a commit starts the liveness bound",
+    "review": "review-result:adversary-native-speech-contract-pass-1",
+    "outcome": "fixed"
+  }
+}

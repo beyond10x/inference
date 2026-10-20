@@ -6,10 +6,13 @@ domain: inference.session
 summary: >-
   A Session is an optional application-level interaction lifetime that may span several graph
   runs and model requests. It is opened over one planned pipeline in that pipeline's interaction
-  mode, references its current run, zero or one, becomes ready once it has one, and is closed by
+  mode, references its current run, zero or one, becomes ready once it has one, may switch to
+  another planned pipeline from Ready, keeping its history and vocabulary, and is closed by
   draining. Transport persistence is not model persistence: the session is stable while the runs
-  below it come and go. History, logical identity and interaction policy, which the design gives
-  the session, are not declared yet.
+  below it come and go. Its history is the ordered committed facts it accepted or delivered (user
+  turns, assistant segments, tool results), each naming the run it came from, and it outlives
+  those runs. Logical identity and interaction policy, which the design also gives the session,
+  are not declared yet.
 
 naming:
   wire: session
@@ -19,6 +22,19 @@ types:
   - name: inference.session.SessionId
     kind: newtype
     of: Uuid
+
+  - name: inference.session.HistoryEntryId
+    kind: newtype
+    of: Uuid
+
+  # What one committed fact of the conversation is: the committed input text of one user turn,
+  # the text of one committed output segment, or the outcome of one tool call. Never a hypothesis,
+  # a tentative segment, a delta or audio (media state).
+  # read from: docs/design/inference.md:737
+  # read from: docs/design/inference.md:739
+  - name: inference.session.HistoryKind
+    kind: enum
+    variants: [user_turn, assistant_segment, tool_result]
 
 entities:
   # read from: docs/design/inference.md:105
@@ -44,13 +60,20 @@ entities:
       # read from: docs/design/inference.md:310
       - name: run_id
         type: Optional<inference.graph.RunId>
-    # UNMAPPED: the design gives the session history, logical identity and interaction policy
-    # (docs/design/inference.md:105) and makes conversation state (committed messages, tool results,
-    # memory projections, turn history) distinct from inference and media state
-    # (docs/design/inference.md:735-741). No field, relation or entity declares any of them here,
-    # and the design does not say whether history is a list of committed spans, of events or of
-    # messages. Open question for the owner; the session-facade epic settles it.
+    # UNMAPPED: the design gives the session logical identity and interaction policy
+    # (docs/design/inference.md:105) besides history, which HistoryEntry declares. No field,
+    # relation or entity declares either of them here. Open question for the owner.
     relations:
+      # The session's history: its entries exist only within it and outlive the runs they name.
+      # read from: docs/design/inference.md:105
+      # read from: docs/design/inference.md:737
+      - name: history
+        kind: owns
+        target: inference.session.HistoryEntry
+        cardinality: many
+        via: session_id
+      # One pipeline at a time: SwitchPipeline replaces it while the session stays.
+      # read from: docs/design/inference.md:1148
       - name: pipeline
         kind: references
         target: inference.graph.Pipeline
@@ -64,12 +87,6 @@ entities:
         target: inference.graph.Run
         cardinality: one
         via: run_id
-      # UNMAPPED: the session holds one pipeline for its lifetime. The design wants a session to
-      # switch among supported topologies without changing its event vocabulary
-      # (docs/design/inference.md:1148, docs/design/inference.md:1162). Whether a switch drains the
-      # current run, and whether a session may replace a current run that is not terminal, is the
-      # topology-switch question; AttachRun below replaces the current run whatever its state.
-      # Stated deviation until the session-facade epic declares it.
       # UNMAPPED: a run is current in at most one session, as an envelope carries one optional
       # session_id (docs/design/inference.md:310); decided, not declared. An AttachRun refusal
       # selecting the other sessions whose run_id is the input's validates, and synthesis then
@@ -106,6 +123,90 @@ entities:
         - name: close
           from: [Draining]
           to: Closed
+        # Sending and committing input move nothing; each is a move from Ready to Ready because
+        # ess 0.60.0 synthesizes no scenario for an accepting update guarded on Ready
+        # (ESS-SYNTH-003, no arrangement of a Ready session) and answers wrong_state only on a
+        # command that moves (ESS-COMMAND-012).
+        # read from: docs/design/inference.md:714
+        # read from: docs/design/inference.md:716
+        - name: send
+          from: [Ready]
+          to: Ready
+        - name: commit
+          from: [Ready]
+          to: Ready
+        # Interrupting moves nothing either: below the session the facade signals cancel to the
+        # run and cuts delivery of the generations it delivered, so a move from Ready to Ready,
+        # as send is.
+        # read from: docs/design/inference.md:717
+        # read from: docs/design/inference.md:637
+        - name: interrupt
+          from: [Ready]
+          to: Ready
+        # The cancel branch of close: processing is cancelled rather than drained, from any
+        # state but Closed, so that a drain that does not finish can still be cut and a session
+        # that never became ready can be cancelled.
+        # read from: docs/design/inference.md:719
+        - name: cancel
+          from: [Opened, Ready, Draining]
+          to: Closed
+        # Switching to another pipeline clears the current run and leaves the session Opened, so
+        # readiness is asserted again for the next run, as an attach does. Only a Ready session
+        # switches: the facade drains its run first, so AttachRun never meets a run that is not
+        # terminal.
+        # read from: docs/design/inference.md:1148
+        # read from: docs/design/inference.md:1162
+        - name: switch
+          from: [Ready]
+          to: Opened
+
+  # One committed fact of the session's conversation state, kept in the order the session
+  # recorded it and for as long as the session row lives, past the run that produced it, so that
+  # committed history can be reconstructed or replayed. It carries the text it records.
+  # UNMAPPED: an entry's link to the row it records (a Turn or Span, an OutputSegment, a
+  # ToolCall). It would point at one of three entities depending on the entry's kind, and the
+  # design does not say whether history references or copies them; the entry carries the text.
+  # read from: docs/design/inference.md:105
+  # read from: docs/design/inference.md:735-741
+  # read from: docs/design/inference.md:990
+  # read from: docs/design/inference.md:1008
+  - name: inference.session.HistoryEntry
+    naming:
+      summary: One committed fact of a session's conversation, naming the run it came from.
+    identity:
+      name: entry_id
+      type: inference.session.HistoryEntryId
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+      # The run the session held when the entry was recorded.
+      - name: run_id
+        type: inference.graph.RunId
+      # The entry's place in its session's history, from 1.
+      - name: position
+        type: Integer
+      - name: kind
+        type: inference.session.HistoryKind
+      # The committed text of a user turn or an assistant segment; the outcome of a tool call.
+      - name: text
+        type: String
+      # The tool call a tool_result entry records the outcome of. Carried, not related: the link
+      # from an entry to the row it records stays UNMAPPED, as stated above.
+      - name: call_id
+        type: Optional<inference.tools.ToolCallId>
+    # The session owns its entries (`inference.session.Session`, relation `history`), which
+    # `session_id` carries.
+    relations:
+      - name: run
+        kind: references
+        target: inference.graph.Run
+        cardinality: one
+        via: run_id
+    # A recorded fact does not change.
+    lifecycle:
+      initial: Recorded
+      states: [Recorded]
+      terminal: [Recorded]
 
 errors:
   # The session's interaction mode is the pipeline's: a session asking for another mode than the
@@ -155,9 +256,11 @@ commands:
   # only after binding, validation and planning, so one that is not Planned is refused, as is an
   # identity no pipeline holds. The refusal names the state required, not the one held: ess reads
   # a related row's fields, not its held state, as a value.
-  # UNMAPPED: the design's session operations send, receive, commit_input, interrupt and describe
-  # (docs/design/inference.md:714-718) are not declared; the stream domain's commands cover
-  # commit and supersede below the session, and the session-facade epic declares the facade.
+  # The design's session operations receive and describe
+  # (docs/design/inference.md:715, docs/design/inference.md:718) are not declared: they are
+  # reads, not commands. send, commit_input and interrupt are SendInput, CommitInput and
+  # Interrupt below, and the stream domain's commands cover commit and supersede below the
+  # session.
   # read from: docs/design/inference.md:713
   # read from: docs/design/inference.md:519
   # read from: docs/design/inference.md:1189
@@ -311,10 +414,9 @@ commands:
           inference.session.SessionStateConflict:
             current: {subject: state}
 
-  # close drains or cancels processing and releases resources; closing starts the drain.
-  # UNMAPPED: the cancel branch of close (docs/design/inference.md:719, "drain or cancel") is not
-  # declared, and whether a session that never became ready may be closed is read here as yes.
-  # Open question for the owner.
+  # close drains or cancels processing and releases resources; closing starts the drain, and
+  # CancelSession below is the cancel branch. A session that never became ready may be closed
+  # either way.
   # read from: docs/design/inference.md:719
   # read from: docs/design/inference.md:339
   - name: inference.session.CloseSession
@@ -375,7 +477,322 @@ commands:
             session_id: input.session_id
         summary: No session carries this identity; nothing moved.
 
+  # send submits typed input to the session's current run; a session admits input only while it
+  # is Ready, so one that is Opened, Draining or Closed refuses it ("admits no new interaction").
+  # Sending moves nothing: below the session the facade forwards the input to the run's ingress,
+  # stamped with the session and the run.
+  # read from: docs/design/inference.md:714
+  # read from: docs/design/inference.md:310
+  # read from: docs/design/inference.md:339
+  - name: inference.session.SendInput
+    input:
+      - name: session_id
+        type: inference.session.SessionId
+    outcomes:
+      - name: sent
+        moves: inference.session.Session.send
+        instance: session_id
+        emits:
+          - inference.session.InputSent
+        payload:
+          inference.session.InputSent:
+            session_id: input.session_id
+        summary: The input went to the session's current run; nothing moved.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.session.SessionStateConflict
+        payload:
+          inference.session.SessionStateConflict:
+            current: {subject: state}
+        summary: The session is not Ready and admits no input; nothing was sent.
+      - name: no-such-session
+        unknown_instance: true
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was sent.
+
+  # commit_input finalizes a text span or logical user turn: below the session the facade sends a
+  # control event of kind commit into the run's ingress. Refused unless Ready, as send is.
+  # read from: docs/design/inference.md:716
+  # read from: docs/design/inference.md:297
+  # read from: docs/design/inference.md:339
+  - name: inference.session.CommitInput
+    input:
+      - name: session_id
+        type: inference.session.SessionId
+    outcomes:
+      - name: committed
+        moves: inference.session.Session.commit
+        instance: session_id
+        emits:
+          - inference.session.InputCommitted
+        payload:
+          inference.session.InputCommitted:
+            session_id: input.session_id
+        summary: The commit went to the session's current run; nothing moved.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.session.SessionStateConflict
+        payload:
+          inference.session.SessionStateConflict:
+            current: {subject: state}
+        summary: The session is not Ready and admits no input; nothing was committed.
+      - name: no-such-session
+        unknown_instance: true
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was committed.
+
+  # interrupt cancels or supersedes the active generation: below the session the facade sends a
+  # control event of kind cancel into the run's ingresses and from then on delivers nothing of a
+  # generation it had delivered, the session being the application's irreversible boundary.
+  # Refused unless Ready, as send is.
+  # read from: docs/design/inference.md:717
+  # read from: docs/design/inference.md:637
+  # read from: docs/design/inference.md:339
+  - name: inference.session.Interrupt
+    input:
+      - name: session_id
+        type: inference.session.SessionId
+    outcomes:
+      - name: interrupted
+        moves: inference.session.Session.interrupt
+        instance: session_id
+        emits:
+          - inference.session.SessionInterrupted
+        payload:
+          inference.session.SessionInterrupted:
+            session_id: input.session_id
+        summary: The active generation is cut at the session; nothing moved.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.session.SessionStateConflict
+        payload:
+          inference.session.SessionStateConflict:
+            current: {subject: state}
+        summary: The session is not Ready; nothing was interrupted.
+      - name: no-such-session
+        unknown_instance: true
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was interrupted.
+
+  # A session switches among supported topologies without changing its event vocabulary: it
+  # selects another planned pipeline of the mode it asks for, refused as OpenSession refuses one,
+  # and stays while the runs below it come and go. The new run is announced by RunAttached.
+  # The three pipeline refusals are external: ess 0.60.0 states no order between a when_related
+  # guard and the unknown_instance branch (ESS-COMMAND-004), so the store decides them from the
+  # pipeline it holds, after the session's existence and before its held state, as AttachRun's
+  # pipeline-mismatch is decided.
+  # UNMAPPED: a pipeline identity no pipeline carries should be refused (unknown-pipeline).
+  # Synthesis sends such an identity for the accepting branch and every scenario arranged
+  # through a switch, so a store that refused it would fail them; as for an AttachRun run no
+  # record carries, the testkit store does not refuse it unless forced, and the facade's live
+  # session refuses it before it runs the command.
+  # read from: docs/design/inference.md:1148
+  # read from: docs/design/inference.md:1162
+  # read from: docs/design/inference.md:731
+  # read from: docs/design/inference.md:713
+  - name: inference.session.SwitchPipeline
+    input:
+      - name: session_id
+        type: inference.session.SessionId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+      - name: mode
+        type: inference.graph.InteractionMode
+    outcomes:
+      - name: no-such-session
+        unknown_instance: true
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was switched.
+      - name: unknown-pipeline
+        external: no pipeline carries the identity
+        error: inference.graph.PipelineNotFound
+        payload:
+          inference.graph.PipelineNotFound:
+            pipeline_id: input.pipeline_id
+        summary: No pipeline carries this identity; nothing was switched.
+      - name: not-planned
+        external: the pipeline is not Planned
+        error: inference.graph.PipelineNotReady
+        payload:
+          inference.graph.PipelineNotReady:
+            pipeline_id: input.pipeline_id
+            required: Planned
+        summary: The pipeline is not Planned; nothing was switched.
+      - name: mode-mismatch
+        external: the pipeline declares another interaction mode
+        error: inference.session.ModeMismatch
+        payload:
+          inference.session.ModeMismatch:
+            pipeline_id: input.pipeline_id
+            mode: input.mode
+        summary: The pipeline declares another interaction mode; nothing was switched.
+      - name: switched
+        moves: inference.session.Session.switch
+        instance: session_id
+        sets:
+          pipeline_id: input.pipeline_id
+          mode: input.mode
+          run_id: {cleared: true}
+        emits:
+          - inference.session.PipelineSwitched
+        payload:
+          inference.session.PipelineSwitched:
+            session_id: input.session_id
+            pipeline_id: input.pipeline_id
+        summary: The session is over the other pipeline, with no current run, and Opened until its next run is ready.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.session.SessionStateConflict
+        payload:
+          inference.session.SessionStateConflict:
+            current: {subject: state}
+        summary: The session is not Ready; nothing was switched.
+
+  # The cancel branch of close: the facade cancels the session's run and cancels the session
+  # once the run is Cancelled. It emits SessionClosed, as the design names no fifth session
+  # event.
+  # read from: docs/design/inference.md:719
+  # read from: docs/design/inference.md:339
+  - name: inference.session.CancelSession
+    input:
+      - name: session_id
+        type: inference.session.SessionId
+    outcomes:
+      - name: cancelled
+        moves: inference.session.Session.cancel
+        instance: session_id
+        emits:
+          - inference.session.SessionClosed
+        payload:
+          inference.session.SessionClosed:
+            session_id: input.session_id
+        summary: Processing was cancelled and the session's resources are released.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.session.SessionStateConflict
+        payload:
+          inference.session.SessionStateConflict:
+            current: {subject: state}
+        summary: The session is Closed already; nothing moved.
+      - name: no-such-session
+        unknown_instance: true
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing moved.
+
+  # The session records each committed fact it accepts or delivers: a user turn when the
+  # application commits its input or the session delivers a voice turn's committed transcript, an
+  # assistant segment when it delivers a committed output segment, a tool result when it delivers
+  # a tool result. It records while the session is Opened, Ready or Draining, since a drain
+  # completes what is in flight, and refuses once it is Closed.
+  # read from: docs/design/inference.md:105
+  # read from: docs/design/inference.md:735-741
+  # read from: docs/design/inference.md:990
+  - name: inference.session.RecordHistory
+    input:
+      - name: session_id
+        type: inference.session.SessionId
+      - name: run_id
+        type: inference.graph.RunId
+      - name: position
+        type: Integer
+      - name: kind
+        type: inference.session.HistoryKind
+      - name: text
+        type: String
+      - name: call_id
+        type: Optional<inference.tools.ToolCallId>
+    outcomes:
+      - name: no-such-session
+        when_related: {via: input.session_id, exists: false}
+        error: inference.session.SessionNotFound
+        payload:
+          inference.session.SessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was recorded.
+      - name: closed
+        when_related: {via: input.session_id, predicate: state == Closed}
+        error: inference.session.SessionStateConflict
+        payload:
+          inference.session.SessionStateConflict:
+            current: Closed
+        summary: The session is Closed and records nothing more.
+      - name: recorded
+        creates: inference.session.HistoryEntry
+        instance: entry_id
+        sets:
+          session_id: input.session_id
+          run_id: input.run_id
+          position: input.position
+          kind: input.kind
+          text: input.text
+          call_id: input.call_id
+        emits:
+          - inference.session.HistoryRecorded
+        payload:
+          inference.session.HistoryRecorded:
+            entry_id: {generated: true}
+            session_id: input.session_id
+            run_id: input.run_id
+            position: input.position
+            kind: input.kind
+        summary: The fact is in the session's history, after every entry recorded before it.
+
 events:
+  # read from: docs/design/inference.md:990
+  - name: inference.session.HistoryRecorded
+    fields:
+      - name: entry_id
+        type: inference.session.HistoryEntryId
+      - name: session_id
+        type: inference.session.SessionId
+      - name: run_id
+        type: inference.graph.RunId
+      - name: position
+        type: Integer
+      - name: kind
+        type: inference.session.HistoryKind
+
+  # read from: docs/design/inference.md:717
+  # read from: docs/design/inference.md:1148
+  - name: inference.session.PipelineSwitched
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+
+  - name: inference.session.SessionInterrupted
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+
+  # read from: docs/design/inference.md:714
+  - name: inference.session.InputSent
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+
+  # read from: docs/design/inference.md:716
+  - name: inference.session.InputCommitted
+    fields:
+      - name: session_id
+        type: inference.session.SessionId
+
   - name: inference.session.SessionOpened
     fields:
       - name: session_id
@@ -421,3 +838,24 @@ views:
         type: Optional<inference.graph.RunId>
       - name: state
         type: inference.session.Session.State
+
+  # The session's history, read in the order it was recorded; it outlives the runs it names.
+  # read from: docs/design/inference.md:990
+  - name: inference.session.History
+    source: inference.session.HistoryEntry
+    consistency: read_your_writes
+    fields:
+      - name: entry_id
+        type: inference.session.HistoryEntryId
+      - name: session_id
+        type: inference.session.SessionId
+      - name: run_id
+        type: inference.graph.RunId
+      - name: position
+        type: Integer
+      - name: kind
+        type: inference.session.HistoryKind
+      - name: text
+        type: String
+      - name: call_id
+        type: Optional<inference.tools.ToolCallId>

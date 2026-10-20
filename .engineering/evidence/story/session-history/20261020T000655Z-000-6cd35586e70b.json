@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:55Z",
+  "actor": "human:timo",
+  "artifact": "story:session-history",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-facade --all-features --test history (VERIFIED, new behaviour: 5 cases fail and conform reports 3 ids unsupported before the change; treatment records turns, segments and tool results in order across runs; final review: a turn precedes the reply received before its commit)"
+  }
+}

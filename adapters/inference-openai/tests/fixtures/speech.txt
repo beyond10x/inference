@@ -1,0 +1,15 @@
+speech.wav is synthesized, not recorded from a person. It was generated with eSpeak NG 1.52.0:
+
+espeak-ng -v en-us -s 150 -w speech.wav "What is the capital of France?"
+
+The output is 16-bit signed PCM, mono, 22050 Hz, 47523 samples (2.16 s), and regenerates byte for
+byte with that version (sha256 c02e3025012e3f3b2d564940365bc79146964f33837dd6921fe1e969455534f2).
+The live test resamples it to the 24 kHz PCM16 the Realtime API takes.
+
+during.wav is the input the native duplex evidence test sends while the answer to speech.wav is
+playing. It was generated the same way:
+
+espeak-ng -v en-us -s 150 -w during.wav "And what about Portugal?"
+
+16-bit signed PCM, mono, 22050 Hz, 40835 samples (1.85 s), byte for byte with that version (sha256
+15d7a10551d2899381dadd3371e71f1f9b6da90543eb1fb0b1693c5133ba6a08).

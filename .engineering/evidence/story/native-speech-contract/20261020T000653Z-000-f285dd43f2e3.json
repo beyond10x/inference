@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:53Z",
+  "actor": "human:timo",
+  "artifact": "story:native-speech-contract",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-duplex --all-features (VERIFIED, new behaviour: on base cdf2586 the contract cases fail 9 of 9 and conform reports 71 duplex ids unsupported; treatment answers every duplex scenario; adversary pass 1 found twelve defects, fixed; the final review fixed the native_duplex evidence probe and the liveness bound after a tool result)"
+  }
+}

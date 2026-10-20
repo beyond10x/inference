@@ -8,8 +8,15 @@
 //! them; what a declaration references and does not hold, the declared profiles and adapters, it
 //! reads through [`GraphCatalog`] over the [`PolicyDomain`] and [`ModelDomain`] stores. A refused
 //! command stores nothing, records no event and takes no identity. The views
-//! `inference.graph.Pipelines`, `Nodes`, `Ports`, `Edges`, `FeedbackLoops` and `Bindings` are the
-//! declaration's entities ([`GraphDomain::declaration`]), read at the call.
+//! `inference.graph.Pipelines`, `Nodes`, `Ports`, `Edges`, `Exposures`, `FeedbackLoops` and
+//! `Bindings` are the declaration's entities ([`GraphDomain::declaration`]), read at the call.
+//! `AddSubgraphNode` is the declaration's, and planning refuses a subgraph node whose ports do not
+//! match its child's exposures (`interface-mismatch`). `NestRun` makes a stored run the child run of a
+//! stored node instance, its parent; a run `NestRun` never named has none.
+//! `DeclareNodeDescriptor` publishes a descriptor once per kind into the store's
+//! [`NodeDescriptors`](inference_pipeline::NodeDescriptors), the view
+//! `inference.graph.NodeDescriptors` ([`GraphDomain::descriptors`]); the descriptors of the mock
+//! nodes of a text-only pipeline are in [`descriptors`](crate::graph::descriptors).
 //!
 //! A validation keeps the validated form of the pipeline ([`ValidatedPipeline`]) and a plan takes
 //! it and keeps the Planned form ([`PlannedPipeline`]), so that `CreateRun` builds a [`Run`] of
@@ -36,6 +43,7 @@
 //!
 //! [`GraphDomain`]: crate::graph::GraphDomain
 //! [`GraphDomain::declaration`]: crate::graph::GraphDomain::declaration
+//! [`GraphDomain::descriptors`]: crate::graph::GraphDomain::descriptors
 //! [`GraphDomain::runs`]: crate::graph::GraphDomain::runs
 //! [`GraphDomain::node_instances`]: crate::graph::GraphDomain::node_instances
 //! [`GraphCatalog`]: crate::graph::GraphCatalog
@@ -63,18 +71,20 @@ use inference_core::policy::{DeploymentProfile, ProfileId, ProfileNotFound};
 #[cfg(feature = "run")]
 use inference_pipeline::PlannedPipeline;
 use inference_pipeline::{
-    AddNode, AddNodeError, AddPort, AddPortError, BindNode, BindNodeError, Catalog, ConnectPorts,
-    ConnectPortsError, Declaration, DeclareFeedbackLoop, DeclareFeedbackLoopError, DeclarePipeline,
-    FeedbackLoopDeclared, NodeAdded, NodeBound, PipelineDeclared, PipelinePlanned,
-    PipelineValidated, PlanPipeline, PlanPipelineError, PortAdded, PortsConnected,
-    ValidatePipeline, ValidatePipelineError, ValidatedPipeline,
+    AddNode, AddNodeError, AddPort, AddPortError, AddSubgraphNode, AddSubgraphNodeError, BindNode,
+    BindNodeError, Catalog, ConnectPorts, ConnectPortsError, Declaration, DeclareFeedbackLoop,
+    DeclareFeedbackLoopError, DeclareNodeDescriptor, DeclarePipeline, ExposePort, ExposePortError,
+    FeedbackLoopDeclared, NodeAdded, NodeBound, NodeDescriptorDeclared, NodeDescriptorExists,
+    NodeDescriptors, PipelineDeclared, PipelinePlanned, PipelineValidated, PlanPipeline,
+    PlanPipelineError, PortAdded, PortExposed, PortsConnected, SubgraphNodeAdded, ValidatePipeline,
+    ValidatePipelineError, ValidatedPipeline,
 };
 #[cfg(feature = "run")]
 use inference_runtime::run::{
     NodeInstance, NodeInstanceCancelling, NodeInstanceDescribed, NodeInstanceDraining,
     NodeInstanceFailed, NodeInstancePrepared, NodeInstanceStarted, NodeInstanceStopped, Run,
-    RunActivated, RunCancelled, RunCompleted, RunCreated, RunDraining, RunFailed, RunPreparing,
-    RunValidating,
+    RunActivated, RunCancelled, RunCompleted, RunCreated, RunDraining, RunFailed, RunNested,
+    RunPreparing, RunValidating,
 };
 
 use crate::model::ModelDomain;
@@ -87,10 +97,16 @@ pub enum GraphEvent {
     PipelineDeclared(PipelineDeclared),
     /// `inference.graph.NodeAdded`.
     NodeAdded(NodeAdded),
+    /// `inference.graph.SubgraphNodeAdded`.
+    SubgraphNodeAdded(SubgraphNodeAdded),
     /// `inference.graph.PortAdded`.
     PortAdded(PortAdded),
     /// `inference.graph.PortsConnected`.
     PortsConnected(PortsConnected),
+    /// `inference.graph.NodeDescriptorDeclared`.
+    NodeDescriptorDeclared(NodeDescriptorDeclared),
+    /// `inference.graph.PortExposed`.
+    PortExposed(PortExposed),
     /// `inference.graph.NodeBound`.
     NodeBound(NodeBound),
     /// `inference.graph.FeedbackLoopDeclared`.
@@ -102,6 +118,9 @@ pub enum GraphEvent {
     /// `inference.graph.RunCreated`.
     #[cfg(feature = "run")]
     RunCreated(RunCreated),
+    /// `inference.graph.RunNested`.
+    #[cfg(feature = "run")]
+    RunNested(RunNested),
     /// `inference.graph.RunValidating`.
     #[cfg(feature = "run")]
     RunValidating(RunValidating),
@@ -172,6 +191,7 @@ pub const IDENTITY_SPACE: u32 = 3;
 #[derive(Debug)]
 pub struct GraphDomain {
     declaration: Declaration,
+    descriptors: NodeDescriptors,
     validated: Vec<ValidatedPipeline>,
     #[cfg(feature = "run")]
     planned: Vec<PlannedPipeline>,
@@ -188,6 +208,7 @@ impl Default for GraphDomain {
     fn default() -> Self {
         Self {
             declaration: Declaration::counted_in(IDENTITY_SPACE),
+            descriptors: NodeDescriptors::new(),
             validated: Vec::new(),
             #[cfg(feature = "run")]
             planned: Vec::new(),
@@ -258,6 +279,54 @@ impl GraphDomain {
     ) -> Result<PortsConnected, ConnectPortsError> {
         let event = self.declaration.connect_ports(input)?;
         self.events.push(GraphEvent::PortsConnected(event));
+        Ok(event)
+    }
+
+    /// Runs `inference.graph.AddSubgraphNode` and records its [`SubgraphNodeAdded`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Declaration::add_subgraph_node`].
+    pub fn add_subgraph_node(
+        &mut self,
+        input: AddSubgraphNode,
+    ) -> Result<SubgraphNodeAdded, AddSubgraphNodeError> {
+        let event = self.declaration.add_subgraph_node(input)?;
+        self.events
+            .push(GraphEvent::SubgraphNodeAdded(event.clone()));
+        Ok(event)
+    }
+
+    /// Runs `inference.graph.DeclareNodeDescriptor` and records its [`NodeDescriptorDeclared`].
+    ///
+    /// # Errors
+    ///
+    /// As [`NodeDescriptors::declare`].
+    pub fn declare_node_descriptor(
+        &mut self,
+        input: DeclareNodeDescriptor,
+    ) -> Result<NodeDescriptorDeclared, NodeDescriptorExists> {
+        let event = self.descriptors.declare(input)?;
+        self.events
+            .push(GraphEvent::NodeDescriptorDeclared(event.clone()));
+        Ok(event)
+    }
+
+    /// The published node descriptors, read at the call: the view
+    /// `inference.graph.NodeDescriptors`.
+    #[must_use]
+    pub const fn descriptors(&self) -> &NodeDescriptors {
+        &self.descriptors
+    }
+
+    /// Runs `inference.graph.ExposePort` and records its [`PortExposed`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Declaration::expose_port`].
+    pub fn expose_port(&mut self, input: ExposePort) -> Result<PortExposed, ExposePortError> {
+        let event = self.declaration.expose_port(input)?;
+        self.events.push(GraphEvent::PortExposed(event.clone()));
         Ok(event)
     }
 
@@ -382,10 +451,10 @@ mod runs {
     };
     use inference_runtime::run::{
         FailureReason, NodeInstance, NodeInstanceCancelling, NodeInstanceDescribed,
-        NodeInstanceDraining, NodeInstanceFailed, NodeInstanceId, NodeInstancePrepared,
-        NodeInstanceStarted, NodeInstanceStateConflict, NodeInstanceStopped, Run, RunActivated,
-        RunCancelled, RunCompleted, RunCreated, RunDraining, RunFailed, RunNotFound, RunNotRunning,
-        RunPreparing, RunStateConflict, RunValidating,
+        NodeInstanceDraining, NodeInstanceFailed, NodeInstanceId, NodeInstanceNotFound,
+        NodeInstancePrepared, NodeInstanceStarted, NodeInstanceStateConflict, NodeInstanceStopped,
+        Run, RunActivated, RunCancelled, RunCompleted, RunCreated, RunDraining, RunFailed,
+        RunNested, RunNotFound, RunNotRunning, RunPreparing, RunStateConflict, RunValidating,
     };
     use uuid::Uuid;
 
@@ -418,6 +487,33 @@ mod runs {
             match self {
                 Self::UnknownPipeline(error) => Some(error),
                 Self::NotPlanned(error) => Some(error),
+            }
+        }
+    }
+
+    /// Why `inference.graph.NestRun` nested nothing.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum NestRunError {
+        /// No stored run carries the identity sent; the specification declares no outcome for it.
+        UnknownRun(RunNotFound),
+        /// The `unknown-parent` outcome: no node instance carries the parent's identity.
+        UnknownParent(NodeInstanceNotFound),
+    }
+
+    impl fmt::Display for NestRunError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::UnknownRun(error) => fmt::Display::fmt(error, f),
+                Self::UnknownParent(error) => fmt::Display::fmt(error, f),
+            }
+        }
+    }
+
+    impl Error for NestRunError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            match self {
+                Self::UnknownRun(error) => Some(error),
+                Self::UnknownParent(error) => Some(error),
             }
         }
     }
@@ -678,6 +774,40 @@ mod runs {
             Ok(event)
         }
 
+        /// Runs `inference.graph.NestRun`: the stored run becomes the child run of the stored
+        /// node instance `parent`. Whether the instance is one of a subgraph node over the run's
+        /// pipeline is not refused, as the specification orders it.
+        ///
+        /// # Errors
+        ///
+        /// In this order: [`NestRunError::UnknownParent`] when no stored instance carries
+        /// `parent`, the `unknown-parent` outcome; [`NestRunError::UnknownRun`] when no stored run
+        /// carries `run_id`, which the specification declares no outcome for. Nothing changes.
+        pub fn nest_run(
+            &mut self,
+            run_id: RunId,
+            parent: NodeInstanceId,
+        ) -> Result<RunNested, NestRunError> {
+            if !self
+                .instances
+                .iter()
+                .any(|instance| instance.instance_id() == parent)
+            {
+                return Err(NestRunError::UnknownParent(NodeInstanceNotFound {
+                    instance_id: parent,
+                }));
+            }
+            let slot = self
+                .runs
+                .iter_mut()
+                .find(|run| run.run_id() == run_id)
+                .ok_or(NestRunError::UnknownRun(RunNotFound { run_id }))?;
+            let (nested, event) = slot.nest(parent);
+            *slot = nested;
+            self.events.push(GraphEvent::RunNested(event));
+            Ok(event)
+        }
+
         /// Runs `inference.graph.ValidateRun`: Created to Validating.
         ///
         /// # Errors
@@ -842,8 +972,8 @@ mod runs {
 
 #[cfg(feature = "run")]
 pub use runs::{
-    CreateRunError, DescribeNodeInstanceError, NodeInstanceMoveError, RUN_IDENTITY_GROUP,
-    RunMoveError,
+    CreateRunError, DescribeNodeInstanceError, NestRunError, NodeInstanceMoveError,
+    RUN_IDENTITY_GROUP, RunMoveError,
 };
 
 /// The recording mock of the node contract, behind the `run` feature: a [`RecordingNode`]
@@ -1016,6 +1146,8 @@ mod recording {
 
 #[cfg(feature = "run")]
 pub use recording::{FallibleStep, LifecycleStep, NodeCall, NodeCalls, RecordingNode};
+
+pub mod descriptors;
 
 /// The mock source and sink nodes of a text-only pipeline, behind the `run` feature, and what
 /// they share with the mock model node of [`crate::llm`].

@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:54Z",
+  "actor": "human:timo",
+  "artifact": "story:subgraph-execution",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --all-features --test subgraph (VERIFIED, new behaviour: 3 of 3 cases fail with \"not implemented\" before the node exists; treatment runs a nested child, crosses drain, cancel and stop and stamps causation; final review: two bridge hangs, fan-out ports and the refused start fixed)"
+  }
+}

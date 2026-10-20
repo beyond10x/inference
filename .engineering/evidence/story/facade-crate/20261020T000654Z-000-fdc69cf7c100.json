@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-20T00:06:54Z",
+  "actor": "human:timo",
+  "artifact": "story:facade-crate",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-facade --all-features --test session (VERIFIED, new behaviour: with command bodies stubbed 11 of 11 fail; treatment passes and the testkit answers every session scenario through the facade)"
+  }
+}

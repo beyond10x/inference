@@ -20,7 +20,10 @@
 //!
 //! Each transition returns the moved run and the event its command emits, or [`RunStateConflict`]
 //! carrying the state the run holds when the transition does not leave it; a refused move changes
-//! nothing. [`Run::fail`] records the [`FailureReason`] on the run.
+//! nothing. [`Run::fail`] records the [`FailureReason`] on the run. A run nested under the instance
+//! of a subgraph node, to run that node's child pipeline ([`Run::nest`],
+//! `inference.graph.NestRun`), records the instance as its parent ([`Run::parent`]); a run no
+//! `NestRun` names records none.
 //!
 //! A [`NodeInstance`] is described ([`NodeInstance::describe`]) for a run that is Preparing or
 //! Active, and is refused with [`RunNotRunning`] otherwise. It then moves by command through the
@@ -51,10 +54,7 @@ use serde::{Deserialize, Serialize};
 use inference_core::id::{NodeId, RunId};
 use inference_pipeline::{PipelineId, PlannedPipeline};
 
-inference_core::uuid_newtype!(
-    /// `inference.graph.NodeInstanceId`: identifies a [`NodeInstance`].
-    NodeInstanceId
-);
+pub use inference_pipeline::NodeInstanceId;
 
 /// `inference.graph.Run.State`: where a run stands. Serialized as written in ESS (`Created`,
 /// `Validating`).
@@ -173,6 +173,32 @@ pub struct RunCreated {
     pub run_id: RunId,
     pub pipeline_id: PipelineId,
 }
+
+/// `inference.graph.RunNested`: the run is the child run of the subgraph node instance it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunNested {
+    pub run_id: RunId,
+    pub parent: NodeInstanceId,
+}
+
+/// `inference.graph.NodeInstanceNotFound`: no node instance carries the identity the command
+/// named. Only a store holding the instances can decide it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeInstanceNotFound {
+    pub instance_id: NodeInstanceId,
+}
+
+impl fmt::Display for NodeInstanceNotFound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "no node instance carries the identity {}",
+            self.instance_id
+        )
+    }
+}
+
+impl Error for NodeInstanceNotFound {}
 
 /// `inference.graph.RunValidating`: the run is validating its plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +383,7 @@ pub struct Run {
     run_id: RunId,
     pipeline_id: PipelineId,
     failure: Option<FailureReason>,
+    parent: Option<NodeInstanceId>,
     state: RunState,
 }
 
@@ -378,6 +405,7 @@ impl Run {
             run_id,
             pipeline_id,
             failure: None,
+            parent: None,
             state: RunState::Created,
         };
         (
@@ -385,6 +413,23 @@ impl Run {
             RunCreated {
                 run_id,
                 pipeline_id,
+            },
+        )
+    }
+
+    /// Runs the `nested` outcome of `inference.graph.NestRun`: the run, in any state, as the child
+    /// run of the subgraph node instance `parent`, and its [`RunNested`]. Whether `parent` is the
+    /// instance of a subgraph node over the run's pipeline is the caller's to know.
+    #[must_use]
+    pub fn nest(&self, parent: NodeInstanceId) -> (Self, RunNested) {
+        (
+            Self {
+                parent: Some(parent),
+                ..self.clone()
+            },
+            RunNested {
+                run_id: self.run_id,
+                parent,
             },
         )
     }
@@ -537,6 +582,13 @@ impl Run {
     #[must_use]
     pub const fn pipeline_id(&self) -> PipelineId {
         self.pipeline_id
+    }
+
+    /// The subgraph node instance the run is the child run of ([`Run::nest`]); none for a run
+    /// no `NestRun` named.
+    #[must_use]
+    pub const fn parent(&self) -> Option<NodeInstanceId> {
+        self.parent
     }
 
     /// The reason the run failed with; none unless it is Failed.

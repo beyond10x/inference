@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:cascade-read-only-tool
 kind: story
-status: draft
+status: implemented
 title: The voice cascade executes a read-only tool and speaks the result
 summary: The cascade declaration executes one read-only tool through the barrier and speaks the result; the acceptance runs it mock-bound, the real-model run is a pinned demonstration.
 relations:
@@ -19,7 +19,11 @@ scope:
   path: crates/inference-runtime/tests/cascade_read_only_tool.rs
 - confidence: inferred
   path: crates/inference-testkit/src/llm.rs
-revision: 13
+revision: 17
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-19T22:56:35Z", actor: "human:timo", revision: 14, decided_on: {"recorded":{"review_outcome":3}}}
+- {from: "proposed", to: "active", at: "2026-10-19T22:56:35Z", actor: "human:timo", revision: 15, decided_on: {"recorded":{"review_outcome":3}}}
+- {from: "active", to: "implemented", at: "2026-10-20T00:06:55Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"test_result":1,"review_outcome":3,"verification":1}}}
 ---
 ## Context
 
@@ -73,19 +77,23 @@ This story also depends on `story:tts-contract`: the deterministic run below rea
 
 ## Demonstration with the real adapters
 
-A real model's output varies (1002), so this run is not reproducible and gates nothing. It is the
-same declaration bound to the local adapters of `epic:local-voice-cascade`, run as an ignored test
-beside that epic's A-04 test, with every field below written into this body before the first run
-and the result (date, pass or fail, transcript on failure) written after it.
+What the run needs before it can be written:
 
-| field | pinned to |
-|---|---|
-| model | the LLM adapter and checkpoint `epic:local-voice-cascade` selects once `decision-blocker:first-adapters` is decided: adapter crate, checkpoint name and digest |
-| sampling | greedy decoding (temperature 0, no nucleus or top-k sampling) and a fixed seed where the adapter exposes one |
-| prompt | the system instruction, the question's wording and the tool description, fixed by the test and quoted here |
-| audio | a recorded utterance of the question, the replay-fixture kind the testkit holds (244), added by the demonstration, not by the acceptance |
-| pass rule | one run with the settings above shows the observables of the acceptance: one Completed read-only call whose `basis_span_id` names the question's Committed span and the generation_id of the played segments, no call for the idempotent-write tool, played text containing the result |
-| failure | a run in which the model proposes no call fails the demonstration and is recorded with the transcript and the settings; it is not evidence against the framework, the deterministic run is |
+- The three adapters of epic:local-voice-cascade (recogniser, LLM with tool calling, synthesiser)
+  once decision-blocker:first-adapters is decided, each implementing the `inference-stt`,
+  `inference-llm` (feature `tools`) and `inference-tts` contracts.
+- Adapter-generic graph nodes. The deterministic run binds `SttNode`, `ModelNode` and `TtsNode` of
+  `inference-testkit`, which take the concrete mocks (`MockRecogniser`, `MockGenerator`,
+  `MockSynthesiser`). The same declaration (`planned(&Bindings)` in
+  `crates/inference-runtime/tests/cascade_read_only_tool.rs`) takes its three adapters from the
+  bindings, so the declaration is shared; the nodes are not yet generic over the contracts.
+- A way to offer the tool set through the contract: `inference_llm::GenerationRequest` carries
+  none today; the mock takes it through `MockGenerator::start_offering`. A real adapter needs the
+  offered set on the request (a contract change of `inference-llm`).
+- The commit-gate node and the acknowledging audio sink of the epic in place of the STT node's
+  turn forwarding and the TTS node's sink double, and the A-04 network test around the run.
+- A recorded utterance of the question (replay fixture, design 244) in place of the synthetic
+  tone, and the prompt, sampling and seed fields of the table filled before the first run.
 
 ## Domain relations
 

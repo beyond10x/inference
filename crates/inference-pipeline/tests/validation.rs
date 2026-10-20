@@ -557,7 +557,8 @@ fn the_findings_serialize_with_the_ess_names() {
             "incompatible_edge",
             "unbounded_cycle",
             "unreachable_mandatory_output",
-            "disallowed_data_flow"
+            "disallowed_data_flow",
+            "duplicate_exposure_name"
         ])
     );
     let port_id = PortId::from(Uuid::from_u128(1));

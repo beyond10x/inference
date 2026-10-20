@@ -17,16 +17,30 @@
 //! lifecycle transitions: the call is Started from its first attempt to its Completed or Failed.
 //! The node starts each call once: an authorized call delivered again is started as the node
 //! holds it, which the state machine refuses (`StartToolCall/outcome/wrong-state`); the refusal is
-//! recorded on the [`ExecutorHandle`], nothing is executed or sent, and the node goes on. The
-//! handle also records each ended call's [`ToolCallMeasure`], its latency, attempts and failure
-//! (1025).
+//! recorded on the [`ExecutorHandle`], nothing is executed or sent, and the node goes on. A node
+//! answering to a tool authority ([`ToolExecutorNode::answering_to`]) starts and ends each call on
+//! the record the authority keeps, so a call the authority rejected in the meantime, such as one
+//! of a superseded generation, is refused `wrong-state` the same way and dropped, not failed:
+//! Rejected is terminal. The handle also records each ended call's [`ToolCallMeasure`], its
+//! latency, attempts and failure (1025).
+//!
+//! Each call is executed under a cancellation signal of its own, a child of the node's
+//! ([`CancellationSignal::child`]). While a call runs the node keeps reading its input edge,
+//! holding what arrives for later in arrival order; an envelope of kind
+//! `inference.stream.GenerationSuperseded` or `inference.stream.GenerationCancelled` naming the
+//! running call's generation fires the call's signal (`docs/design/inference.md` 636, 852). The
+//! node then waits for the executor as before: the tool may finish or fail, and the call ends
+//! Completed or Failed with its event sent; a cancelled call is not attempted again. A call of an
+//! interrupted generation the node starts later is started with its signal fired.
 //!
 //! On the end of input, a control event of kind `stop`, it passes the end of input on and ends;
 //! once its input edge is closed it ends. Cancelled, it cancels the call it is executing, abandons
-//! it and sends nothing more, the answer its executor gives after the cancel among it. An
-//! executor that panics ends the node's exchange, and the node's drain fails naming the panic.
+//! it and sends nothing more, the answer its executor gives after the cancel among it: the check
+//! and each poll of a send are made under the lock the cancel is taken under, so a send is either
+//! complete before the cancel or not made. An executor that panics ends the node's exchange, and
+//! the node's drain fails naming the panic.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::future::{self, Future};
 use std::pin::pin;
@@ -37,15 +51,16 @@ use std::time::{Duration, Instant};
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope};
-use inference_core::id::{NodeId, RunId};
+use inference_core::id::{GenerationId, NodeId, RunId};
 use inference_tools::{
     CancellationSignal, RetryPolicy, SideEffectClass, ToolCall, ToolCallId, ToolCallState,
     ToolCallStateConflict, ToolExecutor, ToolFailure, ToolFailureKind, ToolId,
 };
 
+use super::tool_authority::{CallRecord, interrupts, send_unless};
 use super::{
-    Emitter, Next, Task, ToolCallEvent, ToolCallUpdate, ToolPayload, Watched, block_on, next,
-    one_in_one_out, unpark_waker,
+    AuthorityHandle, Emitter, Next, Task, ToolCallEvent, ToolCallUpdate, ToolPayload, Watched,
+    block_on, next, one_in_one_out, unpark_waker,
 };
 use crate::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
 
@@ -99,6 +114,12 @@ impl ExecutorHandle {
     pub fn measures(&self) -> Vec<ToolCallMeasure> {
         self.state.read(|state| state.measures.clone())
     }
+
+    /// The failure that ended the node's exchange, once one did.
+    #[must_use]
+    pub fn failure(&self) -> Option<String> {
+        self.state.read(|state| state.failure.clone())
+    }
 }
 
 impl fmt::Debug for Watched<ExecutorState> {
@@ -116,15 +137,29 @@ enum Within<T> {
 
 /// Polls `future` on this thread until it completes, `deadline` passes or `cancellation` is
 /// cancelled, whichever comes first; with no deadline, until it completes or is cancelled.
+#[cfg(test)]
 fn within<F: Future>(
     future: F,
     deadline: Option<Instant>,
     cancellation: &CancellationSignal,
 ) -> Within<F::Output> {
+    within_watching(future, deadline, cancellation, |_| {})
+}
+
+/// As [`within`], calling `watch` with this thread's context before each poll of `future`, so
+/// that what `watch` polls wakes the thread too.
+fn within_watching<F: Future>(
+    future: F,
+    deadline: Option<Instant>,
+    cancellation: &CancellationSignal,
+    mut watch: impl FnMut(&mut Context<'_>),
+) -> Within<F::Output> {
     let waker = unpark_waker();
     let mut future = pin!(future);
     loop {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut Context::from_waker(&waker)) {
+        let mut cx = Context::from_waker(&waker);
+        watch(&mut cx);
+        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
             return Within::Done(output);
         }
         if cancellation.is_cancelled() {
@@ -164,6 +199,7 @@ pub struct ToolExecutorNode<E: ?Sized> {
     retries: RetryPolicy,
     node_id: Option<NodeId>,
     state: Arc<Watched<ExecutorState>>,
+    calls: CallRecord,
     cancellation: CancellationSignal,
     task: Task,
 }
@@ -199,6 +235,7 @@ impl<E: ToolExecutor + ?Sized + 'static> ToolExecutorNode<E> {
             retries: RetryPolicy::default(),
             node_id: None,
             state: Arc::new(Watched::new(ExecutorState::default())),
+            calls: CallRecord::default(),
             cancellation: CancellationSignal::new(),
             task: Task::new(),
         }
@@ -209,6 +246,16 @@ impl<E: ToolExecutor + ?Sized + 'static> ToolExecutorNode<E> {
     #[must_use]
     pub const fn with_retries(mut self, policy: RetryPolicy) -> Self {
         self.retries = policy;
+        self
+    }
+
+    /// The node answering to the tool authority whose handle is `authority`: it starts and ends
+    /// each call on the record the authority keeps, so that a call the authority rejected before
+    /// it started is refused `wrong-state` and dropped, and the authority's record shows the
+    /// state each call reached.
+    #[must_use]
+    pub fn answering_to(mut self, authority: &AuthorityHandle) -> Self {
+        self.calls = authority.record();
         self
     }
 
@@ -235,20 +282,66 @@ struct Exchanging<P, E: ?Sized> {
     state: Arc<Watched<ExecutorState>>,
     cancellation: CancellationSignal,
     retries: RetryPolicy,
-    /// Every call the node started, as it last left it.
-    known: HashMap<ToolCallId, ToolCall>,
+    /// Every call the node started, as the last command left it, shared with the authority the
+    /// node answers to, if any.
+    calls: CallRecord,
     input: Box<dyn InputEndpoint<P>>,
+    /// What the input edge delivered while a call ran, in arrival order, `None` for its close.
+    ahead: VecDeque<Option<EventEnvelope<P>>>,
+    /// Whether the input edge delivered its end of input or is closed.
+    input_done: bool,
+    /// The generations an interruption named.
+    interrupted: HashSet<GenerationId>,
     output: Box<dyn OutputEndpoint<P>>,
     emitter: Emitter,
 }
 
-impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
-    /// Sends `envelope` on, unless the node was cancelled: it then sends nothing more.
-    fn send(&self, envelope: EventEnvelope<P>) -> Result<(), String> {
-        if self.cancellation.is_cancelled() {
-            return Ok(());
+/// Takes what `input` delivers until it has nothing ready: an interruption of `running`'s
+/// generation fires `signal`, every interruption is recorded in `interrupted`, and everything else
+/// is held in `ahead`, until the end of input or the close, after which nothing is read.
+fn read_ahead<P>(
+    input: &mut dyn InputEndpoint<P>,
+    ahead: &mut VecDeque<Option<EventEnvelope<P>>>,
+    done: &mut bool,
+    interrupted: &mut HashSet<GenerationId>,
+    running: GenerationId,
+    signal: &CancellationSignal,
+    cx: &mut Context<'_>,
+) {
+    while !*done {
+        let mut recv = input.recv();
+        match recv.as_mut().poll(cx) {
+            Poll::Pending => return,
+            Poll::Ready(None) => {
+                ahead.push_back(None);
+                *done = true;
+            }
+            Poll::Ready(Some(envelope)) if interrupts(&envelope.kind) => {
+                if let Some(generation_id) = envelope.generation_id {
+                    interrupted.insert(generation_id);
+                    if generation_id == running {
+                        signal.cancel();
+                    }
+                }
+            }
+            Poll::Ready(Some(envelope)) => {
+                *done = ControlKind::of(&envelope.kind) == Some(ControlKind::Stop);
+                ahead.push_back(Some(envelope));
+            }
         }
-        block_on(self.output.send(envelope)).map_err(|refused| refused.to_string())
+    }
+}
+
+impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
+    /// Sends `envelope` on, unless the node was cancelled: it then sends nothing more
+    /// ([`send_unless`]).
+    fn send(&self, envelope: EventEnvelope<P>) -> Result<(), String> {
+        block_on(send_unless(
+            &self.state,
+            |state| state.cancelled,
+            self.output.as_ref(),
+            envelope,
+        ))
     }
 
     /// The authorized call the content of an envelope carries, or a failure naming what arrived
@@ -269,9 +362,10 @@ impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
 
     /// The result or failure of executing the started `call`, with the number of attempts its
     /// executor made, or nothing once the node was cancelled. Every attempt runs under the one
-    /// deadline the call started with.
+    /// deadline the call started with and the call's own cancellation signal, which an
+    /// interruption of its generation read from the input meanwhile fires.
     fn execute(
-        &self,
+        &mut self,
         call: &ToolCall,
     ) -> Option<(Result<inference_tools::Json, ToolFailure>, u32)> {
         if !self.tools.contains(&call.tool_id()) {
@@ -285,23 +379,49 @@ impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
         let deadline = now.checked_add(self.deadline);
         let given = deadline.unwrap_or_else(|| latest(now, self.deadline));
         let limit = self.retries.attempts(call.side_effect());
+        let signal = self.cancellation.child();
+        if self.interrupted.contains(&call.generation_id()) {
+            signal.cancel();
+        }
+        let Self {
+            executor,
+            input,
+            ahead,
+            input_done,
+            interrupted,
+            cancellation,
+            retries,
+            deadline: span,
+            ..
+        } = self;
         let mut attempts = 0;
         loop {
             attempts += 1;
-            let execution = self.executor.execute(call, given, &self.cancellation);
-            let outcome = match within(execution, deadline, &self.cancellation) {
+            let execution = executor.execute(call, given, &signal);
+            let watch = |cx: &mut Context<'_>| {
+                read_ahead(
+                    input.as_mut(),
+                    ahead,
+                    input_done,
+                    interrupted,
+                    call.generation_id(),
+                    &signal,
+                    cx,
+                );
+            };
+            let outcome = match within_watching(execution, deadline, cancellation, watch) {
                 Within::Done(outcome) => outcome,
                 Within::Overran => Err(ToolFailure {
                     kind: ToolFailureKind::DeadlineExceeded,
-                    detail: format!("the call did not finish within {:?}", self.deadline),
+                    detail: format!("the call did not finish within {span:?}"),
                 }),
                 Within::Cancelled => return None,
             };
             let again = match &outcome {
                 Err(failure) => {
                     attempts < limit
-                        && self.retries.retries(failure)
-                        && !self.cancellation.is_cancelled()
+                        && retries.retries(failure)
+                        && !signal.is_cancelled()
                         && deadline.is_none_or(|deadline| Instant::now() < deadline)
                 }
                 Ok(_) => false,
@@ -313,21 +433,20 @@ impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
     }
 
     /// Starts, executes and completes or fails the call the envelope `envelope` authorized. A
-    /// call the node holds already is started as the node holds it, so the state machine refuses
-    /// it; the refusal is recorded and nothing is executed or sent.
+    /// call the record holds already is started as the record holds it, so the state machine
+    /// refuses it unless it is still Authorized; the refusal is recorded and nothing is executed
+    /// or sent.
     fn call(&mut self, envelope: EventEnvelope<P>) -> Result<(), String> {
         let delivered = Self::authorized(envelope.payload, &envelope.kind)?;
         let call_id = delivered.call_id();
-        let call = self.known.get(&call_id).cloned().unwrap_or(delivered);
-        let (started, event) = match call.start() {
+        let (started, event) = match self.calls.moved(delivered, ToolCall::start) {
             Ok(moved) => moved,
-            Err(refused) => {
+            Err((call, refused)) => {
                 let refusal = StartRefusal { call, refused };
                 self.state.update(|state| state.refusals.push(refusal));
                 return Ok(());
             }
         };
-        self.known.insert(call_id, started.clone());
         let begun = Instant::now();
         let update = ToolCallUpdate {
             call: started.clone(),
@@ -368,17 +487,23 @@ impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
                 }
             }
         };
-        self.known.insert(call_id, update.call.clone());
+        self.calls.put(update.call.clone());
         let envelope = self.emitter.update(update, cause);
         self.send(envelope)
     }
 
     fn exchange(&mut self) -> Result<(), String> {
         loop {
-            let state = Arc::clone(&self.state);
-            let next = block_on(next(self.input.as_mut(), &state, |state| {
-                state.cancelled.then_some(())
-            }));
+            let next = match self.ahead.pop_front() {
+                Some(Some(envelope)) => Next::Envelope(envelope),
+                Some(None) => Next::Closed,
+                None => {
+                    let state = Arc::clone(&self.state);
+                    block_on(next(self.input.as_mut(), &state, |state| {
+                        state.cancelled.then_some(())
+                    }))
+                }
+            };
             match next {
                 Next::Signal(()) | Next::Closed => return Ok(()),
                 Next::Envelope(envelope) => match ControlKind::of(&envelope.kind) {
@@ -387,6 +512,11 @@ impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
                         return self.send(end);
                     }
                     Some(_) => {}
+                    None if interrupts(&envelope.kind) => {
+                        if let Some(generation_id) = envelope.generation_id {
+                            self.interrupted.insert(generation_id);
+                        }
+                    }
                     None => self.call(envelope)?,
                 },
             }
@@ -425,8 +555,11 @@ where
                 state: Arc::clone(&self.state),
                 cancellation: self.cancellation.clone(),
                 retries: self.retries,
-                known: HashMap::new(),
+                calls: self.calls.clone(),
                 input: input.endpoint,
+                ahead: VecDeque::new(),
+                input_done: false,
+                interrupted: HashSet::new(),
                 emitter: Emitter::new(self.run_id, node_id, output.port_id.to_string()),
                 output: output.endpoint,
             };
@@ -443,8 +576,10 @@ where
     }
 
     fn cancel(&mut self) -> NodeFuture<'_, ()> {
-        self.cancellation.cancel();
+        // The cancel is recorded under the lock every send polls under before the call's signal
+        // fires, so the executor's answer to the signal finds it and is not sent.
         self.state.update(|state| state.cancelled = true);
+        self.cancellation.cancel();
         self.task.unpark();
         Box::pin(future::ready(()))
     }
