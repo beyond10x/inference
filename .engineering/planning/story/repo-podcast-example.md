@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:repo-podcast-example
 kind: story
-status: active
+status: implemented
 title: 'A podcast example: Claude distils a repository, two voice models discuss it over the speaker'
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-20T16:23:02Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-20T16:23:02Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-20T19:15:54Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
