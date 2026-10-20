@@ -58,6 +58,7 @@ pub mod llm;
 pub mod tts;
 
 /// The voice cascade on the mocks: topology B declared with exposed ends, its payload and the
-/// node implementations of one run, behind the `stt`, `llm`, `tts` and `run` features together.
+/// node implementations of one run, and the TTS node of a cascade whose sink acknowledges
+/// playback, behind the `stt`, `llm`, `tts` and `run` features together.
 #[cfg(all(feature = "stt", feature = "llm", feature = "tts", feature = "run"))]
 pub mod cascade;
