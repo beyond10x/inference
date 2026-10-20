@@ -7,9 +7,9 @@
 //! A field the specification does not declare is refused, at every level of the file.
 //!
 //! [`check`] holds the record's evidence to the adapter's claims: every capability the adapter
-//! claims has an evidence entry naming at least one conformance test, and no evidence entry names
-//! a capability the adapter does not claim. [`load`] runs it, so a record that loads is one that
-//! passed. Binding a node does not require a record.
+//! claims has an evidence entry naming at least one conformance test by a name that is not empty
+//! or blank, and no evidence entry names a capability the adapter does not claim. [`load`] runs
+//! it, so a record that loads is one that passed. Binding a node does not require a record.
 //!
 //! ```
 //! # use inference_testkit::model::capability::{self, RecordRefused};
@@ -168,7 +168,8 @@ pub fn parse(text: &str, adapter: &Adapter) -> Result<DeclareCapabilityRecord, R
 /// Holds the evidence of `record` to the claims of `adapter`: each claimed capability, in the
 /// order the adapter claims them, must have an evidence entry naming at least one test, and then
 /// each evidence entry, in the record's order, must name a claimed capability. An entry naming no
-/// test is no evidence.
+/// test is no evidence, and a test name that is empty or only blank names no test: nothing can be
+/// run under it.
 ///
 /// # Errors
 ///
@@ -178,10 +179,10 @@ pub fn parse(text: &str, adapter: &Adapter) -> Result<DeclareCapabilityRecord, R
 pub fn check(record: &DeclareCapabilityRecord, adapter: &Adapter) -> Result<(), RecordRefused> {
     let claims = adapter.capabilities();
     if let Some(unevidenced) = claims.iter().find(|claim| {
-        !record
-            .evidence
-            .iter()
-            .any(|evidence| evidence.capability == **claim && !evidence.tests.is_empty())
+        !record.evidence.iter().any(|evidence| {
+            evidence.capability == **claim
+                && evidence.tests.iter().any(|test| !test.trim().is_empty())
+        })
     }) {
         return Err(RecordRefused::Unevidenced(*unevidenced));
     }
