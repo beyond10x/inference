@@ -6,10 +6,24 @@
 //! protocol client: [`binding`] makes the anonymous, self-hosted Chat Completions binding of a
 //! [`Config`], `llm`'s `ChatClient` speaks the wire, and [`LlamaServer`] is the
 //! [`llm_core::Model`] that [`inference_llm::Generator`] runs generations on. The adapter claims
-//! [`Capability::OutputStreaming`] only ([`declare_adapter`]): each delta of the server reaches the
+//! [`Capability::OutputStreaming`] ([`declare_adapter`]): each delta of the server reaches the
 //! caller while the generation is Active, and input offered while it is Active is refused, as
 //! `inference-llm` refuses input for an adapter that does not claim
 //! [`Capability::ConcurrentInputOutput`].
+//!
+//! # Tool proposals
+//!
+//! With [`Config::tools`] on, the binding declares tools and a tool choice and the adapter claims
+//! [`Capability::ToolCalling`] beside output streaming. The server must then run with `--jinja`,
+//! the only mode in which it parses a chat template's calls into structured `tool_calls`. `llm`'s
+//! client sends the turn's tools and assembles the streamed fragments of each call; a call never
+//! reaches the caller as text. The caller takes it with
+//! [`GenerationHandle::take_proposal`](inference_llm::GenerationHandle::take_proposal), proposes
+//! it on the generation with the `inference.tools.ProposeToolCall` the `tools` feature's
+//! `tools::proposal` makes of it, and answers it with
+//! [`GenerationHandle::integrate`](inference_llm::GenerationHandle::integrate): the next turn runs
+//! on the same generation. A call whose name never arrived is refused by `llm` as a protocol
+//! error, and the generation is cancelled with it.
 //!
 //! # The runtime bridge
 //!
@@ -53,7 +67,9 @@
 //! ```
 //!
 //! `-np` is the number of parallel slots of the server, which [`Config::max_concurrency`]
-//! declares; `-c` is the context window, which [`Config::context_window`] declares.
+//! declares; `-c` is the context window, which [`Config::context_window`] declares. For tool
+//! proposals, add `--jinja` to the server's arguments and run the live tool test with
+//! `--features live,tools --test live_tools`.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -79,6 +95,9 @@ use llm_credentials::{ResolvedSecret, SecretError, SecretRef, SecretResolver};
 use llm_http::{HttpClient, Limits};
 
 pub use inference_core::model::Adapter;
+
+#[cfg(feature = "tools")]
+pub mod tools;
 
 /// The backend an adapter of this crate declares.
 pub const BACKEND: &str = "llama.cpp llama-server";
@@ -122,6 +141,9 @@ pub struct Config {
     /// The bounds of each request: time to the response headers, idle time between chunks and
     /// total time.
     pub limits: Limits,
+    /// Whether the server is offered tools: started with `--jinja`, it streams the calls of a
+    /// chat template it parses as structured `tool_calls`. Off by default.
+    pub tools: bool,
 }
 
 impl Config {
@@ -136,14 +158,18 @@ impl Config {
             max_output_tokens: 1024,
             max_concurrency: 1,
             limits: Limits::default(),
+            tools: false,
         }
     }
 
     /// The capabilities the binding declares: text, streamed, no input into a running turn, and
-    /// no optional setting.
+    /// no optional setting but tools and a tool choice when [`Config::tools`] is on.
     #[must_use]
     pub const fn capabilities(&self) -> Capabilities {
-        Capabilities::text(self.context_window, self.max_output_tokens)
+        let mut capabilities = Capabilities::text(self.context_window, self.max_output_tokens);
+        capabilities.tools = self.tools;
+        capabilities.tool_choice = self.tools;
+        capabilities
     }
 }
 
@@ -212,16 +238,21 @@ pub fn declare_model() -> DeclareModel {
 
 /// The `inference.model.DeclareAdapter` of a server configured by `config`, for the model
 /// `model_id`: backend [`BACKEND`], a local service on a local worker, claiming
-/// [`Capability::OutputStreaming`] only, with the server's slots as its maximum concurrency.
+/// [`Capability::OutputStreaming`], and [`Capability::ToolCalling`] beside it when
+/// [`Config::tools`] is on, with the server's slots as its maximum concurrency.
 #[must_use]
 pub fn declare_adapter(model_id: ModelId, config: &Config) -> DeclareAdapter {
+    let mut capabilities = vec![Capability::OutputStreaming];
+    if config.tools {
+        capabilities.push(Capability::ToolCalling);
+    }
     DeclareAdapter {
         model_id,
         backend: BACKEND.to_owned(),
         contract_revision: CONTRACT_REVISION.to_owned(),
         execution_form: ExecutionForm::LocalService,
         locality: Locality::LocalWorker,
-        capabilities: vec![Capability::OutputStreaming],
+        capabilities,
         max_concurrency: config.max_concurrency,
     }
 }

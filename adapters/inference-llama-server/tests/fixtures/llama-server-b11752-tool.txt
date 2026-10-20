@@ -1,0 +1,34 @@
+The three llama-server-b11752-tool-*.sse files are the response bodies of streamed Chat Completions
+requests with one declared tool. Two were recorded byte for byte on 2026-10-20 from a running
+llama-server; the third is derived from one of them by hand, as said below.
+
+- server: llama.cpp prebuilt release b11752 (build_info b11752-7879491cf), linux x64, CPU only,
+  started with `--alias qwen2.5-1.5b-instruct -c 4096 -np 1 -ngl 0 --jinja`;
+- checkpoint: qwen2.5-1.5b-instruct-q4_k_m.gguf, SHA-256
+  6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e, from
+  https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF at revision
+  91cad51170dc346986eccefdc2dd33a9da36ead9 (Apache-2.0);
+- the tool, in every request: `{"type":"function","function":{"name":"6f0c8a52-3b1d-4e7a-9c2f-5d8e1a4b7c30","description":"local_time","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}}}`,
+  the name being the tool's identifier as `inference_llm::tools::tool_name` offers it;
+- every request also carried `"stream":true,"stream_options":{"include_usage":true},"max_completion_tokens":128,"seed":7,"temperature":0`.
+
+llama-server-b11752-tool-call.sse (recorded): the request's only message was the user's
+`Say "Let me check." and then use the local_time tool for Berlin.`. The server streams the prose
+"Let me check.\n" as four content deltas, then one call: a first `tool_calls` fragment carrying
+index 0, the call's `id`, its `name` and the arguments' first byte, then six fragments carrying
+the rest of the arguments `{"city": "Berlin"}`, then finish reason `tool_calls`, a usage chunk and
+`[DONE]`.
+
+llama-server-b11752-tool-result.sse (recorded): the same request continued with the assistant
+message `{"role":"assistant","content":"Let me check.\n","tool_calls":[{"id":"drCuySC72O9i0Aup52hZORaYoK2S3CMa","type":"function","function":{"name":"6f0c8a52-3b1d-4e7a-9c2f-5d8e1a4b7c30","arguments":"{\"city\":\"Berlin\"}"}}]}`
+and the tool message `{"role":"tool","tool_call_id":"drCuySC72O9i0Aup52hZORaYoK2S3CMa","content":"{\"time\":\"14:05\"}"}`.
+The server answers "The current time in Berlin is 14:05." in content deltas and finishes with
+`stop`.
+
+llama-server-b11752-tool-nameless.sse (derived, not recorded): llama-server-b11752-tool-call.sse
+with the `"name":"6f0c8a52-3b1d-4e7a-9c2f-5d8e1a4b7c30",` member removed from the first
+`tool_calls` fragment and every other byte kept, so no fragment of the call names it. No server
+was seen to send this; it stands for a stream that loses the name.
+
+The loopback fixture of the tests replays each body with `Connection: close` instead of chunked
+encoding.
