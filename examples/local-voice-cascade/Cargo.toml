@@ -1,6 +1,6 @@
 [package]
 name = "local-voice-cascade"
-description = "Example: the local voice cascade, STT, LLM and TTS through commit gates to a speaker that acknowledges playback, on the testkit mocks or the local adapters and an audio host."
+description = "Example: the local voice cascade, STT, LLM and TTS through commit gates to a speaker that acknowledges playback, on the testkit mocks or the local adapters, its recogniser sherpa-onnx or whisper.cpp by configuration, and an audio host."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [features]
-local = ["dep:inference-llama-server", "dep:inference-sherpa-onnx"]
+local = ["dep:inference-llama-server", "dep:inference-sherpa-onnx", "dep:inference-whispercpp"]
 
 [dependencies]
 inference-audio = { path = "../../crates/inference-audio" }
@@ -22,6 +22,7 @@ inference-sherpa-onnx = { path = "../../adapters/inference-sherpa-onnx", feature
 inference-testkit = { path = "../../crates/inference-testkit", features = ["llm", "run", "stt", "tts"] }
 inference-text = { path = "../../crates/inference-text" }
 inference-tts = { path = "../../crates/inference-tts" }
+inference-whispercpp = { path = "../../adapters/inference-whispercpp", optional = true }
 
 [dev-dependencies]
 clap = { version = "4", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
