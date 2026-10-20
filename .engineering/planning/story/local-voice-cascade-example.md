@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:local-voice-cascade-example
 kind: story
-status: draft
+status: active
 title: 'The local voice cascade over the local STT, LLM and TTS adapters, microphone and speaker: an offline spoken answer'
 relations:
 - decomposes: epic:local-voice-cascade
@@ -12,7 +12,10 @@ relations:
 - depends_on: story:cascade-offline-profile
 - depends_on: story:sherpa-onnx-recogniser
 - depends_on: story:llama-server-adapter
-revision: 2
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T10:21:04Z", actor: "human:timo", revision: 4}
+- {from: "proposed", to: "active", at: "2026-10-20T10:21:04Z", actor: "human:timo", revision: 5}
 ---
 ## Context
 
@@ -113,3 +116,19 @@ with the three locations, ask a question and hear the answer, then speak over it
 Tools in the local cascade with real adapters (`story:cascade-read-only-tool` names its
 demonstration); the whisper.cpp swap (`epic:backend-replacement`); GPU execution; echo
 cancellation; moving the generic model nodes out of the testkit.
+
+## Amendment
+
+Amended on 2026-10-20 by the coordinating session, before the story started:
+
+- TTS: no local TTS adapter exists yet (`decision-blocker:sherpa-tts-gpl-phonemiser` is open). The
+  example binds the testkit's mock synthesiser behind the same binding the TTS adapter will take;
+  `talk` plays its output. The TTS checkpoint variable and the A-08/A-10 parts that need real
+  synthesis use the mock until the adapter lands, and the story that adds the adapter swaps the
+  binding.
+- STT input: the pinned sherpa-onnx checkpoint does not recognise the eSpeak fixture (it hears
+  "capitals"). The offline-answer test feeds the checkpoint's LibriSpeech clip `test_wavs/0.wav`
+  (read from `INFERENCE_SHERPA_ONNX_STT_DIR`) and asserts the committed span contains "nightfall";
+  the A-10 test feeds the same clip again while the first answer plays.
+- Acceptance otherwise unchanged: the ignored tests pass with the STT checkpoint and a loopback
+  `llama-server` named by their variables, and `task check` passes without them.
