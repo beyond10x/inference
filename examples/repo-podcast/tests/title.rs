@@ -1,4 +1,5 @@
-//! The project's name in the title, read from a git checkout's files alone.
+//! The project's name in the title, read from a git checkout's files alone. Each test removes
+//! the checkouts it made, so no nested `.git` stays behind in the target directory.
 
 use std::path::{Path, PathBuf};
 
@@ -45,6 +46,7 @@ fn a_worktree_is_named_by_its_origin_remote() {
     assert_eq!(project_name(&tree), "inference");
     assert_eq!(project_name(&tree.join("examples")), "inference/examples");
     assert_eq!(project_name(&main), "inference");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -57,6 +59,7 @@ fn a_checkout_without_origin_is_named_by_its_top_level_directory() {
     let plain = root.join("not-a-checkout");
     std::fs::create_dir_all(&plain).expect("made");
     assert_ne!(project_name(&plain), "");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
