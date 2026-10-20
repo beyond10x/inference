@@ -24,6 +24,11 @@
 //! The demo tool, [`time_tool`], is answered by call id with what the conversation's clock says.
 //! Once the response that proposed it ends, the conversation asks for the next response when the
 //! model takes responses from the caller; a model that creates every response continues itself.
+//!
+//! Usage: each usage the session reports, of a response or of a transcription, is a
+//! [`Note::Usage`]. A [`Tally`] fed with the notes holds the latest usage of each response and
+//! the totals, a count the provider does not report unknown rather than zero, and [`Prices`], a
+//! table the caller supplies, estimates their cost.
 
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
@@ -44,6 +49,10 @@ use inference_duplex::{
     SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechToolCallProposed, TurnDetection,
     TurnTuning,
 };
+
+mod usage;
+
+pub use usage::{Cost, Counts, Prices, PricesError, Reported, Tally, Totals, Usage};
 
 /// The name the demo tool is offered under.
 pub const TIME_TOOL: &str = "local_time";
@@ -182,6 +191,8 @@ pub enum Note {
     Closed,
     /// The session failed.
     Failed(SessionFailure),
+    /// The session reported the usage of a response or of a transcription.
+    Usage(Usage),
 }
 
 /// How a response ended.
@@ -435,11 +446,18 @@ impl<S: SpeechSessionHandle> Conversation<S> {
                 self.silence();
                 notes.push(Note::Failed(failed.failure));
             }
+            SessionEvent::ResponseUsageRecorded(recorded) => {
+                notes.push(Note::Usage(Usage::Response {
+                    response_id: recorded.response_id,
+                    usage: recorded.usage,
+                }));
+            }
+            SessionEvent::TranscriptionUsageRecorded(recorded) => {
+                notes.push(Note::Usage(Usage::Transcription(recorded.usage)));
+            }
             SessionEvent::InputAccepted(_)
             | SessionEvent::InputCommitted(_)
-            | SessionEvent::SpeechStopped(_)
-            | SessionEvent::TranscriptionUsageRecorded(_)
-            | SessionEvent::ResponseUsageRecorded(_) => {}
+            | SessionEvent::SpeechStopped(_) => {}
         }
     }
 
