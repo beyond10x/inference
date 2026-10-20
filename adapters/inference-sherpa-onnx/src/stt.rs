@@ -23,6 +23,11 @@
 //! stream for the next utterance; an utterance with no text emits nothing. At the end of input
 //! the stream is flushed and the last span committed.
 //!
+//! The recognition's usage record, the contract's [`TranscriptOutput::usage`], is its last event,
+//! delivered right after the last commit: the audio offered and one request, as the contract
+//! measures them, and `local_compute_ms` `measured`, the wall time each step spent passing frames
+//! to sherpa-onnx and decoding them, summed. sherpa-onnx reports no quantity of its own.
+//!
 //! The crate's `stt_conformance` tests hold the recogniser to adapter conformance against the
 //! pinned checkpoint: the claims observed, stream order and finalization, timestamps and format
 //! transformations, cancellation, concurrency and provenance. Its capability record on the
@@ -43,6 +48,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use sherpa_onnx::{
@@ -596,7 +602,11 @@ impl Utterance {
         match &mut self.span {
             None => match output.hypothesis(text.to_owned()) {
                 Ok(envelope) => {
-                    self.span = Some((envelope.payload.span_id(), text.to_owned()));
+                    let span_id = envelope
+                        .payload
+                        .span_id()
+                        .expect("a hypothesis is about its span");
+                    self.span = Some((span_id, text.to_owned()));
                     delivered.push_back(envelope);
                 }
                 Err(_) => self.stopped = true,
@@ -727,9 +737,10 @@ impl fmt::Debug for SherpaOnnxRecognition {
 }
 
 impl SherpaOnnxRecognition {
-    /// Takes the frames offered so far into the stream and decodes what is ready; at the end of
-    /// input flushes the stream and commits the last span. Once that has run, nothing more is
-    /// decoded.
+    /// Takes the frames offered so far into the stream and decodes what is ready, adding the time
+    /// that took to the recognition's local compute; at the end of input flushes the stream,
+    /// commits the last span and records the recognition's usage. Once that has run, nothing more
+    /// is decoded.
     fn advance(&mut self) {
         if self.finished {
             return;
@@ -737,6 +748,7 @@ impl SherpaOnnxRecognition {
         let Ok(frames) = self.output.take_input() else {
             return;
         };
+        let computing = Instant::now();
         for frame in &frames {
             let samples = mono_samples(frame);
             if samples.is_empty() {
@@ -772,8 +784,12 @@ impl SherpaOnnxRecognition {
             self.stream.input_finished();
         }
         self.decode();
+        self.output.add_local_compute(computing.elapsed());
         if ended {
             self.utterance.close(&mut self.output, &mut self.delivered);
+            if let Ok(usage) = self.output.usage() {
+                self.delivered.push_back(usage);
+            }
             self.finished = true;
         }
     }

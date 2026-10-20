@@ -188,8 +188,17 @@ fn every_event_of_a_recognition_is_enveloped_in_sequence_on_audio_frame_time() {
             .chain(recognition.after_end)
             .collect();
         let sequences: Vec<i64> = envelopes.iter().map(|envelope| envelope.sequence).collect();
-        let expected: Vec<i64> = (1..=6).collect();
-        assert_eq!(sequences, expected, "{configuration:?}: sequences from 1");
+        let expected: Vec<i64> = (1..=7).collect();
+        assert_eq!(
+            sequences, expected,
+            "{configuration:?}: sequences from 1, the script's six and the usage record"
+        );
+        assert!(
+            envelopes
+                .last()
+                .is_some_and(|envelope| matches!(envelope.payload, TranscriptEvent::Usage(_))),
+            "{configuration:?}: the usage record is the last event"
+        );
 
         let mut last_timestamp = 0;
         for envelope in &envelopes {
@@ -208,8 +217,8 @@ fn every_event_of_a_recognition_is_enveloped_in_sequence_on_audio_frame_time() {
         );
 
         let mut log = EventLog::new();
-        for envelope in envelopes {
-            log.record(stream_envelope(envelope))
+        for envelope in envelopes.into_iter().filter_map(stream_envelope) {
+            log.record(envelope)
                 .unwrap_or_else(|refusal| panic!("{configuration:?}: {refusal}"));
         }
 
@@ -298,8 +307,11 @@ fn a_stream_is_continued_by_reading_the_next_sequence_and_dropping_the_handle_fi
             .start(first_request.clone())
             .expect("a fresh recogniser runs nothing else");
         let mut log = EventLog::new();
-        for envelope in run_to_end(&mut first) {
-            log.record(stream_envelope(envelope))
+        for envelope in run_to_end(&mut first)
+            .into_iter()
+            .filter_map(stream_envelope)
+        {
+            log.record(envelope)
                 .unwrap_or_else(|refusal| panic!("{configuration:?}: {refusal}"));
         }
 
@@ -326,8 +338,8 @@ fn a_stream_is_continued_by_reading_the_next_sequence_and_dropping_the_handle_fi
             Some(next_sequence),
             "{configuration:?}: the second recognition continues the stream"
         );
-        for envelope in events {
-            log.record(stream_envelope(envelope))
+        for envelope in events.into_iter().filter_map(stream_envelope) {
+            log.record(envelope)
                 .unwrap_or_else(|refusal| panic!("{configuration:?}: {refusal}"));
         }
         assert_eq!(log.envelopes().len(), 12, "{configuration:?}");

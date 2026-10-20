@@ -20,12 +20,25 @@
 //!   The `TurnOpened` is passed on as well, on `turns_out`, before the turn's first transcript
 //!   event.
 //!
+//! Given a usage port ([`SttNode::with_usage`]), the output port its pipeline declares under the
+//! name `usage`, the node sends on the edge or exposure leaving it the usage record of each
+//! recognition whose input ended, as `inference-stt` delivers it after the recognition's last
+//! span event: an envelope of kind `inference.usage.UsageRecorded` on a stream of its own, whose
+//! record the node places on the run, itself as the node and the session its envelopes name,
+//! none. The record is neither recorded in the [`RunLog`], which holds `inference.stream` events,
+//! nor sent on `transcript`; the sequence it took on the transcript stream stays used, so the
+//! next recognition continues after it. The port convention is the model node's
+//! (`story:usage-llm`, design 684-688): the edge or exposure leaving it uses an overload policy
+//! that never drops (`pause` or `fail`). A node with no edge leaving its usage port, or given
+//! none, or on a payload that carries no usage ([`SttPayload::usage`]), sends no record. A
+//! recognition the node drops before its input ended, as a cancel does, yields none.
+//!
 //! Once both inputs ended, each by a control event of kind `stop` or by its edge closing, a
 //! recognition still running has its input ended and its events delivered, and the node passes
-//! the end of input on, on every output port. Cancelled, it sends nothing more: a cancel taken
-//! while a send waits for room ends the wait. Content other than a frame on `audio` fails the
-//! node; on `turns` every event but the two turn events is taken and ignored. The spans each
-//! recognition emitted are read from its handle ([`SttHandle::spans`]).
+//! the end of input on, on every output port, `usage` among them. Cancelled, it sends nothing
+//! more: a cancel taken while a send waits for room ends the wait. Content other than a frame on
+//! `audio` fails the node; on `turns` every event but the two turn events is taken and ignored.
+//! The spans each recognition emitted are read from its handle ([`SttHandle::spans`]).
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -33,10 +46,12 @@ use std::future;
 use std::pin::pin;
 use std::sync::{Arc, Weak};
 use std::task::Poll;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
-use inference_core::envelope::{ControlKind, EventEnvelope, Timebase};
-use inference_core::id::{NodeId, RunId, StreamId};
+use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
+use inference_core::id::{NodeId, RunId, SessionId, StreamId};
+use inference_core::usage::UsageRecorded;
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
 use inference_stt::inference_audio::AudioFrame;
 use inference_stt::{Recogniser, RecognitionHandle, RecognitionRequest, TranscriptEvent};
@@ -66,6 +81,13 @@ pub enum Heard {
 pub trait SttPayload: From<ControlKind> + Send + 'static {
     /// The payload carrying `event`.
     fn stream(event: StreamEvent) -> Self;
+
+    /// The payload carrying the usage record `recorded`; none, the default, for a payload that
+    /// carries no usage, on whose edges the node sends no record.
+    fn usage(recorded: UsageRecorded) -> Option<Self> {
+        let _ = recorded;
+        None
+    }
 
     /// What the payload carries.
     fn heard(self) -> Heard;
@@ -101,6 +123,7 @@ pub struct SttNode<R = MockRecogniser> {
     run_id: RunId,
     recogniser: R,
     ports: SttPorts,
+    usage: Option<PortId>,
     log: RunLog,
     node_id: Option<NodeId>,
     state: Arc<Watched<State>>,
@@ -113,6 +136,7 @@ impl<R: fmt::Debug> fmt::Debug for SttNode<R> {
             .field("run_id", &self.run_id)
             .field("recogniser", &self.recogniser)
             .field("ports", &self.ports)
+            .field("usage", &self.usage)
             .field("node_id", &self.node_id)
             .field("state", &self.state)
             .field("exchange", &self.exchange)
@@ -130,11 +154,21 @@ impl<R: Recogniser> SttNode<R> {
             run_id,
             recogniser,
             ports,
+            usage: None,
             log,
             node_id: None,
             state: Arc::new(Watched::new(State::default())),
             exchange: Exchange::new(),
         }
+    }
+
+    /// The same node given a usage port, `usage`, the output port its pipeline declares under the
+    /// name `usage`: once an edge or exposure leaves it, the node sends there the usage record of
+    /// each recognition whose input ended; see the module documentation.
+    #[must_use]
+    pub const fn with_usage(mut self, usage: PortId) -> Self {
+        self.usage = Some(usage);
+        self
     }
 
     /// The test's side of the node.
@@ -257,6 +291,57 @@ impl<P: SttPayload> Out<P> {
     }
 }
 
+/// The `usage` port of a started node given one: the edge or exposure leaving it, on which the
+/// node sends the usage record of each recognition as one stream of its own, numbered from 1.
+struct UsageOut<P> {
+    output: Box<dyn OutputEndpoint<P>>,
+    run_id: RunId,
+    producer: NodeId,
+    /// The session the node's envelopes name: none, as every envelope of the node names none.
+    session_id: Option<SessionId>,
+    port: String,
+    stream_id: StreamId,
+    sequence: i64,
+}
+
+impl<P: SttPayload> UsageOut<P> {
+    /// The envelope of `recorded`, placed on the run, node and session the envelope names; none
+    /// when the payload carries no usage.
+    fn envelope(&mut self, mut recorded: UsageRecorded) -> Option<EventEnvelope<P>> {
+        recorded.run_id = Some(self.run_id);
+        recorded.node_id = Some(self.producer);
+        recorded.session_id = self.session_id;
+        let payload = P::usage(recorded)?;
+        Some(self.next(UsageRecorded::KIND.to_owned(), payload))
+    }
+
+    /// The next envelope on the node's `usage` stream, stamped on the wall clock.
+    fn next(&mut self, kind: String, payload: P) -> EventEnvelope<P> {
+        self.sequence += 1;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_micros()).unwrap_or(i64::MAX)
+            });
+        EventEnvelope {
+            schema_version: 1,
+            event_id: EventId::generate(),
+            run_id: self.run_id,
+            session_id: self.session_id,
+            stream_id: self.stream_id,
+            sequence: self.sequence,
+            producer: self.producer,
+            port: self.port.clone(),
+            kind,
+            generation_id: None,
+            timestamp,
+            timebase: Timebase::WallTime,
+            causation_id: None,
+            payload,
+        }
+    }
+}
+
 /// What the exchange acts on next.
 enum Step<P> {
     Cancel,
@@ -284,6 +369,8 @@ struct Exchanging<P, R: Recogniser> {
     committed_text: Out<P>,
     turns_out: Out<P>,
     transcript: Option<Out<P>>,
+    /// The node's `usage` port, given one with an edge or exposure leaving it.
+    usage: Option<UsageOut<P>>,
     /// The node's transcript stream and the sequence its next event takes.
     stream_id: StreamId,
     next_sequence: i64,
@@ -321,11 +408,16 @@ impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
     }
 
     /// Records `envelope` in the run's log and sends it on `transcript`, if wired, and, a
-    /// committed span, on `committed_text`.
+    /// committed span, on `committed_text`; a usage record goes to the `usage` port instead.
     async fn deliver(&mut self, envelope: EventEnvelope<TranscriptEvent>) -> Result<(), String> {
         self.next_sequence = envelope.sequence + 1;
+        if let TranscriptEvent::Usage(recorded) = envelope.payload {
+            return self.send_usage(recorded).await;
+        }
         let committed = matches!(envelope.payload, TranscriptEvent::Committed(_));
-        let envelope = stream_envelope(envelope);
+        let Some(envelope) = stream_envelope(envelope) else {
+            return Ok(());
+        };
         self.log
             .record(envelope.clone())
             .map_err(|refusal| refusal.to_string())?;
@@ -352,6 +444,43 @@ impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
             self.committed_text.send(carried(&envelope)).await?;
         }
         Ok(())
+    }
+
+    /// Sends `recorded`, the usage of a recognition, on the `usage` port, placed on the run, the
+    /// node and the session of its envelope; a node with no edge leaving its `usage` port sends
+    /// nothing.
+    async fn send_usage(&mut self, recorded: UsageRecorded) -> Result<(), String> {
+        let Some(usage) = self.usage.as_mut() else {
+            return Ok(());
+        };
+        let Some(envelope) = usage.envelope(recorded) else {
+            return Ok(());
+        };
+        send_unless(
+            usage.output.as_ref(),
+            &self.state,
+            |state| state.cancel,
+            envelope,
+        )
+        .await
+    }
+
+    /// Passes the end of input on, on the `usage` port, given one with an edge leaving it.
+    async fn end_usage(&mut self) -> Result<(), String> {
+        let Some(usage) = self.usage.as_mut() else {
+            return Ok(());
+        };
+        let end = usage.next(
+            ControlKind::Stop.as_str().to_owned(),
+            P::from(ControlKind::Stop),
+        );
+        send_unless(
+            usage.output.as_ref(),
+            &self.state,
+            |state| state.cancel,
+            end,
+        )
+        .await
     }
 
     /// Delivers every event the running recognition has ready.
@@ -483,6 +612,7 @@ impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
                 if let Some(transcript) = self.transcript.as_mut() {
                     transcript.end().await?;
                 }
+                self.end_usage().await?;
                 return Ok(Ended::Completed);
             }
             match self.step(false).await {
@@ -505,15 +635,33 @@ impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
 
 impl<R: Recogniser + Clone> SttNode<R> {
     /// The node's exchange over `endpoints`, once it was handed one edge at each of its input
-    /// ports and at each of its output ports, `transcript` optional; otherwise the error saying
-    /// what it was handed.
+    /// ports and at each of its output ports, `transcript` optional and, given a usage port, an
+    /// edge leaving it optional too; otherwise the error saying what it was handed.
     fn exchanging<P: SttPayload>(
         &self,
-        endpoints: NodeEndpoints<P>,
+        mut endpoints: NodeEndpoints<P>,
     ) -> Result<Exchanging<P, R>, NodeError> {
         let node_id = self
             .node_id
             .ok_or_else(|| NodeError::new("the node was started before it was described"))?;
+        let usage = self
+            .usage
+            .and_then(|port| {
+                endpoints
+                    .outputs
+                    .iter()
+                    .position(|output| output.port_id == port)
+            })
+            .map(|at| endpoints.outputs.remove(at))
+            .map(|usage| UsageOut {
+                run_id: self.run_id,
+                producer: node_id,
+                session_id: None,
+                port: usage.port_id.to_string(),
+                output: usage.endpoint,
+                stream_id: StreamId::generate(),
+                sequence: 0,
+            });
         let ports = self.ports;
         let shape = || {
             NodeError::new(format!(
@@ -587,6 +735,7 @@ impl<R: Recogniser + Clone> SttNode<R> {
             committed_text,
             turns_out,
             transcript,
+            usage,
             stream_id: StreamId::generate(),
             next_sequence: 1,
             heard: VecDeque::new(),
