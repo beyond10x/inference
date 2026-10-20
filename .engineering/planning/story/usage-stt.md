@@ -2,14 +2,28 @@
 format: aep.planning-md/3
 id: story:usage-stt
 kind: story
-status: draft
+status: active
 title: 'Speech recognition usage: input audio and local compute per recognition, mock, sherpa-onnx and whisper.cpp'
 summary: The STT contract measures input audio per recognition; local adapters add measured compute; the STT node sends the record on its usage port.
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
 - depends_on: story:usage-llm
-revision: 1
+scope:
+- confidence: cited
+  path: adapters/inference-sherpa-onnx/src/stt.rs
+- confidence: cited
+  path: adapters/inference-whispercpp/src/stt.rs
+- confidence: cited
+  path: crates/inference-stt
+- confidence: cited
+  path: crates/inference-testkit/src/stt
+- confidence: cited
+  path: crates/inference-testkit/src/stt.rs
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T19:17:05Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-20T19:17:05Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 

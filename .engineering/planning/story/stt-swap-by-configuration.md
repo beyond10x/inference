@@ -2,15 +2,21 @@
 format: aep.planning-md/3
 id: story:stt-swap-by-configuration
 kind: story
-status: draft
+status: active
 title: Cascade selects sherpa-onnx or whisper.cpp STT by configuration, same tests, no crates/ change
 summary: A configuration value binds the cascade's stt node to either adapter; the same cascade test functions pass under both; effective capabilities drop incremental_input and output_streaming under whisper.cpp; git diff --stat of the swap lists no path under crates/ (A-05).
 relations:
 - decomposes: epic:backend-replacement
 - serves: vision:inference
 - depends_on: story:whispercpp-stt-adapter
-- depends_on: epic:local-voice-cascade
-revision: 1
+- depends_on: story:local-voice-cascade-example
+scope:
+- confidence: cited
+  path: examples/local-voice-cascade
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T19:17:05Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-20T19:17:05Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 

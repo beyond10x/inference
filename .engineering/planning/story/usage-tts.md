@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:usage-tts
 kind: story
-status: draft
+status: active
 title: 'Speech synthesis usage: characters, output audio and compute per synthesis, the mock and the backend-neutral TTS checks'
 summary: The TTS contract measures characters and output audio per utterance; the TTS checks every adapter runs require one usage record.
 relations:
@@ -10,7 +10,17 @@ relations:
 - serves: vision:inference
 - depends_on: story:usage-stt
 - depends_on: story:tts-adapter-conformance
-revision: 1
+scope:
+- confidence: cited
+  path: crates/inference-testkit/src/tts
+- confidence: cited
+  path: crates/inference-testkit/src/tts.rs
+- confidence: cited
+  path: crates/inference-tts
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-20T19:17:05Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-20T19:17:05Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 
