@@ -1,0 +1,45 @@
+[package]
+name = "inference-llama-server"
+description = "Local adapter of the inference framework for a llama.cpp llama-server: an output-streaming text generator over the llm Chat Completions client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+live = []
+tools = ["inference-llm/tools", "dep:inference-text", "dep:inference-tools"]
+
+[dependencies]
+inference-core = { path = "../../crates/inference-core" }
+inference-llm = { path = "../../crates/inference-llm" }
+inference-text = { path = "../../crates/inference-text", optional = true }
+inference-tools = { path = "../../crates/inference-tools", optional = true }
+llm-blocking = { package = "b10x-llm-blocking", git = "https://github.com/beyond10x/llm", tag = "0.8.0" }
+llm-chat = { package = "b10x-llm-chat", git = "https://github.com/beyond10x/llm", tag = "0.8.0" }
+llm-core.workspace = true
+llm-credentials = { package = "b10x-llm-credentials", git = "https://github.com/beyond10x/llm", tag = "0.8.0" }
+llm-http = { package = "b10x-llm-http", git = "https://github.com/beyond10x/llm", tag = "0.8.0" }
+
+[dev-dependencies]
+inference-pipeline = { path = "../../crates/inference-pipeline" }
+inference-runtime = { path = "../../crates/inference-runtime" }
+inference-testkit = { path = "../../crates/inference-testkit", features = ["llm", "run"] }
+inference-text = { path = "../../crates/inference-text" }
+serde_json.workspace = true
+
+[[test]]
+name = "live"
+required-features = ["live"]
+
+[[test]]
+name = "tool_proposals"
+required-features = ["tools"]
+
+[[test]]
+name = "live_tools"
+required-features = ["live", "tools"]
+
+[lints]
+workspace = true

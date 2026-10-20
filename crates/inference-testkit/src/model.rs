@@ -1,25 +1,40 @@
 //! The `inference.model` domain of `ess/domains/model.yaml`, held in memory.
 //!
-//! [`ModelDomain`] holds one store per entity, [`ModelStore`] and [`AdapterStore`], and records
-//! every event it emits in order. Its commands run the constructors of `inference-core`,
-//! [`Model::declare_as`] and [`Adapter::declare_as`], under identities the domain issues from a
-//! counter rendered as a Uuid in its own [`IDENTITY_SPACE`], so that two runs of the same
-//! commands report the same identities and no other domain issues one of them. What only a store
-//! can decide is decided here: `DeclareAdapter` refuses a `model_id` no declared model carries
-//! ([`ModelNotFound`], the `unknown-model` outcome) before anything else. The views
-//! `inference.model.Models` and `inference.model.Adapters` are [`ModelDomain::models_view`] and
-//! [`ModelDomain::adapters_view`]; both are `read_your_writes`, and since every row is read from
-//! the stores at the call, a write is visible to the next read.
+//! [`ModelDomain`] holds one store per entity, [`ModelStore`], [`AdapterStore`] and
+//! [`CapabilityRecordStore`], and records every event it emits in order. Its commands run the
+//! constructors of `inference-core`, [`Model::declare_as`], [`Adapter::declare_as`] and
+//! [`CapabilityRecord::declare_as`], under identities the domain issues from a counter rendered as
+//! a Uuid in its own [`IDENTITY_SPACE`], so that two runs of the same commands report the same
+//! identities and no other domain issues one of them. What only a store can decide is decided
+//! here: `DeclareAdapter` refuses a `model_id` no declared model carries ([`ModelNotFound`], the
+//! `unknown-model` outcome) before anything else, and `DeclareCapabilityRecord` refuses an
+//! `adapter_id` no declared adapter carries ([`AdapterNotFound`], `unknown-adapter`) and then a
+//! `model_id` no declared model carries (`unknown-model`). The views `inference.model.Models`,
+//! `inference.model.Adapters` and `inference.model.CapabilityRecords` are
+//! [`ModelDomain::models_view`], [`ModelDomain::adapters_view`] and
+//! [`ModelDomain::capability_records_view`]; all are `read_your_writes`, and since every row is
+//! read from the stores at the call, a write is visible to the next read.
+//!
+//! [`capability`] loads the record file an adapter crate commits and checks it against the
+//! adapter's claims.
 
 use std::error::Error;
 use std::fmt;
 
 use uuid::Uuid;
 
+use inference_core::inference_audio::AudioFormat;
 use inference_core::model::{
-    Adapter, AdapterDeclared, AdapterId, Capability, DeclareAdapter, DeclareModel, ExecutionForm,
-    Locality, Modality, Model, ModelDeclared, ModelId, ModelNotFound, NonPositiveConcurrency,
+    Adapter, AdapterDeclared, AdapterId, AdapterNotFound, Capability, CapabilityEvidence,
+    CapabilityRecord, CapabilityRecordDeclared, CapabilityRecordId, DeclareAdapter,
+    DeclareCapabilityRecord, DeclareModel, ExecutionForm, Locality, Modality, Model, ModelDeclared,
+    ModelId, ModelNotFound, NonPositiveConcurrency, ResourceProfile,
 };
+
+/// The capability record of an adapter, loaded from its JSON file and checked against the
+/// adapter's claims.
+#[path = "capability.rs"]
+pub mod capability;
 
 /// The store of `inference.model.Model`, in declaration order.
 #[derive(Debug, Clone, Default)]
@@ -83,6 +98,37 @@ impl AdapterStore {
     }
 }
 
+/// The store of `inference.model.CapabilityRecord`, in declaration order.
+#[derive(Debug, Clone, Default)]
+pub struct CapabilityRecordStore {
+    records: Vec<CapabilityRecord>,
+}
+
+impl CapabilityRecordStore {
+    /// The record carrying `capability_record_id`, if one was declared.
+    #[must_use]
+    pub fn get(&self, capability_record_id: CapabilityRecordId) -> Option<&CapabilityRecord> {
+        self.records
+            .iter()
+            .find(|record| record.capability_record_id() == capability_record_id)
+    }
+
+    /// Every declared record, in declaration order.
+    pub fn iter(&self) -> impl Iterator<Item = &CapabilityRecord> {
+        self.records.iter()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+}
+
 /// An event of `inference.model`, as the domain emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelEvent {
@@ -90,6 +136,8 @@ pub enum ModelEvent {
     ModelDeclared(ModelDeclared),
     /// `inference.model.AdapterDeclared`.
     AdapterDeclared(AdapterDeclared),
+    /// `inference.model.CapabilityRecordDeclared`.
+    CapabilityRecordDeclared(CapabilityRecordDeclared),
 }
 
 /// Why `inference.model.DeclareAdapter` declared nothing.
@@ -115,6 +163,33 @@ impl Error for DeclareAdapterError {
         match self {
             Self::UnknownModel(error) => Some(error),
             Self::Refused(error) => Some(error),
+        }
+    }
+}
+
+/// Why `inference.model.DeclareCapabilityRecord` declared nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclareCapabilityRecordError {
+    /// The `unknown-adapter` outcome: no declared adapter carries the `adapter_id` sent.
+    UnknownAdapter(AdapterNotFound),
+    /// The `unknown-model` outcome: no declared model carries the `model_id` sent.
+    UnknownModel(ModelNotFound),
+}
+
+impl fmt::Display for DeclareCapabilityRecordError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownAdapter(error) => fmt::Display::fmt(error, f),
+            Self::UnknownModel(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl Error for DeclareCapabilityRecordError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::UnknownAdapter(error) => Some(error),
+            Self::UnknownModel(error) => Some(error),
         }
     }
 }
@@ -147,15 +222,30 @@ pub struct AdaptersRow {
     pub max_concurrency: i64,
 }
 
+/// A row of the view `inference.model.CapabilityRecords`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityRecordsRow {
+    pub capability_record_id: CapabilityRecordId,
+    pub adapter_id: AdapterId,
+    pub model_id: ModelId,
+    pub hardware: String,
+    pub languages: Vec<String>,
+    pub audio_formats: Vec<AudioFormat>,
+    pub evidence: Vec<CapabilityEvidence>,
+    pub resource_profile: ResourceProfile,
+    pub adapter_revision: String,
+}
+
 /// The first eight hex digits of every identity the domain issues, which no other domain of the
 /// testkit issues under (see [`crate::policy::IDENTITY_SPACE`]).
 pub const IDENTITY_SPACE: u32 = 1;
 
-/// The `inference.model` domain in memory: its two entity stores and the events it emitted.
+/// The `inference.model` domain in memory: its three entity stores and the events it emitted.
 #[derive(Debug, Clone, Default)]
 pub struct ModelDomain {
     models: ModelStore,
     adapters: AdapterStore,
+    capability_records: CapabilityRecordStore,
     events: Vec<ModelEvent>,
     issued: u128,
 }
@@ -203,6 +293,41 @@ impl ModelDomain {
         Ok(event)
     }
 
+    /// Runs `inference.model.DeclareCapabilityRecord`: stores the record
+    /// [`CapabilityRecord::declare_as`] returns and records its [`CapabilityRecordDeclared`].
+    /// Neither that the model is the adapter's nor that the adapter has no record for the
+    /// hardware target yet is checked, as `ess/domains/model.yaml` declares.
+    ///
+    /// # Errors
+    ///
+    /// [`DeclareCapabilityRecordError::UnknownAdapter`] when no stored adapter carries
+    /// `adapter_id`, decided first; otherwise [`DeclareCapabilityRecordError::UnknownModel`] when
+    /// no stored model carries `model_id`. Either way nothing is stored, no event is recorded and
+    /// no identity is taken.
+    pub fn declare_capability_record(
+        &mut self,
+        input: DeclareCapabilityRecord,
+    ) -> Result<CapabilityRecordDeclared, DeclareCapabilityRecordError> {
+        if self.adapters.get(input.adapter_id).is_none() {
+            return Err(DeclareCapabilityRecordError::UnknownAdapter(
+                AdapterNotFound {
+                    adapter_id: input.adapter_id,
+                },
+            ));
+        }
+        if self.models.get(input.model_id).is_none() {
+            return Err(DeclareCapabilityRecordError::UnknownModel(ModelNotFound {
+                model_id: input.model_id,
+            }));
+        }
+        let capability_record_id = CapabilityRecordId::from(self.issue());
+        let (record, event) = CapabilityRecord::declare_as(capability_record_id, input);
+        self.capability_records.records.push(record);
+        self.events
+            .push(ModelEvent::CapabilityRecordDeclared(event.clone()));
+        Ok(event)
+    }
+
     /// The next identity of the counter; a refused command takes none.
     fn issue(&mut self) -> Uuid {
         self.issued += 1;
@@ -228,6 +353,12 @@ impl ModelDomain {
     #[must_use]
     pub const fn adapters(&self) -> &AdapterStore {
         &self.adapters
+    }
+
+    /// The declared capability records.
+    #[must_use]
+    pub const fn capability_records(&self) -> &CapabilityRecordStore {
+        &self.capability_records
     }
 
     /// Every event emitted, in the order it was emitted.
@@ -273,16 +404,40 @@ impl ModelDomain {
             })
             .collect()
     }
+
+    /// The view `inference.model.CapabilityRecords`: one row per declared record, in declaration
+    /// order.
+    #[must_use]
+    pub fn capability_records_view(&self) -> Vec<CapabilityRecordsRow> {
+        self.capability_records
+            .iter()
+            .map(|record| CapabilityRecordsRow {
+                capability_record_id: record.capability_record_id(),
+                adapter_id: record.adapter_id(),
+                model_id: record.model_id(),
+                hardware: record.hardware().to_owned(),
+                languages: record.languages().to_vec(),
+                audio_formats: record.audio_formats().to_vec(),
+                evidence: record.evidence().to_vec(),
+                resource_profile: record.resource_profile(),
+                adapter_revision: record.adapter_revision().to_owned(),
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use inference_core::model::{
-        Capability, DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality, ModelId,
-        ModelNotFound, NonPositiveConcurrency,
+        AdapterId, AdapterNotFound, Capability, CapabilityEvidence, DeclareAdapter,
+        DeclareCapabilityRecord, DeclareModel, ExecutionForm, Locality, Modality, ModelId,
+        ModelNotFound, NonPositiveConcurrency, ResourceProfile,
     };
 
-    use super::{AdaptersRow, DeclareAdapterError, ModelDomain, ModelEvent, ModelsRow};
+    use super::{
+        AdaptersRow, CapabilityRecordsRow, DeclareAdapterError, DeclareCapabilityRecordError,
+        ModelDomain, ModelEvent, ModelsRow,
+    };
 
     fn declare_model() -> DeclareModel {
         DeclareModel {
@@ -423,6 +578,142 @@ mod tests {
                 model_id: unknown
             }))
         );
+    }
+
+    fn declare_record(adapter_id: AdapterId, model_id: ModelId) -> DeclareCapabilityRecord {
+        DeclareCapabilityRecord {
+            adapter_id,
+            model_id,
+            hardware: "hardware".to_owned(),
+            languages: vec!["en".to_owned()],
+            audio_formats: Vec::new(),
+            evidence: vec![CapabilityEvidence {
+                capability: Capability::OutputStreaming,
+                tests: vec!["test".to_owned()],
+            }],
+            resource_profile: ResourceProfile {
+                peak_resident_memory_mib: 1,
+                load_time_ms: 2,
+                cpu_real_time_factor_milli: Some(3),
+                gpu_memory_mib: None,
+            },
+            adapter_revision: "adapter_revision".to_owned(),
+        }
+    }
+
+    fn unknown_adapter_id() -> AdapterId {
+        serde_json::from_value(serde_json::json!("00000000-0000-4000-8000-eaaf599fc0a2"))
+            .expect("a canonical Uuid")
+    }
+
+    #[test]
+    fn a_record_of_a_declared_adapter_and_model_is_stored_recorded_and_in_its_view() {
+        let mut domain = ModelDomain::new();
+        let model = domain.declare_model(declare_model());
+        let adapter = domain
+            .declare_adapter(declare_adapter(model.model_id, 1))
+            .expect("declared");
+        let input = declare_record(adapter.adapter_id, model.model_id);
+
+        let event = domain
+            .declare_capability_record(input.clone())
+            .expect("the adapter and the model are declared");
+
+        assert_eq!(
+            event.capability_record_id.to_string(),
+            "00000001-0000-4000-8000-000000000003",
+            "the record's identity is the domain counter's next"
+        );
+        assert_eq!(event.adapter_id, adapter.adapter_id);
+        assert_eq!(event.model_id, model.model_id);
+        assert_eq!(event.hardware, "hardware");
+        assert!(
+            domain
+                .capability_records()
+                .get(event.capability_record_id)
+                .is_some()
+        );
+        assert_eq!(domain.capability_records().len(), 1);
+        assert_eq!(
+            domain.events().last(),
+            Some(&ModelEvent::CapabilityRecordDeclared(event.clone()))
+        );
+        assert_eq!(
+            domain.capability_records_view(),
+            [CapabilityRecordsRow {
+                capability_record_id: event.capability_record_id,
+                adapter_id: input.adapter_id,
+                model_id: input.model_id,
+                hardware: input.hardware,
+                languages: input.languages,
+                audio_formats: input.audio_formats,
+                evidence: input.evidence,
+                resource_profile: input.resource_profile,
+                adapter_revision: input.adapter_revision,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_record_of_an_undeclared_adapter_is_refused_before_its_model() {
+        let mut domain = ModelDomain::new();
+        let unknown_adapter = unknown_adapter_id();
+        let unknown_model = unknown_model_id();
+
+        assert_eq!(
+            domain.declare_capability_record(declare_record(unknown_adapter, unknown_model)),
+            Err(DeclareCapabilityRecordError::UnknownAdapter(
+                AdapterNotFound {
+                    adapter_id: unknown_adapter
+                }
+            ))
+        );
+        assert!(domain.capability_records().is_empty());
+        assert!(domain.capability_records_view().is_empty());
+        assert!(domain.events().is_empty());
+    }
+
+    #[test]
+    fn a_record_of_an_undeclared_model_is_refused_and_takes_no_identity() {
+        let mut domain = ModelDomain::new();
+        let model = domain.declare_model(declare_model());
+        let adapter = domain
+            .declare_adapter(declare_adapter(model.model_id, 1))
+            .expect("declared");
+        let unknown = unknown_model_id();
+
+        assert_eq!(
+            domain.declare_capability_record(declare_record(adapter.adapter_id, unknown)),
+            Err(DeclareCapabilityRecordError::UnknownModel(ModelNotFound {
+                model_id: unknown
+            }))
+        );
+        assert!(domain.capability_records().is_empty());
+        assert_eq!(domain.events().len(), 2);
+
+        let declared = domain
+            .declare_capability_record(declare_record(adapter.adapter_id, model.model_id))
+            .expect("declared");
+        assert_eq!(
+            declared.capability_record_id.to_string(),
+            "00000001-0000-4000-8000-000000000003",
+            "the refusal took no identity"
+        );
+    }
+
+    #[test]
+    fn a_record_may_name_a_model_other_than_its_adapters_as_the_specification_declares() {
+        let mut domain = ModelDomain::new();
+        let first = domain.declare_model(declare_model());
+        let second = domain.declare_model(declare_model());
+        let adapter = domain
+            .declare_adapter(declare_adapter(second.model_id, 1))
+            .expect("declared");
+
+        let event = domain
+            .declare_capability_record(declare_record(adapter.adapter_id, first.model_id))
+            .expect("both identities are declared");
+        assert_eq!(event.model_id, first.model_id);
     }
 
     #[test]

@@ -336,7 +336,7 @@ impl NativeSpeechModel for OpenAiRealtime {
 }
 
 /// The contract's failure of a client error.
-fn failure(error: &RealtimeError) -> SessionFailure {
+pub(crate) fn failure(error: &RealtimeError) -> SessionFailure {
     let kind = match error {
         RealtimeError::Connect(refused) if refused.is_refusal() => SessionFailureKind::Rejected,
         RealtimeError::Closed { .. } | RealtimeError::Transport(_) | RealtimeError::Connect(_) => {

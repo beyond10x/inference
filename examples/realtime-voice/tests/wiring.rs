@@ -15,7 +15,9 @@ use inference_duplex::{
     SpeechToolCallState,
 };
 use inference_testkit::duplex::mock::{AUDIO_FRAMES, MockSpeechModel, Reply, ScriptedTurn};
-use realtime_voice::{Conversation, Ending, Note, Options, TIME_TOOL, nova_config, openai_config};
+use realtime_voice::{
+    Conversation, Ending, Note, Options, TIME_TOOL, nova_config, openai_config, openai_live_config,
+};
 use serde_json::json;
 
 /// Interleaved stereo samples of 10 ms at 48 kHz.
@@ -495,5 +497,23 @@ fn a_session_the_model_refuses_opens_nothing() {
     assert!(
         !host.input_open() && !host.output_open(),
         "the devices are released"
+    );
+}
+
+#[test]
+fn the_openai_live_configuration_is_one_gpt_live_takes() {
+    let config = openai_live_config();
+    assert_eq!(
+        inference_openai::live_duplex::capabilities().admit(&config),
+        Ok(())
+    );
+    let model = inference_openai::live_duplex::OpenAiLive::hosted(
+        Box::new(inference_openai::EnvironmentSource::openai()),
+        inference_openai::OPENAI_KEY_NAME,
+    );
+    let start = model.client_config(&config).expect("GPT-Live takes it");
+    assert_eq!(
+        start.instructions.as_deref(),
+        Some(realtime_voice::INSTRUCTIONS)
     );
 }

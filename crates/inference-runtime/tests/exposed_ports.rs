@@ -5,7 +5,9 @@
 //! the reply from the egress until the node's end is gone; the run loop drains on that `stop` as
 //! it does on a source node's, and completes. Every node instance is then Stopped and every queue
 //! of the run, the exposures' among them, is dropped. A run cancelled while its caller never took
-//! its ends drops those ends with the run.
+//! its ends drops those ends with the run. A model node given a `usage` port exposed as an egress
+//! (`story:usage-llm`) delivers there the usage record of each of its turns, placed on the run and
+//! the node.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -20,9 +22,11 @@ use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::model::{Adapter, AdapterId, Capability, ModelId};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
+use inference_core::usage::{Quantity, QuantityKind, UsageRecorded};
+use inference_llm::llm_core::Usage;
 use inference_pipeline::{
     Catalog, Declaration, Delivery, Essentiality, InteractionMode, Node, NodeRole, OverloadPolicy,
-    PipelineSpec, PlannedPipeline, PortTraits, modality,
+    PipelineSpec, PlannedPipeline, PortId, PortTraits, modality,
 };
 use inference_runtime::RunController;
 use inference_runtime::run::{NodeInstanceState, RunState};
@@ -68,6 +72,7 @@ impl Catalog for Fixture {
 
 const INGRESS: &str = "user text";
 const EGRESS: &str = "reply";
+const USAGE_EGRESS: &str = "usage";
 
 fn reply(input: &str) -> String {
     format!("s{input}")
@@ -87,7 +92,7 @@ fn planned(generator: &MockGenerator) -> (Declaration, PlannedPipeline, NodeId) 
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
-        admitted: Vec::new(),
+        admitted: vec![inference_core::model::Locality::SameProcess],
     })
     .expect("a row of the table");
     let profile_id = profile.profile_id();
@@ -302,6 +307,199 @@ fn the_model_runs_between_an_exposed_ingress_and_egress_to_completed_and_every_q
             queue.exposure_id()
         );
     }
+}
+
+/// The model node alone as [`planned`] declares it, with its `usage` output port exposed as the
+/// egress [`USAGE_EGRESS`], pausing on overload so that no record is dropped; the identity of
+/// the model node and of its `usage` port.
+fn planned_with_usage(generator: &MockGenerator) -> (Declaration, PlannedPipeline, NodeId, PortId) {
+    let (profile, _) = DeploymentProfile::declare(DeclareProfile {
+        kind: ProfileKind::OfflineStrict,
+        egress: Egress::Denied,
+        admitted: vec![inference_core::model::Locality::SameProcess],
+    })
+    .expect("a row of the table");
+    let profile_id = profile.profile_id();
+    let adapter_id = generator.adapter().adapter_id();
+    let catalog = Fixture {
+        profile,
+        adapter: generator.adapter().clone(),
+    };
+    let text = PortTraits {
+        essentiality: Essentiality::Essential,
+        delivery: Delivery::Reliable,
+        incremental: true,
+        end_marker_required: true,
+        provisional_allowed: false,
+    };
+    let usage_traits = PortTraits {
+        essentiality: Essentiality::Essential,
+        delivery: Delivery::Reliable,
+        incremental: false,
+        end_marker_required: true,
+        provisional_allowed: false,
+    };
+    let spec = PipelineSpec {
+        name: "exposed model with usage".to_owned(),
+        schema_revision: "1".to_owned(),
+        mode: InteractionMode::TurnBased,
+        required_capabilities: vec![Capability::OutputStreaming],
+    };
+    let mut declaration = Declaration::new();
+    let (pipeline_id, (model, usage)) = declaration
+        .build(&catalog, profile_id, spec, |pipeline| {
+            let model = pipeline.node("model", NodeRole::Model, vec![Capability::OutputStreaming]);
+            let prompt = pipeline.input::<modality::Text>(&model, "prompt", text);
+            let answer = pipeline.output::<modality::Text>(&model, "answer", text);
+            let usage = pipeline.output::<modality::Structured>(&model, "usage", usage_traits);
+            pipeline.expose(
+                &prompt,
+                INGRESS,
+                NonZeroUsize::new(4).expect("4"),
+                OverloadPolicy::Pause,
+            );
+            pipeline.expose(
+                &answer,
+                EGRESS,
+                NonZeroUsize::new(16).expect("16"),
+                OverloadPolicy::Fail,
+            );
+            pipeline.expose(
+                &usage,
+                USAGE_EGRESS,
+                NonZeroUsize::new(16).expect("16"),
+                OverloadPolicy::Pause,
+            );
+            pipeline
+                .bind(&model, adapter_id)
+                .expect("the catalog holds the mock LLM's adapter");
+            (model.id(), usage.id())
+        })
+        .expect("the profile is declared");
+    let validated = declaration
+        .validate(pipeline_id)
+        .expect("a model between an ingress and two egresses is valid");
+    let planned = declaration
+        .plan(validated, &catalog)
+        .expect("the model is bound to an adapter that streams output");
+    (declaration, planned, model, usage)
+}
+
+#[test]
+fn the_usage_of_each_turn_reaches_the_exposed_usage_egress_with_run_and_node_set() {
+    let reported = Usage {
+        input_tokens: Some(7),
+        output_tokens: Some(2),
+        ..Usage::default()
+    };
+    let generator = generator().reporting([Some(reported), None]);
+    let (declaration, planned, model, usage_port) = planned_with_usage(&generator);
+    let run_id = RunId::generate();
+    let mut node = Some(
+        ModelNode::new(run_id, generator.clone(), reply, RunLog::new()).with_usage(usage_port),
+    );
+    let mut controller = RunController::create_as(
+        run_id,
+        &planned,
+        &declaration,
+        HashMap::<GenerationId, i64>::new(),
+        |_: &Node| Box::new(node.take().expect("the pipeline has one node")),
+    )
+    .expect("the pipeline is planned and no exposure cancels or supersedes");
+    controller.validate().expect("a Created run validates");
+    block_on(controller.prepare()).expect("the model prepares");
+    let mut ends = controller.exposed();
+    let ingress = ends.ingress(INGRESS).expect("the ingress");
+    let mut egress = ends.egress(EGRESS).expect("the text egress");
+    let mut usage = ends.egress(USAGE_EGRESS).expect("the usage egress");
+    block_on(controller.activate()).expect("the model starts with the inner ends");
+    let drive = thread::spawn(move || {
+        let result = block_on(controller.drive());
+        (controller, result)
+    });
+
+    let mut application = Application {
+        run_id,
+        producer: NodeId::generate(),
+        stream_id: StreamId::generate(),
+        sequence: 0,
+    };
+    for input in ["1", "2"] {
+        block_on(ingress.send(application.text(input))).expect("the ingress takes the text");
+    }
+    block_on(ingress.send(application.stop())).expect("the ingress takes the end of input");
+    while block_on(egress.recv()).is_some() {}
+    let mut received = Vec::new();
+    while let Some(envelope) = block_on(usage.recv()) {
+        received.push(envelope);
+    }
+    drop((ingress, egress, usage, ends));
+    let (controller, result) = drive.join().expect("the drive loop does not panic");
+    result.expect("the drive loop ends the run");
+    assert_eq!(controller.run().state(), RunState::Completed);
+
+    assert!(
+        received
+            .last()
+            .is_some_and(|envelope| envelope.kind == ControlKind::Stop.as_str()),
+        "the end of input reaches the usage egress last: {received:?}"
+    );
+    let records: Vec<UsageRecorded> = received
+        .iter()
+        .filter_map(|envelope| match &envelope.payload {
+            PipelinePayload::Usage(recorded) => {
+                assert_eq!(envelope.kind, UsageRecorded::KIND);
+                assert_eq!(envelope.run_id, run_id);
+                assert_eq!(envelope.producer, model);
+                Some(recorded.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let [first, second] = records.as_slice() else {
+        panic!("one record per turn on the usage egress: {received:?}")
+    };
+    for record in [first, second] {
+        assert_eq!(
+            record.run_id,
+            Some(run_id),
+            "the node places the record on its run"
+        );
+        assert_eq!(record.node_id, Some(model), "the node names itself");
+        assert_eq!(
+            record.session_id, None,
+            "the run's envelopes name no session"
+        );
+        assert_eq!(record.adapter_id, generator.adapter().adapter_id());
+        assert_eq!(record.model_id, generator.adapter().model_id());
+    }
+    let tokens = |record: &UsageRecorded| -> Vec<Quantity> {
+        record
+            .quantities
+            .iter()
+            .filter(|quantity| {
+                matches!(
+                    quantity.kind(),
+                    QuantityKind::InputTextTokens | QuantityKind::OutputTextTokens
+                )
+            })
+            .copied()
+            .collect()
+    };
+    assert_eq!(
+        tokens(first),
+        [
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 7),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 2),
+        ]
+    );
+    assert_eq!(
+        tokens(second),
+        [
+            Quantity::unknown(QuantityKind::InputTextTokens),
+            Quantity::unknown(QuantityKind::OutputTextTokens),
+        ]
+    );
 }
 
 #[test]

@@ -1,0 +1,167 @@
+//! The live cancellation test against a running `llama-server`. It is ignored and needs the
+//! `live` feature:
+//!
+//! ```text
+//! INFERENCE_LLAMA_SERVER_URL=http://127.0.0.1:8080/v1 \
+//! INFERENCE_LLAMA_SERVER_MODEL=qwen2.5-1.5b-instruct \
+//!     cargo test -p inference-llama-server --features live --test live_cancellation \
+//!     -- --ignored --nocapture
+//! ```
+//!
+//! Run while either variable is unset, the test returns at once and prints that it skipped.
+//! Against a server it starts a long generation, cancels it after the first delta and asserts
+//! `GenerationCancelled` with no later delta: delivery cancellation. Then it reads the slot state
+//! of the server (`GET /slots` at the server root) until no slot is processing or 10 s pass, and
+//! prints which happened: whether the server stopped computing. A server that does not expose
+//! its slot state is reported as "computation cancellation not observed", not as a failure.
+
+#![cfg(feature = "live")]
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use inference_core::generation::GenerationState;
+use inference_core::id::{NodeId, RunId};
+use inference_core::model::{Adapter, Model};
+use inference_llama_server::{Config, LlamaServer, declare_adapter, declare_model};
+use inference_llm::llm_core::{Item, TurnRequest};
+use inference_llm::{GenerationEvent, GenerationRequest, Generator};
+
+const URL_VARIABLE: &str = "INFERENCE_LLAMA_SERVER_URL";
+const MODEL_VARIABLE: &str = "INFERENCE_LLAMA_SERVER_MODEL";
+
+/// How long the test reads the slot state after the cancel.
+const SETTLE: Duration = Duration::from_secs(10);
+
+fn variable(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// Whether some slot of the server is processing, read from `/slots` over plain HTTP at the host
+/// and port of `base_url`; why it could not be read otherwise.
+fn processing(base_url: &str) -> Result<bool, String> {
+    let authority = base_url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split('/').next())
+        .ok_or("the base URL is not plain HTTP")?;
+    let mut socket = TcpStream::connect(authority).map_err(|error| error.to_string())?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| error.to_string())?;
+    write!(
+        socket,
+        "GET /slots HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|error| error.to_string())?;
+    let mut response = String::new();
+    socket
+        .read_to_string(&mut response)
+        .map_err(|error| error.to_string())?;
+    let (head, body) = response.split_once("\r\n\r\n").ok_or("no HTTP response")?;
+    let status = head.lines().next().unwrap_or_default();
+    if !status.contains(" 200 ") {
+        return Err(format!("/slots answered `{status}`"));
+    }
+    let slots: Vec<serde_json::Value> =
+        serde_json::from_str(body).map_err(|_| "/slots is not a list of slots".to_owned())?;
+    let mut any = false;
+    for slot in &slots {
+        any |= slot
+            .get("is_processing")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or("a slot names no is_processing")?;
+    }
+    Ok(any)
+}
+
+#[test]
+#[ignore = "needs a running llama-server named by INFERENCE_LLAMA_SERVER_URL and INFERENCE_LLAMA_SERVER_MODEL"]
+fn a_running_server_cancelled_after_the_first_delta_delivers_nothing_more() {
+    let (Some(base_url), Some(served_model)) = (variable(URL_VARIABLE), variable(MODEL_VARIABLE))
+    else {
+        println!("skipped: set {URL_VARIABLE} and {MODEL_VARIABLE} to run against a llama-server");
+        return;
+    };
+    let mut config = Config::new(base_url.clone(), served_model.clone());
+    config.max_output_tokens = 1024;
+    let (model, _) = Model::declare(declare_model());
+    let (adapter, _) =
+        Adapter::declare(declare_adapter(model.model_id(), &config)).expect("one slot");
+    let server = Arc::new(LlamaServer::new(&config).expect("the configured base URL binds"));
+    let mut generator = Generator::new(adapter, Arc::clone(&server) as _)
+        .expect("the binding declares what the adapter claims");
+
+    let began = Instant::now();
+    let mut handle = generator
+        .start(GenerationRequest {
+            run_id: RunId::generate(),
+            node_id: NodeId::generate(),
+            epoch: 1,
+            turn: TurnRequest::new(
+                served_model,
+                vec![Item::user(
+                    "Write a long story, at least eight hundred words, about a lighthouse keeper.",
+                )],
+            ),
+        })
+        .expect("no generation runs yet");
+
+    let first = loop {
+        match handle.next() {
+            Some(GenerationEvent::TextDelta(delta)) => break delta,
+            Some(GenerationEvent::Cancelled(..)) => {
+                panic!("the generation was cancelled: {:?}", handle.failure())
+            }
+            Some(_) => {}
+            None => panic!("the generation ended before a delta"),
+        }
+    };
+    let first_after = began.elapsed();
+    let before = processing(&base_url);
+
+    let generation_id = handle.output().generation().generation_id();
+    let cancelled = handle.cancel().expect("the generation is Active");
+    let cancelled_at = Instant::now();
+    assert_eq!(cancelled.generation_id, generation_id);
+    assert_eq!(
+        handle.output().generation().state(),
+        GenerationState::Cancelled
+    );
+    let later: Vec<GenerationEvent> = handle.by_ref().collect();
+    assert!(later.is_empty(), "no event after the cancel: {later:?}");
+    assert!(handle.failure().is_none(), "{:?}", handle.failure());
+    drop(handle);
+
+    let stopped = loop {
+        match processing(&base_url) {
+            Ok(false) => break Ok(cancelled_at.elapsed()),
+            Ok(true) if cancelled_at.elapsed() < SETTLE => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(true) => {
+                break Err(format!(
+                    "a slot still processes {SETTLE:?} after the cancel"
+                ));
+            }
+            Err(why) => break Err(why),
+        }
+    };
+    let turns = server.running_turns();
+
+    println!(
+        "first delta {:?} after the start: {:?}",
+        first_after, first.text
+    );
+    println!("delivery cancelled: GenerationCancelled, no later event");
+    println!("slots processing before the cancel: {before:?}");
+    match stopped {
+        Ok(after) => {
+            println!("computation cancelled: no slot processing {after:?} after the cancel")
+        }
+        Err(why) => println!("computation cancellation not observed: {why}"),
+    }
+    println!("turn threads still running: {turns}");
+}

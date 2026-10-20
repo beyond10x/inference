@@ -51,17 +51,12 @@ pub use record::{Response, SpeechSession, SpeechToolCall};
 #[cfg(doc)]
 use inference_tools::Tool;
 
-inference_core::uuid_newtype!(
-    /// `inference.duplex.SpeechSessionId`: identifies a [`SpeechSession`], written and read as
-    /// the identifiers of `inference_core::id` are.
-    SpeechSessionId
-);
-
-inference_core::uuid_newtype!(
-    /// `inference.duplex.ResponseId`: identifies a [`Response`]. An adapter issues one per
-    /// response its provider starts, whatever identity the provider gives it.
-    ResponseId
-);
+/// `inference.duplex.SpeechSessionId` identifies a [`SpeechSession`] and
+/// `inference.duplex.ResponseId` a [`Response`]; an adapter issues one response id per response
+/// its provider starts, whatever identity the provider gives it. Both are declared in
+/// `inference_core::id`, because a usage record of `inference.usage` names them too, and
+/// re-exported here.
+pub use inference_core::id::{ResponseId, SpeechSessionId};
 
 /// `inference.duplex.SpeechCallId`: identifies a [`SpeechToolCall`]. It is the provider's own
 /// string, carried unread, because the result goes back to the provider under it.

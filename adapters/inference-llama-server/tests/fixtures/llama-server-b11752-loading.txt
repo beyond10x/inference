@@ -1,0 +1,14 @@
+llama-server-b11752-loading.http is the whole response, head and body, to one streamed Chat
+Completions request sent while the server was still loading its model, recorded byte for byte on
+2026-10-20 from a running llama-server, not written by hand:
+
+- server: llama.cpp prebuilt release b11752, linux x64, CPU only, started with
+  `--alias qwen2.5-1.5b-instruct -c 4096 -np 1 -ngl 0`, the same server and checkpoint as
+  llama-server-b11752-text.sse;
+- request: POST /v1/chat/completions with
+  {"model":"qwen2.5-1.5b-instruct","stream":true,"messages":[{"role":"user","content":"hi"}]},
+  sent repeatedly from the server's start until the first answer came.
+
+The server answered 503 Service Unavailable with a JSON body naming `"Loading model"` and type
+`unavailable_error`, and closed the connection. The loopback fixture of the tests replays these
+bytes unchanged.

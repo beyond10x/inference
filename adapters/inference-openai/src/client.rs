@@ -22,7 +22,7 @@ use crate::credential::{CredentialError, CredentialSource};
 use crate::error::{ConnectError, RealtimeError};
 use crate::event::ServerEvent;
 
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub(crate) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// One open Realtime session over WebSocket.
 ///
@@ -68,34 +68,8 @@ impl RealtimeClient {
         credential: &str,
         session: &SessionConfig,
     ) -> Result<Self, RealtimeError> {
-        let resolved = source
-            .resolve(credential)
-            .await
-            .map_err(RealtimeError::Credential)?;
-        let mut authorization = Zeroizing::new(Vec::with_capacity(7 + resolved.expose().len()));
-        authorization.extend_from_slice(b"Bearer ");
-        authorization.extend_from_slice(resolved.expose());
-        drop(resolved);
-        let mut header = HeaderValue::from_bytes(&authorization)
-            .map_err(|_| RealtimeError::Credential(CredentialError::Invalid))?;
-        drop(authorization);
-        header.set_sensitive(true);
-
         let url = request_url(endpoint)?;
-        let mut request = url
-            .as_str()
-            .into_client_request()
-            .map_err(|error| RealtimeError::InvalidEndpoint(error.to_string()))?;
-        request.headers_mut().insert("authorization", header);
-        let connector = if url.starts_with("wss://") {
-            Some(Connector::Rustls(tls_config()?))
-        } else {
-            None
-        };
-        let (socket, _) =
-            tokio_tungstenite::connect_async_tls_with_config(request, None, true, connector)
-                .await
-                .map_err(|error| RealtimeError::Connect(handshake_error(&error)))?;
+        let socket = open_socket(&url, source, credential).await?;
 
         let mut client = Self {
             socket,
@@ -296,73 +270,130 @@ impl RealtimeClient {
     /// [`RealtimeError::Transport`] when the close handshake fails;
     /// [`RealtimeError::Stalled`] when the server does not close within the read timeout.
     pub async fn close(mut self) -> Result<(), RealtimeError> {
-        use tokio_tungstenite::tungstenite::Error;
-        self.socket
-            .close(None)
-            .await
-            .map_err(|error| RealtimeError::Transport(error.to_string()))?;
-        let deadline = tokio::time::Instant::now() + self.read_timeout;
-        loop {
-            match tokio::time::timeout_at(deadline, self.socket.next()).await {
-                Err(_) => return Err(RealtimeError::Stalled(self.read_timeout)),
-                Ok(None | Some(Err(Error::ConnectionClosed | Error::AlreadyClosed))) => {
-                    return Ok(());
-                }
-                Ok(Some(Ok(_))) => {}
-                Ok(Some(Err(error))) => return Err(RealtimeError::Transport(error.to_string())),
-            }
-        }
+        close_socket(&mut self.socket, self.read_timeout).await
     }
 
     async fn read_event(&mut self) -> Result<ServerEvent, RealtimeError> {
-        let deadline = tokio::time::Instant::now() + self.read_timeout;
-        loop {
-            let message = tokio::time::timeout_at(deadline, self.socket.next())
-                .await
-                .map_err(|_| RealtimeError::Stalled(self.read_timeout))?;
-            let message = match message {
-                None => {
-                    return Err(RealtimeError::Closed {
-                        code: None,
-                        reason: String::new(),
-                    });
-                }
-                Some(message) => {
-                    message.map_err(|error| RealtimeError::Transport(error.to_string()))?
-                }
-            };
-            match message {
-                Message::Text(text) => return ServerEvent::parse(text.as_str()),
-                Message::Close(frame) => {
-                    return Err(RealtimeError::Closed {
-                        code: frame.as_ref().map(|frame| u16::from(frame.code)),
-                        reason: frame
-                            .map(|frame| frame.reason.as_str().to_owned())
-                            .unwrap_or_default(),
-                    });
-                }
-                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
-                Message::Binary(data) => {
-                    return Err(RealtimeError::Protocol(format!(
-                        "a binary message of {} bytes; the Realtime API sends text",
-                        data.len()
-                    )));
-                }
-            }
-        }
+        let text = read_text(&mut self.socket, self.read_timeout).await?;
+        ServerEvent::parse(&text)
     }
 
     async fn send(&mut self, event: Value) -> Result<(), RealtimeError> {
-        self.socket
-            .send(Message::text(event.to_string()))
-            .await
-            .map_err(|error| RealtimeError::Transport(error.to_string()))
+        send_json(&mut self.socket, &event).await
     }
 }
 
-/// `<url>?model=<model>`, refusing a model id outside the characters model ids use.
-fn request_url(endpoint: &Endpoint) -> Result<String, RealtimeError> {
-    let model = &endpoint.model;
+/// Resolves the secret `credential` names through `source` and opens a WebSocket to `url` with
+/// it as the bearer token. The credential is resolved before any connection is made, is sent only
+/// in the opening handshake, marked sensitive, and is never part of an error.
+pub(crate) async fn open_socket(
+    url: &str,
+    source: &dyn CredentialSource,
+    credential: &str,
+) -> Result<Socket, RealtimeError> {
+    let resolved = source
+        .resolve(credential)
+        .await
+        .map_err(RealtimeError::Credential)?;
+    let mut authorization = Zeroizing::new(Vec::with_capacity(7 + resolved.expose().len()));
+    authorization.extend_from_slice(b"Bearer ");
+    authorization.extend_from_slice(resolved.expose());
+    drop(resolved);
+    let mut header = HeaderValue::from_bytes(&authorization)
+        .map_err(|_| RealtimeError::Credential(CredentialError::Invalid))?;
+    drop(authorization);
+    header.set_sensitive(true);
+
+    let mut request = url
+        .into_client_request()
+        .map_err(|error| RealtimeError::InvalidEndpoint(error.to_string()))?;
+    request.headers_mut().insert("authorization", header);
+    let connector = if url.starts_with("wss://") {
+        Some(Connector::Rustls(tls_config()?))
+    } else {
+        None
+    };
+    let (socket, _) =
+        tokio_tungstenite::connect_async_tls_with_config(request, None, true, connector)
+            .await
+            .map_err(|error| RealtimeError::Connect(handshake_error(&error)))?;
+    Ok(socket)
+}
+
+/// The text of the next text message, waiting at most `read_timeout`; pings and other frames
+/// that are not messages count in the wait.
+pub(crate) async fn read_text(
+    socket: &mut Socket,
+    read_timeout: std::time::Duration,
+) -> Result<String, RealtimeError> {
+    let deadline = tokio::time::Instant::now() + read_timeout;
+    loop {
+        let message = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .map_err(|_| RealtimeError::Stalled(read_timeout))?;
+        let message = match message {
+            None => {
+                return Err(RealtimeError::Closed {
+                    code: None,
+                    reason: String::new(),
+                });
+            }
+            Some(message) => {
+                message.map_err(|error| RealtimeError::Transport(error.to_string()))?
+            }
+        };
+        match message {
+            Message::Text(text) => return Ok(text.as_str().to_owned()),
+            Message::Close(frame) => {
+                return Err(RealtimeError::Closed {
+                    code: frame.as_ref().map(|frame| u16::from(frame.code)),
+                    reason: frame
+                        .map(|frame| frame.reason.as_str().to_owned())
+                        .unwrap_or_default(),
+                });
+            }
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
+            Message::Binary(data) => {
+                return Err(RealtimeError::Protocol(format!(
+                    "a binary message of {} bytes; the API sends text",
+                    data.len()
+                )));
+            }
+        }
+    }
+}
+
+/// Writes `event` as one text message.
+pub(crate) async fn send_json(socket: &mut Socket, event: &Value) -> Result<(), RealtimeError> {
+    socket
+        .send(Message::text(event.to_string()))
+        .await
+        .map_err(|error| RealtimeError::Transport(error.to_string()))
+}
+
+/// Sends a close frame on `socket` and waits at most `read_timeout` for the server's.
+pub(crate) async fn close_socket(
+    socket: &mut Socket,
+    read_timeout: std::time::Duration,
+) -> Result<(), RealtimeError> {
+    use tokio_tungstenite::tungstenite::Error;
+    socket
+        .close(None)
+        .await
+        .map_err(|error| RealtimeError::Transport(error.to_string()))?;
+    let deadline = tokio::time::Instant::now() + read_timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, socket.next()).await {
+            Err(_) => return Err(RealtimeError::Stalled(read_timeout)),
+            Ok(None | Some(Err(Error::ConnectionClosed | Error::AlreadyClosed))) => return Ok(()),
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(error))) => return Err(RealtimeError::Transport(error.to_string())),
+        }
+    }
+}
+
+/// Refuses a model id outside the characters model ids use.
+pub(crate) fn check_model(model: &str) -> Result<(), RealtimeError> {
     if model.is_empty()
         || !model
             .bytes()
@@ -372,6 +403,13 @@ fn request_url(endpoint: &Endpoint) -> Result<String, RealtimeError> {
             "model id `{model}` is empty or holds a character outside A-Z, a-z, 0-9, '-', '.', '_'"
         )));
     }
+    Ok(())
+}
+
+/// `<url>?model=<model>`, refusing a model id outside the characters model ids use.
+fn request_url(endpoint: &Endpoint) -> Result<String, RealtimeError> {
+    let model = &endpoint.model;
+    check_model(model)?;
     if endpoint.url.contains('?') {
         return Err(RealtimeError::InvalidEndpoint(
             "the endpoint URL already has a query; the client adds `model`".to_owned(),

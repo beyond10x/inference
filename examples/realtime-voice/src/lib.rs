@@ -8,8 +8,14 @@
 //!
 //! ```text
 //! cargo run -p realtime-voice --example talk -- --provider openai
+//! cargo run -p realtime-voice --example talk -- --provider openai-live
 //! cargo run -p realtime-voice --example talk -- --provider nova
 //! ```
+//!
+//! The provider is configuration only: each has its [`SessionConfig`] here and one binding of
+//! the same contract, and the conversation is the same code for all. [`compare`] sends the same
+//! recorded utterances through each provider and measures latency and usage
+//! (`examples/compare.rs`).
 //!
 //! The microphone captures in the session's input format, resampled by the device adapter; the
 //! speaker plays the session's output format, resampled to the device.
@@ -24,6 +30,11 @@
 //! The demo tool, [`time_tool`], is answered by call id with what the conversation's clock says.
 //! Once the response that proposed it ends, the conversation asks for the next response when the
 //! model takes responses from the caller; a model that creates every response continues itself.
+//!
+//! Usage: each usage the session reports, of a response or of a transcription, is a
+//! [`Note::Usage`]. A [`Tally`] fed with the notes holds the latest usage of each response and
+//! the totals, a count the provider does not report unknown rather than zero, and [`Prices`], a
+//! table the caller supplies, estimates their cost.
 
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
@@ -44,6 +55,11 @@ use inference_duplex::{
     SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechToolCallProposed, TurnDetection,
     TurnTuning,
 };
+
+pub mod compare;
+mod usage;
+
+pub use usage::{Cost, Counts, Prices, PricesError, Reported, Tally, Totals, Usage};
 
 /// The name the demo tool is offered under.
 pub const TIME_TOOL: &str = "local_time";
@@ -100,6 +116,25 @@ pub fn openai_config() -> SessionConfig {
         turn_tuning: TurnTuning::default(),
         auto_response: true,
         auto_interrupt: false,
+        tools: vec![time_tool()],
+        idle_limit: Duration::from_secs(30),
+    }
+}
+
+/// The session the demo opens on GPT-Live: PCM16 at 24 kHz both ways (GPT-Live takes one format
+/// for both), the model's own turn-taking (`semantic_vad`, no tuning), responses and barge-in,
+/// and the demo tool, which its Responses backend calls.
+#[must_use]
+pub fn openai_live_config() -> SessionConfig {
+    SessionConfig {
+        voice: "marin".to_owned(),
+        instructions: INSTRUCTIONS.to_owned(),
+        input_format: pcm16(24_000),
+        output_format: pcm16(24_000),
+        turn_detection: TurnDetection::SemanticVad,
+        turn_tuning: TurnTuning::default(),
+        auto_response: true,
+        auto_interrupt: true,
         tools: vec![time_tool()],
         idle_limit: Duration::from_secs(30),
     }
@@ -182,6 +217,8 @@ pub enum Note {
     Closed,
     /// The session failed.
     Failed(SessionFailure),
+    /// The session reported the usage of a response or of a transcription.
+    Usage(Usage),
 }
 
 /// How a response ended.
@@ -435,11 +472,18 @@ impl<S: SpeechSessionHandle> Conversation<S> {
                 self.silence();
                 notes.push(Note::Failed(failed.failure));
             }
+            SessionEvent::ResponseUsageRecorded(recorded) => {
+                notes.push(Note::Usage(Usage::Response {
+                    response_id: recorded.response_id,
+                    usage: recorded.usage,
+                }));
+            }
+            SessionEvent::TranscriptionUsageRecorded(recorded) => {
+                notes.push(Note::Usage(Usage::Transcription(recorded.usage)));
+            }
             SessionEvent::InputAccepted(_)
             | SessionEvent::InputCommitted(_)
-            | SessionEvent::SpeechStopped(_)
-            | SessionEvent::TranscriptionUsageRecorded(_)
-            | SessionEvent::ResponseUsageRecorded(_) => {}
+            | SessionEvent::SpeechStopped(_) => {}
         }
     }
 

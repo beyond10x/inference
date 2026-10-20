@@ -304,7 +304,7 @@ fn planned(bindings: &Bindings) -> (Declaration, PlannedPipeline, Ids) {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
-        admitted: Vec::new(),
+        admitted: vec![inference_core::model::Locality::SameProcess],
     })
     .expect("a row of the table");
     assert_eq!(profile.egress(), Egress::Denied, "the whole run is offline");

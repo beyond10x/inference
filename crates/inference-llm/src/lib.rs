@@ -34,6 +34,16 @@
 //! emitted; a turn that showed no delta gives the assistant text of its outcome as one segment
 //! when it ends.
 //!
+//! Every turn is one model call, and every turn that ended yields one usage record,
+//! [`GenerationEvent::Usage`], delivered after the events of that turn: the
+//! `inference.usage.UsageRecorded` of [`usage_of_turn`] over the usage `llm` observed for it, its
+//! start and end measured around the turn on the wall clock, placed on no run, node or session,
+//! which the node that places it fills. A turn that fails yields a record too, before the
+//! [`GenerationEvent::Cancelled`] of its generation: one request, every token count unknown and
+//! its counts not final, so a failed call is still counted. A supersede or a cancel the caller
+//! asks for delivers nothing more, so the record of a turn not yet delivered is dropped with the
+//! rest; a turn running when the generation ends, never having ended, yields none.
+//!
 //! Output streaming, incremental input and input during output are distinct capabilities
 //! (`inference.model.Capability`), and a persistent connection proves none of them. What the
 //! contract can observe, it decides here:
@@ -82,6 +92,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use inference_core::generation::{
     Generation, GenerationCancelled, GenerationCompleted, GenerationStarted, GenerationState,
@@ -89,6 +100,7 @@ use inference_core::generation::{
 };
 use inference_core::id::{GenerationId, NodeId, RunId};
 use inference_core::model::{Adapter, Capability};
+use inference_core::usage::{Quantity, QuantityKind, RecordUsage, UsageRecord, UsageRecorded};
 use inference_text::{
     OutputSegment, SegmentDiscarded, SegmentState, SegmentStateConflict, TextDelta,
     TextSegmentCommitted,
@@ -131,6 +143,66 @@ impl GenerationRequest {
     }
 }
 
+/// Runs `inference.usage.RecordUsage` for one turn the adapter `adapter` served from
+/// `started_at_ms` to `ended_at_ms`, Unix epoch milliseconds on the wall clock, and returns its
+/// `inference.usage.UsageRecorded`, placed on no run, node or session: the node that places it
+/// fills those.
+///
+/// The quantities are those of `usage`, `llm`'s counts of the turn: `input_tokens` as
+/// `input_text_tokens`, `output_tokens` as `output_text_tokens`, `cached_input_tokens` and
+/// `cache_creation_input_tokens` as the kinds of the same name, each `provider_reported`, and
+/// `unknown` where the count is none, beyond `i64`, or `usage` is none. Reasoning tokens stay
+/// inside the output tokens, as `llm` counts them, and are no kind of their own. `requests` is 1,
+/// `measured`, and `local_compute_ms` `unknown`: the contract does not see where the model
+/// computes. `upstream_model` is the model the provider reported serving, and `final` whether it
+/// marked its counts terminal.
+#[must_use]
+pub fn usage_of_turn(
+    adapter: &Adapter,
+    usage: Option<&llm_core::Usage>,
+    upstream_model: Option<&str>,
+    r#final: bool,
+    (started_at_ms, ended_at_ms): (i64, i64),
+) -> UsageRecorded {
+    let usage = usage.cloned().unwrap_or_default();
+    let count = |kind, value: Option<u64>| {
+        value
+            .and_then(|value| i64::try_from(value).ok())
+            .map_or(Quantity::unknown(kind), |value| {
+                Quantity::provider_reported(kind, value)
+            })
+    };
+    let mut input = RecordUsage::new(
+        adapter.adapter_id(),
+        adapter.model_id(),
+        started_at_ms,
+        ended_at_ms,
+        vec![
+            count(QuantityKind::InputTextTokens, usage.input_tokens),
+            count(QuantityKind::OutputTextTokens, usage.output_tokens),
+            count(QuantityKind::CachedInputTokens, usage.cached_input_tokens),
+            count(
+                QuantityKind::CacheCreationInputTokens,
+                usage.cache_creation_input_tokens,
+            ),
+            Quantity::measured(QuantityKind::Requests, 1),
+            Quantity::unknown(QuantityKind::LocalComputeMs),
+        ],
+    );
+    input.upstream_model = upstream_model.map(str::to_owned);
+    input.r#final = r#final;
+    UsageRecord::record(input).1
+}
+
+/// Now, in Unix epoch milliseconds on the wall clock; 0 before the epoch.
+fn wall_clock_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
 /// An event of one generation, as a [`GenerationHandle`] yields it, in the order its commands ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenerationEvent {
@@ -140,11 +212,15 @@ pub enum GenerationEvent {
     TextDelta(TextDelta),
     /// `inference.stream.TextSegmentCommitted`: a segment was committed.
     SegmentCommitted(TextSegmentCommitted),
+    /// `inference.usage.UsageRecorded`: the usage of one turn that ended, delivered after the
+    /// events of that turn; see the crate documentation.
+    Usage(UsageRecorded),
     /// `inference.stream.GenerationCompleted`, always the last of a generation that completes.
     Completed(GenerationCompleted),
     /// `inference.stream.GenerationCancelled` of a generation whose turn failed, with the
     /// `SegmentDiscarded` of each segment the cancel discarded, in emission order; always the
-    /// last. [`GenerationHandle::failure`] holds the `llm` error. A cancel the caller asks for
+    /// last, right after the usage record of the failed turn. [`GenerationHandle::failure`]
+    /// holds the `llm` error. A cancel the caller asks for
     /// returns its event instead.
     Cancelled(GenerationCancelled, Vec<SegmentDiscarded>),
 }
@@ -683,6 +759,8 @@ impl Generator {
         let slot = self.running.admit(self.adapter.max_concurrency())?;
         let (output, started) = GenerationOutput::start(&self.adapter, &request);
         Ok(GenerationHandle {
+            adapter: self.adapter.clone(),
+            turn_started_ms: 0,
             model: Arc::clone(&self.model),
             streams: self.model.capabilities().output_streaming
                 && output.capabilities().contains(&Capability::OutputStreaming),
@@ -753,6 +831,10 @@ struct Turn {
 /// cloneable::<inference_llm::GenerationHandle>();
 /// ```
 pub struct GenerationHandle {
+    /// The adapter record of the generator, which serves every turn.
+    adapter: Adapter,
+    /// When the running or latest turn started, in Unix epoch milliseconds.
+    turn_started_ms: i64,
     model: Arc<dyn Model>,
     streams: bool,
     output: GenerationOutput,
@@ -924,11 +1006,16 @@ impl GenerationHandle {
     /// delivered; a turn may end with several, the calls of one round, taken one by one in order.
     /// It first drives the generation as a poll does, without delivering, so a turn that ended
     /// since the last poll is seen. None while a turn runs or its text is still to be delivered,
-    /// when it ended in prose only, or when every call of it was taken already.
+    /// when it ended in prose only, or when every call of it was taken already. Its usage record
+    /// is not its text: a proposal is taken while the record still waits to be delivered.
     pub fn take_proposal(&mut self) -> Option<ToolCall> {
         let waker = self.waker.clone().unwrap_or_else(|| Waker::noop().clone());
         self.progress(&mut Context::from_waker(&waker));
-        if self.turn.is_none() && self.delivered.is_empty() {
+        let text_delivered = self
+            .delivered
+            .iter()
+            .all(|event| matches!(event, GenerationEvent::Usage(_)));
+        if self.turn.is_none() && text_delivered {
             self.staged.pop_front()
         } else {
             None
@@ -985,7 +1072,7 @@ impl GenerationHandle {
     }
 
     /// Runs `inference.stream.SupersedeGeneration`; the running turn is cancelled and nothing
-    /// more is delivered.
+    /// more is delivered, the usage record of a turn not yet delivered among it.
     ///
     /// # Errors
     ///
@@ -999,7 +1086,7 @@ impl GenerationHandle {
     }
 
     /// Runs `inference.stream.CancelGeneration`; the running turn is cancelled and nothing more
-    /// is delivered.
+    /// is delivered, the usage record of a turn not yet delivered among it.
     ///
     /// # Errors
     ///
@@ -1059,6 +1146,7 @@ impl GenerationHandle {
         let accepted = Accepted::default();
         let mut sink = Queue(Arc::clone(&accepted));
         let future = Box::pin(async move { model.turn(&request, &mut sink, &cancel).await });
+        self.turn_started_ms = wall_clock_ms();
         self.turn = Some(Turn { future, accepted });
     }
 
@@ -1105,11 +1193,13 @@ impl GenerationHandle {
     }
 
     /// Takes the outcome of the turn that ended: its text, when no delta showed it, becomes one
-    /// segment, its items join the conversation and its calls are staged. A turn ending with
-    /// calls is the safe boundary at which an adapter that does not stream delivers what it held,
-    /// so the caller can take the calls while the generation is Active.
+    /// segment, followed by its usage record, its items join the conversation and its calls are
+    /// staged. A turn ending with calls is the safe boundary at which an adapter that does not
+    /// stream delivers what it held, so the caller can take the calls while the generation is
+    /// Active.
     fn turn_ended(&mut self, outcome: TurnOutcome) {
         self.turn = None;
+        let ended_at_ms = wall_clock_ms();
         let text = if self.shown {
             std::mem::take(&mut self.text)
         } else {
@@ -1126,6 +1216,23 @@ impl GenerationHandle {
         if !text.is_empty() {
             self.segment(text);
         }
+        let observation = &outcome.observation;
+        let recorded = usage_of_turn(
+            &self.adapter,
+            observation.usage.as_ref(),
+            observation
+                .upstream_model
+                .as_ref()
+                .map(llm_core::Id::as_str),
+            observation.final_usage,
+            (self.turn_started_ms, ended_at_ms),
+        );
+        let queue = if self.streams {
+            &mut self.delivered
+        } else {
+            &mut self.held
+        };
+        queue.push_back(GenerationEvent::Usage(recorded));
         self.conversation
             .items
             .extend(outcome.items.iter().cloned());
@@ -1142,15 +1249,41 @@ impl GenerationHandle {
     }
 
     /// Cancels the generation of a turn that failed, keeping `error`: what was delivered stays
-    /// queued, and [`GenerationEvent::Cancelled`] follows it with the segments discarded.
+    /// queued, the usage records held among it, then the usage record of the failed turn, one
+    /// request with every token count unknown and its counts not final, and
+    /// [`GenerationEvent::Cancelled`] follows them with the segments discarded.
     fn turn_failed(&mut self, error: llm_core::Error) {
+        let ended_at_ms = wall_clock_ms();
         if let Ok((cancelled, discarded)) = self.output.cancel() {
             self.stop();
-            self.held.clear();
+            self.keep_held_usage();
+            let upstream_model = error
+                .observation
+                .as_ref()
+                .and_then(|observation| observation.upstream_model.as_ref());
+            let recorded = usage_of_turn(
+                &self.adapter,
+                None,
+                upstream_model.map(llm_core::Id::as_str),
+                false,
+                (self.turn_started_ms, ended_at_ms),
+            );
+            self.delivered.push_back(GenerationEvent::Usage(recorded));
             self.delivered
                 .push_back(GenerationEvent::Cancelled(cancelled, discarded));
         }
         self.failure = Some(error);
+    }
+
+    /// Drops what an adapter that does not stream held, but its usage records, which join the
+    /// events to deliver: the usage of a turn that ended is never dropped.
+    fn keep_held_usage(&mut self) {
+        let usage: Vec<GenerationEvent> = self
+            .held
+            .drain(..)
+            .filter(|event| matches!(event, GenerationEvent::Usage(_)))
+            .collect();
+        self.delivered.extend(usage);
     }
 
     /// Completes the generation, delivering what an adapter that does not stream held.

@@ -1,0 +1,384 @@
+//! The adapter against the loopback fixture of `common`, which replays a stream recorded from a
+//! running `llama-server`. No server is started and no weights are read.
+//!
+//! The capability records committed in `capability/` are checked here, each against the
+//! declaration of the adapter it is the record of: [`RECORD`] against the default adapter, tools
+//! off, and [`TOOLS_RECORD`] against the adapter with its `tools` option on. Their
+//! `output_streaming` evidence names the tests of this file that observe it, the `tool_calling`
+//! evidence of [`TOOLS_RECORD`] those of `tool_proposals`.
+//!
+//! The usage record of a turn reads the counts of the recorded `usage` chunk, and counts every
+//! token unknown for the same stream with that chunk removed (`story:usage-llm`).
+
+mod common;
+
+use std::path::Path;
+use std::sync::Arc;
+
+use common::scripted::{Scripted, TEXT_NO_USAGE};
+use common::{DELTAS, Fixture, SERVED_MODEL};
+use inference_core::id::{NodeId, RunId};
+use inference_core::model::{Adapter, Capability, ExecutionForm, Locality, Model};
+use inference_core::usage::{Quantity, QuantityKind, UsageRecorded};
+use inference_llama_server::{
+    BACKEND, CHECKPOINT, CHECKSUM, CODE_LICENSE, Config, LlamaServer, SOURCE, SOURCE_REVISION,
+    WEIGHT_LICENSE, binding, declare_adapter, declare_model,
+};
+use inference_llm::llm_core::{Item, Model as _, TurnRequest};
+use inference_llm::{
+    CapabilityNotClaimed, GenerationEvent, GenerationHandle, GenerationRequest, Generator,
+    InputRefused,
+};
+use inference_testkit::model::capability;
+
+const PROMPT: &str = "Say hello in three words.";
+
+/// The record committed for the default adapter, tools off, on the reference machine, CPU only.
+const RECORD: &str = "capability/reference-machine-cpu.json";
+
+/// The record committed for the adapter with tools on, on the reference machine, CPU only, the
+/// server started with `--jinja`.
+const TOOLS_RECORD: &str = "capability/reference-machine-cpu-tools.json";
+
+/// The model and adapter declared for a server configured by `config`.
+fn declared(config: &Config) -> (Model, Adapter) {
+    let (model, _) = Model::declare(declare_model());
+    let (adapter, _) =
+        Adapter::declare(declare_adapter(model.model_id(), config)).expect("one slot is positive");
+    (model, adapter)
+}
+
+fn generator(fixture: &Fixture) -> Generator {
+    generator_at(fixture.base_url())
+}
+
+fn generator_at(base_url: &str) -> Generator {
+    let config = Config::new(base_url, SERVED_MODEL);
+    let (_, adapter) = declared(&config);
+    LlamaServer::new(&config)
+        .expect("the fixture's base URL makes a binding")
+        .generator(adapter)
+        .expect("the binding declares what the adapter claims")
+}
+
+fn start(generator: &mut Generator) -> GenerationHandle {
+    generator
+        .start(GenerationRequest {
+            run_id: RunId::generate(),
+            node_id: NodeId::generate(),
+            epoch: 1,
+            turn: TurnRequest::new(SERVED_MODEL, vec![Item::user(PROMPT)]),
+        })
+        .expect("no generation runs yet")
+}
+
+/// Takes events up to and including the first text delta.
+fn until_first_delta(handle: &mut GenerationHandle) -> Vec<GenerationEvent> {
+    let mut events = Vec::new();
+    for event in handle.by_ref() {
+        let delta = matches!(event, GenerationEvent::TextDelta(_));
+        events.push(event);
+        if delta {
+            return events;
+        }
+    }
+    panic!("the generation ended before a delta: {events:?}")
+}
+
+fn names(events: &[GenerationEvent]) -> Vec<&'static str> {
+    events
+        .iter()
+        .map(|event| match event {
+            GenerationEvent::Started(_) => "StartGeneration",
+            GenerationEvent::TextDelta(_) => "EmitTextDelta",
+            GenerationEvent::SegmentCommitted(_) => "CommitSegment",
+            GenerationEvent::Usage(_) => "RecordUsage",
+            GenerationEvent::Completed(_) => "CompleteGeneration",
+            GenerationEvent::Cancelled(..) => "CancelGeneration",
+        })
+        .collect()
+}
+
+#[test]
+fn a_delta_reaches_the_caller_while_the_server_still_holds_the_rest_of_the_stream() {
+    let mut fixture = Fixture::holding();
+    let mut generator = generator(&fixture);
+    let mut handle = start(&mut generator);
+
+    let first = until_first_delta(&mut handle);
+    assert_eq!(names(&first), ["StartGeneration", "EmitTextDelta"]);
+    let GenerationEvent::TextDelta(delta) = &first[1] else {
+        unreachable!("the last event taken is a delta")
+    };
+    assert_eq!(delta.text, DELTAS[0]);
+    assert_eq!(
+        handle.output().generation().state(),
+        inference_core::generation::GenerationState::Active,
+        "the delta is delivered while the generation is Active and the turn is still running"
+    );
+
+    fixture.release();
+    let rest: Vec<GenerationEvent> = handle.by_ref().collect();
+    let mut expected = vec!["CommitSegment"];
+    for _ in &DELTAS[1..] {
+        expected.extend(["EmitTextDelta", "CommitSegment"]);
+    }
+    expected.extend(["RecordUsage", "CompleteGeneration"]);
+    assert_eq!(names(&rest), expected, "{rest:?}");
+    let texts: Vec<&str> = first
+        .iter()
+        .chain(&rest)
+        .filter_map(|event| match event {
+            GenerationEvent::TextDelta(delta) => Some(delta.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, DELTAS, "each delta of the server is one segment");
+    assert!(handle.failure().is_none(), "{:?}", handle.failure());
+}
+
+#[test]
+fn input_offered_while_the_generation_is_active_is_refused_and_sends_nothing() {
+    let mut fixture = Fixture::holding();
+    let mut generator = generator(&fixture);
+    let mut handle = start(&mut generator);
+    until_first_delta(&mut handle);
+
+    assert_eq!(
+        handle.offer_input("and once more".to_owned()),
+        Err(InputRefused::CapabilityNotClaimed(CapabilityNotClaimed {
+            capability: Capability::ConcurrentInputOutput,
+        }))
+    );
+
+    fixture.release();
+    let rest: Vec<GenerationEvent> = handle.by_ref().collect();
+    assert!(
+        matches!(rest.last(), Some(GenerationEvent::Completed(_))),
+        "{rest:?}"
+    );
+    assert_eq!(
+        fixture.requests().len(),
+        1,
+        "the refused input reached no second request"
+    );
+}
+
+#[test]
+fn the_request_is_an_anonymous_streamed_chat_completion_of_the_served_model() {
+    let fixture = Fixture::replaying();
+    let mut generator = generator(&fixture);
+    let events: Vec<GenerationEvent> = start(&mut generator).collect();
+    assert!(
+        matches!(events.last(), Some(GenerationEvent::Completed(_))),
+        "{events:?}"
+    );
+
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert!(
+        request.head.starts_with("POST /v1/chat/completions "),
+        "{}",
+        request.head
+    );
+    assert!(
+        !request.head.to_ascii_lowercase().contains("authorization"),
+        "no authorization header: {}",
+        request.head
+    );
+    let body = request.json();
+    assert_eq!(body["stream"], serde_json::json!(true));
+    assert_eq!(body["model"], serde_json::json!(SERVED_MODEL));
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([{"role": "user", "content": PROMPT}])
+    );
+}
+
+#[test]
+fn the_adapter_claims_output_streaming_only_and_the_binding_declares_it() {
+    let config = Config::new("http://127.0.0.1:8080/v1", SERVED_MODEL);
+    let (model, adapter) = declared(&config);
+    assert_eq!(adapter.capabilities(), [Capability::OutputStreaming]);
+    assert_eq!(adapter.backend(), BACKEND);
+    assert_eq!(adapter.execution_form(), ExecutionForm::LocalService);
+    assert_eq!(adapter.locality(), Locality::LocalWorker);
+    assert_eq!(adapter.max_concurrency(), 1);
+    assert_eq!(adapter.model_id(), model.model_id());
+
+    let bound = binding(&config).expect("a loopback base URL makes a binding");
+    let declared = bound.capabilities();
+    assert!(declared.output_streaming);
+    assert!(!declared.input_during_output);
+    assert!(!declared.tools);
+
+    let server = LlamaServer::new(&config).expect("a binding");
+    assert_eq!(server.capabilities(), declared);
+    assert_eq!(server.provenance().model.as_str(), SERVED_MODEL);
+    let generator = Generator::new(adapter, Arc::new(server))
+        .expect("the binding declares output streaming, the only claim");
+    assert_eq!(
+        generator.adapter().capabilities(),
+        [Capability::OutputStreaming]
+    );
+}
+
+#[test]
+fn the_model_declaration_names_the_pinned_checkpoint_its_licences_and_checksum() {
+    let declaration = declare_model();
+    assert_eq!(declaration.checkpoint, CHECKPOINT);
+    assert_eq!(declaration.code_license, CODE_LICENSE);
+    assert_eq!(declaration.weight_license, WEIGHT_LICENSE);
+    assert_eq!(declaration.checksum, CHECKSUM);
+    assert_eq!(declaration.provenance, SOURCE);
+    assert_eq!(declaration.source_revision, SOURCE_REVISION);
+    assert_eq!(CODE_LICENSE, "MIT");
+    assert_eq!(WEIGHT_LICENSE, "Apache-2.0");
+    assert_eq!(
+        CHECKSUM,
+        "sha256:6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
+    );
+}
+
+#[test]
+fn each_committed_capability_record_checks_against_the_declaration_of_its_adapter() {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let default = Config::new("http://127.0.0.1:8080/v1", SERVED_MODEL);
+    let mut tools = default.clone();
+    tools.tools = true;
+    let records = [(RECORD, &default), (TOOLS_RECORD, &tools)];
+
+    let mut committed: Vec<String> = std::fs::read_dir(crate_dir.join("capability"))
+        .expect("the record directory")
+        .map(|entry| {
+            format!(
+                "capability/{}",
+                entry.expect("an entry").file_name().display()
+            )
+        })
+        .collect();
+    committed.sort_unstable();
+    let mut checked: Vec<String> = records.iter().map(|(path, _)| (*path).to_owned()).collect();
+    checked.sort_unstable();
+    assert_eq!(committed, checked, "every committed record is checked here");
+
+    for (path, config) in records {
+        let (_, adapter) = declared(config);
+        let record = capability::load(crate_dir.join(path), &adapter)
+            .unwrap_or_else(|refused| panic!("{path}: {refused}"));
+        assert_eq!(record.adapter_id, adapter.adapter_id());
+        assert_eq!(record.resource_profile.gpu_memory_mib, None, "CPU only");
+        assert!(record.audio_formats.is_empty(), "a text model");
+        assert_eq!(
+            record.hardware.contains("--jinja"),
+            config.tools,
+            "{path}: the server runs with --jinja exactly when the adapter offers tools"
+        );
+
+        for evidence in &record.evidence {
+            for test in &evidence.tests {
+                let (file, name) = test
+                    .split_once("::")
+                    .unwrap_or_else(|| panic!("{path}: `{test}` names no test file"));
+                let source =
+                    std::fs::read_to_string(crate_dir.join("tests").join(format!("{file}.rs")))
+                        .unwrap_or_else(|error| panic!("{path}: `{test}`: {error}"));
+                assert!(
+                    source.contains(&format!("fn {name}()")),
+                    "{path} names `{test}`, which is not a test of this crate"
+                );
+            }
+        }
+    }
+}
+
+/// The one usage record a whole generation over `generator` delivered, checked for what every
+/// record of this adapter carries: its adapter and model, one measured request, local compute
+/// unknown for this out-of-process server, and start and end in order.
+fn the_record(generator: &mut Generator) -> UsageRecorded {
+    let adapter = generator.adapter().clone();
+    let events: Vec<GenerationEvent> = start(generator).collect();
+    let kinds = names(&events);
+    assert_eq!(
+        kinds[kinds.len() - 2..],
+        ["RecordUsage", "CompleteGeneration"],
+        "the record follows the events of its turn: {events:?}"
+    );
+    let records: Vec<UsageRecorded> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            GenerationEvent::Usage(recorded) => Some(recorded),
+            _ => None,
+        })
+        .collect();
+    let [record] = records.as_slice() else {
+        panic!("one turn, one record: {records:?}")
+    };
+    assert_eq!(record.adapter_id, adapter.adapter_id());
+    assert_eq!(record.model_id, adapter.model_id());
+    assert!(record.started_at_ms <= record.ended_at_ms, "{record:?}");
+    assert!(record.r#final, "the stream terminated");
+    let of = |kind| {
+        record
+            .quantities
+            .iter()
+            .find(|quantity| quantity.kind() == kind)
+            .copied()
+            .unwrap_or_else(|| panic!("no {kind:?} quantity: {record:?}"))
+    };
+    assert_eq!(
+        of(QuantityKind::Requests),
+        Quantity::measured(QuantityKind::Requests, 1)
+    );
+    assert_eq!(
+        of(QuantityKind::LocalComputeMs),
+        Quantity::unknown(QuantityKind::LocalComputeMs),
+        "the server computes out of process; its wall time is the record's start and end"
+    );
+    record.clone()
+}
+
+/// The token quantities of `record`, in the order of [`TOKEN_KINDS`].
+fn tokens(record: &UsageRecorded) -> [Quantity; 4] {
+    TOKEN_KINDS.map(|kind| {
+        record
+            .quantities
+            .iter()
+            .find(|quantity| quantity.kind() == kind)
+            .copied()
+            .unwrap_or_else(|| panic!("no {kind:?} quantity: {record:?}"))
+    })
+}
+
+const TOKEN_KINDS: [QuantityKind; 4] = [
+    QuantityKind::InputTextTokens,
+    QuantityKind::OutputTextTokens,
+    QuantityKind::CachedInputTokens,
+    QuantityKind::CacheCreationInputTokens,
+];
+
+#[test]
+fn a_recorded_response_carrying_usage_yields_the_record_with_its_counts() {
+    let fixture = Fixture::replaying();
+    let record = the_record(&mut generator(&fixture));
+    assert_eq!(
+        tokens(&record),
+        [
+            Quantity::provider_reported(QuantityKind::InputTextTokens, 35),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, 4),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 0),
+            Quantity::unknown(QuantityKind::CacheCreationInputTokens),
+        ],
+        "prompt_tokens, completion_tokens and cached_tokens of the recorded usage chunk"
+    );
+    assert_eq!(record.upstream_model.as_deref(), Some(SERVED_MODEL));
+}
+
+#[test]
+fn a_recorded_response_without_usage_yields_the_record_with_every_token_count_unknown() {
+    let fixture = Scripted::new(vec![TEXT_NO_USAGE]);
+    let record = the_record(&mut generator_at(fixture.base_url()));
+    assert_eq!(tokens(&record), TOKEN_KINDS.map(Quantity::unknown));
+    assert_eq!(fixture.requests().len(), 1);
+}

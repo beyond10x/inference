@@ -7,7 +7,8 @@
 //! `inference-runtime`; and behind the `stt`, `llm`, `tts` and `duplex` features, the mocks of
 //! the contract crates, with the graph nodes over them behind each of those features and `run`
 //! together: the mock model node, the STT node and the fan-out of a voice pipeline, and the TTS
-//! node. Its test tree carries the
+//! node, the STT and TTS nodes generic over the recogniser and the synthesiser, the mock by
+//! default, so that a local adapter can take the mock's place. Its test tree carries the
 //! conformance target that answers the synthesized suite of `ess/` (`tests/conform.rs`), which
 //! needs the `run` feature; the library itself pulls no ESS crate, so a crate depending on the
 //! stores or the mocks carries no test tooling, and one that leaves `run` off carries no runtime.
@@ -15,7 +16,8 @@
 //! Every module of a domain `ess/system.yaml` lists exists, empty until the story that declares its
 //! domain fills it; a domain added to the system adds its module line here.
 
-/// `inference.model`: the in-memory stores of the declared models and adapters, and their views.
+/// `inference.model`: the in-memory stores of the declared models, adapters and capability
+/// records, their views, and the loader that checks an adapter's record file against its claims.
 pub mod model;
 
 /// `inference.policy`: the in-memory store of the declared deployment profiles, and its view.
@@ -42,22 +44,31 @@ pub mod session;
 /// tool calls, their views, and behind `duplex` the scripted mock native speech model.
 pub mod duplex;
 
+/// `inference.usage`: the in-memory store of the usage records of model calls, each of a
+/// declared adapter and model.
+pub mod usage;
+
 /// The scripted mock recogniser of the STT contract, in two capability configurations, and
 /// synthetic audio of tone and silence.
 #[cfg(feature = "stt")]
 pub mod stt;
 
 /// The scripted mock `llm` model of the LLM contract, wrapped by its generator, in three
-/// capability configurations, which may also be scripted to propose tool calls.
+/// capability configurations, which may also be scripted to propose tool calls and to report the
+/// usage of each turn.
 #[cfg(feature = "llm")]
 pub mod llm;
 
-/// The scripted mock synthesiser of the TTS contract, in four capability configurations, and a
-/// sink double that acknowledges playback.
+/// The scripted mock synthesiser of the TTS contract, in four capability configurations, a sink
+/// double that acknowledges playback, and the backend-neutral checks of the TTS adapter exit
+/// criteria that an adapter crate runs against its own synthesiser.
 #[cfg(feature = "tts")]
 pub mod tts;
 
 /// The voice cascade on the mocks: topology B declared with exposed ends, its payload and the
-/// node implementations of one run, behind the `stt`, `llm`, `tts` and `run` features together.
+/// node implementations of one run, the TTS node of a cascade whose sink acknowledges playback,
+/// the model node of a cascade that can be interrupted, one generation per turn, and a
+/// synthesiser scripted to deliver frames late, behind the `stt`, `llm`, `tts` and `run` features
+/// together.
 #[cfg(all(feature = "stt", feature = "llm", feature = "tts", feature = "run"))]
 pub mod cascade;

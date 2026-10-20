@@ -1,0 +1,40 @@
+[package]
+name = "local-voice-cascade"
+description = "Example: the local voice cascade, STT, LLM and TTS through commit gates to a speaker that acknowledges playback, on the testkit mocks or the local adapters and an audio host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+local = ["dep:inference-llama-server", "dep:inference-sherpa-onnx"]
+
+[dependencies]
+inference-audio = { path = "../../crates/inference-audio" }
+inference-audio-device = { path = "../../adapters/inference-audio-device", default-features = false, features = ["pipeline"] }
+inference-core = { path = "../../crates/inference-core" }
+inference-llama-server = { path = "../../adapters/inference-llama-server", optional = true }
+inference-llm = { path = "../../crates/inference-llm" }
+inference-pipeline = { path = "../../crates/inference-pipeline" }
+inference-sherpa-onnx = { path = "../../adapters/inference-sherpa-onnx", features = ["stt"], optional = true }
+inference-testkit = { path = "../../crates/inference-testkit", features = ["llm", "run", "stt", "tts"] }
+inference-text = { path = "../../crates/inference-text" }
+inference-tts = { path = "../../crates/inference-tts" }
+
+[dev-dependencies]
+clap = { version = "4", default-features = false, features = ["derive", "env", "error-context", "help", "std", "usage"] }
+inference-audio-device = { path = "../../adapters/inference-audio-device", features = ["pipeline"] }
+inference-runtime = { path = "../../crates/inference-runtime" }
+
+[[test]]
+name = "local_adapters"
+required-features = ["local"]
+
+[[example]]
+name = "talk"
+required-features = ["local"]
+
+[lints]
+workspace = true
