@@ -14,6 +14,24 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// [`distil`] on a stand-in script this test has just written. A test that forks while that
+/// file is open for writing makes exec fail with ETXTBSY until that child execs; such a start is
+/// retried.
+fn distil_written(fake: &Path, dir: &Path) -> Result<String, DistilError> {
+    let mut attempt = 0;
+    loop {
+        match distil(fake, dir) {
+            Err(DistilError::Start { error, .. })
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 50 =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other,
+        }
+    }
+}
+
 fn missing() -> PathBuf {
     scratch("missing").join("no-such-claude")
 }
@@ -96,7 +114,7 @@ fn a_failure_the_command_prints_on_standard_output_is_in_the_error() {
     let fake = dir.join("fake-claude");
     std::fs::write(&fake, "#!/bin/sh\necho 'Invalid API key'\nexit 1\n").expect("written");
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("executable");
-    let error = distil(&fake, &dir).expect_err("the fake fails");
+    let error = distil_written(&fake, &dir).expect_err("the fake fails");
     assert!(error.to_string().contains("Invalid API key"), "{error}");
 }
 
@@ -112,20 +130,7 @@ fn what_the_command_prints_is_kept_up_to_64_kib_and_marked_when_cut() {
     )
     .expect("written");
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("executable");
-    // A test that forks while this file is open for writing makes exec fail with ETXTBSY
-    // until that child execs; such a start is retried.
-    let mut attempt = 0;
-    let text = loop {
-        match distil(&fake, &dir) {
-            Err(DistilError::Start { error, .. })
-                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 50 =>
-            {
-                attempt += 1;
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            other => break other.expect("the fake prints"),
-        }
-    };
+    let text = distil_written(&fake, &dir).expect("the fake prints");
     assert!(text.ends_with(DISTIL_CUT), "{}", &text[text.len() - 100..]);
     assert_eq!(text.len(), DISTIL_LIMIT + DISTIL_CUT.len());
     assert!(DISTIL_CUT.contains("cut"), "{DISTIL_CUT}");
