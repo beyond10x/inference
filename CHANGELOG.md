@@ -15,7 +15,12 @@
   so the conformance suite runs the bindings' ledger. Two authored scenarios
   (`close-delivers-received-usage`, `fail-delivers-received-usage`) stand for the `closed` and
   `failed` outcomes, which ess 0.60.0 synthesis refuses (ESS-SYNTH-001). Each holds two events at
-  the end and one the caller already had.
+  the end and one the caller already had. The close's scenario also has the caller take one event
+  out of order before the close, and a second open session holding one of its own, which the
+  close leaves held.
+- `SessionLedger` counts the frames a binding could not read (`unreadable_frame`,
+  `unreadable_frames`, `last_unreadable`) and ends a response the provider ended unreadably
+  (`response_ended_unread`).
 - `SessionLedger::session_usage_at_end` takes the total of a session billed as a whole and records
   it once, just before the session's end event. Given after the end, it records nothing.
 
@@ -27,6 +32,16 @@
   Sonic, OpenAI Realtime and GPT-Live now record what already arrived before closing.
 - GPT-Live records the billed session seconds after the end events of its responses and just
   before `SpeechSessionClosed` or `SpeechSessionFailed`, not as they arrive.
+- **Breaking:** provider events are decoded field by field, so a field an event may lack is an
+  `Option`: OpenAI Realtime `ServerEvent::ResponseDone` (`response_id`, `status`, `usage`) and
+  `ServerEvent::InputTranscript` (`item_id`, `transcript`); GPT-Live `BackendEvent::Completed` and
+  `BackendEvent::Ended` (`response_id`), `LiveEvent::SessionClosed` and `LiveClosed` (`reason`,
+  `seconds`); Nova Sonic `OutputEvent::CompletionEnd` (`stop_reason`), `OutputContentEnd`
+  (`content_id`, `kind`) and `OutputEvent::Interrupted` (`content_id`).
+- `LiveClient::close` waits for `session.closed` for `CLOSE_TIMEOUT` in all, or the read timeout
+  if longer, not per read. A GPT-Live session whose close reaches that bound still closes, with
+  the usage the server sent meanwhile recorded, unconfirmed.
+- A stall now reads "the provider sent nothing readable for … ms".
 
 ### Fixed
 
@@ -37,6 +52,17 @@
 - A frame or message a binding cannot decode no longer ends a speech session (Nova Sonic, OpenAI
   Realtime, GPT-Live, and `LiveClient::close`). The binding drops it and reads on, so usage the
   provider sends after it is still recorded by `next_event` and by the close.
+- Such a frame is no longer dropped silently: the session counts it and keeps the last one's
+  type or the start of its text, and it does not refresh the liveness bound. A later failure of
+  the session is reported as `ProviderError` naming that count and the last frame, not as
+  `Stalled` or `TransportClosed`.
+- An event that lacks a field the binding does not need keeps its usage and its end. A Realtime
+  `response.done` without `status` ends the response in progress, which fails as a provider error,
+  and still counts its usage; one without its id ends the response in progress, so it no longer
+  blocks the next. A transcription without its transcript still counts its usage. A GPT-Live
+  backend end without its id, and a `session.closed` without its reason or seconds, keep their
+  meaning. A Nova Sonic `completionEnd` without `stopReason` ends the response in progress, and a
+  `contentEnd` or interruption notice without `contentId` applies to it.
 
 ## [0.7.0] — 2026-10-21
 

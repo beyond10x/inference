@@ -1338,3 +1338,142 @@ fn what_arrived_after_an_undecodable_message_is_delivered_by_the_close() {
         "{closing:#?}"
     );
 }
+
+/// The message the binding could not read is counted on the session, named by the start of its
+/// text, and the session stays open.
+#[test]
+fn an_undecodable_message_is_counted_on_the_session() {
+    let server = answered_over_an_undecodable_message();
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, any_completed);
+    assert_eq!(session.ledger().unreadable_frames(), 1, "{events:#?}");
+    let last = session.ledger().last_unreadable().unwrap_or_default();
+    assert!(last.contains("not json"), "{last}");
+    session.close().expect("open");
+    server.finish();
+}
+
+/// A failure that follows a message the binding could not read is reported as a provider error
+/// naming it, not as the closed transport alone.
+#[test]
+fn a_failure_after_an_undecodable_message_is_a_provider_error_naming_it() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        socket
+            .send(Message::text("<html>bad gateway"))
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::SpeechSessionFailed(_))
+    });
+    let Some(SessionEvent::SpeechSessionFailed(failed)) = events.last() else {
+        panic!("the session did not fail: {events:#?}");
+    };
+    assert_eq!(
+        failed.failure.kind,
+        SessionFailureKind::ProviderError,
+        "{failed:?}"
+    );
+    assert!(
+        failed.failure.detail.contains("1 frame") && failed.failure.detail.contains("<html>bad"),
+        "{failed:?}"
+    );
+}
+
+/// A `response.done` without `response.id` ends the response in progress, the only one Realtime
+/// has at a time, and its usage counts.
+#[test]
+fn a_response_done_without_an_id_ends_the_response_in_progress() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, transcript_delta("resp_1", "item_o1", "Hello")).await;
+        let mut done = response_done("resp_1", "completed");
+        done["response"]
+            .as_object_mut()
+            .expect("an object")
+            .remove("id");
+        send(&mut socket, done).await;
+        while let Some(Ok(_)) = socket.next().await {}
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, any_completed);
+    let response = created(&events)[0];
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::ResponseCompleted(completed) if completed.response_id == response
+        )),
+        "{events:#?}"
+    );
+    let recorded = records(&events);
+    assert_eq!(recorded.len(), 1, "{events:#?}");
+    assert!(
+        quantities(recorded[0]).contains(&(QuantityKind::OutputTextTokens, Some(3))),
+        "{recorded:?}"
+    );
+    assert_eq!(session.ledger().unreadable_frames(), 0);
+    session.close().expect("open");
+}
+
+/// An input transcription without its `transcript` still carries billable usage: it is counted,
+/// and the frame is counted as one the binding could not read in full.
+#[test]
+fn the_usage_of_an_input_transcription_without_its_transcript_is_counted() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(
+            &mut socket,
+            json!({"type": "conversation.item.input_audio_transcription.completed", "event_id": "event_t1", "item_id": "item_1", "content_index": 0,
+                "usage": {"type": "tokens", "input_tokens": 13, "output_tokens": 2, "total_tokens": 15}}),
+        )
+        .await;
+        while let Some(Ok(_)) = socket.next().await {}
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::UsageRecorded(_))
+    });
+    let recorded = records(&events);
+    assert_eq!(recorded.len(), 1, "{events:#?}");
+    assert_eq!(
+        quantities(recorded[0]),
+        [
+            (QuantityKind::InputAudioTokens, Some(13)),
+            (QuantityKind::OutputTextTokens, Some(2)),
+        ]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::InputTranscribed(_))),
+        "{events:#?}"
+    );
+    assert_eq!(session.ledger().unreadable_frames(), 1);
+    assert!(
+        session
+            .ledger()
+            .last_unreadable()
+            .is_some_and(|what| what.contains("`transcript`")),
+        "{:?}",
+        session.ledger().last_unreadable()
+    );
+    session.close().expect("open");
+}

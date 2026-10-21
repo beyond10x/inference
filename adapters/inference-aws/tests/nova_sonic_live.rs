@@ -48,7 +48,7 @@ struct Seen {
     audio_bytes: usize,
     assistant_audio_ended: bool,
     interruptions: usize,
-    completion_end: Option<StopReason>,
+    completion_end: Option<Option<StopReason>>,
     usage: Option<Usage>,
 }
 
@@ -105,7 +105,7 @@ async fn one_audio_in_audio_out_exchange() {
                     _ => {}
                 },
                 OutputEvent::AudioOutput(audio) => seen.audio_bytes += audio.pcm.len(),
-                OutputEvent::ContentEnd(end) if end.kind == ContentKind::Audio => {
+                OutputEvent::ContentEnd(end) if end.kind == Some(ContentKind::Audio) => {
                     seen.assistant_audio_ended = true;
                 }
                 OutputEvent::Interrupted { .. } => seen.interruptions += 1,

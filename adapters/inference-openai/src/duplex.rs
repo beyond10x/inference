@@ -45,9 +45,19 @@
 //! * Truncation converts the heard sample to `audio_end_ms` of the response's audio item.
 //! * Tool results go back as `function_call_output` items; the caller creates the response that
 //!   uses them.
-//! * A closed connection, a transport or protocol failure fails the session at once; the
-//!   liveness bound fails it when the server is silent while a response is awaited. `error`
-//!   events do not end the session; they are kept in [`OpenAiRealtimeSession::server_errors`].
+//! * `response.done` and `conversation.item.input_audio_transcription.completed` are read field
+//!   by field, so a field missing from them costs no usage and no end. A `response.done` without
+//!   its id ends the latest response the server created, the only one Realtime runs at a time; one
+//!   without a `status` counts its usage and fails its response as a provider error, and the
+//!   caller still awaits the server. A transcription without its transcript counts its usage.
+//! * A message the client cannot read at all (not JSON, no `type`, a binary message, a typed
+//!   event without a field it needs) is dropped and reading goes on. It is counted on the session
+//!   ([`SessionLedger::unreadable_frames`]), so is a field `response.done` or a transcription
+//!   lacked, and none refreshes the liveness bound. A later failure of the session is then a
+//!   provider error naming how many there were and the last.
+//! * A closed connection or a transport failure fails the session at once; the liveness bound
+//!   fails it when the server sends nothing readable while a response is awaited. `error` events
+//!   do not end the session; they are kept in [`OpenAiRealtimeSession::server_errors`].
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -359,6 +369,7 @@ impl NativeSpeechModel for OpenAiRealtime {
             audio_items: HashMap::new(),
             emitted: HashMap::new(),
             caller_commits: 0,
+            awaiting_done: None,
             server_errors: Vec::new(),
         })
     }
@@ -420,6 +431,9 @@ pub struct OpenAiRealtimeSession {
     emitted: HashMap<ResponseId, u64>,
     /// Caller commits the server has not acknowledged yet.
     caller_commits: usize,
+    /// The latest response the server created and has not ended with `response.done`: the one
+    /// a `response.done` without its id ends, since Realtime runs one response at a time.
+    awaiting_done: Option<ResponseId>,
     server_errors: Vec<ServerError>,
 }
 
@@ -495,7 +509,7 @@ impl OpenAiRealtimeSession {
             };
             match runtime.block_on(without_waiting(client.next_event())) {
                 Some(Ok(event)) => self.record(event),
-                Some(Err(RealtimeError::Protocol(_))) => self.undecodable(),
+                Some(Err(error @ RealtimeError::Protocol(_))) => self.undecodable(&error),
                 None | Some(Err(RealtimeError::Stalled(_))) => return None,
                 Some(Err(error)) => return Some(error),
             }
@@ -504,9 +518,11 @@ impl OpenAiRealtimeSession {
     }
 
     /// The server sent a message that is not a Realtime event. It ends nothing, since the client
-    /// reads on: it is server traffic, and is dropped.
-    fn undecodable(&mut self) {
-        self.ledger.heard(Instant::now());
+    /// reads on, but it is no sign of life either: it is dropped, counted on the session as a
+    /// frame the binding could not read, and named by a later failure of the session.
+    fn undecodable(&mut self, error: &RealtimeError) {
+        self.ledger
+            .unreadable_frame(error.to_string(), Instant::now());
     }
 
     /// The contract's id of a provider response, when the session created one under it.
@@ -530,6 +546,7 @@ impl OpenAiRealtimeSession {
                 if self.ledger.response_created(id, now).is_ok() {
                     self.responses.insert(response_id, id);
                     self.emitted.insert(id, 0);
+                    self.awaiting_done = Some(id);
                 }
             }
             ServerEvent::AudioDelta {
@@ -573,7 +590,16 @@ impl OpenAiRealtimeSession {
             ServerEvent::InputTranscript {
                 transcript, usage, ..
             } => {
-                let _ = self.ledger.input_transcribed(transcript, now);
+                match transcript {
+                    Some(transcript) => {
+                        let _ = self.ledger.input_transcribed(transcript, now);
+                    }
+                    None => self.ledger.unreadable_frame(
+                        "`conversation.item.input_audio_transcription.completed` lacks the \
+                         string field `transcript`",
+                        now,
+                    ),
+                }
                 let (contract, quantities) = match usage {
                     Some(ClientTranscriptionUsage::Tokens {
                         input_tokens,
@@ -642,9 +668,23 @@ impl OpenAiRealtimeSession {
                 status,
                 usage,
             } => {
-                let Some(id) = self.response(&response_id) else {
+                let id = match &response_id {
+                    Some(provider) => self.response(provider),
+                    None => self.awaiting_done,
+                };
+                let Some(id) = id else {
+                    if response_id.is_none() {
+                        self.ledger.unreadable_frame(
+                            "`response.done` lacks the string field `id`, and no response \
+                             awaits its end",
+                            now,
+                        );
+                    }
                     return;
                 };
+                if self.awaiting_done == Some(id) && status != Some(ResponseStatus::InProgress) {
+                    self.awaiting_done = None;
+                }
                 let _ = self.ledger.response_usage_reported(
                     id,
                     usage.as_ref().map(response_usage),
@@ -652,6 +692,13 @@ impl OpenAiRealtimeSession {
                     UsageTotal::Final,
                     now,
                 );
+                let Some(status) = status else {
+                    let what = "`response.done` lacks the string field `status`";
+                    if self.ledger.response_ended_unread(id, what, now).is_err() {
+                        self.ledger.unreadable_frame(what, now);
+                    }
+                    return;
+                };
                 let _ = match status {
                     ResponseStatus::Completed => self.ledger.response_completed(id, now),
                     ResponseStatus::Cancelled => self.ledger.response_cancelled(id, now),
@@ -799,7 +846,8 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
     /// binding are recorded first, so their usage counts and they are delivered after the close,
     /// before `SpeechSessionClosed`; from the first read that fails among them nothing is
     /// recorded, so an open session closes rather than fails. A message that is not a Realtime
-    /// event is no failed read: the client reads on, so what follows it is recorded too. Nothing
+    /// event is no failed read: it is counted, the client reads on, and what follows it is
+    /// recorded too. Nothing
     /// the server sends after the close is delivered.
     fn close(&mut self) -> Result<(), SessionError> {
         if self.ledger.session().require_open().is_ok() && self.record_arrived().is_some() {
@@ -831,7 +879,10 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
                 runtime.block_on(async { tokio::time::timeout(left, client.next_event()).await });
             match read {
                 Ok(Ok(event)) => self.record(event),
-                Ok(Err(RealtimeError::Protocol(_))) => self.undecodable(),
+                Ok(Err(error @ RealtimeError::Protocol(_))) => {
+                    self.undecodable(&error);
+                    self.ledger.check_liveness(Instant::now());
+                }
                 Ok(Err(RealtimeError::Stalled(_))) | Err(_) => {
                     self.ledger.check_liveness(Instant::now());
                 }

@@ -41,7 +41,14 @@
 //!   end. What waits for a next response that never begins is recorded at the session's end, by
 //!   close or failure, before its end event, as usage of the session naming no response, when
 //!   a count of it is above 0 or left out;
-//! - a service error fails the session, a closed stream fails it as `transport_closed`.
+//! - a service error fails the session, a closed stream fails it as `transport_closed`;
+//! - an event is read field by field: one without a field the binding does not need keeps its
+//!   meaning, so a `completionEnd` without its reason still ends the response in progress, and a
+//!   `contentEnd` or interruption notice without its `contentId` applies to the response in
+//!   progress, Nova Sonic streaming one at a time. A frame that is no event at all is dropped and
+//!   reading goes on, but it is counted on the session ([`SessionLedger::unreadable_frames`]), it
+//!   does not refresh the liveness bound, and a later failure of the session is a provider error
+//!   naming how many there were and the start of the last.
 //!
 //! The response boundaries are inferred from the order of content blocks the Nova 2 user guide
 //! and the AWS samples show (speculative text, audio, then final text ending `END_TURN`), not
@@ -379,9 +386,9 @@ enum Received {
     Ended,
     /// The client failed: the input side closed.
     Failed(NovaSonicError),
-    /// A frame that is not an event of the reference. It ends nothing: the reader reads on, so
-    /// it is provider traffic and is dropped.
-    Undecodable,
+    /// A frame that is not an event of the reference, named by the decoder. It ends nothing: the
+    /// reader reads on. It is counted on the session and is no sign of life.
+    Undecodable(String),
     /// The stream was quiet for the client's read timeout; not provider traffic.
     Quiet,
 }
@@ -404,7 +411,7 @@ async fn forward(mut reader: SessionReader, arrived: std_mpsc::Sender<Arrival>) 
             Ok(Some(event)) => Received::Event(event),
             Ok(None) => Received::Ended,
             Err(NovaSonicError::Stall { .. }) => Received::Quiet,
-            Err(NovaSonicError::Decode(_)) => Received::Undecodable,
+            Err(error @ NovaSonicError::Decode(_)) => Received::Undecodable(error.to_string()),
             Err(error) => Received::Failed(error),
         };
         let ended = matches!(what, Received::Ended);
@@ -681,7 +688,7 @@ impl NovaSonicSpeechSession {
         let at = arrival.at;
         match arrival.what {
             Received::Quiet => {}
-            Received::Undecodable => self.ledger.heard(at),
+            Received::Undecodable(what) => self.ledger.unreadable_frame(what, at),
             Received::Ended => self.transport_closed(),
             Received::Failed(error) => {
                 let _ = self.ledger.fail(client_failure(&error));
@@ -715,10 +722,8 @@ impl NovaSonicSpeechSession {
             OutputEvent::ContentEnd(end) => self.content_end(&end, at),
             OutputEvent::Interrupted { content_id, .. } => {
                 self.report_speech(at);
-                let response = self
-                    .turns
-                    .blocks
-                    .get(&content_id)
+                let response = content_id
+                    .and_then(|id| self.turns.blocks.get(&id))
                     .and_then(|block| block.response)
                     .or_else(|| self.ledger.in_progress());
                 if let Some(response) = response {
@@ -867,24 +872,37 @@ impl NovaSonicSpeechSession {
         );
     }
 
+    /// Ends the block's response as its stop reason says. An end without its `contentId` applies
+    /// to the response in progress, Nova Sonic streaming one at a time: an interruption cancels it
+    /// and a tool use completes it, but `END_TURN` needs the block's kind, so it ends nothing.
     fn content_end(&mut self, end: &OutputContentEnd, at: Instant) {
-        let Some(block) = self.turns.blocks.get(&end.content_id).cloned() else {
-            return;
+        let (block, response) = match &end.content_id {
+            Some(id) => {
+                let Some(block) = self.turns.blocks.get(id).cloned() else {
+                    return;
+                };
+                let Some(response) = block.response else {
+                    return;
+                };
+                (Some(block), response)
+            }
+            None => {
+                let Some(response) = self.ledger.in_progress() else {
+                    return;
+                };
+                (None, response)
+            }
         };
-        let Some(response) = block.response else {
-            return;
-        };
+        let final_text = block
+            .as_ref()
+            .is_some_and(|block| block.kind == ContentKind::Text && !block.speculative());
         let _ = match end.stop_reason {
             Some(StopReason::Interrupted) => {
                 self.report_speech(at);
                 self.ledger.response_cancelled(response, at)
             }
             Some(StopReason::ToolUse) => self.ledger.response_completed(response, at),
-            Some(StopReason::EndTurn)
-                if block.kind == ContentKind::Text && !block.speculative() =>
-            {
-                self.ledger.response_completed(response, at)
-            }
+            Some(StopReason::EndTurn) if final_text => self.ledger.response_completed(response, at),
             _ => Ok(()),
         };
     }
@@ -1051,9 +1069,16 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match self.arrivals.recv_timeout(remaining) {
                 Ok(arrival) => {
+                    let unreadable = matches!(arrival.what, Received::Undecodable(_));
                     self.record(arrival);
+                    if unreadable {
+                        self.ledger.check_liveness(Instant::now());
+                    }
                     if let Some(event) = self.ledger.next_event() {
                         return Some(event);
+                    }
+                    if Instant::now() >= deadline {
+                        break;
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => break,
