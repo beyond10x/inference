@@ -585,6 +585,29 @@ fn usage_read_before_the_session_is_priced_is_priced_when_it_is() {
 }
 
 #[test]
+fn a_session_with_no_price_document_has_no_complete_total() {
+    let generator = generator(Vec::<String>::new());
+    let (declaration, planned, usage_port) = planned_with_usage(&generator);
+    let sessions = LiveSessions::new();
+    let (session, _driver) = block_on(sessions.open(
+        &declaration,
+        &planned,
+        InteractionMode::TurnBased,
+        text_nodes(&generator, usage_port),
+    ))
+    .expect("a session opens over the text pipeline");
+
+    let cost = session.usage().cost;
+    assert!(cost.records.is_empty());
+    assert_eq!(cost.pending, 0);
+    assert_eq!(cost.currency, None);
+    assert_eq!(
+        cost.total.complete_total, None,
+        "no price document, no complete total, not even of nothing"
+    );
+}
+
+#[test]
 fn a_price_document_in_another_currency_is_refused() {
     let generator = generator(Vec::<String>::new()).reporting([Some(every_count())]);
     let adapter = generator.adapter().adapter_id();
