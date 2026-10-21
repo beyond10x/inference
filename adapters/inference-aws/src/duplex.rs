@@ -377,10 +377,24 @@ enum Received {
     Event(OutputEvent),
     /// The output stream ended.
     Ended,
-    /// The client failed: an undecodable frame, or the input side closed.
+    /// The client failed: the input side closed.
     Failed(NovaSonicError),
+    /// A frame that is not an event of the reference. It ends nothing: the reader reads on, so
+    /// it is provider traffic and is dropped.
+    Undecodable,
     /// The stream was quiet for the client's read timeout; not provider traffic.
     Quiet,
+}
+
+impl Received {
+    /// Whether recording it ends the session: the stream's end, a client failure or a service
+    /// error. An undecodable frame does not.
+    fn ends(&self) -> bool {
+        matches!(
+            self,
+            Received::Ended | Received::Failed(_) | Received::Event(OutputEvent::Error(_))
+        )
+    }
 }
 
 /// Forwards the reader's events until the stream ends or the session is gone.
@@ -390,6 +404,7 @@ async fn forward(mut reader: SessionReader, arrived: std_mpsc::Sender<Arrival>) 
             Ok(Some(event)) => Received::Event(event),
             Ok(None) => Received::Ended,
             Err(NovaSonicError::Stall { .. }) => Received::Quiet,
+            Err(NovaSonicError::Decode(_)) => Received::Undecodable,
             Err(error) => Received::Failed(error),
         };
         let ended = matches!(what, Received::Ended);
@@ -666,6 +681,7 @@ impl NovaSonicSpeechSession {
         let at = arrival.at;
         match arrival.what {
             Received::Quiet => {}
+            Received::Undecodable => self.ledger.heard(at),
             Received::Ended => self.transport_closed(),
             Received::Failed(error) => {
                 let _ = self.ledger.fail(client_failure(&error));
@@ -678,13 +694,11 @@ impl NovaSonicSpeechSession {
     }
 
     /// Records every arrival already received, as [`Self::record`] does, up to the first that
-    /// would end the session: the stream's end, a client failure or a service error.
+    /// would end the session: the stream's end, a client failure or a service error. An
+    /// undecodable frame is recorded as [`Self::record`] records it, and recording goes on.
     fn record_arrived(&mut self) {
         while let Ok(arrival) = self.arrivals.try_recv() {
-            if matches!(
-                arrival.what,
-                Received::Ended | Received::Failed(_) | Received::Event(OutputEvent::Error(_))
-            ) {
+            if arrival.what.ends() {
                 return;
             }
             self.record(arrival);
@@ -1014,7 +1028,8 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
     /// sent that already reached the binding is recorded first, so its usage counts and its
     /// events are delivered after the close, before `SpeechSessionClosed`; from the first stream
     /// end, client failure or service error among it, nothing is recorded, so an open session
-    /// closes rather than fails. Nothing the provider sends after the close is delivered.
+    /// closes rather than fails. An undecodable frame is none of these: the reader reads on, so
+    /// what follows it is recorded too. Nothing the provider sends after the close is delivered.
     fn close(&mut self) -> Result<(), SessionError> {
         if self.ledger.session().require_open().is_ok() {
             self.record_arrived();

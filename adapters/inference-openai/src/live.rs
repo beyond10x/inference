@@ -834,7 +834,8 @@ impl LiveClient {
     }
 
     /// Closes the session gracefully: sends `session.close`, reads until `session.closed`, then
-    /// closes the connection. Events read on the way are dropped.
+    /// closes the connection. Events read on the way are dropped, and so are messages that are not
+    /// GPT-Live events: the client reads on past them.
     ///
     /// # Errors
     /// The errors of [`LiveClient::next_event`] when the connection ends or stalls before
@@ -844,8 +845,12 @@ impl LiveClient {
         self.request_close().await?;
         self.read_timeout = self.read_timeout.max(CLOSE_TIMEOUT);
         let closed = loop {
-            if let LiveEvent::SessionClosed { reason, seconds } = self.next_event().await? {
-                break LiveClosed { reason, seconds };
+            match self.next_event().await {
+                Ok(LiveEvent::SessionClosed { reason, seconds }) => {
+                    break LiveClosed { reason, seconds };
+                }
+                Ok(_) | Err(RealtimeError::Protocol(_)) => {}
+                Err(error) => return Err(error),
             }
         };
         let _ = close_socket(&mut self.socket, self.read_timeout).await;

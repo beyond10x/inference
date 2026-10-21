@@ -8,11 +8,16 @@
   `ReceiveSessionEvent` and `DeliverSessionEvent` over the entity `ReceivedSessionEvent` and its
   view `ReceivedSessionEvents`. `CloseSpeechSession` and `FailSpeechSession` deliver every event
   still held before their end event, and nothing is received after it. `inference-duplex` carries
-  the record and the testkit `DuplexDomain` runs it. Two authored scenarios
+  the record. `SessionLedger` keeps one for every provider event it holds
+  (`received_events`, `receive_event`, `deliver_event`, `DeliverSessionEventError`), delivers it
+  when the caller takes the event and stamps every one still held at a close or failure. The
+  testkit `DuplexDomain` holds each session in a `SessionLedger` (`SessionLedger::open_record`),
+  so the conformance suite runs the bindings' ledger. Two authored scenarios
   (`close-delivers-received-usage`, `fail-delivers-received-usage`) stand for the `closed` and
-  `failed` outcomes, which ess 0.60.0 synthesis refuses (ESS-SYNTH-001).
+  `failed` outcomes, which ess 0.60.0 synthesis refuses (ESS-SYNTH-001). Each holds two events at
+  the end and one the caller already had.
 - `SessionLedger::session_usage_at_end` takes the total of a session billed as a whole and records
-  it once, just before the session's end event.
+  it once, just before the session's end event. Given after the end, it records nothing.
 
 ### Changed
 
@@ -29,6 +34,9 @@
   `submit_tool_result`; a failed send on OpenAI Realtime and GPT-Live) records what had already
   arrived first, so its usage counts, and fails as the first stream end, client failure or service
   error among it, else as `TransportClosed`.
+- A frame or message a binding cannot decode no longer ends a speech session (Nova Sonic, OpenAI
+  Realtime, GPT-Live, and `LiveClient::close`). The binding drops it and reads on, so usage the
+  provider sends after it is still recorded by `next_event` and by the close.
 
 ## [0.7.0] — 2026-10-21
 

@@ -749,3 +749,25 @@ impl fmt::Display for ReceivedSessionEventStateConflict {
 }
 
 impl Error for ReceivedSessionEventStateConflict {}
+
+/// Why `inference.duplex.DeliverSessionEvent` moved nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliverSessionEventError {
+    /// No received event carries the identity: the `wrong-state` outcome with no state.
+    Unknown { received_id: ReceivedEventId },
+    /// The `wrong-state` outcome.
+    Conflict(ReceivedSessionEventStateConflict),
+}
+
+impl fmt::Display for DeliverSessionEventError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown { received_id } => {
+                write!(f, "no received event carries the identity {received_id}")
+            }
+            Self::Conflict(conflict) => conflict.fmt(f),
+        }
+    }
+}
+
+impl Error for DeliverSessionEventError {}

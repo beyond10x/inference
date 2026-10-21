@@ -421,6 +421,38 @@ fn close_succeeds_over_a_failed_send_that_already_arrived() {
     closes_over(After::RefusesInput, true);
 }
 
+/// A frame that is not an event of the reference does not end the session: the reader keeps
+/// reading, so the usage delta after it is counted and the session stays open until the caller
+/// closes it.
+#[test]
+fn an_undecodable_frame_does_not_end_the_session() {
+    let mut events = one_turn();
+    events.push(json!({}));
+    events.push(usage([0, 0, 0, 5]));
+    let mut session = NovaSonicSpeech::with_connector(Scripted::open(events))
+        .expect("the binding's runtime starts")
+        .open(config())
+        .expect("opens");
+    let mut events = drain(&mut session);
+    assert_eq!(
+        session.ledger().session().state(),
+        SpeechSessionState::Open,
+        "{events:#?}"
+    );
+    session.close().expect("open");
+    events.extend(drain(&mut session));
+    assert!(
+        matches!(events.last(), Some(SessionEvent::SpeechSessionClosed(_))),
+        "{events:#?}"
+    );
+    let records = session.ledger().usage_records();
+    assert_eq!(
+        total(&session, QuantityKind::OutputTextTokens),
+        (13, true),
+        "{records:#?}"
+    );
+}
+
 fn weather() -> Tool {
     Tool::declare(DeclareTool {
         name: "weather".to_owned(),

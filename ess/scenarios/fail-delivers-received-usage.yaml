@@ -1,7 +1,7 @@
 type: ess-scenario/1
 domain: inference.duplex
 scenario: fail-delivers-received-usage
-summary: Usage the provider sent before its transport closed is delivered before SpeechSessionFailed; nothing sent after the failure is received.
+summary: Every event still held when the transport closed, usage among them, is delivered before SpeechSessionFailed; one already delivered stays as it was; nothing later is received.
 arrange:
   - instance: model
     entity: inference.model.Model
@@ -9,7 +9,11 @@ arrange:
     entity: inference.model.Adapter
   - instance: session
     entity: inference.duplex.SpeechSession
+  - instance: transcript
+    entity: inference.duplex.ReceivedSessionEvent
   - instance: usage
+    entity: inference.duplex.ReceivedSessionEvent
+  - instance: end
     entity: inference.duplex.ReceivedSessionEvent
 timeline:
   - at: 2026-01-05T09:00:00Z
@@ -55,18 +59,37 @@ timeline:
     capture: {instance: session, event: inference.duplex.SpeechSessionOpened, field: session_id}
   - at: 2026-01-05T09:00:03Z
     command: inference.duplex.ReceiveSessionEvent
-    input: {session_id: {$instance: session}, kind: usage, sequence: 1}
+    input: {session_id: {$instance: session}, kind: input_transcript, sequence: 1}
+    outcome: received
+    capture: {instance: transcript, event: inference.duplex.SessionEventReceived, field: received_id}
+  - at: 2026-01-05T09:00:04Z
+    command: inference.duplex.DeliverSessionEvent
+    input: {received_id: {$instance: transcript}}
+    outcome: delivered
+  - at: 2026-01-05T09:00:05Z
+    command: inference.duplex.ReceiveSessionEvent
+    input: {session_id: {$instance: session}, kind: usage, sequence: 2}
     outcome: received
     capture: {instance: usage, event: inference.duplex.SessionEventReceived, field: received_id}
-  - at: 2026-01-05T09:00:04Z
+  - at: 2026-01-05T09:00:06Z
+    command: inference.duplex.ReceiveSessionEvent
+    input: {session_id: {$instance: session}, kind: response_end, sequence: 3}
+    outcome: received
+    capture: {instance: end, event: inference.duplex.SessionEventReceived, field: received_id}
+  - at: 2026-01-05T09:00:07Z
     command: inference.duplex.FailSpeechSession
     input:
       session_id: {$instance: session}
       failure: {kind: transport_closed, detail: the provider closed the connection}
     outcome: failed
-  - at: 2026-01-05T09:00:05Z
+    events:
+      - event: inference.duplex.SpeechSessionFailed
+        payload:
+          session_id: {$instance: session}
+          failure: {kind: transport_closed, detail: the provider closed the connection}
+  - at: 2026-01-05T09:00:08Z
     command: inference.duplex.ReceiveSessionEvent
-    input: {session_id: {$instance: session}, kind: usage, sequence: 2}
+    input: {session_id: {$instance: session}, kind: usage, sequence: 4}
     outcome: session-not-open
 assert:
   - view: inference.duplex.ReceivedSessionEvents
@@ -74,10 +97,26 @@ assert:
       received_id: {$instance: usage}
       session_id: {$instance: session}
       kind: usage
-      sequence: 1
+      sequence: 2
       delivered_before: failed
       state: Delivered
   - view: inference.duplex.ReceivedSessionEvents
-    counts: {at_least: 1, at_most: 1}
+    contains:
+      received_id: {$instance: end}
+      session_id: {$instance: session}
+      kind: response_end
+      sequence: 3
+      delivered_before: failed
+      state: Delivered
+  - view: inference.duplex.ReceivedSessionEvents
+    contains:
+      received_id: {$instance: transcript}
+      session_id: {$instance: session}
+      kind: input_transcript
+      sequence: 1
+      delivered_before: null
+      state: Delivered
+  - view: inference.duplex.ReceivedSessionEvents
+    counts: {at_least: 3, at_most: 3}
   - view: inference.duplex.SpeechSessions
     contains: {session_id: {$instance: session}, state: Failed}

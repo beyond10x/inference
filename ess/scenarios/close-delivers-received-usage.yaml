@@ -1,7 +1,7 @@
 type: ess-scenario/1
 domain: inference.duplex
 scenario: close-delivers-received-usage
-summary: Usage the provider sent before the caller closed the session is delivered before SpeechSessionClosed; an event the caller already had stays delivered; nothing sent after the close is received.
+summary: Every event still held at the close, usage among them, is delivered before SpeechSessionClosed; one already delivered stays as it was; nothing sent after the close is received.
 arrange:
   - instance: model
     entity: inference.model.Model
@@ -10,6 +10,8 @@ arrange:
   - instance: session
     entity: inference.duplex.SpeechSession
   - instance: transcript
+    entity: inference.duplex.ReceivedSessionEvent
+  - instance: answer
     entity: inference.duplex.ReceivedSessionEvent
   - instance: usage
     entity: inference.duplex.ReceivedSessionEvent
@@ -66,32 +68,51 @@ timeline:
     outcome: delivered
   - at: 2026-01-05T09:00:05Z
     command: inference.duplex.ReceiveSessionEvent
-    input: {session_id: {$instance: session}, kind: usage, sequence: 2}
+    input: {session_id: {$instance: session}, kind: output_transcript, sequence: 2}
+    outcome: received
+    capture: {instance: answer, event: inference.duplex.SessionEventReceived, field: received_id}
+  - at: 2026-01-05T09:00:06Z
+    command: inference.duplex.ReceiveSessionEvent
+    input: {session_id: {$instance: session}, kind: usage, sequence: 3}
     outcome: received
     capture: {instance: usage, event: inference.duplex.SessionEventReceived, field: received_id}
-  - at: 2026-01-05T09:00:06Z
+  - at: 2026-01-05T09:00:07Z
     command: inference.duplex.CloseSpeechSession
     input: {session_id: {$instance: session}}
     outcome: closed
     events:
       - event: inference.duplex.SpeechSessionClosed
         payload: {session_id: {$instance: session}}
-  - at: 2026-01-05T09:00:07Z
+  - at: 2026-01-05T09:00:08Z
     command: inference.duplex.ReceiveSessionEvent
-    input: {session_id: {$instance: session}, kind: usage, sequence: 3}
+    input: {session_id: {$instance: session}, kind: usage, sequence: 4}
     outcome: session-not-open
 assert:
+  - view: inference.duplex.ReceivedSessionEvents
+    contains:
+      received_id: {$instance: answer}
+      session_id: {$instance: session}
+      kind: output_transcript
+      sequence: 2
+      delivered_before: closed
+      state: Delivered
   - view: inference.duplex.ReceivedSessionEvents
     contains:
       received_id: {$instance: usage}
       session_id: {$instance: session}
       kind: usage
-      sequence: 2
+      sequence: 3
       delivered_before: closed
       state: Delivered
   - view: inference.duplex.ReceivedSessionEvents
-    contains: {received_id: {$instance: transcript}, kind: input_transcript, sequence: 1, state: Delivered}
+    contains:
+      received_id: {$instance: transcript}
+      session_id: {$instance: session}
+      kind: input_transcript
+      sequence: 1
+      delivered_before: null
+      state: Delivered
   - view: inference.duplex.ReceivedSessionEvents
-    counts: {at_least: 2, at_most: 2}
+    counts: {at_least: 3, at_most: 3}
   - view: inference.duplex.SpeechSessions
     contains: {session_id: {$instance: session}, state: Closed}

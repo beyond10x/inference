@@ -9,13 +9,16 @@ use inference_core::usage::{Quantity, QuantityKind, RecordUsage, UsageRecord};
 use inference_tools::{Json, Tool};
 
 use crate::{
-    InputAccepted, InputCommitted, InputTranscribed, OpenError, OpenSpeechSession, OutputAudio,
-    OutputTranscriptDelta, OutputTruncated, ProposeSpeechToolCall, Response, ResponseId,
-    ResponseIdReused, ResponseNotFound, ResponseStateConflict, ResponseUsage,
-    ResponseUsageRecorded, SessionConfig, SessionError, SessionEvent, SessionFailure,
+    DeliverSessionEventError, InputAccepted, InputCommitted, InputTranscribed,
+    NonPositiveIdleLimit, OpenError, OpenSpeechSession, OutputAudio, OutputTranscriptDelta,
+    OutputTruncated, ProposeSpeechToolCall, ReceivedEventId, ReceivedEventKind,
+    ReceivedSessionEvent, Response, ResponseId, ResponseIdReused, ResponseNotFound,
+    ResponseStateConflict, ResponseUsage, ResponseUsageRecorded, SessionConfig, SessionEnd,
+    SessionError, SessionEvent, SessionEventDelivered, SessionEventReceived, SessionFailure,
     SessionFailureKind, SpeechCallId, SpeechCallIdReused, SpeechCapabilities, SpeechSession,
-    SpeechSessionId, SpeechSessionOpened, SpeechStarted, SpeechStopped, SpeechToolCall,
-    TranscriptionUsage, TranscriptionUsageRecorded, Unsupported, UsageTotal,
+    SpeechSessionId, SpeechSessionOpened, SpeechSessionStateConflict, SpeechStarted, SpeechStopped,
+    SpeechToolCall, TranscriptionUsage, TranscriptionUsageRecorded, TuningSupport, Unsupported,
+    UsageTotal,
 };
 
 /// The liveness bound of a session: when the provider was last heard from, and how long it may
@@ -121,7 +124,11 @@ pub struct SessionLedger {
     opened: (Instant, i64),
     /// The latest instant the ledger was given.
     latest: Instant,
-    outbox: VecDeque<SessionEvent>,
+    /// The events recorded and not yet delivered, each with the received event it carries, if any.
+    outbox: VecDeque<(SessionEvent, Option<ReceivedEventId>)>,
+    /// The events the provider sent the open session, in the order received
+    /// ([`SessionLedger::received_events`]).
+    received: Vec<ReceivedSessionEvent>,
 }
 
 /// What the ledger keeps to record one response's usage.
@@ -208,14 +215,68 @@ impl SessionLedger {
         };
         let (session, opened) =
             SpeechSession::open_as(session_id, record).map_err(OpenError::NoLivenessBound)?;
+        let ledger = Self::of(
+            session,
+            adapter.model_id(),
+            capabilities.clone(),
+            config.tools,
+            config.idle_limit,
+            now,
+        );
+        Ok((ledger, opened))
+    }
+
+    /// Runs `inference.duplex.OpenSpeechSession` with `record` as the command gives it, under
+    /// `session_id`, for a store that holds sessions by their record rather than for a binding:
+    /// the record is the whole configuration, so the capabilities are the ones it names, and the
+    /// session offers no tool to call, since the record names its tools only by identity. The
+    /// provider is heard from at `now`.
+    ///
+    /// # Errors
+    ///
+    /// [`NonPositiveIdleLimit`]; nothing is opened.
+    pub fn open_record(
+        session_id: SpeechSessionId,
+        model_id: ModelId,
+        record: OpenSpeechSession,
+        now: Instant,
+    ) -> Result<(Self, SpeechSessionOpened), NonPositiveIdleLimit> {
+        let (session, opened) = SpeechSession::open_as(session_id, record)?;
+        let config = session.config();
+        let capabilities = SpeechCapabilities {
+            input_formats: vec![config.input_format],
+            output_formats: vec![config.output_format],
+            turn_detection: vec![config.turn_detection],
+            turn_tuning: TuningSupport::ALL,
+            manual_commit: true,
+            manual_response: true,
+            manual_interrupt: true,
+            client_cancel: true,
+            truncation: true,
+            tool_calling: true,
+        };
+        let idle_limit = Duration::from_millis(u64::try_from(config.idle_limit_ms).unwrap_or(0));
+        let ledger = Self::of(session, model_id, capabilities, Vec::new(), idle_limit, now);
+        Ok((ledger, opened))
+    }
+
+    /// The ledger of `session`, just opened at `now`.
+    fn of(
+        session: SpeechSession,
+        model_id: ModelId,
+        capabilities: SpeechCapabilities,
+        tools: Vec<Tool>,
+        idle_limit: Duration,
+        now: Instant,
+    ) -> Self {
         let wall = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, millis);
-        let ledger = Self {
+        Self {
             session,
-            model_id: adapter.model_id(),
-            capabilities: capabilities.clone(),
-            tools: config.tools,
+            model_id,
+            capabilities,
+            tools,
             responses: Vec::new(),
             emitted: Vec::new(),
             usage: Vec::new(),
@@ -224,14 +285,14 @@ impl SessionLedger {
             held: Vec::new(),
             at_end: None,
             calls: Vec::new(),
-            liveness: Liveness::new(config.idle_limit, now),
+            liveness: Liveness::new(idle_limit, now),
             requested: false,
             clock_pending: false,
             opened: (now, wall),
             latest: now,
             outbox: VecDeque::new(),
-        };
-        Ok((ledger, opened))
+            received: Vec::new(),
+        }
     }
 
     #[must_use]
@@ -306,9 +367,65 @@ impl SessionLedger {
         self.outbox.len()
     }
 
-    /// The next recorded event not yet delivered.
+    /// The next recorded event not yet delivered. When it carries an event the provider sent the
+    /// open session that is still held, the caller now has that one too:
+    /// `inference.duplex.DeliverSessionEvent`.
     pub fn next_event(&mut self) -> Option<SessionEvent> {
-        self.outbox.pop_front()
+        let (event, received_id) = self.outbox.pop_front()?;
+        if let Some(received_id) = received_id {
+            let _ = self.deliver_event(received_id);
+        }
+        Some(event)
+    }
+
+    /// Every event the provider sent the open session, in the order received: its output, its
+    /// input transcripts, its usage, its tool calls and the ends of its responses, each held
+    /// until the caller has it.
+    #[must_use]
+    pub fn received_events(&self) -> &[ReceivedSessionEvent] {
+        &self.received
+    }
+
+    /// The provider sent the open session an event of `kind`, the `sequence`th it sent, under
+    /// `received_id`: `inference.duplex.ReceiveSessionEvent`. It is held until the caller has it
+    /// ([`Self::deliver_event`]); a close or failure delivers it before its end event. The ledger
+    /// records the events it builds from the provider's traffic this way itself.
+    ///
+    /// # Errors
+    ///
+    /// [`SpeechSessionStateConflict`] when the session is not Open: what a provider sends after
+    /// the end is not received. Nothing is held.
+    pub fn receive_event(
+        &mut self,
+        received_id: ReceivedEventId,
+        kind: ReceivedEventKind,
+        sequence: i64,
+    ) -> Result<SessionEventReceived, SpeechSessionStateConflict> {
+        let (received, event) =
+            ReceivedSessionEvent::receive_as(received_id, &self.session, kind, sequence)?;
+        self.received.push(received);
+        Ok(event)
+    }
+
+    /// The caller has the received event carrying `received_id`:
+    /// `inference.duplex.DeliverSessionEvent`.
+    ///
+    /// # Errors
+    ///
+    /// [`DeliverSessionEventError::Unknown`] when the session received no such event, or
+    /// [`DeliverSessionEventError::Conflict`] when it is no longer held; nothing moved.
+    pub fn deliver_event(
+        &mut self,
+        received_id: ReceivedEventId,
+    ) -> Result<SessionEventDelivered, DeliverSessionEventError> {
+        let slot = self
+            .received
+            .iter_mut()
+            .find(|received| received.received_id() == received_id)
+            .ok_or(DeliverSessionEventError::Unknown { received_id })?;
+        let (moved, event) = slot.deliver().map_err(DeliverSessionEventError::Conflict)?;
+        *slot = moved;
+        Ok(event)
     }
 
     /// The caller sends `frame`: `inference.duplex.AppendInputAudio`, accepted whether or not a
@@ -321,11 +438,10 @@ impl SessionLedger {
         self.require_open()?;
         Self::same_format(*self.session.input_format(), frame.format)?;
         let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::InputAccepted(InputAccepted {
-                session_id,
-                frame,
-            }));
+        self.push(SessionEvent::InputAccepted(InputAccepted {
+            session_id,
+            frame,
+        }));
         Ok(())
     }
 
@@ -420,11 +536,10 @@ impl SessionLedger {
         if heard.get() > emitted {
             return Err(SessionError::BeyondOutput { heard, emitted });
         }
-        self.outbox
-            .push_back(SessionEvent::OutputTruncated(OutputTruncated {
-                response_id,
-                heard,
-            }));
+        self.push(SessionEvent::OutputTruncated(OutputTruncated {
+            response_id,
+            heard,
+        }));
         Ok(())
     }
 
@@ -450,8 +565,7 @@ impl SessionLedger {
             })?;
         let (moved, event) = slot.answer(result).map_err(SessionError::CallConflict)?;
         *slot = moved;
-        self.outbox
-            .push_back(SessionEvent::SpeechToolCallAnswered(event));
+        self.push(SessionEvent::SpeechToolCallAnswered(event));
         if !self.capabilities.manual_response {
             if !self.awaiting() {
                 self.clock_pending = true;
@@ -464,7 +578,9 @@ impl SessionLedger {
     /// The caller closes the session: `inference.duplex.CloseSpeechSession`. The response in
     /// progress is cancelled first, its `ResponseCancelled` just before the total of the session
     /// ([`Self::session_usage_at_end`]) and `SpeechSessionClosed`; every response not yet
-    /// recorded, and any usage held for no response, is recorded before both.
+    /// recorded, and any usage held for no response, is recorded before both. Every event the
+    /// provider sent that is still held is delivered before `SpeechSessionClosed`
+    /// (`delivered_before: closed`), and stays in order before it.
     ///
     /// # Errors
     ///
@@ -476,10 +592,10 @@ impl SessionLedger {
             self.cancel_response(response_id, self.latest)?;
         }
         self.record_at_end();
+        self.deliver_held(SessionEnd::Closed);
         self.session = moved;
         self.requested = false;
-        self.outbox
-            .push_back(SessionEvent::SpeechSessionClosed(event));
+        self.push(SessionEvent::SpeechSessionClosed(event));
         Ok(())
     }
 
@@ -487,7 +603,9 @@ impl SessionLedger {
     /// transport, an error the provider reported or a stall. The response in progress fails with
     /// it first, its `ResponseFailed` just before the total of the session
     /// ([`Self::session_usage_at_end`]) and `SpeechSessionFailed`; every response not yet
-    /// recorded, and any usage held for no response, is recorded before both.
+    /// recorded, and any usage held for no response, is recorded before both. Every event the
+    /// provider sent that is still held is delivered before `SpeechSessionFailed`
+    /// (`delivered_before: failed`), and stays in order before it.
     ///
     /// # Errors
     ///
@@ -502,10 +620,10 @@ impl SessionLedger {
             self.fail_response(response_id, failure, self.latest)?;
         }
         self.record_at_end();
+        self.deliver_held(SessionEnd::Failed);
         self.session = moved;
         self.requested = false;
-        self.outbox
-            .push_back(SessionEvent::SpeechSessionFailed(event));
+        self.push(SessionEvent::SpeechSessionFailed(event));
         Ok(())
     }
 
@@ -568,11 +686,10 @@ impl SessionLedger {
         self.require_open()?;
         self.heard(now);
         let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::SpeechStarted(SpeechStarted {
-                session_id,
-                position,
-            }));
+        self.push(SessionEvent::SpeechStarted(SpeechStarted {
+            session_id,
+            position,
+        }));
         Ok(())
     }
 
@@ -589,11 +706,10 @@ impl SessionLedger {
         self.require_open()?;
         self.heard(now);
         let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::SpeechStopped(SpeechStopped {
-                session_id,
-                position,
-            }));
+        self.push(SessionEvent::SpeechStopped(SpeechStopped {
+            session_id,
+            position,
+        }));
         Ok(())
     }
 
@@ -606,11 +722,10 @@ impl SessionLedger {
         self.require_open()?;
         self.heard(now);
         let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::InputTranscribed(InputTranscribed {
-                session_id,
-                text,
-            }));
+        self.push_received(
+            ReceivedEventKind::InputTranscript,
+            SessionEvent::InputTranscribed(InputTranscribed { session_id, text }),
+        );
         Ok(())
     }
 
@@ -662,7 +777,7 @@ impl SessionLedger {
             settled: false,
             recorded: false,
         });
-        self.outbox.push_back(SessionEvent::ResponseCreated(event));
+        self.push(SessionEvent::ResponseCreated(event));
         Ok(())
     }
 
@@ -683,11 +798,10 @@ impl SessionLedger {
         Self::same_format(*self.session.output_format(), frame.format)?;
         self.heard(now);
         self.emitted[index] += u64::from(frame.sample_count);
-        self.outbox
-            .push_back(SessionEvent::OutputAudio(OutputAudio {
-                response_id,
-                frame,
-            }));
+        self.push_received(
+            ReceivedEventKind::OutputAudio,
+            SessionEvent::OutputAudio(OutputAudio { response_id, frame }),
+        );
         Ok(())
     }
 
@@ -705,11 +819,10 @@ impl SessionLedger {
     ) -> Result<(), SessionError> {
         self.in_progress_index(response_id)?;
         self.heard(now);
-        self.outbox
-            .push_back(SessionEvent::OutputTranscriptDelta(OutputTranscriptDelta {
-                response_id,
-                text,
-            }));
+        self.push_received(
+            ReceivedEventKind::OutputTranscript,
+            SessionEvent::OutputTranscriptDelta(OutputTranscriptDelta { response_id, text }),
+        );
         Ok(())
     }
 
@@ -732,8 +845,10 @@ impl SessionLedger {
         self.heard(now);
         self.responses[index] = moved;
         self.ended(index, now);
-        self.outbox
-            .push_back(SessionEvent::ResponseCompleted(event));
+        self.push_received(
+            ReceivedEventKind::ResponseEnd,
+            SessionEvent::ResponseCompleted(event),
+        );
         Ok(())
     }
 
@@ -783,11 +898,10 @@ impl SessionLedger {
         self.heard(now);
         self.usage[index] = Some(usage);
         let response_id = self.responses[index].response_id();
-        self.outbox
-            .push_back(SessionEvent::ResponseUsageRecorded(ResponseUsageRecorded {
-                response_id,
-                usage,
-            }));
+        self.push_received(
+            ReceivedEventKind::Usage,
+            SessionEvent::ResponseUsageRecorded(ResponseUsageRecorded { response_id, usage }),
+        );
     }
 
     /// The provider reported the usage of a response as `quantities`, built from its own fields
@@ -837,10 +951,13 @@ impl SessionLedger {
         self.heard(now);
         let session_id = self.session.session_id();
         if let Some(usage) = usage {
-            self.outbox
-                .push_back(SessionEvent::TranscriptionUsageRecorded(
-                    TranscriptionUsageRecorded { session_id, usage },
-                ));
+            self.push_received(
+                ReceivedEventKind::Usage,
+                SessionEvent::TranscriptionUsageRecorded(TranscriptionUsageRecorded {
+                    session_id,
+                    usage,
+                }),
+            );
         }
         self.record_of_session(quantities, true, now, now);
         Ok(())
@@ -884,12 +1001,11 @@ impl SessionLedger {
     /// total so far as `quantities`; `confirmed` is false while the provider has not confirmed
     /// them final. They replace the total given before and are recorded once, as usage of the
     /// session naming no response, when a close, a failure or a stall ends it: after the end
-    /// events of its responses, just before its own. Given after the end, they are recorded at
-    /// once.
+    /// events of its responses, just before its own. Given after the end, they record nothing
+    /// and push nothing: the total was recorded once, at the end.
     pub fn session_usage_at_end(&mut self, quantities: Vec<Quantity>, confirmed: bool) {
-        self.at_end = Some((quantities, confirmed));
-        if self.session.require_open().is_err() {
-            self.record_at_end();
+        if self.session.require_open().is_ok() {
+            self.at_end = Some((quantities, confirmed));
         }
     }
 
@@ -992,7 +1108,36 @@ impl SessionLedger {
     fn push_record(&mut self, usage: RecordUsage) {
         let (record, event) = UsageRecord::record(usage);
         self.records.push(record);
-        self.outbox.push_back(SessionEvent::UsageRecorded(event));
+        self.push_received(ReceivedEventKind::Usage, SessionEvent::UsageRecorded(event));
+    }
+
+    /// Records `event` for the caller; it carries nothing the provider sent.
+    fn push(&mut self, event: SessionEvent) {
+        self.outbox.push_back((event, None));
+    }
+
+    /// Records `event`, built from what the provider sent, for the caller: while the session is
+    /// open it is received as an event of `kind`, the next in sequence, and held until
+    /// [`Self::next_event`] delivers it or the session's end does. After the end nothing is
+    /// received, and the event carries none.
+    fn push_received(&mut self, kind: ReceivedEventKind, event: SessionEvent) {
+        let sequence = i64::try_from(self.received.len())
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let received_id = ReceivedEventId::generate();
+        let received = self.receive_event(received_id, kind, sequence).ok();
+        self.outbox
+            .push_back((event, received.map(|received| received.received_id)));
+    }
+
+    /// The session ends with `end`: every event the provider sent that is still held is
+    /// delivered before the end event, which the caller records next.
+    fn deliver_held(&mut self, end: SessionEnd) {
+        for slot in &mut self.received {
+            if let Some(moved) = slot.delivered_before_end(end) {
+                *slot = moved;
+            }
+        }
     }
 
     /// `at` on the wall clock, in Unix epoch milliseconds, placed relative to the opening.
@@ -1049,8 +1194,10 @@ impl SessionLedger {
         .map_err(SessionError::ResponseNotInProgress)?;
         self.heard(now);
         self.calls.push(call);
-        self.outbox
-            .push_back(SessionEvent::SpeechToolCallProposed(event));
+        self.push_received(
+            ReceivedEventKind::ToolCall,
+            SessionEvent::SpeechToolCallProposed(event),
+        );
         Ok(())
     }
 
@@ -1072,8 +1219,7 @@ impl SessionLedger {
             self.await_response(now);
         }
         let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::InputCommitted(InputCommitted { session_id }));
+        self.push(SessionEvent::InputCommitted(InputCommitted { session_id }));
     }
 
     fn cancel_response(
@@ -1087,8 +1233,7 @@ impl SessionLedger {
             .map_err(SessionError::ResponseNotInProgress)?;
         self.responses[index] = moved;
         self.ended(index, at);
-        self.outbox
-            .push_back(SessionEvent::ResponseCancelled(event));
+        self.push(SessionEvent::ResponseCancelled(event));
         Ok(())
     }
 
@@ -1104,7 +1249,7 @@ impl SessionLedger {
             .map_err(SessionError::ResponseNotInProgress)?;
         self.responses[index] = moved;
         self.ended(index, at);
-        self.outbox.push_back(SessionEvent::ResponseFailed(event));
+        self.push(SessionEvent::ResponseFailed(event));
         Ok(())
     }
 
