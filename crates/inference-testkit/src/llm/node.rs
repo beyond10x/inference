@@ -68,17 +68,20 @@
 //!   ([`MockGenerator::proposing_round`](super::MockGenerator::proposing_round)): each is sent, in
 //!   order, and the generation awaits every one of them; each outcome is integrated as it arrives,
 //!   and the next turn runs once the last of them did;
-//! * superseded through its handle ([`ModelHandle::supersede`]), the node runs
-//!   `inference.stream.SupersedeGeneration` on its generation, which then emits nothing more, and
-//!   sends its `GenerationSuperseded` on the text port and, given tools, on `tool_call`, so that
-//!   the tool authority rejects the calls of the generation it still holds and the executor is told
-//!   to cancel the one it runs. An outcome that arrives for a generation that is no longer Active,
-//!   superseded or completed, is not reinjected and runs no turn (design 376, 637); it
-//!   is recorded ([`ModelHandle::not_reinjected`]) and still ends the wait for its call;
+//! * superseded through its handle ([`ModelHandle::supersede`]), also while a turn runs and has
+//!   nothing to deliver, the node runs `inference.stream.SupersedeGeneration` on its generation,
+//!   which then emits no more text, and sends its `GenerationSuperseded` on the text port and,
+//!   given tools, on `tool_call`, so that the tool authority rejects the calls of the generation
+//!   it still holds and the executor is told to cancel the one it runs; it then sends on `usage`
+//!   the usage records the generation still delivers, of the turns that ended and of the turn
+//!   the supersede cut (`inference-llm`). An outcome that arrives for a generation that is no
+//!   longer Active, superseded or completed, is not reinjected and runs no turn (design 376,
+//!   637); it is recorded ([`ModelHandle::not_reinjected`]) and still ends the wait for its call;
 //! * cancelled through its handle ([`ModelHandle::cancel_generation`]), the host's interrupt by
 //!   cancel rather than supersede (design 716), the node runs `inference.stream.CancelGeneration`
-//!   on its generation and sends its `GenerationCancelled` on the same ports, as for a supersede;
-//!   the node does not fail, as it does when a turn fails, and goes on to the end of input;
+//!   on its generation and sends its `GenerationCancelled` on the same ports, and the usage
+//!   records after it, as for a supersede; the node does not fail, as it does when a turn fails,
+//!   and goes on to the end of input;
 //! * the end of input, or a drain once the input edge is closed, completes the generation only
 //!   once no outcome is awaited and no input is deferred; the node then passes the end of input
 //!   on, on both output ports, and ends once every edge into `tool_result` has ended, so that what
@@ -715,13 +718,29 @@ impl<P: ModelPayload> Exchanging<P> {
         }
     }
 
-    /// Emits every event of the turns that can run now, until none is left to deliver.
+    /// Emits every event of the turns that can run now, until none is left to deliver. While a
+    /// turn runs and has nothing to deliver, a cancel, a supersede or a cancel of the generation
+    /// the node was asked for and has not taken ends the wait, so that the node takes it.
     async fn deliver_turn(&mut self) -> Result<(), String> {
         loop {
             let Some(generation) = self.generation.as_mut() else {
                 return Ok(());
             };
-            let Some(event) = generation.next_turn_event().await else {
+            let signal = &self.signal;
+            let next = future::poll_fn(|cx| {
+                if let Poll::Ready(event) = generation.poll_turn_event(cx) {
+                    return Poll::Ready(event);
+                }
+                let interrupted = pin!(signal.until(|signal| {
+                    (signal.cancel
+                        || (signal.supersede && !signal.superseded)
+                        || (signal.cancel_generation && !signal.generation_cancelled))
+                        .then_some(())
+                }));
+                interrupted.poll(cx).map(|()| None)
+            })
+            .await;
+            let Some(event) = next else {
                 return Ok(());
             };
             self.send(event).await?;
@@ -865,7 +884,8 @@ impl<P: ModelPayload> Exchanging<P> {
             superseded.generation_id,
             StreamEvent::GenerationSuperseded(superseded),
         )
-        .await
+        .await?;
+        self.deliver_turn().await
     }
 
     /// Runs `inference.stream.CancelGeneration` on the generation and sends its
@@ -882,7 +902,8 @@ impl<P: ModelPayload> Exchanging<P> {
             cancelled.generation_id,
             StreamEvent::GenerationCancelled(cancelled),
         )
-        .await
+        .await?;
+        self.deliver_turn().await
     }
 
     /// Sends `event`, the interruption of the generation `generation_id`, on the text port and,
