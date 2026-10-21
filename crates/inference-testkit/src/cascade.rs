@@ -14,20 +14,17 @@
 //! | `text split` | fan_out | [`FanOut`]: hands the committed text to the TTS node and the egress |
 //! | `tts` | model | [`TtsNode`] over the [`MockSynthesiser`] |
 //!
-//! It has no source and no sink node. It exposes four ends, each bounded and pausing on
-//! overload: the ingress [`AUDIO_INGRESS`] at the input of `split`, in front of the detector, and
-//! the egresses [`TRANSCRIPT_EGRESS`], every transcript event of the STT node,
-//! [`TEXT_EGRESS`], the LLM node's output, its committed assistant text among it, and
-//! [`SPEECH_EGRESS`], the frames and segment events of the TTS node. The detector consumes the
+//! It has no source and no sink node. It exposes seven ends, each bounded and pausing on
+//! overload: the ingress [`AUDIO_INGRESS`] at the input of `split`, in front of the detector, the
+//! egresses [`TRANSCRIPT_EGRESS`], every transcript event of the STT node, [`TEXT_EGRESS`], the
+//! LLM node's output, its committed assistant text among it, and [`SPEECH_EGRESS`], the frames
+//! and segment events of the TTS node, and the output port `usage` of each model node as the
+//! egresses [`STT_USAGE_EGRESS`], [`LLM_USAGE_EGRESS`] and [`TTS_USAGE_EGRESS`], so that the
+//! usage record of every model call reaches the caller on the reliable path, which no overload
+//! drops; the nodes of its runs are given those ports. The detector consumes the
 //! frames it hears and sends only speech activity on, so the frames reach the STT node through
 //! the fan-out rather than through the detector. The LLM node takes the STT node's turns, so it
 //! starts its generation at the completion of the first turn.
-//!
-//! [`declare_with_usage`] declares the same cascade with each model node's output port `usage`
-//! exposed as one more egress, [`STT_USAGE_EGRESS`], [`LLM_USAGE_EGRESS`] and
-//! [`TTS_USAGE_EGRESS`], each pausing on overload, so that the usage record of every model call
-//! reaches the caller on the reliable path; the nodes of its runs are given those ports. A caller
-//! of [`declare`] gets the four ends alone, and its model nodes send no usage record.
 //!
 //! The run's payload is [`CascadePayload`]: audio frames, `inference.stream` events, the speech
 //! activity and turn events among them, usage records and control events.
@@ -97,16 +94,13 @@ pub const TEXT_EGRESS: &str = "assistant_text";
 /// The name of the egress carrying the TTS node's frames and segment events.
 pub const SPEECH_EGRESS: &str = "speech";
 
-/// The name of the egress carrying the usage records of the STT node, in a cascade declared by
-/// [`declare_with_usage`].
+/// The name of the egress carrying the usage records of the STT node.
 pub const STT_USAGE_EGRESS: &str = "stt_usage";
 
-/// The name of the egress carrying the usage records of the LLM node, in a cascade declared by
-/// [`declare_with_usage`].
+/// The name of the egress carrying the usage records of the LLM node.
 pub const LLM_USAGE_EGRESS: &str = "llm_usage";
 
-/// The name of the egress carrying the usage records of the TTS node, in a cascade declared by
-/// [`declare_with_usage`].
+/// The name of the egress carrying the usage records of the TTS node.
 pub const TTS_USAGE_EGRESS: &str = "tts_usage";
 
 /// The detector of the cascade: a frame is loud from a tenth of half scale, speech starts after
@@ -306,12 +300,11 @@ pub struct CascadeIds {
     pub tts: NodeId,
     pub stt_ports: SttPorts,
     pub llm_turns: PortId,
-    /// The `usage` ports of the model nodes, in a cascade declared with them
-    /// ([`declare_with_usage`]).
-    pub usage: Option<UsagePorts>,
+    /// The `usage` ports of the model nodes.
+    pub usage: UsagePorts,
 }
 
-/// The output port `usage` of each model node of a cascade declared by [`declare_with_usage`].
+/// The output port `usage` of each model node of the cascade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsagePorts {
     pub stt: PortId,
@@ -396,34 +389,6 @@ pub fn declare(
     declaration: &mut Declaration,
     mocks: &Mocks,
 ) -> Result<VoiceCascade, CascadeRefused> {
-    declare_as(declaration, mocks, false)
-}
-
-/// Declares the cascade as [`declare`] does, each model node also with an output port `usage`
-/// exposed as an egress of its own, [`STT_USAGE_EGRESS`], [`LLM_USAGE_EGRESS`] and
-/// [`TTS_USAGE_EGRESS`], each bounded and pausing on overload so that no record is dropped; the
-/// nodes of its runs ([`VoiceCascade::nodes`]) send their usage records there.
-///
-/// # Errors
-///
-/// As [`declare`].
-///
-/// # Panics
-///
-/// As [`declare`], never.
-pub fn declare_with_usage(
-    declaration: &mut Declaration,
-    mocks: &Mocks,
-) -> Result<VoiceCascade, CascadeRefused> {
-    declare_as(declaration, mocks, true)
-}
-
-/// Declares the cascade, with the model nodes' `usage` ports exposed when `usage`.
-fn declare_as(
-    declaration: &mut Declaration,
-    mocks: &Mocks,
-    usage: bool,
-) -> Result<VoiceCascade, CascadeRefused> {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
@@ -504,18 +469,16 @@ fn declare_as(
             pipeline.expose(&transcript, TRANSCRIPT_EGRESS, capacity, pause);
             pipeline.expose(&to_app, TEXT_EGRESS, capacity, pause);
             pipeline.expose(&spoken, SPEECH_EGRESS, capacity, pause);
-            let usage = usage.then(|| {
-                let mut port = |node, egress| {
-                    let port = pipeline.output::<modality::Structured>(node, "usage", records);
-                    pipeline.expose(&port, egress, capacity, pause);
-                    port.id()
-                };
-                UsagePorts {
-                    stt: port(&stt, STT_USAGE_EGRESS),
-                    llm: port(&llm, LLM_USAGE_EGRESS),
-                    tts: port(&tts, TTS_USAGE_EGRESS),
-                }
-            });
+            let mut usage = |node, egress| {
+                let port = pipeline.output::<modality::Structured>(node, "usage", records);
+                pipeline.expose(&port, egress, capacity, pause);
+                port.id()
+            };
+            let usage = UsagePorts {
+                stt: usage(&stt, STT_USAGE_EGRESS),
+                llm: usage(&llm, LLM_USAGE_EGRESS),
+                tts: usage(&tts, TTS_USAGE_EGRESS),
+            };
             for (node, adapter) in [&stt, &llm, &tts].into_iter().zip(&catalog.adapters) {
                 pipeline
                     .bind(node, adapter.adapter_id())
@@ -580,21 +543,18 @@ impl fmt::Debug for CascadeRun {
 
 impl VoiceCascade {
     /// The implementations of the nodes of the run `run_id` over `mocks`, the turn policy's
-    /// commands answered by `turns` and what the nodes emit recorded in `log`. In a cascade
-    /// declared with usage ([`declare_with_usage`]) each model node is given its `usage` port.
+    /// commands answered by `turns` and what the nodes emit recorded in `log`, each model node
+    /// given its `usage` port.
     #[must_use]
     pub fn nodes(&self, run_id: RunId, mocks: Mocks, turns: TurnStore, log: RunLog) -> CascadeRun {
         let ids = self.ids;
         let policy = TurnPolicy::new(run_id, turns);
-        let mut stt = SttNode::new(run_id, mocks.recogniser, ids.stt_ports, log.clone());
-        let mut llm = ModelNode::carrying(run_id, mocks.generator, mocks.reply, log.clone())
-            .with_turns(ids.llm_turns);
-        let mut tts = TtsNode::new(run_id, mocks.synthesiser, log);
-        if let Some(usage) = ids.usage {
-            stt = stt.with_usage(usage.stt);
-            llm = llm.with_usage(usage.llm);
-            tts = tts.with_usage(usage.tts);
-        }
+        let stt = SttNode::new(run_id, mocks.recogniser, ids.stt_ports, log.clone())
+            .with_usage(ids.usage.stt);
+        let llm = ModelNode::carrying(run_id, mocks.generator, mocks.reply, log.clone())
+            .with_turns(ids.llm_turns)
+            .with_usage(ids.usage.llm);
+        let tts = TtsNode::new(run_id, mocks.synthesiser, log).with_usage(ids.usage.tts);
         let handles = CascadeHandles {
             policy: policy.handle(),
             stt: stt.handle(),

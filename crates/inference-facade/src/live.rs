@@ -622,6 +622,7 @@ impl LiveSessions {
             requests: controller.requests(),
             queues: controller.queues(),
             exposure_queues: controller.exposure_queues(),
+            recorded: None,
         };
         Ok((session, SessionDriver { controller, shared }))
     }
@@ -731,6 +732,8 @@ pub struct LiveSession<P> {
     pub(crate) requests: RunRequests,
     pub(crate) queues: Vec<QueueWatch<P>>,
     pub(crate) exposure_queues: Vec<ExposureWatch<P>>,
+    /// The run whose ingresses [`LiveSession::record_inputs`] tapped, if any.
+    pub(crate) recorded: Option<RunId>,
 }
 
 impl<P: SessionPayload> LiveSession<P> {
@@ -1069,14 +1072,46 @@ impl<P: SessionPayload + Clone + fmt::Debug> LiveSession<P> {
     /// run of the pipeline. With the nodes wrapped by the same recorder as the session creates
     /// them ([`Recorder::wrap`], in the `implement` given to [`LiveSessions::open`]), the
     /// recording holds the run's whole event path, its usage records among it. A switch gives the
-    /// session another run, whose ingresses are not tapped.
-    pub fn record_inputs(&mut self, recorder: &Recorder<P>) {
+    /// session another run, whose ingresses are not tapped until this is called again.
+    ///
+    /// # Errors
+    ///
+    /// [`AlreadyRecorded`] when the ingresses of the current run are tapped already, by this
+    /// recorder or another: a second tap would record, and a replay feed, every input twice.
+    /// Nothing is tapped again.
+    pub fn record_inputs(&mut self, recorder: &Recorder<P>) -> Result<(), AlreadyRecorded> {
+        if self.recorded == Some(self.run_id) {
+            return Err(AlreadyRecorded {
+                run_id: self.run_id,
+            });
+        }
+        self.recorded = Some(self.run_id);
         for ingress in &mut self.ingresses {
             let endpoint = std::mem::replace(&mut ingress.endpoint, Box::new(Detached));
             ingress.endpoint = recorder.ingress(ingress.name.clone(), endpoint);
         }
+        Ok(())
     }
 }
+
+/// [`LiveSession::record_inputs`] refused: the ingresses of the run `run_id` are tapped already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlreadyRecorded {
+    pub run_id: RunId,
+}
+
+impl fmt::Display for AlreadyRecorded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the ingresses of run {} are recorded already; a second tap would record every \
+             input twice",
+            self.run_id
+        )
+    }
+}
+
+impl Error for AlreadyRecorded {}
 
 /// The place an ingress's endpoint is held in while it is wrapped: it takes nothing.
 struct Detached;

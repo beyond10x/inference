@@ -7,7 +7,8 @@
 //! total spans them all, across [`crate::live::LiveSession::switch`]. A record is counted when
 //! the session reads it, whether or not it is delivered: an interrupt does not cut it, and a
 //! cancelled session, which delivers nothing more, still counts what it reads. Unknown quantities
-//! stay unknown ([`UsageTotal`]). Usage travels on the run's egresses, the reliable path of
+//! stay unknown and a record whose `final` is false counts as partial, so neither total reads as
+//! complete over them ([`UsageTotal`]). Usage travels on the run's egresses, the reliable path of
 //! committed facts, so it never depends on telemetry, which drops what its consumer does not
 //! take.
 //!
@@ -46,8 +47,9 @@ impl SessionUsage {
     /// Adds `recorded`, read off an egress of the run `run_id`, to that run's total and the
     /// session's.
     pub(crate) fn add(&mut self, run_id: RunId, recorded: &UsageRecorded) {
-        self.total_of(run_id).add(&recorded.quantities);
-        self.session.add(&recorded.quantities);
+        self.total_of(run_id)
+            .add(&recorded.quantities, recorded.r#final);
+        self.session.add(&recorded.quantities, recorded.r#final);
     }
 
     /// The total of the run `run_id`, a new one of no record if the session had none.

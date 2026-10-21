@@ -5,17 +5,21 @@ use inference_core::usage::{KindTotal, Quantity, QuantityKind, UsageTotal};
 #[test]
 fn a_record_carrying_one_kind_twice_counts_once_as_a_record_and_keeps_both_values() {
     let mut total = UsageTotal::new();
-    total.add(&[
-        Quantity::measured(QuantityKind::OutputAudioMs, 20),
-        Quantity::unknown(QuantityKind::OutputAudioMs),
-        Quantity::provider_reported(QuantityKind::OutputAudioMs, 5),
-    ]);
+    total.add(
+        &[
+            Quantity::measured(QuantityKind::OutputAudioMs, 20),
+            Quantity::unknown(QuantityKind::OutputAudioMs),
+            Quantity::provider_reported(QuantityKind::OutputAudioMs, 5),
+        ],
+        true,
+    );
     assert_eq!(
         total.kind(QuantityKind::OutputAudioMs),
         Some(KindTotal {
             known: 25,
             unknown: 1,
             records: 1,
+            partial: 0,
         })
     );
     assert_eq!(total.records(), 1);
@@ -24,7 +28,7 @@ fn a_record_carrying_one_kind_twice_counts_once_as_a_record_and_keeps_both_value
 #[test]
 fn a_record_without_quantities_is_counted_and_carries_no_kind() {
     let mut total = UsageTotal::new();
-    total.add(&[]);
+    total.add(&[], true);
     assert_eq!(total.records(), 1);
     assert_eq!(total.kinds().count(), 0);
     assert!(total.complete());
@@ -46,10 +50,10 @@ fn the_order_records_are_added_in_does_not_change_the_total() {
     let mut forward = UsageTotal::new();
     let mut backward = UsageTotal::new();
     for record in &records {
-        forward.add(record);
+        forward.add(record, true);
     }
     for record in records.iter().rev() {
-        backward.add(record);
+        backward.add(record, true);
     }
     assert_eq!(forward, backward);
 }
@@ -57,7 +61,7 @@ fn the_order_records_are_added_in_does_not_change_the_total() {
 #[test]
 fn an_unknown_never_reads_as_a_complete_zero() {
     let mut total = UsageTotal::new();
-    total.add(&[Quantity::unknown(QuantityKind::InputCharacters)]);
+    total.add(&[Quantity::unknown(QuantityKind::InputCharacters)], true);
     let kind = total.kind(QuantityKind::InputCharacters).expect("carried");
     assert_eq!(kind.known, 0);
     assert!(
@@ -71,8 +75,14 @@ fn an_unknown_never_reads_as_a_complete_zero() {
 fn the_extremes_of_i64_sum_without_overflow() {
     let mut total = UsageTotal::new();
     for _ in 0..4 {
-        total.add(&[Quantity::measured(QuantityKind::LocalComputeMs, i64::MAX)]);
-        total.add(&[Quantity::measured(QuantityKind::InputAudioMs, i64::MIN)]);
+        total.add(
+            &[Quantity::measured(QuantityKind::LocalComputeMs, i64::MAX)],
+            true,
+        );
+        total.add(
+            &[Quantity::measured(QuantityKind::InputAudioMs, i64::MIN)],
+            true,
+        );
     }
     assert_eq!(
         total.kind(QuantityKind::LocalComputeMs).map(|k| k.known),

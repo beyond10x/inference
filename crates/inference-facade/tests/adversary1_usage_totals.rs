@@ -45,7 +45,7 @@ fn records(events: &[SessionEvent]) -> Vec<&UsageRecorded> {
 fn total_of<'a>(records: impl IntoIterator<Item = &'a UsageRecorded>) -> UsageTotal {
     let mut total = UsageTotal::new();
     for recorded in records {
-        total.add(&recorded.quantities);
+        total.add(&recorded.quantities, recorded.r#final);
     }
     total
 }
@@ -300,7 +300,7 @@ fn many_runs_keep_one_total_each_their_usage_before_their_end_and_a_session_tota
         assert_eq!(of_run.len(), TURNS, "run {at}: one record per turn");
         assert_eq!(usage.run(*run_id), Some(&total_of(of_run.iter().copied())));
         for recorded in &of_run {
-            sum.add(&recorded.quantities);
+            sum.add(&recorded.quantities, recorded.r#final);
         }
         let ended = received
             .iter()
