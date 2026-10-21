@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:usage-unconnected-port-counted
 kind: story
-status: active
+status: implemented
 title: Usage that reaches no edge is counted or marks the run total partial
 relations:
 - decomposes: epic:usage-and-cost
@@ -26,10 +26,11 @@ scope:
   path: ess/domains/graph.yaml
 - confidence: cited
   path: ess/domains/usage.yaml
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-21T09:08:56Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-10-21T09:08:56Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-21T11:54:16Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
