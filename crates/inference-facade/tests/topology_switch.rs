@@ -29,7 +29,10 @@ use inference_pipeline::{
     PipelineNotFound,
 };
 use inference_runtime::run::RunState;
-use inference_testkit::cascade::{AUDIO_INGRESS, CascadePayload, Mocks, TurnStore, declare};
+use inference_testkit::cascade::{
+    AUDIO_INGRESS, CascadePayload, LLM_USAGE_EGRESS, Mocks, SPEECH_EGRESS, STT_USAGE_EGRESS,
+    TEXT_EGRESS, TRANSCRIPT_EGRESS, TTS_USAGE_EGRESS, TurnStore, declare,
+};
 use inference_testkit::graph::PipelinePayload;
 use inference_testkit::graph::RunLog;
 use inference_testkit::llm::{MockConfiguration as LlmConfiguration, MockGenerator, ModelNode};
@@ -395,7 +398,23 @@ fn one_session_switches_text_to_voice_and_back_with_one_vocabulary_and_one_histo
         3,
         "the three model nodes are bound"
     );
-    assert_eq!(voice_described.exposures.len(), 4);
+    assert_eq!(
+        voice_described
+            .exposures
+            .iter()
+            .map(|exposure| exposure.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            AUDIO_INGRESS,
+            TRANSCRIPT_EGRESS,
+            TEXT_EGRESS,
+            SPEECH_EGRESS,
+            STT_USAGE_EGRESS,
+            LLM_USAGE_EGRESS,
+            TTS_USAGE_EGRESS,
+        ],
+        "the ingress, the three egresses of content and the usage egress of each model node"
+    );
 }
 
 #[test]

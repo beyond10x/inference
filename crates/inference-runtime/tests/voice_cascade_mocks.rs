@@ -4,7 +4,8 @@
 //! The testkit's cascade fixture declares topology B under the `offline_strict` profile with
 //! egress denied, with exposed ends and no source or sink node: the audio ingress, at the fan-out
 //! in front of the voice activity detector and the STT node, and three egresses, the STT node's
-//! transcript events, the committed assistant text and the synthesized audio. The test is the
+//! transcript events, the committed assistant text and the synthesized audio, besides the usage
+//! egress of each model node, which this test leaves unread. The test is the
 //! application: it sends the synthetic utterance and the end of input into the ingress, and reads
 //! each egress until the node's end is gone. It finds the committed span of the scripted
 //! question, the committed text of the scripted reply and the frames the mock synthesiser made
@@ -24,8 +25,8 @@ use inference_pipeline::Declaration;
 use inference_runtime::RunController;
 use inference_runtime::run::{NodeInstanceState, RunState};
 use inference_testkit::cascade::{
-    AUDIO_INGRESS, CascadePayload, Mocks, SPEECH_EGRESS, TEXT_EGRESS, TRANSCRIPT_EGRESS, TurnStore,
-    declare,
+    AUDIO_INGRESS, CascadePayload, LLM_USAGE_EGRESS, Mocks, SPEECH_EGRESS, STT_USAGE_EGRESS,
+    TEXT_EGRESS, TRANSCRIPT_EGRESS, TTS_USAGE_EGRESS, TurnStore, declare,
 };
 use inference_testkit::graph::RunLog;
 use inference_testkit::llm::{MockConfiguration as LlmConfiguration, MockGenerator};
@@ -219,7 +220,19 @@ fn the_utterance_through_the_ingress_comes_out_as_transcript_reply_text_and_spee
     assert_eq!(controller.run().state(), RunState::Active);
     let queues = controller.queues();
     let exposure_queues = controller.exposure_queues();
-    assert_eq!(exposure_queues.len(), 4, "one queue per exposure");
+    assert_eq!(
+        ends.egresses
+            .iter()
+            .map(|egress| egress.name.as_str())
+            .collect::<Vec<_>>(),
+        [STT_USAGE_EGRESS, LLM_USAGE_EGRESS, TTS_USAGE_EGRESS],
+        "the usage egress of each model node, besides the three taken"
+    );
+    assert_eq!(
+        exposure_queues.len(),
+        7,
+        "one queue per exposure: the ingress, the three egresses taken and the three usage egresses"
+    );
     let drive = thread::spawn(move || {
         let result = block_on(controller.drive());
         (controller, result)

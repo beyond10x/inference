@@ -19,8 +19,9 @@
 //! The text pipeline's payload, [`PipelinePayload`], is a [`SessionPayload`]: a live session of
 //! `inference-facade` over a text pipeline writes its control events as
 //! [`PipelinePayload::Control`] and delivers each `inference.stream` event the session event
-//! vocabulary carries as its [`SessionEvent`] variant; a control event, a speech, turn or queued
-//! or discarded segment event has no variant and is not delivered.
+//! vocabulary carries as its [`SessionEvent`] variant, and a usage record a model node sent on an
+//! exposed `usage` port as `UsageRecorded`; a control event, a speech, turn or queued or
+//! discarded segment event has no variant and is not delivered.
 //!
 //! The module needs the `run` feature, which brings `inference-facade`: a crate that leaves `run`
 //! off carries neither the runtime nor the session API.
@@ -52,7 +53,8 @@ impl SessionPayload for PipelinePayload {
     fn session_event(&self) -> Option<SessionEvent> {
         match self {
             Self::Stream(event) => stream_session_event(event),
-            Self::Usage(_) | Self::Control(_) => None,
+            Self::Usage(recorded) => Some(SessionEvent::UsageRecorded(recorded.clone())),
+            Self::Control(_) => None,
         }
     }
 }

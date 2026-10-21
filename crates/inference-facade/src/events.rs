@@ -13,6 +13,7 @@
 //! | text generation | `GenerationStarted`, `TextDelta`, `TextSegmentCommitted`, `GenerationCompleted`, `GenerationSuperseded`, `GenerationCancelled` |
 //! | synthesis audio | `AudioChunk`, `SynthesisCompleted`, `AudioPlayed` |
 //! | tools | `ToolCallProposed`, `ToolCallAuthorized`, `ToolCallRejected`, `ToolCallStarted`, `ToolCallResult`, `ToolCallFailed` |
+//! | usage | `UsageRecorded` |
 //! | run | `RunCompleted`, `RunCancelled`, `RunFailed` |
 //!
 //! A topology emits the subset it produces. The session lifecycle events are the session state
@@ -25,6 +26,7 @@ use inference_core::envelope::ControlKind;
 use inference_core::generation::{
     GenerationCancelled, GenerationCompleted, GenerationStarted, GenerationSuperseded,
 };
+use inference_core::usage::UsageRecorded;
 use inference_runtime::run::{RunCancelled, RunCompleted, RunFailed};
 use inference_text::{
     AudioPlayed, SynthesisCompleted, TextDelta, TextSegmentCommitted, TranscriptCommitted,
@@ -103,6 +105,10 @@ pub enum SessionEvent {
     ToolCallResult(ToolCallResult),
     /// `inference.tools.ToolCallFailed`.
     ToolCallFailed(ToolCallFailed),
+    /// `inference.usage.UsageRecorded`: the usage of one model call of the session's run, sent on
+    /// an egress the pipeline exposes a model node's `usage` port on. An interrupt does not cut
+    /// it, and the session adds it to its usage view ([`crate::usage`]).
+    UsageRecorded(UsageRecorded),
     /// `inference.graph.RunCompleted`: the session's run drained and completed.
     RunCompleted(RunCompleted),
     /// `inference.graph.RunCancelled`: the session's run was cancelled.
