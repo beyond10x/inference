@@ -1,5 +1,35 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `ess/domains/duplex.yaml` models what a session receives from its provider:
+  `ReceiveSessionEvent` and `DeliverSessionEvent` over the entity `ReceivedSessionEvent` and its
+  view `ReceivedSessionEvents`. `CloseSpeechSession` and `FailSpeechSession` deliver every event
+  still held before their end event, and nothing is received after it. `inference-duplex` carries
+  the record and the testkit `DuplexDomain` runs it. Two authored scenarios
+  (`close-delivers-received-usage`, `fail-delivers-received-usage`) stand for the `closed` and
+  `failed` outcomes, which ess 0.60.0 synthesis refuses (ESS-SYNTH-001).
+- `SessionLedger::session_usage_at_end` takes the total of a session billed as a whole and records
+  it once, just before the session's end event.
+
+### Changed
+
+- **Breaking:** `SpeechSessionHandle::close` delivers every event the binding received before the
+  close, usage included, after the close and before `SpeechSessionClosed`, and nothing the provider
+  sends after it; a caller that counts usage reads `next_event` until `SpeechSessionClosed`. Nova
+  Sonic, OpenAI Realtime and GPT-Live now record what already arrived before closing.
+- GPT-Live records the billed session seconds after the end events of its responses and just
+  before `SpeechSessionClosed` or `SpeechSessionFailed`, not as they arrive.
+
+### Fixed
+
+- A speech session whose transport closed under a command (Nova Sonic `append_audio`, `send` and
+  `submit_tool_result`; a failed send on OpenAI Realtime and GPT-Live) records what had already
+  arrived first, so its usage counts, and fails as the first stream end, client failure or service
+  error among it, else as `TransportClosed`.
+
 ## [0.7.0] — 2026-10-21
 
 ### Added

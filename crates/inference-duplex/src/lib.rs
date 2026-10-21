@@ -52,7 +52,7 @@ pub use contract::{
     SpeechSessionHandle, TuningOption, TuningSupport, TurnTuning, Unsupported,
 };
 pub use ledger::{Liveness, SessionLedger};
-pub use record::{Response, SpeechSession, SpeechToolCall};
+pub use record::{ReceivedSessionEvent, Response, SpeechSession, SpeechToolCall};
 
 /// The `inference.usage` vocabulary a session's usage records are written in, re-exported from
 /// `inference_core::usage`.
@@ -649,3 +649,103 @@ impl fmt::Display for SpeechToolCallStateConflict {
 }
 
 impl Error for SpeechToolCallStateConflict {}
+
+inference_core::uuid_newtype!(
+    /// `inference.duplex.ReceivedEventId`: identifies a [`ReceivedSessionEvent`].
+    ReceivedEventId
+);
+
+/// `inference.duplex.ReceivedEventKind`: what a session received from its provider. Serialized as
+/// written in ESS (`input_transcript`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceivedEventKind {
+    /// Usage of a response, a transcription or the session.
+    Usage,
+    /// The transcript of the input.
+    InputTranscript,
+    /// Output audio of a response.
+    OutputAudio,
+    /// Output transcript of a response.
+    OutputTranscript,
+    /// A tool call a response proposed.
+    ToolCall,
+    /// The end of a response.
+    ResponseEnd,
+}
+
+impl ReceivedEventKind {
+    /// Every kind, in the order `ess/domains/duplex.yaml` lists them.
+    pub const ALL: [Self; 6] = [
+        Self::Usage,
+        Self::InputTranscript,
+        Self::OutputAudio,
+        Self::OutputTranscript,
+        Self::ToolCall,
+        Self::ResponseEnd,
+    ];
+}
+
+/// `inference.duplex.SessionEnd`: the end event a received event was delivered before. Serialized
+/// as written in ESS (`closed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionEnd {
+    /// `SpeechSessionClosed`.
+    Closed,
+    /// `SpeechSessionFailed`.
+    Failed,
+}
+
+impl SessionEnd {
+    /// Every end, in the order `ess/domains/duplex.yaml` lists them.
+    pub const ALL: [Self; 2] = [Self::Closed, Self::Failed];
+}
+
+/// `inference.duplex.ReceivedSessionEvent.State`. Serialized as written in ESS (`Received`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReceivedSessionEventState {
+    /// Received from the provider; the caller does not have it yet.
+    Received,
+    /// The caller has it.
+    Delivered,
+}
+
+impl ReceivedSessionEventState {
+    /// Every state, in the order `ess/domains/duplex.yaml` lists them.
+    pub const ALL: [Self; 2] = [Self::Received, Self::Delivered];
+}
+
+/// `inference.duplex.SessionEventReceived`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEventReceived {
+    pub received_id: ReceivedEventId,
+    pub session_id: SpeechSessionId,
+    pub kind: ReceivedEventKind,
+    pub sequence: i64,
+}
+
+/// `inference.duplex.SessionEventDelivered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEventDelivered {
+    pub received_id: ReceivedEventId,
+}
+
+/// `inference.duplex.ReceivedSessionEventStateConflict`: the received event is not held for the
+/// caller. `current` is the state it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceivedSessionEventStateConflict {
+    pub current: ReceivedSessionEventState,
+}
+
+impl fmt::Display for ReceivedSessionEventStateConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the received event is {:?}, which this command does not deliver it from",
+            self.current
+        )
+    }
+}
+
+impl Error for ReceivedSessionEventStateConflict {}

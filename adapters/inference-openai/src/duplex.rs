@@ -364,6 +364,26 @@ impl NativeSpeechModel for OpenAiRealtime {
     }
 }
 
+/// What `read` gives when it completes without waiting: it is polled once, and once more after
+/// one turn of the runtime's drivers, so a message that already reached the socket is read.
+/// `None` when it would still wait; `read` is then dropped, so it must be cancel safe, as reading
+/// the next event is.
+pub(crate) async fn without_waiting<F: std::future::Future>(read: F) -> Option<F::Output> {
+    let mut read = std::pin::pin!(read);
+    for turn in 0..2 {
+        let polled =
+            std::future::poll_fn(|context| std::task::Poll::Ready(read.as_mut().poll(context)))
+                .await;
+        if let std::task::Poll::Ready(output) = polled {
+            return Some(output);
+        }
+        if turn == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    None
+}
+
 /// The contract's failure of a client error.
 pub(crate) fn failure(error: &RealtimeError) -> SessionFailure {
     let kind = match error {
@@ -452,6 +472,7 @@ impl OpenAiRealtimeSession {
                 .map_err(SessionError::NotOpen);
         };
         if let Err(error) = runtime.block_on(operation(client)) {
+            let error = self.record_arrived().unwrap_or(error);
             let _ = self.ledger.fail(failure(&error));
             return self
                 .ledger
@@ -460,6 +481,24 @@ impl OpenAiRealtimeSession {
                 .map_err(SessionError::NotOpen);
         }
         Ok(())
+    }
+
+    /// Records every server event that already reached the binding, without waiting for more,
+    /// up to the first read that fails, whose error is returned; a session the ledger no longer
+    /// holds open records nothing.
+    fn record_arrived(&mut self) -> Option<RealtimeError> {
+        while self.ledger.session().require_open().is_ok() {
+            let (Some(client), Some(runtime)) = (self.client.as_mut(), self.runtime.as_ref())
+            else {
+                return None;
+            };
+            match runtime.block_on(without_waiting(client.next_event())) {
+                Some(Ok(event)) => self.record(event),
+                None | Some(Err(RealtimeError::Stalled(_))) => return None,
+                Some(Err(error)) => return Some(error),
+            }
+        }
+        None
     }
 
     /// The contract's id of a provider response, when the session created one under it.
@@ -748,7 +787,15 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
         })
     }
 
+    /// Closes the session and the connection. The server events that already reached the
+    /// binding are recorded first, so their usage counts and they are delivered after the close,
+    /// before `SpeechSessionClosed`; from the first read that fails among them nothing is
+    /// recorded, so an open session closes rather than fails. Nothing the server sends after the
+    /// close is delivered.
     fn close(&mut self) -> Result<(), SessionError> {
+        if self.ledger.session().require_open().is_ok() && self.record_arrived().is_some() {
+            self.client = None;
+        }
         self.ledger.close()?;
         if let (Some(client), Some(runtime)) = (self.client.take(), self.runtime.as_ref()) {
             let _ = runtime.block_on(client.close());

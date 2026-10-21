@@ -16,9 +16,10 @@ use inference_aws::nova_sonic::{
 use inference_duplex::inference_audio::{
     AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition,
 };
+use inference_duplex::inference_tools::{DeclareTool, SideEffectClass, Tool};
 use inference_duplex::{
     NativeSpeechModel, Quantity, QuantityKind, SessionConfig as SpeechConfig, SessionEvent,
-    SpeechSessionHandle, SpeechSessionState, TurnDetection, TurnTuning,
+    SessionFailureKind, SpeechSessionHandle, SpeechSessionState, TurnDetection, TurnTuning,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -52,6 +53,9 @@ enum After {
     Errors(ServiceError),
     /// Stops taking input, so the binding's next send fails; its output stays open.
     RefusesInput,
+    /// Reports a service error on its output stream, then stops taking input as `RefusesInput`
+    /// does.
+    ErrorsAndRefusesInput(ServiceError),
 }
 
 impl Connector for Scripted {
@@ -87,6 +91,11 @@ impl Connector for Scripted {
                         while received.recv().await.is_some() {}
                     }
                     After::RefusesInput => {
+                        drop(received);
+                        frames.closed().await;
+                    }
+                    After::ErrorsAndRefusesInput(error) => {
+                        let _ = frames.send(Err(error)).await;
                         drop(received);
                         frames.closed().await;
                     }
@@ -410,4 +419,180 @@ fn close_succeeds_over_a_stream_end_that_already_arrived() {
 #[test]
 fn close_succeeds_over_a_failed_send_that_already_arrived() {
     closes_over(After::RefusesInput, true);
+}
+
+fn weather() -> Tool {
+    Tool::declare(DeclareTool {
+        name: "weather".to_owned(),
+        schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+        schema_revision: "1".to_owned(),
+        side_effect: SideEffectClass::ReadOnly,
+        requires_confirmation: false,
+    })
+    .0
+}
+
+/// One turn whose response proposes a call of `weather`; its usage delta of 8 output text tokens
+/// follows the response's end on the stream.
+fn one_call() -> Vec<Value> {
+    let mut events = vec![event("completionStart", json!({}))];
+    events.extend(final_text("user-1", "USER", "how warm is it"));
+    events.push(usage([50, 0, 0, 0]));
+    events.extend([
+        event(
+            "contentStart",
+            json!({
+                "contentId": "tool-1",
+                "type": "TOOL",
+                "role": "TOOL",
+                "toolUseOutputConfiguration": {"mediaType": "application/json"}
+            }),
+        ),
+        event(
+            "toolUse",
+            json!({
+                "contentId": "tool-1",
+                "toolUseId": "tooluse-1",
+                "toolName": "weather",
+                "content": "{\"city\":\"Berlin\"}"
+            }),
+        ),
+        event(
+            "contentEnd",
+            json!({"contentId": "tool-1", "type": "TOOL", "stopReason": "TOOL_USE"}),
+        ),
+    ]);
+    events.push(usage([0, 0, 0, 8]));
+    events
+}
+
+/// What the caller does once the provider stopped taking input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Next {
+    AppendAudio,
+    SubmitToolResult,
+}
+
+/// The caller reads to the response's end and sends one frame, which the writer fails to send
+/// as the provider stopped taking input, while the usage delta and whatever `after` sends first
+/// already reached the binding. The caller's `next` command finds the command channel closed:
+/// what arrived is recorded first, so the usage delta counts once, and the session fails as the
+/// first arrival that ends it says, `kind`.
+fn fails_over(after: After, next: Next, kind: SessionFailureKind) {
+    let mut config = config();
+    let script = match next {
+        Next::AppendAudio => one_turn(),
+        Next::SubmitToolResult => {
+            config.tools = vec![weather()];
+            one_call()
+        }
+    };
+    let mut session = NovaSonicSpeech::with_connector(Scripted {
+        events: script,
+        after,
+    })
+    .expect("the binding's runtime starts")
+    .open(config)
+    .expect("opens");
+    let mut events = Vec::new();
+    loop {
+        let event = session.next_event(WAIT).expect("the response completes");
+        let completed = matches!(event, SessionEvent::ResponseCompleted(_));
+        events.push(event);
+        if completed {
+            break;
+        }
+        assert!(events.len() < 500, "the response never completed");
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    session
+        .append_audio(silence(0))
+        .expect("the writer has not failed yet");
+    std::thread::sleep(Duration::from_millis(300));
+    let refused = match next {
+        Next::AppendAudio => session.append_audio(silence(320)),
+        Next::SubmitToolResult => {
+            let call_id = events
+                .iter()
+                .find_map(|event| match event {
+                    SessionEvent::SpeechToolCallProposed(proposed) => {
+                        Some(proposed.call_id.clone())
+                    }
+                    _ => None,
+                })
+                .expect("a proposed call");
+            session.submit_tool_result(&call_id, json!({"celsius": 21}))
+        }
+    };
+    events.extend(drain(&mut session));
+    let records = session.ledger().usage_records();
+    assert_eq!(
+        total(&session, QuantityKind::OutputTextTokens),
+        (8, true),
+        "the usage that arrived before the failure counts once: {records:#?}"
+    );
+    assert_eq!(
+        total(&session, QuantityKind::InputAudioTokens),
+        (50, true),
+        "{records:#?}"
+    );
+    let failures: Vec<SessionFailureKind> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::SpeechSessionFailed(failed) => Some(failed.failure.kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures, [kind], "{events:#?}");
+    assert_eq!(
+        session.ledger().session().state(),
+        SpeechSessionState::Failed,
+        "{events:#?}"
+    );
+    assert!(
+        refused.is_err(),
+        "the command on a failed session is refused: {refused:?}"
+    );
+}
+
+#[test]
+fn audio_after_a_failed_send_counts_the_usage_that_arrived_before_it() {
+    fails_over(
+        After::RefusesInput,
+        Next::AppendAudio,
+        SessionFailureKind::TransportClosed,
+    );
+}
+
+#[test]
+fn a_tool_result_after_a_failed_send_counts_the_usage_that_arrived_before_it() {
+    fails_over(
+        After::RefusesInput,
+        Next::SubmitToolResult,
+        SessionFailureKind::TransportClosed,
+    );
+}
+
+#[test]
+fn audio_after_a_failed_send_fails_as_the_service_error_that_arrived_first() {
+    fails_over(
+        After::ErrorsAndRefusesInput(ServiceError::new(
+            ServiceErrorKind::ModelStreamError,
+            "it failed",
+        )),
+        Next::AppendAudio,
+        SessionFailureKind::ProviderError,
+    );
+}
+
+#[test]
+fn a_tool_result_after_a_failed_send_fails_as_the_service_error_that_arrived_first() {
+    fails_over(
+        After::ErrorsAndRefusesInput(ServiceError::new(
+            ServiceErrorKind::ModelStreamError,
+            "it failed",
+        )),
+        Next::SubmitToolResult,
+        SessionFailureKind::ProviderError,
+    );
 }

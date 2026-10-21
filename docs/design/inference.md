@@ -715,7 +715,7 @@ A session conceptually supports:
 | `commit_input` | Finalize a text span or logical user turn. |
 | `interrupt` | Cancel or supersede active generation/playback. |
 | `describe` | Inspect selected models, graph, capabilities, and degradation. |
-| `close` | Drain or cancel processing and release resources. |
+| `close` | Drain or cancel processing and release resources. Closing a speech session delivers every event its binding already received, usage included, before the closed event, and nothing the provider sends after it. |
 
 A session MAY internally dispatch many independent HTTP requests or model invocations. Applications see one logical interaction lifetime; model state management remains truthful to each adapter's contract.
 

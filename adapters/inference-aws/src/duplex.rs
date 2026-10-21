@@ -638,8 +638,21 @@ pub struct NovaSonicSpeechSession {
 impl NovaSonicSpeechSession {
     fn send(&mut self, command: Command) {
         if self.commands.send(command).is_err() {
-            self.transport_closed();
+            self.commands_closed();
         }
+    }
+
+    /// The writer stopped: what already arrived is recorded first, so its usage counts and the
+    /// session fails as the first stream end, client failure or service error among it says;
+    /// failing none, as a closed transport.
+    fn commands_closed(&mut self) {
+        while self.ledger.session().require_open().is_ok() {
+            let Ok(arrival) = self.arrivals.try_recv() else {
+                break;
+            };
+            self.record(arrival);
+        }
+        self.transport_closed();
     }
 
     fn transport_closed(&mut self) {
@@ -932,10 +945,11 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
         &self.ledger
     }
 
-    /// Sends the frame's bytes untouched once the ledger accepts it.
+    /// Sends the frame's bytes untouched once the ledger accepts it. Once the writer stopped, the
+    /// session fails first, after recording what already arrived, and the frame is refused.
     fn append_audio(&mut self, frame: AudioFrame) -> Result<(), SessionError> {
         if self.commands.is_closed() {
-            self.transport_closed();
+            self.commands_closed();
         }
         let pcm = frame.data.clone();
         let end = frame
@@ -973,12 +987,16 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
     }
 
     /// Sends the result under the provider's `toolUseId`. Nova Sonic takes a JSON object; any
-    /// other value is sent as `{"result": value}`.
+    /// other value is sent as `{"result": value}`. Once the writer stopped, the session fails
+    /// first, after recording what already arrived, and the result is refused.
     fn submit_tool_result(
         &mut self,
         call_id: &SpeechCallId,
         result: Json,
     ) -> Result<(), SessionError> {
+        if self.commands.is_closed() {
+            self.commands_closed();
+        }
         let content = match &result {
             Json::Object(_) => result.to_string(),
             other => serde_json::json!({ "result": other }).to_string(),

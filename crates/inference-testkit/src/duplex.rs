@@ -1,21 +1,25 @@
 //! The native speech sessions of `ess/domains/duplex.yaml`, held in memory, and behind the
 //! `duplex` feature the scripted mock of the `inference-duplex` contract.
 //!
-//! [`DuplexDomain`] holds the sessions, responses and tool calls and records every event it emits
-//! in order. Its commands run the [`SpeechSession`], [`Response`] and [`SpeechToolCall`] state
-//! machines of `inference-duplex` under identities the domain issues from a counter rendered as a
-//! Uuid in its own [`IDENTITY_SPACE`], `00000006-0000-4000-8000-000000000001` first; a call id,
-//! which is the provider's string, is that Uuid written as a string.
+//! [`DuplexDomain`] holds the sessions, responses, tool calls and received provider events and
+//! records every event it emits in order. Its commands run the [`SpeechSession`], [`Response`],
+//! [`SpeechToolCall`] and [`ReceivedSessionEvent`] state machines of `inference-duplex` under
+//! identities the domain issues from a counter rendered as a Uuid in its own [`IDENTITY_SPACE`],
+//! `00000006-0000-4000-8000-000000000001` first; a call id, which is the provider's string, is
+//! that Uuid written as a string.
 //!
 //! What only a store can decide is decided here: an adapter no record of the `inference.model`
-//! store carries, a tool no record of the `inference.tools` store carries, a session, response or
-//! call no record here carries. Each command decides in the order its outcomes are declared. The
-//! views are [`DuplexDomain::speech_sessions_view`], [`DuplexDomain::responses_view`] and
-//! [`DuplexDomain::speech_tool_calls_view`], all `read_your_writes`.
+//! store carries, a tool no record of the `inference.tools` store carries, a session, response,
+//! call or received event no record here carries. Each command decides in the order its outcomes
+//! are declared. Closing or failing a session delivers every event it received and still holds
+//! before the end event. The views are [`DuplexDomain::speech_sessions_view`],
+//! [`DuplexDomain::responses_view`], [`DuplexDomain::speech_tool_calls_view`] and
+//! [`DuplexDomain::received_session_events_view`], all `read_your_writes`.
 //!
 //! [`SpeechSession`]: inference_duplex::SpeechSession
 //! [`Response`]: inference_duplex::Response
 //! [`SpeechToolCall`]: inference_duplex::SpeechToolCall
+//! [`ReceivedSessionEvent`]: inference_duplex::ReceivedSessionEvent
 
 use uuid::Uuid;
 
@@ -24,11 +28,13 @@ use inference_duplex::inference_audio::{AudioFormat, AudioFrame, SampleClockPosi
 use inference_duplex::{
     AdapterNotFound, InputAccepted, InputCommitted, InputTranscribed, NonPositiveIdleLimit,
     OpenSpeechSession, OutputAudio, OutputTranscriptDelta, OutputTruncated, ProposeSpeechToolCall,
-    Response, ResponseCancelled, ResponseCompleted, ResponseCreated, ResponseFailed, ResponseId,
-    ResponseNotFound, ResponseState, ResponseStateConflict, ResponseUsage, ResponseUsageRecorded,
-    SessionFailure, SpeechCallId, SpeechSession, SpeechSessionClosed, SpeechSessionFailed,
-    SpeechSessionId, SpeechSessionNotFound, SpeechSessionOpened, SpeechSessionState,
-    SpeechSessionStateConflict, SpeechStarted, SpeechStopped, SpeechToolCall,
+    ReceivedEventId, ReceivedEventKind, ReceivedSessionEvent, ReceivedSessionEventState,
+    ReceivedSessionEventStateConflict, Response, ResponseCancelled, ResponseCompleted,
+    ResponseCreated, ResponseFailed, ResponseId, ResponseNotFound, ResponseState,
+    ResponseStateConflict, ResponseUsage, ResponseUsageRecorded, SessionEnd, SessionEventDelivered,
+    SessionEventReceived, SessionFailure, SpeechCallId, SpeechSession, SpeechSessionClosed,
+    SpeechSessionFailed, SpeechSessionId, SpeechSessionNotFound, SpeechSessionOpened,
+    SpeechSessionState, SpeechSessionStateConflict, SpeechStarted, SpeechStopped, SpeechToolCall,
     SpeechToolCallAnswered, SpeechToolCallProposed, SpeechToolCallState,
     SpeechToolCallStateConflict, TranscriptionUsage, TranscriptionUsageRecorded, TurnDetection,
 };
@@ -66,6 +72,8 @@ pub enum DuplexEvent {
     ResponseUsageRecorded(ResponseUsageRecorded),
     SpeechToolCallProposed(SpeechToolCallProposed),
     SpeechToolCallAnswered(SpeechToolCallAnswered),
+    SessionEventReceived(SessionEventReceived),
+    SessionEventDelivered(SessionEventDelivered),
     SpeechSessionClosed(SpeechSessionClosed),
     SpeechSessionFailed(SpeechSessionFailed),
 }
@@ -117,6 +125,15 @@ pub enum AnswerSpeechToolCallError {
     Conflict(SpeechToolCallStateConflict),
 }
 
+/// Why `inference.duplex.DeliverSessionEvent` moved nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliverSessionEventError {
+    /// No received event carries the identity: the `wrong-state` outcome with no state.
+    Unknown { received_id: ReceivedEventId },
+    /// The `wrong-state` outcome.
+    Conflict(ReceivedSessionEventStateConflict),
+}
+
 /// A row of the view `inference.duplex.SpeechSessions`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeechSessionsRow {
@@ -152,12 +169,24 @@ pub struct SpeechToolCallsRow {
     pub state: SpeechToolCallState,
 }
 
-/// `inference.duplex` in memory: its three entity stores and the events it emitted.
+/// A row of the view `inference.duplex.ReceivedSessionEvents`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceivedSessionEventsRow {
+    pub received_id: ReceivedEventId,
+    pub session_id: SpeechSessionId,
+    pub kind: ReceivedEventKind,
+    pub sequence: i64,
+    pub delivered_before: Option<SessionEnd>,
+    pub state: ReceivedSessionEventState,
+}
+
+/// `inference.duplex` in memory: its four entity stores and the events it emitted.
 #[derive(Debug, Clone, Default)]
 pub struct DuplexDomain {
     sessions: Vec<SpeechSession>,
     responses: Vec<Response>,
     calls: Vec<SpeechToolCall>,
+    received: Vec<ReceivedSessionEvent>,
     events: Vec<DuplexEvent>,
     issued: u128,
 }
@@ -496,6 +525,7 @@ impl DuplexDomain {
         session_id: SpeechSessionId,
     ) -> Result<SpeechSessionClosed, SessionCommandError> {
         let event = self.move_session(session_id, SpeechSession::close)?;
+        self.deliver_held(session_id, SessionEnd::Closed);
         self.record(DuplexEvent::SpeechSessionClosed(event));
         Ok(event)
     }
@@ -511,7 +541,57 @@ impl DuplexDomain {
         failure: SessionFailure,
     ) -> Result<SpeechSessionFailed, SessionCommandError> {
         let event = self.move_session(session_id, |session| session.fail(failure))?;
+        self.deliver_held(session_id, SessionEnd::Failed);
         self.record(DuplexEvent::SpeechSessionFailed(event.clone()));
+        Ok(event)
+    }
+
+    /// Runs `inference.duplex.ReceiveSessionEvent`: the provider sent the open session an event
+    /// of `kind`, the `sequence`th it sent.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionCommandError::Unknown`], then [`SessionCommandError::Conflict`]; nothing is held
+    /// and no identity is issued.
+    pub fn receive_session_event(
+        &mut self,
+        session_id: SpeechSessionId,
+        kind: ReceivedEventKind,
+        sequence: i64,
+    ) -> Result<SessionEventReceived, SessionCommandError> {
+        let session = self
+            .session(session_id)
+            .ok_or(SessionCommandError::Unknown(SpeechSessionNotFound {
+                session_id,
+            }))?;
+        let received_id = ReceivedEventId::from(self.next());
+        let (received, event) =
+            ReceivedSessionEvent::receive_as(received_id, session, kind, sequence)
+                .map_err(SessionCommandError::Conflict)?;
+        self.issue();
+        self.received.push(received);
+        self.record(DuplexEvent::SessionEventReceived(event));
+        Ok(event)
+    }
+
+    /// Runs `inference.duplex.DeliverSessionEvent`: the caller has the event.
+    ///
+    /// # Errors
+    ///
+    /// [`DeliverSessionEventError::Unknown`] or [`DeliverSessionEventError::Conflict`]; nothing
+    /// moved.
+    pub fn deliver_session_event(
+        &mut self,
+        received_id: ReceivedEventId,
+    ) -> Result<SessionEventDelivered, DeliverSessionEventError> {
+        let slot = self
+            .received
+            .iter_mut()
+            .find(|received| received.received_id() == received_id)
+            .ok_or(DeliverSessionEventError::Unknown { received_id })?;
+        let (moved, event) = slot.deliver().map_err(DeliverSessionEventError::Conflict)?;
+        *slot = moved;
+        self.record(DuplexEvent::SessionEventDelivered(event));
         Ok(event)
     }
 
@@ -590,8 +670,37 @@ impl DuplexDomain {
             .collect()
     }
 
+    /// The view `inference.duplex.ReceivedSessionEvents`: one row per received event, in the
+    /// order received.
+    #[must_use]
+    pub fn received_session_events_view(&self) -> Vec<ReceivedSessionEventsRow> {
+        self.received
+            .iter()
+            .map(|received| ReceivedSessionEventsRow {
+                received_id: received.received_id(),
+                session_id: received.session_id(),
+                kind: received.kind(),
+                sequence: received.sequence(),
+                delivered_before: received.delivered_before(),
+                state: received.state(),
+            })
+            .collect()
+    }
+
     fn record(&mut self, event: DuplexEvent) {
         self.events.push(event);
+    }
+
+    /// The effect of a close or failure on the received events of `session_id`: each one still
+    /// held is delivered before `end`, which the caller records next.
+    fn deliver_held(&mut self, session_id: SpeechSessionId, end: SessionEnd) {
+        for slot in &mut self.received {
+            if slot.session_id() == session_id
+                && let Some(moved) = slot.delivered_before_end(end)
+            {
+                *slot = moved;
+            }
+        }
     }
 
     /// The session, which must exist and be Open.

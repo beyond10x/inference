@@ -1177,3 +1177,104 @@ fn the_evidence_procedure_runs_through_the_binding_against_a_replay() {
         "{refused:?}"
     );
 }
+
+/// A server that answers one turn, its usage included, then does what `then` says.
+fn answered_then<F, Fut>(then: F) -> Server
+where
+    F: FnOnce(Socket) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    Server::start(move |mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, transcript_delta("resp_1", "item_o1", "Hello")).await;
+        send(&mut socket, response_done("resp_1", "completed")).await;
+        then(socket).await;
+    })
+}
+
+/// The events after the response began that `events` holds: its transcript, its completion and
+/// its one usage record, with the output text tokens its `response.done` reported.
+fn the_answered_turn(events: &[SessionEvent], response: ResponseId) {
+    assert_eq!(transcript(events, response), "Hello", "{events:#?}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::ResponseCompleted(done) if done.response_id == response
+        )),
+        "{events:#?}"
+    );
+    let recorded = records(events);
+    assert_eq!(recorded.len(), 1, "{events:#?}");
+    assert_eq!(recorded[0].response_id, Some(response));
+    assert!(
+        quantities(recorded[0]).contains(&(QuantityKind::OutputTextTokens, Some(3))),
+        "{:?}",
+        recorded[0]
+    );
+}
+
+/// What the provider sent before the caller closes, its usage included, already reached the
+/// binding: the close delivers it, before `SpeechSessionClosed`, and nothing more.
+#[test]
+fn what_arrived_before_the_close_is_delivered_before_the_session_closed() {
+    let server =
+        answered_then(|mut socket| async move { while let Some(Ok(_)) = socket.next().await {} });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::ResponseCreated(_))
+    });
+    let response = created(&events)[0];
+    std::thread::sleep(Duration::from_millis(300));
+    session.close().expect("open");
+    server.finish();
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    the_answered_turn(&closing, response);
+    assert!(
+        matches!(closing.last(), Some(SessionEvent::SpeechSessionClosed(_))),
+        "{closing:#?}"
+    );
+}
+
+/// The connection closed after the provider's last events reached the binding, so a send fails:
+/// those events are recorded before the session fails, and the failure is the closed connection
+/// they end with.
+#[test]
+fn what_arrived_before_a_failed_send_is_recorded_before_the_failure() {
+    let server = answered_then(|mut socket| async move {
+        socket.close(None).await.unwrap();
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::ResponseCreated(_))
+    });
+    let response = created(&events)[0];
+    server.finish();
+    std::thread::sleep(Duration::from_millis(300));
+    let mut refused = None;
+    for index in 0..20 {
+        if let Err(error) = session.append_audio(frame(pcm24(), index * 240, vec![0; 480])) {
+            refused = Some(error);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(refused.is_some(), "a send on the closed connection fails");
+    let rest: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    the_answered_turn(&rest, response);
+    assert!(
+        matches!(
+            rest.last(),
+            Some(SessionEvent::SpeechSessionFailed(failed))
+                if failed.failure.kind == SessionFailureKind::TransportClosed
+        ),
+        "{rest:#?}"
+    );
+}

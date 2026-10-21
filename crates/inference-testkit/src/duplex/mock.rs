@@ -1250,4 +1250,46 @@ mod tests {
             "not stalled"
         );
     }
+
+    /// What the model produced before the close, its transcription usage included, is delivered
+    /// after the close and before `SpeechSessionClosed`; nothing of the response comes after.
+    #[test]
+    fn what_was_produced_before_the_close_is_delivered_before_the_session_closed() {
+        let mut model = MockSpeechModel::native(vec![turn("what time is it", "It is noon")]);
+        let mut session = model
+            .open(config(TurnDetection::Disabled, false))
+            .expect("the model takes the configuration");
+        speak(&mut session, 0, 3);
+        session.commit_input().expect("a manual commit");
+        session.create_response().expect("no response in progress");
+        session.close().expect("open");
+        let events = drain(&mut session);
+        let closed = events
+            .iter()
+            .position(|event| matches!(event, SessionEvent::SpeechSessionClosed(_)))
+            .expect("the session closed");
+        assert_eq!(closed, events.len() - 1, "{events:#?}");
+        let before = &events[..closed];
+        assert!(before.iter().any(|event| matches!(
+            event,
+            SessionEvent::InputTranscribed(heard) if heard.text == "what time is it"
+        )));
+        assert!(
+            before
+                .iter()
+                .any(|event| matches!(event, SessionEvent::TranscriptionUsageRecorded(_))),
+            "{events:#?}"
+        );
+        let response = created(before);
+        assert_eq!(response.len(), 1, "{events:#?}");
+        assert!(output_of(&events).is_empty(), "{events:#?}");
+        assert_eq!(
+            session.ledger().usage_records().len(),
+            events
+                .iter()
+                .filter(|event| matches!(event, SessionEvent::UsageRecorded(_)))
+                .count(),
+            "every usage record is delivered: {events:#?}"
+        );
+    }
 }

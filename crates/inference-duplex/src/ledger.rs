@@ -109,6 +109,9 @@ pub struct SessionLedger {
     records: Vec<UsageRecord>,
     /// Usage the provider reported that no response holds yet ([`SessionLedger::hold_usage`]).
     held: Vec<Quantity>,
+    /// The total of the session billed as a whole, recorded just before its end event
+    /// ([`SessionLedger::session_usage_at_end`]), and whether the provider confirmed it final.
+    at_end: Option<(Vec<Quantity>, bool)>,
     calls: Vec<SpeechToolCall>,
     liveness: Liveness,
     requested: bool,
@@ -219,6 +222,7 @@ impl SessionLedger {
             meters: Vec::new(),
             records: Vec::new(),
             held: Vec::new(),
+            at_end: None,
             calls: Vec::new(),
             liveness: Liveness::new(config.idle_limit, now),
             requested: false,
@@ -458,9 +462,9 @@ impl SessionLedger {
     }
 
     /// The caller closes the session: `inference.duplex.CloseSpeechSession`. The response in
-    /// progress is cancelled first, its `ResponseCancelled` just before `SpeechSessionClosed`;
-    /// every response not yet recorded, and any usage held for no response, is recorded before
-    /// both.
+    /// progress is cancelled first, its `ResponseCancelled` just before the total of the session
+    /// ([`Self::session_usage_at_end`]) and `SpeechSessionClosed`; every response not yet
+    /// recorded, and any usage held for no response, is recorded before both.
     ///
     /// # Errors
     ///
@@ -471,6 +475,7 @@ impl SessionLedger {
         if let Some(response_id) = self.in_progress() {
             self.cancel_response(response_id, self.latest)?;
         }
+        self.record_at_end();
         self.session = moved;
         self.requested = false;
         self.outbox
@@ -480,7 +485,8 @@ impl SessionLedger {
 
     /// The session fails with `failure`: `inference.duplex.FailSpeechSession`, for a closed
     /// transport, an error the provider reported or a stall. The response in progress fails with
-    /// it first, its `ResponseFailed` just before `SpeechSessionFailed`; every response not yet
+    /// it first, its `ResponseFailed` just before the total of the session
+    /// ([`Self::session_usage_at_end`]) and `SpeechSessionFailed`; every response not yet
     /// recorded, and any usage held for no response, is recorded before both.
     ///
     /// # Errors
@@ -495,6 +501,7 @@ impl SessionLedger {
         if let Some(response_id) = self.in_progress() {
             self.fail_response(response_id, failure, self.latest)?;
         }
+        self.record_at_end();
         self.session = moved;
         self.requested = false;
         self.outbox
@@ -873,6 +880,19 @@ impl SessionLedger {
         self.held = quantities;
     }
 
+    /// The provider bills the session as a whole, such as seconds of session, and reported its
+    /// total so far as `quantities`; `confirmed` is false while the provider has not confirmed
+    /// them final. They replace the total given before and are recorded once, as usage of the
+    /// session naming no response, when a close, a failure or a stall ends it: after the end
+    /// events of its responses, just before its own. Given after the end, they are recorded at
+    /// once.
+    pub fn session_usage_at_end(&mut self, quantities: Vec<Quantity>, confirmed: bool) {
+        self.at_end = Some((quantities, confirmed));
+        if self.session.require_open().is_err() {
+            self.record_at_end();
+        }
+    }
+
     /// Every usage record of the session, in the order they were recorded.
     #[must_use]
     pub fn usage_records(&self) -> &[UsageRecord] {
@@ -918,6 +938,13 @@ impl SessionLedger {
         let held = std::mem::take(&mut self.held);
         if !held.is_empty() {
             self.record_of_session(held, true, self.opened.0, self.latest);
+        }
+    }
+
+    /// Records the total of the session billed as a whole, if one was given, once.
+    fn record_at_end(&mut self) {
+        if let Some((quantities, confirmed)) = self.at_end.take() {
+            self.record_of_session(quantities, confirmed, self.opened.0, self.latest);
         }
     }
 
