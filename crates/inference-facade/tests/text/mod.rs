@@ -16,7 +16,7 @@ use inference_core::model::{Adapter, AdapterId, Capability, ModelId};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
     Catalog, Declaration, Delivery, Essentiality, InteractionMode, Node, NodeImplementation,
-    NodeRole, OverloadPolicy, PipelineSpec, PlannedPipeline, PortTraits, modality,
+    NodeRole, OverloadPolicy, PipelineSpec, PlannedPipeline, PortId, PortTraits, modality,
 };
 use inference_testkit::graph::{PipelinePayload, RunLog};
 use inference_testkit::llm::{MockConfiguration, MockGenerator, ModelNode};
@@ -25,6 +25,7 @@ use inference_text::{SpanId, TranscriptCommitted};
 
 pub const INGRESS: &str = "user text";
 pub const EGRESS: &str = "reply";
+pub const USAGE_EGRESS: &str = "usage";
 
 struct Unpark(Thread);
 
@@ -94,6 +95,35 @@ pub fn planned_with_egress(
     required: &[Capability],
     egress: NonZeroUsize,
 ) -> (Declaration, PlannedPipeline) {
+    let (declaration, planned, _) = text_pipeline(generator, required, egress, false);
+    (declaration, planned)
+}
+
+/// As [`planned`] requiring `output_streaming`, the model node's output port `usage` exposed as
+/// the egress [`USAGE_EGRESS`], pausing on overload so that no record is dropped; and that port,
+/// which the node is given ([`ModelNode::with_usage`]).
+pub fn planned_with_usage(generator: &MockGenerator) -> (Declaration, PlannedPipeline, PortId) {
+    let (declaration, planned, usage) = text_pipeline(
+        generator,
+        &[Capability::OutputStreaming],
+        NonZeroUsize::new(64).expect("64"),
+        true,
+    );
+    (
+        declaration,
+        planned,
+        usage.expect("the usage port was declared"),
+    )
+}
+
+/// The text pipeline, its egress holding at most `egress` envelopes, and, when `usage`, the
+/// model node's `usage` port, exposed as [`USAGE_EGRESS`].
+fn text_pipeline(
+    generator: &MockGenerator,
+    required: &[Capability],
+    egress: NonZeroUsize,
+    usage: bool,
+) -> (Declaration, PlannedPipeline, Option<PortId>) {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
@@ -119,8 +149,12 @@ pub fn planned_with_egress(
         mode: InteractionMode::TurnBased,
         required_capabilities: required.to_vec(),
     };
+    let records = PortTraits {
+        incremental: false,
+        ..text
+    };
     let mut declaration = Declaration::new();
-    let (pipeline_id, ()) = declaration
+    let (pipeline_id, usage) = declaration
         .build(&catalog, profile_id, spec, |pipeline| {
             let model = pipeline.node("model", NodeRole::Model, required.to_vec());
             let prompt = pipeline.input::<modality::Text>(&model, "prompt", text);
@@ -132,9 +166,20 @@ pub fn planned_with_egress(
                 OverloadPolicy::Pause,
             );
             pipeline.expose(&answer, EGRESS, egress, OverloadPolicy::Pause);
+            let usage = usage.then(|| {
+                let port = pipeline.output::<modality::Structured>(&model, "usage", records);
+                pipeline.expose(
+                    &port,
+                    USAGE_EGRESS,
+                    NonZeroUsize::new(16).expect("16"),
+                    OverloadPolicy::Pause,
+                );
+                port.id()
+            });
             pipeline
                 .bind(&model, adapter_id)
                 .expect("the catalog holds the mock LLM's adapter");
+            usage
         })
         .expect("the profile is declared");
     let validated = declaration
@@ -143,7 +188,7 @@ pub fn planned_with_egress(
     let planned = declaration
         .plan(validated, &catalog)
         .expect("the model is bound to an adapter that streams output");
-    (declaration, planned)
+    (declaration, planned, usage)
 }
 
 /// A sink node alone behind the ingress `user text`, a turn-based pipeline with no egress,

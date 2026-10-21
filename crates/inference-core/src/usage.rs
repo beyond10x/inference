@@ -14,7 +14,24 @@
 //! The contract crate of a call fills the adapter, model, timing and quantities
 //! ([`RecordUsage::new`]); the node that places the record on a run fills the run, node and
 //! session ([`RecordUsage::placed`]). A call inside a subgraph names the child run it was made in.
+//!
+//! A [`UsageTotal`] adds records up, kind by kind ([`KindTotal`]): the sum of the known values,
+//! the number of unknown quantities, the number of records that carried the kind and how many of
+//! those were partial, their `final` false; a kind is complete only when none of its quantities
+//! was unknown and none of its records partial. An unknown quantity is counted as unknown, never
+//! added as zero, and a partial count is counted, never taken for a final one. The total is a value its holder keeps, such as a session over its runs; the
+//! specification declares no entity for it.
+//!
+//! A [`CostRecord`] prices one usage record with one price document: the document's currency,
+//! revision and digest, one [`CostLine`] per quantity kind the record's adapter is charged for,
+//! each an exact decimal amount as a string or an [`UnknownReason`], and a [`CostTotal`] of the
+//! known subtotal, the unknown lines and a complete total that is none unless no line is unknown.
+//! It is created only through [`CostRecord::record`], from the [`PriceUsage`] a pricing crate
+//! computed, and returned with the [`CostRecorded`] event. This crate computes no price: the
+//! record holds what the pricing crate wrote, as a usage record holds what its contract crate
+//! counted.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
@@ -474,14 +491,322 @@ impl UsageRecord {
     }
 }
 
+/// The total of one [`QuantityKind`] over the records a [`UsageTotal`] took.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KindTotal {
+    /// The sum of the known values of the kind. Wider than a value, so that no sum overflows.
+    pub known: i128,
+    /// How many quantities of the kind were [`QuantitySource::Unknown`]: counted here, never
+    /// added to `known`.
+    pub unknown: u64,
+    /// How many records carried a quantity of the kind.
+    pub records: u64,
+    /// How many of those records were partial, their `final` false: the provider may still
+    /// change their counts, so `known` and `unknown` may change with them.
+    pub partial: u64,
+}
+
+impl KindTotal {
+    /// Whether `known` is the whole and settled total of the kind: no quantity of it was unknown
+    /// and no record carrying it was partial.
+    #[must_use]
+    pub const fn complete(&self) -> bool {
+        self.unknown == 0 && self.partial == 0
+    }
+}
+
+/// The usage of several calls added up, kind by kind; see the module documentation. A kind no
+/// record carried has no [`KindTotal`]. A total is complete only when every kind is: no quantity
+/// unknown and no record partial, so a total over counts the provider may still change never
+/// reads as settled.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UsageTotal {
+    records: u64,
+    kinds: BTreeMap<QuantityKind, KindTotal>,
+}
+
+impl UsageTotal {
+    /// The total of no record.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds the record whose quantities are `quantities` and whose ESS field `final` is
+    /// `is_final`: each known value to its kind's sum, each unknown quantity to its kind's unknown
+    /// count, and the record to the count of every kind it carries and, when it is not final, to
+    /// the partial count of each.
+    pub fn add(&mut self, quantities: &[Quantity], is_final: bool) {
+        self.records += 1;
+        let mut carried: Vec<QuantityKind> = Vec::with_capacity(quantities.len());
+        for quantity in quantities {
+            let total = self.kinds.entry(quantity.kind()).or_default();
+            match quantity.value() {
+                Some(value) => total.known += i128::from(value),
+                None => total.unknown += 1,
+            }
+            if !carried.contains(&quantity.kind()) {
+                carried.push(quantity.kind());
+                total.records += 1;
+                if !is_final {
+                    total.partial += 1;
+                }
+            }
+        }
+    }
+
+    /// How many records the total took.
+    #[must_use]
+    pub const fn records(&self) -> u64 {
+        self.records
+    }
+
+    /// The total of `kind`; none when no record carried it.
+    #[must_use]
+    pub fn kind(&self, kind: QuantityKind) -> Option<KindTotal> {
+        self.kinds.get(&kind).copied()
+    }
+
+    /// The total of every kind some record carried, in the order of [`QuantityKind::ALL`].
+    pub fn kinds(&self) -> impl Iterator<Item = (QuantityKind, KindTotal)> + '_ {
+        self.kinds.iter().map(|(kind, total)| (*kind, *total))
+    }
+
+    /// Whether every kind is complete: no quantity the total took was unknown and no record it
+    /// took was partial.
+    #[must_use]
+    pub fn complete(&self) -> bool {
+        self.kinds.values().all(KindTotal::complete)
+    }
+}
+
+uuid_newtype!(
+    /// `inference.usage.CostRecordId`: identifies a [`CostRecord`].
+    CostRecordId
+);
+
+/// `inference.usage.UsageRecordNotFound`: no usage record carries the identity a cost record
+/// named; nothing was priced. It is the error of `PriceUsage`'s `unknown-usage` outcome, which
+/// only a store holding the usage records can decide; [`CostRecord::record`] never returns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageRecordNotFound {
+    pub usage_record_id: UsageRecordId,
+}
+
+impl fmt::Display for UsageRecordNotFound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "no usage record carries the identity {}",
+            self.usage_record_id
+        )
+    }
+}
+
+impl Error for UsageRecordNotFound {}
+
+/// `inference.usage.UnknownReason`: why a [`CostLine`] has no amount, or only a lower bound.
+/// Serialized as written in ESS (`price_unknown`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownReason {
+    /// The quantity was not counted.
+    QuantityUnknown,
+    /// The price names no rate for the quantity.
+    RateUnknown,
+    /// No price covers the kind, or the adapter has no price at all.
+    PriceUnknown,
+    /// The price's binding is not the one the call was made over.
+    BindingMismatch,
+    /// The provider reported no upstream model, so no model price can be matched.
+    ModelUnknown,
+    /// The upstream model the provider reported is not the one the price is for.
+    ModelMismatch,
+    /// A recorded charge carried no amount.
+    ChargeUnknown,
+    /// The provider marked the counts partial: the amount is a lower bound.
+    UsageIncomplete,
+}
+
+impl UnknownReason {
+    /// Every reason, in the order `ess/domains/usage.yaml` lists them.
+    pub const ALL: [Self; 8] = [
+        Self::QuantityUnknown,
+        Self::RateUnknown,
+        Self::PriceUnknown,
+        Self::BindingMismatch,
+        Self::ModelUnknown,
+        Self::ModelMismatch,
+        Self::ChargeUnknown,
+        Self::UsageIncomplete,
+    ];
+}
+
+/// `inference.usage.CostLine`: one charged quantity kind priced. `quantity` is the count priced,
+/// none when unknown; `amount` an exact decimal string in the record's currency, never a float,
+/// none when it cannot be known; `unknown` why the amount is none, or why it is only a lower
+/// bound. A field the specification does not declare is refused; an `Optional` field may be left
+/// out or sent as `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostLine {
+    pub kind: QuantityKind,
+    #[serde(default)]
+    pub quantity: Option<i64>,
+    #[serde(default)]
+    pub amount: Option<String>,
+    #[serde(default)]
+    pub unknown: Option<UnknownReason>,
+}
+
+/// `inference.usage.CostTotal`: the lines of a [`CostRecord`] added up. `known_subtotal` is the
+/// sum of the known amounts, `unknown_lines` the number of lines whose amount is none or only a
+/// lower bound, and `complete_total` the whole, none unless no line is unknown. Amounts are exact
+/// decimal strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostTotal {
+    pub known_subtotal: String,
+    pub unknown_lines: u64,
+    #[serde(default)]
+    pub complete_total: Option<String>,
+}
+
+/// `inference.usage.PriceUsage`: the input that records the cost of the usage record
+/// `usage_record_id` under one price document, as the pricing crate computed it. A field the
+/// specification does not declare is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PriceUsage {
+    pub usage_record_id: UsageRecordId,
+    /// The three-letter code of the price document's currency.
+    pub currency: String,
+    pub price_revision: String,
+    /// The content digest of the price document.
+    pub price_digest: String,
+    pub lines: Vec<CostLine>,
+    pub total: CostTotal,
+}
+
+/// `inference.usage.CostRecorded`: the whole cost record, so that a meter needs nothing else to
+/// read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CostRecorded {
+    pub cost_record_id: CostRecordId,
+    pub usage_record_id: UsageRecordId,
+    pub currency: String,
+    pub price_revision: String,
+    pub price_digest: String,
+    pub lines: Vec<CostLine>,
+    pub total: CostTotal,
+}
+
+impl CostRecorded {
+    /// The `kind` of an [`EventEnvelope`](crate::envelope::EventEnvelope) carrying this event: its
+    /// declared name.
+    pub const KIND: &'static str = "inference.usage.CostRecorded";
+}
+
+/// `inference.usage.CostRecord`: one usage record priced with one price document. It references
+/// the usage record; a usage record has one cost record per price document it is priced with.
+/// Its one state is `Declared`: a new price document makes a new record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CostRecord {
+    cost_record_id: CostRecordId,
+    usage_record_id: UsageRecordId,
+    currency: String,
+    price_revision: String,
+    price_digest: String,
+    lines: Vec<CostLine>,
+    total: CostTotal,
+}
+
+impl CostRecord {
+    /// Runs `inference.usage.PriceUsage`: generates a [`CostRecordId`] and returns the record
+    /// with the input's fields and the [`CostRecorded`] event.
+    #[must_use]
+    pub fn record(input: PriceUsage) -> (Self, CostRecorded) {
+        Self::record_as(CostRecordId::generate(), input)
+    }
+
+    /// Runs `inference.usage.PriceUsage` under `cost_record_id` instead of a generated one, and
+    /// otherwise as [`CostRecord::record`]; for a store that assigns the identities itself.
+    #[must_use]
+    pub fn record_as(cost_record_id: CostRecordId, input: PriceUsage) -> (Self, CostRecorded) {
+        let record = Self {
+            cost_record_id,
+            usage_record_id: input.usage_record_id,
+            currency: input.currency,
+            price_revision: input.price_revision,
+            price_digest: input.price_digest,
+            lines: input.lines,
+            total: input.total,
+        };
+        let event = record.recorded();
+        (record, event)
+    }
+
+    /// The [`CostRecorded`] event that carries this record.
+    #[must_use]
+    pub fn recorded(&self) -> CostRecorded {
+        CostRecorded {
+            cost_record_id: self.cost_record_id,
+            usage_record_id: self.usage_record_id,
+            currency: self.currency.clone(),
+            price_revision: self.price_revision.clone(),
+            price_digest: self.price_digest.clone(),
+            lines: self.lines.clone(),
+            total: self.total.clone(),
+        }
+    }
+
+    #[must_use]
+    pub const fn cost_record_id(&self) -> CostRecordId {
+        self.cost_record_id
+    }
+
+    /// The usage record priced.
+    #[must_use]
+    pub const fn usage_record_id(&self) -> UsageRecordId {
+        self.usage_record_id
+    }
+
+    #[must_use]
+    pub fn currency(&self) -> &str {
+        &self.currency
+    }
+
+    #[must_use]
+    pub fn price_revision(&self) -> &str {
+        &self.price_revision
+    }
+
+    #[must_use]
+    pub fn price_digest(&self) -> &str {
+        &self.price_digest
+    }
+
+    #[must_use]
+    pub fn lines(&self) -> &[CostLine] {
+        &self.lines
+    }
+
+    #[must_use]
+    pub const fn total(&self) -> &CostTotal {
+        &self.total
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
     use super::{
-        Quantity, QuantityKind, QuantityMismatch, QuantitySource, RecordUsage, UsageRecord,
-        UsageRecordId, UsageRecorded,
+        CostLine, CostRecord, CostRecordId, CostRecorded, CostTotal, KindTotal, PriceUsage,
+        Quantity, QuantityKind, QuantityMismatch, QuantitySource, RecordUsage, UnknownReason,
+        UsageRecord, UsageRecordId, UsageRecorded, UsageTotal,
     };
     use crate::id::{NodeId, RunId, SessionId};
     use crate::model::{AdapterId, ModelId};
@@ -639,6 +964,280 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&event).expect("serializes"))
                 .expect("the event reads back");
         assert_eq!(read, event);
+    }
+
+    #[test]
+    fn a_total_sums_known_values_and_counts_unknowns_apart_from_zero() {
+        let mut total = UsageTotal::new();
+        assert_eq!(total.records(), 0);
+        assert!(total.complete(), "no record is a complete total of nothing");
+        assert_eq!(total.kind(QuantityKind::Requests), None);
+
+        total.add(
+            &[
+                Quantity::provider_reported(QuantityKind::InputTextTokens, 12),
+                Quantity::measured(QuantityKind::Requests, 1),
+                Quantity::unknown(QuantityKind::LocalComputeMs),
+            ],
+            true,
+        );
+        total.add(
+            &[
+                Quantity::unknown(QuantityKind::InputTextTokens),
+                Quantity::measured(QuantityKind::Requests, 1),
+                Quantity::measured(QuantityKind::LocalComputeMs, 0),
+            ],
+            true,
+        );
+        total.add(
+            &[Quantity::provider_reported(
+                QuantityKind::InputTextTokens,
+                30,
+            )],
+            true,
+        );
+
+        assert_eq!(total.records(), 3);
+        assert_eq!(
+            total.kind(QuantityKind::InputTextTokens),
+            Some(KindTotal {
+                known: 42,
+                unknown: 1,
+                records: 3,
+                partial: 0,
+            }),
+            "the unknown count of the second record is not added as zero"
+        );
+        assert_eq!(
+            total.kind(QuantityKind::Requests),
+            Some(KindTotal {
+                known: 2,
+                unknown: 0,
+                records: 2,
+                partial: 0,
+            })
+        );
+        assert_eq!(
+            total.kind(QuantityKind::LocalComputeMs),
+            Some(KindTotal {
+                known: 0,
+                unknown: 1,
+                records: 2,
+                partial: 0,
+            }),
+            "a measured zero is known; the unknown beside it stays unknown"
+        );
+        assert_eq!(total.kind(QuantityKind::OutputTextTokens), None);
+        assert!(
+            !total
+                .kind(QuantityKind::InputTextTokens)
+                .expect("carried")
+                .complete()
+        );
+        assert!(
+            total
+                .kind(QuantityKind::Requests)
+                .expect("carried")
+                .complete()
+        );
+        assert!(!total.complete());
+        assert_eq!(
+            total.kinds().map(|(kind, _)| kind).collect::<Vec<_>>(),
+            [
+                QuantityKind::InputTextTokens,
+                QuantityKind::Requests,
+                QuantityKind::LocalComputeMs
+            ],
+            "kinds in the order the specification lists them"
+        );
+    }
+
+    #[test]
+    fn a_total_of_unknowns_only_knows_nothing_and_a_sum_past_i64_does_not_overflow() {
+        let mut unknown = UsageTotal::new();
+        unknown.add(&[Quantity::unknown(QuantityKind::OutputAudioMs)], true);
+        unknown.add(&[Quantity::unknown(QuantityKind::OutputAudioMs)], true);
+        assert_eq!(
+            unknown.kind(QuantityKind::OutputAudioMs),
+            Some(KindTotal {
+                known: 0,
+                unknown: 2,
+                records: 2,
+                partial: 0,
+            })
+        );
+        assert!(!unknown.complete());
+
+        let mut large = UsageTotal::new();
+        large.add(
+            &[Quantity::measured(QuantityKind::InputAudioMs, i64::MAX)],
+            true,
+        );
+        large.add(
+            &[Quantity::measured(QuantityKind::InputAudioMs, i64::MAX)],
+            true,
+        );
+        assert_eq!(
+            large
+                .kind(QuantityKind::InputAudioMs)
+                .map(|kind| kind.known),
+            Some(2 * i128::from(i64::MAX))
+        );
+        assert!(large.complete());
+    }
+
+    #[test]
+    fn a_partial_record_keeps_its_kinds_incomplete_however_well_they_are_counted() {
+        let mut total = UsageTotal::new();
+        total.add(
+            &[
+                Quantity::provider_reported(QuantityKind::OutputTextTokens, 9),
+                Quantity::measured(QuantityKind::Requests, 1),
+            ],
+            false,
+        );
+        total.add(&[Quantity::measured(QuantityKind::Requests, 1)], true);
+
+        assert_eq!(
+            total.kind(QuantityKind::OutputTextTokens),
+            Some(KindTotal {
+                known: 9,
+                unknown: 0,
+                records: 1,
+                partial: 1,
+            }),
+            "every count known, but the provider marked it partial"
+        );
+        assert_eq!(
+            total.kind(QuantityKind::Requests),
+            Some(KindTotal {
+                known: 2,
+                unknown: 0,
+                records: 2,
+                partial: 1,
+            })
+        );
+        assert!(
+            !total
+                .kind(QuantityKind::OutputTextTokens)
+                .expect("carried")
+                .complete()
+        );
+        assert!(
+            !total.complete(),
+            "a total over partial counts is not complete"
+        );
+
+        let mut final_only = UsageTotal::new();
+        final_only.add(&[Quantity::measured(QuantityKind::Requests, 1)], true);
+        assert!(final_only.complete());
+    }
+
+    fn price_usage() -> PriceUsage {
+        PriceUsage {
+            usage_record_id: UsageRecordId::from(Uuid::from_u128(6)),
+            currency: "EUR".to_owned(),
+            price_revision: "2026-10".to_owned(),
+            price_digest: "prices-sha256:00".to_owned(),
+            lines: vec![
+                CostLine {
+                    kind: QuantityKind::OutputTextTokens,
+                    quantity: Some(9),
+                    amount: Some("0.000018".to_owned()),
+                    unknown: None,
+                },
+                CostLine {
+                    kind: QuantityKind::InputAudioMs,
+                    quantity: Some(300),
+                    amount: None,
+                    unknown: Some(UnknownReason::PriceUnknown),
+                },
+            ],
+            total: CostTotal {
+                known_subtotal: "0.000018".to_owned(),
+                unknown_lines: 1,
+                complete_total: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_cost_record_carries_its_input_and_its_event_carries_the_record() {
+        let id = CostRecordId::from(Uuid::from_u128(7));
+        let (record, event) = CostRecord::record_as(id, price_usage());
+
+        assert_eq!(record.cost_record_id(), id);
+        assert_eq!(record.usage_record_id(), price_usage().usage_record_id);
+        assert_eq!(record.currency(), "EUR");
+        assert_eq!(record.price_revision(), "2026-10");
+        assert_eq!(record.price_digest(), "prices-sha256:00");
+        assert_eq!(record.lines(), price_usage().lines.as_slice());
+        assert_eq!(record.total(), &price_usage().total);
+        assert_eq!(event, record.recorded());
+        assert_eq!(event.cost_record_id, id);
+        let read: CostRecorded =
+            serde_json::from_value(serde_json::to_value(&event).expect("serializes"))
+                .expect("the event reads back");
+        assert_eq!(read, event);
+        assert_ne!(
+            CostRecord::record(price_usage()).1.cost_record_id,
+            CostRecord::record(price_usage()).1.cost_record_id,
+            "a generated identity per record"
+        );
+    }
+
+    #[test]
+    fn cost_names_are_the_ess_names_and_amounts_are_strings() {
+        assert_eq!(
+            serde_json::to_value(UnknownReason::ALL).expect("serializes"),
+            json!([
+                "quantity_unknown",
+                "rate_unknown",
+                "price_unknown",
+                "binding_mismatch",
+                "model_unknown",
+                "model_mismatch",
+                "charge_unknown",
+                "usage_incomplete"
+            ])
+        );
+        let wire = serde_json::to_value(price_usage()).expect("serializes");
+        assert_eq!(
+            wire["lines"][0],
+            json!({"kind": "output_text_tokens", "quantity": 9, "amount": "0.000018", "unknown": null})
+        );
+        assert_eq!(
+            wire["total"],
+            json!({"known_subtotal": "0.000018", "unknown_lines": 1, "complete_total": null})
+        );
+        assert_eq!(CostRecorded::KIND, "inference.usage.CostRecorded");
+    }
+
+    #[test]
+    fn a_cost_line_and_total_read_without_their_optional_fields_and_refuse_undeclared_ones() {
+        assert_eq!(
+            serde_json::from_value::<CostLine>(json!({"kind": "requests"})).expect("read"),
+            CostLine {
+                kind: QuantityKind::Requests,
+                quantity: None,
+                amount: None,
+                unknown: None,
+            }
+        );
+        assert_eq!(
+            serde_json::from_value::<CostTotal>(json!({"known_subtotal": "0", "unknown_lines": 0}))
+                .expect("read"),
+            CostTotal {
+                known_subtotal: "0".to_owned(),
+                unknown_lines: 0,
+                complete_total: None,
+            }
+        );
+        let extra =
+            serde_json::from_value::<CostLine>(json!({"kind": "requests", "unit": "request"}));
+        assert!(extra.is_err(), "{extra:?}");
+        let float = serde_json::from_value::<CostLine>(json!({"kind": "requests", "amount": 0.5}));
+        assert!(float.is_err(), "an amount is never a float: {float:?}");
     }
 
     #[test]

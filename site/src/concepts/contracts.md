@@ -11,7 +11,7 @@ on `inference-stt` and one adapter.
 | `inference-audio` | Audio frames, formats, sample-clock positions. No codec or resampler. |
 | `inference-text` | Inbound spans and turns; outbound output segments. |
 | `inference-stt` | `Recogniser`: audio frames in, transcript hypotheses, revisions and commits out. |
-| `inference-llm` | `Generator`: a thin wrapper over the `llm` project's model contract (`llm_core::Model`, tag 0.8.0) that adds generation identity, segment commits and input during output. |
+| `inference-llm` | `Generator`: a thin wrapper over the `llm` project's model contract (`llm_core::Model`, tag 0.8.3) that adds generation identity, segment commits and input during output. |
 | `inference-tts` | `Synthesiser`: committed segments in, audio frames out; playback is confirmed by the sink. |
 | `inference-tools` | `Tool`, `ToolCall` lifecycle, the executor contract and retry policy by side-effect class. |
 | `inference-duplex` | `NativeSpeechModel`: one multiport session that takes audio and control and gives audio, transcripts and tool calls. Never an STT, LLM and TTS in disguise. |

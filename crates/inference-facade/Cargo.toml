@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+cost = ["dep:llm-cost", "dep:llm-core"]
+
 [dependencies]
 inference-audio = { path = "../inference-audio" }
 inference-core = { path = "../inference-core" }
@@ -14,12 +17,18 @@ inference-pipeline = { path = "../inference-pipeline" }
 inference-runtime = { path = "../inference-runtime" }
 inference-text = { path = "../inference-text" }
 inference-tools = { path = "../inference-tools" }
+llm-core = { workspace = true, optional = true }
+llm-cost = { workspace = true, optional = true }
 uuid.workspace = true
 
 [dev-dependencies]
 inference-llm = { path = "../inference-llm" }
 inference-testkit = { path = "../inference-testkit", features = ["llm", "run", "stt", "tts"] }
 serde_json.workspace = true
+
+[[test]]
+name = "cost"
+required-features = ["cost"]
 
 [lints]
 workspace = true
