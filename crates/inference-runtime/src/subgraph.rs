@@ -4,13 +4,17 @@
 //!
 //! A [`SubgraphNode`] is the implementation of a node declared with
 //! `inference.graph.AddSubgraphNode`, whose ports planning matched one to one with its child
-//! pipeline's exposures. It drives a [`RunController`] of the child from its own lifecycle:
+//! pipeline's exposures, its usage port aside: the node's structured output port `usage` also
+//! carries every usage egress of the child no port of the node names
+//! ([`Declaration::forwarded_usage`]), so the usage of every model call of the child reaches the
+//! parent and counts in the parent run's total. It drives a [`RunController`] of the child from
+//! its own lifecycle:
 //!
 //! | step of the subgraph node | what the child run does |
 //! |---|---|
 //! | `describe`, `described` | nothing yet; the node keeps its declaration and its instance |
 //! | `prepare` | created under the node's instance as its parent (`NestRun`), validated, prepared |
-//! | `start` | activated; the parent edges arriving at each input port are merged into the child ingress of its name, and the child egress of each output port's name is fanned out to every parent edge leaving it; the child's run loop runs. A refused start cancels and stops the child |
+//! | `start` | activated; the parent edges arriving at each input port are merged into the child ingress of its name, and the child egress of each output port's name, with every usage egress the usage port forwards merged into it, is fanned out to every parent edge leaving it; the child's run loop runs. A refused start cancels and stops the child |
 //! | `drain` | `stop` is sent into each ingress still open and a drain is asked for; the step returns once the child run is terminal |
 //! | `cancel` | cancelled |
 //! | `stop` | returns once the child run is terminal and its queues are dropped |
@@ -30,7 +34,9 @@
 //! side with that side's run identity, a new event identity, the subgraph node as its producer, the
 //! port or exposure name it crosses to as its port, and the crossed envelope's event identity as
 //! its `causation_id`; its stream, sequence, generation, kind and payload are kept, so a child's
-//! generation epochs stay the child's. A run's parent is read from its controller
+//! generation epochs stay the child's. A usage record crossing to the parent therefore travels on
+//! the parent run, whose total counts it, and still names the child run it was made in in its
+//! payload, so the child's total stays derivable. A run's parent is read from its controller
 //! ([`RunController::parent`]).
 //!
 //! The child's run loop and the bridges run on a thread of the subgraph node's own, polled by an
@@ -50,7 +56,7 @@ use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{NodeId, RunId, StreamId};
 use inference_pipeline::{
     Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInstanceId,
-    PlannedPipeline, PortId,
+    PlannedPipeline, PortId, USAGE_PORT,
 };
 
 use crate::controller::{Ingress, RunController, RunError};
@@ -390,15 +396,28 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
                 },
             )));
         }
+        let forwarded: Vec<String> = self
+            .declaration
+            .forwarded_usage(node_id)
+            .iter()
+            .map(|exposure| exposure.name().to_owned())
+            .collect();
         for (port, parents) in outputs {
-            let Some(egress) = ends.egress(&port) else {
+            let mut egresses: Vec<Box<dyn InputEndpoint<P>>> =
+                ends.egress(&port).into_iter().collect();
+            if port == USAGE_PORT {
+                for name in &forwarded {
+                    egresses.extend(ends.egress(name));
+                }
+            }
+            if egresses.is_empty() {
                 return Err(NodeError::new(format!(
                     "the child has no egress named `{port}` for the node's output port of that \
                      name"
                 )));
-            };
+            }
             tasks.push(Box::pin(egress_bridge(
-                egress,
+                egresses,
                 parents,
                 Arc::clone(&bridges),
                 Crossing {
@@ -664,25 +683,6 @@ async fn send<P>(
     }
 }
 
-/// The next envelope of `input`, none once the edge is empty and closed, or `Err` once the node is
-/// cancelled, which answers first.
-async fn until_cancelled<P>(
-    input: &mut dyn InputEndpoint<P>,
-    bridges: &Bridges,
-) -> Result<Option<EventEnvelope<P>>, ()> {
-    let mut recv = input.recv();
-    future::poll_fn(|cx| {
-        if bridges
-            .read(cx, |state| state.cancel.then_some(()))
-            .is_some()
-        {
-            return Poll::Ready(Err(()));
-        }
-        recv.as_mut().poll(cx).map(Ok)
-    })
-    .await
-}
-
 /// One parent edge's next envelope, with the edge's receiving end handed back.
 type Receiving<P> =
     Pin<Box<dyn Future<Output = (Box<dyn InputEndpoint<P>>, Option<EventEnvelope<P>>)> + Send>>;
@@ -772,22 +772,72 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
     }
 }
 
-/// Forwards what the child sends out of its egress into every parent edge leaving the subgraph
-/// node's output port of its name, each copy a crossing of its own, until the child's end of the
-/// egress is gone, every parent edge refused, or the node is cancelled. An edge that refuses is
-/// sent nothing more; the others go on.
-async fn egress_bridge<P: Clone + Send>(
-    mut egress: Box<dyn InputEndpoint<P>>,
+/// One child egress's next envelope, with the egress's index among those a bridge merges and its
+/// receiving end handed back.
+type Indexed<P> = Pin<
+    Box<dyn Future<Output = (usize, Box<dyn InputEndpoint<P>>, Option<EventEnvelope<P>>)> + Send>,
+>;
+
+fn indexed<P: Send + 'static>(index: usize, mut egress: Box<dyn InputEndpoint<P>>) -> Indexed<P> {
+    Box::pin(async move {
+        let received = egress.recv().await;
+        (index, egress, received)
+    })
+}
+
+/// Forwards what the child sends out of `egresses` into every parent edge leaving the subgraph
+/// node's output port, each copy a crossing of its own, until the child's end of every egress is
+/// gone, every parent edge refused, or the node is cancelled, which answers first. An edge that
+/// refuses is sent nothing more; the others go on.
+///
+/// `egresses` is the child's egress of the port's name, or, for the node's usage port, that and
+/// every usage egress the port forwards ([`Declaration::forwarded_usage`]), merged as they arrive,
+/// so every usage record of the child crosses once. A `stop` ends one egress's input: it crosses
+/// once every egress has sent one, the last to arrive, and none crosses if an egress ended
+/// without it, as on the ingress side; so the parent sees one end of input whatever it merges.
+async fn egress_bridge<P: Clone + Send + 'static>(
+    egresses: Vec<Box<dyn InputEndpoint<P>>>,
     parents: Vec<Box<dyn OutputEndpoint<P>>>,
     bridges: Arc<Bridges>,
     crossing: Crossing,
 ) {
     let mut parents = parents;
-    loop {
-        let next = until_cancelled(egress.as_mut(), &bridges).await;
-        let Ok(Some(envelope)) = next else {
+    let mut stopped = vec![false; egresses.len()];
+    let mut pending: Vec<Indexed<P>> = egresses
+        .into_iter()
+        .enumerate()
+        .map(|(index, egress)| indexed(index, egress))
+        .collect();
+    while !pending.is_empty() {
+        let next = future::poll_fn(|cx| {
+            if bridges
+                .read(cx, |state| state.cancel.then_some(()))
+                .is_some()
+            {
+                return Poll::Ready(None);
+            }
+            for at in 0..pending.len() {
+                if let Poll::Ready(received) = pending[at].as_mut().poll(cx) {
+                    drop(pending.swap_remove(at));
+                    return Poll::Ready(Some(received));
+                }
+            }
+            Poll::Pending
+        })
+        .await;
+        let Some((index, egress, received)) = next else {
             return;
         };
+        let Some(envelope) = received else {
+            continue;
+        };
+        pending.push(indexed(index, egress));
+        if envelope.kind == ControlKind::Stop.as_str() {
+            stopped[index] = true;
+            if !stopped.iter().all(|stopped| *stopped) {
+                continue;
+            }
+        }
         let mut kept = Vec::with_capacity(parents.len());
         for parent in parents {
             match send(

@@ -40,7 +40,8 @@
 //!
 //! A Planned pipeline may stand as a node of another ([`Declaration::add_subgraph_node`],
 //! [`PipelineBuilder::subgraph`]): its exposures are the ingress and egress contracts the node's
-//! ports are held to when the parent is planned.
+//! ports are held to when the parent is planned, except that the node's port [`USAGE_PORT`] also
+//! carries every usage egress of the child no port names ([`Declaration::forwarded_usage`]).
 //!
 //! A pipeline may also be written declaratively, as JSON ([`PipelineDefinition`]), naming each
 //! node by the kind of a [`NodeDescriptor`] its implementation publishes
@@ -439,10 +440,16 @@ pub struct SubgraphNodeAdded {
     pub name: String,
 }
 
+/// The name of the structured output port on which a model node sends the usage record of each
+/// of its calls, and on which a subgraph node forwards the usage records of its child run
+/// ([`Declaration::forwarded_usage`]).
+pub const USAGE_PORT: &str = "usage";
+
 /// `inference.graph.SubgraphInterfaceMismatch`: the ports of the subgraph node `node_id` do not
-/// match its child pipeline's exposures one to one by name, direction and modality. `port_id`
-/// names a port no exposure matches, `exposure_id` an exposure no port matches; both, a port and
-/// the exposure of its name that differs from it in direction or modality.
+/// match its child pipeline's exposures one to one by name, direction and modality, the usage
+/// roll-up aside ([`Declaration::forwarded_usage`]). `port_id` names a port no exposure matches,
+/// `exposure_id` an exposure no port matches; both, a port and the exposure of its name that
+/// differs from it in direction or modality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubgraphInterfaceMismatch {
     pub node_id: NodeId,
