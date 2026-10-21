@@ -612,10 +612,10 @@ impl SessionLedger {
     /// (`delivered_before: failed`), and stays in order before it.
     ///
     /// When the provider had sent frames the binding could not read
-    /// ([`Self::unreadable_frame`]), the failure is reported as
-    /// [`SessionFailureKind::ProviderError`] whatever its kind, its detail naming how many and
-    /// the last one: a session the provider stopped speaking readably to has not just stalled or
-    /// lost its transport.
+    /// ([`Self::unreadable_frame`]), the failure's detail names how many and the last one. Its
+    /// kind stays what the binding or the provider stated, except
+    /// [`SessionFailureKind::Stalled`]: a provider that kept sending frames the binding could
+    /// not read was not silent, so a stall becomes [`SessionFailureKind::ProviderError`].
     ///
     /// # Errors
     ///
@@ -694,15 +694,18 @@ impl SessionLedger {
         self.unreadable.1.as_deref()
     }
 
-    /// `failure` as the session reports it: a provider error naming the frames the binding
-    /// could not read, when there were any.
+    /// `failure` as the session reports it, naming the frames the binding could not read when
+    /// there were any: a stall becomes a provider error, every other kind stays.
     fn after_unreadable(&self, failure: SessionFailure) -> SessionFailure {
         let (count, Some(last)) = (self.unreadable.0, self.unreadable.1.as_deref()) else {
             return failure;
         };
         let frames = if count == 1 { "frame" } else { "frames" };
         SessionFailure {
-            kind: SessionFailureKind::ProviderError,
+            kind: match failure.kind {
+                SessionFailureKind::Stalled => SessionFailureKind::ProviderError,
+                kind => kind,
+            },
             detail: format!(
                 "{}; the provider had sent {count} {frames} the binding could not read, the last: {last}",
                 failure.detail

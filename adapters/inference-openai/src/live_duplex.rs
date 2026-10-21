@@ -67,8 +67,9 @@
 //! * A message the client cannot read (not JSON, no `type`, a typed event without a field it
 //!   needs) is dropped and reading goes on. It is counted on the session
 //!   ([`SessionLedger::unreadable_frames`]), so is a `session.closed` lacking a field, and none
-//!   refreshes the liveness bound. A later failure of the session is then a provider error naming
-//!   how many there were and the last.
+//!   refreshes the liveness bound. A later failure of the session names how many there were and
+//!   the last; a stall becomes a provider error, every other failure keeps its kind, so a
+//!   `connection_lost` without its seconds is still a closed transport.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

@@ -1356,10 +1356,10 @@ fn an_undecodable_message_is_counted_on_the_session() {
     server.finish();
 }
 
-/// A failure that follows a message the binding could not read is reported as a provider error
-/// naming it, not as the closed transport alone.
+/// A failure that follows a message the binding could not read keeps its kind, here the closed
+/// transport, and names the message.
 #[test]
-fn a_failure_after_an_undecodable_message_is_a_provider_error_naming_it() {
+fn a_failure_after_an_undecodable_message_keeps_its_kind_and_names_it() {
     let server = Server::start(|mut socket| async move {
         accept_session(&mut socket).await;
         socket
@@ -1380,7 +1380,7 @@ fn a_failure_after_an_undecodable_message_is_a_provider_error_naming_it() {
     };
     assert_eq!(
         failed.failure.kind,
-        SessionFailureKind::ProviderError,
+        SessionFailureKind::TransportClosed,
         "{failed:?}"
     );
     assert!(
@@ -1475,5 +1475,144 @@ fn the_usage_of_an_input_transcription_without_its_transcript_is_counted() {
         "{:?}",
         session.ledger().last_unreadable()
     );
+    session.close().expect("open");
+}
+
+/// A `response.done` whose `usage` is in a shape the binding cannot read still ends its
+/// response, its counts unknown; the frame is counted as one the binding could not read in full.
+#[test]
+fn a_response_done_with_an_unreadable_usage_is_counted_as_an_unreadable_frame() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, transcript_delta("resp_1", "item_o1", "Hello")).await;
+        let mut done = response_done("resp_1", "completed");
+        done["response"]["usage"] = json!("forty tokens");
+        send(&mut socket, done).await;
+        while let Some(Ok(_)) = socket.next().await {}
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, any_completed);
+    let recorded = records(&events);
+    assert_eq!(recorded.len(), 1, "{events:#?}");
+    assert!(
+        quantities(recorded[0]).contains(&(QuantityKind::OutputTextTokens, None)),
+        "{recorded:?}"
+    );
+    assert_eq!(session.ledger().unreadable_frames(), 1);
+    assert!(
+        session
+            .ledger()
+            .last_unreadable()
+            .is_some_and(|what| what.contains("`usage`")),
+        "{:?}",
+        session.ledger().last_unreadable()
+    );
+    session.close().expect("open");
+}
+
+/// An input transcription whose `usage` is in a shape the binding cannot read still delivers its
+/// transcript; the frame is counted as one the binding could not read in full.
+#[test]
+fn an_input_transcription_with_an_unreadable_usage_is_counted_as_an_unreadable_frame() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        let mut transcription = transcribed("item_1", "Hey");
+        transcription["usage"] = json!({"type": "duration"});
+        send(&mut socket, transcription).await;
+        while let Some(Ok(_)) = socket.next().await {}
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::InputTranscribed(_))
+    });
+    assert!(
+        matches!(events.last(), Some(SessionEvent::InputTranscribed(_))),
+        "{events:#?}"
+    );
+    assert_eq!(session.ledger().unreadable_frames(), 1);
+    assert!(
+        session
+            .ledger()
+            .last_unreadable()
+            .is_some_and(|what| what.contains("`seconds`")),
+        "{:?}",
+        session.ledger().last_unreadable()
+    );
+    session.close().expect("open");
+}
+
+/// Realtime runs one response at a time: a `response.created` while one is in progress ends that
+/// one first, as a provider error naming the frames the binding could not read, its usage
+/// recorded with every count unknown; the new response is accepted.
+#[test]
+fn a_response_created_while_one_is_in_progress_ends_it_first_with_its_usage_unknown() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, transcript_delta("resp_1", "item_o1", "Hello")).await;
+        socket
+            .send(Message::text("<html>bad gateway"))
+            .await
+            .unwrap();
+        send(&mut socket, committed("item_2")).await;
+        send(&mut socket, response_created("resp_2")).await;
+        send(&mut socket, transcript_delta("resp_2", "item_o2", "World")).await;
+        send(&mut socket, response_done("resp_2", "completed")).await;
+        while let Some(Ok(_)) = socket.next().await {}
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, any_completed);
+    let ids = created(&events);
+    assert_eq!(ids.len(), 2, "{events:#?}");
+    let failed = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::ResponseFailed(failed) if failed.response_id == ids[0] => Some(failed),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the first response did not fail: {events:#?}"));
+    assert_eq!(
+        failed.failure.kind,
+        SessionFailureKind::ProviderError,
+        "{failed:?}"
+    );
+    assert!(
+        failed.failure.detail.contains("1 frame") && failed.failure.detail.contains("<html>bad"),
+        "{failed:?}"
+    );
+    let first = events
+        .iter()
+        .position(|event| matches!(event, SessionEvent::ResponseFailed(_)))
+        .expect("failed");
+    let second = events
+        .iter()
+        .position(|event| {
+            matches!(event, SessionEvent::ResponseCreated(created) if created.response_id == ids[1])
+        })
+        .expect("created");
+    assert!(first < second, "{events:#?}");
+    let recorded = records(&events);
+    let of_first = recorded
+        .iter()
+        .find(|record| record.response_id == Some(ids[0]))
+        .unwrap_or_else(|| panic!("the first response's usage was not recorded: {events:#?}"));
+    assert!(
+        quantities(of_first).contains(&(QuantityKind::OutputTextTokens, None)),
+        "{of_first:?}"
+    );
+    assert_eq!(transcript(&events, ids[1]), "World", "{events:#?}");
     session.close().expect("open");
 }

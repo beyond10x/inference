@@ -52,11 +52,13 @@ pub enum ServerEvent {
     /// `conversation.item.input_audio_transcription.completed`, with the usage the server
     /// reported for the transcription. It is read field by field: a field the server left out or
     /// sent in another shape is `None`, so the usage of an event without its `transcript` still
-    /// counts.
+    /// counts. A `usage` the server sent in a shape that cannot be read is `None` too, and
+    /// `unreadable_usage` says why.
     InputTranscript {
         item_id: Option<String>,
         transcript: Option<String>,
         usage: Option<TranscriptionUsage>,
+        unreadable_usage: Option<String>,
     },
     /// `input_audio_buffer.speech_started`.
     SpeechStarted {
@@ -83,13 +85,15 @@ pub enum ServerEvent {
     },
     /// `response.done`, with the response's final status and the usage the server reported. It
     /// is read field by field: a field of `response` the server left out or sent in another shape
-    /// is `None`, and so is each when `response` is. It still ends a response: Realtime has one
-    /// in progress at a time, so one without its id ends that one, and its usage counts whatever
-    /// else it lacks.
+    /// is `None`, and so is each when `response` is. It still ends a response: Realtime ends its
+    /// responses in the order it created them, so one without its id ends the oldest response
+    /// still awaiting its end, and its usage counts whatever else it lacks. A `usage` the server
+    /// sent in a shape that cannot be read is `None` too, and `unreadable_usage` says why.
     ResponseDone {
         response_id: Option<String>,
         status: Option<ResponseStatus>,
         usage: Option<Usage>,
+        unreadable_usage: Option<String>,
     },
     /// `error`.
     Error(ServerError),
@@ -162,11 +166,15 @@ impl ServerEvent {
                 item_id: event.string("item_id")?,
                 delta: event.optional_string("delta")?.unwrap_or_default(),
             },
-            "conversation.item.input_audio_transcription.completed" => Self::InputTranscript {
-                item_id: event.lenient_string("item_id"),
-                transcript: event.lenient_string("transcript"),
-                usage: event.transcription_usage().ok().flatten(),
-            },
+            "conversation.item.input_audio_transcription.completed" => {
+                let (usage, unreadable_usage) = split(event.transcription_usage());
+                Self::InputTranscript {
+                    item_id: event.lenient_string("item_id"),
+                    transcript: event.lenient_string("transcript"),
+                    usage,
+                    unreadable_usage,
+                }
+            }
             "input_audio_buffer.speech_started" => Self::SpeechStarted {
                 item_id: event.string("item_id")?,
                 audio_start_ms: event.unsigned("audio_start_ms")?,
@@ -192,12 +200,15 @@ impl ServerEvent {
             },
             "response.done" => {
                 let response = event.response().ok();
+                let (usage, unreadable_usage) =
+                    response.map_or((None, None), |response| split(response.usage()));
                 Self::ResponseDone {
                     response_id: response.and_then(|response| response.lenient_string("id")),
                     status: response
                         .and_then(|response| response.lenient_string("status"))
                         .map(|status| ResponseStatus::from_wire(&status)),
-                    usage: response.and_then(|response| response.usage().ok().flatten()),
+                    usage,
+                    unreadable_usage,
                 }
             }
             "error" => {
@@ -215,6 +226,16 @@ impl ServerEvent {
                 raw: raw.clone(),
             },
         })
+    }
+}
+
+/// A usage as read, `None` when the server sent none, and why it could not be read when it
+/// sent one in another shape.
+fn split<T>(usage: Result<Option<T>, RealtimeError>) -> (Option<T>, Option<String>) {
+    match usage {
+        Ok(usage) => (usage, None),
+        Err(RealtimeError::Protocol(what)) => (None, Some(what)),
+        Err(error) => (None, Some(error.to_string())),
     }
 }
 

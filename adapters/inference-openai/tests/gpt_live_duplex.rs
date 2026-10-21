@@ -1292,10 +1292,10 @@ fn an_undecodable_message_is_counted_on_the_session() {
     server.finish();
 }
 
-/// A failure that follows a message the binding could not read is reported as a provider error
-/// naming it, not as the closed transport alone.
+/// A failure that follows a message the binding could not read keeps its kind, here the closed
+/// transport, and names the message.
 #[test]
-fn a_failure_after_an_undecodable_message_is_a_provider_error_naming_it() {
+fn a_failure_after_an_undecodable_message_keeps_its_kind_and_names_it() {
     let server = Server::start(|mut socket| async move {
         accept_start(&mut socket).await;
         socket
@@ -1314,7 +1314,7 @@ fn a_failure_after_an_undecodable_message_is_a_provider_error_naming_it() {
     };
     assert_eq!(
         failed.failure.kind,
-        SessionFailureKind::ProviderError,
+        SessionFailureKind::TransportClosed,
         "{failed:?}"
     );
     assert!(
