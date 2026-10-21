@@ -3,7 +3,8 @@
 //!
 //! Cancelling delivery and asking the server to stop computing are two facts, and separate tests
 //! report them. Delivery cancellation is `GenerationCancelled` with no later delta, though the
-//! rest of the stream had reached the adapter. The request to stop computing is the connection
+//! rest of the stream had reached the adapter; the usage record of a turn that ended before the
+//! cancel is still delivered. The request to stop computing is the connection
 //! closed while the fixture still held the rest of the stream: `llama-server` stops a task whose
 //! connection is gone. Whether a live server did stop is the live test's to observe.
 //!
@@ -164,8 +165,9 @@ fn cancelling_after_the_first_delta_delivers_generation_cancelled_and_no_later_d
     );
     let later: Vec<GenerationEvent> = handle.by_ref().collect();
     assert!(
-        later.is_empty(),
-        "none of the {} later deltas the adapter received is delivered: {later:?}",
+        matches!(later.as_slice(), [GenerationEvent::Usage(recorded)] if recorded.r#final),
+        "none of the {} later deltas the adapter received is delivered, only the usage record \
+         of the turn, which ended before the cancel: {later:?}",
         DELTAS.len() - 1
     );
     assert!(handle.next().is_none());

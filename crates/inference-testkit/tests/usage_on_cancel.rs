@@ -25,7 +25,12 @@ use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::GenerationStarted;
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::model::ModelId;
-use inference_core::usage::UsageRecorded;
+use inference_core::usage::{QuantityKind, QuantitySource, UsageRecorded};
+use inference_llm::Generator;
+use inference_llm::llm_core::{
+    BoxFuture, Cancel, Capabilities, Error as LlmError, Id, Model, Protocol, Provenance,
+    StreamEvent as LlmEvent, StreamSink, TurnOutcome, TurnRequest, Usage,
+};
 use inference_pipeline::{
     Declaration, NodeEndpoints, NodeImplementation, NodeInput, NodeOutput, PortId,
 };
@@ -312,6 +317,169 @@ fn a_cancel_during_an_llm_turn_still_yields_the_turns_usage_record() {
     );
     assert_eq!(records[0].run_id, Some(run_id));
     assert_eq!(records[0].node_id, Some(ids.llm));
+}
+
+/// A model that streams one delta, then waits for the cancel of its turn and never returns.
+struct Stubborn(Provenance, Capabilities);
+
+impl Stubborn {
+    fn new() -> Self {
+        let id = |value: &str| Id::new(value).expect("a printable identifier");
+        let provenance = Provenance {
+            protocol: Protocol::Messages,
+            provider: id("test"),
+            account: id("test"),
+            endpoint: id("in-process"),
+            model: id("stubborn"),
+            binding_revision: id("1"),
+        };
+        Self(provenance, Capabilities::text(1024, 256))
+    }
+}
+
+impl Model for Stubborn {
+    fn provenance(&self) -> &Provenance {
+        &self.0
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        &self.1
+    }
+
+    fn turn<'a>(
+        &'a self,
+        _request: &'a TurnRequest,
+        sink: &'a mut dyn StreamSink,
+        cancel: &'a Cancel,
+    ) -> BoxFuture<'a, Result<TurnOutcome, LlmError>> {
+        Box::pin(async move {
+            sink.emit(LlmEvent::TextDelta {
+                text: "partial".to_owned(),
+            })
+            .await?;
+            cancel.cancelled().await;
+            future::pending::<()>().await;
+            unreachable!("a stubborn turn never returns")
+        })
+    }
+}
+
+/// Starts the LLM node of the cascade answering on `generator` one input, waits until the turn
+/// streamed its segment and holds, cancels the node (the runtime's cancel, `Step::Cancel`) and
+/// waits until its exchange ended; answers the usage records its usage output took.
+fn cancelled_during_a_held_turn(generator: Generator) -> Vec<UsageRecorded> {
+    let (declaration, cascade) = cascade();
+    let ids = cascade.ids;
+    let run_id = RunId::generate();
+    let mut node = ModelNode::<CascadePayload>::carrying(run_id, generator, reply, RunLog::new())
+        .with_usage(ids.usage.llm);
+    block_on(node.describe(declaration.node(ids.llm).expect("the LLM node")));
+    let mut input = Stream::new(run_id);
+    let question = input.event(
+        StreamEvent::TranscriptCommitted(TranscriptCommitted {
+            span_id: SpanId::generate(),
+            text: "hello".to_owned(),
+        }),
+        0,
+    );
+    let (text, shown) = Edge::taking();
+    let (usage, taken) = Edge::taking();
+    let endpoints = NodeEndpoints {
+        inputs: vec![NodeInput {
+            port_id: PortId::generate(),
+            endpoint: Box::new(Scripted(VecDeque::from([question]))),
+        }],
+        outputs: vec![
+            NodeOutput {
+                port_id: PortId::generate(),
+                endpoint: Box::new(text),
+            },
+            NodeOutput {
+                port_id: ids.usage.llm,
+                endpoint: Box::new(usage),
+            },
+        ],
+    };
+    block_on(node.start(endpoints)).expect("the node starts on its edges");
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !shown
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|envelope| envelope.kind == "inference.stream.TextSegmentCommitted")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn streams its segment"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    block_on(node.cancel());
+    block_on(node.stop());
+    taken
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter_map(|envelope| match &envelope.payload {
+            CascadePayload::Usage(recorded) => Some(recorded.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `story:llm-usage-on-cancel`, D2: the runtime's cancel of the node during a turn the model
+/// holds cuts that turn, and the node sends its record before it stops: the counts the model
+/// reported for it, not final.
+#[test]
+fn a_cancel_of_the_llm_node_during_a_held_turn_sends_that_turns_record() {
+    let generator = MockGenerator::new(
+        LlmConfiguration::StreamingAndConcurrentInput,
+        ModelId::generate(),
+        Vec::<String>::new(),
+    )
+    .reporting([Some(Usage {
+        input_tokens: Some(20),
+        output_tokens: Some(1),
+        ..Usage::default()
+    })])
+    .holding(0);
+    let records = cancelled_during_a_held_turn(generator.into());
+    let [recorded] = records.as_slice() else {
+        panic!("the cut turn's record: {records:#?}")
+    };
+    assert!(!recorded.r#final, "{recorded:?}");
+    assert!(
+        recorded.quantities.iter().any(|quantity| {
+            quantity.kind() == QuantityKind::InputTextTokens && quantity.value() == Some(20)
+        }),
+        "the counts the model reported: {recorded:?}"
+    );
+}
+
+/// D2 with the bound of ruling 3: the runtime's cancel of the node during a turn whose model
+/// never returns from its cancel still ends the node, and the node sends the record of that turn
+/// as one request with every token count unknown, not final.
+#[test]
+fn a_cancel_of_the_llm_node_during_a_turn_that_never_returns_sends_a_record_of_one_request() {
+    let mock = MockGenerator::new(
+        LlmConfiguration::StreamingAndConcurrentInput,
+        ModelId::generate(),
+        Vec::<String>::new(),
+    );
+    let generator = Generator::new(mock.adapter().clone(), Arc::new(Stubborn::new()))
+        .expect("the stubborn model declares what the mock's adapter claims");
+    let records = cancelled_during_a_held_turn(generator);
+    let [recorded] = records.as_slice() else {
+        panic!("the cut turn's record: {records:#?}")
+    };
+    assert!(!recorded.r#final, "{recorded:?}");
+    for quantity in &recorded.quantities {
+        match quantity.kind() {
+            QuantityKind::Requests => assert_eq!(quantity.value(), Some(1)),
+            QuantityKind::LocalComputeMs => {}
+            _ => assert_eq!(quantity.source(), QuantitySource::Unknown, "{recorded:?}"),
+        }
+    }
 }
 
 #[test]

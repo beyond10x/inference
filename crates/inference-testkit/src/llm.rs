@@ -10,9 +10,11 @@
 //! stream shows no delta and returns that text in the turn's outcome only, as `llm` defines one.
 //! Each turn answered so is a model request. A turn reports no usage unless the generator was
 //! scripted to ([`MockGenerator::reporting`]), so the wrapper's record of it counts every token
-//! unknown. The model declares to `llm` that it streams exactly
-//! when its configuration claims `output_streaming` ([`MockConfiguration::declared`]), so the
-//! wrapper accepts the claims. What a generation
+//! unknown. Scripted to hold a turn ([`MockGenerator::holding`]), the model streams that turn's
+//! text and then waits for its cancel, failing with the turn's usage as counts not final, as a
+//! call cut short in the middle of its output does. The model declares to `llm` that it streams
+//! exactly when its configuration claims `output_streaming` ([`MockConfiguration::declared`]), so
+//! the wrapper accepts the claims. What a generation
 //! delivers follows from what its configuration claims, as the wrapper decides it:
 //!
 //! * claiming `output_streaming`, each piece is one segment, emitted and committed while the
@@ -51,8 +53,9 @@ use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_llm::llm_core::{
-    self, BoxFuture, CallId, Cancel, Capabilities, Id, Item, Protocol, Provenance, StopReason,
-    StreamEvent, StreamSink, ToolCall, ToolSpec, TurnObservation, TurnOutcome, TurnRequest, Usage,
+    self, BoxFuture, CallId, Cancel, Capabilities, Dispatch, Id, Item, Protocol, Provenance,
+    StopReason, StreamEvent, StreamSink, ToolCall, ToolSpec, TurnObservation, TurnOutcome,
+    TurnRequest, Usage,
 };
 use inference_llm::tools::{ToolOutcome, tool_name};
 use inference_llm::{
@@ -155,6 +158,8 @@ struct MockModel {
     offered: Offered,
     /// The usage the n-th turn of a conversation reports; a turn past the list reports none.
     usage: Vec<Option<Usage>>,
+    /// The turn of a conversation, counted from 0, that holds until it is cancelled.
+    holding: Option<usize>,
 }
 
 /// The tool sets offered to the model of one generator, shared by its clones.
@@ -211,6 +216,7 @@ impl MockGenerator {
             tools: None,
             offered: Offered::default(),
             usage: Vec::new(),
+            holding: None,
         };
         Self::over(adapter, model)
     }
@@ -261,6 +267,7 @@ impl MockGenerator {
             }),
             offered: self.model.offered.clone(),
             usage: self.model.usage.clone(),
+            holding: self.model.holding,
         };
         Self::over(adapter, model)
     }
@@ -277,6 +284,28 @@ impl MockGenerator {
             tools: self.model.tools.clone(),
             offered: self.model.offered.clone(),
             usage: usage.into_iter().collect(),
+            holding: self.model.holding,
+        };
+        Self::over(self.generator.adapter().clone(), model)
+    }
+
+    /// The same generator, whose model holds the `turn`-th turn of a conversation, counted from
+    /// 0 as [`MockGenerator::reporting`] counts: it streams that turn's pieces, if it streams,
+    /// and then neither ends nor fails until the turn is cancelled, as a call cut short in the
+    /// middle of its output. Cancelled, it fails with `llm`'s cancelled error, dispatch
+    /// accepted, carrying the usage scripted for that turn as counts not final, as `llm`'s
+    /// clients keep the partial usage of an interrupted stream; no usage scripted, it carries
+    /// none. Its adapter is the same.
+    #[must_use]
+    pub fn holding(self, turn: usize) -> Self {
+        let model = MockModel {
+            provenance: self.model.provenance.clone(),
+            capabilities: self.model.capabilities.clone(),
+            script: self.model.script.clone(),
+            tools: self.model.tools.clone(),
+            offered: self.model.offered.clone(),
+            usage: self.model.usage.clone(),
+            holding: Some(turn),
         };
         Self::over(self.generator.adapter().clone(), model)
     }
@@ -413,7 +442,7 @@ impl llm_core::Model for MockModel {
         &'a self,
         request: &'a TurnRequest,
         sink: &'a mut dyn StreamSink,
-        _cancel: &'a Cancel,
+        cancel: &'a Cancel,
     ) -> BoxFuture<'a, Result<TurnOutcome, llm_core::Error>> {
         Box::pin(async move {
             let (pieces, calls) = self.answer(request);
@@ -425,6 +454,22 @@ impl llm_core::Model for MockModel {
                     .await?;
                 }
             }
+            let turn = request
+                .items
+                .iter()
+                .filter(|item| matches!(item, Item::AssistantText { .. }))
+                .count();
+            let usage = self.usage.get(turn).cloned().flatten();
+            if self.holding == Some(turn) {
+                cancel.cancelled().await;
+                return Err(llm_core::Error::cancelled()
+                    .with_dispatch(Dispatch::Accepted)
+                    .with_observation(TurnObservation {
+                        usage,
+                        final_usage: false,
+                        ..TurnObservation::new(self.provenance.clone())
+                    }));
+            }
             let stop_reason = if calls.is_empty() {
                 StopReason::EndTurn
             } else {
@@ -432,16 +477,11 @@ impl llm_core::Model for MockModel {
             };
             let mut items = vec![Item::assistant(pieces.concat())];
             items.extend(calls.into_iter().map(Item::ToolCall));
-            let turn = request
-                .items
-                .iter()
-                .filter(|item| matches!(item, Item::AssistantText { .. }))
-                .count();
             Ok(TurnOutcome {
                 stop_reason,
                 items,
                 observation: TurnObservation {
-                    usage: self.usage.get(turn).cloned().flatten(),
+                    usage,
                     final_usage: true,
                     ..TurnObservation::new(self.provenance.clone())
                 },

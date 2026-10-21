@@ -15,9 +15,12 @@
 //! `GenerationCompleted` and passes the end of input on. Drained, it takes what its input edge still holds until the edge
 //! is closed and then completes the generation the same way. Cancelled, it cancels the
 //! generation, which discards its unplayed segments, and sends nothing more, a cancel taken while
-//! a send waits for room ending the wait, but the usage record of a turn it already holds, which
-//! a cancel never loses; scripted to emit after the cancel, it emits once into the cancelled
-//! generation, which refuses it as stale.
+//! a send waits for room ending the wait, but the usage records: the record of a turn it already
+//! holds, which a cancel never loses, and, before it stops, every record its generation still
+//! holds, the turn the cancel cut among them, given up if its model has not returned from the
+//! cancel and then recorded as one request with every token count unknown, not final; scripted
+//! to emit after the cancel, it emits once into the cancelled generation, which refuses it as
+//! stale.
 //! Given a usage port ([`ModelNode::with_usage`]), the output port its pipeline declares under the
 //! name `usage`, the node sends on the edge or exposure leaving it the usage record of each turn
 //! of its generation that ended, a failed one among them, as `inference-llm` delivers it after the
@@ -68,17 +71,26 @@
 //!   ([`MockGenerator::proposing_round`](super::MockGenerator::proposing_round)): each is sent, in
 //!   order, and the generation awaits every one of them; each outcome is integrated as it arrives,
 //!   and the next turn runs once the last of them did;
-//! * superseded through its handle ([`ModelHandle::supersede`]), the node runs
-//!   `inference.stream.SupersedeGeneration` on its generation, which then emits nothing more, and
-//!   sends its `GenerationSuperseded` on the text port and, given tools, on `tool_call`, so that
-//!   the tool authority rejects the calls of the generation it still holds and the executor is told
-//!   to cancel the one it runs. An outcome that arrives for a generation that is no longer Active,
-//!   superseded or completed, is not reinjected and runs no turn (design 376, 637); it
-//!   is recorded ([`ModelHandle::not_reinjected`]) and still ends the wait for its call;
+//! * superseded through its handle ([`ModelHandle::supersede`]), also while a turn runs and has
+//!   nothing to deliver, the node runs `inference.stream.SupersedeGeneration` on its generation,
+//!   which then emits no more text, and sends its `GenerationSuperseded` on the text port and,
+//!   given tools, on `tool_call`, so that the tool authority rejects the calls of the generation
+//!   it still holds and the executor is told to cancel the one it runs; it then sends on `usage`
+//!   the usage records the generation still delivers, of the turns that ended and of the turn
+//!   the supersede cut (`inference-llm`). It waits for that turn to return from its cancel until
+//!   the node is cancelled or drained, which bound the wait: it then gives the turn up and sends
+//!   its record as one request with every token count unknown, not final. Once a supersede or a
+//!   cancel of the generation is asked, taken or not, no input is offered to the generation: an
+//!   input deferred or arriving then is dropped and recorded ([`ModelHandle::dropped_inputs`])
+//!   and is no model request. An outcome that arrives for a generation that is no longer Active,
+//!   superseded or completed, or once such an interruption is asked, is not reinjected and runs
+//!   no turn (design 376, 637); it is recorded ([`ModelHandle::not_reinjected`]) and still ends
+//!   the wait for its call;
 //! * cancelled through its handle ([`ModelHandle::cancel_generation`]), the host's interrupt by
 //!   cancel rather than supersede (design 716), the node runs `inference.stream.CancelGeneration`
-//!   on its generation and sends its `GenerationCancelled` on the same ports, as for a supersede;
-//!   the node does not fail, as it does when a turn fails, and goes on to the end of input;
+//!   on its generation and sends its `GenerationCancelled` on the same ports, and the usage
+//!   records after it, as for a supersede; the node does not fail, as it does when a turn fails,
+//!   and goes on to the end of input;
 //! * the end of input, or a drain once the input edge is closed, completes the generation only
 //!   once no outcome is awaited and no input is deferred; the node then passes the end of input
 //!   on, on both output ports, and ends once every edge into `tool_result` has ended, so that what
@@ -212,6 +224,16 @@ impl fmt::Debug for Watched<Record> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.read(|record| record.fmt(f))
     }
+}
+
+/// What the wait of `deliver_turn` came to.
+enum Next {
+    /// An event of the generation to send.
+    Event(GenerationEvent),
+    /// Nothing is left to deliver and no turn runs.
+    Done,
+    /// A signal ended the wait for a running turn.
+    Interrupted,
 }
 
 /// How the exchange ended.
@@ -715,16 +737,65 @@ impl<P: ModelPayload> Exchanging<P> {
         }
     }
 
-    /// Emits every event of the turns that can run now, until none is left to deliver.
+    /// Emits every event of the turns that can run now, until none is left to deliver. While a
+    /// turn runs and has nothing to deliver, a cancel, a supersede or a cancel of the generation
+    /// the node was asked for and has not taken ends the wait, so that the node takes it. While
+    /// the turn a supersede, a cancel or a completion cut has not returned from its cancel, the
+    /// node's cancel or its drain bounds the wait: the node gives the turn up, sends its record,
+    /// one request with every token count unknown, not final, and goes on.
     async fn deliver_turn(&mut self) -> Result<(), String> {
         loop {
             let Some(generation) = self.generation.as_mut() else {
                 return Ok(());
             };
-            let Some(event) = generation.next_turn_event().await else {
-                return Ok(());
-            };
-            self.send(event).await?;
+            let signal = &self.signal;
+            let next = future::poll_fn(|cx| {
+                if let Poll::Ready(event) = generation.poll_turn_event(cx) {
+                    return Poll::Ready(event.map_or(Next::Done, Next::Event));
+                }
+                let cut = generation.awaits_cut_turn();
+                let interrupted = pin!(signal.until(|signal| {
+                    let ends_the_wait = if cut {
+                        signal.cancel || signal.drain
+                    } else {
+                        signal.cancel
+                            || (signal.supersede && !signal.superseded)
+                            || (signal.cancel_generation && !signal.generation_cancelled)
+                    };
+                    ends_the_wait.then_some(())
+                }));
+                interrupted.poll(cx).map(|()| Next::Interrupted)
+            })
+            .await;
+            match next {
+                Next::Event(event) => self.send(event).await?,
+                Next::Done => return Ok(()),
+                Next::Interrupted if generation.abandon_cut_turn() => {}
+                Next::Interrupted => return Ok(()),
+            }
+        }
+    }
+
+    /// The usage records the generation still holds once the node was cancelled: polled without
+    /// waiting, the turn its cancel cut given up if it has not returned, as the cancel bounds the
+    /// wait for it.
+    fn held_usage(&mut self) -> Vec<UsageRecorded> {
+        let Some(generation) = self.generation.as_mut() else {
+            return Vec::new();
+        };
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut records = Vec::new();
+        loop {
+            match generation.poll_turn_event(&mut cx) {
+                Poll::Ready(Some(GenerationEvent::Usage(recorded))) => records.push(recorded),
+                Poll::Ready(Some(_)) => {}
+                Poll::Ready(None) => return records,
+                Poll::Pending => {
+                    if !generation.abandon_cut_turn() {
+                        return records;
+                    }
+                }
+            }
         }
     }
 
@@ -865,7 +936,8 @@ impl<P: ModelPayload> Exchanging<P> {
             superseded.generation_id,
             StreamEvent::GenerationSuperseded(superseded),
         )
-        .await
+        .await?;
+        self.deliver_turn().await
     }
 
     /// Runs `inference.stream.CancelGeneration` on the generation and sends its
@@ -882,7 +954,8 @@ impl<P: ModelPayload> Exchanging<P> {
             cancelled.generation_id,
             StreamEvent::GenerationCancelled(cancelled),
         )
-        .await
+        .await?;
+        self.deliver_turn().await
     }
 
     /// Sends `event`, the interruption of the generation `generation_id`, on the text port and,
@@ -956,8 +1029,11 @@ impl<P: ModelPayload> Exchanging<P> {
             return Ok(());
         }
         let (_, proposed) = tool_loop.awaiting.remove(awaited);
+        let interrupted = self
+            .signal
+            .read(|signal| signal.supersede || signal.cancel_generation);
         let Some(generation) = self.generation.as_mut().filter(|generation| {
-            generation.output().generation().state() == GenerationState::Active
+            generation.output().generation().state() == GenerationState::Active && !interrupted
         }) else {
             self.not_reinjected.push(update);
             return Ok(());
@@ -1067,6 +1143,13 @@ impl<P: ModelPayload> Exchanging<P> {
         }
     }
 
+    /// Whether the host asked for a supersede or a cancel of the generation, taken or not: from
+    /// then on no input and no outcome is offered to it, as no turn of it is to run.
+    fn interruption_asked(&self) -> bool {
+        self.signal
+            .read(|signal| signal.supersede || signal.cancel_generation)
+    }
+
     /// Whether the generation started and is Active.
     fn active(&self) -> bool {
         self.generation.as_ref().is_some_and(|generation| {
@@ -1121,7 +1204,7 @@ impl<P: ModelPayload> Exchanging<P> {
         sequence: i64,
         committed: TranscriptCommitted,
     ) -> Result<(), String> {
-        if !self.active() {
+        if !self.active() || self.interruption_asked() {
             self.dropped.push(committed.text);
             return Ok(());
         }
@@ -1268,7 +1351,16 @@ impl<P: ModelPayload> Exchanging<P> {
         let ended = block_on(self.exchange());
         let (late_refusal, failure) = match ended {
             Ended::Completed => (None, None),
-            Ended::Cancelled => (self.cancel(), None),
+            Ended::Cancelled => {
+                let late = self.cancel();
+                let held = self.held_usage();
+                block_on(async {
+                    for recorded in held {
+                        let _ = self.send_usage(recorded).await;
+                    }
+                });
+                (late, None)
+            }
             Ended::Failed(failure) => (None, Some(failure)),
         };
         let dropped = std::mem::take(&mut self.dropped);
@@ -1529,9 +1621,9 @@ impl ModelHandle {
         self.record.read(|record| record.late_refusal)
     }
 
-    /// The text of every input the node dropped because it arrived once its generation was no
-    /// longer Active, such as after the iteration rule completed it; empty before the exchange
-    /// ended.
+    /// The text of every input the node dropped because it was to be offered once its generation
+    /// was no longer Active, such as after the iteration rule completed it, or once a supersede
+    /// or a cancel of the generation was asked; empty before the exchange ended.
     #[must_use]
     pub fn dropped_inputs(&self) -> Vec<String> {
         self.record.read(|record| record.dropped.clone())
@@ -1584,8 +1676,9 @@ impl ModelHandle {
         self.record.read(|record| record.supersede_refusal)
     }
 
-    /// Every outcome of an awaited call that arrived once the generation was no longer Active, in
-    /// arrival order, none of them reinjected; empty before the exchange ended.
+    /// Every outcome of an awaited call that arrived once the generation was no longer Active, or
+    /// once a supersede or a cancel of it was asked, in arrival order, none of them reinjected;
+    /// empty before the exchange ended.
     #[must_use]
     pub fn not_reinjected(&self) -> Vec<ToolCallUpdate> {
         self.record.read(|record| record.not_reinjected.clone())
