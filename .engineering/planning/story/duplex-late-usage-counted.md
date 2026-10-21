@@ -2,12 +2,24 @@
 format: aep.planning-md/3
 id: story:duplex-late-usage-counted
 kind: story
-status: draft
+status: active
 title: A usage delta that arrives after its response was recorded is still counted
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: cited
+  path: adapters/inference-aws/src/duplex.rs
+- confidence: inferred
+  path: adapters/inference-aws/tests
+- confidence: cited
+  path: crates/inference-duplex/src/ledger.rs
+- confidence: inferred
+  path: crates/inference-duplex/tests
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-21T09:08:56Z", actor: "human:timo", revision: 4}
+- {from: "proposed", to: "active", at: "2026-10-21T09:08:56Z", actor: "human:timo", revision: 5}
 ---
 ## Context
 

@@ -2,12 +2,34 @@
 format: aep.planning-md/3
 id: story:usage-unconnected-port-counted
 kind: story
-status: draft
+status: active
 title: Usage that reaches no edge is counted or marks the run total partial
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: inferred
+  path: crates/inference-core/src/usage.rs
+- confidence: cited
+  path: crates/inference-facade/src/live.rs
+- confidence: cited
+  path: crates/inference-facade/src/usage.rs
+- confidence: inferred
+  path: crates/inference-facade/tests
+- confidence: cited
+  path: crates/inference-runtime/src/controller.rs
+- confidence: cited
+  path: crates/inference-runtime/src/subgraph.rs
+- confidence: inferred
+  path: crates/inference-runtime/tests/adversary1_unconnected_usage_port.rs
+- confidence: cited
+  path: ess/domains/graph.yaml
+- confidence: cited
+  path: ess/domains/usage.yaml
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-21T09:08:56Z", actor: "human:timo", revision: 4}
+- {from: "proposed", to: "active", at: "2026-10-21T09:08:56Z", actor: "human:timo", revision: 5}
 ---
 ## Context
 
