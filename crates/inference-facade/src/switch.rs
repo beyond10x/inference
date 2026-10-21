@@ -116,14 +116,10 @@ impl<P: SessionPayload> LiveSession<P> {
         let (mut controller, run_id) = run_session(&self.shared, declaration, planned, implement)
             .await
             .map_err(SwitchError::Start)?;
-        let ends = controller.exposed();
+        let (ingresses, egresses) = crate::live::outlets(controller.exposed());
         self.run_id = run_id;
-        self.ingresses = ends.ingresses;
-        self.egresses = ends
-            .egresses
-            .into_iter()
-            .map(|egress| egress.endpoint)
-            .collect();
+        self.ingresses = ingresses;
+        self.egresses = egresses;
         self.requests = controller.requests();
         self.queues = controller.queues();
         self.exposure_queues = controller.exposure_queues();
@@ -140,11 +136,12 @@ impl<P: SessionPayload> LiveSession<P> {
             let mut progressed = false;
             let mut index = 0;
             while index < self.egresses.len() {
-                let polled = self.egresses[index].recv().as_mut().poll(cx);
+                let delivers = self.egresses[index].delivers;
+                let polled = self.egresses[index].endpoint.recv().as_mut().poll(cx);
                 match polled {
                     Poll::Ready(Some(envelope)) => {
                         progressed = true;
-                        if let Some(event) = self.deliver(&envelope) {
+                        if let Some(event) = self.read(&envelope, delivers) {
                             self.shared.record(event);
                         }
                     }
