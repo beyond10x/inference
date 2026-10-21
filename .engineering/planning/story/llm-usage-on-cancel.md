@@ -2,12 +2,22 @@
 format: aep.planning-md/3
 id: story:llm-usage-on-cancel
 kind: story
-status: draft
+status: active
 title: A cancelled or superseded generation still delivers its usage records
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: cited
+  path: adapters/inference-llama-server/tests
+- confidence: cited
+  path: crates/inference-llm
+- confidence: cited
+  path: crates/inference-testkit/src/llm
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-21T03:08:09Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-21T03:08:10Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 

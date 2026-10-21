@@ -2,12 +2,22 @@
 format: aep.planning-md/3
 id: story:usage-subgraph-rollup
 kind: story
-status: draft
+status: active
 title: Usage of a subgraph's child runs rolls up into the parent run's total
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: cited
+  path: crates/inference-facade/src/usage.rs
+- confidence: cited
+  path: crates/inference-pipeline
+- confidence: cited
+  path: crates/inference-runtime
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-21T03:08:10Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-21T03:08:11Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 
