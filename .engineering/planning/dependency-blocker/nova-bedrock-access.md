@@ -2,12 +2,14 @@
 format: aep.planning-md/3
 id: dependency-blocker:nova-bedrock-access
 kind: dependency-blocker
-status: open
+status: cleared
 title: The operator's AWS role cannot invoke Nova Sonic in a region that offers it
 relations:
 - blocks: story:nova-sonic-client
 - blocks: story:nova-sonic-adapter
-revision: 1
+revision: 3
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-21T09:07:02Z", actor: "human:timo", revision: 3}
 ---
 ## What is blocked
 
@@ -29,3 +31,10 @@ The role used for the live run may invoke a Nova Sonic model in a region that of
 policy allowing `bedrock:InvokeModel` and `bedrock:InvokeModelWithBidirectionalStream` on that
 model), or another AWS account with that access is named. Then the live tests run with
 `AWS_REGION=<that region>`.
+
+## Cleared (2026-10-21)
+
+The operator named a role with that access. One live exchange ran through the AWS SDK's default
+provider chain, with `AWS_REGION` set to a region that offers the model and the adapter's default
+model id `amazon.nova-2-sonic-v1:0`: the user transcript, the assistant answer in text and audio,
+`EndTurn` and the usage totals arrived, and the test passed. No key and no IAM user was created.
