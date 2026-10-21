@@ -39,8 +39,10 @@
 //!
 //! `inference.graph.DrainRun` admits no new input; in-flight events complete. So the sender of an
 //! ingress refuses an envelope of user content once a drain was asked for while the run was Active
-//! ([`RunRequests::drain`]), or once the run moved to Draining, whichever came first: the
-//! envelope never reaches the ingress's queue and the send answers [`SendError::Closed`], since
+//! ([`RunRequests::drain`]), or once the run moved to Draining, whichever came first, read when
+//! the send's future is first polled, so a send built earlier and awaited after the request is
+//! refused too: the envelope never reaches the ingress's queue and the send answers
+//! [`SendError::Closed`], since
 //! nothing of user content sent there is ever delivered again. What the queue took before is in
 //! flight and is still delivered, and a subgraph node's ingress bridge forwards what its parent
 //! edges hold before it ends (`subgraph` module). A control event still passes, `stop` among
@@ -429,12 +431,10 @@ impl<P: Send + 'static, E: OutputEndpoint<P>> OutputEndpoint<P> for GuardedSende
     fn send(&self, envelope: EventEnvelope<P>) -> EndpointFuture<'_, Result<(), SendError<P>>> {
         let end = self.source.is_some() && envelope.kind == ControlKind::Stop.as_str();
         let content = !is_control_kind(&envelope.kind);
-        let not_admitted = content
-            && matches!(self.source, Some(Feed::Ingress(_)))
-            && !self.signals.admits_input();
+        let guarded = content && matches!(self.source, Some(Feed::Ingress(_)));
         let checked = content.then_some((envelope.stream_id, envelope.sequence, envelope.producer));
         Box::pin(async move {
-            if not_admitted {
+            if guarded && !self.signals.admits_input() {
                 return Err(SendError::Closed(envelope));
             }
             let mut taken = None;

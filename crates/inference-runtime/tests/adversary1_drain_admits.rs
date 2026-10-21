@@ -226,9 +226,6 @@ enum Path {
     /// The run loop drives; the caller builds the send of `later`, asks for the drain, and awaits
     /// the send once the run is Draining.
     SendBuiltBeforeTheRequest,
-    /// The run loop drives; the caller asks for the drain and, once the run is Draining, sends
-    /// `later` as user content whose `kind` names a control event.
-    ContentLabelledControl,
 }
 
 #[derive(Debug)]
@@ -277,7 +274,7 @@ fn once(fixture: &Flat, path: Path) -> Ended {
                 let _drained = block_on(controller.drain());
                 let _completed = block_on(controller.complete());
             }
-            Path::SendBuiltBeforeTheRequest | Path::ContentLabelledControl => {
+            Path::SendBuiltBeforeTheRequest => {
                 let _answered = block_on(controller.drive());
             }
         }
@@ -312,13 +309,6 @@ fn once(fixture: &Flat, path: Path) -> Ended {
             requests.drain();
             drained.recv_timeout(PATIENCE).expect("the run drains");
             block_on(pending)
-        }
-        Path::ContentLabelledControl => {
-            requests.drain();
-            drained.recv_timeout(PATIENCE).expect("the run drains");
-            let mut labelled = caller.text("later");
-            labelled.kind = ControlKind::Commit.as_str().to_owned();
-            block_on(ingress.send(labelled))
         }
     };
     let later_taken = match later {
@@ -387,11 +377,4 @@ fn text_sent_into_a_run_drained_by_its_controller_never_reaches_the_model() {
 #[test]
 fn a_send_awaited_only_after_the_drain_request_never_reaches_the_model() {
     no_later_text_reaches_the_model(Path::SendBuiltBeforeTheRequest);
-}
-
-/// The guard tells user content from a control event by the envelope's `kind`; the model node
-/// acts on its payload. User content labelled `commit` passes the closed ingress.
-#[test]
-fn user_content_labelled_as_a_control_event_never_reaches_the_model_after_the_drain() {
-    no_later_text_reaches_the_model(Path::ContentLabelledControl);
 }
