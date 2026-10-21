@@ -565,6 +565,19 @@ fn a_delta_reaches_the_caller_while_the_turn_runs_and_a_cancel_reaches_the_turn(
     handle.cancel().expect("Active cancels");
     assert!(cancel.is_cancelled(), "the running turn is told to stop");
     let next = pin!(handle.next_event()).poll(&mut cx);
+    let Poll::Ready(Some(GenerationEvent::Usage(recorded))) = next else {
+        panic!("the cut turn's record and no text: {next:?}")
+    };
+    assert!(!recorded.r#final, "no counts were reported: {recorded:?}");
+    assert_eq!(
+        quantity(&recorded, QuantityKind::Requests),
+        Quantity::measured(QuantityKind::Requests, 1),
+        "the cut call is still counted"
+    );
+    for kind in TOKEN_KINDS {
+        assert_eq!(quantity(&recorded, kind), Quantity::unknown(kind));
+    }
+    let next = pin!(handle.next_event()).poll(&mut cx);
     assert_eq!(next, Poll::Ready(None), "nothing more is delivered");
     assert_eq!(
         handle.output().generation().state(),

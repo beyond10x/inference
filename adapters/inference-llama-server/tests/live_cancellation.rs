@@ -12,10 +12,11 @@
 //!
 //! Against a server the first starts a long generation, cancels it after the first delta and
 //! asserts `GenerationCancelled` with no later delta: delivery cancellation. What the cancelled
-//! generation still delivers is the usage record of the turn it cut, not final, when `llm`
-//! reported usage for it, and nothing when it did not: a server that counts only on the last
-//! chunk of its stream has reported nothing for a stream cut in the middle. The test asserts
-//! that and prints which happened. Then it reads the slot state of the server (`GET /slots` at
+//! generation still delivers is the usage record of the turn it cut, one request: the counts
+//! `llm` reported for it, or every token count unknown when it reported none, as a server that
+//! counts only on the last chunk of its stream has reported nothing for a stream cut in the
+//! middle; not final either way. The test asserts that and prints the counts. Then it reads the
+//! slot state of the server (`GET /slots` at
 //! the server root) until no slot is processing or 10 s pass, and prints which happened: whether
 //! the server stopped computing. A server that does not expose its slot state is reported as
 //! "computation cancellation not observed", not as a failure.
@@ -90,7 +91,8 @@ fn processing(base_url: &str) -> Result<bool, String> {
 
 #[test]
 #[ignore = "needs a running llama-server named by INFERENCE_LLAMA_SERVER_URL and INFERENCE_LLAMA_SERVER_MODEL"]
-fn a_running_server_cancelled_after_the_first_delta_delivers_nothing_more() {
+fn a_running_server_cancelled_after_the_first_delta_delivers_no_more_text_and_the_cut_turns_record()
+{
     let (Some(base_url), Some(served_model)) = (variable(URL_VARIABLE), variable(MODEL_VARIABLE))
     else {
         println!("skipped: set {URL_VARIABLE} and {MODEL_VARIABLE} to run against a llama-server");
@@ -142,21 +144,16 @@ fn a_running_server_cancelled_after_the_first_delta_delivers_nothing_more() {
         GenerationState::Cancelled
     );
     let later: Vec<GenerationEvent> = handle.by_ref().collect();
-    let cut: Vec<&UsageRecorded> = later
+    let [GenerationEvent::Usage(cut)] = later.as_slice() else {
+        panic!("the record of the turn it cut and no text after the cancel: {later:?}")
+    };
+    assert!(!cut.r#final, "the cut turn's counts are not final: {cut:?}");
+    let requests = cut
+        .quantities
         .iter()
-        .map(|event| match event {
-            GenerationEvent::Usage(recorded) => recorded,
-            other => panic!("nothing but usage after the cancel: {other:?}"),
-        })
-        .collect();
-    assert!(
-        cut.len() <= 1,
-        "at most the record of the turn it cut: {cut:?}"
-    );
-    assert!(
-        cut.iter().all(|recorded| !recorded.r#final),
-        "the cut turn's counts are not final: {cut:?}"
-    );
+        .find(|quantity| quantity.kind() == QuantityKind::Requests)
+        .and_then(|quantity| quantity.value());
+    assert_eq!(requests, Some(1), "the cut call is counted: {cut:?}");
     assert!(handle.failure().is_none(), "{:?}", handle.failure());
     drop(handle);
 
@@ -181,10 +178,7 @@ fn a_running_server_cancelled_after_the_first_delta_delivers_nothing_more() {
         first_after, first.text
     );
     println!("delivery cancelled: GenerationCancelled, no later text");
-    match cut.first() {
-        Some(recorded) => println!("usage record of the cut turn: {:?}", recorded.quantities),
-        None => println!("usage record of the cut turn: none, the server reported no counts"),
-    }
+    println!("usage record of the cut turn: {:?}", cut.quantities);
     println!("slots processing before the cancel: {before:?}");
     match stopped {
         Ok(after) => {

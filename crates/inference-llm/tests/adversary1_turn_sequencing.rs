@@ -320,7 +320,8 @@ fn assert_round_answerable(handle: &mut GenerationHandle) {
 }
 
 /// "Iteration ends [...] once the generation is superseded": a delta the running turn streams
-/// after the supersede is not delivered, and the turn is not asked again.
+/// after the supersede is not delivered, and the turn is not asked again; its usage record is
+/// (`story:llm-usage-on-cancel`).
 #[test]
 fn a_delta_fed_after_a_supersede_is_not_delivered() {
     let model = Feeding::new();
@@ -332,7 +333,10 @@ fn a_delta_fed_after_a_supersede_is_not_delivered() {
     handle.supersede().expect("Active supersedes");
     model.end(Vec::new());
     let after = ready(&mut handle);
-    assert_eq!(after, Vec::new(), "nothing after the supersede");
+    assert!(
+        matches!(after.as_slice(), [GenerationEvent::Usage(_)]),
+        "no text after the supersede, only the record of the request the turn made: {after:?}"
+    );
     assert_eq!(
         handle.output().generation().state(),
         GenerationState::Superseded

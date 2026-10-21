@@ -490,10 +490,10 @@ fn a_generation_cut_during_its_second_turn_delivers_two_usage_records_the_second
     }
 }
 
-/// A turn the mock holds and whose usage it never reported yields no record when it is cut:
-/// there is nothing to report.
+/// A turn the mock holds and whose usage it never reported is still a model call: cut, it yields
+/// one record of one request, every token count unknown, not final.
 #[test]
-fn a_cut_turn_whose_usage_was_never_reported_yields_no_record() {
+fn a_cut_turn_whose_usage_was_never_reported_counts_one_request_of_unknown_tokens() {
     let mut generator = generator(MockConfiguration::StreamingOnly).holding(0);
     let mut handle = generator
         .start(request())
@@ -511,7 +511,18 @@ fn a_cut_turn_whose_usage_was_never_reported_yields_no_record() {
     );
     handle.supersede().expect("Active supersedes");
     let after: Vec<GenerationEvent> = handle.by_ref().collect();
-    assert_eq!(after, Vec::new(), "no usage reported, no record");
+    let [GenerationEvent::Usage(recorded)] = after.as_slice() else {
+        panic!("one record and no text: {after:?}")
+    };
+    assert!(!recorded.r#final, "its counts are unknown");
+    assert_eq!(
+        quantity(recorded, QuantityKind::Requests),
+        Quantity::measured(QuantityKind::Requests, 1)
+    );
+    assert_eq!(
+        TOKEN_KINDS.map(|kind| quantity(recorded, kind)),
+        TOKEN_KINDS.map(Quantity::unknown)
+    );
 }
 
 #[test]
