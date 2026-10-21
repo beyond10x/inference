@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-21T08:36:21Z",
+  "actor": "human:timo",
+  "artifact": "story:subgraph-unconnected-usage-port",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0 with ess 0.66.0: 311 suites, 2155 passed, 0 failed, 50 ignored (wave/26 a3cd8d2)"
+  }
+}

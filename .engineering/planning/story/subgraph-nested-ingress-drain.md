@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:subgraph-nested-ingress-drain
 kind: story
-status: active
+status: implemented
 title: Input sent before stop is never overtaken by the drain at a nested subgraph's ingress
 relations:
 - decomposes: epic:session-facade
@@ -10,10 +10,11 @@ relations:
 scope:
 - confidence: cited
   path: crates/inference-runtime
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-21T07:28:54Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-21T07:28:54Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-21T08:36:21Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
