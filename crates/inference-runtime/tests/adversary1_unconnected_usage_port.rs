@@ -532,11 +532,73 @@ impl NodeImplementation<PipelinePayload> for Probe {
     }
 }
 
+/// A child node that, as it starts, sends one envelope and `stop` on its first output port, both
+/// taken before anything reads them, and releases its endpoints at its stop: a node that sent all
+/// it had before an edge downstream of it could refuse.
+struct Eager {
+    run_id: RunId,
+    held: Option<NodeEndpoints<PipelinePayload>>,
+}
+
+impl NodeImplementation<PipelinePayload> for Eager {
+    fn describe(&mut self, _node: &Node) -> NodeFuture<'_, ()> {
+        Box::pin(future::ready(()))
+    }
+
+    fn prepare(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        Box::pin(future::ready(Ok(())))
+    }
+
+    fn start(
+        &mut self,
+        endpoints: NodeEndpoints<PipelinePayload>,
+    ) -> NodeFuture<'_, Result<(), NodeError>> {
+        let held = self.held.insert(endpoints);
+        let mut application = Application::new(self.run_id);
+        Box::pin(async move {
+            let output = held.outputs.first().expect("one output port");
+            for envelope in [
+                application.text(USAGE_PORT, "sent at start"),
+                application.stop(USAGE_PORT),
+            ] {
+                output
+                    .endpoint
+                    .send(envelope)
+                    .await
+                    .map_err(|refused| NodeError::new(refused.to_string()))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        Box::pin(future::ready(Ok(())))
+    }
+
+    fn cancel(&mut self) -> NodeFuture<'_, ()> {
+        Box::pin(future::ready(()))
+    }
+
+    fn stop(&mut self) -> NodeFuture<'_, ()> {
+        self.held = None;
+        Box::pin(future::ready(()))
+    }
+}
+
 /// A child pipeline of one probe node, needing no binding: its input exposed as `user text` and
 /// its one output port, `output` of structured modality, exposed as `exposed`; and a parent of
 /// one subgraph node over it, whose input port is exposed as `user text` and whose output port
 /// `output`, optional, has no edge. Answers the declaration, the child and the parent.
 fn probed(output: &str, exposed: &str) -> (Declaration, PlannedPipeline, PlannedPipeline) {
+    probed_with(output, exposed, false)
+}
+
+/// As [`probed`], the parent's output port `output` exposed under its name when `connected`.
+fn probed_with(
+    output: &str,
+    exposed: &str,
+    connected: bool,
+) -> (Declaration, PlannedPipeline, PlannedPipeline) {
     let (catalog, profile_id) = catalog(Vec::new());
     let mut declaration = Declaration::new();
     let (child, ()) = declaration
@@ -562,8 +624,13 @@ fn probed(output: &str, exposed: &str) -> (Declaration, PlannedPipeline, Planned
                 .expect("the child is Planned");
             let into = pipeline.input::<modality::Text>(&subgraph, "user text", TEXT);
             pipeline.expose(&into, "user text", capacity(), OverloadPolicy::Pause);
-            let _unconnected =
-                pipeline.output::<modality::Structured>(&subgraph, output, optional(RECORDS));
+            if connected {
+                let out = pipeline.output::<modality::Structured>(&subgraph, output, RECORDS);
+                pipeline.expose(&out, output, capacity(), OverloadPolicy::Pause);
+            } else {
+                let _unconnected =
+                    pipeline.output::<modality::Structured>(&subgraph, output, optional(RECORDS));
+            }
         })
         .expect("the profile is declared");
     let validated = declaration.validate(parent).expect("valid");
@@ -573,9 +640,15 @@ fn probed(output: &str, exposed: &str) -> (Declaration, PlannedPipeline, Planned
 
 /// Runs the parent of [`probed`], its child's probe made as `probe` says, and ends its input
 /// with `stop`; answers how the parent run ended.
-fn run_probed(
+fn run_probed(probed: (Declaration, PlannedPipeline, PlannedPipeline), release: bool) -> RunState {
+    run_probed_holding(probed, release, &[])
+}
+
+/// As [`run_probed`], the caller holding the parent's egresses `egresses` until the run ended.
+fn run_probed_holding(
     (declaration, child, parent): (Declaration, PlannedPipeline, PlannedPipeline),
     release: bool,
+    egresses: &[&str],
 ) -> RunState {
     let handles: Arc<Mutex<HashMap<NodeId, SubgraphHandle>>> = Arc::default();
     let running = {
@@ -583,7 +656,7 @@ fn run_probed(
         Running::start(
             &declaration,
             &parent,
-            (&["user text"], &[]),
+            (&["user text"], egresses),
             move |run_id, node| {
                 subgraph_node(
                     run_id,
@@ -952,14 +1025,69 @@ fn a_child_node_releasing_its_egress_at_stop_completes_the_parent() {
 /// A child node that keeps its endpoints past its stop, which `NodeImplementation::stop` does
 /// not allow ("releases what the node holds") but a flat run tolerates, and sends nothing on an
 /// output port the parent left with no edge. Before this story the egress end was dropped and the
-/// run completed; the bridge now waits for the egress to close, which it never does.
+/// run completed; the bridge reading it ends once the child run has returned, so the run still
+/// completes.
 #[test]
-#[ignore = "undecided: a child node that keeps its egress end past its stop holds the drain of a subgraph node whose port has no edge"]
 fn a_child_node_keeping_its_egress_past_stop_still_completes_the_parent() {
     bounded(|| {
         assert_eq!(
             run_probed(probed("kept", "kept"), false),
             RunState::Completed
         )
+    });
+}
+
+/// The same behind a port with an edge, the parent's caller holding the egress it leads to. The
+/// bridge forwarding the child's egress ends once the child run has returned, as the one with no
+/// edge does, so a child node that keeps its egress end past its stop holds no drain.
+#[test]
+fn a_child_node_keeping_its_egress_past_stop_behind_a_port_with_an_edge_completes_the_parent() {
+    bounded(|| {
+        assert_eq!(
+            run_probed_holding(probed_with("kept", "kept", true), false, &["kept"]),
+            RunState::Completed
+        )
+    });
+}
+
+/// The case above it with no race: a child node that sent all it had, `stop` included, before
+/// the subgraph node's only edge on that port refused, closed, so the child run completes. A
+/// model node whose edge refuses fails, so the subgraph node fails the parent as well, the same
+/// end as when the child's node sends after the refusal and fails the child run.
+#[test]
+fn a_child_that_sent_all_it_had_before_every_edge_refused_fails_the_parent_as_a_model_node_does() {
+    bounded(|| {
+        let (declaration, child, parent) = probed_with(USAGE_PORT, "probe usage", true);
+        let handles: Arc<Mutex<HashMap<NodeId, SubgraphHandle>>> = Arc::default();
+        let running = {
+            let declaration_ = declaration.clone();
+            Running::start(
+                &declaration,
+                &parent,
+                (&["user text"], &[]),
+                move |run_id, node| {
+                    subgraph_node(
+                        run_id,
+                        node,
+                        &declaration_,
+                        &child,
+                        Box::new(move |child_run: RunId, _: &Node| {
+                            Box::new(Eager {
+                                run_id: child_run,
+                                held: None,
+                            })
+                                as Box<dyn NodeImplementation<PipelinePayload>>
+                        }),
+                        &handles,
+                    )
+                },
+            )
+        };
+        let mut application = Application::new(running.run_id);
+        running.send("user text", application.stop("user text"));
+        assert_eq!(
+            running.drive.join().expect("the loop does not panic"),
+            RunState::Failed
+        );
     });
 }
