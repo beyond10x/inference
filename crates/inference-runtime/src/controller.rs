@@ -208,7 +208,10 @@ impl Error for FailNodeError {
 
 /// The caller's end of an ingress of the run: where it sends what the exposed input port of
 /// `exposure_id` receives. The caller is the ingress's source: its end of input is the control
-/// event of kind `stop` it sends here.
+/// event of kind `stop` it sends here. Once a drain was asked for while the run was Active, or the
+/// run moved to Draining, the endpoint refuses user content as
+/// [`SendError::Closed`](inference_core::endpoint::SendError::Closed), since the run admits no new
+/// input; a control event, `stop` among them, still passes.
 pub struct Ingress<P> {
     pub exposure_id: ExposureId,
     /// The name the pipeline exposes the port under.
