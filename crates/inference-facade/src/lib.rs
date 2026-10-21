@@ -16,12 +16,18 @@
 //! delivers is its history ([`history`]), which outlives its runs. A Ready session switches to
 //! another planned pipeline ([`switch`]), draining its run first and keeping its history and its
 //! vocabulary, and [`describe`] reports the pipeline it runs now: nodes, bindings, effective
-//! capabilities, downgrades and exposures. The crate carries no concrete model, backend or
-//! provider.
+//! capabilities, downgrades and exposures. What the session's model calls consumed it delivers
+//! as `UsageRecorded` and adds up per run and over the session ([`usage`]). The crate carries no
+//! concrete model, backend or provider. Behind the feature `cost`, `cost` prices those records
+//! with a price document the caller supplies, record by record and over the session, through
+//! `llm-cost`; without it the crate depends on no pricing crate.
 
+#[cfg(feature = "cost")]
+pub mod cost;
 pub mod describe;
 pub mod events;
 pub mod history;
 pub mod live;
 pub mod session;
 pub mod switch;
+pub mod usage;

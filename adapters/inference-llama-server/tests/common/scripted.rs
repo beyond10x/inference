@@ -28,6 +28,12 @@ pub const TOOL_NAMELESS: &[u8] =
 pub const TEXT_NO_USAGE: &[u8] =
     include_bytes!("../fixtures/llama-server-b11752-text-no-usage.sse");
 
+/// The streamed body of the request of the parent module's recording sent without
+/// `stream_options.include_usage`: no usage chunk, its counters in the `timings` object of the
+/// finish chunk; see `fixtures/llama-server-b11752-text.txt`.
+pub const TEXT_TIMINGS_ONLY: &[u8] =
+    include_bytes!("../fixtures/llama-server-b11752-text-timings-only.sse");
+
 /// A server on a loopback port answering its n-th connection with the n-th body of its script,
 /// and every connection past the script with an HTTP 500.
 pub struct Scripted {

@@ -35,8 +35,10 @@
 //! Every `inference.stream` event it emits is recorded in the run's [`RunLog`] in its envelope. On
 //! the end of input, a control event of kind `stop`, or once its input edge is closed, it ends the
 //! utterance, delivers what the synthesis has left, its usage record last, and passes the end of
-//! input on, on every output port, `usage` among them. Cancelled, it
-//! sends nothing more: a cancel taken while a send waits for room ends the wait. Every other
+//! input on, on every output port, `usage` first, so that a consumer that has the end of `audio`
+//! has the end of `usage` too. Cancelled, it sends nothing more but the usage record of a
+//! synthesis it already holds, which a cancel never loses: a cancel taken while a send waits for
+//! room ends the wait, a send on `usage` excepted. Every other
 //! event, such as `GenerationCompleted`, is taken and ignored; a segment the synthesis refuses
 //! fails the node.
 
@@ -46,7 +48,7 @@ use std::future;
 use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
+use inference_core::endpoint::{InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{Generation, StartGeneration};
 use inference_core::id::{GenerationId, NodeId, RunId, SessionId, StreamId};
@@ -403,6 +405,9 @@ impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
     /// Sends `recorded`, the usage of the synthesis, on the `usage` port, placed on the run, the
     /// node and the session of its envelope; a node with no edge leaving its `usage` port sends
     /// nothing.
+    /// It sends the record whether or not the node was cancelled, waiting for room as long as
+    /// the edge takes it, so a cancel never loses the usage of a call the node already holds;
+    /// only an edge that is closed once the node was cancelled takes it no more.
     async fn send_usage(&mut self, recorded: UsageRecorded) -> Result<(), String> {
         let Some(usage) = self.usage.as_mut() else {
             return Ok(());
@@ -410,13 +415,11 @@ impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
         let Some(envelope) = usage.envelope(recorded) else {
             return Ok(());
         };
-        send_unless(
-            usage.output.as_ref(),
-            &self.state,
-            |state| state.cancel,
-            envelope,
-        )
-        .await
+        match usage.output.send(envelope).await {
+            Ok(()) => Ok(()),
+            Err(SendError::Closed(_)) if self.state.read(|state| state.cancel) => Ok(()),
+            Err(refused) => Err(refused.to_string()),
+        }
     }
 
     /// Passes the end of input on, on the `usage` port, given one with an edge leaving it.
@@ -500,9 +503,9 @@ impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
         }
         let _ = self.synthesis.end_utterance();
         self.pump().await?;
+        self.end_usage().await?;
         let end = self.emitter.control(ControlKind::Stop);
-        self.send(end).await?;
-        self.end_usage().await
+        self.send(end).await
     }
 
     fn run(mut self) {

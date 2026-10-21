@@ -706,8 +706,8 @@ dependencies = [
 
 [[package]]
 name = "b10x-llm-blocking"
-version = "0.8.0"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.0#7873aa63e37db33716e946cd206c3656a76676a9"
+version = "0.8.3"
+source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
 dependencies = [
  "b10x-llm-core",
  "tokio",
@@ -715,8 +715,8 @@ dependencies = [
 
 [[package]]
 name = "b10x-llm-chat"
-version = "0.8.0"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.0#7873aa63e37db33716e946cd206c3656a76676a9"
+version = "0.8.3"
+source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
 dependencies = [
  "b10x-llm-core",
  "b10x-llm-credentials",
@@ -730,8 +730,8 @@ dependencies = [
 
 [[package]]
 name = "b10x-llm-core"
-version = "0.8.0"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.0#7873aa63e37db33716e946cd206c3656a76676a9"
+version = "0.8.3"
+source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
 dependencies = [
  "serde",
  "serde_json",
@@ -740,9 +740,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "b10x-llm-cost"
+version = "0.8.3"
+source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
+dependencies = [
+ "b10x-llm-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
 name = "b10x-llm-credentials"
-version = "0.8.0"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.0#7873aa63e37db33716e946cd206c3656a76676a9"
+version = "0.8.3"
+source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
 dependencies = [
  "b10x-llm-core",
  "serde",
@@ -753,8 +766,8 @@ dependencies = [
 
 [[package]]
 name = "b10x-llm-http"
-version = "0.8.0"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.0#7873aa63e37db33716e946cd206c3656a76676a9"
+version = "0.8.3"
+source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
 dependencies = [
  "b10x-llm-core",
  "bytes",
@@ -767,8 +780,8 @@ dependencies = [
 
 [[package]]
 name = "b10x-llm-providers"
-version = "0.8.0"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.0#7873aa63e37db33716e946cd206c3656a76676a9"
+version = "0.8.3"
+source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
 dependencies = [
  "b10x-llm-core",
  "b10x-llm-credentials",
@@ -2251,6 +2264,8 @@ dependencies = [
 name = "inference-facade"
 version = "0.7.0"
 dependencies = [
+ "b10x-llm-core",
+ "b10x-llm-cost",
  "inference-audio",
  "inference-core",
  "inference-llm",
