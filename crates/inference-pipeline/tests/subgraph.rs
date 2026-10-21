@@ -9,6 +9,11 @@
 //! or carrying one of another modality, or carrying a port no exposure matches, is refused with a
 //! finding naming the node and the exposure or port. `AddSubgraphNode` refuses an unknown parent,
 //! an unknown child, a parent no longer Declared and a child not Planned, in that order.
+//!
+//! The usage roll-up (`story:usage-subgraph-rollup`): a subgraph node's structured output port
+//! `usage` matches every usage egress of its child that no port of the node names, and the node
+//! forwards them on it; an egress a port names crosses to that port alone. A usage egress with
+//! neither is refused, as is a `usage` port, or one of another modality, that forwards nothing.
 
 use std::num::NonZeroUsize;
 
@@ -652,5 +657,239 @@ fn a_binding_nested_two_subgraphs_deep_is_refused_under_the_parents_profile_nami
             .map(inference_pipeline::Pipeline::state),
         Some(PipelineState::Validated),
         "nothing moved"
+    );
+}
+
+/// The usage roll-up's child (`story:usage-subgraph-rollup`): one model per name of `usage`, the
+/// first between the ingress `user text` and the egress `reply`, the model `i` after it between
+/// `user text {i}` and `reply {i}`, each with a structured output port `usage` exposed as the
+/// egress `usage[i]`; bound, validated and planned. Answers the child and the usage exposures in
+/// that order.
+fn usage_child(
+    declaration: &mut Declaration,
+    known: &Known,
+    usage: &[&str],
+) -> (PipelineId, Vec<ExposureId>) {
+    let records = PortTraits {
+        incremental: false,
+        ..TEXT
+    };
+    let capacity = NonZeroUsize::new(4).expect("4");
+    let (pipeline_id, exposures) = declaration
+        .build(
+            known,
+            known.profile.profile_id(),
+            spec("models with usage"),
+            |pipeline| {
+                let mut exposures = Vec::new();
+                for (i, name) in usage.iter().enumerate() {
+                    let (ingress, egress) = match i {
+                        0 => ("user text".to_owned(), "reply".to_owned()),
+                        _ => (format!("user text {i}"), format!("reply {i}")),
+                    };
+                    let model = pipeline.node(
+                        format!("model {i}"),
+                        NodeRole::Model,
+                        vec![Capability::OutputStreaming],
+                    );
+                    let prompt = pipeline.input::<modality::Text>(&model, "prompt", TEXT);
+                    let answer = pipeline.output::<modality::Text>(&model, "answer", TEXT);
+                    let used = pipeline.output::<modality::Structured>(&model, "usage", records);
+                    pipeline.expose(&prompt, ingress, capacity, OverloadPolicy::Pause);
+                    pipeline.expose(&answer, egress, capacity, OverloadPolicy::Pause);
+                    exposures.push(
+                        pipeline
+                            .expose(&used, *name, capacity, OverloadPolicy::Pause)
+                            .id(),
+                    );
+                    pipeline
+                        .bind(&model, known.adapter.adapter_id())
+                        .expect("the adapter is known");
+                }
+                exposures
+            },
+        )
+        .expect("the profile is known");
+    let validated = declaration.validate(pipeline_id).expect("valid");
+    let _planned = declaration.plan(validated, known).expect("planned");
+    (pipeline_id, exposures)
+}
+
+/// The text ports of a subgraph node over a [`usage_child`] of `models` models, then `more`.
+fn usage_ports(models: usize, more: &[(&str, PortDirection, Modality)]) -> Vec<NamedPort> {
+    let mut ports: Vec<NamedPort> = MATCHING
+        .iter()
+        .map(|(name, direction, modality)| ((*name).to_owned(), *direction, *modality))
+        .collect();
+    for i in 1..models {
+        ports.push((
+            format!("user text {i}"),
+            PortDirection::Input,
+            Modality::Text,
+        ));
+        ports.push((format!("reply {i}"), PortDirection::Output, Modality::Text));
+    }
+    ports.extend(
+        more.iter()
+            .map(|(name, direction, modality)| ((*name).to_owned(), *direction, *modality)),
+    );
+    ports
+}
+
+type NamedPort = (String, PortDirection, Modality);
+
+/// A parent over a [`usage_child`], validated, and what its cases read of it.
+struct UsageParent {
+    known: Known,
+    declaration: Declaration,
+    parent: PipelineId,
+    node: NodeId,
+    ports: Vec<(String, PortId)>,
+    exposures: Vec<ExposureId>,
+}
+
+impl UsageParent {
+    /// A parent over a [`usage_child`] naming `usage`, its subgraph node carrying `ports`.
+    fn new(usage: &[&str], ports: &[NamedPort]) -> Self {
+        let known = known();
+        let mut declaration = Declaration::counted();
+        let (child, exposures) = usage_child(&mut declaration, &known, usage);
+        let ports: Vec<(&str, PortDirection, Modality)> = ports
+            .iter()
+            .map(|(name, direction, modality)| (name.as_str(), *direction, *modality))
+            .collect();
+        let (parent, node, ports) = parent(&mut declaration, &known, child, &ports);
+        Self {
+            known,
+            declaration,
+            parent,
+            node,
+            ports,
+            exposures,
+        }
+    }
+
+    /// The exposures the subgraph node forwards on its `usage` port.
+    fn forwarded(&self) -> Vec<ExposureId> {
+        self.declaration
+            .forwarded_usage(self.node)
+            .iter()
+            .map(|exposure| exposure.exposure_id())
+            .collect()
+    }
+
+    /// Plans the parent.
+    fn plan(&mut self) -> Result<(), PlanPipelineError> {
+        let validated = self.declaration.validate(self.parent).expect("valid");
+        self.declaration
+            .plan(validated, &self.known)
+            .map(|_planned| ())
+    }
+
+    /// Plans the parent and answers its interface refusal.
+    fn refused(&mut self) -> SubgraphInterfaceMismatch {
+        let Err(PlanPipelineError::InterfaceMismatch(mismatch)) = self.plan() else {
+            panic!("the parent is refused for its subgraph node's interface");
+        };
+        mismatch
+    }
+}
+
+const USAGE: (&str, PortDirection, Modality) =
+    ("usage", PortDirection::Output, Modality::Structured);
+
+#[test]
+fn a_usage_port_forwards_every_usage_egress_of_the_child_no_port_names_and_the_parent_plans() {
+    let mut fixture = UsageParent::new(&["first usage", "second usage"], &usage_ports(2, &[USAGE]));
+    assert_eq!(inference_pipeline::USAGE_PORT, "usage");
+    fixture.plan().expect(
+        "the node's `usage` port matches both usage egresses of the child, which no port names",
+    );
+    assert_eq!(
+        fixture.forwarded(),
+        fixture.exposures,
+        "the node forwards both, in the child's exposure order"
+    );
+}
+
+#[test]
+fn a_usage_egress_a_port_of_the_node_names_crosses_by_name_and_is_not_forwarded_again() {
+    let mut fixture = UsageParent::new(
+        &["usage", "second usage"],
+        &usage_ports(
+            2,
+            &[
+                USAGE,
+                ("second usage", PortDirection::Output, Modality::Structured),
+            ],
+        ),
+    );
+    fixture
+        .plan()
+        .expect("each usage egress has the port of its name");
+    assert!(
+        fixture.forwarded().is_empty(),
+        "an egress crosses to the port of its name only, so no record is forwarded twice"
+    );
+}
+
+#[test]
+fn a_usage_port_and_the_usage_egress_of_its_name_forward_the_other_usage_egresses_too() {
+    let mut fixture = UsageParent::new(&["usage", "second usage"], &usage_ports(2, &[USAGE]));
+    fixture
+        .plan()
+        .expect("`usage` by name, `second usage` forwarded on it");
+    assert_eq!(fixture.forwarded(), fixture.exposures[1..]);
+}
+
+#[test]
+fn without_a_usage_port_a_usage_egress_of_the_child_is_refused_naming_it_so_no_usage_is_lost() {
+    let mut fixture = UsageParent::new(&["model usage"], &usage_ports(1, &[]));
+    assert!(fixture.forwarded().is_empty());
+    assert_eq!(
+        fixture.refused(),
+        SubgraphInterfaceMismatch {
+            node_id: fixture.node,
+            port_id: None,
+            exposure_id: Some(fixture.exposures[0]),
+        }
+    );
+}
+
+#[test]
+fn a_usage_port_of_another_modality_forwards_nothing_and_is_refused_naming_it() {
+    let mut fixture = UsageParent::new(
+        &["model usage"],
+        &usage_ports(1, &[("usage", PortDirection::Output, Modality::Text)]),
+    );
+    assert!(fixture.forwarded().is_empty());
+    assert_eq!(
+        fixture.refused(),
+        SubgraphInterfaceMismatch {
+            node_id: fixture.node,
+            port_id: Some(fixture.ports[2].1),
+            exposure_id: None,
+        }
+    );
+}
+
+#[test]
+fn a_usage_port_over_a_child_without_a_usage_egress_is_refused_naming_the_port() {
+    let known = known();
+    let mut declaration = Declaration::counted();
+    let (child, _, _) = child(&mut declaration, &known);
+    let ports = [MATCHING[0], MATCHING[1], USAGE];
+    let (parent, node, node_ports) = parent(&mut declaration, &known, child, &ports);
+    assert!(declaration.forwarded_usage(node).is_empty());
+    let validated = declaration.validate(parent).expect("valid");
+    assert_eq!(
+        declaration.plan(validated, &known).map(|_planned| ()),
+        Err(PlanPipelineError::InterfaceMismatch(
+            SubgraphInterfaceMismatch {
+                node_id: node,
+                port_id: Some(node_ports[2].1),
+                exposure_id: None,
+            }
+        ))
     );
 }
