@@ -3,6 +3,12 @@
 Rust contracts, adapters, pipelines and a runtime for AI inference. This file is for agents working
 on this repository. `README.md` is for people.
 
+## Serves
+
+- **O4 — products run on the foundation.** `inference-llm` runs model turns over the released `llm`
+  contract (`b10x-llm-core`, pinned by tag), and the crates are held to their ESS specification in
+  `ess/`; nothing comes from the predecessor monorepo.
+
 ## Start here
 
 | read | for |
