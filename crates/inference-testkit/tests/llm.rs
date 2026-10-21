@@ -402,6 +402,129 @@ fn a_generation_of_two_turns_records_the_reported_counts_and_the_missing_ones_as
     }
 }
 
+/// `story:llm-usage-on-cancel`: a generation on the mock superseded, or cancelled, during its
+/// second turn delivers two usage records, the first final and the second, of the turn it cut,
+/// not final, carrying the counts the model reported for it.
+#[test]
+fn a_generation_cut_during_its_second_turn_delivers_two_usage_records_the_second_not_final() {
+    let first = Usage {
+        input_tokens: Some(12),
+        output_tokens: Some(3),
+        ..Usage::default()
+    };
+    let cut = Usage {
+        input_tokens: Some(20),
+        output_tokens: Some(1),
+        ..Usage::default()
+    };
+    for supersede in [true, false] {
+        let mut generator = generator(MockConfiguration::StreamingAndConcurrentInput)
+            .reporting([Some(first.clone()), Some(cut.clone())])
+            .holding(1);
+        let mut handle = generator
+            .start(request())
+            .expect("a fresh generator runs nothing else");
+        let mut events = Vec::new();
+        for event in handle.by_ref() {
+            let ended = matches!(event, GenerationEvent::Usage(_));
+            events.push(event);
+            if ended {
+                break;
+            }
+        }
+        handle
+            .offer_input(INPUT.to_owned())
+            .expect("the configuration claims concurrent input");
+        let mut cx = Context::from_waker(Waker::noop());
+        while let Poll::Ready(Some(event)) = handle.poll_event(&mut cx) {
+            events.push(event);
+        }
+        assert!(
+            matches!(events.last(), Some(GenerationEvent::SegmentCommitted(_))),
+            "the second turn streamed its text and still runs: {events:?}"
+        );
+        assert_eq!(
+            handle.output().generation().state(),
+            GenerationState::Active
+        );
+        if supersede {
+            handle.supersede().expect("Active supersedes");
+        } else {
+            handle.cancel().expect("Active cancels");
+        }
+        let after: Vec<GenerationEvent> = handle.by_ref().collect();
+        assert!(
+            after
+                .iter()
+                .all(|event| matches!(event, GenerationEvent::Usage(_))),
+            "supersede {supersede}: nothing but usage after the cut: {after:?}"
+        );
+        events.extend(after);
+
+        let records: Vec<&UsageRecorded> = events
+            .iter()
+            .filter_map(|event| match event {
+                GenerationEvent::Usage(recorded) => Some(recorded),
+                _ => None,
+            })
+            .collect();
+        let [ended, partial] = records.as_slice() else {
+            panic!("supersede {supersede}: two usage records: {events:?}")
+        };
+        assert!(ended.r#final, "the first turn ended");
+        assert!(!partial.r#final, "the cut turn did not end: {partial:?}");
+        assert_eq!(
+            TOKEN_KINDS.map(|kind| quantity(partial, kind)),
+            [
+                Quantity::provider_reported(QuantityKind::InputTextTokens, 20),
+                Quantity::provider_reported(QuantityKind::OutputTextTokens, 1),
+                Quantity::unknown(QuantityKind::CachedInputTokens),
+                Quantity::unknown(QuantityKind::CacheCreationInputTokens),
+            ]
+        );
+        assert_eq!(
+            quantity(partial, QuantityKind::Requests),
+            Quantity::measured(QuantityKind::Requests, 1)
+        );
+        assert!(partial.started_at_ms <= partial.ended_at_ms);
+    }
+}
+
+/// A turn the mock holds and whose usage it never reported is still a model call: cut, it yields
+/// one record of one request, every token count unknown, not final.
+#[test]
+fn a_cut_turn_whose_usage_was_never_reported_counts_one_request_of_unknown_tokens() {
+    let mut generator = generator(MockConfiguration::StreamingOnly).holding(0);
+    let mut handle = generator
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut events = Vec::new();
+    while let Poll::Ready(Some(event)) = handle.poll_event(&mut cx) {
+        events.push(event);
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, GenerationEvent::TextDelta(_))),
+        "{events:?}"
+    );
+    handle.supersede().expect("Active supersedes");
+    let after: Vec<GenerationEvent> = handle.by_ref().collect();
+    let [GenerationEvent::Usage(recorded)] = after.as_slice() else {
+        panic!("one record and no text: {after:?}")
+    };
+    assert!(!recorded.r#final, "its counts are unknown");
+    assert_eq!(
+        quantity(recorded, QuantityKind::Requests),
+        Quantity::measured(QuantityKind::Requests, 1)
+    );
+    assert_eq!(
+        TOKEN_KINDS.map(|kind| quantity(recorded, kind)),
+        TOKEN_KINDS.map(Quantity::unknown)
+    );
+}
+
 #[test]
 fn the_mock_reports_no_usage_by_default() {
     for configuration in MockConfiguration::ALL {

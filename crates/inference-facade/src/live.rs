@@ -40,9 +40,10 @@
 //! application does not commit, because it closes, cancels, switches or lets go of its handle,
 //! is not recorded; the facts delivered while it was open are, then.
 //!
-//! A usage record a model node sends on an exposed `usage` port is delivered as
-//! `UsageRecorded` and added to the session's usage view, a total per run and one over the
-//! session ([`LiveSession::usage`], [`crate::usage`]); with the feature `cost`, a session priced
+//! A usage record a model node sends on an exposed `usage` port, or a subgraph node forwards on
+//! one from its child run, is delivered as `UsageRecorded` and added to the session's usage view,
+//! a total per run and one over the session ([`LiveSession::usage`], [`crate::usage`]), the
+//! child's record under the run the session holds; with the feature `cost`, a session priced
 //! with `LiveSession::price_with` also prices it. [`LiveSession::record_inputs`] taps the
 //! ingresses of the session's run for a recorder of the runtime, so that the run can be replayed.
 //!
