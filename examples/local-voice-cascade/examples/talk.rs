@@ -180,6 +180,7 @@ fn talk(args: Args) -> Result<(), Box<dyn Error>> {
         ends.egress(TEXT_EGRESS)
             .ok_or("the cascade exposes no assistant text egress")?,
     );
+    drop(ends);
     block_on(controller.activate())?;
     let watch = EgressWatch::start(Egress::Denied, controller.requests())?;
     let drive = thread::spawn(move || {

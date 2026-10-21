@@ -238,7 +238,9 @@ pub struct Egress<P> {
 /// The caller's ends of every exposure of the run, in the declaration order of the exposures, and
 /// of every `usage` port of the run's nodes that no edge leaves and no exposure carries, in the
 /// declaration order of the ports. A record read off `usage` is delivered nowhere else, so it is
-/// counted once when the caller counts it.
+/// counted once when the caller counts it. A sink holds what it is sent until it is read, with no
+/// bound: a caller that does not count usage drops `usage` (or the whole of these ends) as soon as
+/// it took the ends it needs, and from then on every send there is taken and kept nowhere.
 pub struct ExposedEnds<P> {
     pub ingresses: Vec<Ingress<P>>,
     pub egresses: Vec<Egress<P>>,

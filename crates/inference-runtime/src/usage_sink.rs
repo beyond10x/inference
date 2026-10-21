@@ -79,10 +79,12 @@ pub(crate) fn unconnected_ports(
 /// depth, that has no `usage` port while its child pipeline has a `usage` port no edge leaves and
 /// no exposure carries: what the child keeps in that port's sink reaches no run above it. The
 /// child's node may send no record there; a node is named for the port it holds, not for what it
-/// sent.
+/// sent. Every such node is named, several over one child pipeline among them; each child
+/// pipeline is searched once, however many nodes run it.
 #[must_use]
 pub fn uncounted_usage(declaration: &Declaration, pipeline_id: PipelineId) -> Vec<NodeId> {
     let mut uncounted = Vec::new();
+    let mut searched = vec![pipeline_id];
     let mut pipelines = vec![pipeline_id];
     while let Some(pipeline_id) = pipelines.pop() {
         for node in declaration
@@ -92,16 +94,16 @@ pub fn uncounted_usage(declaration: &Declaration, pipeline_id: PipelineId) -> Ve
             let Some(child) = node.subgraph_id() else {
                 continue;
             };
-            if child == pipeline_id || pipelines.contains(&child) {
-                continue;
-            }
             let has_usage_port = declaration
                 .ports()
                 .any(|port| port.node_id() == node.node_id() && carries_usage(port));
             if !has_usage_port && !unconnected_ports(declaration, child).is_empty() {
                 uncounted.push(node.node_id());
             }
-            pipelines.push(child);
+            if !searched.contains(&child) {
+                searched.push(child);
+                pipelines.push(child);
+            }
         }
     }
     uncounted
@@ -196,5 +198,72 @@ impl<P> Drop for SinkReceiver<P> {
         let mut state = lock(&self.state);
         state.receiving = false;
         state.queue.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    use inference_core::endpoint::OutputEndpoint;
+    use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
+    use inference_core::id::{NodeId, RunId, StreamId};
+
+    use super::{lock, sink};
+
+    fn stop(sequence: i64) -> EventEnvelope<ControlKind> {
+        EventEnvelope {
+            schema_version: 1,
+            event_id: EventId::generate(),
+            run_id: RunId::generate(),
+            session_id: None,
+            stream_id: StreamId::generate(),
+            sequence,
+            producer: NodeId::generate(),
+            port: "usage".to_owned(),
+            kind: ControlKind::Stop.as_str().to_owned(),
+            generation_id: None,
+            timestamp: 0,
+            timebase: Timebase::WallTime,
+            causation_id: None,
+            payload: ControlKind::Stop,
+        }
+    }
+
+    fn sent(sender: &dyn OutputEndpoint<ControlKind>, sequence: i64) -> bool {
+        let mut future = pin!(sender.send(stop(sequence)));
+        matches!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Ok(()))
+        )
+    }
+
+    #[test]
+    fn a_send_after_the_reader_is_dropped_is_taken_at_once_and_kept_nowhere() {
+        let (sender, receiver) = sink();
+        let state = Arc::clone(&sender.state);
+        assert!(sent(&sender, 1));
+        assert_eq!(
+            lock(&state).queue.len(),
+            1,
+            "a held reader keeps what was sent"
+        );
+        drop(receiver);
+        assert!(
+            lock(&state).queue.is_empty(),
+            "the dropped reader's backlog goes"
+        );
+        for sequence in 2..1_000 {
+            assert!(sent(&sender, sequence), "a send is never refused");
+        }
+        assert!(
+            lock(&state).queue.is_empty(),
+            "nothing sent after the reader is gone is kept"
+        );
     }
 }

@@ -263,7 +263,13 @@ fn two_subgraph_nodes_with_no_usage_port_over_one_child_are_both_named() {
             &planned,
             &[INGRESS, "back text"],
             move |run_id, _| {
-                let generator = generator.clone();
+                // A generator of its own for each subgraph node, over the same adapter: a mock
+                // generator admits one generation at a time, and both children answer at once.
+                let generator = generator.clone().reporting([Some(Usage {
+                    input_tokens: Some(7),
+                    output_tokens: Some(2),
+                    ..Usage::default()
+                })]);
                 Box::new(SubgraphNode::new(
                     run_id,
                     &declaration_,
