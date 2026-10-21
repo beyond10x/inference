@@ -10,6 +10,11 @@
 //!   Received.
 //! - `Restamp`: the end stamps every event of the session `delivered_before` it, the one the
 //!   caller already had as well.
+//! - `Watermark`: the end stamps every event of the session from the first one it still held
+//!   onward, by sequence, as an end that keeps a delivery cursor instead of each event's state
+//!   would: one the caller had out of order, after one still held, is restamped.
+//! - `CrossSession`: the end also delivers what another open session still holds, as an end that
+//!   does not filter the received events by session would.
 //!
 //! The suite is synthesized with `ess` from `ess/`, as `conform.rs` does; `ess` must be on PATH.
 
@@ -42,6 +47,8 @@ enum Mutation {
     None,
     FirstOnly,
     Restamp,
+    Watermark,
+    CrossSession,
 }
 
 /// The testkit's target, with `ReceivedSessionEvents` rewritten by `mutation`.
@@ -57,6 +64,15 @@ fn ended(row: &ViewRow) -> Option<(Node, Node)> {
         return None;
     }
     Some((row.get("session_id")?.clone(), end.clone()))
+}
+
+fn sequence(row: &ViewRow) -> Option<i64> {
+    target::integer(row.get("sequence")?)
+}
+
+fn deliver_before(row: &mut ViewRow, end: &Node) {
+    row.insert("delivered_before".to_owned(), end.clone());
+    row.insert("state".to_owned(), Node::Text("Delivered".to_owned()));
 }
 
 impl Mutant {
@@ -92,6 +108,43 @@ impl Mutant {
                     };
                     if let Some((_, end)) = ends.iter().find(|(id, _)| *id == session) {
                         row.insert("delivered_before".to_owned(), end.clone());
+                    }
+                }
+            }
+            Mutation::Watermark => {
+                let mut lowest: Vec<(Node, Node, i64)> = Vec::new();
+                for row in &result.rows {
+                    let (Some((session, end)), Some(at)) = (ended(row), sequence(row)) else {
+                        continue;
+                    };
+                    match lowest.iter_mut().find(|(id, _, _)| *id == session) {
+                        Some((_, _, low)) => *low = (*low).min(at),
+                        None => lowest.push((session, end, at)),
+                    }
+                }
+                for row in &mut result.rows {
+                    let (Some(session), Some(at)) = (row.get("session_id").cloned(), sequence(row))
+                    else {
+                        continue;
+                    };
+                    if let Some((_, end, low)) = lowest.iter().find(|(id, _, _)| *id == session)
+                        && at > *low
+                    {
+                        deliver_before(row, end);
+                    }
+                }
+            }
+            Mutation::CrossSession => {
+                let ends: Vec<(Node, Node)> = result.rows.iter().filter_map(ended).collect();
+                for row in &mut result.rows {
+                    let held = row.get("state") == Some(&Node::Text("Received".to_owned()));
+                    let Some(session) = row.get("session_id").cloned() else {
+                        continue;
+                    };
+                    if let Some((_, end)) = ends.iter().find(|(id, _)| *id != session)
+                        && held
+                    {
+                        deliver_before(row, end);
                     }
                 }
             }
@@ -218,6 +271,25 @@ fn both_authored_scenarios_reject_every_mutant_of_the_end() {
         assert!(
             mutated.iter().all(|(_, status)| *status != Status::Passed),
             "{mutation:?} survives an authored scenario: {mutated:?}"
+        );
+    }
+}
+
+/// The close's scenario holds two sessions and an event the caller had out of order before the
+/// close, so it rejects an end that keeps a delivery cursor and one that crosses sessions.
+#[test]
+fn the_close_scenario_rejects_the_watermark_and_cross_session_mutants() {
+    let admitted = synthesized();
+    for mutation in [Mutation::Watermark, Mutation::CrossSession] {
+        let mutated = statuses(&admitted, mutation);
+        let close = mutated
+            .iter()
+            .find(|(id, _)| id == AUTHORED[0])
+            .expect("the close's scenario ran");
+        assert_ne!(
+            close.1,
+            Status::Passed,
+            "{mutation:?} survives the close's scenario: {mutated:?}"
         );
     }
 }

@@ -61,7 +61,14 @@
 //!   connect as a closed transport. A `session.closed` the caller did not ask for (expired, a
 //!   safety filter, a remote hangup) fails the session as a provider error, `connection_lost` as
 //!   a closed transport; a closed or failed connection fails it at once. `error` events do not
-//!   end the session and are kept in [`OpenAiLiveSession::server_errors`].
+//!   end the session and are kept in [`OpenAiLiveSession::server_errors`]. A `session.closed`
+//!   without its reason or seconds still ends the session, and a backend response end without
+//!   its id still counts its usage.
+//! * A message the client cannot read (not JSON, no `type`, a typed event without a field it
+//!   needs) is dropped and reading goes on. It is counted on the session
+//!   ([`SessionLedger::unreadable_frames`]), so is a `session.closed` lacking a field, and none
+//!   refreshes the liveness bound. A later failure of the session is then a provider error naming
+//!   how many there were and the last.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -489,7 +496,7 @@ impl OpenAiLiveSession {
     pub fn voice_seconds(&self) -> Option<f64> {
         self.final_usage
             .as_ref()
-            .map(|closed| closed.seconds)
+            .and_then(|closed| closed.seconds)
             .or(self.voice_seconds)
     }
 
@@ -558,7 +565,7 @@ impl OpenAiLiveSession {
                     return Arrived::Closed(LiveClosed { reason, seconds });
                 }
                 Some(Ok(event)) => self.record(event),
-                Some(Err(RealtimeError::Protocol(_))) => self.undecodable(),
+                Some(Err(error @ RealtimeError::Protocol(_))) => self.undecodable(&error),
                 None | Some(Err(RealtimeError::Stalled(_))) => break,
                 Some(Err(error)) => return Arrived::Failed(error),
             }
@@ -567,9 +574,11 @@ impl OpenAiLiveSession {
     }
 
     /// The server sent a message that is not a GPT-Live event. It ends nothing, since the client
-    /// reads on: it is server traffic, and is dropped.
-    fn undecodable(&mut self) {
-        self.ledger.heard(Instant::now());
+    /// reads on, but it is no sign of life either: it is dropped, counted on the session as a
+    /// frame the binding could not read, and named by a later failure of the session.
+    fn undecodable(&mut self, error: &RealtimeError) {
+        self.ledger
+            .unreadable_frame(error.to_string(), Instant::now());
     }
 
     /// The response in progress, created when none is.
@@ -678,11 +687,51 @@ impl OpenAiLiveSession {
     }
 
     /// `session.closed` confirmed the billed voice seconds: they replace the running total the
-    /// ledger records just before the session's end event.
+    /// ledger records just before the session's end event. One without its seconds confirms
+    /// nothing, and one without its reason or seconds is counted as a frame the binding could
+    /// not read in full.
     fn confirm(&mut self, closed: LiveClosed) {
-        self.ledger
-            .session_usage_at_end(billed(Some(closed.seconds)), true);
+        let missing = match (&closed.reason, closed.seconds) {
+            (Some(_), Some(_)) => None,
+            (None, Some(_)) => Some("the string field `reason`"),
+            (Some(_), None) => Some("the number field `usage.seconds`"),
+            (None, None) => Some("the fields `reason` and `usage.seconds`"),
+        };
+        if let Some(missing) = missing {
+            self.ledger
+                .unreadable_frame(format!("`session.closed` lacks {missing}"), Instant::now());
+        }
+        if let Some(seconds) = closed.seconds {
+            self.ledger
+                .session_usage_at_end(billed(Some(seconds)), true);
+        }
         self.final_usage = Some(closed);
+    }
+
+    /// What the server sent between the caller's close and `session.closed`: only its usage is
+    /// recorded, the voice seconds as the running total and each backend response's tokens, and
+    /// a message that is not a GPT-Live event is counted; nothing of it is delivered.
+    fn closing(&mut self, event: Result<LiveEvent, RealtimeError>) {
+        let now = Instant::now();
+        match event {
+            Ok(LiveEvent::UsageUpdated { seconds, .. }) => {
+                self.voice_seconds = Some(seconds);
+                self.ledger
+                    .session_usage_at_end(billed(Some(seconds)), false);
+            }
+            Ok(LiveEvent::Backend {
+                event:
+                    BackendEvent::Completed {
+                        usage: Some(usage), ..
+                    }
+                    | BackendEvent::Ended {
+                        usage: Some(usage), ..
+                    },
+                ..
+            }) => self.backend_usage_recorded(usage, now),
+            Ok(_) => {}
+            Err(error) => self.undecodable(&error),
+        }
     }
 
     /// Records one server event through the ledger; what the ledger refuses is dropped.
@@ -736,12 +785,15 @@ impl OpenAiLiveSession {
                     .session_usage_at_end(billed(Some(seconds)), false);
             }
             LiveEvent::SessionClosed { reason, seconds } => {
-                let kind = if reason == "connection_lost" {
+                let kind = if reason.as_deref() == Some("connection_lost") {
                     SessionFailureKind::TransportClosed
                 } else {
                     SessionFailureKind::ProviderError
                 };
-                let detail = format!("the provider ended the session: {reason}");
+                let detail = match &reason {
+                    Some(reason) => format!("the provider ended the session: {reason}"),
+                    None => "the provider ended the session without a reason".to_owned(),
+                };
                 self.confirm(LiveClosed { reason, seconds });
                 let _ = self.ledger.fail(SessionFailure { kind, detail });
                 self.current = None;
@@ -807,11 +859,13 @@ impl SpeechSessionHandle for OpenAiLiveSession {
     /// reached the binding are recorded first, so their usage counts and they are delivered after
     /// the close, before `SpeechSessionClosed`; a `session.closed` among them confirms the final
     /// usage, and from it or a read that fails nothing is recorded, so an open session closes
-    /// rather than fails. A message that is not a GPT-Live event is no failed read: the client
-    /// reads on, so what follows it is recorded too. Otherwise the close asks the server for
-    /// `session.closed` and awaits it;
-    /// the seconds it carries are recorded just before `SpeechSessionClosed`, and nothing else
-    /// the server sends after the close is delivered.
+    /// rather than fails. A message that is not a GPT-Live event is no failed read: it is
+    /// counted, the client reads on, and what follows it is recorded too. Otherwise the close asks
+    /// the server for `session.closed` and awaits it, for [`crate::live::CLOSE_TIMEOUT`] at most
+    /// in all when the endpoint's read timeout is shorter; the seconds it carries are recorded
+    /// just before `SpeechSessionClosed`. Of what the server sends meanwhile only its usage is
+    /// recorded and nothing is delivered; without `session.closed` the session still closes, with
+    /// the usage seen so far, unconfirmed.
     fn close(&mut self) -> Result<(), SessionError> {
         if self.ledger.session().require_open().is_ok() {
             match self.record_arrived() {
@@ -822,10 +876,16 @@ impl SpeechSessionHandle for OpenAiLiveSession {
                 Arrived::Failed(_) => self.client = None,
                 Arrived::Nothing => {}
             }
+            let mut seen = Vec::new();
             let closed = match (self.client.take(), self.runtime.as_ref()) {
-                (Some(client), Some(runtime)) => runtime.block_on(client.close()).ok(),
+                (Some(client), Some(runtime)) => runtime
+                    .block_on(client.close_seeing(|event| seen.push(event)))
+                    .ok(),
                 _ => None,
             };
+            for event in seen {
+                self.closing(event);
+            }
             if let Some(closed) = closed {
                 self.confirm(closed);
             }
@@ -854,7 +914,10 @@ impl SpeechSessionHandle for OpenAiLiveSession {
                 runtime.block_on(async { tokio::time::timeout(left, client.next_event()).await });
             match read {
                 Ok(Ok(event)) => self.record(event),
-                Ok(Err(RealtimeError::Protocol(_))) => self.undecodable(),
+                Ok(Err(error @ RealtimeError::Protocol(_))) => {
+                    self.undecodable(&error);
+                    self.ledger.check_liveness(Instant::now());
+                }
                 Ok(Err(RealtimeError::Stalled(_))) | Err(_) => {
                     self.ledger.check_liveness(Instant::now());
                 }

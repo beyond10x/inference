@@ -50,10 +50,12 @@ pub enum ServerEvent {
     /// `conversation.item.input_audio_transcription.delta`.
     InputTranscriptDelta { item_id: String, delta: String },
     /// `conversation.item.input_audio_transcription.completed`, with the usage the server
-    /// reported for the transcription.
+    /// reported for the transcription. It is read field by field: a field the server left out or
+    /// sent in another shape is `None`, so the usage of an event without its `transcript` still
+    /// counts.
     InputTranscript {
-        item_id: String,
-        transcript: String,
+        item_id: Option<String>,
+        transcript: Option<String>,
         usage: Option<TranscriptionUsage>,
     },
     /// `input_audio_buffer.speech_started`.
@@ -79,10 +81,14 @@ pub enum ServerEvent {
         name: String,
         arguments: String,
     },
-    /// `response.done`, with the response's final status and the usage the server reported.
+    /// `response.done`, with the response's final status and the usage the server reported. It
+    /// is read field by field: a field of `response` the server left out or sent in another shape
+    /// is `None`, and so is each when `response` is. It still ends a response: Realtime has one
+    /// in progress at a time, so one without its id ends that one, and its usage counts whatever
+    /// else it lacks.
     ResponseDone {
-        response_id: String,
-        status: ResponseStatus,
+        response_id: Option<String>,
+        status: Option<ResponseStatus>,
         usage: Option<Usage>,
     },
     /// `error`.
@@ -95,16 +101,23 @@ impl ServerEvent {
     /// Reads one server event from the text of a WebSocket message.
     ///
     /// # Errors
-    /// [`RealtimeError::Protocol`] when the text is not a JSON object with a string `type`, or
-    /// when a typed event lacks a field the reference requires.
+    /// [`RealtimeError::Protocol`] when the text is not a JSON object with a string `type`,
+    /// naming the start of the text, or when a typed event lacks a field the reference requires
+    /// and without which it means nothing. `response.done` and
+    /// `conversation.item.input_audio_transcription.completed`, which end a response or carry
+    /// billable usage, are read field by field and never refused for a field.
     pub fn parse(text: &str) -> Result<Self, RealtimeError> {
         let raw: Value = serde_json::from_str(text).map_err(|error| {
-            RealtimeError::Protocol(format!("server event is not JSON: {error}"))
+            RealtimeError::Protocol(format!(
+                "server event is not JSON ({error}); it begins {:?}",
+                text_start(text)
+            ))
         })?;
         let Some(event_type) = raw.get("type").and_then(Value::as_str) else {
-            return Err(RealtimeError::Protocol(
-                "server event has no string `type`".to_owned(),
-            ));
+            return Err(RealtimeError::Protocol(format!(
+                "server event has no string `type`; it begins {:?}",
+                text_start(text)
+            )));
         };
         let event = Fields {
             event_type,
@@ -150,9 +163,9 @@ impl ServerEvent {
                 delta: event.optional_string("delta")?.unwrap_or_default(),
             },
             "conversation.item.input_audio_transcription.completed" => Self::InputTranscript {
-                item_id: event.string("item_id")?,
-                transcript: event.string("transcript")?,
-                usage: event.transcription_usage()?,
+                item_id: event.lenient_string("item_id"),
+                transcript: event.lenient_string("transcript"),
+                usage: event.transcription_usage().ok().flatten(),
             },
             "input_audio_buffer.speech_started" => Self::SpeechStarted {
                 item_id: event.string("item_id")?,
@@ -178,11 +191,13 @@ impl ServerEvent {
                 arguments: event.string("arguments")?,
             },
             "response.done" => {
-                let response = event.response()?;
+                let response = event.response().ok();
                 Self::ResponseDone {
-                    response_id: response.string("id")?,
-                    status: ResponseStatus::from_wire(&response.string("status")?),
-                    usage: response.usage()?,
+                    response_id: response.and_then(|response| response.lenient_string("id")),
+                    status: response
+                        .and_then(|response| response.lenient_string("status"))
+                        .map(|status| ResponseStatus::from_wire(&status)),
+                    usage: response.and_then(|response| response.usage().ok().flatten()),
                 }
             }
             "error" => {
@@ -201,6 +216,13 @@ impl ServerEvent {
             },
         })
     }
+}
+
+/// The first 32 characters of a server message, to name one that could not be read.
+pub(crate) fn text_start(text: &str) -> &str {
+    text.char_indices()
+        .nth(32)
+        .map_or(text, |(end, _)| &text[..end])
 }
 
 /// Field access on one JSON object of a typed event; a missing or mistyped field the reference
@@ -234,6 +256,11 @@ impl<'a> Fields<'a> {
             Some(Value::String(value)) => Ok(Some(value.clone())),
             Some(_) => Err(self.missing(field, "the string")),
         }
+    }
+
+    /// A string field, `None` when it is missing or not a string.
+    fn lenient_string(&self, field: &str) -> Option<String> {
+        self.optional_string(field).ok().flatten()
     }
 
     fn unsigned(&self, field: &str) -> Result<u64, RealtimeError> {

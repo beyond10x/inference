@@ -120,6 +120,9 @@ pub struct SessionLedger {
     requested: bool,
     /// The bound was armed without an instant: it starts at the next liveness check.
     clock_pending: bool,
+    /// How many frames the binding could not read, whole or in part
+    /// ([`SessionLedger::unreadable_frame`]), and what the last one was.
+    unreadable: (u64, Option<String>),
     /// The instant the session opened, and the wall clock then in Unix epoch milliseconds.
     opened: (Instant, i64),
     /// The latest instant the ledger was given.
@@ -288,6 +291,7 @@ impl SessionLedger {
             liveness: Liveness::new(idle_limit, now),
             requested: false,
             clock_pending: false,
+            unreadable: (0, None),
             opened: (now, wall),
             latest: now,
             outbox: VecDeque::new(),
@@ -607,10 +611,17 @@ impl SessionLedger {
     /// provider sent that is still held is delivered before `SpeechSessionFailed`
     /// (`delivered_before: failed`), and stays in order before it.
     ///
+    /// When the provider had sent frames the binding could not read
+    /// ([`Self::unreadable_frame`]), the failure is reported as
+    /// [`SessionFailureKind::ProviderError`] whatever its kind, its detail naming how many and
+    /// the last one: a session the provider stopped speaking readably to has not just stalled or
+    /// lost its transport.
+    ///
     /// # Errors
     ///
     /// [`SessionError::NotOpen`].
     pub fn fail(&mut self, failure: SessionFailure) -> Result<(), SessionError> {
+        let failure = self.after_unreadable(failure);
         let (moved, event) = self
             .session
             .fail(failure.clone())
@@ -645,7 +656,7 @@ impl SessionLedger {
         self.fail(SessionFailure {
             kind: SessionFailureKind::Stalled,
             detail: format!(
-                "the provider sent nothing for {} ms, the bound is {} ms",
+                "the provider sent nothing readable for {} ms, the bound is {} ms",
                 silent.as_millis(),
                 self.liveness.limit.as_millis()
             ),
@@ -658,6 +669,45 @@ impl SessionLedger {
         self.tick(now);
         self.liveness.heard(now);
         self.clock_pending = false;
+    }
+
+    /// The provider sent, at `now`, a frame the binding could not read, whole or in part;
+    /// `what` names it: its type, or the start of its text. The binding reads on past it, and
+    /// it ends nothing, but it is no sign of life: the liveness bound runs on as if the provider
+    /// had sent nothing. It is counted, and a later failure of the session names it
+    /// ([`Self::fail`]).
+    pub fn unreadable_frame(&mut self, what: impl Into<String>, now: Instant) {
+        self.tick(now);
+        self.unreadable.0 = self.unreadable.0.saturating_add(1);
+        self.unreadable.1 = Some(what.into());
+    }
+
+    /// How many frames the binding could not read ([`Self::unreadable_frame`]).
+    #[must_use]
+    pub const fn unreadable_frames(&self) -> u64 {
+        self.unreadable.0
+    }
+
+    /// What the last frame the binding could not read was.
+    #[must_use]
+    pub fn last_unreadable(&self) -> Option<&str> {
+        self.unreadable.1.as_deref()
+    }
+
+    /// `failure` as the session reports it: a provider error naming the frames the binding
+    /// could not read, when there were any.
+    fn after_unreadable(&self, failure: SessionFailure) -> SessionFailure {
+        let (count, Some(last)) = (self.unreadable.0, self.unreadable.1.as_deref()) else {
+            return failure;
+        };
+        let frames = if count == 1 { "frame" } else { "frames" };
+        SessionFailure {
+            kind: SessionFailureKind::ProviderError,
+            detail: format!(
+                "{}; the provider had sent {count} {frames} the binding could not read, the last: {last}",
+                failure.detail
+            ),
+        }
     }
 
     /// The provider's turn detection committed the input. With `auto_response` on it owes a
@@ -867,6 +917,39 @@ impl SessionLedger {
         self.require_open()?;
         self.fail_response(response_id, failure, now)?;
         self.heard(now);
+        Ok(())
+    }
+
+    /// The provider ended a response at `now` with a frame whose outcome the binding could not
+    /// read; `what` names what it lacked. The response fails as a provider error naming it, and
+    /// the frame is counted as one the binding could not read ([`Self::unreadable_frame`]).
+    /// Whether the provider meant the response to be done is unknown, so the caller still awaits
+    /// it: the liveness bound runs on from `now` until the provider creates a response, and a
+    /// provider that stays silent fails the session.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::NotOpen`], [`SessionError::UnknownResponse`], then
+    /// [`SessionError::ResponseNotInProgress`].
+    pub fn response_ended_unread(
+        &mut self,
+        response_id: ResponseId,
+        what: impl Into<String>,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        self.require_open()?;
+        let what = what.into();
+        self.fail_response(
+            response_id,
+            SessionFailure {
+                kind: SessionFailureKind::ProviderError,
+                detail: format!("the provider ended the response unreadably: {what}"),
+            },
+            now,
+        )?;
+        self.heard(now);
+        self.unreadable_frame(what, now);
+        self.requested = true;
         Ok(())
     }
 

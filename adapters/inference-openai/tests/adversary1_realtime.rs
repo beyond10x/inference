@@ -482,8 +482,8 @@ fn reference_examples_of_the_untested_typed_events_decode() {
         assert_eq!(
             done,
             ServerEvent::ResponseDone {
-                response_id: "resp_9".to_owned(),
-                status,
+                response_id: Some("resp_9".to_owned()),
+                status: Some(status),
                 usage: None
             }
         );

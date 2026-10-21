@@ -469,8 +469,8 @@ async fn text_in_audio_out_response() {
     else {
         panic!("last event is not response.done: {events:?}");
     };
-    assert_eq!(response_id, "resp_C9G8p7IH2WxLbkgPNouYL");
-    assert_eq!(*status, ResponseStatus::Completed);
+    assert_eq!(response_id.as_deref(), Some("resp_C9G8p7IH2WxLbkgPNouYL"));
+    assert_eq!(*status, Some(ResponseStatus::Completed));
     let usage = usage.as_ref().expect("usage reported");
     assert_eq!(
         (usage.total_tokens, usage.input_tokens, usage.output_tokens),
@@ -602,8 +602,8 @@ async fn barge_in_cancels_the_response_and_truncates_the_played_audio() {
                 delta: "Hey".to_owned()
             },
             ServerEvent::InputTranscript {
-                item_id: "msg_003".to_owned(),
-                transcript: "Hey, can you hear me?".to_owned(),
+                item_id: Some("msg_003".to_owned()),
+                transcript: Some("Hey, can you hear me?".to_owned()),
                 usage: Some(TranscriptionUsage::Tokens {
                     total_tokens: Some(22),
                     input_tokens: Some(13),
@@ -615,8 +615,8 @@ async fn barge_in_cancels_the_response_and_truncates_the_played_audio() {
     assert_eq!(
         events[3],
         ServerEvent::ResponseDone {
-            response_id: "resp_001".to_owned(),
-            status: ResponseStatus::Cancelled,
+            response_id: Some("resp_001".to_owned()),
+            status: Some(ResponseStatus::Cancelled),
             usage: None
         }
     );
@@ -697,7 +697,7 @@ async fn a_function_call_is_answered_with_its_output() {
     assert!(matches!(
         events.last(),
         Some(ServerEvent::ResponseDone {
-            status: ResponseStatus::Completed,
+            status: Some(ResponseStatus::Completed),
             usage: None,
             ..
         })
