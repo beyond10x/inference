@@ -15,8 +15,9 @@
 //! `GenerationCompleted` and passes the end of input on. Drained, it takes what its input edge still holds until the edge
 //! is closed and then completes the generation the same way. Cancelled, it cancels the
 //! generation, which discards its unplayed segments, and sends nothing more, a cancel taken while
-//! a send waits for room ending the wait; scripted to emit after the cancel, it emits once into
-//! the cancelled generation, which refuses it as stale.
+//! a send waits for room ending the wait, but the usage record of a turn it already holds, which
+//! a cancel never loses; scripted to emit after the cancel, it emits once into the cancelled
+//! generation, which refuses it as stale.
 //! Given a usage port ([`ModelNode::with_usage`]), the output port its pipeline declares under the
 //! name `usage`, the node sends on the edge or exposure leaving it the usage record of each turn
 //! of its generation that ended, a failed one among them, as `inference-llm` delivers it after the
@@ -767,6 +768,9 @@ impl<P: ModelPayload> Exchanging<P> {
     /// Sends `recorded`, the usage of a turn of the node's generation, on the `usage` port, placed
     /// on the run, the node and the session of its envelope; a node with no edge leaving its
     /// `usage` port sends nothing.
+    /// It sends the record whether or not the node was cancelled, waiting for room as long as
+    /// the edge takes it, so a cancel never loses the usage of a call the node already holds;
+    /// only an edge that is closed once the node was cancelled takes it no more.
     async fn send_usage(&mut self, recorded: UsageRecorded) -> Result<(), String> {
         let generation_id = self
             .generation
@@ -778,13 +782,11 @@ impl<P: ModelPayload> Exchanging<P> {
         let Some(envelope) = usage.envelope(recorded, generation_id) else {
             return Ok(());
         };
-        send_unless(
-            usage.output.as_ref(),
-            &self.signal,
-            |signal| signal.cancel,
-            envelope,
-        )
-        .await
+        match usage.output.send(envelope).await {
+            Ok(()) => Ok(()),
+            Err(SendError::Closed(_)) if self.signal.read(|signal| signal.cancel) => Ok(()),
+            Err(refused) => Err(refused.to_string()),
+        }
     }
 
     /// Completes the generation, whatever call is unanswered, and emits `GenerationCompleted`.

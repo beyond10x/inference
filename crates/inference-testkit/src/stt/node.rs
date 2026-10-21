@@ -35,8 +35,10 @@
 //!
 //! Once both inputs ended, each by a control event of kind `stop` or by its edge closing, a
 //! recognition still running has its input ended and its events delivered, and the node passes
-//! the end of input on, on every output port, `usage` among them. Cancelled, it sends nothing
-//! more: a cancel taken while a send waits for room ends the wait. Content other than a frame on
+//! the end of input on, on every output port, `usage` first, so that a consumer that has the end
+//! of any other port has the end of `usage` too. Cancelled, it sends nothing more but the usage
+//! record of a recognition it already holds, which a cancel never loses: a cancel taken while a
+//! send waits for room ends the wait, a send on `usage` excepted. Content other than a frame on
 //! `audio` fails the node; on `turns` every event but the two turn events is taken and ignored.
 //! The spans each recognition emitted are read from its handle ([`SttHandle::spans`]).
 
@@ -48,7 +50,7 @@ use std::sync::{Arc, Weak};
 use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
+use inference_core::endpoint::{InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{NodeId, RunId, SessionId, StreamId};
 use inference_core::usage::UsageRecorded;
@@ -450,6 +452,9 @@ impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
     /// Sends `recorded`, the usage of a recognition, on the `usage` port, placed on the run, the
     /// node and the session of its envelope; a node with no edge leaving its `usage` port sends
     /// nothing.
+    /// It sends the record whether or not the node was cancelled, waiting for room as long as
+    /// the edge takes it, so a cancel never loses the usage of a call the node already holds;
+    /// only an edge that is closed once the node was cancelled takes it no more.
     async fn send_usage(&mut self, recorded: UsageRecorded) -> Result<(), String> {
         let Some(usage) = self.usage.as_mut() else {
             return Ok(());
@@ -457,13 +462,11 @@ impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
         let Some(envelope) = usage.envelope(recorded) else {
             return Ok(());
         };
-        send_unless(
-            usage.output.as_ref(),
-            &self.state,
-            |state| state.cancel,
-            envelope,
-        )
-        .await
+        match usage.output.send(envelope).await {
+            Ok(()) => Ok(()),
+            Err(SendError::Closed(_)) if self.state.read(|state| state.cancel) => Ok(()),
+            Err(refused) => Err(refused.to_string()),
+        }
     }
 
     /// Passes the end of input on, on the `usage` port, given one with an edge leaving it.
@@ -608,12 +611,12 @@ impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
         loop {
             if self.audio_ended && self.turns_ended {
                 self.finish_recognition().await?;
+                self.end_usage().await?;
                 self.committed_text.end().await?;
                 self.turns_out.end().await?;
                 if let Some(transcript) = self.transcript.as_mut() {
                     transcript.end().await?;
                 }
-                self.end_usage().await?;
                 return Ok(Ended::Completed);
             }
             match self.step(false).await {
