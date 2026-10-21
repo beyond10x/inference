@@ -13,19 +13,20 @@
 //!
 //! | the record's adapter | its lines |
 //! |---|---|
-//! | has no binding | one `price_unknown` line per quantity the record carries: priced as unknown, never skipped and never zero |
+//! | has no binding | one `price_unknown` line per quantity the record carries, or one `requests` line of no quantity when it carries none: priced as unknown, never skipped and never zero |
 //! | is bound | one line per charged kind, in the order of [`QuantityKind::ALL`]; a kind it does not charge has none |
 //!
 //! A charged token kind is priced by `PriceBook::quote` over an `AttemptUsage` of the record's
 //! counts, upstream model and `final`, under the binding's model price; `local_compute_ms` over a
 //! `ComputeUsage` under its compute price. A missing quantity, rate, price, upstream model or
-//! binding match stays unknown with `llm-cost`'s reason, and counts the provider marked partial
-//! give a lower bound marked `usage_incomplete`. The input line counts the input tokens neither
+//! binding match stays unknown with `llm-cost`'s reason, and the counts of a record whose `final`
+//! is false, its compute among them, give a lower bound marked `usage_incomplete`. The input line counts the input tokens neither
 //! read from nor written to the cache, as `llm-cost` prices them, which a cache split known only
 //! in part leaves unknown. A charged kind `llm-cost` has no unit for (audio tokens, audio
 //! milliseconds, characters, requests), or a charged kind with no price of its family in the
-//! binding, gets a `price_unknown` line. A count beyond `u64`, a negative one among them, is read
-//! as unknown.
+//! binding, gets a `price_unknown` line. Quantities of one kind are added up, each checked first:
+//! one unknown or negative value, or a sum beyond `i64`, makes the kind's count unknown, never
+//! netted.
 //!
 //! A live session priced with [`crate::live::LiveSession::price_with`] prices every usage record
 //! it reads with the pricing current then, and the records it read before any pricing at that
@@ -152,6 +153,9 @@ impl From<CostError> for PriceError {
 /// [`PriceError::Cost`] when `llm-cost` refuses the record's counts or an amount overflows.
 pub fn price(pricing: &Pricing, recorded: &UsageRecorded) -> Result<CostRecorded, PriceError> {
     let lines = match pricing.bindings.get(&recorded.adapter_id) {
+        None if recorded.quantities.is_empty() => {
+            vec![price_unknown(QuantityKind::Requests, None)]
+        }
         None => recorded
             .quantities
             .iter()
@@ -208,7 +212,15 @@ fn bound_lines(
     };
     let compute = match &binding.compute {
         Some(compute) if charged(&QuantityKind::LocalComputeMs) => {
-            quote(book, Observation::Compute(compute_usage(compute, recorded)))?
+            let mut lines = quote(book, Observation::Compute(compute_usage(compute, recorded)))?;
+            // `llm-cost` reads no finality of a compute observation; a partial record's count is
+            // a lower bound, marked as the token lines of a partial attempt are.
+            for line in &mut lines {
+                if !recorded.r#final && line.unknown.is_none() {
+                    line.unknown = Some(llm_cost::UnknownReason::UsageIncomplete);
+                }
+            }
+            lines
         }
         _ => Vec::new(),
     };
@@ -271,19 +283,24 @@ const fn reason(reason: llm_cost::UnknownReason) -> UnknownReason {
 }
 
 /// The value of `kind` in `recorded`: the sum of its quantities of that kind, none when it
-/// carries none or one of them is unknown.
+/// carries none, one of them is unknown or negative, or the sum overflows. Every value is checked
+/// before any is added, so a negative count is never netted against another.
 fn count(recorded: &UsageRecorded, kind: QuantityKind) -> Option<i64> {
-    let mut values = recorded
+    let values = recorded
         .quantities
         .iter()
         .filter(|quantity| quantity.kind() == kind)
-        .map(|quantity| quantity.value())
-        .peekable();
-    values.peek()?;
-    values.try_fold(0_i64, |sum, value| sum.checked_add(value?))
+        .map(|quantity| quantity.value().filter(|value| *value >= 0))
+        .collect::<Option<Vec<i64>>>()?;
+    if values.is_empty() {
+        return None;
+    }
+    values
+        .into_iter()
+        .try_fold(0_i64, |sum, value| sum.checked_add(value))
 }
 
-/// [`count`] as `llm-cost` counts: none for a negative count too.
+/// [`count`] as `llm-cost` counts it.
 fn unsigned(recorded: &UsageRecorded, kind: QuantityKind) -> Option<u64> {
     count(recorded, kind).and_then(|value| u64::try_from(value).ok())
 }
@@ -409,8 +426,11 @@ pub struct Unpriced {
 
 /// What a session's usage cost: the cost record of each usage record it read and priced, in the
 /// order it read them, and their total. A record read before any pricing is pending until the
-/// session is priced. The total is complete only when no line of any record is unknown, no
-/// record is pending and none was refused.
+/// session is priced: the session keeps every such record, with no bound, until
+/// [`crate::live::LiveSession::price_with`] is called, so a session that is never priced holds all
+/// it read. The total is complete only once a price document is set, and then only when no line
+/// of any record is unknown, no record is pending and none was refused; a session never priced
+/// has no complete total, not even of nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionCost {
     /// The currency of the first price document; none before the session is priced.
@@ -433,7 +453,10 @@ impl Default for SessionCost {
             records: Vec::new(),
             unpriced: Vec::new(),
             pending: 0,
-            total: Sum::default().total(),
+            total: CostTotal {
+                complete_total: None,
+                ..Sum::default().total()
+            },
             sum: Sum::default(),
         }
     }
@@ -528,11 +551,11 @@ impl SessionCost {
         }
     }
 
-    /// The total of the records, complete only when no line is unknown, no record pending and
-    /// none unpriced.
+    /// The total of the records, complete only once a price document is set and when no line is
+    /// unknown, no record pending and none unpriced.
     fn refresh(&mut self) {
         let mut total = self.sum.total();
-        if self.pending > 0 || !self.unpriced.is_empty() {
+        if self.documents.is_empty() || self.pending > 0 || !self.unpriced.is_empty() {
             total.complete_total = None;
         }
         self.total = total;
