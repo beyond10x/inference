@@ -36,7 +36,7 @@ on this repository. `README.md` is for people.
 ```
 task check                      # specification and planning store validation, then format, lint and tests
 ess specify validate --path ess
-ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json   # the obliged scenarios plus the authored ones; the only refusals allowed are the three affects cascades, each executed by an authored scenario
+ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json   # the obliged scenarios plus the authored ones; the only refusals allowed are the three affects cascades, each executed by an authored scenario, and ESS-SYNTH-013 for the `inference.usage.Quantity` invariants, which no view can publish outside the `quantities` list and `Quantity::new` enforces
 ess verify conform run --path ess --scenarios ess/scenarios --target interpreted --report-format 2 --report-out .engineering/drafts/report.json   # every scenario against the specification itself
 aep plan artifact validate
 cargo fmt --all --check
@@ -69,7 +69,11 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   `rust-version` is what that tag requires, 1.98 (owner decision, 2026-10-20, reversing the
   2026-10-18 rule for `llm` only). Its request, items, tool calls and usage are `llm`'s; the
   wrapper adds only graph concerns, and `llm`'s wire crates, being provider implementations, stay
-  out of the contract crates. Other beyond10x repositories (`llm-gateway`, `loom`) are not
+  out of the contract crates. `b10x-llm-cost` at the same tag, its `sqlite` feature off, is the
+  one other `llm` crate admitted, for pricing only and only behind `inference-facade`'s `cost`
+  feature: its price document format, exact decimal money and unknown-preserving arithmetic are
+  versioned there, and a second implementation here would fork the price document format (owner
+  decision, 2026-10-20). Other beyond10x repositories (`llm-gateway`, `loom`) are not
   dependencies and the plan treats them as absent (owner decision, 2026-10-18); an adapter to one
   may be written later. The `secrets` library is the exception, used only by adapters' local
   credential lookup behind a feature (owner decision, 2026-10-19).

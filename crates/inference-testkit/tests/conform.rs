@@ -549,9 +549,12 @@ const DUPLEX_SCENARIOS: [&str; 74] = [
     "inference.duplex/authored/input-during-output-continues-response",
 ];
 
-/// The three `inference.usage` scenarios this target answers: a usage record of a declared adapter
-/// and model, and the refusals of an undeclared adapter and an undeclared model.
-const USAGE_SCENARIOS: [&str; 3] = [
+/// The five `inference.usage` scenarios this target answers: a usage record of a declared adapter
+/// and model, the refusals of an undeclared adapter and an undeclared model, a cost record of a
+/// recorded usage, and the refusal of an unknown usage record.
+const USAGE_SCENARIOS: [&str; 5] = [
+    "inference.usage.PriceUsage/outcome/priced",
+    "inference.usage.PriceUsage/outcome/unknown-usage",
     "inference.usage.RecordUsage/outcome/recorded",
     "inference.usage.RecordUsage/outcome/unknown-adapter",
     "inference.usage.RecordUsage/outcome/unknown-model",
