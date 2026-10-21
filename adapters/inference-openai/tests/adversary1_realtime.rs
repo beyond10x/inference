@@ -484,7 +484,8 @@ fn reference_examples_of_the_untested_typed_events_decode() {
             ServerEvent::ResponseDone {
                 response_id: Some("resp_9".to_owned()),
                 status: Some(status),
-                usage: None
+                usage: None,
+                unreadable_usage: None
             }
         );
     }

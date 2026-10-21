@@ -465,6 +465,7 @@ async fn text_in_audio_out_response() {
         response_id,
         status,
         usage,
+        unreadable_usage: None,
     }) = events.last()
     else {
         panic!("last event is not response.done: {events:?}");
@@ -608,7 +609,8 @@ async fn barge_in_cancels_the_response_and_truncates_the_played_audio() {
                     total_tokens: Some(22),
                     input_tokens: Some(13),
                     output_tokens: Some(9)
-                })
+                }),
+                unreadable_usage: None
             },
         ]
     );
@@ -617,7 +619,8 @@ async fn barge_in_cancels_the_response_and_truncates_the_played_audio() {
         ServerEvent::ResponseDone {
             response_id: Some("resp_001".to_owned()),
             status: Some(ResponseStatus::Cancelled),
-            usage: None
+            usage: None,
+            unreadable_usage: None
         }
     );
 }

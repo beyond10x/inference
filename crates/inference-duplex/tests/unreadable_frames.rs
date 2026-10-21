@@ -1,5 +1,5 @@
 //! Frames the binding could not read: each is counted on the session, none refreshes the liveness
-//! bound, and a later failure of the session is reported as a provider error naming them. A
+//! bound, and a later failure of the session names them, a stall becoming a provider error. A
 //! response the provider ended with an outcome the binding could not read fails, and the caller
 //! still awaits the provider.
 
@@ -121,32 +121,36 @@ fn unreadable_frames_are_counted_and_do_not_refresh_the_bound() {
     assert!(failure.detail.contains("still not"), "{failure:?}");
 }
 
+/// A failure whose kind was stated, by the transport or by the provider, keeps it after frames
+/// the binding could not read; its detail names them.
 #[test]
-fn a_failure_after_unreadable_frames_is_a_provider_error_naming_them() {
-    let start = Instant::now();
-    let mut ledger = open(start);
-    ledger.unreadable_frame("`response.done` lacks the object field `response`", start);
-    ledger
-        .fail(SessionFailure {
-            kind: SessionFailureKind::TransportClosed,
-            detail: "the provider closed the connection".to_owned(),
-        })
-        .expect("open");
-    let events: Vec<_> = std::iter::from_fn(|| ledger.next_event()).collect();
-    let failure = failure(&events);
-    assert_eq!(
-        failure.kind,
+fn a_stated_failure_after_unreadable_frames_keeps_its_kind_and_names_them() {
+    for kind in [
+        SessionFailureKind::TransportClosed,
+        SessionFailureKind::Rejected,
         SessionFailureKind::ProviderError,
-        "{failure:?}"
-    );
-    assert!(
-        failure
-            .detail
-            .contains("the provider closed the connection")
-            && failure.detail.contains("1 frame ")
-            && failure.detail.contains("`response.done`"),
-        "{failure:?}"
-    );
+    ] {
+        let start = Instant::now();
+        let mut ledger = open(start);
+        ledger.unreadable_frame("`response.done` lacks the object field `response`", start);
+        ledger
+            .fail(SessionFailure {
+                kind,
+                detail: "the provider closed the connection".to_owned(),
+            })
+            .expect("open");
+        let events: Vec<_> = std::iter::from_fn(|| ledger.next_event()).collect();
+        let failure = failure(&events);
+        assert_eq!(failure.kind, kind, "{failure:?}");
+        assert!(
+            failure
+                .detail
+                .contains("the provider closed the connection")
+                && failure.detail.contains("1 frame ")
+                && failure.detail.contains("`response.done`"),
+            "{failure:?}"
+        );
+    }
 }
 
 #[test]

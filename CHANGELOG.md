@@ -34,7 +34,8 @@
   before `SpeechSessionClosed` or `SpeechSessionFailed`, not as they arrive.
 - **Breaking:** provider events are decoded field by field, so a field an event may lack is an
   `Option`: OpenAI Realtime `ServerEvent::ResponseDone` (`response_id`, `status`, `usage`) and
-  `ServerEvent::InputTranscript` (`item_id`, `transcript`); GPT-Live `BackendEvent::Completed` and
+  `ServerEvent::InputTranscript` (`item_id`, `transcript`), both of which also gain
+  `unreadable_usage`, saying why a `usage` in another shape could not be read; GPT-Live `BackendEvent::Completed` and
   `BackendEvent::Ended` (`response_id`), `LiveEvent::SessionClosed` and `LiveClosed` (`reason`,
   `seconds`); Nova Sonic `OutputEvent::CompletionEnd` (`stop_reason`), `OutputContentEnd`
   (`content_id`, `kind`) and `OutputEvent::Interrupted` (`content_id`).
@@ -54,12 +55,17 @@
   provider sends after it is still recorded by `next_event` and by the close.
 - Such a frame is no longer dropped silently: the session counts it and keeps the last one's
   type or the start of its text, and it does not refresh the liveness bound. A later failure of
-  the session is reported as `ProviderError` naming that count and the last frame, not as
-  `Stalled` or `TransportClosed`.
+  the session names that count and the last frame. A stall after such frames is reported as
+  `ProviderError`; every other failure keeps the kind the transport or the provider stated, so a
+  GPT-Live `connection_lost` without its seconds is still `TransportClosed`.
 - An event that lacks a field the binding does not need keeps its usage and its end. A Realtime
-  `response.done` without `status` ends the response in progress, which fails as a provider error,
-  and still counts its usage; one without its id ends the response in progress, so it no longer
-  blocks the next. A transcription without its transcript still counts its usage. A GPT-Live
+  `response.done` without `status` ends its response, which fails as a provider error, and still
+  counts its usage. One without its id ends the oldest response still awaiting its
+  `response.done`, never a newer one, so it no longer blocks the next. A `usage` in a shape the
+  binding cannot read counts as unknown, and its frame is counted as unreadable. A transcription
+  without its transcript still counts its usage. A Realtime `response.created` while a response is
+  still in progress ends that one first, as a provider error naming the unreadable frames, its
+  usage recorded with every count unknown, and the new response is accepted. A GPT-Live
   backend end without its id, and a `session.closed` without its reason or seconds, keep their
   meaning. A Nova Sonic `completionEnd` without `stopReason` ends the response in progress, and a
   `contentEnd` or interruption notice without `contentId` applies to it.

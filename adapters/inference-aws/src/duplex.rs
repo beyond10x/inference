@@ -47,8 +47,9 @@
 //!   `contentEnd` or interruption notice without its `contentId` applies to the response in
 //!   progress, Nova Sonic streaming one at a time. A frame that is no event at all is dropped and
 //!   reading goes on, but it is counted on the session ([`SessionLedger::unreadable_frames`]), it
-//!   does not refresh the liveness bound, and a later failure of the session is a provider error
-//!   naming how many there were and the start of the last.
+//!   does not refresh the liveness bound, and a later failure of the session names how many there
+//!   were and the start of the last; a stall becomes a provider error, every other failure keeps
+//!   its kind.
 //!
 //! The response boundaries are inferred from the order of content blocks the Nova 2 user guide
 //! and the AWS samples show (speculative text, audio, then final text ending `END_TURN`), not

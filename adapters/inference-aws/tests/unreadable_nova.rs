@@ -270,3 +270,33 @@ fn a_content_end_without_its_id_still_cancels_the_response_in_progress() {
         .collect();
     assert_eq!(states, [ResponseState::Cancelled], "{events:#?}");
 }
+
+/// A `contentStart` without its `contentId`, `type` or `role` opens no block the binding could
+/// place; it is not dropped silently but counted as a frame the binding could not read, each
+/// named by the field it lacked.
+#[test]
+fn a_content_start_without_its_id_type_or_role_is_counted_as_unreadable() {
+    let mut steps = user_turn();
+    for lacking in ["contentId", "type", "role"] {
+        let mut body = json!({
+            "contentId": "assistant-1",
+            "type": "TEXT",
+            "role": "ASSISTANT",
+            "textOutputConfiguration": {"mediaType": "text/plain"}
+        });
+        body.as_object_mut().expect("an object").remove(lacking);
+        steps.push(event("contentStart", body));
+    }
+    steps.push(usage(5));
+    let mut session = open(steps, Duration::from_secs(5));
+    let events = drain(&mut session);
+    assert_eq!(session.ledger().unreadable_frames(), 3, "{events:#?}");
+    let last = session.ledger().last_unreadable().unwrap_or_default();
+    assert!(
+        last.contains("contentStart") && last.contains("role"),
+        "{last}"
+    );
+    session.close().expect("open");
+    drain(&mut session);
+    assert_eq!(output_text_tokens(&session), 5);
+}
