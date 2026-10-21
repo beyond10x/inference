@@ -44,13 +44,17 @@
 //! asks for delivers no more text, and no usage record is lost to it: the record of each turn
 //! that ended and was not yet taken is still delivered, and the turn running then is cancelled
 //! through [`llm_core::Cancel`] and polled until its model returns from the cancel, which may
-//! take as long as the model takes, and then yields a record if `llm` reported usage for it: the
-//! counts its outcome or its error carries, `final` only when the turn ended all the same with
-//! final counts, so a turn cut short is marked `final: false`. A completion the caller asks for
-//! cuts a running turn the same way, its record before [`GenerationEvent::Completed`]. A cut turn
-//! whose usage `llm` never reported yields no record, as there is nothing to report: a server
-//! that counts only on the last chunk of its stream has reported nothing for a stream cut before
-//! it. Dropping the handle gives every record still in it up.
+//! take as long as the model takes, and then yields one record, as every model call does. It
+//! carries the counts its outcome or its error carries, `final` as `llm` marked them: the
+//! provider's mark, which `ess/domains/usage.yaml` makes the meaning of `final`, whether the turn
+//! ended or failed with the cancel. A cut turn for which `llm` reported no counts, as a server
+//! that counts only on the last chunk of its stream has reported none for a stream cut before it,
+//! is recorded as a failed turn is: one request, every token count unknown, not final, as its
+//! counts are unknown; a turn that ended all the same reporting no counts keeps the mark of its
+//! outcome. A completion the caller asks for cuts a running turn the same way, its record before
+//! [`GenerationEvent::Completed`]. A caller that will not wait for the cut turn any longer gives
+//! it up with [`GenerationHandle::abandon_cut_turn`], which records it the same way as a turn
+//! with no counts reported. Dropping the handle gives every record still in it up.
 //!
 //! Output streaming, incremental input and input during output are distinct capabilities
 //! (`inference.model.Capability`), and a persistent connection proves none of them. What the
@@ -1073,8 +1077,8 @@ impl GenerationHandle {
 
     /// Runs `inference.stream.CompleteGeneration` now, whatever is unanswered: the running turn
     /// is cancelled, unanswered calls and waiting input are dropped, and what an adapter that
-    /// does not stream held is delivered, then the usage record of the turn it cut, if `llm`
-    /// reported usage for it, once its model returns, then [`GenerationEvent::Completed`].
+    /// does not stream held is delivered, then the usage record of the turn it cut, once its
+    /// model returns, then [`GenerationEvent::Completed`].
     ///
     /// # Errors
     ///
@@ -1334,31 +1338,68 @@ impl GenerationHandle {
         self.keep_held_usage();
     }
 
-    /// Takes the end of the turn the end of its generation cut: its usage record, when `llm`
-    /// reported usage for it, final only when the turn ended all the same and its counts were
-    /// final, then the [`GenerationEvent::Completed`] a completion held back. Its text and its
-    /// calls are not delivered.
+    /// Takes the end of the turn the end of its generation cut: its usage record, then the
+    /// [`GenerationEvent::Completed`] a completion held back. The record carries the counts `llm`
+    /// reported, final as `llm` marked them; a turn that failed with no counts reported is one
+    /// request with every token count unknown, not final. Its text and its calls are not
+    /// delivered.
     fn cut_turn_ended(&mut self, ended: Result<TurnOutcome, llm_core::Error>) {
         self.turn = None;
-        let ended_at_ms = wall_clock_ms();
-        let (observation, turn_ended) = match &ended {
-            Ok(outcome) => (Some(&outcome.observation), true),
-            Err(error) => (error.observation.as_deref(), false),
+        let observation = match &ended {
+            Ok(outcome) => Some(&outcome.observation),
+            Err(error) => error.observation.as_deref(),
         };
-        if let Some(observation) = observation.filter(|observation| observation.usage.is_some()) {
-            let recorded = usage_of_turn(
-                &self.adapter,
-                observation.usage.as_ref(),
-                observation
-                    .upstream_model
-                    .as_ref()
-                    .map(llm_core::Id::as_str),
-                turn_ended && observation.final_usage,
-                (self.turn_started_ms, ended_at_ms),
-            );
-            self.delivered.push_back(GenerationEvent::Usage(recorded));
-        }
+        let r#final = match (&ended, observation) {
+            (Ok(_), Some(observation)) => observation.final_usage,
+            (Err(_), Some(observation)) => observation.final_usage && observation.usage.is_some(),
+            (_, None) => false,
+        };
+        self.record_cut_turn(
+            observation.and_then(|observation| observation.usage.as_ref()),
+            observation.and_then(|observation| observation.upstream_model.as_ref()),
+            r#final,
+        );
+    }
+
+    /// Queues the record of the cut turn, then the [`GenerationEvent::Completed`] a completion
+    /// held back.
+    fn record_cut_turn(
+        &mut self,
+        usage: Option<&llm_core::Usage>,
+        upstream_model: Option<&llm_core::Id>,
+        r#final: bool,
+    ) {
+        let recorded = usage_of_turn(
+            &self.adapter,
+            usage,
+            upstream_model.map(llm_core::Id::as_str),
+            r#final,
+            (self.turn_started_ms, wall_clock_ms()),
+        );
+        self.delivered.push_back(GenerationEvent::Usage(recorded));
         self.delivered.extend(self.ending.take());
+    }
+
+    /// Whether the generation ended, by a supersede, a cancel or a completion, while a turn
+    /// ran, and that turn has not yet returned from its cancel.
+    #[must_use]
+    pub fn awaits_cut_turn(&self) -> bool {
+        self.turn.is_some() && self.output.generation().state() != GenerationState::Active
+    }
+
+    /// Gives up waiting for the turn the end of the generation cut, for a caller with a bound
+    /// of its own, since the handle keeps no timer: the turn is dropped, and its record is
+    /// queued as for a cut turn for which `llm` reported no counts, one request with every token
+    /// count unknown, not final, then the [`GenerationEvent::Completed`] a completion held back.
+    /// True when there was such a turn; false, changing nothing, when there was none
+    /// ([`GenerationHandle::awaits_cut_turn`]).
+    pub fn abandon_cut_turn(&mut self) -> bool {
+        if !self.awaits_cut_turn() {
+            return false;
+        }
+        self.turn = None;
+        self.record_cut_turn(None, None, false);
+        true
     }
 
     /// Cancels the running turn, which stays to be polled until its model returns from the
