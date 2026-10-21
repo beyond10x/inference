@@ -14,7 +14,7 @@
 //! |---|---|
 //! | `describe`, `described` | nothing yet; the node keeps its declaration and its instance |
 //! | `prepare` | created under the node's instance as its parent (`NestRun`), validated, prepared |
-//! | `start` | activated; the parent edges arriving at each input port are merged into the child ingress of its name, and the child egress of each output port's name, with every usage egress the usage port forwards merged into it, is fanned out to every parent edge leaving it; every child egress of an output port no parent edge leaves is read and what it sends dropped; the child's run loop runs. A refused start cancels and stops the child |
+//! | `start` | activated; the parent edges arriving at each input port are merged into the child ingress of its name, and the child egress of each output port's name, with every usage egress the usage port forwards and the sink of every unconnected child `usage` port merged into it, is fanned out to every parent edge leaving it; every child egress of an output port other than `usage` that no parent edge leaves is read and what it sends dropped; the child's run loop runs. A refused start cancels and stops the child |
 //! | `drain` | each ingress still open forwards what its parent edges hold, sends `stop` and ends; only then is a drain asked for, so input the parent admitted before its drain is never overtaken by it at any nesting level (`inference.graph.DrainRun`: in-flight events complete); the step returns once the child run is terminal |
 //! | `cancel` | cancelled |
 //! | `stop` | returns once the child run is terminal and its queues are dropped |
@@ -37,17 +37,24 @@
 //! back-pressure, not loss: the bridge holds the envelope until the queue has room (see its
 //! private `send`).
 //!
-//! An output port of the node that no parent edge leaves, its `usage` port among them, which
-//! validation admits when the port is optional, is the node's as a model node's port with no edge
-//! is the model node's: what the child sends out of the egresses the port takes reaches no parent
-//! edge, and the parent run is not failed for it. A bridge with no parent edge reads those
-//! egresses as any egress bridge does, a usage egress through a cancel until it closes, and drops
-//! what it reads, so that the child's nodes are never refused on a send there and the child run
+//! An output port of the node other than `usage` that no parent edge leaves, which validation
+//! admits when the port is optional, is the node's as a model node's port with no edge is the
+//! model node's: what the child sends out of the egresses the port takes reaches no parent edge,
+//! and the parent run is not failed for it. A bridge with no parent edge reads those egresses as
+//! any egress bridge does, a usage egress through a cancel until it closes, and drops what it
+//! reads, so that the child's nodes are never refused on a send there and the child run
 //! completes. Every egress bridge, with parent edges or none, ends once the child run has
 //! returned and its egresses hold nothing more, even where a node of the child kept its egress
-//! end past its stop. Nothing in the parent carries a usage record dropped there, as nothing
-//! carries the record a model node with no edge on its `usage` port does not send; the child's own
-//! nodes sent it, so a [`Recorder`](crate::record::Recorder) wrapping them records it in the child.
+//! end past its stop.
+//!
+//! Usage is not dropped that way (`story:usage-unconnected-port-counted`). The node's `usage`
+//! port with no parent edge is handed a sink by the parent run ([`crate::usage_sink`]), as a model
+//! node's is, so the usage it forwards reaches the parent's caller, which counts it in the parent
+//! run's total. A `usage` port of the child with no edge and no exposure is handed a sink by the
+//! child run, and the node's `usage` port forwards what that sink holds with the child's usage
+//! egresses. Only a node with no `usage` port, whose child exposes no usage egress, has nowhere to
+//! send what such a sink holds and drops it; [`crate::usage_sink::uncounted_usage`] names it, so
+//! that the caller can mark its total partial.
 //!
 //! Tracing needs no library: every envelope inside the child carries the child run's identity, as
 //! its nodes stamp it. An envelope crossing the boundary, in either direction, is sent on the other
@@ -408,9 +415,10 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
 
     /// The bridges between the node's edge endpoints and the child's exposures: one per exposure
     /// the node's ports name, an ingress merging every parent edge into its input port of that
-    /// name, an egress fanned out to every parent edge leaving its output port of that name; and
-    /// one with no parent edge reading every egress of the child no other bridge took, those of
-    /// the output ports no parent edge leaves, and dropping what it reads.
+    /// name, an egress fanned out to every parent edge leaving its output port of that name, the
+    /// `usage` port's merging the sinks of the child's unconnected `usage` ports too; and one with
+    /// no parent edge reading every egress of the child no other bridge took, and those sinks when
+    /// the node has no `usage` port, and dropping what it reads.
     ///
     /// # Errors
     ///
@@ -485,12 +493,13 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
             if port == USAGE_PORT {
                 names.extend(forwarded.iter().cloned());
             }
-            let egresses: Vec<ChildEgress<P>> = names
+            let mut egresses: Vec<ChildEgress<P>> = names
                 .iter()
                 .filter_map(|name| {
                     ends.egress(name).map(|endpoint| ChildEgress {
                         endpoint,
                         usage: carries_usage(name),
+                        sink: false,
                     })
                 })
                 .collect();
@@ -499,6 +508,15 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
                     "the child has no egress named `{port}` for the node's output port of that \
                      name"
                 )));
+            }
+            if port == USAGE_PORT {
+                egresses.extend(std::mem::take(&mut ends.usage).into_iter().map(|sink| {
+                    ChildEgress {
+                        endpoint: sink.endpoint,
+                        usage: true,
+                        sink: true,
+                    }
+                }));
             }
             tasks.push(Box::pin(egress_bridge(
                 egresses,
@@ -516,7 +534,13 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
             .map(|egress| ChildEgress {
                 usage: carries_usage(&egress.name),
                 endpoint: egress.endpoint,
+                sink: false,
             })
+            .chain(ends.usage.into_iter().map(|sink| ChildEgress {
+                endpoint: sink.endpoint,
+                usage: true,
+                sink: true,
+            }))
             .collect();
         if !unconnected.is_empty() {
             tasks.push(Box::pin(egress_bridge(
@@ -907,11 +931,14 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
     }
 }
 
-/// A child egress an egress bridge reads, and whether it is a usage egress
-/// ([`Declaration::is_usage_egress`]).
+/// A child egress an egress bridge reads, whether it is a usage egress
+/// ([`Declaration::is_usage_egress`]), and whether it is the sink of a child `usage` port no edge
+/// leaves and no exposure carries ([`crate::usage_sink`]), whose `stop` the bridge neither waits
+/// for nor forwards, since no exposure of the child ends there.
 struct ChildEgress<P> {
     endpoint: Box<dyn InputEndpoint<P>>,
     usage: bool,
+    sink: bool,
 }
 
 /// One child egress's next envelope, with the egress's index among those a bridge merges and its
@@ -960,9 +987,11 @@ enum Next<P> {
 ///
 /// `egresses` is the child's egress of the port's name, or, for the node's usage port, that and
 /// every usage egress the port forwards ([`Declaration::forwarded_usage`]), merged as they arrive,
-/// so every usage record of the child crosses once. A `stop` ends one egress's input: it crosses
-/// once every egress has sent one, the last to arrive, and none crosses if an egress ended
-/// without it, as on the ingress side; so the parent sees one end of input whatever it merges.
+/// so every usage record of the child crosses once, with the sink of every child `usage` port no
+/// edge leaves and no exposure carries ([`crate::usage_sink`]). A `stop` ends one egress's input:
+/// it crosses once every egress has sent one, the last to arrive, and none crosses if an egress
+/// ended without it, as on the ingress side; so the parent sees one end of input whatever it
+/// merges. A sink's `stop` is not waited for and does not cross, since it ends no exposure.
 async fn egress_bridge<P: Clone + Send + 'static>(
     egresses: Vec<ChildEgress<P>>,
     parents: Vec<Box<dyn OutputEndpoint<P>>>,
@@ -971,7 +1000,8 @@ async fn egress_bridge<P: Clone + Send + 'static>(
 ) {
     let mut parents = parents;
     let discards = parents.is_empty();
-    let mut stopped = vec![false; egresses.len()];
+    let sinks: Vec<bool> = egresses.iter().map(|egress| egress.sink).collect();
+    let mut stopped = sinks.clone();
     let usage: Vec<bool> = egresses.iter().map(|egress| egress.usage).collect();
     let mut cancelled = false;
     let mut pending: Vec<(usize, Indexed<P>)> = egresses
@@ -1013,6 +1043,9 @@ async fn egress_bridge<P: Clone + Send + 'static>(
         };
         pending.push((index, indexed(index, egress)));
         if envelope.kind == ControlKind::Stop.as_str() {
+            if sinks[index] {
+                continue;
+            }
             stopped[index] = true;
             if !stopped.iter().all(|stopped| *stopped) {
                 continue;
