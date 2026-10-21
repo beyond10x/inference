@@ -469,10 +469,12 @@ const SESSION_SCENARIOS: [&str; 62] = [
     "inference.session.SwitchPipeline/outcome/unknown-pipeline",
 ];
 
-/// Every `inference.duplex` scenario the suite synthesizes and the two authored ones, 74: the
-/// native speech session, its responses and tool calls, their transitions and state refusals,
-/// the format range, barge-in and the input-during-output evidence for `native_duplex`.
-const DUPLEX_SCENARIOS: [&str; 74] = [
+/// Every `inference.duplex` scenario the suite synthesizes and the four authored ones, 81: the
+/// native speech session, its responses, tool calls and received provider events, their
+/// transitions and state refusals, the format range, barge-in, the input-during-output evidence
+/// for `native_duplex`, and a close and a failure delivering what the session received before
+/// them, which stand for the `closed` and `failed` outcomes the synthesizer refuses.
+const DUPLEX_SCENARIOS: [&str; 81] = [
     "inference.duplex.AnswerSpeechToolCall/outcome/answered",
     "inference.duplex.AnswerSpeechToolCall/outcome/wrong-state",
     "inference.duplex.AppendInputAudio/outcome/accepted",
@@ -481,7 +483,6 @@ const DUPLEX_SCENARIOS: [&str; 74] = [
     "inference.duplex.AppendInputAudio/outcome/unknown-session",
     "inference.duplex.CancelResponse/outcome/cancelled",
     "inference.duplex.CancelResponse/outcome/wrong-state",
-    "inference.duplex.CloseSpeechSession/outcome/closed",
     "inference.duplex.CloseSpeechSession/outcome/wrong-state",
     "inference.duplex.CommitInput/outcome/committed",
     "inference.duplex.CommitInput/outcome/session-not-open",
@@ -491,6 +492,8 @@ const DUPLEX_SCENARIOS: [&str; 74] = [
     "inference.duplex.CreateResponse/outcome/created",
     "inference.duplex.CreateResponse/outcome/session-not-open",
     "inference.duplex.CreateResponse/outcome/unknown-session",
+    "inference.duplex.DeliverSessionEvent/outcome/delivered",
+    "inference.duplex.DeliverSessionEvent/outcome/wrong-state",
     "inference.duplex.EmitOutputAudio/outcome/emitted",
     "inference.duplex.EmitOutputAudio/outcome/format-out-of-range",
     "inference.duplex.EmitOutputAudio/outcome/not-in-progress",
@@ -500,7 +503,6 @@ const DUPLEX_SCENARIOS: [&str; 74] = [
     "inference.duplex.EmitOutputTranscript/outcome/unknown-response",
     "inference.duplex.FailResponse/outcome/failed",
     "inference.duplex.FailResponse/outcome/wrong-state",
-    "inference.duplex.FailSpeechSession/outcome/failed",
     "inference.duplex.FailSpeechSession/outcome/wrong-state",
     "inference.duplex.ObserveSpeechStarted/outcome/observed",
     "inference.duplex.ObserveSpeechStarted/outcome/session-not-open",
@@ -516,6 +518,11 @@ const DUPLEX_SCENARIOS: [&str; 74] = [
     "inference.duplex.ProposeSpeechToolCall/outcome/proposed",
     "inference.duplex.ProposeSpeechToolCall/outcome/unknown-response",
     "inference.duplex.ProposeSpeechToolCall/outcome/unknown-tool",
+    "inference.duplex.ReceiveSessionEvent/outcome/received",
+    "inference.duplex.ReceiveSessionEvent/outcome/session-not-open",
+    "inference.duplex.ReceiveSessionEvent/outcome/unknown-session",
+    "inference.duplex.ReceivedSessionEvent/state/Delivered/refuses/inference.duplex.DeliverSessionEvent",
+    "inference.duplex.ReceivedSessionEvent/transition/deliver/by/inference.duplex.DeliverSessionEvent/delivered",
     "inference.duplex.RecordResponseUsage/outcome/recorded",
     "inference.duplex.RecordResponseUsage/outcome/unknown-response",
     "inference.duplex.RecordTranscriptionUsage/outcome/recorded",
@@ -546,6 +553,8 @@ const DUPLEX_SCENARIOS: [&str; 74] = [
     "inference.duplex.TruncateOutput/outcome/truncated",
     "inference.duplex.TruncateOutput/outcome/unknown-response",
     "inference.duplex/authored/barge-in-cancels-response",
+    "inference.duplex/authored/close-delivers-received-usage",
+    "inference.duplex/authored/fail-delivers-received-usage",
     "inference.duplex/authored/input-during-output-continues-response",
 ];
 

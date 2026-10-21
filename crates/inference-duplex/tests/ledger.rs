@@ -1036,6 +1036,57 @@ fn a_transcription_in_seconds_and_a_session_total_are_records_of_the_session() {
     assert_eq!(ledger.usage_records().len(), 2);
 }
 
+/// A session billed as a whole, such as seconds of session: the latest total is recorded once, as
+/// usage of the session, after the end events of its responses and just before its own, whether
+/// a close, a failure or a stall ends it; given after the end, it is recorded at once.
+#[test]
+fn a_session_total_is_recorded_just_before_the_session_ends() {
+    let seconds = |ms| vec![Quantity::provider_reported(QuantityKind::InputAudioMs, ms)];
+    let ends: [fn(&mut SessionLedger); 2] = [
+        |ledger| ledger.close().expect("open"),
+        |ledger| {
+            ledger
+                .fail(SessionFailure {
+                    kind: SessionFailureKind::ProviderError,
+                    detail: "the provider ended the session: expired".to_owned(),
+                })
+                .expect("open");
+        },
+    ];
+    for (end, (ended, last)) in ends.into_iter().zip([
+        ("ResponseCancelled", "SpeechSessionClosed"),
+        ("ResponseFailed", "SpeechSessionFailed"),
+    ]) {
+        let start = Instant::now();
+        let mut ledger = open(&full(), config(TurnDetection::Disabled), start);
+        let response = ResponseId::generate();
+        ledger.response_created(response, start).expect("created");
+        ledger.session_usage_at_end(seconds(3_000), false);
+        ledger.session_usage_at_end(seconds(4_500), true);
+        end(&mut ledger);
+        let events = drain(&mut ledger);
+        assert_eq!(
+            kinds(&events),
+            [
+                "ResponseCreated",
+                "UsageRecorded",
+                ended,
+                "UsageRecorded",
+                last
+            ]
+        );
+        let recorded = records(&events);
+        assert_eq!(recorded[0].response_id, Some(response));
+        assert_eq!(recorded[1].response_id, None);
+        assert_eq!(recorded[1].quantities, seconds(4_500), "the latest total");
+        assert!(recorded[1].r#final);
+        ledger.session_usage_at_end(seconds(5_000), true);
+        let after = drain(&mut ledger);
+        assert_eq!(kinds(&after), ["UsageRecorded"], "after the end, at once");
+        assert_eq!(ledger.usage_records().len(), 3);
+    }
+}
+
 /// Usage a provider reported before the response it counts toward began, such as input billed
 /// before a response the session never reaches: the latest quantities held are recorded once, as
 /// usage of the session, before the end event of a close, a failure or a stall.
