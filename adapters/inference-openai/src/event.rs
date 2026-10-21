@@ -95,6 +95,10 @@ pub enum ServerEvent {
         usage: Option<Usage>,
         unreadable_usage: Option<String>,
     },
+    /// A message that is not JSON, but whose text still reads `"type": "response.done"`: a
+    /// `response.done` nothing else of which could be read. `what` names it as an unreadable
+    /// message is named, by the parse error and the start of its text.
+    UnreadableResponseDone { what: String },
     /// `error`.
     Error(ServerError),
     /// Any other event: its `type` and the whole event as received.
@@ -109,14 +113,22 @@ impl ServerEvent {
     /// naming the start of the text, or when a typed event lacks a field the reference requires
     /// and without which it means nothing. `response.done` and
     /// `conversation.item.input_audio_transcription.completed`, which end a response or carry
-    /// billable usage, are read field by field and never refused for a field.
+    /// billable usage, are read field by field and never refused for a field; text that is not
+    /// JSON but reads `"type": "response.done"` is [`ServerEvent::UnreadableResponseDone`].
     pub fn parse(text: &str) -> Result<Self, RealtimeError> {
-        let raw: Value = serde_json::from_str(text).map_err(|error| {
-            RealtimeError::Protocol(format!(
-                "server event is not JSON ({error}); it begins {:?}",
-                text_start(text)
-            ))
-        })?;
+        let raw: Value = match serde_json::from_str(text) {
+            Ok(raw) => raw,
+            Err(error) => {
+                let what = format!(
+                    "server event is not JSON ({error}); it begins {:?}",
+                    text_start(text)
+                );
+                if type_reads(text, "response.done") {
+                    return Ok(Self::UnreadableResponseDone { what });
+                }
+                return Err(RealtimeError::Protocol(what));
+            }
+        };
         let Some(event_type) = raw.get("type").and_then(Value::as_str) else {
             return Err(RealtimeError::Protocol(format!(
                 "server event has no string `type`; it begins {:?}",
@@ -237,6 +249,18 @@ fn split<T>(usage: Result<Option<T>, RealtimeError>) -> (Option<T>, Option<Strin
         Err(RealtimeError::Protocol(what)) => (None, Some(what)),
         Err(error) => (None, Some(error.to_string())),
     }
+}
+
+/// Whether a key `"type"` in `text`, which need not be JSON, has the string value `wanted`.
+fn type_reads(text: &str, wanted: &str) -> bool {
+    text.match_indices("\"type\"").any(|(at, key)| {
+        let rest = text[at + key.len()..].trim_start();
+        rest.strip_prefix(':')
+            .map(str::trim_start)
+            .and_then(|value| value.strip_prefix('"'))
+            .and_then(|value| value.strip_prefix(wanted))
+            .is_some_and(|after| after.starts_with('"'))
+    })
 }
 
 /// The first 32 characters of a server message, to name one that could not be read.

@@ -438,7 +438,10 @@ pub trait SpeechSessionHandle {
     /// `wait` and the session stands as it was. A provider silent beyond the liveness bound
     /// yields [`SpeechSessionFailed`] with [`SessionFailureKind::Stalled`], and a closed transport
     /// yields it with [`SessionFailureKind::TransportClosed`] at once, never silence, after the
-    /// events that arrived before the transport closed.
+    /// events that arrived before the transport closed. A failure names the frames the binding
+    /// could not read. Stalled turns into ProviderError only when an unreadable frame arrived
+    /// after the last readable frame. A readable frame clears that state. The detail still names
+    /// the total unreadable count.
     ///
     /// [`SessionFailureKind::Stalled`]: crate::SessionFailureKind::Stalled
     /// [`SessionFailureKind::TransportClosed`]: crate::SessionFailureKind::TransportClosed

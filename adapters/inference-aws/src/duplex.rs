@@ -48,8 +48,10 @@
 //!   progress, Nova Sonic streaming one at a time. A frame that is no event at all is dropped and
 //!   reading goes on, but it is counted on the session ([`SessionLedger::unreadable_frames`]), it
 //!   does not refresh the liveness bound, and a later failure of the session names how many there
-//!   were and the start of the last; a stall becomes a provider error, every other failure keeps
-//!   its kind.
+//!   were and the start of the last. Stalled turns into ProviderError only when an unreadable
+//!   frame arrived after the last readable frame. A readable frame clears that state. The detail
+//!   still names the total unreadable count. Every other failure keeps its kind, and every
+//!   provider event the ledger refuses is dropped and kept in [`SessionLedger::dropped_events`].
 //!
 //! The response boundaries are inferred from the order of content blocks the Nova 2 user guide
 //! and the AWS samples show (speculative text, audio, then final text ending `END_TURN`), not
@@ -659,6 +661,14 @@ pub struct NovaSonicSpeechSession {
 }
 
 impl NovaSonicSpeechSession {
+    /// A ledger refusal the binding drops: it changed nothing, and the ledger keeps it
+    /// ([`SessionLedger::dropped_events`]).
+    fn or_drop(&mut self, result: Result<(), SessionError>) {
+        if let Err(refusal) = result {
+            self.ledger.dropped(refusal);
+        }
+    }
+
     fn send(&mut self, command: Command) {
         if self.commands.send(command).is_err() {
             self.commands_closed();
@@ -679,10 +689,11 @@ impl NovaSonicSpeechSession {
     }
 
     fn transport_closed(&mut self) {
-        let _ = self.ledger.fail(failure(
+        let refused = self.ledger.fail(failure(
             SessionFailureKind::TransportClosed,
             "the provider's stream closed",
         ));
+        self.or_drop(refused);
     }
 
     fn record(&mut self, arrival: Arrival) {
@@ -692,7 +703,8 @@ impl NovaSonicSpeechSession {
             Received::Undecodable(what) => self.ledger.unreadable_frame(what, at),
             Received::Ended => self.transport_closed(),
             Received::Failed(error) => {
-                let _ = self.ledger.fail(client_failure(&error));
+                let refused = self.ledger.fail(client_failure(&error));
+                self.or_drop(refused);
             }
             Received::Event(event) => {
                 self.ledger.heard(at);
@@ -728,17 +740,20 @@ impl NovaSonicSpeechSession {
                     .and_then(|block| block.response)
                     .or_else(|| self.ledger.in_progress());
                 if let Some(response) = response {
-                    let _ = self.ledger.response_cancelled(response, at);
+                    let refused = self.ledger.response_cancelled(response, at);
+                    self.or_drop(refused);
                 }
             }
             OutputEvent::Usage(usage) => self.usage(&usage, at),
             OutputEvent::CompletionEnd { .. } => {
                 if let Some(response) = self.ledger.in_progress() {
-                    let _ = self.ledger.response_completed(response, at);
+                    let refused = self.ledger.response_completed(response, at);
+                    self.or_drop(refused);
                 }
             }
             OutputEvent::Error(error) => {
-                let _ = self.ledger.fail(service_failure(&error));
+                let refused = self.ledger.fail(service_failure(&error));
+                self.or_drop(refused);
             }
             OutputEvent::CompletionStart(_) | OutputEvent::Unknown { .. } => {}
         }
@@ -754,8 +769,9 @@ impl NovaSonicSpeechSession {
         }
         let position =
             SampleClockPosition::new(self.turns.input_end).unwrap_or(SampleClockPosition::MAX);
-        if self.ledger.speech_started(position, at).is_ok() {
-            self.turns.speech_reported = true;
+        match self.ledger.speech_started(position, at) {
+            Ok(()) => self.turns.speech_reported = true,
+            Err(refusal) => self.ledger.dropped(refusal),
         }
     }
 
@@ -771,11 +787,15 @@ impl NovaSonicSpeechSession {
             (Role::User, ContentKind::Text) if !block.speculative() => {
                 self.report_speech(at);
                 if let Some(response) = self.ledger.in_progress() {
-                    let _ = self.ledger.response_completed(response, at);
+                    let refused = self.ledger.response_completed(response, at);
+                    self.or_drop(refused);
                 }
-                if self.ledger.input_committed(at).is_ok() {
-                    self.turns.open = true;
-                    self.turns.speech_reported = false;
+                match self.ledger.input_committed(at) {
+                    Ok(()) => {
+                        self.turns.open = true;
+                        self.turns.speech_reported = false;
+                    }
+                    Err(refusal) => self.ledger.dropped(refusal),
                 }
             }
             (Role::User, _) => {}
@@ -815,10 +835,12 @@ impl NovaSonicSpeechSession {
         }
         match (&block.role, block.response) {
             (Role::User, _) => {
-                let _ = self.ledger.input_transcribed(text.content, at);
+                let refused = self.ledger.input_transcribed(text.content, at);
+                self.or_drop(refused);
             }
             (Role::Assistant, Some(response)) => {
-                let _ = self.ledger.output_transcript(response, text.content, at);
+                let refused = self.ledger.output_transcript(response, text.content, at);
+                self.or_drop(refused);
             }
             _ => {}
         }
@@ -848,8 +870,9 @@ impl NovaSonicSpeechSession {
             sample_count: samples,
             data: audio.pcm,
         };
-        if self.ledger.output_audio(response, frame, at).is_ok() {
-            self.turns.emitted += u64::from(samples);
+        match self.ledger.output_audio(response, frame, at) {
+            Ok(()) => self.turns.emitted += u64::from(samples),
+            Err(refusal) => self.ledger.dropped(refusal),
         }
     }
 
@@ -864,13 +887,14 @@ impl NovaSonicSpeechSession {
             return;
         };
         let arguments = serde_json::from_str(&tool.content).unwrap_or(Json::String(tool.content));
-        let _ = self.ledger.tool_call(
+        let refused = self.ledger.tool_call(
             SpeechCallId::new(tool.tool_use_id),
             response,
             &tool.tool_name,
             arguments,
             at,
         );
+        self.or_drop(refused);
     }
 
     /// Ends the block's response as its stop reason says. An end without its `contentId` applies
@@ -897,7 +921,7 @@ impl NovaSonicSpeechSession {
         let final_text = block
             .as_ref()
             .is_some_and(|block| block.kind == ContentKind::Text && !block.speculative());
-        let _ = match end.stop_reason {
+        let ended = match end.stop_reason {
             Some(StopReason::Interrupted) => {
                 self.report_speech(at);
                 self.ledger.response_cancelled(response, at)
@@ -906,6 +930,7 @@ impl NovaSonicSpeechSession {
             Some(StopReason::EndTurn) if final_text => self.ledger.response_completed(response, at),
             _ => Ok(()),
         };
+        self.or_drop(ended);
     }
 
     /// Sums a usage delta per response: into the response in progress, or between responses its
@@ -945,13 +970,14 @@ impl NovaSonicSpeechSession {
         let total = self.turns.totals.entry(response).or_default();
         total.merge(delta);
         let total = *total;
-        let _ = self.ledger.response_usage_reported(
+        let refused = self.ledger.response_usage_reported(
             response,
             (delta.sum != ResponseUsage::default()).then_some(total.sum),
             total.quantities(),
             UsageTotal::Running,
             at,
         );
+        self.or_drop(refused);
     }
 }
 

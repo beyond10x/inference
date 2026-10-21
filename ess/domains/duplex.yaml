@@ -1158,6 +1158,9 @@ commands:
 
   # A stalled provider or a closed transport fails the session with a typed failure, never with
   # silence. As at a close, every event received before the failure is delivered before it.
+  # A failure names the frames the binding could not read. Stalled turns into ProviderError only
+  # when an unreadable frame arrived after the last readable frame. A readable frame clears that
+  # state. The detail still names the total unreadable count.
   # read from: docs/design/inference.md:1006
   # read from: docs/design/inference.md:718
   - name: inference.duplex.FailSpeechSession
