@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-21T09:05:26Z",
+  "actor": "human:timo",
+  "artifact": "story:nova-sonic-client",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "live: tests/nova_sonic_live.rs one_audio_in_audio_out_exchange with timing added, passed (1 passed, 0 failed); amazon.nova-2-sonic-v1:0; EndTurn; 652 tokens"
+  }
+}
