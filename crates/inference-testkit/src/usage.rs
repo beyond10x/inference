@@ -1,15 +1,20 @@
 //! The `inference.usage` domain of `ess/domains/usage.yaml`, held in memory.
 //!
-//! [`UsageDomain`] holds the store of [`UsageRecord`]s, [`UsageRecordStore`], and records every
-//! event it emits in order. Its one command runs the constructor of `inference-core`,
+//! [`UsageDomain`] holds the store of [`UsageRecord`]s, [`UsageRecordStore`], and of
+//! [`CostRecord`]s, [`CostRecordStore`], and records every event it emits in order, both kinds in
+//! one sequence. `RecordUsage` runs the constructor of `inference-core`,
 //! [`UsageRecord::record_as`], under identities the domain issues from a counter rendered as a
-//! Uuid in its own [`IDENTITY_SPACE`], `00000007-0000-4000-8000-000000000001` first. What only a
-//! store can decide is decided here, reading the `inference.model` store: `RecordUsage` refuses an
-//! `adapter_id` no declared adapter carries ([`AdapterNotFound`], the `unknown-adapter` outcome)
-//! and then a `model_id` no declared model carries ([`ModelNotFound`], `unknown-model`), in the
-//! order the outcomes are declared. The run, node, session, speech session and response a record
-//! names are not checked, as `ess/domains/usage.yaml` declares. The specification declares no view
-//! of the records; [`UsageDomain::records`] is the store itself.
+//! Uuid in its own [`IDENTITY_SPACE`], `00000007-0000-4000-8000-000000000001` first; `PriceUsage`
+//! runs [`CostRecord::record_as`] under identities of a second counter in the group `0001` of that
+//! space, `00000007-0001-4000-8000-000000000001` first. What only a store can decide is decided
+//! here, reading the `inference.model` store: `RecordUsage` refuses an `adapter_id` no declared
+//! adapter carries ([`AdapterNotFound`], the `unknown-adapter` outcome) and then a `model_id` no
+//! declared model carries ([`ModelNotFound`], `unknown-model`), in the order the outcomes are
+//! declared; `PriceUsage` refuses a `usage_record_id` no usage record carries
+//! ([`UsageRecordNotFound`], `unknown-usage`). The run, node, session, speech session and response
+//! a record names are not checked, as `ess/domains/usage.yaml` declares, and neither are a cost
+//! record's lines and totals, which are the pricing crate's. The specification declares no view of
+//! the records; [`UsageDomain::records`] and [`UsageDomain::costs`] are the stores themselves.
 
 use std::error::Error;
 use std::fmt;
@@ -17,7 +22,10 @@ use std::fmt;
 use uuid::Uuid;
 
 use inference_core::model::{AdapterNotFound, ModelNotFound};
-use inference_core::usage::{RecordUsage, UsageRecord, UsageRecordId, UsageRecorded};
+use inference_core::usage::{
+    CostRecord, CostRecordId, CostRecorded, PriceUsage, RecordUsage, UsageRecord, UsageRecordId,
+    UsageRecordNotFound, UsageRecorded,
+};
 
 use crate::model::ModelDomain;
 
@@ -56,11 +64,44 @@ impl UsageRecordStore {
     }
 }
 
+/// The store of `inference.usage.CostRecord`, in the order the records were made.
+#[derive(Debug, Clone, Default)]
+pub struct CostRecordStore {
+    records: Vec<CostRecord>,
+}
+
+impl CostRecordStore {
+    /// The record carrying `cost_record_id`, if one was made.
+    #[must_use]
+    pub fn get(&self, cost_record_id: CostRecordId) -> Option<&CostRecord> {
+        self.records
+            .iter()
+            .find(|record| record.cost_record_id() == cost_record_id)
+    }
+
+    /// Every record, in the order the records were made.
+    pub fn iter(&self) -> impl Iterator<Item = &CostRecord> {
+        self.records.iter()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+}
+
 /// An event of `inference.usage`, as the domain emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageEvent {
     /// `inference.usage.UsageRecorded`.
     UsageRecorded(UsageRecorded),
+    /// `inference.usage.CostRecorded`.
+    CostRecorded(CostRecorded),
 }
 
 /// Why `inference.usage.RecordUsage` recorded nothing.
@@ -90,12 +131,14 @@ impl Error for RecordUsageError {
     }
 }
 
-/// The `inference.usage` domain in memory: its record store and the events it emitted.
+/// The `inference.usage` domain in memory: its record stores and the events it emitted.
 #[derive(Debug, Clone, Default)]
 pub struct UsageDomain {
     records: UsageRecordStore,
+    costs: CostRecordStore,
     events: Vec<UsageEvent>,
     issued: u128,
+    costs_issued: u128,
 }
 
 impl UsageDomain {
@@ -146,10 +189,42 @@ impl UsageDomain {
         )
     }
 
+    /// Runs `inference.usage.PriceUsage`: stores the record [`CostRecord::record_as`] returns and
+    /// records its [`CostRecorded`].
+    ///
+    /// # Errors
+    ///
+    /// [`UsageRecordNotFound`] when no usage record of this domain carries `usage_record_id`;
+    /// nothing is stored, no event is recorded and no identity is taken.
+    pub fn price_usage(&mut self, input: PriceUsage) -> Result<CostRecorded, UsageRecordNotFound> {
+        if self.records.get(input.usage_record_id).is_none() {
+            return Err(UsageRecordNotFound {
+                usage_record_id: input.usage_record_id,
+            });
+        }
+        self.costs_issued += 1;
+        let cost_record_id = CostRecordId::from(Uuid::from_u128(
+            (u128::from(IDENTITY_SPACE) << 96)
+                | (1 << 80)
+                | 0x0000_0000_0000_4000_8000_0000_0000_0000
+                | self.costs_issued,
+        ));
+        let (record, event) = CostRecord::record_as(cost_record_id, input);
+        self.costs.records.push(record);
+        self.events.push(UsageEvent::CostRecorded(event.clone()));
+        Ok(event)
+    }
+
     /// The usage records made.
     #[must_use]
     pub const fn records(&self) -> &UsageRecordStore {
         &self.records
+    }
+
+    /// The cost records made.
+    #[must_use]
+    pub const fn costs(&self) -> &CostRecordStore {
+        &self.costs
     }
 
     /// Every event emitted, in the order it was emitted.
@@ -165,7 +240,10 @@ mod tests {
         AdapterId, AdapterNotFound, DeclareAdapter, DeclareModel, ExecutionForm, Locality,
         Modality, ModelId, ModelNotFound,
     };
-    use inference_core::usage::{Quantity, QuantityKind, RecordUsage};
+    use inference_core::usage::{
+        CostLine, CostTotal, PriceUsage, Quantity, QuantityKind, RecordUsage, UsageRecordId,
+        UsageRecordNotFound,
+    };
     use uuid::Uuid;
 
     use super::{RecordUsageError, UsageDomain, UsageEvent};
@@ -253,6 +331,87 @@ mod tests {
         );
         assert!(domain.records().is_empty());
         assert!(domain.events().is_empty());
+    }
+
+    fn price(usage_record_id: UsageRecordId) -> PriceUsage {
+        PriceUsage {
+            usage_record_id,
+            currency: "EUR".to_owned(),
+            price_revision: "1".to_owned(),
+            price_digest: "prices-sha256:00".to_owned(),
+            lines: vec![CostLine {
+                kind: QuantityKind::OutputTextTokens,
+                quantity: Some(7),
+                amount: Some("0.000014".to_owned()),
+                unknown: None,
+            }],
+            total: CostTotal {
+                known_subtotal: "0.000014".to_owned(),
+                unknown_lines: 0,
+                complete_total: Some("0.000014".to_owned()),
+            },
+        }
+    }
+
+    #[test]
+    fn a_cost_of_a_recorded_usage_is_stored_and_recorded_after_it() {
+        let (model, adapter_id, model_id) = declared();
+        let mut domain = UsageDomain::new();
+        let usage = domain
+            .record_usage(&model, usage(adapter_id, model_id))
+            .expect("declared");
+
+        let cost = domain
+            .price_usage(price(usage.usage_record_id))
+            .expect("the usage record exists");
+
+        assert_eq!(
+            cost.cost_record_id.to_string(),
+            "00000007-0001-4000-8000-000000000001",
+            "the cost counter's first identity, apart from the usage records'"
+        );
+        assert_eq!(cost.usage_record_id, usage.usage_record_id);
+        assert_eq!(cost.lines, price(usage.usage_record_id).lines);
+        assert_eq!(cost.total, price(usage.usage_record_id).total);
+        let record = domain.costs().get(cost.cost_record_id).expect("stored");
+        assert_eq!(record.recorded(), cost);
+        assert_eq!(domain.costs().len(), 1);
+        assert_eq!(
+            domain.events(),
+            [
+                UsageEvent::UsageRecorded(usage),
+                UsageEvent::CostRecorded(cost)
+            ],
+            "one sequence, in the order emitted"
+        );
+    }
+
+    #[test]
+    fn a_cost_of_an_unknown_usage_is_refused_and_takes_no_identity() {
+        let (model, adapter_id, model_id) = declared();
+        let mut domain = UsageDomain::new();
+        let missing = unknown::<UsageRecordId>();
+
+        assert_eq!(
+            domain.price_usage(price(missing)),
+            Err(UsageRecordNotFound {
+                usage_record_id: missing
+            })
+        );
+        assert!(domain.costs().is_empty());
+        assert!(domain.events().is_empty());
+
+        let usage = domain
+            .record_usage(&model, usage(adapter_id, model_id))
+            .expect("declared");
+        let cost = domain
+            .price_usage(price(usage.usage_record_id))
+            .expect("exists");
+        assert_eq!(
+            cost.cost_record_id.to_string(),
+            "00000007-0001-4000-8000-000000000001",
+            "the refusal took no identity"
+        );
     }
 
     #[test]
