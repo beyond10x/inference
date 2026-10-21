@@ -27,7 +27,10 @@
 //! adapter the catalog does not hold has no locality and is not refused for one; a profile the
 //! catalog does not hold admits nothing. Next, planning refuses a subgraph node whose ports and
 //! its child's exposures do not match one to one by name, direction and modality
-//! ([`SubgraphInterfaceMismatch`], the first such node in declaration order).
+//! ([`SubgraphInterfaceMismatch`], the first such node in declaration order), with one exception,
+//! the usage roll-up: the node's structured output port `usage` also matches every egress of the
+//! child that exposes a structured output port `usage` and whose name no port of the node carries
+//! ([`Declaration::forwarded_usage`]); such a port matching no egress at all is refused.
 //!
 //! Planning refuses, in this order: a node with a non-empty `requires` and no binding
 //! ([`NodeUnbound`], the first such node in declaration order); a node requiring a capability a
@@ -46,6 +49,7 @@ use std::fmt;
 use inference_core::model::{Adapter, Capability, Locality};
 use inference_core::policy::{DeploymentProfile, ProfileId};
 
+use crate::declaration::carries_usage;
 use crate::{
     CapabilityMismatch, Catalog, Declaration, Essentiality, LocalityDenied, Node, NodeId, NodeRole,
     NodeUnbound, Pipeline, PipelineId, PipelineNotFound, PipelinePlanned, PipelineState,
@@ -422,10 +426,12 @@ impl Declaration {
     }
 
     /// The first subgraph node of `nodes`, in declaration order, whose ports and its child's
-    /// exposures do not match one to one by name, direction and modality, with what does not
-    /// match: in the node's port order, a port no exposure carries the name of, or one whose
-    /// exposure of that name differs in direction or modality or was matched by an earlier port;
-    /// then, in the child's exposure order, an exposure no port carries the name of.
+    /// exposures do not match one to one by name, direction and modality, the usage roll-up
+    /// aside, with what does not match: in the node's port order, a port no exposure carries the
+    /// name of, unless it is the node's usage port and forwards an egress
+    /// ([`Declaration::forwarded_usage`]), or one whose exposure of that name differs in direction
+    /// or modality or was matched by an earlier port; then, in the child's exposure order, an
+    /// exposure no port carries the name of and the usage port does not forward.
     fn interface_mismatch(&self, nodes: &[&Node]) -> Option<SubgraphInterfaceMismatch> {
         for node in nodes {
             let Some(child) = node.subgraph_id() else {
@@ -442,7 +448,12 @@ impl Declaration {
                 .exposures()
                 .filter(|exposure| exposure.pipeline_id() == child)
                 .collect();
-            let mut matched = BTreeSet::new();
+            let forwarded: BTreeSet<_> = self
+                .forwarded_usage(node_id)
+                .iter()
+                .map(|exposure| exposure.exposure_id())
+                .collect();
+            let mut matched = forwarded.clone();
             for port in &ports {
                 let mismatch = |exposure_id| SubgraphInterfaceMismatch {
                     node_id,
@@ -453,6 +464,9 @@ impl Declaration {
                     .iter()
                     .find(|exposure| exposure.name() == port.name())
                 else {
+                    if carries_usage(port) && !forwarded.is_empty() {
+                        continue;
+                    }
                     return Some(mismatch(None));
                 };
                 let alike = self.port(exposure.port_id()).is_some_and(|exposed| {
