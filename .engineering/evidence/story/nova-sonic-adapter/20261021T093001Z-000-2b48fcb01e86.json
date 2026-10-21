@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-21T09:30:01Z",
+  "actor": "human:timo",
+  "artifact": "story:nova-sonic-adapter",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "live: tests/nova_sonic_duplex_live.rs, 2 passed, 0 failed; amazon.nova-2-sonic-v1:0; one session through the inference-duplex contract (transcripts, 59520 samples of audio, 1 response, usage 572 in / 70 out); native_duplex evidence agrees with the claim (not claimed)"
+  }
+}
