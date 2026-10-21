@@ -808,18 +808,18 @@ fn a_model_two_subgraphs_deep_rolls_up_once_naming_the_innermost_run() {
         };
         let mut application = Application::new(running.run_id);
         running.send("user text", application.text("user text", "1"));
-        // The stop waits for the answer: sent at once, the drain it starts can overtake the text
-        // two bridges deep, which then never reaches the model (6 of 160 runs; the ingress
-        // bridge it runs through is not changed by this story).
-        let answered = until(running.egress("reply"), |envelope| {
-            envelope.kind == "inference.stream.TextSegmentCommitted"
-        });
-        assert!(
-            answered.is_some(),
-            "the model answers through two subgraphs"
-        );
         running.send("user text", application.stop("user text"));
         let replies = drain(running.egress("reply"));
+        assert!(
+            replies
+                .iter()
+                .any(|envelope| envelope.kind == "inference.stream.TextSegmentCommitted"),
+            "the model answers through two subgraphs: {:?}",
+            replies
+                .iter()
+                .map(|envelope| envelope.kind.as_str())
+                .collect::<Vec<_>>()
+        );
         let received = drain(running.egress(USAGE_PORT));
         let state = running.drive.join().expect("the loop does not panic");
         assert_eq!(state, RunState::Completed);
