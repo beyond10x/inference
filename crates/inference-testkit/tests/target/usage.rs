@@ -1,6 +1,9 @@
-//! `inference.usage`: the one command of `ess/domains/usage.yaml`, answered by [`UsageDomain`]
-//! over the `inference.model` store, which decides whether the adapter and the model are
-//! declared.
+//! `inference.usage`: the two commands of `ess/domains/usage.yaml`, answered by [`UsageDomain`]:
+//! `RecordUsage` over the `inference.model` store, which decides whether the adapter and the
+//! model are declared, and `PriceUsage` over the domain's own usage records, which decide whether
+//! the usage record priced exists. A cost line and a cost total are read field by field, as a
+//! quantity is, and an `Optional` field left out is none, as `ess` 0.66 leaves them out of the
+//! minimal input of a refusal.
 //!
 //! Each request field is read on its own ([`Input`]); an `Optional` field left out or sent as
 //! null is none. A quantity is read field by field, `kind`, `source` and `value`, every other
@@ -19,7 +22,9 @@ use ess_conformance::target::{
     SemanticCommandResult, SemanticViewRequest, SemanticViewResult, TargetError,
 };
 use ess_primitives::node::Node;
-use inference_core::usage::{Quantity, RecordUsage, UsageRecorded};
+use inference_core::usage::{
+    CostLine, CostRecorded, CostTotal, PriceUsage, Quantity, RecordUsage, UsageRecorded,
+};
 use inference_testkit::usage::{RecordUsageError, UsageDomain, UsageEvent};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -33,9 +38,12 @@ use super::{
 pub const DOMAIN: &str = "inference.usage";
 
 const RECORD_USAGE: &str = "inference.usage.RecordUsage";
+const PRICE_USAGE: &str = "inference.usage.PriceUsage";
 const USAGE_RECORDED: &str = "inference.usage.UsageRecorded";
+const COST_RECORDED: &str = "inference.usage.CostRecorded";
 const ADAPTER_NOT_FOUND: &str = "inference.model.AdapterNotFound";
 const MODEL_NOT_FOUND: &str = "inference.model.ModelNotFound";
+const USAGE_RECORD_NOT_FOUND: &str = "inference.usage.UsageRecordNotFound";
 
 /// The `inference.usage` store of one scenario.
 pub type State = UsageDomain;
@@ -48,6 +56,7 @@ pub fn execute_command(
     let name = request.command.to_string();
     let result = match name.as_str() {
         RECORD_USAGE => record_usage(stores, request)?,
+        PRICE_USAGE => price_usage(stores, request)?,
         _ => return Err(unsupported(&name)),
     };
     stores.publish();
@@ -101,6 +110,156 @@ fn record_usage(
             )
         }
     })
+}
+
+/// `PriceUsage`: each field read on its own, a cost line and the total field by field, every
+/// undeclared field refused and an `Optional` one left out or null read as none. The lines and
+/// totals are recorded as sent: they are the pricing crate's, and the specification declares no
+/// outcome on them.
+fn price_usage(
+    stores: &mut Stores,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let price = PriceUsage {
+        usage_record_id: input.named("usage_record_id")?,
+        currency: input.text("currency")?,
+        price_revision: input.text("price_revision")?,
+        price_digest: input.text("price_digest")?,
+        lines: cost_lines(input.node("lines")?)?,
+        total: cost_total(input.node("total")?)?,
+    };
+    input.finish()?;
+    Ok(match stores.usage.price_usage(price) {
+        Ok(event) => SemanticCommandResult::took(outcome(PRICE_USAGE, "priced"))
+            .emitting(cost_recorded(&event)?.in_activity(request.correlation.clone())),
+        Err(error) => SemanticCommandResult::took(outcome(PRICE_USAGE, "unknown-usage"))
+            .with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(USAGE_RECORD_NOT_FOUND))
+                    .with("usage_record_id", named_node(&error.usage_record_id)?),
+            ),
+    })
+}
+
+/// A `List<inference.usage.CostLine>`.
+fn cost_lines(node: &Node) -> Result<Vec<CostLine>, TargetError> {
+    let Node::Seq(items) = node else {
+        return Err(cost_refused("lines", &format!("not a list: {node:?}")));
+    };
+    items.iter().map(cost_line).collect()
+}
+
+fn cost_line(node: &Node) -> Result<CostLine, TargetError> {
+    let fields = declared_fields(node, "lines", &["kind", "quantity", "amount", "unknown"])?;
+    let quantity = match present(fields, "quantity") {
+        None => None,
+        Some(node) => Some(integer(node).ok_or_else(|| {
+            cost_refused(
+                "lines",
+                &format!("`quantity` is not an integer within i64: {node:?}"),
+            )
+        })?),
+    };
+    Ok(CostLine {
+        kind: cost_variant(fields, "lines", "kind")?,
+        quantity,
+        amount: optional_string(fields, "lines", "amount")?,
+        unknown: present(fields, "unknown")
+            .map(|_| cost_variant(fields, "lines", "unknown"))
+            .transpose()?,
+    })
+}
+
+/// An `inference.usage.CostTotal`.
+fn cost_total(node: &Node) -> Result<CostTotal, TargetError> {
+    let fields = declared_fields(
+        node,
+        "total",
+        &["known_subtotal", "unknown_lines", "complete_total"],
+    )?;
+    let unknown_lines = present(fields, "unknown_lines")
+        .and_then(integer)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| {
+            cost_refused(
+                "total",
+                &format!(
+                    "`unknown_lines` is not a count: {:?}",
+                    fields.get("unknown_lines")
+                ),
+            )
+        })?;
+    Ok(CostTotal {
+        known_subtotal: optional_string(fields, "total", "known_subtotal")?
+            .ok_or_else(|| cost_refused("total", "`known_subtotal` is missing"))?,
+        unknown_lines,
+        complete_total: optional_string(fields, "total", "complete_total")?,
+    })
+}
+
+/// The fields of the struct `node`, refusing a field outside `declared`.
+fn declared_fields<'a>(
+    node: &'a Node,
+    field: &str,
+    declared: &[&str],
+) -> Result<&'a BTreeMap<String, Node>, TargetError> {
+    let Node::Map(fields) = node else {
+        return Err(cost_refused(field, &format!("not a struct: {node:?}")));
+    };
+    if let Some(extra) = fields
+        .keys()
+        .find(|name| !declared.contains(&name.as_str()))
+    {
+        return Err(cost_refused(
+            field,
+            &format!("carries the undeclared field `{extra}`"),
+        ));
+    }
+    Ok(fields)
+}
+
+/// The field `name` of a struct, none when left out or null.
+fn present<'a>(fields: &'a BTreeMap<String, Node>, name: &str) -> Option<&'a Node> {
+    fields.get(name).filter(|node| !matches!(node, Node::Null))
+}
+
+/// A `String` or `Optional<String>` field of a struct: none when left out or null.
+fn optional_string(
+    fields: &BTreeMap<String, Node>,
+    field: &str,
+    name: &str,
+) -> Result<Option<String>, TargetError> {
+    match present(fields, name) {
+        None => Ok(None),
+        Some(Node::Text(text)) => Ok(Some(text.clone())),
+        Some(other) => Err(cost_refused(
+            field,
+            &format!("`{name}` is not a string: {other:?}"),
+        )),
+    }
+}
+
+/// The enum variant a struct carries in its field `name`.
+fn cost_variant<T: DeserializeOwned>(
+    fields: &BTreeMap<String, Node>,
+    field: &str,
+    name: &str,
+) -> Result<T, TargetError> {
+    match present(fields, name) {
+        Some(Node::Text(text)) => serde_json::from_value(serde_json::Value::String(text.clone()))
+            .map_err(|error| cost_refused(field, &format!("`{name}`: {error}"))),
+        other => Err(cost_refused(
+            field,
+            &format!("`{name}` is not a declared value: {other:?}"),
+        )),
+    }
+}
+
+fn cost_refused(field: &str, detail: &str) -> TargetError {
+    unreadable(
+        format!("reading `{PRICE_USAGE}`"),
+        format!("`{field}`: {detail}"),
+    )
 }
 
 /// An `Optional` identifier: none when left out or null, otherwise read as [`Input::named`] reads
@@ -204,21 +363,71 @@ pub fn observe_events(
     request: &EventObservationRequest,
 ) -> Result<Vec<ObservedEvent>, TargetError> {
     let wanted = request.event.to_string();
-    if wanted != USAGE_RECORDED {
+    if wanted != USAGE_RECORDED && wanted != COST_RECORDED {
         return Err(unsupported(&wanted));
     }
     stores.publish();
     let mut observed = Vec::new();
     for (index, event) in stores.usage.events().iter().enumerate() {
-        let UsageEvent::UsageRecorded(event) = event;
+        let event = match event {
+            UsageEvent::UsageRecorded(event) if wanted == USAGE_RECORDED => usage_recorded(event)?,
+            UsageEvent::CostRecorded(event) if wanted == COST_RECORDED => cost_recorded(event)?,
+            _ => continue,
+        };
         let position = stores.usage_position(index)?;
-        observed.push(
-            usage_recorded(event)?
-                .in_activity(request.correlation.clone())
-                .at(position),
-        );
+        observed.push(event.in_activity(request.correlation.clone()).at(position));
     }
     Ok(observed)
+}
+
+fn cost_recorded(event: &CostRecorded) -> Result<ObservedEvent, TargetError> {
+    let lines = event
+        .lines
+        .iter()
+        .map(|line| {
+            Ok(Node::Map(BTreeMap::from([
+                ("kind".to_owned(), named_node(&line.kind)?),
+                (
+                    "quantity".to_owned(),
+                    line.quantity.map_or(Node::Null, integer_node),
+                ),
+                (
+                    "amount".to_owned(),
+                    line.amount.as_deref().map_or(Node::Null, text_node),
+                ),
+                ("unknown".to_owned(), optional_node(line.unknown.as_ref())?),
+            ])))
+        })
+        .collect::<Result<Vec<_>, TargetError>>()?;
+    let unknown_lines = i64::try_from(event.total.unknown_lines).map_err(|_| {
+        unreadable(
+            format!("writing `{COST_RECORDED}`"),
+            "`unknown_lines` beyond i64",
+        )
+    })?;
+    let total = Node::Map(BTreeMap::from([
+        (
+            "known_subtotal".to_owned(),
+            text_node(&event.total.known_subtotal),
+        ),
+        ("unknown_lines".to_owned(), integer_node(unknown_lines)),
+        (
+            "complete_total".to_owned(),
+            event
+                .total
+                .complete_total
+                .as_deref()
+                .map_or(Node::Null, text_node),
+        ),
+    ]));
+    Ok(ObservedEvent::new(parse::<EventRef>(COST_RECORDED))
+        .with("cost_record_id", named_node(&event.cost_record_id)?)
+        .with("usage_record_id", named_node(&event.usage_record_id)?)
+        .with("currency", text_node(&event.currency))
+        .with("price_revision", text_node(&event.price_revision))
+        .with("price_digest", text_node(&event.price_digest))
+        .with("lines", Node::Seq(lines))
+        .with("total", total))
 }
 
 fn usage_recorded(event: &UsageRecorded) -> Result<ObservedEvent, TargetError> {
@@ -297,8 +506,9 @@ mod tests {
     use ess_primitives::ids::CorrelationId;
     use ess_primitives::node::Node;
     use inference_core::model::{DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality};
+    use inference_core::usage::UnknownReason;
 
-    use super::{RECORD_USAGE, Stores, execute_command};
+    use super::{PRICE_USAGE, RECORD_USAGE, Stores, execute_command};
 
     fn request(quantity: BTreeMap<String, Node>) -> SemanticCommandRequest {
         SemanticCommandRequest {
@@ -408,6 +618,126 @@ mod tests {
             ])),
         );
         assert!(answer.is_err(), "{answer:?}");
+    }
+
+    /// A `PriceUsage` of `usage_record_id` whose line carries `line` and whose total carries
+    /// `total`.
+    fn price_request(
+        usage_record_id: &str,
+        line: &[(&str, Node)],
+        total: &[(&str, Node)],
+    ) -> SemanticCommandRequest {
+        SemanticCommandRequest {
+            command: PRICE_USAGE.parse::<CommandRef>().expect("a command name"),
+            actor: None,
+            caller: None,
+            input: [
+                ("usage_record_id", Node::Text(usage_record_id.to_owned())),
+                ("currency", Node::Text("EUR".to_owned())),
+                ("price_revision", Node::Text("1".to_owned())),
+                ("price_digest", Node::Text("prices-sha256:00".to_owned())),
+                ("lines", Node::Seq(vec![Node::Map(quantity(line))])),
+                ("total", Node::Map(quantity(total))),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect(),
+            correlation: CorrelationId::new("usage").expect("a correlation id"),
+        }
+    }
+
+    fn outcome_of(answer: &ess_conformance::target::SemanticCommandResult) -> Option<String> {
+        answer.outcome.as_ref().map(ToString::to_string)
+    }
+
+    #[test]
+    fn a_minimal_price_input_without_its_optional_fields_is_read_and_its_usage_decided() {
+        let mut stores = Stores::default();
+        let answer = execute_command(
+            &mut stores,
+            &price_request(
+                "00000000-0000-4000-8000-c33919ac60ea",
+                &[("kind", Node::Text("input_text_tokens".to_owned()))],
+                &[
+                    ("known_subtotal", Node::Text("0".to_owned())),
+                    ("unknown_lines", Node::Number(Number::from(1_i64))),
+                ],
+            ),
+        )
+        .expect("the request is read");
+        assert_eq!(
+            outcome_of(&answer),
+            Some("inference.usage.PriceUsage/unknown-usage".to_owned())
+        );
+        assert!(stores.usage.events().is_empty());
+    }
+
+    #[test]
+    fn a_cost_of_a_recorded_usage_is_priced_with_its_lines_as_sent() {
+        let mut stores = declared();
+        execute_command(
+            &mut stores,
+            &request(quantity(&[
+                ("kind", Node::Text("requests".to_owned())),
+                ("source", Node::Text("measured".to_owned())),
+                ("value", Node::Number(Number::from(1_i64))),
+            ])),
+        )
+        .expect("recorded");
+        let answer = execute_command(
+            &mut stores,
+            &price_request(
+                "00000007-0000-4000-8000-000000000001",
+                &[
+                    ("kind", Node::Text("requests".to_owned())),
+                    ("quantity", Node::Number(Number::from(1_i64))),
+                    ("amount", Node::Null),
+                    ("unknown", Node::Text("price_unknown".to_owned())),
+                ],
+                &[
+                    ("known_subtotal", Node::Text("0".to_owned())),
+                    ("unknown_lines", Node::Number(Number::from(1_i64))),
+                    ("complete_total", Node::Null),
+                ],
+            ),
+        )
+        .expect("the request is read");
+        assert_eq!(
+            outcome_of(&answer),
+            Some("inference.usage.PriceUsage/priced".to_owned())
+        );
+        let cost = stores.usage.costs().iter().next().expect("stored");
+        assert_eq!(cost.lines()[0].unknown, Some(UnknownReason::PriceUnknown));
+        assert_eq!(cost.lines()[0].amount, None);
+        assert_eq!(cost.total().complete_total, None);
+    }
+
+    #[test]
+    fn a_cost_line_with_an_undeclared_field_or_a_float_amount_is_an_error() {
+        for line in [
+            vec![
+                ("kind", Node::Text("requests".to_owned())),
+                ("unit", Node::Text("request".to_owned())),
+            ],
+            vec![
+                ("kind", Node::Text("requests".to_owned())),
+                ("amount", Node::Number(Number::from(1_i64))),
+            ],
+        ] {
+            let mut stores = Stores::default();
+            let answer = execute_command(
+                &mut stores,
+                &price_request(
+                    "00000000-0000-4000-8000-c33919ac60ea",
+                    &line,
+                    &[
+                        ("known_subtotal", Node::Text("0".to_owned())),
+                        ("unknown_lines", Node::Number(Number::from(0_i64))),
+                    ],
+                ),
+            );
+            assert!(answer.is_err(), "{line:?}: {answer:?}");
+        }
     }
 
     #[test]
