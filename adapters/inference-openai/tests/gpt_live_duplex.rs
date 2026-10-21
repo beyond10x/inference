@@ -19,8 +19,9 @@ use inference_core::model::Capability;
 use inference_duplex::conformance::{NativeDuplexProbe, NoNativeDuplex, native_duplex_evidence};
 use inference_duplex::{
     NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage, SessionConfig,
-    SessionError, SessionEvent, SessionFailureKind, SpeechSessionHandle, TokenCounts, TuningOption,
-    TuningSupport, TurnDetection, TurnSensitivity, TurnTuning, Unsupported, UsageRecorded,
+    SessionError, SessionEvent, SessionFailureKind, SpeechSessionHandle, SpeechSessionState,
+    TokenCounts, TuningOption, TuningSupport, TurnDetection, TurnSensitivity, TurnTuning,
+    Unsupported, UsageRecorded,
 };
 use inference_openai::live::{LIVE_MODEL, LiveClosed, LiveFormat};
 use inference_openai::live_duplex::{
@@ -1180,4 +1181,97 @@ fn backend_usage_that_arrived_before_a_failed_send_is_recorded_before_the_failur
         ),
         "{rest:#?}"
     );
+}
+
+/// A server that speaks, sends a message that is not a GPT-Live event, completes one backend
+/// response with its usage, then answers the close with another such message and
+/// `session.closed`.
+fn spoke_over_an_undecodable_message() -> Server {
+    Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        send(&mut socket, said(" Hi.", 0)).await;
+        socket.send(Message::text("not json")).await.unwrap();
+        send(
+            &mut socket,
+            backend("del_1", backend_completed("resp_1", 12, 4, 3)),
+        )
+        .await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        socket.send(Message::text("not json")).await.unwrap();
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    })
+}
+
+/// A message that is not a GPT-Live event does not end the session: the client reads on, so the
+/// backend usage after it is recorded and the session stays open until the caller closes it.
+#[test]
+fn an_undecodable_message_does_not_end_the_session() {
+    let server = spoke_over_an_undecodable_message();
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let mut events = until(&mut session, |event| {
+        matches!(event, SessionEvent::OutputTranscriptDelta(_))
+    });
+    let response = created(&events)[0];
+    events.extend(until(&mut session, |_| false));
+    assert_eq!(session.backend_usage().len(), 1, "{events:#?}");
+    assert_eq!(
+        session.ledger().session().state(),
+        SpeechSessionState::Open,
+        "{events:#?}"
+    );
+    session.close().expect("open");
+    assert_eq!(
+        session.final_usage(),
+        Some(&LiveClosed {
+            reason: "close_requested".to_owned(),
+            seconds: 1.5
+        }),
+        "session.closed confirmed the seconds past the message that is not an event"
+    );
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert_eq!(output_text_tokens(&closing, response), Some(3));
+    assert!(
+        matches!(closing.last(), Some(SessionEvent::SpeechSessionClosed(_))),
+        "{closing:#?}"
+    );
+    server.finish();
+}
+
+/// The backend usage reached the binding after a message that is not a GPT-Live event, before
+/// the caller closes: that message is not the end of the stream, so the close records the usage
+/// on the response before `SpeechSessionClosed`.
+#[test]
+fn backend_usage_after_an_undecodable_message_is_recorded_by_the_close() {
+    let server = spoke_over_an_undecodable_message();
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::OutputTranscriptDelta(_))
+    });
+    let response = created(&events)[0];
+    std::thread::sleep(Duration::from_millis(300));
+    session.close().expect("open");
+    assert_eq!(
+        session.final_usage(),
+        Some(&LiveClosed {
+            reason: "close_requested".to_owned(),
+            seconds: 1.5
+        }),
+        "session.closed confirmed the seconds past the message that is not an event"
+    );
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert_eq!(session.backend_usage().len(), 1, "{closing:#?}");
+    assert_eq!(output_text_tokens(&closing, response), Some(3));
+    assert!(
+        matches!(closing.last(), Some(SessionEvent::SpeechSessionClosed(_))),
+        "{closing:#?}"
+    );
+    server.finish();
 }

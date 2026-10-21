@@ -17,8 +17,9 @@ use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPositio
 use inference_duplex::conformance::{NativeDuplexProbe, NoNativeDuplex, native_duplex_evidence};
 use inference_duplex::{
     NativeSpeechModel, OpenError, QuantityKind, QuantitySource, ResponseId, ResponseUsage,
-    SessionConfig, SessionEvent, SessionFailureKind, SpeechSessionHandle, TokenCounts,
-    TuningOption, TurnDetection, TurnSensitivity, TurnTuning, Unsupported, UsageRecorded,
+    SessionConfig, SessionEvent, SessionFailureKind, SpeechSessionHandle, SpeechSessionState,
+    TokenCounts, TuningOption, TurnDetection, TurnSensitivity, TurnTuning, Unsupported,
+    UsageRecorded,
 };
 use inference_openai::duplex::{OpenAiRealtime, capabilities, claims, wire_format};
 use inference_openai::{
@@ -1276,5 +1277,64 @@ fn what_arrived_before_a_failed_send_is_recorded_before_the_failure() {
                 if failed.failure.kind == SessionFailureKind::TransportClosed
         ),
         "{rest:#?}"
+    );
+}
+
+/// A server that answers one turn as `answered_then` does, with a message that is not a Realtime
+/// event between its transcript and its `response.done`, then reads until the connection ends.
+fn answered_over_an_undecodable_message() -> Server {
+    Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, transcript_delta("resp_1", "item_o1", "Hello")).await;
+        socket.send(Message::text("not json")).await.unwrap();
+        send(&mut socket, response_done("resp_1", "completed")).await;
+        while let Some(Ok(_)) = socket.next().await {}
+    })
+}
+
+/// A message that is not a Realtime event does not end the session: the client reads on, so what
+/// follows it is recorded, its usage included, and the session stays open.
+#[test]
+fn an_undecodable_message_does_not_end_the_session() {
+    let server = answered_over_an_undecodable_message();
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, any_completed);
+    let response = created(&events)[0];
+    the_answered_turn(&events, response);
+    assert_eq!(
+        session.ledger().session().state(),
+        SpeechSessionState::Open,
+        "{events:#?}"
+    );
+    session.close().expect("open");
+    server.finish();
+}
+
+/// What arrived before the close is delivered by it whatever undecodable message lies among it:
+/// that message is not the end of the stream, so the usage after it counts and the session closes.
+#[test]
+fn what_arrived_after_an_undecodable_message_is_delivered_by_the_close() {
+    let server = answered_over_an_undecodable_message();
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::ResponseCreated(_))
+    });
+    let response = created(&events)[0];
+    std::thread::sleep(Duration::from_millis(300));
+    session.close().expect("open");
+    server.finish();
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    the_answered_turn(&closing, response);
+    assert!(
+        matches!(closing.last(), Some(SessionEvent::SpeechSessionClosed(_))),
+        "{closing:#?}"
     );
 }

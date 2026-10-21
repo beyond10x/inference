@@ -485,7 +485,8 @@ impl OpenAiRealtimeSession {
 
     /// Records every server event that already reached the binding, without waiting for more,
     /// up to the first read that fails, whose error is returned; a session the ledger no longer
-    /// holds open records nothing.
+    /// holds open records nothing. A message that is not a Realtime event is no failed read:
+    /// it is recorded as [`SpeechSessionHandle::next_event`] records it, and recording goes on.
     fn record_arrived(&mut self) -> Option<RealtimeError> {
         while self.ledger.session().require_open().is_ok() {
             let (Some(client), Some(runtime)) = (self.client.as_mut(), self.runtime.as_ref())
@@ -494,11 +495,18 @@ impl OpenAiRealtimeSession {
             };
             match runtime.block_on(without_waiting(client.next_event())) {
                 Some(Ok(event)) => self.record(event),
+                Some(Err(RealtimeError::Protocol(_))) => self.undecodable(),
                 None | Some(Err(RealtimeError::Stalled(_))) => return None,
                 Some(Err(error)) => return Some(error),
             }
         }
         None
+    }
+
+    /// The server sent a message that is not a Realtime event. It ends nothing, since the client
+    /// reads on: it is server traffic, and is dropped.
+    fn undecodable(&mut self) {
+        self.ledger.heard(Instant::now());
     }
 
     /// The contract's id of a provider response, when the session created one under it.
@@ -790,8 +798,9 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
     /// Closes the session and the connection. The server events that already reached the
     /// binding are recorded first, so their usage counts and they are delivered after the close,
     /// before `SpeechSessionClosed`; from the first read that fails among them nothing is
-    /// recorded, so an open session closes rather than fails. Nothing the server sends after the
-    /// close is delivered.
+    /// recorded, so an open session closes rather than fails. A message that is not a Realtime
+    /// event is no failed read: the client reads on, so what follows it is recorded too. Nothing
+    /// the server sends after the close is delivered.
     fn close(&mut self) -> Result<(), SessionError> {
         if self.ledger.session().require_open().is_ok() && self.record_arrived().is_some() {
             self.client = None;
@@ -822,6 +831,7 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
                 runtime.block_on(async { tokio::time::timeout(left, client.next_event()).await });
             match read {
                 Ok(Ok(event)) => self.record(event),
+                Ok(Err(RealtimeError::Protocol(_))) => self.undecodable(),
                 Ok(Err(RealtimeError::Stalled(_))) | Err(_) => {
                     self.ledger.check_liveness(Instant::now());
                 }
