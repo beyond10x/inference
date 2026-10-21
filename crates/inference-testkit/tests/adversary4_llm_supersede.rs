@@ -1,8 +1,9 @@
 //! The mock generator's `supersede` and `cancel`, which the unit's suite never calls. The
-//! `GenerationHandle` contract: "Runs `inference.stream.SupersedeGeneration`; nothing more is
+//! `GenerationHandle` contract: "Runs `inference.stream.SupersedeGeneration`; no more text is
 //! delivered", and `ess/domains/stream.yaml` discards every unplayed segment of the generation in
 //! the same outcome. A streaming generation interrupted between a `TextDelta` and the
-//! `TextSegmentCommitted` queued behind it delivers neither that commit nor anything after it.
+//! `TextSegmentCommitted` queued behind it delivers neither that commit nor any text after it,
+//! only the usage record of the turn that ended (`story:llm-usage-on-cancel`).
 
 #![cfg(feature = "llm")]
 
@@ -51,7 +52,10 @@ fn interrupted(supersede: bool) {
         handle.output().segments()
     );
     let after: Vec<GenerationEvent> = handle.by_ref().collect();
-    assert_eq!(after, [], "{state:?}: nothing more is delivered");
+    assert!(
+        matches!(after.as_slice(), [GenerationEvent::Usage(recorded)] if recorded.r#final),
+        "{state:?}: no more text, only the usage record of the turn that ended: {after:?}"
+    );
     assert!(handle.supersede().is_err() && handle.cancel().is_err());
 }
 

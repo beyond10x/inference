@@ -41,8 +41,16 @@
 //! which the node that places it fills. A turn that fails yields a record too, before the
 //! [`GenerationEvent::Cancelled`] of its generation: one request, every token count unknown and
 //! its counts not final, so a failed call is still counted. A supersede or a cancel the caller
-//! asks for delivers nothing more, so the record of a turn not yet delivered is dropped with the
-//! rest; a turn running when the generation ends, never having ended, yields none.
+//! asks for delivers no more text, and no usage record is lost to it: the record of each turn
+//! that ended and was not yet taken is still delivered, and the turn running then is cancelled
+//! through [`llm_core::Cancel`] and polled until its model returns from the cancel, which may
+//! take as long as the model takes, and then yields a record if `llm` reported usage for it: the
+//! counts its outcome or its error carries, `final` only when the turn ended all the same with
+//! final counts, so a turn cut short is marked `final: false`. A completion the caller asks for
+//! cuts a running turn the same way, its record before [`GenerationEvent::Completed`]. A cut turn
+//! whose usage `llm` never reported yields no record, as there is nothing to report: a server
+//! that counts only on the last chunk of its stream has reported nothing for a stream cut before
+//! it. Dropping the handle gives every record still in it up.
 //!
 //! Output streaming, incremental input and input during output are distinct capabilities
 //! (`inference.model.Capability`), and a persistent connection proves none of them. What the
@@ -776,6 +784,7 @@ impl Generator {
             waker: None,
             delivered: VecDeque::from([GenerationEvent::Started(started)]),
             held: VecDeque::new(),
+            ending: None,
             text: String::new(),
             shown: false,
             outcomes: Vec::new(),
@@ -821,7 +830,8 @@ struct Turn {
 /// Iterating the handle blocks the calling thread until the next event of
 /// [`GenerationHandle::poll_event`], and yields none while the generation awaits results, which
 /// only the caller can give; it ends after [`GenerationEvent::Completed`] or
-/// [`GenerationEvent::Cancelled`], or once the generation is superseded or cancelled.
+/// [`GenerationEvent::Cancelled`], or once the generation is superseded or cancelled and the
+/// usage records it still held are delivered.
 ///
 /// It is not `Clone`: a copy taken while the generation is Active would deliver output for it
 /// after it was superseded or cancelled.
@@ -860,6 +870,9 @@ pub struct GenerationHandle {
     /// The events of an adapter that does not stream, held until the generation completes or a
     /// turn ends with calls.
     held: VecDeque<GenerationEvent>,
+    /// The [`GenerationEvent::Completed`] of a completion that cut a running turn, delivered
+    /// once that turn returned and its usage record was.
+    ending: Option<GenerationEvent>,
     /// The text of the running turn of an adapter that does not stream.
     text: String,
     /// Whether the running turn showed a text delta.
@@ -1060,7 +1073,8 @@ impl GenerationHandle {
 
     /// Runs `inference.stream.CompleteGeneration` now, whatever is unanswered: the running turn
     /// is cancelled, unanswered calls and waiting input are dropped, and what an adapter that
-    /// does not stream held is delivered, then [`GenerationEvent::Completed`].
+    /// does not stream held is delivered, then the usage record of the turn it cut, if `llm`
+    /// reported usage for it, once its model returns, then [`GenerationEvent::Completed`].
     ///
     /// # Errors
     ///
@@ -1071,47 +1085,54 @@ impl GenerationHandle {
         Ok(())
     }
 
-    /// Runs `inference.stream.SupersedeGeneration`; the running turn is cancelled and nothing
-    /// more is delivered, the usage record of a turn not yet delivered among it.
+    /// Runs `inference.stream.SupersedeGeneration`; no more text is delivered, and the usage
+    /// records are: the record of every turn that ended and was not yet taken, and the record
+    /// of the running turn, which is cancelled, once its model returns from the cancel; see the
+    /// crate documentation.
     ///
     /// # Errors
     ///
     /// [`GenerationStateConflict`] carrying the held state when the generation is not Active.
     pub fn supersede(&mut self) -> Result<GenerationSuperseded, GenerationStateConflict> {
         let (event, _) = self.output.supersede()?;
-        self.stop();
-        self.delivered.clear();
-        self.held.clear();
+        self.cut();
         Ok(event)
     }
 
-    /// Runs `inference.stream.CancelGeneration`; the running turn is cancelled and nothing more
-    /// is delivered, the usage record of a turn not yet delivered among it.
+    /// Runs `inference.stream.CancelGeneration`; no more text is delivered, and the usage
+    /// records are, as for [`GenerationHandle::supersede`].
     ///
     /// # Errors
     ///
     /// [`GenerationStateConflict`] carrying the held state when the generation is not Active.
     pub fn cancel(&mut self) -> Result<GenerationCancelled, GenerationStateConflict> {
         let (event, _) = self.output.cancel()?;
-        self.stop();
-        self.delivered.clear();
-        self.held.clear();
+        self.cut();
         Ok(event)
     }
 
     /// Drives the generation without delivering: polls the running turn and starts the next one
-    /// while one can start, until a turn is pending or none can start.
+    /// while one can start, until a turn is pending or none can start. Once the generation is
+    /// no longer Active, it polls only the turn its end cut, until that returns.
     fn progress(&mut self, cx: &mut Context<'_>) {
-        while self.output.generation().state() == GenerationState::Active {
+        loop {
+            let active = self.output.generation().state() == GenerationState::Active;
             if let Some(turn) = self.turn.as_mut() {
                 let polled = turn.future.as_mut().poll(cx);
+                if !active {
+                    match polled {
+                        Poll::Ready(ended) => self.cut_turn_ended(ended),
+                        Poll::Pending => return,
+                    }
+                    continue;
+                }
                 self.take_accepted();
                 match polled {
                     Poll::Ready(Ok(outcome)) => self.turn_ended(outcome),
                     Poll::Ready(Err(error)) => self.turn_failed(error),
                     Poll::Pending => return,
                 }
-            } else if self.can_start() {
+            } else if active && self.can_start() {
                 self.start_turn();
             } else {
                 return;
@@ -1253,6 +1274,7 @@ impl GenerationHandle {
     /// request with every token count unknown and its counts not final, and
     /// [`GenerationEvent::Cancelled`] follows them with the segments discarded.
     fn turn_failed(&mut self, error: llm_core::Error) {
+        self.turn = None;
         let ended_at_ms = wall_clock_ms();
         if let Ok((cancelled, discarded)) = self.output.cancel() {
             self.stop();
@@ -1286,20 +1308,63 @@ impl GenerationHandle {
         self.delivered.extend(usage);
     }
 
-    /// Completes the generation, delivering what an adapter that does not stream held.
+    /// Completes the generation, delivering what an adapter that does not stream held, then the
+    /// usage record of the turn the completion cut, if one ran, once its model returns, and
+    /// [`GenerationEvent::Completed`] last.
     fn finish(&mut self) {
         if let Ok(completed) = self.output.complete() {
             self.stop();
             self.delivered.extend(self.held.drain(..));
-            self.delivered
-                .push_back(GenerationEvent::Completed(completed));
+            let completed = GenerationEvent::Completed(completed);
+            if self.turn.is_some() {
+                self.ending = Some(completed);
+            } else {
+                self.delivered.push_back(completed);
+            }
         }
     }
 
-    /// Cancels the running turn and drops what no later turn or delivery will take.
+    /// Ends the delivery of a generation superseded or cancelled by the caller: the running turn
+    /// is cancelled and kept until its model returns, and of what was still to deliver only the
+    /// usage records stay, in order.
+    fn cut(&mut self) {
+        self.stop();
+        self.delivered
+            .retain(|event| matches!(event, GenerationEvent::Usage(_)));
+        self.keep_held_usage();
+    }
+
+    /// Takes the end of the turn the end of its generation cut: its usage record, when `llm`
+    /// reported usage for it, final only when the turn ended all the same and its counts were
+    /// final, then the [`GenerationEvent::Completed`] a completion held back. Its text and its
+    /// calls are not delivered.
+    fn cut_turn_ended(&mut self, ended: Result<TurnOutcome, llm_core::Error>) {
+        self.turn = None;
+        let ended_at_ms = wall_clock_ms();
+        let (observation, turn_ended) = match &ended {
+            Ok(outcome) => (Some(&outcome.observation), true),
+            Err(error) => (error.observation.as_deref(), false),
+        };
+        if let Some(observation) = observation.filter(|observation| observation.usage.is_some()) {
+            let recorded = usage_of_turn(
+                &self.adapter,
+                observation.usage.as_ref(),
+                observation
+                    .upstream_model
+                    .as_ref()
+                    .map(llm_core::Id::as_str),
+                turn_ended && observation.final_usage,
+                (self.turn_started_ms, ended_at_ms),
+            );
+            self.delivered.push_back(GenerationEvent::Usage(recorded));
+        }
+        self.delivered.extend(self.ending.take());
+    }
+
+    /// Cancels the running turn, which stays to be polled until its model returns from the
+    /// cancel, and drops what no later turn or delivery will take.
     fn stop(&mut self) {
         self.cancel.cancel();
-        self.turn = None;
         self.text.clear();
         self.inputs.clear();
         self.staged.clear();

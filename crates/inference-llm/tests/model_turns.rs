@@ -18,7 +18,7 @@ use inference_core::model::{
 };
 use inference_core::usage::{Quantity, QuantityKind, UsageRecorded};
 use inference_llm::llm_core::{
-    BoxFuture, CallId, Cancel, Capabilities, Error, ErrorCode, Id, Item, Model, Protocol,
+    BoxFuture, CallId, Cancel, Capabilities, Dispatch, Error, ErrorCode, Id, Item, Model, Protocol,
     Provenance, StopReason, StreamEvent, StreamSink, ToolCall, ToolName, TurnObservation,
     TurnOutcome, TurnRequest, Usage,
 };
@@ -43,6 +43,10 @@ enum Answer {
     Fail,
     /// This delta, then nothing until the turn is cancelled.
     Hang(&'static str),
+    /// This delta, then nothing until the turn is cancelled, which fails it with `llm`'s
+    /// cancelled error carrying this usage as counts not final and the upstream model
+    /// [`UPSTREAM`], as `llm`'s clients keep the partial usage of an interrupted stream.
+    Cut(&'static str, Usage),
 }
 
 #[derive(Debug, Default)]
@@ -127,6 +131,21 @@ impl Model for Scripted {
                     .await?;
                     cancel.cancelled().await;
                     Err(Error::cancelled())
+                }
+                Answer::Cut(text, usage) => {
+                    sink.emit(StreamEvent::TextDelta {
+                        text: text.to_owned(),
+                    })
+                    .await?;
+                    cancel.cancelled().await;
+                    Err(Error::cancelled()
+                        .with_dispatch(Dispatch::Accepted)
+                        .with_observation(TurnObservation {
+                            usage: Some(usage),
+                            upstream_model: Some(Id::new(UPSTREAM).expect("printable")),
+                            final_usage: false,
+                            ..TurnObservation::new(self.provenance.clone())
+                        }))
                 }
                 Answer::Unreported(deltas) => {
                     for text in &deltas {
@@ -551,6 +570,206 @@ fn a_delta_reaches_the_caller_while_the_turn_runs_and_a_cancel_reaches_the_turn(
         handle.output().generation().state(),
         GenerationState::Cancelled
     );
+}
+
+/// Every event `handle` yields at once, polled without waiting.
+fn ready(handle: &mut GenerationHandle) -> Vec<GenerationEvent> {
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut events = Vec::new();
+    while let Poll::Ready(Some(event)) = handle.poll_turn_event(&mut cx) {
+        events.push(event);
+    }
+    events
+}
+
+/// How a test ends a generation whose turn runs.
+#[derive(Debug, Clone, Copy)]
+enum Cut {
+    Supersede,
+    Cancel,
+}
+
+impl Cut {
+    const ALL: [Self; 2] = [Self::Supersede, Self::Cancel];
+
+    fn apply(self, handle: &mut GenerationHandle) {
+        let generation_id = handle.output().generation().generation_id();
+        let cut = match self {
+            Self::Supersede => handle.supersede().expect("Active supersedes").generation_id,
+            Self::Cancel => handle.cancel().expect("Active cancels").generation_id,
+        };
+        assert_eq!(cut, generation_id);
+    }
+}
+
+#[test]
+fn a_generation_cut_during_its_second_turn_delivers_that_turns_usage_not_final() {
+    for cut in Cut::ALL {
+        let model = Scripted::new([
+            Answer::Text(vec!["Hel", "lo"], Vec::new()),
+            Answer::Cut(
+                "Sun",
+                Usage {
+                    input_tokens: Some(30),
+                    output_tokens: Some(1),
+                    ..Usage::default()
+                },
+            ),
+        ]);
+        let mut handle = generator(
+            vec![
+                Capability::OutputStreaming,
+                Capability::ConcurrentInputOutput,
+            ],
+            &model,
+        )
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+        let mut seen = Vec::new();
+        for event in handle.by_ref() {
+            let ended = matches!(event, GenerationEvent::Usage(_));
+            seen.push((event, GenerationState::Active));
+            if ended {
+                break;
+            }
+        }
+        handle
+            .offer_input("and the weather?".to_owned())
+            .expect("Active, and the adapter claims concurrent input");
+        seen.extend(
+            ready(&mut handle)
+                .into_iter()
+                .map(|event| (event, GenerationState::Active)),
+        );
+        let cancel = model
+            .with(|script| script.cancel.clone())
+            .expect("the turn was handed a cancel");
+        cut.apply(&mut handle);
+        assert!(
+            cancel.is_cancelled(),
+            "{cut:?}: the running turn is told to stop"
+        );
+        let after = drain(&mut handle);
+        assert_eq!(
+            kinds(&after),
+            ["usage"],
+            "{cut:?}: the usage of the turn it cut and nothing else: {after:?}"
+        );
+        seen.extend(after);
+
+        assert_eq!(
+            kinds(&seen),
+            [
+                "started",
+                "delta",
+                "committed",
+                "delta",
+                "committed",
+                "usage",
+                "delta",
+                "committed",
+                "usage"
+            ],
+            "{cut:?}"
+        );
+        let records = usage(&seen);
+        let [ended, partial] = records.as_slice() else {
+            panic!("{cut:?}: two records: {records:?}")
+        };
+        assert!(ended.r#final);
+        assert!(!partial.r#final, "{cut:?}: the cut turn did not end");
+        assert_eq!(partial.upstream_model.as_deref(), Some(UPSTREAM));
+        assert_eq!(
+            TOKEN_KINDS.map(|kind| quantity(partial, kind)),
+            [
+                Quantity::provider_reported(QuantityKind::InputTextTokens, 30),
+                Quantity::provider_reported(QuantityKind::OutputTextTokens, 1),
+                Quantity::unknown(QuantityKind::CachedInputTokens),
+                Quantity::unknown(QuantityKind::CacheCreationInputTokens),
+            ],
+            "{cut:?}: the counts llm reported for the cut turn"
+        );
+        assert_eq!(
+            quantity(partial, QuantityKind::Requests),
+            Quantity::measured(QuantityKind::Requests, 1)
+        );
+        assert!(partial.started_at_ms <= partial.ended_at_ms);
+        assert_ne!(ended.usage_record_id, partial.usage_record_id);
+    }
+}
+
+#[test]
+fn a_usage_record_not_yet_taken_survives_a_supersede_or_a_cancel() {
+    for cut in Cut::ALL {
+        for streams in [true, false] {
+            let model = Scripted::new([Answer::Text(vec!["Hi"], Vec::new())]);
+            let capabilities = if streams {
+                vec![Capability::OutputStreaming]
+            } else {
+                Vec::new()
+            };
+            let mut handle = generator(capabilities, &model)
+                .start(request())
+                .expect("a fresh generator runs nothing else");
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut taken = Vec::new();
+            loop {
+                match handle.poll_turn_event(&mut cx) {
+                    Poll::Ready(Some(GenerationEvent::Usage(recorded))) => {
+                        panic!("{cut:?}, streams {streams}: taken too early: {recorded:?}")
+                    }
+                    Poll::Ready(Some(event)) => {
+                        let last = matches!(event, GenerationEvent::SegmentCommitted(_));
+                        taken.push(event);
+                        if last {
+                            break;
+                        }
+                    }
+                    Poll::Ready(None) | Poll::Pending => break,
+                }
+            }
+            assert!(
+                handle.outcomes().len() == 1,
+                "{cut:?}, streams {streams}: the turn ended: {taken:?}"
+            );
+            cut.apply(&mut handle);
+            let after = drain(&mut handle);
+            assert_eq!(
+                kinds(&after),
+                ["usage"],
+                "{cut:?}, streams {streams}: the record of the turn that ended is delivered, \
+                 and no text: {after:?}"
+            );
+            assert!(usage(&after)[0].r#final);
+        }
+    }
+}
+
+#[test]
+fn completing_a_generation_cuts_its_running_turn_and_delivers_that_turns_usage_before_completed() {
+    let model = Scripted::new([Answer::Cut(
+        "partial",
+        Usage {
+            output_tokens: Some(1),
+            ..Usage::default()
+        },
+    )]);
+    let mut handle = generator(vec![Capability::OutputStreaming], &model)
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+    let before: Vec<_> = ready(&mut handle)
+        .into_iter()
+        .map(|event| (event, GenerationState::Active))
+        .collect();
+    assert_eq!(kinds(&before), ["started", "delta", "committed"]);
+    handle.complete().expect("Active completes");
+    let after = drain(&mut handle);
+    assert_eq!(
+        kinds(&after),
+        ["usage", "completed"],
+        "Completed stays the last event: {after:?}"
+    );
+    assert!(!usage(&after)[0].r#final);
 }
 
 #[test]

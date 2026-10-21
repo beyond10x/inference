@@ -53,10 +53,11 @@ fn input_admitted_before_supersede_or_cancel_is_refused_after_and_never_delivere
                 GenerationStateConflict { current: state }
             ))
         );
-        assert_eq!(
-            handle.by_ref().count(),
-            0,
-            "{state:?}: nothing is delivered"
+        let after: Vec<GenerationEvent> = handle.by_ref().collect();
+        assert!(
+            matches!(after.as_slice(), [GenerationEvent::Usage(recorded)] if recorded.r#final),
+            "{state:?}: no output is delivered, only the usage record of the turn that ended: \
+             {after:?}"
         );
     }
 }
