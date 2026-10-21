@@ -824,8 +824,10 @@ errors:
         type: inference.graph.NodeInstanceId
 
   # A subgraph node's ports and its child pipeline's exposures match one to one by name,
-  # direction and modality. The finding names the node and the port that has no matching
-  # exposure, or the exposure that has no matching port.
+  # direction and modality, except that the node's structured output port `usage` also matches
+  # each egress of a structured output port `usage` no port of the node names (the usage roll-up,
+  # under PlanPipeline). The finding names the node and the port that has no matching exposure,
+  # or the exposure that has no matching port.
   # read from: docs/design/inference.md:544
   # read from: docs/design/inference.md:1188
   - name: inference.graph.SubgraphInterfaceMismatch
@@ -1548,14 +1550,19 @@ commands:
       # (100) and lists roles (461-469) without saying which need a binding; the planning story
       # reads "a node with a non-empty `requires`". Open question for the owner.
       # A subgraph node preserves its child's declared ingress and egress contracts: its ports
-      # and the child's exposures match one to one by name, direction and modality. The rule
-      # compares the node's Port rows with the child's Exposure rows and their Port rows, sets of
-      # rows two references away, which no guard in ess 0.60.0 compares, so the refusal is the
-      # planner's to decide and names what it found, as locality-denied is.
+      # and the child's exposures match one to one by name, direction and modality, with one
+      # exception, the usage roll-up: the node's structured output port `usage` also matches every
+      # egress of the child that exposes a structured output port `usage` and whose name no port
+      # of the node carries, and the node forwards the usage records of all of them on that port,
+      # so a run's usage total includes its child runs' (inference.usage.UsageRecord, run_id) and
+      # no usage of a child is left behind. Such a `usage` port matching no exposure at all is a
+      # mismatch. The rule compares the node's Port rows with the child's Exposure rows and their
+      # Port rows, sets of rows two references away, which no guard in ess 0.60.0 compares, so the
+      # refusal is the planner's to decide and names what it found, as locality-denied is.
       # read from: docs/design/inference.md:544
       # read from: docs/design/inference.md:1188
       - name: interface-mismatch
-        external: a subgraph node of the pipeline has a port no exposure of its child pipeline matches by name, direction and modality, or the child has an exposure no port of the node matches
+        external: a subgraph node of the pipeline has a port no exposure of its child pipeline matches by name, direction and modality, its structured output port usage aside while it forwards a usage egress of the child, or the child has an exposure no port of the node matches, by name or, for an egress of a structured output port usage, as one the node's usage port forwards
         error: inference.graph.SubgraphInterfaceMismatch
         payload:
           inference.graph.SubgraphInterfaceMismatch:

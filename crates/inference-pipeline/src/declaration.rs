@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 
 use uuid::Uuid;
 
-use inference_core::model::{Adapter, AdapterId};
+use inference_core::model::{Adapter, AdapterId, Modality};
 use inference_core::policy::{DeploymentProfile, ProfileId, ProfileNotFound};
 
 use crate::{
@@ -108,6 +108,13 @@ impl SubgraphRefusal {
             Self::NotPlanned(error) => AddSubgraphNodeError::SubgraphNotPlanned(error),
         }
     }
+}
+
+/// Whether `port` is a usage port: a structured output port named [`crate::USAGE_PORT`].
+pub(crate) fn carries_usage(port: &Port) -> bool {
+    port.name == crate::USAGE_PORT
+        && port.direction == PortDirection::Output
+        && port.modality == Modality::Structured
 }
 
 /// Why `inference.graph.AddPort` added nothing. The refusals are decided in this order.
@@ -723,6 +730,38 @@ impl Declaration {
         self.exposures
             .iter()
             .find(|exposure| exposure.exposure_id == exposure_id)
+    }
+
+    /// The egresses of the child of the subgraph node `node_id` that the node forwards on its
+    /// structured output port [`USAGE_PORT`](crate::USAGE_PORT) besides the egress of that name,
+    /// which crosses to it by name as any exposure does: in the child's exposure order, every
+    /// egress of the child exposing a structured output port named `usage` whose name no port of
+    /// the node carries (the usage roll-up of `inference.graph.PlanPipeline`). Planning holds them
+    /// matched by that port, and the runtime forwards their usage records on it, so the usage of
+    /// every model call of the child reaches the parent, each record once. None for a node that is
+    /// not a subgraph node or has no such port.
+    #[must_use]
+    pub fn forwarded_usage(&self, node_id: NodeId) -> Vec<&Exposure> {
+        let Some((node, child)) = self
+            .node(node_id)
+            .and_then(|node| node.subgraph_id().map(|child| (node, child)))
+        else {
+            return Vec::new();
+        };
+        let ports: Vec<&Port> = self
+            .ports
+            .iter()
+            .filter(|port| port.node_id == node_id && port.pipeline_id == node.pipeline_id())
+            .collect();
+        if !ports.iter().any(|port| carries_usage(port)) {
+            return Vec::new();
+        }
+        self.exposures
+            .iter()
+            .filter(|exposure| exposure.pipeline_id == child)
+            .filter(|exposure| self.port(exposure.port_id).is_some_and(carries_usage))
+            .filter(|exposure| ports.iter().all(|port| port.name != exposure.name))
+            .collect()
     }
 
     /// Every feedback loop, in declaration order.
