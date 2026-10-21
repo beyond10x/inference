@@ -42,7 +42,8 @@
 //!
 //! A usage record a model node sends on an exposed `usage` port is delivered as
 //! `UsageRecorded` and added to the session's usage view, a total per run and one over the
-//! session ([`LiveSession::usage`], [`crate::usage`]). [`LiveSession::record_inputs`] taps the
+//! session ([`LiveSession::usage`], [`crate::usage`]); with the feature `cost`, a session priced
+//! with `LiveSession::price_with` also prices it. [`LiveSession::record_inputs`] taps the
 //! ingresses of the session's run for a recorder of the runtime, so that the run can be replayed.
 //!
 //! The control events the session writes travel on a stream of its own, produced under an
@@ -61,6 +62,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, SessionId, StreamId};
+use inference_core::usage::UsageRecorded;
 use inference_pipeline::{
     Declaration, InteractionMode, Node, NodeImplementation, PipelineId, PlannedPipeline,
 };
@@ -199,9 +201,21 @@ pub(crate) struct Shared {
     pub(crate) session_id: SessionId,
     inbox: Mutex<Inbox>,
     usage: Mutex<SessionUsage>,
+    /// The session's pricing; locked after `usage`, never before it.
+    #[cfg(feature = "cost")]
+    pricer: Mutex<crate::cost::Pricer>,
 }
 
 impl Shared {
+    /// Counts `recorded`, read off an egress of the run `run_id`, in the session's usage view
+    /// and, with the feature `cost`, prices it.
+    fn count_usage(&self, run_id: RunId, recorded: &UsageRecorded) {
+        let mut usage = lock(&self.usage);
+        usage.add(run_id, recorded);
+        #[cfg(feature = "cost")]
+        lock(&self.pricer).read(&mut usage.cost, recorded);
+    }
+
     /// The session's current run is `run_id`: its end is the one the session ends with, and its
     /// usage has a total of its own.
     pub(crate) fn follow(&self, run_id: RunId) {
@@ -598,6 +612,8 @@ impl LiveSessions {
             session_id: opened.session_id,
             inbox: Mutex::new(Inbox::default()),
             usage: Mutex::new(SessionUsage::default()),
+            #[cfg(feature = "cost")]
+            pricer: Mutex::new(crate::cost::Pricer::default()),
         });
         shared.record(SessionEvent::SessionOpened(opened));
 
@@ -767,6 +783,23 @@ impl<P: SessionPayload> LiveSession<P> {
     #[must_use]
     pub fn usage(&self) -> SessionUsage {
         lock(&self.shared.usage).clone()
+    }
+
+    /// Prices the session's usage with `pricing` from now on, and at the call the usage records
+    /// it read before it was first priced; the records it priced already keep their cost records
+    /// ([`crate::cost`]). What they cost is the `cost` of [`LiveSession::usage`].
+    ///
+    /// # Errors
+    ///
+    /// [`CurrencyMismatch`](crate::cost::CurrencyMismatch) when the session was priced before in
+    /// another currency; the session keeps its pricing.
+    #[cfg(feature = "cost")]
+    pub fn price_with(
+        &self,
+        pricing: crate::cost::Pricing,
+    ) -> Result<(), crate::cost::CurrencyMismatch> {
+        let mut usage = lock(&self.shared.usage);
+        lock(&self.shared.pricer).price_with(&mut usage.cost, pricing)
     }
 
     /// `send`: runs `SendInput` and forwards `envelope` to the ingress its `port` names, stamped
@@ -982,7 +1015,7 @@ impl<P: SessionPayload> LiveSession<P> {
     pub(crate) fn deliver(&self, envelope: &EventEnvelope<P>) -> Option<SessionEvent> {
         let event = envelope.payload.session_event()?;
         if let SessionEvent::UsageRecorded(recorded) = &event {
-            lock(&self.shared.usage).add(envelope.run_id, recorded);
+            self.shared.count_usage(envelope.run_id, recorded);
             return (!self.cancelled.load(Ordering::Acquire)).then_some(event);
         }
         if self.cancelled.load(Ordering::Acquire) {

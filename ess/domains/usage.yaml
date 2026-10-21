@@ -10,6 +10,11 @@
 # delivery. Open question for the owner.
 # read from: docs/design/inference.md:688
 # read from: docs/design/inference.md:1231
+# A CostRecord prices one usage record against one price document the caller supplies: the
+# document's currency, revision and digest, one line per quantity kind its adapter is charged for,
+# each an exact decimal amount or an unknown reason, and totals that keep the unknown apart from
+# the known. No provider price is looked up and no currency converted.
+# read from: docs/design/inference.md:439
 domain: inference.usage
 
 summary: >-
@@ -20,7 +25,10 @@ summary: >-
   out, cached and cache-creation input tokens, audio tokens and audio milliseconds in and out,
   input characters, requests, local compute milliseconds), its source (reported by the provider,
   measured locally, or unknown) and its value, none exactly when the source is unknown. A record
-  is created once, when its call ends, and never changes.
+  is created once, when its call ends, and never changes. A CostRecord prices one usage record
+  with one caller-supplied price document: its currency, revision and digest, a line per charged
+  quantity kind with an exact decimal amount or the reason it is unknown, and totals of the known
+  subtotal, the unknown lines and a complete total only when no line is unknown.
 
 naming:
   wire: usage
@@ -64,7 +72,8 @@ types:
     variants: [provider_reported, measured, unknown]
 
   # One counted quantity. `value` is none exactly when `source` is unknown; the contract crate
-  # refuses a quantity whose value and source disagree.
+  # refuses a quantity whose value and source disagree, and the invariants state that rule so that
+  # an arranged usage record is one the contract can hold.
   # read from: docs/design/inference.md:439
   - name: inference.usage.Quantity
     kind: struct
@@ -75,6 +84,59 @@ types:
         type: inference.usage.QuantitySource
       - name: value
         type: Optional<Integer>
+    invariants:
+      - any: [source == unknown, "defined(value)"]
+      - any: [source != unknown, {not: "defined(value)"}]
+
+  - name: inference.usage.CostRecordId
+    kind: newtype
+    of: Uuid
+
+  # Why a cost line has no amount, or only a lower bound: no quantity, no rate, no price for the
+  # kind or the adapter, a price whose binding or upstream model does not match the call's, no
+  # upstream model reported, no recorded charge, or counts the provider marked partial.
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.UnknownReason
+    kind: enum
+    variants:
+      - quantity_unknown
+      - rate_unknown
+      - price_unknown
+      - binding_mismatch
+      - model_unknown
+      - model_mismatch
+      - charge_unknown
+      - usage_incomplete
+
+  # One charged quantity kind priced. `quantity` is the count priced, none when unknown; `amount`
+  # is an exact decimal string in the record's currency, never a float, none when it cannot be
+  # known; `unknown` names why the amount is none, or why it is only a lower bound.
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.CostLine
+    kind: struct
+    fields:
+      - name: kind
+        type: inference.usage.QuantityKind
+      - name: quantity
+        type: Optional<Integer>
+      - name: amount
+        type: Optional<String>
+      - name: unknown
+        type: Optional<inference.usage.UnknownReason>
+
+  # The lines of a cost record added up: the sum of the known amounts, the number of unknown
+  # lines, and the complete total, none unless no line is unknown. Amounts are exact decimal
+  # strings.
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.CostTotal
+    kind: struct
+    fields:
+      - name: known_subtotal
+        type: String
+      - name: unknown_lines
+        type: Integer
+      - name: complete_total
+        type: Optional<String>
 
 entities:
   # The usage of one model call. The contract crate of the call fills its adapter, model, timing
@@ -185,6 +247,54 @@ entities:
       states: [Declared]
       terminal: [Declared]
 
+  # One usage record priced with one price document: a usage record has one cost record per price
+  # document it is priced with, none without one. The pricing crate fills the currency, the
+  # document's revision and digest, the lines and the totals.
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.CostRecord
+    naming:
+      summary: One usage record priced with one price document.
+    identity:
+      name: cost_record_id
+      type: inference.usage.CostRecordId
+    fields:
+      - name: usage_record_id
+        type: inference.usage.UsageRecordId
+      # The three-letter code of the price document's currency; no amount is converted.
+      - name: currency
+        type: String
+      - name: price_revision
+        type: String
+      # The content digest of the price document, which changes with any price in it.
+      - name: price_digest
+        type: String
+      - name: lines
+        type: List<inference.usage.CostLine>
+      - name: total
+        type: inference.usage.CostTotal
+    relations:
+      # One: the usage record priced.
+      # read from: docs/design/inference.md:439
+      - name: usage
+        kind: references
+        target: inference.usage.UsageRecord
+        cardinality: one
+        via: usage_record_id
+    # A single Declared state: a cost record is made once and never changes; a new price document
+    # makes a new one.
+    lifecycle:
+      initial: Declared
+      states: [Declared]
+      terminal: [Declared]
+
+errors:
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.UsageRecordNotFound
+    summary: No usage record carries the identity the cost record named; nothing was priced.
+    fields:
+      - name: usage_record_id
+        type: inference.usage.UsageRecordId
+
 commands:
   # Records the usage of one ended call. The adapter and the model must be declared; that the
   # model is the adapter's is the contract crate's rule, as for a capability record. The run,
@@ -270,6 +380,56 @@ commands:
             quantities: input.quantities
         summary: The call's usage is recorded and published for a meter.
 
+  # Records the cost of one usage record under one price document. The usage record must exist;
+  # the lines and totals are the pricing crate's, which computes them from the record, the
+  # document and the caller's price binding of the record's adapter.
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.PriceUsage
+    input:
+      - name: usage_record_id
+        type: inference.usage.UsageRecordId
+      - name: currency
+        type: String
+      - name: price_revision
+        type: String
+      - name: price_digest
+        type: String
+      - name: lines
+        type: List<inference.usage.CostLine>
+      - name: total
+        type: inference.usage.CostTotal
+    outcomes:
+      - name: unknown-usage
+        when_related: {via: input.usage_record_id, exists: false}
+        error: inference.usage.UsageRecordNotFound
+        payload:
+          inference.usage.UsageRecordNotFound:
+            usage_record_id: input.usage_record_id
+        summary: No usage record carries this identity, and nothing was priced.
+
+      - name: priced
+        creates: inference.usage.CostRecord
+        instance: cost_record_id
+        sets:
+          usage_record_id: input.usage_record_id
+          currency: input.currency
+          price_revision: input.price_revision
+          price_digest: input.price_digest
+          lines: input.lines
+          total: input.total
+        emits:
+          - inference.usage.CostRecorded
+        payload:
+          inference.usage.CostRecorded:
+            cost_record_id: {generated: true}
+            usage_record_id: input.usage_record_id
+            currency: input.currency
+            price_revision: input.price_revision
+            price_digest: input.price_digest
+            lines: input.lines
+            total: input.total
+        summary: The usage record is priced and its cost published.
+
 events:
   # The whole record, so that a meter or a price document needs nothing else to read it.
   # read from: docs/design/inference.md:688
@@ -301,3 +461,22 @@ events:
         type: Boolean
       - name: quantities
         type: List<inference.usage.Quantity>
+
+  # The whole cost record, so that a meter needs nothing else to read it.
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.CostRecorded
+    fields:
+      - name: cost_record_id
+        type: inference.usage.CostRecordId
+      - name: usage_record_id
+        type: inference.usage.UsageRecordId
+      - name: currency
+        type: String
+      - name: price_revision
+        type: String
+      - name: price_digest
+        type: String
+      - name: lines
+        type: List<inference.usage.CostLine>
+      - name: total
+        type: inference.usage.CostTotal

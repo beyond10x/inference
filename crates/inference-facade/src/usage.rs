@@ -20,13 +20,17 @@ use inference_core::id::RunId;
 use inference_core::usage::{UsageRecorded, UsageTotal};
 
 /// The usage a live session counted: a total per run it held, in the order it attached them, and
-/// one over the session.
+/// one over the session; with the feature `cost`, what that usage cost.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionUsage {
     /// Each run the session held and the total of the usage read off its egresses.
     pub runs: Vec<(RunId, UsageTotal)>,
     /// The total over every run the session held.
     pub session: UsageTotal,
+    /// The cost record of each usage record the session priced and their total, beside the
+    /// session's usage total ([`crate::cost`]).
+    #[cfg(feature = "cost")]
+    pub cost: crate::cost::SessionCost,
 }
 
 impl SessionUsage {

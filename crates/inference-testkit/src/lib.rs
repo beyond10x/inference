@@ -45,7 +45,8 @@ pub mod session;
 pub mod duplex;
 
 /// `inference.usage`: the in-memory store of the usage records of model calls, each of a
-/// declared adapter and model.
+/// declared adapter and model, and of the cost records that price them, each of a stored usage
+/// record.
 pub mod usage;
 
 /// The scripted mock recogniser of the STT contract, in two capability configurations, each
