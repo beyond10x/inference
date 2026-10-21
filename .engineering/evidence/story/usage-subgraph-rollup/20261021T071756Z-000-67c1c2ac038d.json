@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-21T07:17:56Z",
+  "actor": "human:timo",
+  "artifact": "story:usage-subgraph-rollup",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0 with ess 0.66.0: 308 suites, 2134 passed, 0 failed, 52 ignored (wave/25 a0864e4)"
+  }
+}
