@@ -1,7 +1,7 @@
 //! Run and session usage totals in the facade (`story:usage-session-totals`).
 //!
 //! A session over the voice cascade on the testkit mocks, each model node's `usage` port exposed
-//! as an egress ([`declare_with_usage`]), answers one spoken turn: it delivers one
+//! as an egress ([`declare`]), answers one spoken turn: it delivers one
 //! `UsageRecorded` per model call, one STT, one LLM turn and one TTS, and its usage view holds a
 //! total of its run and of the session equal, kind by kind, to the sum of those records, every
 //! unknown quantity counted as unknown. The run's nodes are wrapped by a recorder of the runtime
@@ -30,7 +30,7 @@ use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::model::ModelId;
 use inference_core::usage::{KindTotal, QuantityKind, QuantitySource, UsageRecorded, UsageTotal};
 use inference_facade::events::SessionEvent;
-use inference_facade::live::{LiveSession, LiveSessions};
+use inference_facade::live::{AlreadyRecorded, LiveSession, LiveSessions};
 use inference_facade::usage::SessionUsage;
 use inference_llm::llm_core::Usage;
 use inference_pipeline::{Declaration, InteractionMode, Node, NodeImplementation};
@@ -41,7 +41,7 @@ use inference_runtime::run::RunState;
 use inference_runtime::telemetry::{self, TelemetrySink};
 use inference_testkit::cascade::{
     AUDIO_INGRESS, CascadePayload, LLM_USAGE_EGRESS, Mocks, SPEECH_EGRESS, STT_USAGE_EGRESS,
-    TEXT_EGRESS, TRANSCRIPT_EGRESS, TTS_USAGE_EGRESS, TurnStore, VoiceCascade, declare_with_usage,
+    TEXT_EGRESS, TRANSCRIPT_EGRESS, TTS_USAGE_EGRESS, TurnStore, VoiceCascade, declare,
 };
 use inference_testkit::graph::RunLog;
 use inference_testkit::llm::{MockConfiguration as LlmConfiguration, MockGenerator, ModelNode};
@@ -253,7 +253,7 @@ fn records(received: &[SessionEvent]) -> Vec<&UsageRecorded> {
 fn total_of<'a>(records: impl IntoIterator<Item = &'a UsageRecorded>) -> UsageTotal {
     let mut total = UsageTotal::new();
     for recorded in records {
-        total.add(&recorded.quantities);
+        total.add(&recorded.quantities, recorded.r#final);
     }
     total
 }
@@ -275,7 +275,7 @@ struct Voiced {
 fn voice_session(telemetry: Option<Arc<dyn TelemetrySink>>) -> Voiced {
     let mocks = mocks();
     let mut declaration = Declaration::new();
-    let cascade = declare_with_usage(&mut declaration, &mocks).expect("the cascade plans");
+    let cascade = declare(&mut declaration, &mocks).expect("the cascade plans");
     let mut recorder = Recorder::new(POLICY);
     if let Some(sink) = telemetry {
         recorder = recorder.with_telemetry(sink);
@@ -290,7 +290,9 @@ fn voice_session(telemetry: Option<Arc<dyn TelemetrySink>>) -> Voiced {
         move |run_id, node| wrapping.wrap(node, nodes(run_id, node)),
     ))
     .expect("a session opens over the cascade");
-    session.record_inputs(&recorder);
+    session
+        .record_inputs(&recorder)
+        .expect("the ingresses of the new run are not tapped yet");
     let run_id = session.run_id();
     let drive = thread::spawn(move || block_on(driver.drive()));
     let mut received = Vec::new();
@@ -354,6 +356,7 @@ fn a_spoken_turn_delivers_one_usage_record_per_model_call_and_totals_them_kind_b
             known: 3,
             unknown: 0,
             records: 3,
+            partial: 0,
         }),
         "each model call is one request"
     );
@@ -363,6 +366,7 @@ fn a_spoken_turn_delivers_one_usage_record_per_model_call_and_totals_them_kind_b
             known: 0,
             unknown: 3,
             records: 3,
+            partial: 0,
         }),
         "no mock computes anything of its own: unknown, never zero"
     );
@@ -372,6 +376,7 @@ fn a_spoken_turn_delivers_one_usage_record_per_model_call_and_totals_them_kind_b
             known: 0,
             unknown: 1,
             records: 1,
+            partial: 0,
         }),
         "the mock LLM reports no tokens"
     );
@@ -568,7 +573,7 @@ fn a_session_switching_from_text_to_the_cascade_keeps_one_total_per_run_and_one_
     let (text_declaration, text_planned, usage_port) = planned_with_usage(&text_generator);
     let mocks = mocks();
     let mut voice_declaration = Declaration::new();
-    let cascade = declare_with_usage(&mut voice_declaration, &mocks).expect("the cascade plans");
+    let cascade = declare(&mut voice_declaration, &mocks).expect("the cascade plans");
     let sessions = LiveSessions::new();
     let mut application = Application::new();
     let mut received = Vec::new();
@@ -648,5 +653,103 @@ fn a_session_switching_from_text_to_the_cascade_keeps_one_total_per_run_and_one_
             .map(|total| total.unknown),
         Some(2),
         "both LLM turns' tokens unknown, kept apart from zero"
+    );
+}
+
+/// The identities of the inputs `recorder` recorded, in merge order.
+fn inputs(recorder: &Recorder<CascadePayload>) -> Vec<EventId> {
+    recorder
+        .recording()
+        .inputs()
+        .filter_map(|recorded| recorded.envelope().map(|envelope| envelope.event_id))
+        .collect()
+}
+
+#[test]
+fn a_second_tap_of_a_runs_ingresses_is_refused_so_every_input_is_recorded_once() {
+    let first_generator = generator(Vec::<String>::new());
+    let (first_declaration, first_planned, first_usage) = planned_with_usage(&first_generator);
+    let second_generator = generator(Vec::<String>::new());
+    let (second_declaration, second_planned, second_usage) = planned_with_usage(&second_generator);
+    let sessions = LiveSessions::new();
+    let (mut session, driver) = block_on(sessions.open(
+        &first_declaration,
+        &first_planned,
+        InteractionMode::TurnBased,
+        text_nodes(&first_generator, first_usage),
+    ))
+    .expect("a session opens over the text pipeline");
+    let first_run = session.run_id();
+    let first_drive = thread::spawn(move || block_on(driver.drive()));
+
+    let recorder = Recorder::new(POLICY);
+    session
+        .record_inputs(&recorder)
+        .expect("the first tap of the run's ingresses");
+    assert_eq!(
+        session.record_inputs(&recorder),
+        Err(AlreadyRecorded { run_id: first_run }),
+        "a second tap by the same recorder is refused"
+    );
+    assert_eq!(
+        session.record_inputs(&Recorder::new(POLICY)),
+        Err(AlreadyRecorded { run_id: first_run }),
+        "and by another"
+    );
+
+    let mut application = Application::new();
+    let mut received = Vec::new();
+    block_on(session.send(application.text("hello"))).expect("sent");
+    block_on(session.commit_input()).expect("committed");
+    while !received
+        .iter()
+        .any(|event| matches!(event, SessionEvent::TextSegmentCommitted(_)))
+    {
+        received.push(block_on(session.receive()).expect("the session delivers the reply"));
+    }
+
+    // A switch gives the session a run whose ingresses are not tapped yet.
+    let driver = block_on(session.switch(
+        &second_declaration,
+        &second_planned,
+        InteractionMode::TurnBased,
+        text_nodes(&second_generator, second_usage),
+    ))
+    .expect("a Ready session switches");
+    let second_run = session.run_id();
+    first_drive
+        .join()
+        .expect("no panic")
+        .expect("the first run ends");
+    let second_drive = thread::spawn(move || block_on(driver.drive()));
+    let second_recorder = Recorder::new(POLICY);
+    session
+        .record_inputs(&second_recorder)
+        .expect("the new run's ingresses are tapped once");
+    assert_eq!(
+        session.record_inputs(&second_recorder),
+        Err(AlreadyRecorded { run_id: second_run })
+    );
+    block_on(session.close()).expect("drains");
+    while block_on(session.receive()).is_some() {}
+    second_drive
+        .join()
+        .expect("no panic")
+        .expect("the second run ends");
+
+    let first = inputs(&recorder);
+    assert_eq!(
+        first.len(),
+        3,
+        "the text, the commit and the end of input the switch sent, each once: {first:?}"
+    );
+    let mut unique = first.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), first.len(), "no input is recorded twice");
+    assert_eq!(
+        inputs(&second_recorder).len(),
+        1,
+        "the end of input the close sent, once"
     );
 }

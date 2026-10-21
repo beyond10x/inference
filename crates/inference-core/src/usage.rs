@@ -16,9 +16,10 @@
 //! session ([`RecordUsage::placed`]). A call inside a subgraph names the child run it was made in.
 //!
 //! A [`UsageTotal`] adds records up, kind by kind ([`KindTotal`]): the sum of the known values,
-//! the number of unknown quantities and the number of records that carried the kind, complete
-//! only when none of them was unknown. An unknown quantity is counted as unknown, never added as
-//! zero. The total is a value its holder keeps, such as a session over its runs; the
+//! the number of unknown quantities, the number of records that carried the kind and how many of
+//! those were partial, their `final` false; a kind is complete only when none of its quantities
+//! was unknown and none of its records partial. An unknown quantity is counted as unknown, never
+//! added as zero, and a partial count is counted, never taken for a final one. The total is a value its holder keeps, such as a session over its runs; the
 //! specification declares no entity for it.
 
 use std::collections::BTreeMap;
@@ -491,18 +492,24 @@ pub struct KindTotal {
     pub unknown: u64,
     /// How many records carried a quantity of the kind.
     pub records: u64,
+    /// How many of those records were partial, their `final` false: the provider may still
+    /// change their counts, so `known` and `unknown` may change with them.
+    pub partial: u64,
 }
 
 impl KindTotal {
-    /// Whether `known` is the whole total of the kind: no quantity of it was unknown.
+    /// Whether `known` is the whole and settled total of the kind: no quantity of it was unknown
+    /// and no record carrying it was partial.
     #[must_use]
     pub const fn complete(&self) -> bool {
-        self.unknown == 0
+        self.unknown == 0 && self.partial == 0
     }
 }
 
 /// The usage of several calls added up, kind by kind; see the module documentation. A kind no
-/// record carried has no [`KindTotal`].
+/// record carried has no [`KindTotal`]. A total is complete only when every kind is: no quantity
+/// unknown and no record partial, so a total over counts the provider may still change never
+/// reads as settled.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UsageTotal {
     records: u64,
@@ -516,10 +523,11 @@ impl UsageTotal {
         Self::default()
     }
 
-    /// Adds the record whose quantities are `quantities`: each known value to its kind's sum,
-    /// each unknown quantity to its kind's unknown count, and the record to the count of every
-    /// kind it carries.
-    pub fn add(&mut self, quantities: &[Quantity]) {
+    /// Adds the record whose quantities are `quantities` and whose ESS field `final` is
+    /// `is_final`: each known value to its kind's sum, each unknown quantity to its kind's unknown
+    /// count, and the record to the count of every kind it carries and, when it is not final, to
+    /// the partial count of each.
+    pub fn add(&mut self, quantities: &[Quantity], is_final: bool) {
         self.records += 1;
         let mut carried: Vec<QuantityKind> = Vec::with_capacity(quantities.len());
         for quantity in quantities {
@@ -531,6 +539,9 @@ impl UsageTotal {
             if !carried.contains(&quantity.kind()) {
                 carried.push(quantity.kind());
                 total.records += 1;
+                if !is_final {
+                    total.partial += 1;
+                }
             }
         }
     }
@@ -552,7 +563,8 @@ impl UsageTotal {
         self.kinds.iter().map(|(kind, total)| (*kind, *total))
     }
 
-    /// Whether every kind is complete: no quantity the total took was unknown.
+    /// Whether every kind is complete: no quantity the total took was unknown and no record it
+    /// took was partial.
     #[must_use]
     pub fn complete(&self) -> bool {
         self.kinds.values().all(KindTotal::complete)
@@ -733,20 +745,29 @@ mod tests {
         assert!(total.complete(), "no record is a complete total of nothing");
         assert_eq!(total.kind(QuantityKind::Requests), None);
 
-        total.add(&[
-            Quantity::provider_reported(QuantityKind::InputTextTokens, 12),
-            Quantity::measured(QuantityKind::Requests, 1),
-            Quantity::unknown(QuantityKind::LocalComputeMs),
-        ]);
-        total.add(&[
-            Quantity::unknown(QuantityKind::InputTextTokens),
-            Quantity::measured(QuantityKind::Requests, 1),
-            Quantity::measured(QuantityKind::LocalComputeMs, 0),
-        ]);
-        total.add(&[Quantity::provider_reported(
-            QuantityKind::InputTextTokens,
-            30,
-        )]);
+        total.add(
+            &[
+                Quantity::provider_reported(QuantityKind::InputTextTokens, 12),
+                Quantity::measured(QuantityKind::Requests, 1),
+                Quantity::unknown(QuantityKind::LocalComputeMs),
+            ],
+            true,
+        );
+        total.add(
+            &[
+                Quantity::unknown(QuantityKind::InputTextTokens),
+                Quantity::measured(QuantityKind::Requests, 1),
+                Quantity::measured(QuantityKind::LocalComputeMs, 0),
+            ],
+            true,
+        );
+        total.add(
+            &[Quantity::provider_reported(
+                QuantityKind::InputTextTokens,
+                30,
+            )],
+            true,
+        );
 
         assert_eq!(total.records(), 3);
         assert_eq!(
@@ -755,6 +776,7 @@ mod tests {
                 known: 42,
                 unknown: 1,
                 records: 3,
+                partial: 0,
             }),
             "the unknown count of the second record is not added as zero"
         );
@@ -764,6 +786,7 @@ mod tests {
                 known: 2,
                 unknown: 0,
                 records: 2,
+                partial: 0,
             })
         );
         assert_eq!(
@@ -772,6 +795,7 @@ mod tests {
                 known: 0,
                 unknown: 1,
                 records: 2,
+                partial: 0,
             }),
             "a measured zero is known; the unknown beside it stays unknown"
         );
@@ -803,21 +827,28 @@ mod tests {
     #[test]
     fn a_total_of_unknowns_only_knows_nothing_and_a_sum_past_i64_does_not_overflow() {
         let mut unknown = UsageTotal::new();
-        unknown.add(&[Quantity::unknown(QuantityKind::OutputAudioMs)]);
-        unknown.add(&[Quantity::unknown(QuantityKind::OutputAudioMs)]);
+        unknown.add(&[Quantity::unknown(QuantityKind::OutputAudioMs)], true);
+        unknown.add(&[Quantity::unknown(QuantityKind::OutputAudioMs)], true);
         assert_eq!(
             unknown.kind(QuantityKind::OutputAudioMs),
             Some(KindTotal {
                 known: 0,
                 unknown: 2,
                 records: 2,
+                partial: 0,
             })
         );
         assert!(!unknown.complete());
 
         let mut large = UsageTotal::new();
-        large.add(&[Quantity::measured(QuantityKind::InputAudioMs, i64::MAX)]);
-        large.add(&[Quantity::measured(QuantityKind::InputAudioMs, i64::MAX)]);
+        large.add(
+            &[Quantity::measured(QuantityKind::InputAudioMs, i64::MAX)],
+            true,
+        );
+        large.add(
+            &[Quantity::measured(QuantityKind::InputAudioMs, i64::MAX)],
+            true,
+        );
         assert_eq!(
             large
                 .kind(QuantityKind::InputAudioMs)
@@ -825,6 +856,53 @@ mod tests {
             Some(2 * i128::from(i64::MAX))
         );
         assert!(large.complete());
+    }
+
+    #[test]
+    fn a_partial_record_keeps_its_kinds_incomplete_however_well_they_are_counted() {
+        let mut total = UsageTotal::new();
+        total.add(
+            &[
+                Quantity::provider_reported(QuantityKind::OutputTextTokens, 9),
+                Quantity::measured(QuantityKind::Requests, 1),
+            ],
+            false,
+        );
+        total.add(&[Quantity::measured(QuantityKind::Requests, 1)], true);
+
+        assert_eq!(
+            total.kind(QuantityKind::OutputTextTokens),
+            Some(KindTotal {
+                known: 9,
+                unknown: 0,
+                records: 1,
+                partial: 1,
+            }),
+            "every count known, but the provider marked it partial"
+        );
+        assert_eq!(
+            total.kind(QuantityKind::Requests),
+            Some(KindTotal {
+                known: 2,
+                unknown: 0,
+                records: 2,
+                partial: 1,
+            })
+        );
+        assert!(
+            !total
+                .kind(QuantityKind::OutputTextTokens)
+                .expect("carried")
+                .complete()
+        );
+        assert!(
+            !total.complete(),
+            "a total over partial counts is not complete"
+        );
+
+        let mut final_only = UsageTotal::new();
+        final_only.add(&[Quantity::measured(QuantityKind::Requests, 1)], true);
+        assert!(final_only.complete());
     }
 
     #[test]
