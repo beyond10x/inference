@@ -1,6 +1,8 @@
 //! Adversary pass 1 on `story:usage-subgraph-rollup`: the usage roll-up of a subgraph node under
 //! a cancel of the parent, a child model that fails, nesting, a stop that crosses late, and a
-//! `usage` port the parent does not connect.
+//! `usage` port the parent does not connect, with the cases of
+//! `story:subgraph-unconnected-usage-port`: three levels, a cancel and a text port the parent does
+//! not connect.
 //!
 //! Every case runs on a thread of its own and is bounded by [`PATIENCE`], so a bridge that never
 //! ends fails the case instead of hanging the suite.
@@ -13,7 +15,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
@@ -31,6 +33,7 @@ use inference_pipeline::{
     NodeRole, OverloadPolicy, PipelineId, PipelineSpec, PlannedPipeline, PortId, PortTraits,
     USAGE_PORT, modality,
 };
+use inference_runtime::record::Recorder;
 use inference_runtime::run::RunState;
 use inference_runtime::{ChildImplementations, RunController, SubgraphHandle, SubgraphNode};
 use inference_testkit::graph::{PipelinePayload, RunLog};
@@ -933,10 +936,36 @@ fn the_merged_stop_waits_for_a_usage_egress_that_ends_late() {
     });
 }
 
+/// The model nodes of a child run as [`model_nodes`] makes them, each wrapped by `recorder`, so
+/// that every envelope they send is recorded before it reaches the child's edge or egress.
+fn recorded_models(
+    usage_of: &[(NodeId, PortId)],
+    answering: Generator,
+    recorder: &Recorder<PipelinePayload>,
+) -> ChildImplementations<PipelinePayload> {
+    let mut inner = model_nodes(usage_of, answering);
+    let recorder = recorder.clone();
+    Box::new(move |run_id: RunId, node: &Node| recorder.wrap(node, inner(run_id, node)))
+}
+
+/// The usage records `recorder` took, in merge order.
+fn recorded_usage(recorder: &Recorder<PipelinePayload>) -> Vec<UsageRecorded> {
+    recorder
+        .recording()
+        .usage()
+        .into_iter()
+        .filter_map(|envelope| match &envelope.payload {
+            PipelinePayload::Usage(recorded) => Some(recorded.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Runs one turn through a parent whose subgraph node's structured output port `port`, optional,
 /// takes the child's usage egress `model usage` and is connected to nothing; answers how the
-/// parent run ended.
-fn unconnected(port: &'static str) -> RunState {
+/// parent run ended, the records the child's model sent, as a recorder on the child's nodes took
+/// them, and the child run.
+fn unconnected(port: &'static str) -> (RunState, Vec<UsageRecorded>, RunId) {
     let mock = generator().reporting([Some(usage(5))]);
     let (catalog, profile_id) = catalog(vec![mock.adapter().clone()]);
     let mut declaration = Declaration::new();
@@ -957,8 +986,11 @@ fn unconnected(port: &'static str) -> RunState {
     );
     let answering: Generator = mock.into();
     let handles: Arc<Mutex<Vec<SubgraphHandle>>> = Arc::default();
+    let recorder = Recorder::new("1");
     let mut running = {
         let declaration_ = declaration.clone();
+        let handles = Arc::clone(&handles);
+        let recorder = recorder.clone();
         Running::start(
             &declaration,
             &parent,
@@ -968,7 +1000,7 @@ fn unconnected(port: &'static str) -> RunState {
                     run_id,
                     &declaration_,
                     &child.planned,
-                    model_nodes(&child.usage_of, answering.clone()),
+                    recorded_models(&child.usage_of, answering.clone(), &recorder),
                     &handles,
                 )
             },
@@ -978,23 +1010,341 @@ fn unconnected(port: &'static str) -> RunState {
     running.send("user text", application.text("user text", "1"));
     running.send("user text", application.stop("user text"));
     let _replies = drain(running.egress("reply"));
-    running.drive.join().expect("the loop does not panic")
+    let state = running.drive.join().expect("the loop does not panic");
+    (state, recorded_usage(&recorder), child_run(&handles, 0))
 }
 
-/// Decision 4 of the unit: a `usage` port the parent connects to nothing leaves the child's
-/// usage egresses unbridged. A model node whose `usage` port has no edge sends no record and its
-/// run completes; the same model inside a subgraph node whose `usage` port has no edge should
-/// not fail its parent for usage nobody asked for.
+/// The rule of `story:subgraph-unconnected-usage-port`: a subgraph node whose `usage` port has
+/// no edge behaves as a model node whose own `usage` port has no edge, whose run completes. The
+/// node goes on reading the child's usage egresses, so the child's model sends its record as in
+/// a run of its own, where the child's recorder sees it, and nothing in the parent carries it.
 #[test]
-#[ignore = "pre-existing: an unbridged child egress is dropped, so the child node fails on its send"]
 fn a_usage_port_the_parent_connects_to_nothing_does_not_fail_the_parent() {
-    bounded(|| assert_eq!(unconnected(USAGE_PORT), RunState::Completed));
+    bounded(|| {
+        let (state, records, child) = unconnected(USAGE_PORT);
+        assert_eq!(state, RunState::Completed);
+        let [recorded] = records.as_slice() else {
+            panic!("the child's model sends its record once: {records:#?}")
+        };
+        assert_eq!(recorded.run_id, Some(child));
+    });
 }
 
 /// The same without the roll-up: the node's port carries the name of the child's usage egress,
 /// which it matched by name before this story, and is connected to nothing.
 #[test]
-#[ignore = "pre-existing: an unbridged child egress is dropped, so the child node fails on its send"]
 fn a_port_named_after_the_childs_usage_egress_connected_to_nothing_does_not_fail_the_parent() {
-    bounded(|| assert_eq!(unconnected("model usage"), RunState::Completed));
+    bounded(|| {
+        let (state, records, child) = unconnected("model usage");
+        assert_eq!(state, RunState::Completed);
+        let [recorded] = records.as_slice() else {
+            panic!("the child's model sends its record once: {records:#?}")
+        };
+        assert_eq!(recorded.run_id, Some(child));
+    });
+}
+
+/// A subgraph node's ports: an input port per name of `inputs` and a text output port per entry
+/// of `outputs`, exposed under its name when its flag is set and otherwise optional and connected
+/// to nothing; and a structured output port `usage`, none when `usage` is none, otherwise exposed
+/// under the name it holds or, holding none, optional and connected to nothing. Planned.
+fn over_with(
+    declaration: &mut Declaration,
+    catalog: &Fixture,
+    profile_id: ProfileId,
+    child: PipelineId,
+    (inputs, outputs): (&[&str], &[(&str, bool)]),
+    usage: Option<Option<&str>>,
+) -> (PipelineId, PlannedPipeline) {
+    let optional = |traits: PortTraits| PortTraits {
+        essentiality: Essentiality::Optional,
+        ..traits
+    };
+    let (pipeline, ()) = declaration
+        .build(catalog, profile_id, spec("over"), |pipeline| {
+            let subgraph = pipeline
+                .subgraph("frontend", NodeRole::Transform, child)
+                .expect("the child is Planned");
+            for &name in inputs {
+                let into = pipeline.input::<modality::Text>(&subgraph, name, TEXT);
+                pipeline.expose(&into, name, capacity(), OverloadPolicy::Pause);
+            }
+            for &(name, exposed) in outputs {
+                let traits = if exposed { TEXT } else { optional(TEXT) };
+                let out = pipeline.output::<modality::Text>(&subgraph, name, traits);
+                if exposed {
+                    pipeline.expose(&out, name, capacity(), OverloadPolicy::Pause);
+                }
+            }
+            if let Some(usage) = usage {
+                let traits = if usage.is_some() {
+                    RECORDS
+                } else {
+                    optional(RECORDS)
+                };
+                let used = pipeline.output::<modality::Structured>(&subgraph, USAGE_PORT, traits);
+                if let Some(name) = usage {
+                    pipeline.expose(&used, name, capacity(), OverloadPolicy::Pause);
+                }
+            }
+        })
+        .expect("the profile is declared");
+    let validated = declaration.validate(pipeline).expect("valid");
+    let planned = declaration.plan(validated, catalog).expect("planned");
+    (pipeline, planned)
+}
+
+/// Runs one turn through three levels, a top run over a middle pipeline over a child of one
+/// model reporting usage; `middle` is the middle subgraph node's `usage` port and `top` the top
+/// one's, as [`over_with`] reads them. Answers how the top run ended, the records the innermost
+/// model sent, as a recorder on it took them, and the innermost run.
+fn three_levels(
+    middle: Option<&'static str>,
+    top: Option<Option<&'static str>>,
+) -> (RunState, Vec<UsageRecorded>, RunId) {
+    let mock = generator().reporting([Some(usage(9))]);
+    let (catalog, profile_id) = catalog(vec![mock.adapter().clone()]);
+    let mut declaration = Declaration::new();
+    let inner = models(
+        &mut declaration,
+        &catalog,
+        profile_id,
+        &[("user text", "reply", "model usage")],
+        mock.adapter().adapter_id(),
+    );
+    let texts: (&[&str], &[(&str, bool)]) = (&["user text"], &[("reply", true)]);
+    let (middle_id, middle_planned) = over_with(
+        &mut declaration,
+        &catalog,
+        profile_id,
+        inner.pipeline,
+        texts,
+        Some(middle),
+    );
+    let (_, top_planned) = over_with(
+        &mut declaration,
+        &catalog,
+        profile_id,
+        middle_id,
+        texts,
+        top,
+    );
+    let answering: Generator = mock.into();
+    let recorder = Recorder::new("1");
+    let inner_handles: Arc<Mutex<Vec<SubgraphHandle>>> = Arc::default();
+    let mut running = {
+        let declaration_ = declaration.clone();
+        let recorder = recorder.clone();
+        let inner_handles = Arc::clone(&inner_handles);
+        Running::start(
+            &declaration,
+            &top_planned,
+            (&["user text"], &["reply"]),
+            move |run_id, _| {
+                let declaration__ = declaration_.clone();
+                let inner_planned = inner.planned.clone();
+                let usage_of = inner.usage_of.clone();
+                let answering = answering.clone();
+                let recorder = recorder.clone();
+                let inner_handles = Arc::clone(&inner_handles);
+                subgraph_node(
+                    run_id,
+                    &declaration_,
+                    &middle_planned,
+                    Box::new(move |middle_run: RunId, _: &Node| {
+                        subgraph_node(
+                            middle_run,
+                            &declaration__,
+                            &inner_planned,
+                            recorded_models(&usage_of, answering.clone(), &recorder),
+                            &inner_handles,
+                        )
+                    }),
+                    &Arc::default(),
+                )
+            },
+        )
+    };
+    let mut application = Application::new(running.run_id);
+    running.send("user text", application.text("user text", "1"));
+    running.send("user text", application.stop("user text"));
+    let replies = drain(running.egress("reply"));
+    assert!(
+        replies
+            .iter()
+            .any(|envelope| envelope.kind == "inference.stream.TextSegmentCommitted"),
+        "the model answers through two subgraphs: {replies:#?}"
+    );
+    let state = running.drive.join().expect("the loop does not panic");
+    (
+        state,
+        recorded_usage(&recorder),
+        child_run(&inner_handles, 0),
+    )
+}
+
+/// Three levels, the top subgraph node's `usage` port connected to nothing: the middle node
+/// forwards the innermost model's record on its egress `inner usage`, and the top node reads that
+/// egress and carries the record nowhere, as a model node with no edge on its `usage` port.
+#[test]
+fn three_levels_with_the_top_usage_port_connected_to_nothing_complete() {
+    bounded(|| {
+        let (state, records, innermost) = three_levels(Some("inner usage"), Some(None));
+        assert_eq!(state, RunState::Completed);
+        let [recorded] = records.as_slice() else {
+            panic!("the innermost model sends its record once: {records:#?}")
+        };
+        assert_eq!(recorded.run_id, Some(innermost));
+    });
+}
+
+/// Three levels, the middle subgraph node's `usage` port connected to nothing inside the middle
+/// pipeline, and the top node with no `usage` port, the middle pipeline exposing no usage.
+#[test]
+fn three_levels_with_the_middle_usage_port_connected_to_nothing_complete() {
+    bounded(|| {
+        let (state, records, innermost) = three_levels(None, None);
+        assert_eq!(state, RunState::Completed);
+        let [recorded] = records.as_slice() else {
+            panic!("the innermost model sends its record once: {records:#?}")
+        };
+        assert_eq!(recorded.run_id, Some(innermost));
+    });
+}
+
+/// A cancel of the parent whose subgraph node's `usage` port is connected to nothing. The child's
+/// model reports usage for a first turn that ends before the cancel and holds the second, which
+/// the cancel cuts; it sends both records, the cut one after its own cancel, and the node reads
+/// the usage egress through the cancel until it closes, so the child run is cancelled, not
+/// failed, and its recorder holds both records.
+#[test]
+fn a_cancel_of_the_parent_with_its_usage_port_connected_to_nothing_cancels_the_child() {
+    bounded(|| {
+        let mock = generator()
+            .reporting([Some(usage(5)), Some(usage(20))])
+            .holding(1);
+        let (catalog, profile_id) = catalog(vec![mock.adapter().clone()]);
+        let mut declaration = Declaration::new();
+        let child = models(
+            &mut declaration,
+            &catalog,
+            profile_id,
+            &[("user text", "reply", "model usage")],
+            mock.adapter().adapter_id(),
+        );
+        let (_, parent) = over_with(
+            &mut declaration,
+            &catalog,
+            profile_id,
+            child.pipeline,
+            (&["user text"], &[("reply", true)]),
+            Some(None),
+        );
+        let answering: Generator = mock.into();
+        let handles: Arc<Mutex<Vec<SubgraphHandle>>> = Arc::default();
+        let recorder = Recorder::new("1");
+        let mut running = {
+            let declaration_ = declaration.clone();
+            let handles = Arc::clone(&handles);
+            let recorder = recorder.clone();
+            Running::start(
+                &declaration,
+                &parent,
+                (&["user text"], &["reply"]),
+                move |run_id, _| {
+                    subgraph_node(
+                        run_id,
+                        &declaration_,
+                        &child.planned,
+                        recorded_models(&child.usage_of, answering.clone(), &recorder),
+                        &handles,
+                    )
+                },
+            )
+        };
+        let mut application = Application::new(running.run_id);
+        running.send("user text", application.text("user text", "1"));
+        let committed = |envelope: &EventEnvelope<PipelinePayload>| {
+            envelope.kind == "inference.stream.TextSegmentCommitted"
+        };
+        until(running.egress("reply"), committed).expect("the first turn ends");
+        let deadline = Instant::now() + PATIENCE / 2;
+        while recorded_usage(&recorder).is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        running.send("user text", application.text("user text", "2"));
+        let _held = until(running.egress("reply"), is_text);
+        running.requests.cancel();
+        let state = running.drive.join().expect("the loop does not panic");
+        assert_eq!(state, RunState::Cancelled);
+        let at_stop = handles.lock().unwrap_or_else(PoisonError::into_inner)[0]
+            .at_stop()
+            .expect("the node stopped");
+        assert_eq!(at_stop.state, RunState::Cancelled, "{at_stop:#?}");
+        assert!(at_stop.queues_dropped);
+        let finals: Vec<bool> = recorded_usage(&recorder)
+            .iter()
+            .map(|recorded| recorded.r#final)
+            .collect();
+        assert_eq!(finals, [true, false]);
+    });
+}
+
+/// The rest of the class: a text output port of the subgraph node connected to nothing, which
+/// validation admits as optional, leaves the child's egress of its name to be read and dropped
+/// as well, so the child's model, which sends its reply there, does not fail the parent, and its
+/// usage still rolls up on the connected `usage` port.
+#[test]
+fn a_text_port_the_parent_connects_to_nothing_does_not_fail_the_parent() {
+    bounded(|| {
+        let mock = generator().reporting([Some(usage(6))]);
+        let (catalog, profile_id) = catalog(vec![mock.adapter().clone()]);
+        let mut declaration = Declaration::new();
+        let child = models(
+            &mut declaration,
+            &catalog,
+            profile_id,
+            &[("user text", "reply", "model usage")],
+            mock.adapter().adapter_id(),
+        );
+        let (_, parent) = over_with(
+            &mut declaration,
+            &catalog,
+            profile_id,
+            child.pipeline,
+            (&["user text"], &[("reply", false)]),
+            Some(Some(USAGE_PORT)),
+        );
+        let answering: Generator = mock.into();
+        let handles: Arc<Mutex<Vec<SubgraphHandle>>> = Arc::default();
+        let mut running = {
+            let declaration_ = declaration.clone();
+            let handles = Arc::clone(&handles);
+            Running::start(
+                &declaration,
+                &parent,
+                (&["user text"], &[USAGE_PORT]),
+                move |run_id, _| {
+                    subgraph_node(
+                        run_id,
+                        &declaration_,
+                        &child.planned,
+                        model_nodes(&child.usage_of, answering.clone()),
+                        &handles,
+                    )
+                },
+            )
+        };
+        let mut application = Application::new(running.run_id);
+        running.send("user text", application.text("user text", "1"));
+        running.send("user text", application.stop("user text"));
+        let received = drain(running.egress(USAGE_PORT));
+        let state = running.drive.join().expect("the loop does not panic");
+        assert_eq!(state, RunState::Completed);
+        let records = records(&received);
+        let [(_, recorded)] = records.as_slice() else {
+            panic!("the child's record rolls up: {received:#?}")
+        };
+        assert_eq!(recorded.run_id, Some(child_run(&handles, 0)));
+    });
 }
