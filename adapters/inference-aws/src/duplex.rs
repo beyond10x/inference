@@ -664,6 +664,20 @@ impl NovaSonicSpeechSession {
         }
     }
 
+    /// Records every arrival already received, as [`Self::record`] does, up to the first that
+    /// would end the session: the stream's end, a client failure or a service error.
+    fn record_arrived(&mut self) {
+        while let Ok(arrival) = self.arrivals.try_recv() {
+            if matches!(
+                arrival.what,
+                Received::Ended | Received::Failed(_) | Received::Event(OutputEvent::Error(_))
+            ) {
+                return;
+            }
+            self.record(arrival);
+        }
+    }
+
     /// Records one provider event; what the ledger refuses is dropped.
     fn translate(&mut self, event: OutputEvent, at: Instant) {
         match event {
@@ -978,9 +992,15 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
         Ok(())
     }
 
-    /// Closes the session and ends the prompt and the session on the stream; nothing the provider
-    /// sends after is delivered.
+    /// Closes the session and ends the prompt and the session on the stream. What the provider
+    /// sent that already reached the binding is recorded first, so its usage counts and its
+    /// events are delivered after the close, before `SpeechSessionClosed`; from the first stream
+    /// end, client failure or service error among it, nothing is recorded, so an open session
+    /// closes rather than fails. Nothing the provider sends after the close is delivered.
     fn close(&mut self) -> Result<(), SessionError> {
+        if self.ledger.session().require_open().is_ok() {
+            self.record_arrived();
+        }
         self.ledger.close()?;
         let _ = self.commands.send(Command::Close);
         Ok(())

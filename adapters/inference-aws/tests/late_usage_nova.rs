@@ -10,22 +10,48 @@ use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;
 
 use inference_aws::duplex::{Connector, NovaSonicSpeech};
-use inference_aws::nova_sonic::{DEFAULT_MODEL_ID, NovaSonicError, Session, SessionConfig};
-use inference_duplex::inference_audio::{AudioEncoding, AudioFormat};
+use inference_aws::nova_sonic::{
+    DEFAULT_MODEL_ID, NovaSonicError, ServiceError, ServiceErrorKind, Session, SessionConfig,
+};
+use inference_duplex::inference_audio::{
+    AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition,
+};
 use inference_duplex::{
     NativeSpeechModel, Quantity, QuantityKind, SessionConfig as SpeechConfig, SessionEvent,
-    SpeechSessionHandle, TurnDetection, TurnTuning,
+    SpeechSessionHandle, SpeechSessionState, TurnDetection, TurnTuning,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 const WAIT: Duration = Duration::from_millis(100);
 
-/// A provider that sends `events` in order once the session opens, then stays open until the
-/// session ends.
+/// A provider that sends `events` in order once the session opens, then does what `after` says.
 #[derive(Debug, Clone)]
 struct Scripted {
     events: Vec<Value>,
+    after: After,
+}
+
+impl Scripted {
+    fn open(events: Vec<Value>) -> Self {
+        Scripted {
+            events,
+            after: After::StaysOpen,
+        }
+    }
+}
+
+/// What the scripted provider does once its events are sent.
+#[derive(Debug, Clone)]
+enum After {
+    /// Stays open until the session ends.
+    StaysOpen,
+    /// Ends its output stream.
+    Ends,
+    /// Reports a service error on its output stream.
+    Errors(ServiceError),
+    /// Stops taking input, so the binding's next send fails; its output stays open.
+    RefusesInput,
 }
 
 impl Connector for Scripted {
@@ -38,6 +64,7 @@ impl Connector for Scripted {
         config: SessionConfig,
     ) -> impl Future<Output = Result<Session, NovaSonicError>> + Send + 'static {
         let events = self.events.clone();
+        let after = self.after.clone();
         async move {
             let (input, mut received) = mpsc::channel::<Vec<u8>>(256);
             let (frames, output) = mpsc::channel(256);
@@ -52,7 +79,18 @@ impl Connector for Scripted {
                         return;
                     }
                 }
-                while received.recv().await.is_some() {}
+                match after {
+                    After::StaysOpen => while received.recv().await.is_some() {},
+                    After::Ends => {}
+                    After::Errors(error) => {
+                        let _ = frames.send(Err(error)).await;
+                        while received.recv().await.is_some() {}
+                    }
+                    After::RefusesInput => {
+                        drop(received);
+                        frames.closed().await;
+                    }
+                }
             });
             Ok(session)
         }
@@ -196,12 +234,10 @@ fn total(session: &impl SpeechSessionHandle, kind: QuantityKind) -> (i64, bool) 
 /// carries the late ones; between the two, response 1 does, because the ledger records a
 /// running total only when the next response begins.
 fn counted_once(late: &[u64], when: Late) {
-    let mut session = NovaSonicSpeech::with_connector(Scripted {
-        events: script(late, when),
-    })
-    .expect("the binding's runtime starts")
-    .open(config())
-    .expect("opens");
+    let mut session = NovaSonicSpeech::with_connector(Scripted::open(script(late, when)))
+        .expect("the binding's runtime starts")
+        .open(config())
+        .expect("opens");
     let mut events = drain(&mut session);
     assert_eq!(
         events
@@ -271,4 +307,107 @@ fn one_late_delta_between_responses_is_counted_once() {
 #[test]
 fn two_late_deltas_between_responses_are_counted_once() {
     counted_once(&[5, 3], Late::BetweenResponses);
+}
+
+/// One turn whose usage delta of 8 output text tokens follows the response's end on the stream.
+fn one_turn() -> Vec<Value> {
+    let mut events = vec![event("completionStart", json!({}))];
+    events.extend(final_text("user-1", "USER", "hi"));
+    events.push(usage([50, 0, 0, 0]));
+    events.extend(final_text("assistant-1", "ASSISTANT", "Hello"));
+    events.push(usage([0, 0, 0, 8]));
+    events
+}
+
+/// A 20 ms frame of silence in the session's input format.
+fn silence(position: u64) -> AudioFrame {
+    let format = pcm();
+    let samples = format.sample_rate.get() / 50;
+    AudioFrame {
+        format,
+        position: SampleClockPosition::new(position).expect("a position"),
+        sample_count: samples,
+        data: vec![0; usize::try_from(format.data_len(samples)).expect("a length")],
+    }
+}
+
+/// The caller reads to the response's end, waits, then closes, while the usage delta and then
+/// `after` already reached the binding. Closing an open session succeeds whatever waits: the
+/// session ends closed, not failed, and the usage that arrived before the failure is counted.
+fn closes_over(after: After, refused_send: bool) {
+    let mut session = NovaSonicSpeech::with_connector(Scripted {
+        events: one_turn(),
+        after,
+    })
+    .expect("the binding's runtime starts")
+    .open(config())
+    .expect("opens");
+    let mut events = Vec::new();
+    loop {
+        let event = session.next_event(WAIT).expect("the response completes");
+        let completed = matches!(event, SessionEvent::ResponseCompleted(_));
+        events.push(event);
+        if completed {
+            break;
+        }
+        assert!(events.len() < 500, "the response never completed");
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    if refused_send {
+        session
+            .append_audio(silence(0))
+            .expect("the writer has not failed yet");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    session
+        .close()
+        .expect("closing an open session succeeds whatever already arrived");
+    events.extend(drain(&mut session));
+    assert_eq!(
+        session.ledger().session().state(),
+        SpeechSessionState::Closed,
+        "{events:#?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SessionEvent::SpeechSessionClosed(_))),
+        "{events:#?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SpeechSessionFailed(_))),
+        "{events:#?}"
+    );
+    let records = session.ledger().usage_records();
+    assert_eq!(
+        total(&session, QuantityKind::OutputTextTokens),
+        (8, true),
+        "{records:#?}"
+    );
+    assert_eq!(
+        total(&session, QuantityKind::InputAudioTokens),
+        (50, true),
+        "{records:#?}"
+    );
+}
+
+#[test]
+fn close_succeeds_over_a_service_error_that_already_arrived() {
+    closes_over(
+        After::Errors(ServiceError::new(
+            ServiceErrorKind::ModelStreamError,
+            "it failed",
+        )),
+        false,
+    );
+}
+
+#[test]
+fn close_succeeds_over_a_stream_end_that_already_arrived() {
+    closes_over(After::Ends, false);
+}
+
+#[test]
+fn close_succeeds_over_a_failed_send_that_already_arrived() {
+    closes_over(After::RefusesInput, true);
 }
