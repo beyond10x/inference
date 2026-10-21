@@ -68,8 +68,11 @@
 //!   needs) is dropped and reading goes on. It is counted on the session
 //!   ([`SessionLedger::unreadable_frames`]), so is a `session.closed` lacking a field, and none
 //!   refreshes the liveness bound. A later failure of the session names how many there were and
-//!   the last; a stall becomes a provider error, every other failure keeps its kind, so a
-//!   `connection_lost` without its seconds is still a closed transport.
+//!   the last. Stalled turns into ProviderError only when an unreadable frame arrived after the
+//!   last readable frame. A readable frame clears that state. The detail still names the total
+//!   unreadable count. Every other failure keeps its kind, so a `connection_lost` without its
+//!   seconds is still a closed transport. Every provider event the ledger refuses is dropped and
+//!   kept in [`SessionLedger::dropped_events`].
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -482,6 +485,14 @@ impl std::fmt::Debug for OpenAiLiveSession {
 }
 
 impl OpenAiLiveSession {
+    /// A ledger refusal the binding drops: it changed nothing, and the ledger keeps it
+    /// ([`SessionLedger::dropped_events`]).
+    fn or_drop(&mut self, result: Result<(), SessionError>) {
+        if let Err(refusal) = result {
+            self.ledger.dropped(refusal);
+        }
+    }
+
     /// The `error` events the server sent during the session, which do not end it.
     pub fn server_errors(&self) -> &[ServerError] {
         &self.server_errors
@@ -534,10 +545,12 @@ impl OpenAiLiveSession {
                     self.record(LiveEvent::SessionClosed { reason, seconds });
                 }
                 Arrived::Failed(read) => {
-                    let _ = self.ledger.fail(failure(&read));
+                    let refused = self.ledger.fail(failure(&read));
+                    self.or_drop(refused);
                 }
                 Arrived::Nothing => {
-                    let _ = self.ledger.fail(failure(&error));
+                    let refused = self.ledger.fail(failure(&error));
+                    self.or_drop(refused);
                 }
             }
             self.current = None;
@@ -623,7 +636,8 @@ impl OpenAiLiveSession {
             sample_count,
             data: audio[..whole].to_vec(),
         };
-        if self.ledger.output_audio(id, frame, now).is_err() {
+        if let Err(refusal) = self.ledger.output_audio(id, frame, now) {
+            self.ledger.dropped(refusal);
             return;
         }
         *self.emitted.entry(id).or_insert(0) += samples;
@@ -632,7 +646,8 @@ impl OpenAiLiveSession {
         } else {
             self.silent_run += samples;
             if self.silent_run >= self.gap_samples {
-                let _ = self.ledger.response_completed(id, now);
+                let refused = self.ledger.response_completed(id, now);
+                self.or_drop(refused);
                 self.current = None;
                 self.silent_run = 0;
             }
@@ -675,13 +690,14 @@ impl OpenAiLiveSession {
         ];
         match id {
             Some(id) => {
-                let _ = self.ledger.response_usage_reported(
+                let refused = self.ledger.response_usage_reported(
                     id,
                     Some(sum),
                     quantities,
                     UsageTotal::Running,
                     now,
                 );
+                self.or_drop(refused);
             }
             None => self.ledger.hold_usage(quantities),
         }
@@ -744,11 +760,13 @@ impl OpenAiLiveSession {
             LiveEvent::OutputTranscript { delta, .. } => {
                 if let Some(id) = self.begin(now) {
                     self.silent_run = 0;
-                    let _ = self.ledger.output_transcript(id, delta, now);
+                    let refused = self.ledger.output_transcript(id, delta, now);
+                    self.or_drop(refused);
                 }
             }
             LiveEvent::InputTranscript { delta, .. } => {
-                let _ = self.ledger.input_transcribed(delta, now);
+                let refused = self.ledger.input_transcribed(delta, now);
+                self.or_drop(refused);
             }
             LiveEvent::Backend { event, .. } => match event {
                 BackendEvent::FunctionCall {
@@ -760,13 +778,14 @@ impl OpenAiLiveSession {
                     if let Some(id) = self.begin(now) {
                         let arguments =
                             serde_json::from_str(&arguments).unwrap_or(Json::String(arguments));
-                        let _ = self.ledger.tool_call(
+                        let refused = self.ledger.tool_call(
                             SpeechCallId::new(call_id),
                             id,
                             &name,
                             arguments,
                             now,
                         );
+                        self.or_drop(refused);
                     }
                 }
                 BackendEvent::Completed {
@@ -796,7 +815,8 @@ impl OpenAiLiveSession {
                     None => "the provider ended the session without a reason".to_owned(),
                 };
                 self.confirm(LiveClosed { reason, seconds });
-                let _ = self.ledger.fail(SessionFailure { kind, detail });
+                let refused = self.ledger.fail(SessionFailure { kind, detail });
+                self.or_drop(refused);
                 self.current = None;
                 self.client = None;
             }
@@ -923,7 +943,8 @@ impl SpeechSessionHandle for OpenAiLiveSession {
                     self.ledger.check_liveness(Instant::now());
                 }
                 Ok(Err(error)) => {
-                    let _ = self.ledger.fail(failure(&error));
+                    let refused = self.ledger.fail(failure(&error));
+                    self.or_drop(refused);
                     self.current = None;
                     self.client = None;
                 }

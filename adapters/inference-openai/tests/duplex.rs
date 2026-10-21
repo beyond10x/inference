@@ -1551,10 +1551,11 @@ fn an_input_transcription_with_an_unreadable_usage_is_counted_as_an_unreadable_f
 }
 
 /// Realtime runs one response at a time: a `response.created` while one is in progress ends that
-/// one first, as a provider error naming the frames the binding could not read, its usage
-/// recorded with every count unknown; the new response is accepted.
+/// one first, as a provider error naming the frames the binding could not read, and the new
+/// response is accepted. The first one's usage is not recorded then: the second one's
+/// `response.done`, carrying its id, ends it with every count unknown.
 #[test]
-fn a_response_created_while_one_is_in_progress_ends_it_first_with_its_usage_unknown() {
+fn a_response_created_while_one_is_in_progress_ends_it_first_and_a_later_done_records_it() {
     let server = Server::start(|mut socket| async move {
         accept_session(&mut socket).await;
         send(&mut socket, committed("item_1")).await;
@@ -1613,6 +1614,118 @@ fn a_response_created_while_one_is_in_progress_ends_it_first_with_its_usage_unkn
         quantities(of_first).contains(&(QuantityKind::OutputTextTokens, None)),
         "{of_first:?}"
     );
+    let recorded_at = events
+        .iter()
+        .position(|event| {
+            matches!(event, SessionEvent::UsageRecorded(record) if record.response_id == Some(ids[0]))
+        })
+        .expect("recorded");
+    assert!(
+        second < recorded_at,
+        "the next response.created recorded the first response's usage: {events:#?}"
+    );
     assert_eq!(transcript(&events, ids[1]), "World", "{events:#?}");
+    session.close().expect("open");
+}
+
+/// A response the next `response.created` ended, whose own `response.done` never arrives: the
+/// session's close records its usage once, every count unknown, before `SpeechSessionClosed`.
+#[test]
+fn a_response_ended_by_the_next_created_without_a_done_is_recorded_unknown_at_the_close() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, transcript_delta("resp_1", "item_o1", "Hello")).await;
+        send(&mut socket, committed("item_2")).await;
+        send(&mut socket, response_created("resp_2")).await;
+        send(&mut socket, transcript_delta("resp_2", "item_o2", "World")).await;
+        while let Some(Ok(_)) = socket.next().await {}
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let mut events = until(
+        &mut session,
+        |event| matches!(event, SessionEvent::OutputTranscriptDelta(delta) if delta.text == "World"),
+    );
+    let ids = created(&events);
+    assert_eq!(ids.len(), 2, "{events:#?}");
+    assert!(
+        records(&events).is_empty(),
+        "a usage was recorded before any response.done: {events:#?}"
+    );
+    session.close().expect("open");
+    events.extend(until(&mut session, |event| {
+        matches!(event, SessionEvent::SpeechSessionClosed(_))
+    }));
+    let of_first: Vec<_> = records(&events)
+        .into_iter()
+        .filter(|record| record.response_id == Some(ids[0]))
+        .collect();
+    assert_eq!(of_first.len(), 1, "{events:#?}");
+    assert!(
+        quantities(of_first[0]).contains(&(QuantityKind::OutputAudioTokens, None)),
+        "{:?}",
+        of_first[0]
+    );
+    let recorded_at = events
+        .iter()
+        .position(|event| {
+            matches!(event, SessionEvent::UsageRecorded(record) if record.response_id == Some(ids[0]))
+        })
+        .expect("recorded");
+    let closed_at = events
+        .iter()
+        .position(|event| matches!(event, SessionEvent::SpeechSessionClosed(_)))
+        .expect("closed");
+    assert!(recorded_at < closed_at, "{events:#?}");
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            SessionEvent::ResponseUsageRecorded(usage) if usage.response_id == ids[0]
+        )),
+        "{events:#?}"
+    );
+}
+
+/// A `response.done` that is not JSON but whose `type` reads `response.done` ends the response
+/// awaiting its end, its usage unknown, and is counted as a frame the binding could not read.
+#[test]
+fn an_unreadable_frame_typed_response_done_ends_the_oldest_response_with_its_usage_unknown() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, transcript_delta("resp_1", "item_o1", "Hello")).await;
+        socket
+            .send(Message::text(
+                r#"{"event_id":"event_rd","type": "response.done","response":{"id":"resp_1""#,
+            ))
+            .await
+            .unwrap();
+        while let Some(Ok(_)) = socket.next().await {}
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::ResponseFailed(_))
+    });
+    let ids = created(&events);
+    assert_eq!(ids.len(), 1, "{events:#?}");
+    let of_first: Vec<_> = records(&events)
+        .into_iter()
+        .filter(|record| record.response_id == Some(ids[0]))
+        .collect();
+    assert_eq!(of_first.len(), 1, "{events:#?}");
+    assert!(
+        quantities(of_first[0]).contains(&(QuantityKind::OutputAudioTokens, None)),
+        "{:?}",
+        of_first[0]
+    );
+    assert_eq!(session.ledger().unreadable_frames(), 1);
     session.close().expect("open");
 }

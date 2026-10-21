@@ -21,6 +21,11 @@
 - `SessionLedger` counts the frames a binding could not read (`unreadable_frame`,
   `unreadable_frames`, `last_unreadable`) and ends a response the provider ended unreadably
   (`response_ended_unread`).
+- `SessionLedger::usage_awaited` keeps the next response from settling a response whose final
+  usage the provider reports in a frame of its own; `SessionLedger::response_usage_unknown`
+  settles it unknown when that frame was lost. `SessionLedger::dropped` and `dropped_events` keep
+  every refusal a binding drops; the Realtime, GPT-Live and Nova Sonic bindings hand every one to
+  it.
 - `SessionLedger::session_usage_at_end` takes the total of a session billed as a whole and records
   it once, just before the session's end event. Given after the end, it records nothing.
 
@@ -43,6 +48,9 @@
   if longer, not per read. A GPT-Live session whose close reaches that bound still closes, with
   the usage the server sent meanwhile recorded, unconfirmed.
 - A stall now reads "the provider sent nothing readable for … ms".
+- **Breaking:** `SessionLedger::response_usage_reported` for a response whose usage is already
+  recorded changes nothing: it no longer records `ResponseUsageRecorded`. OpenAI Realtime
+  `ServerEvent` gains the variant `UnreadableResponseDone`.
 
 ### Fixed
 
@@ -55,17 +63,24 @@
   provider sends after it is still recorded by `next_event` and by the close.
 - Such a frame is no longer dropped silently: the session counts it and keeps the last one's
   type or the start of its text, and it does not refresh the liveness bound. A later failure of
-  the session names that count and the last frame. A stall after such frames is reported as
-  `ProviderError`; every other failure keeps the kind the transport or the provider stated, so a
-  GPT-Live `connection_lost` without its seconds is still `TransportClosed`.
+  the session names that count and the last frame. Stalled turns into ProviderError only when an
+  unreadable frame arrived after the last readable frame. A readable frame clears that state. The
+  detail still names the total unreadable count. Every other failure keeps the kind the transport
+  or the provider stated, so a GPT-Live `connection_lost` without its seconds is still
+  `TransportClosed`.
 - An event that lacks a field the binding does not need keeps its usage and its end. A Realtime
   `response.done` without `status` ends its response, which fails as a provider error, and still
   counts its usage. One without its id ends the oldest response still awaiting its
   `response.done`, never a newer one, so it no longer blocks the next. A `usage` in a shape the
   binding cannot read counts as unknown, and its frame is counted as unreadable. A transcription
   without its transcript still counts its usage. A Realtime `response.created` while a response is
-  still in progress ends that one first, as a provider error naming the unreadable frames, its
-  usage recorded with every count unknown, and the new response is accepted. A GPT-Live
+  still in progress ends that one first, as a provider error naming the unreadable frames, and the
+  new response is accepted. Its usage, like a cancelled response's, is recorded once by its own
+  `response.done` whenever it arrives, else with every count unknown when a later response's
+  `response.done` carrying its id ends it (Realtime ends responses in creation order) or at the
+  session's end, before `SpeechSessionClosed` or `SpeechSessionFailed`. A message that is not
+  JSON but whose `type` reads `response.done` (`ServerEvent::UnreadableResponseDone`) ends the
+  oldest response awaiting its end, its usage unknown. A GPT-Live
   backend end without its id, and a `session.closed` without its reason or seconds, keep their
   meaning. A Nova Sonic `completionEnd` without `stopReason` ends the response in progress, and a
   `contentEnd` or interruption notice without `contentId` applies to it.

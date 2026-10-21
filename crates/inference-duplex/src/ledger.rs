@@ -63,7 +63,7 @@ impl Liveness {
 /// The caller's operations and the provider's events both go through it. Each checks what the
 /// specification and this contract decide, records its event, or returns the [`SessionError`]
 /// and changes nothing; an adapter drops a provider event the ledger refuses, such as late audio
-/// of a cancelled response.
+/// of a cancelled response, and hands the refusal to [`SessionLedger::dropped`].
 ///
 /// Identities are never reused: a response id the adapter issued, or a call id the provider
 /// gave, that the session already holds is refused. Closing the session cancels the response
@@ -88,7 +88,9 @@ impl Liveness {
 ///   end settles the response it cancels or fails; one settled later is recorded by its final
 ///   report at once, by the next response just before that response's `ResponseCreated`, by the
 ///   session's end before the end events it records. A response with no usage reported is
-///   recorded with every token count unknown.
+///   recorded with every token count unknown. The next response does not settle a response
+///   whose final usage the provider sends in a frame of its own ([`SessionLedger::usage_awaited`]):
+///   that frame does, the binding's word that it was lost does, or the session's end does.
 /// * A transcription's usage is recorded when reported, and so is usage of the whole session
 ///   ([`SessionLedger::session_usage`]); neither names a response.
 /// * Usage no response holds yet ([`SessionLedger::hold_usage`]) is recorded at the session's
@@ -123,6 +125,11 @@ pub struct SessionLedger {
     /// How many frames the binding could not read, whole or in part
     /// ([`SessionLedger::unreadable_frame`]), and what the last one was.
     unreadable: (u64, Option<String>),
+    /// Whether a frame the binding could not read arrived after the last readable frame.
+    unread_since_readable: bool,
+    /// The provider events and failures the ledger refused and the binding dropped
+    /// ([`SessionLedger::dropped`]), in order.
+    dropped: Vec<SessionError>,
     /// The instant the session opened, and the wall clock then in Unix epoch milliseconds.
     opened: (Instant, i64),
     /// The latest instant the ledger was given.
@@ -143,6 +150,9 @@ struct Meter {
     quantities: Vec<Quantity>,
     /// Whether no later report changes them.
     settled: bool,
+    /// Whether the provider reports the response's final usage in a frame of its own, however
+    /// the response ends: the next response does not settle it ([`SessionLedger::usage_awaited`]).
+    awaited: bool,
     recorded: bool,
 }
 
@@ -292,6 +302,8 @@ impl SessionLedger {
             requested: false,
             clock_pending: false,
             unreadable: (0, None),
+            unread_since_readable: false,
+            dropped: Vec::new(),
             opened: (now, wall),
             latest: now,
             outbox: VecDeque::new(),
@@ -614,8 +626,10 @@ impl SessionLedger {
     /// When the provider had sent frames the binding could not read
     /// ([`Self::unreadable_frame`]), the failure's detail names how many and the last one. Its
     /// kind stays what the binding or the provider stated, except
-    /// [`SessionFailureKind::Stalled`]: a provider that kept sending frames the binding could
-    /// not read was not silent, so a stall becomes [`SessionFailureKind::ProviderError`].
+    /// [`SessionFailureKind::Stalled`]: a stall turns into [`SessionFailureKind::ProviderError`]
+    /// only when an unreadable frame arrived after the last readable frame, since a provider
+    /// whose last frames could not be read was not silent. A readable frame clears that state.
+    /// The detail still names the total unreadable count.
     ///
     /// # Errors
     ///
@@ -646,7 +660,7 @@ impl SessionLedger {
             return false;
         }
         if self.clock_pending {
-            self.heard(now);
+            self.restart_bound(now);
             return false;
         }
         if !self.liveness.expired(now) {
@@ -664,11 +678,30 @@ impl SessionLedger {
         .is_ok()
     }
 
-    /// The provider was heard from at `now`, whatever it sent.
+    /// The provider was heard from at `now`, with a frame the binding could read, whatever it
+    /// sent. A stall after it is a stall again, whatever frames before it could not be read.
     pub fn heard(&mut self, now: Instant) {
+        self.restart_bound(now);
+        self.unread_since_readable = false;
+    }
+
+    /// The liveness bound runs from `now`.
+    fn restart_bound(&mut self, now: Instant) {
         self.tick(now);
         self.liveness.heard(now);
         self.clock_pending = false;
+    }
+
+    /// The binding dropped a provider event, or a failure, that the ledger refused with
+    /// `refusal`: it changed nothing, and it is kept in [`Self::dropped_events`].
+    pub fn dropped(&mut self, refusal: SessionError) {
+        self.dropped.push(refusal);
+    }
+
+    /// The refusals the binding dropped ([`Self::dropped`]), in order.
+    #[must_use]
+    pub fn dropped_events(&self) -> &[SessionError] {
+        &self.dropped
     }
 
     /// The provider sent, at `now`, a frame the binding could not read, whole or in part;
@@ -680,6 +713,7 @@ impl SessionLedger {
         self.tick(now);
         self.unreadable.0 = self.unreadable.0.saturating_add(1);
         self.unreadable.1 = Some(what.into());
+        self.unread_since_readable = true;
     }
 
     /// How many frames the binding could not read ([`Self::unreadable_frame`]).
@@ -695,7 +729,8 @@ impl SessionLedger {
     }
 
     /// `failure` as the session reports it, naming the frames the binding could not read when
-    /// there were any: a stall becomes a provider error, every other kind stays.
+    /// there were any: a stall becomes a provider error when an unreadable frame arrived after
+    /// the last readable frame, every other kind stays.
     fn after_unreadable(&self, failure: SessionFailure) -> SessionFailure {
         let (count, Some(last)) = (self.unreadable.0, self.unreadable.1.as_deref()) else {
             return failure;
@@ -703,7 +738,9 @@ impl SessionLedger {
         let frames = if count == 1 { "frame" } else { "frames" };
         SessionFailure {
             kind: match failure.kind {
-                SessionFailureKind::Stalled => SessionFailureKind::ProviderError,
+                SessionFailureKind::Stalled if self.unread_since_readable => {
+                    SessionFailureKind::ProviderError
+                }
                 kind => kind,
             },
             detail: format!(
@@ -828,6 +865,7 @@ impl SessionLedger {
             ended: None,
             quantities: Vec::new(),
             settled: false,
+            awaited: false,
             recorded: false,
         });
         self.push(SessionEvent::ResponseCreated(event));
@@ -998,7 +1036,8 @@ impl SessionLedger {
     /// # Errors
     ///
     /// [`SessionError::UnknownResponse`], then [`SessionError::ResponseNotInProgress`] when the
-    /// response's usage was already recorded; `usage` is recorded all the same.
+    /// response's usage was already recorded: then nothing is recorded, not `usage` either, so
+    /// no `ResponseUsageRecorded` gives counts its usage record does not carry.
     pub fn response_usage_reported(
         &mut self,
         response_id: ResponseId,
@@ -1008,16 +1047,60 @@ impl SessionLedger {
         now: Instant,
     ) -> Result<(), SessionError> {
         let index = self.index_of(response_id)?;
+        self.require_unrecorded(index)?;
         match usage {
             Some(usage) => self.record_response_usage(index, usage, now),
             None => self.heard(now),
         }
+        self.count(index, quantities, total);
+        Ok(())
+    }
+
+    /// The provider reports the final usage of the response in a frame of its own, however the
+    /// response ends, and may send it after the next response was created: that response does
+    /// not settle it. Its final report does ([`Self::response_usage_reported`] with
+    /// [`UsageTotal::Final`]), [`Self::response_usage_unknown`] does, or the session's end does,
+    /// recording every count it did not report as unknown before the end events.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::UnknownResponse`], then [`SessionError::ResponseNotInProgress`] when the
+    /// response's usage was already recorded.
+    pub fn usage_awaited(&mut self, response_id: ResponseId) -> Result<(), SessionError> {
+        let index = self.index_of(response_id)?;
+        self.require_unrecorded(index)?;
+        self.meters[index].awaited = true;
+        Ok(())
+    }
+
+    /// The frame that carried the response's final usage was lost or could not be read: its
+    /// usage is settled at `now` with every count the provider did not report unknown, and
+    /// recorded once it ended. This is no sign of life: the liveness bound runs on.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::UnknownResponse`], then [`SessionError::ResponseNotInProgress`] when the
+    /// response's usage was already recorded.
+    pub fn response_usage_unknown(
+        &mut self,
+        response_id: ResponseId,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        let index = self.index_of(response_id)?;
+        self.require_unrecorded(index)?;
+        self.tick(now);
+        let quantities = std::mem::take(&mut self.meters[index].quantities);
+        self.count(index, quantities, UsageTotal::Final);
+        Ok(())
+    }
+
+    /// Refuses a report for the response at `index` once its usage is recorded.
+    fn require_unrecorded(&self, index: usize) -> Result<(), SessionError> {
         if self.meters[index].recorded {
             return Err(SessionError::ResponseNotInProgress(ResponseStateConflict {
                 current: self.responses[index].state(),
             }));
         }
-        self.count(index, quantities, total);
         Ok(())
     }
 
@@ -1121,22 +1204,24 @@ impl SessionLedger {
     }
 
     /// Records every response that ended and is not recorded yet: the next response, or the
-    /// session's end, settles them.
+    /// session's end, settles them; the next response does not settle one whose final usage is
+    /// awaited ([`Self::usage_awaited`]).
     fn settle_ended(&mut self) {
         for index in 0..self.meters.len() {
-            if self.meters[index].ended.is_some() {
+            let meter = &self.meters[index];
+            if meter.ended.is_some() && (meter.settled || !meter.awaited) {
                 self.record_response(index);
             }
         }
     }
 
-    /// The session ends: every response that ended is recorded, and the one in progress is
-    /// settled, so that its end records it just before its end event.
+    /// The session ends: every response settles, every one that ended is recorded, and the one
+    /// in progress is recorded by its end, just before its end event.
     fn settle_for_end(&mut self) {
-        self.settle_ended();
         for meter in &mut self.meters {
             meter.settled = true;
         }
+        self.settle_ended();
         let held = std::mem::take(&mut self.held);
         if !held.is_empty() {
             self.record_of_session(held, true, self.opened.0, self.latest);
@@ -1295,7 +1380,7 @@ impl SessionLedger {
     /// The caller awaits a response from `now`, unless it already awaits one.
     fn await_response(&mut self, now: Instant) {
         if !self.awaiting() {
-            self.heard(now);
+            self.restart_bound(now);
         }
         self.requested = true;
     }
