@@ -12,16 +12,18 @@
 //! committed facts, so it never depends on telemetry, which drops what its consumer does not
 //! take.
 //!
-//! A run's total includes the usage of the child runs of its subgraph nodes. A subgraph node
-//! forwards every usage record of its child run on its own `usage` port, which the parent
-//! exposes, the record of a turn a cancel cut among them, since a cancel does not end the
-//! forwarding of a usage egress before the child run is terminal and the egress closes; the
-//! record crosses to the parent run as any envelope does
+//! A run's total includes the usage of the child runs of its subgraph nodes whose `usage` port
+//! has an edge. A subgraph node forwards every usage record of its child run on its own `usage`
+//! port, which the parent exposes, the record of a turn a cancel cut among them, since a cancel
+//! does not end the forwarding of a usage egress before the child run is terminal and the egress
+//! closes; the record crosses to the parent run as any envelope does
 //! (`inference_runtime::SubgraphNode`), so the session reads it off an egress of the run it
 //! holds and counts it there, once, in that run's total and the session's. The record's own
 //! `run_id` still names the child run it was made in, so the child's total stays derivable from
 //! the records; the session keeps no total of a run it did not hold, so no record of a child run
-//! is counted twice.
+//! is counted twice. A subgraph node whose `usage` port has no edge reads its child's usage and
+//! drops it, as a model node with no edge on its `usage` port sends none, so neither the run's
+//! total nor the session's includes it.
 
 use inference_core::id::RunId;
 use inference_core::usage::{UsageRecorded, UsageTotal};
