@@ -758,10 +758,17 @@ impl Declaration {
         }
         self.exposures
             .iter()
-            .filter(|exposure| exposure.pipeline_id == child)
-            .filter(|exposure| self.port(exposure.port_id).is_some_and(carries_usage))
+            .filter(|exposure| exposure.pipeline_id == child && self.is_usage_egress(exposure))
             .filter(|exposure| ports.iter().all(|port| port.name != exposure.name))
             .collect()
+    }
+
+    /// Whether `exposure` is a usage egress: the exposure of a structured output port named
+    /// [`USAGE_PORT`](crate::USAGE_PORT), on which a node sends the usage records of its calls,
+    /// whatever name the exposure carries.
+    #[must_use]
+    pub fn is_usage_egress(&self, exposure: &Exposure) -> bool {
+        self.port(exposure.port_id).is_some_and(carries_usage)
     }
 
     /// Every feedback loop, in declaration order.

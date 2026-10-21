@@ -609,7 +609,6 @@ fn a_cancel_of_the_parent_still_rolls_up_the_cut_turns_record_of_the_child() {
 /// The same through a port named after the child's usage egress, which crossed by name before
 /// this story: whether the loss predates the roll-up.
 #[test]
-#[ignore = "pre-existing: the egress bridge ends at the cancel before the child sends the cut record; proves the loss predates the roll-up"]
 fn a_cancel_of_the_parent_still_delivers_the_cut_turns_record_through_a_port_of_its_name() {
     bounded(|| cut_in_child("model usage"));
 }
