@@ -2,12 +2,21 @@
 format: aep.planning-md/3
 id: story:subgraph-unconnected-usage-port
 kind: story
-status: draft
+status: implemented
 title: An unconnected usage port of a subgraph node neither loses usage nor fails the run
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: cited
+  path: crates/inference-pipeline
+- confidence: cited
+  path: crates/inference-runtime
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-21T07:28:54Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-21T07:28:54Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-21T08:36:21Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
@@ -32,3 +41,21 @@ error naming the node and the port, or completes with the child's usage observab
 the run.
 
 - `task check` passes.
+
+
+## Closing note (wave 26)
+
+The Planned scope offered two rules. The wave took the runtime rule, matched to a model node: a
+subgraph node's output port with no edge in the parent gets a bridge that reads the child's egress
+and drops what it reads, so the run completes. A model node's port with no edge gets no endpoint and
+sends nothing, so in both cases the parent keeps no trace of that usage; a `Recorder` around the
+child's nodes still sees the child's records, which is how the Acceptance's "child's usage observable"
+is met. "Nothing is silent" in the Planned scope is not met by this story: counting usage that reaches
+no edge, for model and subgraph nodes alike, is `story:usage-unconnected-port-counted`.
+
+The rule covers every optional output port of a subgraph node, not only `usage`, because the same
+defect failed the run for an unconnected text port. The drop-bridge ends when its egresses close or
+when the child run has returned, so a child node that keeps an endpoint past `stop` does not hang
+the parent's drain. `ess/domains/graph.yaml` and the facade's usage documentation now state that the
+roll-up holds when the `usage` port has an edge.
+
