@@ -15,7 +15,7 @@
 //! | `describe`, `described` | nothing yet; the node keeps its declaration and its instance |
 //! | `prepare` | created under the node's instance as its parent (`NestRun`), validated, prepared |
 //! | `start` | activated; the parent edges arriving at each input port are merged into the child ingress of its name, and the child egress of each output port's name, with every usage egress the usage port forwards merged into it, is fanned out to every parent edge leaving it; the child's run loop runs. A refused start cancels and stops the child |
-//! | `drain` | `stop` is sent into each ingress still open and a drain is asked for; the step returns once the child run is terminal |
+//! | `drain` | each ingress still open forwards what its parent edges hold, sends `stop` and ends; only then is a drain asked for, so input the parent admitted before its drain is never overtaken by it at any nesting level (`inference.graph.DrainRun`: in-flight events complete); the step returns once the child run is terminal |
 //! | `cancel` | cancelled |
 //! | `stop` | returns once the child run is terminal and its queues are dropped |
 //!
@@ -134,6 +134,8 @@ struct BridgeState {
     child_ended: bool,
     /// The thread of the child has returned.
     done: bool,
+    /// The ingress bridges that have not ended.
+    ingresses: usize,
 }
 
 impl Bridges {
@@ -162,6 +164,36 @@ impl Bridges {
             None => Poll::Pending,
         })
         .await;
+    }
+
+    /// Returns once every ingress bridge has ended, or the thread of the child has returned.
+    async fn ingresses_ended(&self) {
+        future::poll_fn(|cx| {
+            match self.read(cx, |state| {
+                (state.ingresses == 0 || state.done).then_some(())
+            }) {
+                Some(()) => Poll::Ready(()),
+                None => Poll::Pending,
+            }
+        })
+        .await;
+    }
+}
+
+/// One ingress bridge counted open in its [`Bridges`] until it is dropped, whichever way it ends.
+struct OpenIngress(Arc<Bridges>);
+
+impl OpenIngress {
+    fn new(bridges: &Arc<Bridges>) -> Self {
+        bridges.update(|state| state.ingresses += 1);
+        Self(Arc::clone(bridges))
+    }
+}
+
+impl Drop for OpenIngress {
+    fn drop(&mut self) {
+        self.0
+            .update(|state| state.ingresses = state.ingresses.saturating_sub(1));
     }
 }
 
@@ -394,7 +426,7 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
                 parents,
                 ingress,
                 room,
-                Arc::clone(&bridges),
+                OpenIngress::new(&bridges),
                 Crossing {
                     run_id: child_run,
                     producer: node_id,
@@ -498,6 +530,7 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
         } = &self.state
         {
             bridges.update(|state| state.drain = true);
+            bridges.ingresses_ended().await;
             requests.drain();
         }
         self.ended().await;
@@ -730,14 +763,18 @@ enum Merged<P> {
 /// closes; once every edge ended, `stop` crosses if every one of them ended with `stop`, and none
 /// does if one closed without it (which ends no input, as on the run loop's own edges). It also
 /// ends when the node drains with nothing left to take on any edge (then `stop` is sent), is
-/// cancelled, or its child ended.
+/// cancelled, or its child ended. The node's drain asks the child run for its drain only once
+/// every ingress bridge has ended, which `open` counts: a child that is itself a subgraph node's
+/// parent would otherwise drain that node, whose ingress bridge then finds nothing on its edge and
+/// sends `stop`, before this bridge has forwarded what it took.
 async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
     parents: Vec<Box<dyn InputEndpoint<P>>>,
     ingress: Box<dyn OutputEndpoint<P>>,
     room: Option<Room<P>>,
-    bridges: Arc<Bridges>,
+    open: OpenIngress,
     crossing: Crossing,
 ) {
+    let bridges = &open.0;
     let mut pending: Vec<Receiving<P>> = parents.into_iter().map(receiving).collect();
     let mut closed = false;
     loop {
@@ -747,7 +784,7 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
                     ingress.as_ref(),
                     crossing.stop(),
                     room.as_ref(),
-                    &bridges,
+                    bridges,
                     true,
                 )
                 .await;
@@ -783,7 +820,7 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
                     ingress.as_ref(),
                     crossing.cross(*envelope),
                     room.as_ref(),
-                    &bridges,
+                    bridges,
                     true,
                 )
                 .await
@@ -798,7 +835,7 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
                     ingress.as_ref(),
                     crossing.stop(),
                     room.as_ref(),
-                    &bridges,
+                    bridges,
                     true,
                 )
                 .await;
