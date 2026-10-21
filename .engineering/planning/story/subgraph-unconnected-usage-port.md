@@ -2,12 +2,20 @@
 format: aep.planning-md/3
 id: story:subgraph-unconnected-usage-port
 kind: story
-status: draft
+status: active
 title: An unconnected usage port of a subgraph node neither loses usage nor fails the run
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: cited
+  path: crates/inference-pipeline
+- confidence: cited
+  path: crates/inference-runtime
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-21T07:28:54Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-21T07:28:54Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 
