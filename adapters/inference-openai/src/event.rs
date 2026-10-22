@@ -50,11 +50,15 @@ pub enum ServerEvent {
     /// `conversation.item.input_audio_transcription.delta`.
     InputTranscriptDelta { item_id: String, delta: String },
     /// `conversation.item.input_audio_transcription.completed`, with the usage the server
-    /// reported for the transcription.
+    /// reported for the transcription. It is read field by field: a field the server left out or
+    /// sent in another shape is `None`, so the usage of an event without its `transcript` still
+    /// counts. A `usage` the server sent in a shape that cannot be read is `None` too, and
+    /// `unreadable_usage` says why.
     InputTranscript {
-        item_id: String,
-        transcript: String,
+        item_id: Option<String>,
+        transcript: Option<String>,
         usage: Option<TranscriptionUsage>,
+        unreadable_usage: Option<String>,
     },
     /// `input_audio_buffer.speech_started`.
     SpeechStarted {
@@ -79,12 +83,22 @@ pub enum ServerEvent {
         name: String,
         arguments: String,
     },
-    /// `response.done`, with the response's final status and the usage the server reported.
+    /// `response.done`, with the response's final status and the usage the server reported. It
+    /// is read field by field: a field of `response` the server left out or sent in another shape
+    /// is `None`, and so is each when `response` is. It still ends a response: Realtime ends its
+    /// responses in the order it created them, so one without its id ends the oldest response
+    /// still awaiting its end, and its usage counts whatever else it lacks. A `usage` the server
+    /// sent in a shape that cannot be read is `None` too, and `unreadable_usage` says why.
     ResponseDone {
-        response_id: String,
-        status: ResponseStatus,
+        response_id: Option<String>,
+        status: Option<ResponseStatus>,
         usage: Option<Usage>,
+        unreadable_usage: Option<String>,
     },
+    /// A message that is not JSON, but whose text still reads `"type": "response.done"`: a
+    /// `response.done` nothing else of which could be read. `what` names it as an unreadable
+    /// message is named, by the parse error and the start of its text.
+    UnreadableResponseDone { what: String },
     /// `error`.
     Error(ServerError),
     /// Any other event: its `type` and the whole event as received.
@@ -95,16 +109,31 @@ impl ServerEvent {
     /// Reads one server event from the text of a WebSocket message.
     ///
     /// # Errors
-    /// [`RealtimeError::Protocol`] when the text is not a JSON object with a string `type`, or
-    /// when a typed event lacks a field the reference requires.
+    /// [`RealtimeError::Protocol`] when the text is not a JSON object with a string `type`,
+    /// naming the start of the text, or when a typed event lacks a field the reference requires
+    /// and without which it means nothing. `response.done` and
+    /// `conversation.item.input_audio_transcription.completed`, which end a response or carry
+    /// billable usage, are read field by field and never refused for a field; text that is not
+    /// JSON but reads `"type": "response.done"` is [`ServerEvent::UnreadableResponseDone`].
     pub fn parse(text: &str) -> Result<Self, RealtimeError> {
-        let raw: Value = serde_json::from_str(text).map_err(|error| {
-            RealtimeError::Protocol(format!("server event is not JSON: {error}"))
-        })?;
+        let raw: Value = match serde_json::from_str(text) {
+            Ok(raw) => raw,
+            Err(error) => {
+                let what = format!(
+                    "server event is not JSON ({error}); it begins {:?}",
+                    text_start(text)
+                );
+                if type_reads(text, "response.done") {
+                    return Ok(Self::UnreadableResponseDone { what });
+                }
+                return Err(RealtimeError::Protocol(what));
+            }
+        };
         let Some(event_type) = raw.get("type").and_then(Value::as_str) else {
-            return Err(RealtimeError::Protocol(
-                "server event has no string `type`".to_owned(),
-            ));
+            return Err(RealtimeError::Protocol(format!(
+                "server event has no string `type`; it begins {:?}",
+                text_start(text)
+            )));
         };
         let event = Fields {
             event_type,
@@ -149,11 +178,15 @@ impl ServerEvent {
                 item_id: event.string("item_id")?,
                 delta: event.optional_string("delta")?.unwrap_or_default(),
             },
-            "conversation.item.input_audio_transcription.completed" => Self::InputTranscript {
-                item_id: event.string("item_id")?,
-                transcript: event.string("transcript")?,
-                usage: event.transcription_usage()?,
-            },
+            "conversation.item.input_audio_transcription.completed" => {
+                let (usage, unreadable_usage) = split(event.transcription_usage());
+                Self::InputTranscript {
+                    item_id: event.lenient_string("item_id"),
+                    transcript: event.lenient_string("transcript"),
+                    usage,
+                    unreadable_usage,
+                }
+            }
             "input_audio_buffer.speech_started" => Self::SpeechStarted {
                 item_id: event.string("item_id")?,
                 audio_start_ms: event.unsigned("audio_start_ms")?,
@@ -178,11 +211,16 @@ impl ServerEvent {
                 arguments: event.string("arguments")?,
             },
             "response.done" => {
-                let response = event.response()?;
+                let response = event.response().ok();
+                let (usage, unreadable_usage) =
+                    response.map_or((None, None), |response| split(response.usage()));
                 Self::ResponseDone {
-                    response_id: response.string("id")?,
-                    status: ResponseStatus::from_wire(&response.string("status")?),
-                    usage: response.usage()?,
+                    response_id: response.and_then(|response| response.lenient_string("id")),
+                    status: response
+                        .and_then(|response| response.lenient_string("status"))
+                        .map(|status| ResponseStatus::from_wire(&status)),
+                    usage,
+                    unreadable_usage,
                 }
             }
             "error" => {
@@ -201,6 +239,35 @@ impl ServerEvent {
             },
         })
     }
+}
+
+/// A usage as read, `None` when the server sent none, and why it could not be read when it
+/// sent one in another shape.
+fn split<T>(usage: Result<Option<T>, RealtimeError>) -> (Option<T>, Option<String>) {
+    match usage {
+        Ok(usage) => (usage, None),
+        Err(RealtimeError::Protocol(what)) => (None, Some(what)),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
+/// Whether a key `"type"` in `text`, which need not be JSON, has the string value `wanted`.
+fn type_reads(text: &str, wanted: &str) -> bool {
+    text.match_indices("\"type\"").any(|(at, key)| {
+        let rest = text[at + key.len()..].trim_start();
+        rest.strip_prefix(':')
+            .map(str::trim_start)
+            .and_then(|value| value.strip_prefix('"'))
+            .and_then(|value| value.strip_prefix(wanted))
+            .is_some_and(|after| after.starts_with('"'))
+    })
+}
+
+/// The first 32 characters of a server message, to name one that could not be read.
+pub(crate) fn text_start(text: &str) -> &str {
+    text.char_indices()
+        .nth(32)
+        .map_or(text, |(end, _)| &text[..end])
 }
 
 /// Field access on one JSON object of a typed event; a missing or mistyped field the reference
@@ -234,6 +301,11 @@ impl<'a> Fields<'a> {
             Some(Value::String(value)) => Ok(Some(value.clone())),
             Some(_) => Err(self.missing(field, "the string")),
         }
+    }
+
+    /// A string field, `None` when it is missing or not a string.
+    fn lenient_string(&self, field: &str) -> Option<String> {
+        self.optional_string(field).ok().flatten()
     }
 
     fn unsigned(&self, field: &str) -> Result<u64, RealtimeError> {
@@ -297,16 +369,20 @@ impl<'a> Fields<'a> {
         let input_audio_tokens = detail(input, "audio_tokens");
         let output_text_tokens = detail(output, "text_tokens");
         let output_audio_tokens = detail(output, "audio_tokens");
-        let input_tokens = usage
-            .optional_unsigned("input_tokens")
-            .unwrap_or_else(|| input_text_tokens.unwrap_or(0) + input_audio_tokens.unwrap_or(0));
-        let output_tokens = usage
-            .optional_unsigned("output_tokens")
-            .unwrap_or_else(|| output_text_tokens.unwrap_or(0) + output_audio_tokens.unwrap_or(0));
+        let input_tokens = usage.optional_unsigned("input_tokens").unwrap_or_else(|| {
+            input_text_tokens
+                .unwrap_or(0)
+                .saturating_add(input_audio_tokens.unwrap_or(0))
+        });
+        let output_tokens = usage.optional_unsigned("output_tokens").unwrap_or_else(|| {
+            output_text_tokens
+                .unwrap_or(0)
+                .saturating_add(output_audio_tokens.unwrap_or(0))
+        });
         Ok(Some(Usage {
             total_tokens: usage
                 .optional_unsigned("total_tokens")
-                .unwrap_or(input_tokens + output_tokens),
+                .unwrap_or(input_tokens.saturating_add(output_tokens)),
             input_tokens,
             output_tokens,
             input_text_tokens,
@@ -336,7 +412,7 @@ impl<'a> Fields<'a> {
             total_tokens: usage.optional_unsigned("total_tokens").or_else(|| {
                 input_tokens
                     .zip(output_tokens)
-                    .map(|(input, output)| input + output)
+                    .and_then(|(input, output)| input.checked_add(output))
             }),
             input_tokens,
             output_tokens,
@@ -347,7 +423,7 @@ impl<'a> Fields<'a> {
 /// The usage of a completed input transcription: tokens of the transcription model, or, for a
 /// model billed by time, the seconds of audio it transcribed. A count the server left out is
 /// `None`, never 0; the total is the sum of the two when the server sent none and both are
-/// known.
+/// known, and unknown when that sum would pass `u64::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TranscriptionUsage {
     Tokens {
@@ -386,7 +462,8 @@ pub enum ResponseStatus {
 }
 
 /// The token usage of a response, from `response.done`. The details are `None` when the server
-/// did not report them.
+/// did not report them. A total the server left out is the sum of its parts, stopping at
+/// `u64::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Usage {
     pub total_tokens: u64,

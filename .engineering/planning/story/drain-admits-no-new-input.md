@@ -2,12 +2,27 @@
 format: aep.planning-md/3
 id: story:drain-admits-no-new-input
 kind: story
-status: draft
+status: implemented
 title: Input sent after a drain was requested never reaches a model
 relations:
 - decomposes: epic:session-facade
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: inferred
+  path: crates/inference-facade/src/live.rs
+- confidence: inferred
+  path: crates/inference-runtime/src/controller.rs
+- confidence: cited
+  path: crates/inference-runtime/src/drive.rs
+- confidence: cited
+  path: crates/inference-runtime/src/subgraph.rs
+- confidence: inferred
+  path: crates/inference-runtime/tests/drain_admits_no_new_input.rs
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-21T09:08:56Z", actor: "human:timo", revision: 4}
+- {from: "proposed", to: "active", at: "2026-10-21T09:08:56Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-21T11:54:16Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

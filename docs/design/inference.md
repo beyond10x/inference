@@ -715,7 +715,7 @@ A session conceptually supports:
 | `commit_input` | Finalize a text span or logical user turn. |
 | `interrupt` | Cancel or supersede active generation/playback. |
 | `describe` | Inspect selected models, graph, capabilities, and degradation. |
-| `close` | Drain or cancel processing and release resources. |
+| `close` | Drain or cancel processing and release resources. Closing a speech session delivers every event its binding already received, usage included, before the closed event, and nothing the provider sends after it. |
 
 A session MAY internally dispatch many independent HTTP requests or model invocations. Applications see one logical interaction lifetime; model state management remains truthful to each adapter's contract.
 
@@ -1002,7 +1002,7 @@ A runtime MUST NOT promise that switching between two arbitrary LLM backends pre
 
 ### 19.3 Failure policy
 
-- A failed node MUST surface a typed, actionable error to the run controller.
+- A failed node MUST surface a typed, actionable error to the run controller. A speech session whose provider sends nothing readable within its liveness bound fails as stalled, and a failure names the frames its binding could not read. Stalled turns into ProviderError only when an unreadable frame arrived after the last readable frame. A readable frame clears that state. The detail still names the total unreadable count.
 - Automatically restarting an inference request MAY be safe; retrying an irreversible tool operation may not be.
 - Recovery may start a new generation using committed history, but it must mark changes in generation/epoch identity.
 - A provider outage cannot silently activate a cloud replacement or disclose additional data.

@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-21T11:54:16Z",
+  "actor": "human:timo",
+  "artifact": "story:drain-admits-no-new-input",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0 with ess 0.60.0: 316 suites, 2174 passed, 0 failed, 50 ignored (wave/27 a09c1b7)"
+  }
+}

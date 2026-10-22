@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-22T07:50:42Z",
+  "actor": "human:timo",
+  "artifact": "story:duplex-late-usage-counted",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0 with ess 0.67.0: 351 suites, 2520 passed, 0 failed, 50 ignored (wave/27 6adcd4f)"
+  }
+}

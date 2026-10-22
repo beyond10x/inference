@@ -2,12 +2,14 @@
 format: aep.planning-md/3
 id: decision-blocker:sherpa-tts-gpl-phonemiser
 kind: decision-blocker
-status: open
+status: cleared
 title: Nobody has decided whether the GPL-3.0 espeak-ng inside sherpa-onnx TTS is admitted under the code-licence policy
 summary: sherpa-onnx TTS links espeak-ng (GPL-3.0); the policy admits Apache-2.0, MIT or BSD code only; the owner picks admit, change backend, or patch the build.
 relations:
 - blocks: epic:local-tts-adapter
-revision: 1
+revision: 2
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-21T22:53:46Z", actor: "human:timo", revision: 2}
 ---
 ## Question
 

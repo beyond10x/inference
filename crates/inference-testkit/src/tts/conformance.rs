@@ -328,9 +328,11 @@ pub struct CancellationObserved {
 /// What [`usage_recorded`] observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsageObserved {
-    /// The `input_characters` of the record, the Unicode scalar values of the utterance.
+    /// The `input_characters` of the record, the Unicode scalar values of the utterance. Beyond
+    /// `i64::MAX` it reads `i64::MAX`; the record then carried them as unknown.
     pub characters: i64,
-    /// The `output_audio_ms` of the record, the audio of the frames delivered.
+    /// The `output_audio_ms` of the record, the audio of the frames delivered. Beyond `i64::MAX`
+    /// it reads `i64::MAX`; the record then carried them as unknown.
     pub audio_ms: i64,
     /// The frames delivered.
     pub frames: usize,
@@ -345,7 +347,7 @@ pub struct UsageObserved {
 /// utterance's sentences; `output_audio_ms`, `measured`, the samples per channel of every frame
 /// delivered at each sample rate over that rate, summed and rounded down to the millisecond once;
 /// `requests`, `measured` 1; and `local_compute_ms`, measured or unknown as the synthesiser
-/// reports it.
+/// reports it. Characters or milliseconds above `i64::MAX` are expected unknown.
 ///
 /// # Errors
 ///
@@ -403,8 +405,6 @@ pub fn usage_recorded<S: Synthesiser>(
         .iter()
         .map(|sentence| sentence.chars().count())
         .sum::<usize>();
-    let characters = i64::try_from(characters).unwrap_or(i64::MAX);
-    let audio_ms = audio_ms(&samples);
     let one = |kind: QuantityKind| {
         let mut found = record
             .quantities
@@ -415,11 +415,8 @@ pub fn usage_recorded<S: Synthesiser>(
             _ => None,
         }
     };
-    for expected in [
-        Quantity::measured(QuantityKind::InputCharacters, characters),
-        Quantity::measured(QuantityKind::OutputAudioMs, audio_ms),
-        Quantity::measured(QuantityKind::Requests, 1),
-    ] {
+    let expected = expected_quantities(characters, &samples);
+    for expected in expected {
         let actual = one(expected.kind());
         if actual != Some(expected) {
             return Err(driver.fail(Fault::UsageQuantity {
@@ -436,18 +433,40 @@ pub fn usage_recorded<S: Synthesiser>(
             actual: None,
         }));
     };
+    let [characters, audio_ms, _] = expected;
     Ok(UsageObserved {
-        characters,
-        audio_ms,
+        characters: characters.value().unwrap_or(i64::MAX),
+        audio_ms: audio_ms.value().unwrap_or(i64::MAX),
         frames,
         local_compute,
     })
 }
 
+/// The quantities a usage record must carry for `characters` offered and `samples` delivered:
+/// `input_characters`, `output_audio_ms` and `requests` 1, each `measured`. A count above
+/// `i64::MAX` is expected unknown, as `inference-tts` records it, never clamped to `i64::MAX`.
+fn expected_quantities(characters: usize, samples: &BTreeMap<u32, u128>) -> [Quantity; 3] {
+    [
+        measured(
+            QuantityKind::InputCharacters,
+            i64::try_from(characters).ok(),
+        ),
+        measured(QuantityKind::OutputAudioMs, audio_ms(samples)),
+        Quantity::measured(QuantityKind::Requests, 1),
+    ]
+}
+
+/// `count` of `kind`, measured; unknown when there is none.
+fn measured(kind: QuantityKind, count: Option<i64>) -> Quantity {
+    count.map_or(Quantity::unknown(kind), |count| {
+        Quantity::measured(kind, count)
+    })
+}
+
 /// The milliseconds of `samples`, samples per channel by sample rate: each rate's samples over
 /// that rate, summed exactly and rounded down once; should the sum not fit `u128`, each rate's
-/// milliseconds rounded down on their own and summed.
-fn audio_ms(samples: &BTreeMap<u32, u128>) -> i64 {
+/// milliseconds rounded down on their own and summed. None above `i64::MAX`.
+fn audio_ms(samples: &BTreeMap<u32, u128>) -> Option<i64> {
     let rates = samples
         .keys()
         .try_fold(1_u128, |common, &rate| lcm(common, u128::from(rate)));
@@ -469,7 +488,7 @@ fn audio_ms(samples: &BTreeMap<u32, u128>) -> i64 {
             .map(|(&rate, &count)| count.saturating_mul(1_000) / u128::from(rate))
             .fold(0, u128::saturating_add)
     });
-    i64::try_from(ms).unwrap_or(i64::MAX)
+    i64::try_from(ms).ok()
 }
 
 /// The least common multiple of `a` and `b`, both above 0; none when it does not fit `u128`.
@@ -990,4 +1009,35 @@ fn tentative(generation: &Generation, sequence: i64, text: &str) -> OutputSegmen
 /// `segment`, committed.
 fn commit(segment: OutputSegment) -> OutputSegment {
     segment.commit().expect("a Tentative segment commits").0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Characters and milliseconds above `i64::MAX` are expected unknown, as `inference-tts`
+    /// records them, never a number clamped to `i64::MAX`; counts at `i64::MAX` are expected as
+    /// they are.
+    #[test]
+    fn counts_above_i64_max_are_expected_unknown() {
+        let largest = u128::try_from(i64::MAX).expect("i64::MAX fits a u128");
+        let characters = usize::try_from(largest + 1).expect("a 64-bit usize");
+        let [characters, audio_ms, requests] =
+            expected_quantities(characters, &BTreeMap::from([(1_000, largest + 1)]));
+        assert_eq!(characters, Quantity::unknown(QuantityKind::InputCharacters));
+        assert_eq!(audio_ms, Quantity::unknown(QuantityKind::OutputAudioMs));
+        assert_eq!(requests, Quantity::measured(QuantityKind::Requests, 1));
+
+        let characters = usize::try_from(largest).expect("a 64-bit usize");
+        let [characters, audio_ms, _] =
+            expected_quantities(characters, &BTreeMap::from([(1_000, largest)]));
+        assert_eq!(
+            characters,
+            Quantity::measured(QuantityKind::InputCharacters, i64::MAX)
+        );
+        assert_eq!(
+            audio_ms,
+            Quantity::measured(QuantityKind::OutputAudioMs, i64::MAX)
+        );
+    }
 }
