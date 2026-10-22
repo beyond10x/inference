@@ -155,6 +155,9 @@ pub fn capabilities() -> SpeechCapabilities {
 /// capital of Portugal …"). The evidence holds on this segmentation: a gap long enough to
 /// bridge a pause in which the model yields to the listener would count a restart as one
 /// response.
+///
+/// `interruptible` is not claimed: a caller can neither cancel nor interrupt a response (see
+/// [`capabilities`]), so nothing stops work within a declared latency.
 pub fn claims() -> Vec<Capability> {
     vec![
         Capability::OutputStreaming,
@@ -162,7 +165,6 @@ pub fn claims() -> Vec<Capability> {
         Capability::ConcurrentInputOutput,
         Capability::NativeDuplex,
         Capability::ToolCalling,
-        Capability::Interruptible,
     ]
 }
 

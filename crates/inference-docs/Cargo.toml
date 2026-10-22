@@ -1,0 +1,19 @@
+[package]
+name = "inference-docs"
+description = "Generates the derived pages and data of the inference documentation site (crate list, adapter claims, error kinds, status, landing terminal) and checks them for drift."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
+inference-core = { path = "../inference-core" }
+serde.workspace = true
+serde_json.workspace = true
+stt-only = { path = "../../examples/stt-only" }
+
+[lints]
+workspace = true

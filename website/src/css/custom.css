@@ -1,0 +1,4 @@
+@media (max-width: 720px) {
+  .b10x-product-page .b10x-flow { gap: 2.6rem; }
+  .b10x-product-page .b10x-flow__step:not(:last-child)::after { bottom: -1.85rem; }
+}

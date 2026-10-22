@@ -797,16 +797,6 @@ errors:
       - name: adapter_id
         type: inference.model.AdapterId
 
-  # A node belongs to one pipeline; a command naming another pipeline does not reach it.
-  # read from: docs/design/inference.md:525
-  - name: inference.graph.NodeOutsidePipeline
-    summary: The node belongs to another pipeline, so nothing was added or bound.
-    fields:
-      - name: node_id
-        type: inference.graph.NodeId
-      - name: pipeline_id
-        type: inference.graph.PipelineId
-
   # A kind names one descriptor: a second declaration under it would leave a definition naming the
   # kind unsure which ports it has.
   # read from: docs/design/inference.md:491
