@@ -482,3 +482,38 @@ events:
         type: List<inference.usage.CostLine>
       - name: total
         type: inference.usage.CostTotal
+
+views:
+  # Every usage record as it was made, its quantities with it, so that a meter can read the
+  # records without having observed their events.
+  # read from: docs/design/inference.md:439
+  - name: inference.usage.UsageRecords
+    source: inference.usage.UsageRecord
+    consistency: read_your_writes
+    fields:
+      - name: usage_record_id
+        type: inference.usage.UsageRecordId
+      - name: run_id
+        type: Optional<inference.graph.RunId>
+      - name: node_id
+        type: Optional<inference.graph.NodeId>
+      - name: session_id
+        type: Optional<inference.session.SessionId>
+      - name: speech_session_id
+        type: Optional<inference.duplex.SpeechSessionId>
+      - name: response_id
+        type: Optional<inference.duplex.ResponseId>
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: model_id
+        type: inference.model.ModelId
+      - name: upstream_model
+        type: Optional<String>
+      - name: started_at_ms
+        type: Integer
+      - name: ended_at_ms
+        type: Integer
+      - name: final
+        type: Boolean
+      - name: quantities
+        type: List<inference.usage.Quantity>

@@ -13,8 +13,10 @@
 //! declared; `PriceUsage` refuses a `usage_record_id` no usage record carries
 //! ([`UsageRecordNotFound`], `unknown-usage`). The run, node, session, speech session and response
 //! a record names are not checked, as `ess/domains/usage.yaml` declares, and neither are a cost
-//! record's lines and totals, which are the pricing crate's. The specification declares no view of
-//! the records; [`UsageDomain::records`] and [`UsageDomain::costs`] are the stores themselves.
+//! record's lines and totals, which are the pricing crate's. The view `inference.usage.UsageRecords`
+//! is [`UsageDomain::usage_records_view`], `read_your_writes`; the specification declares no view
+//! of the cost records. [`UsageDomain::records`] and [`UsageDomain::costs`] are the stores
+//! themselves.
 
 use std::error::Error;
 use std::fmt;
@@ -232,6 +234,14 @@ impl UsageDomain {
     pub fn events(&self) -> &[UsageEvent] {
         &self.events
     }
+
+    /// The view `inference.usage.UsageRecords`: one row per usage record, in the order they were
+    /// made. A row carries every field of its record, which are the fields of the record's
+    /// [`UsageRecorded`], so the row is that event.
+    #[must_use]
+    pub fn usage_records_view(&self) -> Vec<UsageRecorded> {
+        self.records.iter().map(UsageRecord::recorded).collect()
+    }
 }
 
 #[cfg(test)]
@@ -411,6 +421,37 @@ mod tests {
             cost.cost_record_id.to_string(),
             "00000007-0001-4000-8000-000000000001",
             "the refusal took no identity"
+        );
+    }
+
+    #[test]
+    fn the_view_reads_every_record_with_its_quantities_in_the_order_made() {
+        let (model, adapter_id, model_id) = declared();
+        let mut domain = UsageDomain::new();
+        assert!(domain.usage_records_view().is_empty());
+
+        let first = domain
+            .record_usage(&model, usage(adapter_id, model_id))
+            .expect("declared");
+        let refused = domain.record_usage(&model, usage(adapter_id, unknown()));
+        assert!(refused.is_err());
+        let second = domain
+            .record_usage(&model, usage(adapter_id, model_id))
+            .expect("declared");
+        domain
+            .price_usage(price(first.usage_record_id))
+            .expect("exists");
+
+        let rows = domain.usage_records_view();
+        assert_eq!(
+            rows,
+            [first, second],
+            "one row per record, none for a refusal"
+        );
+        assert_eq!(
+            rows[0].quantities,
+            usage(adapter_id, model_id).quantities,
+            "the quantities as recorded, an unknown one kept unknown"
         );
     }
 
