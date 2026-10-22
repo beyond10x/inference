@@ -51,11 +51,11 @@
 //!   in the order it created them. A `response.done` with its id first ends every older response
 //!   still awaiting its `response.done`, each with its usage unknown. One without its id ends the
 //!   oldest response still awaiting its `response.done`, never a newer one, except a response
-//!   the next `response.created` ended after a message without a readable `type` arrived, or
-//!   one the caller cancelled that such a message followed before the next `response.created`:
-//!   that message was likely its `response.done`, so only a `response.done` with its id ends
-//!   it. A message whose `type` reads as anything but `response.done` is no lost
-//!   `response.done` and changes nothing here, even when the binding cannot read the rest. One
+//!   after whose creation a message without a readable `type` arrived before the next
+//!   `response.created`, which ended it or followed the caller's cancel of it: that message
+//!   was likely its `response.done`, so only a `response.done` with its id ends it. A message
+//!   whose `type` reads as anything but `response.done` is no lost `response.done` and changes
+//!   nothing here, even when the binding cannot read the rest. One
 //!   without a `status` counts its usage and fails its response as a provider error, and the
 //!   caller still awaits the server. A message that is not JSON but whose `type` reads
 //!   `response.done` ends the oldest response an id-less `response.done` would end, with its
@@ -478,12 +478,12 @@ struct Awaiting {
     id: ResponseId,
     /// How many messages the binding could not read at all when the server created the response.
     undecodable_at_creation: u64,
-    /// How many messages the binding could not read at all when the caller cancelled the
-    /// response, until the next `response.created` decides [`Self::by_id_only`].
-    undecodable_at_cancel: Option<u64>,
-    /// A message the binding could not read at all arrived while the response was in progress
-    /// and the next `response.created` ended it, or arrived after the caller cancelled it and
-    /// before the next `response.created`. That message was likely its `response.done`, so a
+    /// The caller cancelled the response, and no `response.created` has followed yet to decide
+    /// [`Self::by_id_only`].
+    cancelled: bool,
+    /// A message the binding could not read at all arrived after the response's creation and
+    /// before the next `response.created`, which ended it or followed the caller's cancel of
+    /// it. That message was likely its `response.done`, so a
     /// `response.done` without its id does not end it: only one with its id does, one with the
     /// id of a later response, or the session's end.
     by_id_only: bool,
@@ -688,28 +688,29 @@ impl OpenAiRealtimeSession {
         self.or_drop(failed);
     }
 
-    /// The caller cancelled `id`: whether a message the binding could not read at all arrives
-    /// before the next `response.created` decides whether a `response.done` without its id
-    /// still ends it ([`Self::cancelled_before_created`]).
+    /// The caller cancelled `id`: whether a message the binding could not read at all arrived
+    /// after its creation, before the cancel or after it, decides at the next `response.created`
+    /// whether a `response.done` without its id still ends it
+    /// ([`Self::cancelled_before_created`]).
     fn cancelled(&mut self, id: ResponseId) {
-        let undecodable = self.undecodable;
         if let Some(awaiting) = self
             .awaiting_done
             .iter_mut()
             .find(|awaiting| awaiting.id == id)
         {
-            awaiting.undecodable_at_cancel = Some(undecodable);
+            awaiting.cancelled = true;
         }
     }
 
     /// The server is creating a response: every response the caller cancelled since the last
-    /// `response.created` that a message the binding could not read at all followed is ended by
-    /// a `response.done` with its id only, since that message was likely its `response.done`.
+    /// `response.created` that a message the binding could not read at all followed after its
+    /// creation is ended by a `response.done` with its id only, since that message was likely
+    /// its `response.done`, whether it arrived before the cancel or after it.
     fn cancelled_before_created(&mut self) {
         let undecodable = self.undecodable;
         for awaiting in &mut self.awaiting_done {
-            if let Some(at_cancel) = awaiting.undecodable_at_cancel.take() {
-                awaiting.by_id_only |= undecodable > at_cancel;
+            if std::mem::take(&mut awaiting.cancelled) {
+                awaiting.by_id_only |= undecodable > awaiting.undecodable_at_creation;
             }
         }
     }
@@ -752,7 +753,7 @@ impl OpenAiRealtimeSession {
                 self.awaiting_done.push_back(Awaiting {
                     id,
                     undecodable_at_creation: self.undecodable,
-                    undecodable_at_cancel: None,
+                    cancelled: false,
                     by_id_only: false,
                 });
             }
