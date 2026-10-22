@@ -3,7 +3,9 @@
 //! model are declared, and `PriceUsage` over the domain's own usage records, which decide whether
 //! the usage record priced exists. A cost line and a cost total are read field by field, as a
 //! quantity is, and an `Optional` field left out is none, as `ess` 0.66 leaves them out of the
-//! minimal input of a refusal.
+//! minimal input of a refusal. The view `inference.usage.UsageRecords` is
+//! [`UsageDomain::usage_records_view`], each row carrying the fields its record's
+//! `UsageRecorded` carries, its quantities written as the event writes them.
 //!
 //! Each request field is read on its own ([`Input`]); an `Optional` field left out or sent as
 //! null is none. A quantity is read field by field, `kind`, `source` and `value`, every other
@@ -19,7 +21,7 @@ use std::collections::BTreeMap;
 use ess_conformance::scenario::{CommandRef, ErrorRef, EventRef, OutcomeRef};
 use ess_conformance::target::{
     DeclaredErrorValue, EventObservationRequest, ObservedEvent, SemanticCommandRequest,
-    SemanticCommandResult, SemanticViewRequest, SemanticViewResult, TargetError,
+    SemanticCommandResult, SemanticViewRequest, SemanticViewResult, TargetError, ViewRow,
 };
 use ess_primitives::node::Node;
 use inference_core::usage::{
@@ -40,6 +42,7 @@ pub const DOMAIN: &str = "inference.usage";
 const RECORD_USAGE: &str = "inference.usage.RecordUsage";
 const PRICE_USAGE: &str = "inference.usage.PriceUsage";
 const USAGE_RECORDED: &str = "inference.usage.UsageRecorded";
+const USAGE_RECORDS: &str = "inference.usage.UsageRecords";
 const COST_RECORDED: &str = "inference.usage.CostRecorded";
 const ADAPTER_NOT_FOUND: &str = "inference.model.AdapterNotFound";
 const MODEL_NOT_FOUND: &str = "inference.model.ModelNotFound";
@@ -354,8 +357,17 @@ pub fn query_view(
     request: &SemanticViewRequest,
 ) -> Result<SemanticViewResult, TargetError> {
     let name = request.view.to_string();
+    if name != USAGE_RECORDS {
+        return Err(unsupported(&name));
+    }
     stores.require(&name, &request.consistency)?;
-    Err(unsupported(&name))
+    let rows = stores
+        .usage
+        .usage_records_view()
+        .iter()
+        .map(usage_record_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SemanticViewResult::of(rows))
 }
 
 pub fn observe_events(
@@ -431,29 +443,51 @@ fn cost_recorded(event: &CostRecorded) -> Result<ObservedEvent, TargetError> {
 }
 
 fn usage_recorded(event: &UsageRecorded) -> Result<ObservedEvent, TargetError> {
-    Ok(ObservedEvent::new(parse::<EventRef>(USAGE_RECORDED))
-        .with("usage_record_id", named_node(&event.usage_record_id)?)
-        .with("run_id", optional_node(event.run_id.as_ref())?)
-        .with("node_id", optional_node(event.node_id.as_ref())?)
-        .with("session_id", optional_node(event.session_id.as_ref())?)
-        .with(
-            "speech_session_id",
+    Ok(usage_record_row(event)?.into_iter().fold(
+        ObservedEvent::new(parse::<EventRef>(USAGE_RECORDED)),
+        |observed, (field, value)| observed.with(field, value),
+    ))
+}
+
+/// Every field of a usage record, which are the fields of its event and of its row in the view
+/// `inference.usage.UsageRecords`.
+fn usage_record_row(event: &UsageRecorded) -> Result<ViewRow, TargetError> {
+    Ok(BTreeMap::from([
+        (
+            "usage_record_id".to_owned(),
+            named_node(&event.usage_record_id)?,
+        ),
+        ("run_id".to_owned(), optional_node(event.run_id.as_ref())?),
+        ("node_id".to_owned(), optional_node(event.node_id.as_ref())?),
+        (
+            "session_id".to_owned(),
+            optional_node(event.session_id.as_ref())?,
+        ),
+        (
+            "speech_session_id".to_owned(),
             optional_node(event.speech_session_id.as_ref())?,
-        )
-        .with("response_id", optional_node(event.response_id.as_ref())?)
-        .with("adapter_id", named_node(&event.adapter_id)?)
-        .with("model_id", named_node(&event.model_id)?)
-        .with(
-            "upstream_model",
+        ),
+        (
+            "response_id".to_owned(),
+            optional_node(event.response_id.as_ref())?,
+        ),
+        ("adapter_id".to_owned(), named_node(&event.adapter_id)?),
+        ("model_id".to_owned(), named_node(&event.model_id)?),
+        (
+            "upstream_model".to_owned(),
             event
                 .upstream_model
                 .as_deref()
                 .map_or(Node::Null, text_node),
-        )
-        .with("started_at_ms", integer_node(event.started_at_ms))
-        .with("ended_at_ms", integer_node(event.ended_at_ms))
-        .with("final", boolean_node(event.r#final))
-        .with("quantities", quantities_node(&event.quantities)?))
+        ),
+        (
+            "started_at_ms".to_owned(),
+            integer_node(event.started_at_ms),
+        ),
+        ("ended_at_ms".to_owned(), integer_node(event.ended_at_ms)),
+        ("final".to_owned(), boolean_node(event.r#final)),
+        ("quantities".to_owned(), quantities_node(&event.quantities)?),
+    ]))
 }
 
 fn optional_node<T: Serialize>(value: Option<&T>) -> Result<Node, TargetError> {

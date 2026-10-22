@@ -21,3 +21,4 @@ scenarios:
   - scenarios/barge-in-cancels-response.yaml
   - scenarios/close-delivers-received-usage.yaml
   - scenarios/fail-delivers-received-usage.yaml
+  - scenarios/unknown-quantity-stays-unknown.yaml
