@@ -75,6 +75,7 @@
 - `inference-llama-server` and `inference-llm` move to `llm` 0.8.3; the adapter uses its
   `AnonymousResolver`, and a server response without a usage chunk reports its tokens from the
   server's timings.
+- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.66.0 to 0.67.0.
 
 ### Fixed
 
