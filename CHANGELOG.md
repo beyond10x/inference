@@ -23,9 +23,12 @@
   (`response_ended_unread`).
 - `SessionLedger::usage_awaited` keeps the next response from settling a response whose final
   usage the provider reports in a frame of its own; `SessionLedger::response_usage_unknown`
-  settles it unknown when that frame was lost. `SessionLedger::dropped` and `dropped_events` keep
-  every refusal a binding drops; the Realtime, GPT-Live and Nova Sonic bindings hand every one to
-  it.
+  settles it unknown when that frame was lost. `SessionLedger::dropped` counts every refusal a
+  binding drops (`dropped_count`), and `dropped_events` keeps the most recent
+  `SessionLedger::DROPPED_EVENTS_KEPT` (64) of them; the Realtime, GPT-Live and Nova Sonic
+  bindings hand every one to it.
+- OpenAI Realtime `RealtimeClient::unparsed_type` gives the top-level `type` of the last message
+  the client could not take as an event, when that message has one.
 - `SessionLedger::session_usage_at_end` takes the total of a session billed as a whole and records
   it once, just before the session's end event. Given after the end, it records nothing.
 
@@ -80,7 +83,15 @@
   `response.done` carrying its id ends it (Realtime ends responses in creation order) or at the
   session's end, before `SpeechSessionClosed` or `SpeechSessionFailed`. A message that is not
   JSON but whose `type` reads `response.done` (`ServerEvent::UnreadableResponseDone`) ends the
-  oldest response awaiting its end, its usage unknown. A GPT-Live
+  oldest response awaiting its end, its usage unknown. An id-less `response.done` skips a
+  response only when a message without a readable top-level `type` may have been its
+  `response.done`: one that arrived while it was in progress before the next `response.created`
+  ended it, or after the caller cancelled it and before the next `response.created`. A message
+  whose `type` reads as another event, even one the binding cannot decode, does not make it skip
+  one. A frame read in part, such as a transcription without its transcript, does not either, and it
+  leaves the session as an unreadable frame does, so a stall after it is a provider error. A Nova
+  Sonic `append_audio` or `submit_tool_result` after the session ended returns `NotOpen` and
+  drops nothing. A GPT-Live
   backend end without its id, and a `session.closed` without its reason or seconds, keep their
   meaning. A Nova Sonic `completionEnd` without `stopReason` ends the response in progress, and a
   `contentEnd` or interruption notice without `contentId` applies to it.

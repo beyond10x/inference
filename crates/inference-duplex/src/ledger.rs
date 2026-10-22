@@ -127,9 +127,10 @@ pub struct SessionLedger {
     unreadable: (u64, Option<String>),
     /// Whether a frame the binding could not read arrived after the last readable frame.
     unread_since_readable: bool,
-    /// The provider events and failures the ledger refused and the binding dropped
-    /// ([`SessionLedger::dropped`]), in order.
-    dropped: Vec<SessionError>,
+    /// How many provider events and failures the ledger refused and the binding dropped
+    /// ([`SessionLedger::dropped`]), and the most recent of them, at most
+    /// [`SessionLedger::DROPPED_EVENTS_KEPT`], oldest first.
+    dropped: (u64, Vec<SessionError>),
     /// The instant the session opened, and the wall clock then in Unix epoch milliseconds.
     opened: (Instant, i64),
     /// The latest instant the ledger was given.
@@ -194,6 +195,9 @@ fn millis(duration: Duration) -> i64 {
 }
 
 impl SessionLedger {
+    /// How many of the most recent dropped refusals [`Self::dropped_events`] keeps.
+    pub const DROPPED_EVENTS_KEPT: usize = 64;
+
     /// Runs `inference.duplex.OpenSpeechSession` for `adapter` under `session_id` with `config`,
     /// once `capabilities` admit it; the provider is heard from at `now`.
     ///
@@ -303,7 +307,7 @@ impl SessionLedger {
             clock_pending: false,
             unreadable: (0, None),
             unread_since_readable: false,
-            dropped: Vec::new(),
+            dropped: (0, Vec::new()),
             opened: (now, wall),
             latest: now,
             outbox: VecDeque::new(),
@@ -693,15 +697,29 @@ impl SessionLedger {
     }
 
     /// The binding dropped a provider event, or a failure, that the ledger refused with
-    /// `refusal`: it changed nothing, and it is kept in [`Self::dropped_events`].
+    /// `refusal`: it changed nothing. It is counted ([`Self::dropped_count`]) and kept in
+    /// [`Self::dropped_events`], which forgets the oldest refusal beyond
+    /// [`Self::DROPPED_EVENTS_KEPT`].
     pub fn dropped(&mut self, refusal: SessionError) {
-        self.dropped.push(refusal);
+        self.dropped.0 = self.dropped.0.saturating_add(1);
+        if self.dropped.1.len() == Self::DROPPED_EVENTS_KEPT {
+            self.dropped.1.remove(0);
+        }
+        self.dropped.1.push(refusal);
     }
 
-    /// The refusals the binding dropped ([`Self::dropped`]), in order.
+    /// How many refusals the binding dropped over the session ([`Self::dropped`]).
+    #[must_use]
+    pub const fn dropped_count(&self) -> u64 {
+        self.dropped.0
+    }
+
+    /// The most recent refusals the binding dropped ([`Self::dropped`]), oldest first: at most
+    /// [`Self::DROPPED_EVENTS_KEPT`] (64), so a session dropping events without end holds no more.
+    /// [`Self::dropped_count`] counts every one.
     #[must_use]
     pub fn dropped_events(&self) -> &[SessionError] {
-        &self.dropped
+        &self.dropped.1
     }
 
     /// The provider sent, at `now`, a frame the binding could not read, whole or in part;

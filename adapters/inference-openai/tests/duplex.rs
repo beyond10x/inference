@@ -1729,3 +1729,66 @@ fn an_unreadable_frame_typed_response_done_ends_the_oldest_response_with_its_usa
     assert_eq!(session.ledger().unreadable_frames(), 1);
     session.close().expect("open");
 }
+
+/// An input transcription delta without its `item_id` is a message the binding cannot decode,
+/// but its `type` reads as no `response.done`: it was not the lost end of the response in
+/// progress. The next `response.created` ends that response, and the `response.done` without its
+/// id that follows still ends it, not the newer response, whose own `response.done` ends it.
+#[test]
+fn a_transcription_frame_missing_a_required_field_does_not_make_an_id_less_done_skip_its_response()
+{
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, transcript_delta("resp_1", "item_o1", "Hello")).await;
+        send(
+            &mut socket,
+            json!({"type": "conversation.item.input_audio_transcription.delta", "event_id": "event_x", "content_index": 0, "delta": "hi"}),
+        )
+        .await;
+        send(&mut socket, committed("item_2")).await;
+        send(&mut socket, response_created("resp_2")).await;
+        let mut done = response_done("resp_1", "completed");
+        done["response"]
+            .as_object_mut()
+            .expect("an object")
+            .remove("id");
+        send(&mut socket, done).await;
+        send(&mut socket, transcript_delta("resp_2", "item_o2", "World")).await;
+        send(&mut socket, response_done("resp_2", "completed")).await;
+        while let Some(Ok(_)) = socket.next().await {}
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let mut events = until(&mut session, any_completed);
+    assert_eq!(session.ledger().unreadable_frames(), 1);
+    session.close().expect("open");
+    events.extend(until(&mut session, |event| {
+        matches!(event, SessionEvent::SpeechSessionClosed(_))
+    }));
+    let ids = created(&events);
+    assert_eq!(ids.len(), 2, "{events:#?}");
+    for id in &ids {
+        let of_response: Vec<_> = records(&events)
+            .into_iter()
+            .filter(|record| record.response_id == Some(*id))
+            .collect();
+        assert_eq!(of_response.len(), 1, "{id:?}: {events:#?}");
+        assert!(
+            quantities(of_response[0]).contains(&(QuantityKind::OutputAudioTokens, Some(12))),
+            "the id-less done skipped the first response: {:?}",
+            of_response[0]
+        );
+    }
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::ResponseCompleted(completed) if completed.response_id == ids[1]
+        )),
+        "{events:#?}"
+    );
+    assert_eq!(transcript(&events, ids[1]), "World", "{events:#?}");
+}

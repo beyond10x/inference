@@ -72,7 +72,8 @@
 //!   last readable frame. A readable frame clears that state. The detail still names the total
 //!   unreadable count. Every other failure keeps its kind, so a `connection_lost` without its
 //!   seconds is still a closed transport. Every provider event the ledger refuses is dropped and
-//!   kept in [`SessionLedger::dropped_events`].
+//!   counted in [`SessionLedger::dropped_count`]; [`SessionLedger::dropped_events`] keeps the
+//!   most recent 64.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -485,8 +486,8 @@ impl std::fmt::Debug for OpenAiLiveSession {
 }
 
 impl OpenAiLiveSession {
-    /// A ledger refusal the binding drops: it changed nothing, and the ledger keeps it
-    /// ([`SessionLedger::dropped_events`]).
+    /// A ledger refusal the binding drops: it changed nothing, and the ledger counts it
+    /// ([`SessionLedger::dropped`]).
     fn or_drop(&mut self, result: Result<(), SessionError>) {
         if let Err(refusal) = result {
             self.ledger.dropped(refusal);
