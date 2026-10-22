@@ -1,8 +1,9 @@
 //! Frames the binding cannot read, whole or in part. One it cannot read at all is dropped and
 //! reading goes on, but it is counted on the session, it is no sign of life for the liveness
-//! bound, and a later failure of the session names it. One that lacks a field the binding does
-//! not need keeps its meaning. Offline: a scripted provider stream over in-process channels, no
-//! network, no credential.
+//! bound, and a later failure of the session names it; a readable frame after it makes a stall
+//! a stall again. One that lacks a field the binding does not need keeps its meaning. And a
+//! caller operation after the session ended drops nothing. Offline: a scripted provider stream
+//! over in-process channels, no network, no credential.
 #![cfg(feature = "duplex")]
 
 use std::future::Future;
@@ -11,10 +12,13 @@ use std::time::{Duration, Instant};
 
 use inference_aws::duplex::{Connector, NovaSonicSpeech};
 use inference_aws::nova_sonic::{DEFAULT_MODEL_ID, NovaSonicError, Session, SessionConfig};
-use inference_duplex::inference_audio::{AudioEncoding, AudioFormat};
+use inference_duplex::inference_audio::{
+    AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition,
+};
 use inference_duplex::{
-    NativeSpeechModel, QuantityKind, ResponseState, SessionConfig as SpeechConfig, SessionEvent,
-    SessionFailureKind, SpeechSessionHandle, SpeechSessionState, TurnDetection, TurnTuning,
+    NativeSpeechModel, QuantityKind, ResponseState, SessionConfig as SpeechConfig, SessionError,
+    SessionEvent, SessionFailureKind, SpeechSessionHandle, SpeechSessionState, TurnDetection,
+    TurnTuning,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -228,6 +232,72 @@ fn undecodable_frames_do_not_keep_the_session_alive() {
         "{failed:?}"
     );
     assert!(session.ledger().unreadable_frames() > 1);
+}
+
+/// A frame the binding cannot read, then a readable one, then silence while the caller awaits
+/// the answer: the readable frame was the last, so the stall stays a stall, and its detail
+/// still names the frame the binding could not read.
+#[test]
+fn a_stall_after_a_readable_frame_stays_a_stall_naming_the_unreadable_frame() {
+    let mut steps = user_turn();
+    steps.push(Step::Raw("not json at all"));
+    steps.push(usage(5));
+    let mut session = open(steps, Duration::from_millis(600));
+    let started = Instant::now();
+    let mut events = Vec::new();
+    while started.elapsed() < Duration::from_secs(6) {
+        if let Some(event) = session.next_event(WAIT) {
+            let failed = matches!(event, SessionEvent::SpeechSessionFailed(_));
+            events.push(event);
+            if failed {
+                break;
+            }
+        }
+    }
+    let Some(SessionEvent::SpeechSessionFailed(failed)) = events.last() else {
+        panic!("the session did not fail: {events:#?}");
+    };
+    assert_eq!(session.ledger().unreadable_frames(), 1, "{events:#?}");
+    assert_eq!(
+        failed.failure.kind,
+        SessionFailureKind::Stalled,
+        "{failed:?}"
+    );
+    assert!(
+        failed.failure.detail.contains("1 frame") && failed.failure.detail.contains("not json"),
+        "{failed:?}"
+    );
+}
+
+/// Audio the caller appends after the close is refused with `NotOpen`, the writer stopped or
+/// not, and the session drops nothing for it: no refusal is counted or kept.
+#[test]
+fn audio_appended_after_the_close_is_refused_and_drops_nothing() {
+    let mut session = open(user_turn(), Duration::from_secs(5));
+    drain(&mut session);
+    session.close().expect("open");
+    drain(&mut session);
+    let dropped = session.ledger().dropped_count();
+    let kept = session.ledger().dropped_events().len();
+    let started = Instant::now();
+    let mut appended = 0_u64;
+    while started.elapsed() < Duration::from_secs(1) {
+        let frame = AudioFrame {
+            format: pcm(),
+            position: SampleClockPosition::new(appended * 160).expect("a position"),
+            sample_count: 160,
+            data: vec![0; 320],
+        };
+        assert!(
+            matches!(session.append_audio(frame), Err(SessionError::NotOpen(_))),
+            "an append after the close was not refused as NotOpen"
+        );
+        appended += 1;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(appended > 10, "{appended}");
+    assert_eq!(session.ledger().dropped_count(), dropped);
+    assert_eq!(session.ledger().dropped_events().len(), kept);
 }
 
 /// A `completionEnd` without its `stopReason` still ends the response in progress: the binding

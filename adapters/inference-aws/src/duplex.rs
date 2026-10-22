@@ -51,7 +51,9 @@
 //!   were and the start of the last. Stalled turns into ProviderError only when an unreadable
 //!   frame arrived after the last readable frame. A readable frame clears that state. The detail
 //!   still names the total unreadable count. Every other failure keeps its kind, and every
-//!   provider event the ledger refuses is dropped and kept in [`SessionLedger::dropped_events`].
+//!   provider event the ledger refuses is dropped and counted in [`SessionLedger::dropped_count`];
+//!   [`SessionLedger::dropped_events`] keeps the most recent 64. A caller operation after the
+//!   session ended returns its error and drops nothing.
 //!
 //! The response boundaries are inferred from the order of content blocks the Nova 2 user guide
 //! and the AWS samples show (speculative text, audio, then final text ending `END_TURN`), not
@@ -661,8 +663,8 @@ pub struct NovaSonicSpeechSession {
 }
 
 impl NovaSonicSpeechSession {
-    /// A ledger refusal the binding drops: it changed nothing, and the ledger keeps it
-    /// ([`SessionLedger::dropped_events`]).
+    /// A ledger refusal the binding drops: it changed nothing, and the ledger counts it
+    /// ([`SessionLedger::dropped`]).
     fn or_drop(&mut self, result: Result<(), SessionError>) {
         if let Err(refusal) = result {
             self.ledger.dropped(refusal);
@@ -677,7 +679,8 @@ impl NovaSonicSpeechSession {
 
     /// The writer stopped: what already arrived is recorded first, so its usage counts and the
     /// session fails as the first stream end, client failure or service error among it says;
-    /// failing none, as a closed transport.
+    /// failing none, as a closed transport. A session already closed or failed records and
+    /// fails nothing, so a caller operation after its end drops nothing.
     fn commands_closed(&mut self) {
         while self.ledger.session().require_open().is_ok() {
             let Ok(arrival) = self.arrivals.try_recv() else {
@@ -685,7 +688,9 @@ impl NovaSonicSpeechSession {
             };
             self.record(arrival);
         }
-        self.transport_closed();
+        if self.ledger.session().require_open().is_ok() {
+            self.transport_closed();
+        }
     }
 
     fn transport_closed(&mut self) {
