@@ -6,7 +6,7 @@ status: open
 title: ess synthesis and the interpreted target leave six refusals and one unsupported scenario
 relations:
 - blocks: story:ess-defect-fixes
-revision: 3
+revision: 4
 ---
 ## What is blocked
 
@@ -21,7 +21,7 @@ gives 469 scenarios and six refusals:
 | ESS-SYNTH-001 | `inference.graph.CancelRun/outcome/cancelled` (`ess/domains/graph.yaml:1854`) | authored scenario `cancel-run-discards-unplayed.yaml` |
 | ESS-SYNTH-001 | `inference.stream.CancelGeneration/outcome/cancelled` (`ess/domains/stream.yaml:711`) | authored scenario `cancel-generation-discards-unplayed.yaml` |
 | ESS-SYNTH-001 | `inference.stream.SupersedeGeneration/outcome/superseded` (`ess/domains/stream.yaml:681`) | authored scenario `supersede-discards-unplayed.yaml` |
-| ESS-SYNTH-013 | type `inference.usage.Quantity` has no scenario (`ess/domains/usage.yaml:78`) | `Quantity::new` enforces the invariants; no view publishes the type outside the `quantities` list |
+| ESS-SYNTH-013 | type `inference.usage.Quantity` has no scenario (`ess/domains/usage.yaml:78`) | `Quantity::new` enforces the invariants; `ess/domains/usage.yaml` declares no view that publishes the type |
 
 Synthesis finds no witness for each outcome's `affects[0]` move. For the two duplex outcomes the
 target `inference.duplex.ReceivedSessionEvent` "has no three rows the filter selects that the
@@ -39,13 +39,19 @@ exits 1, so it stays outside `task check`; the testkit target runs the scenario 
 
 ## What clears it
 
-An ess release, installed under the toolchain pin, after which synthesis reports 0 refusals and the
-interpreted run reports 0 unsupported. Each gap is reported to the ESS maintainers (2026-10-19 for
-the first three cascades, 2026-10-22 for all three gaps against ess 0.67.0); once ESS records them
-as stories, this body and `AGENTS.md` cite those story ids instead of the version. The workarounds
-are dropped after the fixing release is verified.
+| result | owner | clears with |
+|---|---|---|
+| five ESS-SYNTH-001 cascades | ESS story:a-cascade-onto-rows-of-a-guarded-creator-is-witnessed | ess 0.70.0 |
+| ESS-SYNTH-013 `inference.usage.Quantity` | this repository: `ess/domains/usage.yaml` declares no view, so nothing publishes `Quantity` | a usage view that publishes a list of `Quantity`, answered by the testkit target (needs a build, next unit) |
+| interpreted unsupported `AddSubgraphNode/outcome/added` | ESS story:an-unfillable-required-field-is-named-by-validate-and-the-view | ess 0.70.0 |
+
+Cleared when the pin is on ess 0.70.0 or newer, the usage view has landed, synthesis reports 0
+refusals and the interpreted run reports 0 unsupported. The workarounds are dropped after that run
+is verified.
 
 ## Decision
 
 2026-10-22: record the six refusals and the unsupported scenario as of ess 0.67.0 in `AGENTS.md`
-and here, in one pull request, with no build.
+and here, in one pull request, with no build. ESS answered the same day with the two story ids
+above and placed the `Quantity` refusal in this repository; the usage view is the next unit because
+the testkit target must answer it.
