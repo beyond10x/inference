@@ -57,12 +57,10 @@ ess specify validate --path ess
 cargo test -p inference-testkit --features run --test conform
 ```
 
-With ess 0.66.0, the release CI installs, the validation prints the following. Long lines are
+With ess 0.67.0, the release CI installs, the validation prints the following. Long lines are
 wrapped here, and their continuation lines are indented four spaces:
 
 ```text
-warning: ess/ess-inputs.yaml requires ess 0.60 and this is ess 0.66.0, which is newer;
-    continuing (--strict-requires refuses)
 warning[ESS-ENTITY-019]: `inference.session.HistoryEntry` stores `call_id`, typed
     `Optional<inference.tools.ToolCallId>`, which identifies `inference.tools.ToolCall`,
     and no relation declares that it names a `inference.tools.ToolCall`
@@ -71,7 +69,7 @@ warning[ESS-ENTITY-019]: `inference.session.HistoryEntry` stores `call_id`, type
     `{name: call_id, kind: references, target: inference.tools.ToolCall,
     cardinality: one, via: call_id}`
   --> domains/session.yaml:173:5
-inference v1 — 10 file(s), 6 scenario(s), valid
+inference v1 — 11 file(s), 8 scenario(s), valid
 ```
 
 The last lines of the test run:
