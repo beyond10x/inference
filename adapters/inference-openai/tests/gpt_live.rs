@@ -425,7 +425,7 @@ fn nested_responses_events_are_unwrapped() {
         BackendEvent::Completed {
             response_id: Some("resp_1".to_owned()),
             usage: Some(BackendUsage {
-                input_tokens: 120,
+                input_tokens: Some(120),
                 cached_tokens: Some(64),
                 output_tokens: Some(30),
                 reasoning_tokens: Some(12),
@@ -627,7 +627,7 @@ fn a_backend_end_without_its_id_keeps_its_usage() {
         matches!(
             &completed,
             LiveEvent::Backend { event: BackendEvent::Completed { response_id: None, usage: Some(usage), unreadable_usage: None }, .. }
-                if usage.input_tokens == 5 && usage.output_tokens == Some(2)
+                if usage.input_tokens == Some(5) && usage.output_tokens == Some(2)
         ),
         "{completed:?}"
     );
@@ -652,9 +652,8 @@ fn a_backend_end_without_its_id_keeps_its_usage() {
     );
 }
 
-/// A backend usage is read field by field: without `output_tokens` it keeps its input tokens and
-/// its output is unknown; without `input_tokens`, or not an object, there is none. Each says
-/// what could not be read.
+/// A backend usage is read field by field: a count it lacks is unknown and the others are kept;
+/// a usage that is not an object gives none. Each says what could not be read.
 #[test]
 fn a_backend_usage_is_read_field_by_field() {
     let read = |usage: Value| {
@@ -680,7 +679,7 @@ fn a_backend_usage_is_read_field_by_field() {
     assert_eq!(
         usage,
         Some(BackendUsage {
-            input_tokens: 20,
+            input_tokens: Some(20),
             cached_tokens: None,
             output_tokens: None,
             reasoning_tokens: None,
@@ -697,7 +696,16 @@ fn a_backend_usage_is_read_field_by_field() {
     assert_eq!(usage.and_then(|usage| usage.total_tokens), None);
     assert!(unreadable.is_some());
     let (usage, unreadable) = read(json!({"output_tokens": 2}));
-    assert_eq!(usage, None);
+    assert_eq!(
+        usage,
+        Some(BackendUsage {
+            input_tokens: None,
+            cached_tokens: None,
+            output_tokens: Some(2),
+            reasoning_tokens: None,
+            total_tokens: None
+        })
+    );
     assert!(
         unreadable
             .as_deref()
