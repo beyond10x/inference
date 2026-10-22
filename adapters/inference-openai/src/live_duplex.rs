@@ -89,7 +89,7 @@ use inference_core::model::{
 };
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
-    NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
+    LivenessMark, NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
     SessionConfig as SpeechConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
     SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechSessionId,
     TokenCounts, TuningSupport, TurnDetection, Unsupported, UsageTotal, reported,
@@ -447,8 +447,8 @@ fn billed(seconds: Option<f64>) -> Vec<Quantity> {
     )]
 }
 
-/// Adds `count` to the sum kept under `id`: `None` once a count was left out, since the sum is
-/// then unknown.
+/// Adds `count` to the sum kept under `id`: `None` once a count was left out, or once the sum
+/// would pass `u64::MAX`, since the sum is then unknown.
 fn known_sum(
     sums: &mut HashMap<Option<ResponseId>, Option<u64>>,
     id: Option<ResponseId>,
@@ -456,7 +456,11 @@ fn known_sum(
 ) -> Option<u64> {
     *sums
         .entry(id)
-        .and_modify(|sum| *sum = sum.zip(count).map(|(sum, count)| sum + count))
+        .and_modify(|sum| {
+            *sum = sum
+                .zip(count)
+                .and_then(|(sum, count)| sum.checked_add(count));
+        })
         .or_insert(count)
 }
 
@@ -680,24 +684,28 @@ impl OpenAiLiveSession {
     }
 
     /// A backend response ended: what of its usage was read is summed
-    /// ([`Self::backend_usage_recorded`]), and a `usage` read only in part or not at all counts
-    /// its frame once as one the binding could not read in full, after what it recorded.
+    /// ([`Self::backend_usage_recorded`]), and a `response` or `usage` read only in part or not
+    /// at all counts its frame once as one the binding could not read in full, after what it
+    /// recorded; the liveness bound then stands where it stood at `mark`, before the frame.
     fn backend_ended(
         &mut self,
         usage: Option<BackendUsage>,
         unreadable_usage: Option<String>,
+        mark: LivenessMark,
         now: Instant,
     ) {
         if let Some(usage) = usage {
             self.backend_usage_recorded(usage, now);
         }
         if let Some(what) = unreadable_usage {
-            self.ledger.unreadable_frame(what, now);
+            self.ledger.read_in_part(mark, what, now);
         }
     }
 
     /// Sums a backend response's usage onto the response in progress or the latest one; before
-    /// the first response, onto the session, held in the ledger for its end.
+    /// the first response, onto the session, held in the ledger for its end. A sum that would
+    /// pass `u64::MAX` is unknown in the usage record ([`known_sum`]); the contract's
+    /// `ResponseUsage`, which has no unknown, stops at `u64::MAX`.
     fn backend_usage_recorded(&mut self, usage: BackendUsage, now: Instant) {
         self.backend_usage.push(usage);
         let id = self.current.or_else(|| {
@@ -709,12 +717,21 @@ impl OpenAiLiveSession {
         let sum = self.usage.entry(id).or_default();
         *sum = ResponseUsage {
             input: TokenCounts {
-                text_tokens: sum.input.text_tokens + usage.input_tokens.unwrap_or(0),
+                text_tokens: sum
+                    .input
+                    .text_tokens
+                    .saturating_add(usage.input_tokens.unwrap_or(0)),
                 audio_tokens: 0,
-                cached_tokens: sum.input.cached_tokens + usage.cached_tokens.unwrap_or(0),
+                cached_tokens: sum
+                    .input
+                    .cached_tokens
+                    .saturating_add(usage.cached_tokens.unwrap_or(0)),
             },
             output: TokenCounts {
-                text_tokens: sum.output.text_tokens + usage.output_tokens.unwrap_or(0),
+                text_tokens: sum
+                    .output
+                    .text_tokens
+                    .saturating_add(usage.output_tokens.unwrap_or(0)),
                 audio_tokens: 0,
                 cached_tokens: 0,
             },
@@ -746,8 +763,9 @@ impl OpenAiLiveSession {
     /// `session.closed` confirmed the billed voice seconds: they replace the running total the
     /// ledger records just before the session's end event. One without its seconds confirms
     /// nothing, and one without its reason or seconds is counted as a frame the binding could
-    /// not read in full.
-    fn confirm(&mut self, closed: LiveClosed) {
+    /// not read in full, which leaves the liveness bound where it stood at `mark`, before the
+    /// frame.
+    fn confirm(&mut self, closed: LiveClosed, mark: LivenessMark) {
         let missing = match (&closed.reason, closed.seconds) {
             (Some(_), Some(_)) => None,
             (None, Some(_)) => Some("the string field `reason`"),
@@ -755,8 +773,11 @@ impl OpenAiLiveSession {
             (None, None) => Some("the fields `reason` and `usage.seconds`"),
         };
         if let Some(missing) = missing {
-            self.ledger
-                .unreadable_frame(format!("`session.closed` lacks {missing}"), Instant::now());
+            self.ledger.read_in_part(
+                mark,
+                format!("`session.closed` lacks {missing}"),
+                Instant::now(),
+            );
         }
         if let Some(seconds) = closed.seconds {
             self.ledger
@@ -770,6 +791,7 @@ impl OpenAiLiveSession {
     /// a message that is not a GPT-Live event is counted; nothing of it is delivered.
     fn closing(&mut self, event: Result<LiveEvent, RealtimeError>) {
         let now = Instant::now();
+        let mark = self.ledger.liveness_mark();
         match event {
             Ok(LiveEvent::UsageUpdated { seconds, .. }) => {
                 self.voice_seconds = Some(seconds);
@@ -789,15 +811,18 @@ impl OpenAiLiveSession {
                         ..
                     },
                 ..
-            }) => self.backend_ended(usage, unreadable_usage, now),
+            }) => self.backend_ended(usage, unreadable_usage, mark, now),
             Ok(_) => {}
             Err(error) => self.undecodable(&error),
         }
     }
 
-    /// Records one server event through the ledger; what the ledger refuses is dropped.
+    /// Records one server event through the ledger; what the ledger refuses is dropped. A frame
+    /// read whole hears the provider; one read only in part leaves the liveness bound where it
+    /// stood before it ([`SessionLedger::read_in_part`]).
     fn record(&mut self, event: LiveEvent) {
         let now = Instant::now();
+        let mark = self.ledger.liveness_mark();
         self.ledger.heard(now);
         match event {
             LiveEvent::OutputAudio { audio } => self.output(audio, now),
@@ -841,7 +866,7 @@ impl OpenAiLiveSession {
                     usage,
                     unreadable_usage,
                     ..
-                } => self.backend_ended(usage, unreadable_usage, now),
+                } => self.backend_ended(usage, unreadable_usage, mark, now),
                 BackendEvent::Created { .. } | BackendEvent::Other { .. } => {}
             },
             LiveEvent::UsageUpdated { seconds, .. } => {
@@ -859,7 +884,7 @@ impl OpenAiLiveSession {
                     Some(reason) => format!("the provider ended the session: {reason}"),
                     None => "the provider ended the session without a reason".to_owned(),
                 };
-                self.confirm(LiveClosed { reason, seconds });
+                self.confirm(LiveClosed { reason, seconds }, mark);
                 let refused = self.ledger.fail(SessionFailure { kind, detail });
                 self.or_drop(refused);
                 self.current = None;
@@ -936,7 +961,8 @@ impl SpeechSessionHandle for OpenAiLiveSession {
         if self.ledger.session().require_open().is_ok() {
             match self.record_arrived() {
                 Arrived::Closed(closed) => {
-                    self.confirm(closed);
+                    let mark = self.ledger.liveness_mark();
+                    self.confirm(closed, mark);
                     self.client = None;
                 }
                 Arrived::Failed(_) => self.client = None,
@@ -953,7 +979,8 @@ impl SpeechSessionHandle for OpenAiLiveSession {
                 self.closing(event);
             }
             if let Some(closed) = closed {
-                self.confirm(closed);
+                let mark = self.ledger.liveness_mark();
+                self.confirm(closed, mark);
             }
         }
         self.ledger.close()?;

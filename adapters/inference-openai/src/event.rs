@@ -369,16 +369,20 @@ impl<'a> Fields<'a> {
         let input_audio_tokens = detail(input, "audio_tokens");
         let output_text_tokens = detail(output, "text_tokens");
         let output_audio_tokens = detail(output, "audio_tokens");
-        let input_tokens = usage
-            .optional_unsigned("input_tokens")
-            .unwrap_or_else(|| input_text_tokens.unwrap_or(0) + input_audio_tokens.unwrap_or(0));
-        let output_tokens = usage
-            .optional_unsigned("output_tokens")
-            .unwrap_or_else(|| output_text_tokens.unwrap_or(0) + output_audio_tokens.unwrap_or(0));
+        let input_tokens = usage.optional_unsigned("input_tokens").unwrap_or_else(|| {
+            input_text_tokens
+                .unwrap_or(0)
+                .saturating_add(input_audio_tokens.unwrap_or(0))
+        });
+        let output_tokens = usage.optional_unsigned("output_tokens").unwrap_or_else(|| {
+            output_text_tokens
+                .unwrap_or(0)
+                .saturating_add(output_audio_tokens.unwrap_or(0))
+        });
         Ok(Some(Usage {
             total_tokens: usage
                 .optional_unsigned("total_tokens")
-                .unwrap_or(input_tokens + output_tokens),
+                .unwrap_or(input_tokens.saturating_add(output_tokens)),
             input_tokens,
             output_tokens,
             input_text_tokens,
@@ -458,7 +462,8 @@ pub enum ResponseStatus {
 }
 
 /// The token usage of a response, from `response.done`. The details are `None` when the server
-/// did not report them.
+/// did not report them. A total the server left out is the sum of its parts, stopping at
+/// `u64::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Usage {
     pub total_tokens: u64,

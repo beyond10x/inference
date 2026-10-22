@@ -94,7 +94,7 @@ use inference_core::model::{
 };
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
-    NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
+    LivenessMark, NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
     SessionConfig as SpeechConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
     SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechSessionId,
     TokenCounts, TranscriptionUsage, TuningOption, TuningSupport,
@@ -588,10 +588,11 @@ impl OpenAiRealtimeSession {
     }
 
     /// A frame the binding read only in part: `unread` names each field it could not read, and
-    /// the frame is counted once, when there is any.
-    fn unread(&mut self, unread: &[String], now: Instant) {
+    /// the frame is counted once, when there is any, and leaves the liveness bound where it
+    /// stood at `mark`, before the frame ([`SessionLedger::read_in_part`]).
+    fn unread(&mut self, unread: &[String], mark: LivenessMark, now: Instant) {
         if !unread.is_empty() {
-            self.ledger.unreadable_frame(unread.join("; "), now);
+            self.ledger.read_in_part(mark, unread.join("; "), now);
         }
     }
 
@@ -728,6 +729,7 @@ impl OpenAiRealtimeSession {
             self.unreadable_done(what, now);
             return;
         }
+        let mark = self.ledger.liveness_mark();
         self.ledger.heard(now);
         let config = self.ledger.session().config().clone();
         let input_rate = u64::from(config.input_format.sample_rate.get());
@@ -840,7 +842,7 @@ impl OpenAiRealtimeSession {
                         vec![reported(QuantityKind::InputAudioMs, milliseconds(seconds))],
                     ),
                     None => {
-                        self.unread(&unread, now);
+                        self.unread(&unread, mark, now);
                         return;
                     }
                 };
@@ -848,9 +850,9 @@ impl OpenAiRealtimeSession {
                     .ledger
                     .transcription_usage_reported(contract, quantities, now);
                 self.or_drop(recorded);
-                // Counted after the usage, whose record hears the provider: the frame was read
-                // only in part, and it stays the last frame the binding could not read.
-                self.unread(&unread, now);
+                // Counted after the usage: the frame was read only in part, so it stays the last
+                // frame the binding could not read and leaves the liveness bound where it stood.
+                self.unread(&unread, mark, now);
             }
             ServerEvent::SpeechStarted { audio_start_ms, .. } => {
                 if let Some(position) = at(audio_start_ms) {
@@ -912,7 +914,7 @@ impl OpenAiRealtimeSession {
                                 .to_owned(),
                         );
                     }
-                    self.unread(&unread, now);
+                    self.unread(&unread, mark, now);
                     return;
                 };
                 if response_id.is_some() {
@@ -937,7 +939,7 @@ impl OpenAiRealtimeSession {
                     let what = unread.join("; ");
                     if let Err(refusal) = self.ledger.response_ended_unread(id, &what, now) {
                         self.ledger.dropped(refusal);
-                        self.ledger.unreadable_frame(what, now);
+                        self.ledger.read_in_part(mark, what, now);
                     }
                     return;
                 };
@@ -957,7 +959,7 @@ impl OpenAiRealtimeSession {
                     ),
                 };
                 self.or_drop(ended);
-                self.unread(&unread, now);
+                self.unread(&unread, mark, now);
             }
             ServerEvent::Error(error) => {
                 let refused_commit = error
