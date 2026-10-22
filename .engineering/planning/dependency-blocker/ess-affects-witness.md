@@ -3,10 +3,10 @@ format: aep.planning-md/3
 id: dependency-blocker:ess-affects-witness
 kind: dependency-blocker
 status: open
-title: ess synthesis and the interpreted target leave five refusals and one unsupported scenario
+title: ess synthesis and the interpreted target leave five refusals, one unsupported and one failed scenario
 relations:
 - blocks: story:ess-defect-fixes
-revision: 6
+revision: 8
 ---
 ## What is blocked
 
@@ -35,7 +35,14 @@ The interpreted run (`--target interpreted --report-format 2`) gives 468 passed 
 expose interpreted view: the model does not determine a complete typed view observation". The run
 exits 1, so it stays outside `task check`; the testkit target runs the scenario and passes.
 
-`AGENTS.md` names the five remaining refusals and the one unsupported scenario, as of ess 0.67.0.
+Under ess 0.67.0 and 0.68.0 the interpreted run also fails the authored scenario
+`inference.usage/authored/unknown-quantity-stays-unknown` (471 scenarios: 469 passed, 1 failed, 1
+unsupported). The interpreted `UsageRecords` view leaves an unknown quantity's `value` out; the
+scenario asserts `value: null`, and with that line removed the run passes the scenario (470 passed).
+The null stays: it is what fails a view that reads the unknown quantity as 0
+(`crates/inference-testkit/tests/adversary_usage_view.rs`, `ZeroUnknown`).
+
+`AGENTS.md` names the five remaining refusals, the unsupported scenario and the failed one, as of ess 0.68.0.
 
 ## What clears it
 
@@ -44,9 +51,10 @@ exits 1, so it stays outside `task check`; the testkit target runs the scenario 
 | five ESS-SYNTH-001 cascades | ESS story:a-cascade-onto-rows-of-a-guarded-creator-is-witnessed | ess 0.70.0 |
 | ESS-SYNTH-013 `inference.usage.Quantity` | this repository: `ess/domains/usage.yaml` declares no view, so nothing publishes `Quantity` | cleared by story:usage-quantity-view (view `inference.usage.UsageRecords`) |
 | interpreted unsupported `AddSubgraphNode/outcome/added` | ESS story:an-unfillable-required-field-is-named-by-validate-and-the-view | ess 0.70.0 |
+| interpreted failed `unknown-quantity-stays-unknown` | ESS: `contains` with `null` against an absent optional field, reported to ESS 2026-10-23 | not yet scheduled |
 
 Cleared when the pin is on ess 0.70.0 or newer, the usage view has landed, synthesis reports 0
-refusals and the interpreted run reports 0 unsupported. The workarounds are dropped after that run
+refusals and the interpreted run reports 0 unsupported and 0 failed. The workarounds are dropped after that run
 is verified.
 
 ## Decision
