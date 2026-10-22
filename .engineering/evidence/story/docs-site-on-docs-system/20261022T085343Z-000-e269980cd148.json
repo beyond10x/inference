@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-22T08:53:43Z",
+  "actor": "human:timo",
+  "artifact": "story:docs-site-on-docs-system",
+  "kind": "story",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check"
+  }
+}

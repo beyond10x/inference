@@ -355,10 +355,13 @@ fn the_declared_capabilities_are_what_gpt_live_takes() {
         Capability::ConcurrentInputOutput,
         Capability::NativeDuplex,
         Capability::ToolCalling,
-        Capability::Interruptible,
     ] {
         assert!(claimed.contains(&capability), "{capability:?}");
     }
+    assert!(
+        !claimed.contains(&Capability::Interruptible),
+        "no caller can cancel or interrupt a GPT-Live response, so it cannot stop work within a declared latency"
+    );
     assert_eq!(live_format(&pcm24()), Some(LiveFormat::Pcm24k));
     assert_eq!(
         live_format(&format(AudioEncoding::PcmS16le, 16_000)),

@@ -1,5 +1,38 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `inference-facade`: `SessionEvent::UsageRecorded`, and usage totals per run and per session
+  (`LiveSession::usage`, `UsageTotal` in `inference-core`), where an unknown count is never added as
+  0; `LiveSession::record_inputs` records a session's ingress inputs for replay.
+- `inference-facade`, feature `cost`: a usage record priced against a caller's price document
+  (`CostRecord`), with `price_unknown` lines instead of zero and a session cost total through
+  `LiveSession::price_with`; the synthesized suite grows from 460 to 462 scenarios, all answered.
+- A subgraph node's `usage` output port also carries the usage of its child run, counted once under
+  the parent run.
+- The documentation site moves from mdBook under `site/` to Docusaurus under `website/`, with
+  pages generated from the source by the `inference-docs` crate and checked by `task check`.
+
+### Changed
+
+- `inference-llm`: a cancelled or superseded generation keeps the usage its turn reported, as a
+  final or partial record, instead of dropping it.
+- `inference-llama-server` and `inference-llm` move to `llm` 0.8.3; the adapter uses its
+  `AnonymousResolver`, and a server response without a usage chunk reports its tokens from the
+  server's timings.
+
+### Fixed
+
+- `inference-openai`: the GPT-Live binding no longer claims `interruptible`. A caller can neither
+  cancel nor interrupt its responses, so nothing stops its work within a declared latency.
+- A nested subgraph drain no longer loses input sent right before stop.
+- An output port of a subgraph node with no edge no longer fails the run; the child's output on it
+  is read and dropped.
+- A subgraph node's egress bridges end with the child run, so a child that keeps its endpoint past
+  stop no longer hangs the drain, and a drain fails when every parent edge of a port refused.
+
 ## [0.7.0] — 2026-10-21
 
 ### Added
