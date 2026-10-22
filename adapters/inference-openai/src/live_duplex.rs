@@ -53,10 +53,12 @@
 //!   as text tokens (the backend takes no audio),
 //!   cached tokens inside them; a session without backend work records no `ResponseUsage`. In a
 //!   response's usage record those sums are reported, its audio tokens unknown, and its cached
-//!   tokens unknown once one backend response left them out; backend usage may arrive after a
-//!   response's silence gap ended it, so the record waits for the next response or the session's
-//!   end. In the contract's `ResponseUsage` a cached count the server left out is 0, its absence
-//!   kept in [`OpenAiLiveSession::backend_usage`].
+//!   or output tokens unknown once one backend response left them out; backend usage may arrive
+//!   after a response's silence gap ended it, so the record waits for the next response or the
+//!   session's end. In the contract's `ResponseUsage` a cached or output count the server left
+//!   out is 0, its absence kept in [`OpenAiLiveSession::backend_usage`]. A backend usage without
+//!   its output tokens counts its input tokens; one without its input tokens, or not an object,
+//!   counts nothing. Either counts its frame once as one the binding could not read in full.
 //! * A refused handshake (HTTP 401 or 403) fails the open as rejected, any other failure to
 //!   connect as a closed transport. A `session.closed` the caller did not ask for (expired, a
 //!   safety filter, a remote hangup) fails the session as a provider error, `connection_lost` as
@@ -66,7 +68,8 @@
 //!   its id still counts its usage.
 //! * A message the client cannot read (not JSON, no `type`, a typed event without a field it
 //!   needs) is dropped and reading goes on. It is counted on the session
-//!   ([`SessionLedger::unreadable_frames`]), so is a `session.closed` lacking a field, and none
+//!   ([`SessionLedger::unreadable_frames`]), so is a `session.closed` lacking a field or a
+//!   backend response end whose `usage` was read only in part, and none
 //!   refreshes the liveness bound. A later failure of the session names how many there were and
 //!   the last. Stalled turns into ProviderError only when an unreadable frame arrived after the
 //!   last readable frame. A readable frame clears that state. The detail still names the total
@@ -413,6 +416,7 @@ impl NativeSpeechModel for OpenAiLive {
             emitted: HashMap::new(),
             usage: HashMap::new(),
             cached: HashMap::new(),
+            output: HashMap::new(),
             backend_usage: Vec::new(),
             voice_seconds: None,
             final_usage: None,
@@ -440,6 +444,19 @@ fn billed(seconds: Option<f64>) -> Vec<Quantity> {
     )]
 }
 
+/// Adds `count` to the sum kept under `id`: `None` once a count was left out, since the sum is
+/// then unknown.
+fn known_sum(
+    sums: &mut HashMap<Option<ResponseId>, Option<u64>>,
+    id: Option<ResponseId>,
+    count: Option<u64>,
+) -> Option<u64> {
+    *sums
+        .entry(id)
+        .and_modify(|sum| *sum = sum.zip(count).map(|(sum, count)| sum + count))
+        .or_insert(count)
+}
+
 /// One open GPT-Live session through the contract. It owns the runtime it blocks on; dropping
 /// it shuts that runtime down without blocking.
 pub struct OpenAiLiveSession {
@@ -460,6 +477,8 @@ pub struct OpenAiLiveSession {
     usage: HashMap<Option<ResponseId>, ResponseUsage>,
     /// The cached tokens summed as `usage` is; `None` once a backend response left them out.
     cached: HashMap<Option<ResponseId>, Option<u64>>,
+    /// The output tokens summed as `usage` is; `None` once a backend response left them out.
+    output: HashMap<Option<ResponseId>, Option<u64>>,
     backend_usage: Vec<BackendUsage>,
     voice_seconds: Option<f64>,
     final_usage: Option<LiveClosed>,
@@ -655,6 +674,23 @@ impl OpenAiLiveSession {
         }
     }
 
+    /// A backend response ended: what of its usage was read is summed
+    /// ([`Self::backend_usage_recorded`]), and a `usage` read only in part or not at all counts
+    /// its frame once as one the binding could not read in full, after what it recorded.
+    fn backend_ended(
+        &mut self,
+        usage: Option<BackendUsage>,
+        unreadable_usage: Option<String>,
+        now: Instant,
+    ) {
+        if let Some(usage) = usage {
+            self.backend_usage_recorded(usage, now);
+        }
+        if let Some(what) = unreadable_usage {
+            self.ledger.unreadable_frame(what, now);
+        }
+    }
+
     /// Sums a backend response's usage onto the response in progress or the latest one; before
     /// the first response, onto the session, held in the ledger for its end.
     fn backend_usage_recorded(&mut self, usage: BackendUsage, now: Instant) {
@@ -673,21 +709,18 @@ impl OpenAiLiveSession {
                 cached_tokens: sum.input.cached_tokens + usage.cached_tokens.unwrap_or(0),
             },
             output: TokenCounts {
-                text_tokens: sum.output.text_tokens + usage.output_tokens,
+                text_tokens: sum.output.text_tokens + usage.output_tokens.unwrap_or(0),
                 audio_tokens: 0,
                 cached_tokens: 0,
             },
         };
         let sum = *sum;
-        let cached = *self
-            .cached
-            .entry(id)
-            .and_modify(|cached| *cached = cached.zip(usage.cached_tokens).map(|(a, b)| a + b))
-            .or_insert(usage.cached_tokens);
+        let cached = known_sum(&mut self.cached, id, usage.cached_tokens);
+        let output = known_sum(&mut self.output, id, usage.output_tokens);
         let quantities = vec![
             reported(QuantityKind::InputTextTokens, Some(sum.input.text_tokens)),
             reported(QuantityKind::CachedInputTokens, cached),
-            reported(QuantityKind::OutputTextTokens, Some(sum.output.text_tokens)),
+            reported(QuantityKind::OutputTextTokens, output),
         ];
         match id {
             Some(id) => {
@@ -740,13 +773,17 @@ impl OpenAiLiveSession {
             Ok(LiveEvent::Backend {
                 event:
                     BackendEvent::Completed {
-                        usage: Some(usage), ..
+                        usage,
+                        unreadable_usage,
+                        ..
                     }
                     | BackendEvent::Ended {
-                        usage: Some(usage), ..
+                        usage,
+                        unreadable_usage,
+                        ..
                     },
                 ..
-            }) => self.backend_usage_recorded(usage, now),
+            }) => self.backend_ended(usage, unreadable_usage, now),
             Ok(_) => {}
             Err(error) => self.undecodable(&error),
         }
@@ -790,15 +827,16 @@ impl OpenAiLiveSession {
                     }
                 }
                 BackendEvent::Completed {
-                    usage: Some(usage), ..
+                    usage,
+                    unreadable_usage,
+                    ..
                 }
                 | BackendEvent::Ended {
-                    usage: Some(usage), ..
-                } => self.backend_usage_recorded(usage, now),
-                BackendEvent::Completed { usage: None, .. }
-                | BackendEvent::Ended { usage: None, .. }
-                | BackendEvent::Created { .. }
-                | BackendEvent::Other { .. } => {}
+                    usage,
+                    unreadable_usage,
+                    ..
+                } => self.backend_ended(usage, unreadable_usage, now),
+                BackendEvent::Created { .. } | BackendEvent::Other { .. } => {}
             },
             LiveEvent::UsageUpdated { seconds, .. } => {
                 self.voice_seconds = Some(seconds);

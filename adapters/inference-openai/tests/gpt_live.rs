@@ -427,10 +427,11 @@ fn nested_responses_events_are_unwrapped() {
             usage: Some(BackendUsage {
                 input_tokens: 120,
                 cached_tokens: Some(64),
-                output_tokens: 30,
+                output_tokens: Some(30),
                 reasoning_tokens: Some(12),
-                total_tokens: 150
-            })
+                total_tokens: Some(150)
+            }),
+            unreadable_usage: None
         }
     );
     assert_eq!(
@@ -440,7 +441,8 @@ fn nested_responses_events_are_unwrapped() {
         BackendEvent::Ended {
             response_id: Some("resp_2".to_owned()),
             status: "failed".to_owned(),
-            usage: None
+            usage: None,
+            unreadable_usage: None
         }
     );
     assert!(matches!(
@@ -624,8 +626,8 @@ fn a_backend_end_without_its_id_keeps_its_usage() {
     assert!(
         matches!(
             &completed,
-            LiveEvent::Backend { event: BackendEvent::Completed { response_id: None, usage: Some(usage) }, .. }
-                if usage.input_tokens == 5 && usage.output_tokens == 2
+            LiveEvent::Backend { event: BackendEvent::Completed { response_id: None, usage: Some(usage), unreadable_usage: None }, .. }
+                if usage.input_tokens == 5 && usage.output_tokens == Some(2)
         ),
         "{completed:?}"
     );
@@ -648,6 +650,69 @@ fn a_backend_end_without_its_id_keeps_its_usage() {
         ),
         "{failed:?}"
     );
+}
+
+/// A backend usage is read field by field: without `output_tokens` it keeps its input tokens and
+/// its output is unknown; without `input_tokens`, or not an object, there is none. Each says
+/// what could not be read.
+#[test]
+fn a_backend_usage_is_read_field_by_field() {
+    let read = |usage: Value| {
+        let parsed = LiveEvent::parse(
+            &json!({"type": "response.event", "event_id": "e", "event": {"type": "response.completed", "response": {"id": "resp_1", "usage": usage}}})
+                .to_string(),
+        )
+        .unwrap();
+        match parsed {
+            LiveEvent::Backend {
+                event:
+                    BackendEvent::Completed {
+                        usage,
+                        unreadable_usage,
+                        ..
+                    },
+                ..
+            } => (usage, unreadable_usage),
+            other => panic!("{other:?}"),
+        }
+    };
+    let (usage, unreadable) = read(json!({"input_tokens": 20, "total_tokens": 20}));
+    assert_eq!(
+        usage,
+        Some(BackendUsage {
+            input_tokens: 20,
+            cached_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: Some(20)
+        })
+    );
+    assert!(
+        unreadable
+            .as_deref()
+            .is_some_and(|what| what.contains("`usage.output_tokens`")),
+        "{unreadable:?}"
+    );
+    let (usage, unreadable) = read(json!({"input_tokens": 20}));
+    assert_eq!(usage.and_then(|usage| usage.total_tokens), None);
+    assert!(unreadable.is_some());
+    let (usage, unreadable) = read(json!({"output_tokens": 2}));
+    assert_eq!(usage, None);
+    assert!(
+        unreadable
+            .as_deref()
+            .is_some_and(|what| what.contains("`usage.input_tokens`")),
+        "{unreadable:?}"
+    );
+    let (usage, unreadable) = read(json!("tokens"));
+    assert_eq!(usage, None);
+    assert!(
+        unreadable
+            .as_deref()
+            .is_some_and(|what| what.contains("`usage`")),
+        "{unreadable:?}"
+    );
+    assert_eq!(read(Value::Null), (None, None));
 }
 
 /// A message that is not JSON is named by the start of its text.

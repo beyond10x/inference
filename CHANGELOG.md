@@ -44,7 +44,8 @@
   `Option`: OpenAI Realtime `ServerEvent::ResponseDone` (`response_id`, `status`, `usage`) and
   `ServerEvent::InputTranscript` (`item_id`, `transcript`), both of which also gain
   `unreadable_usage`, saying why a `usage` in another shape could not be read; GPT-Live `BackendEvent::Completed` and
-  `BackendEvent::Ended` (`response_id`), `LiveEvent::SessionClosed` and `LiveClosed` (`reason`,
+  `BackendEvent::Ended` (`response_id`), both of which also gain `unreadable_usage`,
+  `BackendUsage` (`output_tokens`, `total_tokens`), `LiveEvent::SessionClosed` and `LiveClosed` (`reason`,
   `seconds`); Nova Sonic `OutputEvent::CompletionEnd` (`stop_reason`), `OutputContentEnd`
   (`content_id`, `kind`) and `OutputEvent::Interrupted` (`content_id`).
 - `LiveClient::close` waits for `session.closed` for `CLOSE_TIMEOUT` in all, or the read timeout
@@ -85,13 +86,16 @@
   JSON but whose `type` reads `response.done` (`ServerEvent::UnreadableResponseDone`) ends the
   oldest response awaiting its end, its usage unknown. An id-less `response.done` skips a
   response only when a message without a readable top-level `type` may have been its
-  `response.done`: one that arrived while it was in progress before the next `response.created`
-  ended it, or after the caller cancelled it and before the next `response.created`. A message
+  `response.done`: one that arrived after its creation and before the next `response.created`,
+  which ended it or followed the caller's cancel of it, the message before the cancel or after
+  it. A message
   whose `type` reads as another event, even one the binding cannot decode, does not make it skip
   one. A frame read in part, such as a transcription without its transcript, does not either, and it
   leaves the session as an unreadable frame does, so a stall after it is a provider error. A Nova
   Sonic `append_audio` or `submit_tool_result` after the session ended returns `NotOpen` and
-  drops nothing. A GPT-Live
+  drops nothing. A GPT-Live backend usage without `output_tokens` counts its input tokens and
+  leaves the response's output tokens unknown, and one without `input_tokens` counts nothing;
+  either counts its frame once as read in part. A GPT-Live
   backend end without its id, and a `session.closed` without its reason or seconds, keep their
   meaning. A Nova Sonic `completionEnd` without `stopReason` ends the response in progress, and a
   `contentEnd` or interruption notice without `contentId` applies to it.

@@ -1412,3 +1412,78 @@ fn a_close_that_reaches_its_bound_keeps_the_usage_seen() {
         "{closing:#?}"
     );
 }
+
+/// The quantity of `kind` in the usage record of `response` among `events`.
+fn quantity(events: &[SessionEvent], response: ResponseId, kind: QuantityKind) -> Option<i64> {
+    let recorded: Vec<_> = records(events)
+        .into_iter()
+        .filter(|record| record.response_id == Some(response))
+        .collect();
+    assert_eq!(recorded.len(), 1, "{events:#?}");
+    recorded[0]
+        .quantities
+        .iter()
+        .find(|quantity| quantity.kind() == kind)
+        .and_then(Quantity::value)
+}
+
+/// A second backend response reports its input tokens and leaves out `output_tokens`: its input
+/// tokens are summed onto the response, the response's output tokens are unknown from then on,
+/// and the frame is counted once as one the binding could not read in full.
+#[test]
+fn a_backend_usage_without_output_tokens_counts_its_input_and_leaves_the_output_unknown() {
+    let server = spoke_then(|mut socket| async move {
+        send(
+            &mut socket,
+            backend(
+                "del_1",
+                json!({"type": "response.completed", "sequence_number": 10, "response": {
+                    "id": "resp_2", "status": "completed", "output": [],
+                    "usage": {"input_tokens": 20, "input_tokens_details": {"cached_tokens": 0}, "total_tokens": 20}
+                }}),
+            ),
+        )
+        .await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::OutputTranscriptDelta(_))
+    });
+    let response = created(&events)[0];
+    std::thread::sleep(Duration::from_millis(300));
+    session.close().expect("open");
+    server.finish();
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    let outputs: Vec<_> = session
+        .backend_usage()
+        .iter()
+        .map(|usage| (usage.input_tokens, usage.output_tokens))
+        .collect();
+    assert_eq!(outputs, [(12, Some(3)), (20, None)], "{closing:#?}");
+    assert_eq!(
+        quantity(&closing, response, QuantityKind::InputTextTokens),
+        Some(32)
+    );
+    assert_eq!(
+        quantity(&closing, response, QuantityKind::OutputTextTokens),
+        None
+    );
+    assert_eq!(session.ledger().unreadable_frames(), 1);
+    assert!(
+        session
+            .ledger()
+            .last_unreadable()
+            .is_some_and(|what| what.contains("usage.output_tokens")),
+        "{:?}",
+        session.ledger().last_unreadable()
+    );
+}
