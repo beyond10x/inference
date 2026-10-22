@@ -75,8 +75,7 @@
 - `inference-llama-server` and `inference-llm` move to `llm` 0.8.3; the adapter uses its
   `AnonymousResolver`, and a server response without a usage chunk reports its tokens from the
   server's timings.
-- The `ess` CLI that CI installs and the testkit's `ess-conformance` and `ess-primitives` move
-  from 0.66.0 to 0.67.0.
+- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.66.0 to 0.67.0.
 
 ### Fixed
 
@@ -184,7 +183,7 @@
   a span is uncommitted or a segment is not synthesized, unless the call failed.
 - The local cascade's `stt` node requires no capability, so a batch recogniser binds to it;
   `STREAMING_STT_REQUIRES` keeps the stricter declaration.
-- The `ess` CLI that CI installs and the testkit's `ess-conformance` and `ess-primitives` move from 0.60.0 to 0.66.0; the
+- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.60.0 to 0.66.0; the
   specification is unchanged and the synthesized suite stays at 460 scenarios, all answered; the
   testkit target reads the inputs 0.66.0 synthesizes with optional fields left out.
 
