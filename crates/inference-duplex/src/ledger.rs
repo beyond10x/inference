@@ -29,16 +29,94 @@ pub struct Liveness {
     last_heard: Instant,
 }
 
-/// Where the liveness bound of a session stood before a frame was recorded
-/// ([`SessionLedger::liveness_mark`]): the session, how many times its provider had been heard
-/// from and whether its bound waited for the next check, so that a frame read only in part
-/// leaves the bound where its readable frames put it ([`SessionLedger::read_in_part`]). It
-/// carries no limit and no instant.
+/// One frame the provider sent, being recorded ([`SessionLedger::provider_frame`]). The ledger's
+/// operations run through it, and every time the provider is heard from while it is open is the
+/// frame's own, exactly. Dropped, the frame was readable and those times stand;
+/// [`ProviderFrame::read_in_part`] takes them out of the liveness bound.
+///
+/// A frame borrows its ledger mutably, so a session's frames are recorded one at a time: a
+/// second frame cannot be opened while the first is still to be resolved.
+///
+/// ```compile_fail,E0499
+/// # use std::time::Instant;
+/// # use inference_duplex::SessionLedger;
+/// fn overlapping(ledger: &mut SessionLedger, now: Instant) {
+///     let mut partial = ledger.provider_frame();
+///     let mut readable = ledger.provider_frame();
+///     partial.heard(now);
+///     readable.heard(now);
+///     partial.read_in_part("`response.done` lacks `usage`", now);
+/// }
+/// ```
+///
+/// One after the other, each frame's hearings are its own:
+///
+/// ```
+/// # use std::time::Instant;
+/// # use inference_duplex::SessionLedger;
+/// fn one_at_a_time(ledger: &mut SessionLedger, now: Instant) {
+///     let mut readable = ledger.provider_frame();
+///     readable.heard(now);
+///     drop(readable);
+///     let mut partial = ledger.provider_frame();
+///     partial.heard(now);
+///     partial.read_in_part("`response.done` lacks `usage`", now);
+/// }
+/// ```
+///
+/// A frame opened through another, while that one is open, is part of it: the outer frame read
+/// in part takes the inner frame's hearings out with its own.
+#[derive(Debug)]
+#[must_use = "a frame dropped at once owns no hearing"]
+pub struct ProviderFrame<'a> {
+    ledger: &'a mut SessionLedger,
+    /// The frame's place among the frames open on the ledger, outermost 0.
+    depth: usize,
+}
+
+/// Where the liveness bound of a session would stand without the hearings of one open
+/// [`ProviderFrame`]: the instant it would run from, and whether it would wait for the next
+/// check. Everything else that moves the bound moves this too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LivenessMark {
-    session_id: SpeechSessionId,
-    hearings: u64,
+struct BoundWithout {
+    last_heard: Instant,
     clock_pending: bool,
+}
+
+impl std::ops::Deref for ProviderFrame<'_> {
+    type Target = SessionLedger;
+
+    fn deref(&self) -> &SessionLedger {
+        self.ledger
+    }
+}
+
+impl std::ops::DerefMut for ProviderFrame<'_> {
+    fn deref_mut(&mut self) -> &mut SessionLedger {
+        self.ledger
+    }
+}
+
+impl ProviderFrame<'_> {
+    /// The frame was read only in part: `what` names what could not be read. What of it was
+    /// readable stays recorded, but it is no sign of life: every time the provider was heard
+    /// from while the frame was open is taken out of the liveness bound, which stands where it
+    /// would without them, its instant and whether it waits for the next check. Anything else
+    /// that moved the bound meanwhile, a request, a commit, an answer or a check, stays. The
+    /// frame is counted as one the binding could not read ([`SessionLedger::unreadable_frame`]).
+    pub fn read_in_part(self, what: impl Into<String>, now: Instant) {
+        if let Some(without) = self.ledger.frames.get(self.depth).copied() {
+            self.ledger.liveness.last_heard = without.last_heard;
+            self.ledger.clock_pending = without.clock_pending;
+        }
+        self.ledger.unreadable_frame(what, now);
+    }
+}
+
+impl Drop for ProviderFrame<'_> {
+    fn drop(&mut self) {
+        self.ledger.frames.truncate(self.depth);
+    }
 }
 
 impl Liveness {
@@ -85,7 +163,9 @@ impl Liveness {
 /// The liveness bound runs while the caller awaits the provider: from a request for a response,
 /// from a commit of the input when `auto_response` is on, or, when the model creates every
 /// response, from the answer to a call, until the response ends. A session nobody awaits
-/// anything of is idle, not stalled.
+/// anything of is idle, not stalled. A binding that may read a frame only in part records it
+/// through a [`ProviderFrame`] ([`SessionLedger::provider_frame`]), one frame at a time, so that
+/// the frame's own hearings can be taken out of the bound.
 ///
 /// Usage is recorded as `inference.usage` records, [`SessionEvent::UsageRecorded`], each naming
 /// the session's speech session, adapter and the adapter's model, and no run, node or session
@@ -134,16 +214,9 @@ pub struct SessionLedger {
     requested: bool,
     /// The bound was armed without an instant: it starts at the next liveness check.
     clock_pending: bool,
-    /// The most recent times the provider was heard from, at most
-    /// [`SessionLedger::HEARINGS_KEPT`], oldest first: how many times it had been heard from
-    /// before each, and its instant. A frame read in part takes its own out
-    /// ([`SessionLedger::read_in_part`]), and the bound runs from the latest left.
-    hearings: VecDeque<(u64, Instant)>,
-    /// How many times the provider was heard from.
-    heard_count: u64,
-    /// The latest instant among the hearings no longer kept, and the instant the session opened:
-    /// the bound never runs from earlier than this.
-    heard_floor: Instant,
+    /// For each open [`ProviderFrame`], outermost first, where the bound would stand without
+    /// its hearings ([`ProviderFrame::read_in_part`]).
+    frames: Vec<BoundWithout>,
     /// How many frames the binding could not read, whole or in part
     /// ([`SessionLedger::unreadable_frame`]), and what the last one was.
     unreadable: (u64, Option<String>),
@@ -219,10 +292,6 @@ fn millis(duration: Duration) -> i64 {
 impl SessionLedger {
     /// How many of the most recent dropped refusals [`Self::dropped_events`] keeps.
     pub const DROPPED_EVENTS_KEPT: usize = 64;
-
-    /// How many of the most recent times the provider was heard from the ledger keeps, so that a
-    /// frame read in part can be taken out of the liveness bound ([`Self::read_in_part`]).
-    pub const HEARINGS_KEPT: usize = 64;
 
     /// Runs `inference.duplex.OpenSpeechSession` for `adapter` under `session_id` with `config`,
     /// once `capabilities` admit it; the provider is heard from at `now`.
@@ -331,9 +400,7 @@ impl SessionLedger {
             liveness: Liveness::new(idle_limit, now),
             requested: false,
             clock_pending: false,
-            hearings: VecDeque::new(),
-            heard_count: 0,
-            heard_floor: now,
+            frames: Vec::new(),
             unreadable: (0, None),
             unread_since_readable: false,
             dropped: (0, Vec::new()),
@@ -618,6 +685,9 @@ impl SessionLedger {
         if !self.capabilities.manual_response {
             if !self.awaiting() {
                 self.clock_pending = true;
+                for frame in &mut self.frames {
+                    frame.clock_pending = true;
+                }
             }
             self.requested = true;
         }
@@ -713,23 +783,24 @@ impl SessionLedger {
 
     /// The provider was heard from at `now`, with a frame the binding could read, whatever it
     /// sent. A stall after it is a stall again, whatever frames before it could not be read.
+    /// Heard while a [`ProviderFrame`] is open, it is that frame's own.
     pub fn heard(&mut self, now: Instant) {
-        self.restart_bound(now);
+        self.tick(now);
+        self.liveness.heard(now);
+        self.clock_pending = false;
         self.unread_since_readable = false;
     }
 
-    /// The liveness bound runs from `now`.
+    /// The liveness bound runs from `now`, by the caller's request or a check rather than by
+    /// the provider: no open frame owns it, so a frame read in part leaves it.
     fn restart_bound(&mut self, now: Instant) {
         self.tick(now);
-        if self.hearings.len() == Self::HEARINGS_KEPT
-            && let Some((_, forgotten)) = self.hearings.pop_front()
-        {
-            self.heard_floor = self.heard_floor.max(forgotten);
-        }
-        self.hearings.push_back((self.heard_count, now));
-        self.heard_count = self.heard_count.saturating_add(1);
         self.liveness.heard(now);
         self.clock_pending = false;
+        for frame in &mut self.frames {
+            frame.last_heard = frame.last_heard.max(now);
+            frame.clock_pending = false;
+        }
     }
 
     /// The binding dropped a provider event, or a failure, that the ledger refused with
@@ -770,51 +841,20 @@ impl SessionLedger {
         self.unread_since_readable = true;
     }
 
-    /// Where the liveness bound stands now, taken before a frame is recorded, so that
-    /// [`Self::read_in_part`] can take the frame out of it. Marks may overlap: several taken
-    /// before any of their frames is resolved, resolved in any order.
-    #[must_use]
-    pub fn liveness_mark(&self) -> LivenessMark {
-        LivenessMark {
-            session_id: self.session.session_id(),
-            hearings: self.heard_count,
+    /// Opens the next frame the provider sent, to be recorded through the [`ProviderFrame`]
+    /// returned and resolved as readable, by dropping it, or as read only in part
+    /// ([`ProviderFrame::read_in_part`]). Every time the provider is heard from while it is
+    /// open is the frame's own; a session's frames are recorded one at a time.
+    pub fn provider_frame(&mut self) -> ProviderFrame<'_> {
+        let depth = self.frames.len();
+        self.frames.push(BoundWithout {
+            last_heard: self.liveness.last_heard,
             clock_pending: self.clock_pending,
+        });
+        ProviderFrame {
+            ledger: self,
+            depth,
         }
-    }
-
-    /// The frame recorded at `now` since `mark` was taken was read only in part: `what` names
-    /// what could not be read. What of it was readable stays recorded, but it is no sign of
-    /// life, and the frame is counted as one the binding could not read
-    /// ([`Self::unreadable_frame`]).
-    ///
-    /// Every time the provider was heard from at `now` since the mark was taken is the frame's
-    /// own and is taken out of the liveness bound, which runs again from the latest time left:
-    /// a readable frame heard after the mark stays, and so does any heard before it. Frames
-    /// read in part under overlapping marks are each taken out, in whatever order they are
-    /// resolved. When none is left since the mark and the bound waited for the next check at
-    /// the mark, it waits again. Only the instant changes, never the session's limit, and a mark
-    /// of another session changes nothing. The ledger keeps the most recent
-    /// [`Self::HEARINGS_KEPT`] times it heard the provider; a frame heard before them stays in
-    /// the bound.
-    pub fn read_in_part(&mut self, mark: LivenessMark, what: impl Into<String>, now: Instant) {
-        if mark.session_id == self.session.session_id() {
-            let kept = self.hearings.len();
-            self.hearings
-                .retain(|&(count, at)| count < mark.hearings || at != now);
-            if self.hearings.len() < kept {
-                self.liveness.last_heard = self
-                    .hearings
-                    .iter()
-                    .map(|&(_, at)| at)
-                    .fold(self.heard_floor, Instant::max);
-                let heard_since = self
-                    .hearings
-                    .iter()
-                    .any(|&(count, _)| count >= mark.hearings);
-                self.clock_pending |= mark.clock_pending && !heard_since;
-            }
-        }
-        self.unreadable_frame(what, now);
     }
 
     /// How many frames the binding could not read ([`Self::unreadable_frame`]).

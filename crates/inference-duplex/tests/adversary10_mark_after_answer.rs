@@ -1,5 +1,6 @@
-//! Adversary case, pass 10, story `duplex-late-usage-counted` at b873a7e: `read_in_part`
-//! restores the mark's `clock_pending` as well as its `Liveness`. Once the caller answers a call
+//! Adversary case, pass 10, story `duplex-late-usage-counted` at b873a7e: a frame read only in
+//! part (`ProviderFrame::read_in_part`) takes its hearings out of whether the bound waits for the
+//! next check as well as out of its instant. Once the caller answers a call
 //! of a model that creates every response, the bound starts at the first check after the answer
 //! (`answering_a_call_of_a_model_that_creates_every_response_arms_the_bound`). A frame read only
 //! in part that arrives before that first check is no sign of life, so the bound still starts at
@@ -123,13 +124,9 @@ fn a_frame_read_in_part_before_the_first_check_after_an_answer_does_not_start_th
     ledger
         .answer(&SpeechCallId::new("call-1"), json!({"celsius": 21}))
         .expect("answered");
-    let mark = ledger.liveness_mark();
-    ledger.heard(answered);
-    ledger.read_in_part(
-        mark,
-        "`response.done` lacks the object field `usage`",
-        answered,
-    );
+    let mut frame = ledger.provider_frame();
+    frame.heard(answered);
+    frame.read_in_part("`response.done` lacks the object field `usage`", answered);
     assert!(
         !ledger.check_liveness(answered),
         "the session stalled at the first check after the answer: a frame read in part moved \

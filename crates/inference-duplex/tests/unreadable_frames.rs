@@ -222,8 +222,8 @@ fn a_frame_read_in_part_records_what_it_carried_and_does_not_refresh_the_bound()
     let response = ResponseId::generate();
     ledger.response_created(response, start).expect("created");
     let partial = start + BOUND / 2;
-    let mark = ledger.liveness_mark();
-    ledger
+    let mut frame = ledger.provider_frame();
+    frame
         .response_usage_reported(
             response,
             None,
@@ -232,8 +232,7 @@ fn a_frame_read_in_part_records_what_it_carried_and_does_not_refresh_the_bound()
             partial,
         )
         .expect("in progress");
-    ledger.read_in_part(
-        mark,
+    frame.read_in_part(
         "`response.completed` lacks the non-negative integer field `usage.output_tokens`",
         partial,
     );

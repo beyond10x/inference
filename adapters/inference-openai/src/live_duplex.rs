@@ -89,7 +89,7 @@ use inference_core::model::{
 };
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
-    LivenessMark, NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
+    NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
     SessionConfig as SpeechConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
     SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechSessionId,
     TokenCounts, TuningSupport, TurnDetection, Unsupported, UsageTotal, reported,
@@ -464,6 +464,36 @@ fn known_sum(
         .or_insert(count)
 }
 
+/// A backend response's usage summed onto a response, or onto the session under `None`, ready
+/// for the ledger.
+struct BackendSum {
+    id: Option<ResponseId>,
+    sum: ResponseUsage,
+    quantities: Vec<Quantity>,
+}
+
+impl BackendSum {
+    /// Records the sum as the response's running total, or holds it in the ledger for the
+    /// session's end; what the ledger refuses is dropped.
+    fn record(self, ledger: &mut SessionLedger, now: Instant) {
+        match self.id {
+            Some(id) => {
+                let refused = ledger.response_usage_reported(
+                    id,
+                    Some(self.sum),
+                    self.quantities,
+                    UsageTotal::Running,
+                    now,
+                );
+                if let Err(refusal) = refused {
+                    ledger.dropped(refusal);
+                }
+            }
+            None => ledger.hold_usage(self.quantities),
+        }
+    }
+}
+
 /// One open GPT-Live session through the contract. It owns the runtime it blocks on; dropping
 /// it shuts that runtime down without blocking.
 pub struct OpenAiLiveSession {
@@ -683,30 +713,38 @@ impl OpenAiLiveSession {
         }
     }
 
-    /// A backend response ended: what of its usage was read is summed
-    /// ([`Self::backend_usage_recorded`]), and a `response` or `usage` read only in part or not
-    /// at all counts its frame once as one the binding could not read in full, after what it
-    /// recorded; the liveness bound then stands where it stood at `mark`, before the frame.
+    /// A backend response ended. Its frame is recorded through a frame scope of its own
+    /// ([`SessionLedger::provider_frame`]) that hears the provider when `heard`: what of its
+    /// usage was read is summed ([`Self::backend_usage_summed`]), and a `response` or `usage`
+    /// read only in part or not at all counts the frame once as one the binding could not read
+    /// in full, after what it recorded; the liveness bound then stands where it stood before the
+    /// frame ([`read_in_part`](inference_duplex::ProviderFrame::read_in_part)).
     fn backend_ended(
         &mut self,
         usage: Option<BackendUsage>,
         unreadable_usage: Option<String>,
-        mark: LivenessMark,
+        heard: bool,
         now: Instant,
     ) {
-        if let Some(usage) = usage {
-            self.backend_usage_recorded(usage, now);
+        let summed = usage.map(|usage| self.backend_usage_summed(usage));
+        let mut frame = self.ledger.provider_frame();
+        if heard {
+            frame.heard(now);
+        }
+        if let Some(summed) = summed {
+            summed.record(&mut frame, now);
         }
         if let Some(what) = unreadable_usage {
-            self.ledger.read_in_part(mark, what, now);
+            frame.read_in_part(what, now);
         }
     }
 
     /// Sums a backend response's usage onto the response in progress or the latest one; before
-    /// the first response, onto the session, held in the ledger for its end. A sum that would
-    /// pass `u64::MAX` is unknown in the usage record ([`known_sum`]); the contract's
-    /// `ResponseUsage`, which has no unknown, stops at `u64::MAX`.
-    fn backend_usage_recorded(&mut self, usage: BackendUsage, now: Instant) {
+    /// the first response, onto the session, held in the ledger for its end
+    /// ([`BackendSum::record`]). A sum that would pass `u64::MAX` is unknown in the usage record
+    /// ([`known_sum`]); the contract's `ResponseUsage`, which has no unknown, stops at
+    /// `u64::MAX`.
+    fn backend_usage_summed(&mut self, usage: BackendUsage) -> BackendSum {
         self.backend_usage.push(usage);
         let id = self.current.or_else(|| {
             self.ledger
@@ -745,36 +783,34 @@ impl OpenAiLiveSession {
             reported(QuantityKind::CachedInputTokens, cached),
             reported(QuantityKind::OutputTextTokens, output),
         ];
-        match id {
-            Some(id) => {
-                let refused = self.ledger.response_usage_reported(
-                    id,
-                    Some(sum),
-                    quantities,
-                    UsageTotal::Running,
-                    now,
-                );
-                self.or_drop(refused);
-            }
-            None => self.ledger.hold_usage(quantities),
+        BackendSum {
+            id,
+            sum,
+            quantities,
         }
     }
 
     /// `session.closed` confirmed the billed voice seconds: they replace the running total the
-    /// ledger records just before the session's end event. One without its seconds confirms
-    /// nothing, and one without its reason or seconds is counted as a frame the binding could
-    /// not read in full, which leaves the liveness bound where it stood at `mark`, before the
-    /// frame.
-    fn confirm(&mut self, closed: LiveClosed, mark: LivenessMark, now: Instant) {
+    /// ledger records just before the session's end event. Its frame is recorded through a frame
+    /// scope of its own ([`SessionLedger::provider_frame`]) that hears the provider when `heard`.
+    /// One without its seconds confirms nothing, and one without its reason or seconds is
+    /// counted as a frame the binding could not read in full, which leaves the liveness bound
+    /// where it stood before the frame
+    /// ([`read_in_part`](inference_duplex::ProviderFrame::read_in_part)).
+    fn confirm(&mut self, closed: LiveClosed, heard: bool, now: Instant) {
         let missing = match (&closed.reason, closed.seconds) {
             (Some(_), Some(_)) => None,
             (None, Some(_)) => Some("the string field `reason`"),
             (Some(_), None) => Some("the number field `usage.seconds`"),
             (None, None) => Some("the fields `reason` and `usage.seconds`"),
         };
-        if let Some(missing) = missing {
-            self.ledger
-                .read_in_part(mark, format!("`session.closed` lacks {missing}"), now);
+        let mut frame = self.ledger.provider_frame();
+        if heard {
+            frame.heard(now);
+        }
+        match missing {
+            Some(missing) => frame.read_in_part(format!("`session.closed` lacks {missing}"), now),
+            None => drop(frame),
         }
         if let Some(seconds) = closed.seconds {
             self.ledger
@@ -788,7 +824,6 @@ impl OpenAiLiveSession {
     /// a message that is not a GPT-Live event is counted; nothing of it is delivered.
     fn closing(&mut self, event: Result<LiveEvent, RealtimeError>) {
         let now = Instant::now();
-        let mark = self.ledger.liveness_mark();
         match event {
             Ok(LiveEvent::UsageUpdated { seconds, .. }) => {
                 self.voice_seconds = Some(seconds);
@@ -808,19 +843,30 @@ impl OpenAiLiveSession {
                         ..
                     },
                 ..
-            }) => self.backend_ended(usage, unreadable_usage, mark, now),
+            }) => self.backend_ended(usage, unreadable_usage, false, now),
             Ok(_) => {}
             Err(error) => self.undecodable(&error),
         }
     }
 
     /// Records one server event through the ledger; what the ledger refuses is dropped. A frame
-    /// read whole hears the provider; one read only in part leaves the liveness bound where it
-    /// stood before it ([`SessionLedger::read_in_part`]).
+    /// read whole hears the provider; one that may be read only in part, a backend response's
+    /// end or `session.closed`, is recorded through a frame scope of its own
+    /// ([`SessionLedger::provider_frame`]), one frame at a time, and read only in part it leaves
+    /// the liveness bound where it stood before it
+    /// ([`read_in_part`](inference_duplex::ProviderFrame::read_in_part)).
     fn record(&mut self, event: LiveEvent) {
         let now = Instant::now();
-        let mark = self.ledger.liveness_mark();
-        self.ledger.heard(now);
+        let framed = matches!(
+            event,
+            LiveEvent::Backend {
+                event: BackendEvent::Completed { .. } | BackendEvent::Ended { .. },
+                ..
+            } | LiveEvent::SessionClosed { .. }
+        );
+        if !framed {
+            self.ledger.heard(now);
+        }
         match event {
             LiveEvent::OutputAudio { audio } => self.output(audio, now),
             LiveEvent::OutputTranscript { delta, .. } => {
@@ -863,7 +909,7 @@ impl OpenAiLiveSession {
                     usage,
                     unreadable_usage,
                     ..
-                } => self.backend_ended(usage, unreadable_usage, mark, now),
+                } => self.backend_ended(usage, unreadable_usage, true, now),
                 BackendEvent::Created { .. } | BackendEvent::Other { .. } => {}
             },
             LiveEvent::UsageUpdated { seconds, .. } => {
@@ -881,7 +927,7 @@ impl OpenAiLiveSession {
                     Some(reason) => format!("the provider ended the session: {reason}"),
                     None => "the provider ended the session without a reason".to_owned(),
                 };
-                self.confirm(LiveClosed { reason, seconds }, mark, now);
+                self.confirm(LiveClosed { reason, seconds }, true, now);
                 let refused = self.ledger.fail(SessionFailure { kind, detail });
                 self.or_drop(refused);
                 self.current = None;
@@ -958,8 +1004,7 @@ impl SpeechSessionHandle for OpenAiLiveSession {
         if self.ledger.session().require_open().is_ok() {
             match self.record_arrived() {
                 Arrived::Closed(closed) => {
-                    let mark = self.ledger.liveness_mark();
-                    self.confirm(closed, mark, Instant::now());
+                    self.confirm(closed, false, Instant::now());
                     self.client = None;
                 }
                 Arrived::Failed(_) => self.client = None,
@@ -976,8 +1021,7 @@ impl SpeechSessionHandle for OpenAiLiveSession {
                 self.closing(event);
             }
             if let Some(closed) = closed {
-                let mark = self.ledger.liveness_mark();
-                self.confirm(closed, mark, Instant::now());
+                self.confirm(closed, false, Instant::now());
             }
         }
         self.ledger.close()?;

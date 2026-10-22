@@ -51,7 +51,7 @@ pub use contract::{
     NativeSpeechModel, OpenError, SessionConfig, SessionError, SessionEvent, SpeechCapabilities,
     SpeechSessionHandle, TuningOption, TuningSupport, TurnTuning, Unsupported,
 };
-pub use ledger::{Liveness, LivenessMark, SessionLedger};
+pub use ledger::{Liveness, ProviderFrame, SessionLedger};
 pub use record::{ReceivedSessionEvent, Response, SpeechSession, SpeechToolCall};
 
 /// The `inference.usage` vocabulary a session's usage records are written in, re-exported from

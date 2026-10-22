@@ -79,7 +79,7 @@
 //!   one exception: a `response.done` without its `status` that ends its response ends it as
 //!   failed ([`SessionLedger::response_ended_unread`]) and restarts the bound, because the
 //!   caller then awaits a new response. One the ledger refuses to end leaves the bound where it
-//!   stood before the frame ([`SessionLedger::read_in_part`]). A later
+//!   stood before the frame ([`ProviderFrame::read_in_part`]). A later
 //!   failure of the session names how many there were and the last. Stalled turns into
 //!   ProviderError only when an unreadable frame arrived after the last readable frame. A
 //!   readable frame clears that state. The detail still names the total unreadable count. Every
@@ -98,7 +98,7 @@ use inference_core::model::{
 };
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
-    LivenessMark, NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
+    NativeSpeechModel, OpenError, ProviderFrame, Quantity, QuantityKind, ResponseId, ResponseUsage,
     SessionConfig as SpeechConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
     SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechSessionId,
     TokenCounts, TranscriptionUsage, TuningOption, TuningSupport,
@@ -591,21 +591,10 @@ impl OpenAiRealtimeSession {
             .unreadable_frame(error.to_string(), Instant::now());
     }
 
-    /// A frame the binding read only in part: `unread` names each field it could not read, and
-    /// the frame is counted once, when there is any, and leaves the liveness bound where it
-    /// stood at `mark`, before the frame ([`SessionLedger::read_in_part`]).
-    fn unread(&mut self, unread: &[String], mark: LivenessMark, now: Instant) {
-        if !unread.is_empty() {
-            self.ledger.read_in_part(mark, unread.join("; "), now);
-        }
-    }
-
     /// A ledger refusal the binding drops: it changed nothing, and the ledger counts it
     /// ([`SessionLedger::dropped`]).
     fn or_drop(&mut self, result: Result<(), SessionError>) {
-        if let Err(refusal) = result {
-            self.ledger.dropped(refusal);
-        }
+        drop_refusal(&mut self.ledger, result);
     }
 
     /// The response a `response.done` without its id ends: the oldest awaiting its end that one
@@ -619,20 +608,20 @@ impl OpenAiRealtimeSession {
 
     /// A `response.done` with the id of `id` arrived: Realtime ends its responses in the order
     /// it created them, so every response created before `id` that still awaits its
-    /// `response.done` was ended in a frame the binding did not get, its usage unknown.
-    fn end_older(&mut self, id: ResponseId, now: Instant) {
+    /// `response.done` was ended in a frame the binding did not get. They no longer await it,
+    /// and are returned for their usage to be settled unknown.
+    fn older_than(&mut self, id: ResponseId) -> Vec<ResponseId> {
         let Some(position) = self
             .awaiting_done
             .iter()
             .position(|awaiting| awaiting.id == id)
         else {
-            return;
+            return Vec::new();
         };
-        let older: Vec<Awaiting> = self.awaiting_done.drain(..position).collect();
-        for awaiting in older {
-            let unknown = self.ledger.response_usage_unknown(awaiting.id, now);
-            self.or_drop(unknown);
-        }
+        self.awaiting_done
+            .drain(..position)
+            .map(|awaiting| awaiting.id)
+            .collect()
     }
 
     /// A message that is not JSON but reads as `response.done`: it ends the oldest response a
@@ -726,15 +715,22 @@ impl OpenAiRealtimeSession {
     }
 
     /// Records one server event through the ledger; what the ledger refuses is dropped
-    /// ([`Self::or_drop`]).
+    /// ([`Self::or_drop`]). A frame read whole hears the provider. A transcription or a
+    /// `response.done`, which may be read only in part, is recorded through a frame of its own
+    /// ([`SessionLedger::provider_frame`]), so that a frame read in part leaves the liveness bound
+    /// where it stood before it ([`ProviderFrame::read_in_part`]).
     fn record(&mut self, event: ServerEvent) {
         let now = Instant::now();
         if let ServerEvent::UnreadableResponseDone { what } = event {
             self.unreadable_done(what, now);
             return;
         }
-        let mark = self.ledger.liveness_mark();
-        self.ledger.heard(now);
+        if !matches!(
+            event,
+            ServerEvent::InputTranscript { .. } | ServerEvent::ResponseDone { .. }
+        ) {
+            self.ledger.heard(now);
+        }
         let config = self.ledger.session().config().clone();
         let input_rate = u64::from(config.input_format.sample_rate.get());
         let at = |ms: u64| SampleClockPosition::new(ms.saturating_mul(input_rate) / 1_000);
@@ -811,11 +807,13 @@ impl OpenAiRealtimeSession {
                 unreadable_usage,
                 ..
             } => {
+                let mut frame = self.ledger.provider_frame();
+                frame.heard(now);
                 let mut unread = Vec::new();
                 match transcript {
                     Some(transcript) => {
-                        let recorded = self.ledger.input_transcribed(transcript, now);
-                        self.or_drop(recorded);
+                        let recorded = frame.input_transcribed(transcript, now);
+                        drop_refusal(&mut frame, recorded);
                     }
                     None => unread.push(
                         "`conversation.item.input_audio_transcription.completed` lacks the \
@@ -846,17 +844,15 @@ impl OpenAiRealtimeSession {
                         vec![reported(QuantityKind::InputAudioMs, milliseconds(seconds))],
                     ),
                     None => {
-                        self.unread(&unread, mark, now);
+                        resolve(frame, &unread, now);
                         return;
                     }
                 };
-                let recorded = self
-                    .ledger
-                    .transcription_usage_reported(contract, quantities, now);
-                self.or_drop(recorded);
+                let recorded = frame.transcription_usage_reported(contract, quantities, now);
+                drop_refusal(&mut frame, recorded);
                 // Counted after the usage: the frame was read only in part, so it stays the last
                 // frame the binding could not read and leaves the liveness bound where it stood.
-                self.unread(&unread, mark, now);
+                resolve(frame, &unread, now);
             }
             ServerEvent::SpeechStarted { audio_start_ms, .. } => {
                 if let Some(position) = at(audio_start_ms) {
@@ -918,42 +914,52 @@ impl OpenAiRealtimeSession {
                                 .to_owned(),
                         );
                     }
-                    self.unread(&unread, mark, now);
+                    let mut frame = self.ledger.provider_frame();
+                    frame.heard(now);
+                    resolve(frame, &unread, now);
                     return;
                 };
-                if response_id.is_some() {
-                    self.end_older(id, now);
-                }
+                let older = if response_id.is_some() {
+                    self.older_than(id)
+                } else {
+                    Vec::new()
+                };
                 if status != Some(ResponseStatus::InProgress) {
                     self.awaiting_done.retain(|awaiting| awaiting.id != id);
                 }
-                let reported = self.ledger.response_usage_reported(
+                let mut frame = self.ledger.provider_frame();
+                frame.heard(now);
+                for older in older {
+                    let unknown = frame.response_usage_unknown(older, now);
+                    drop_refusal(&mut frame, unknown);
+                }
+                let reported = frame.response_usage_reported(
                     id,
                     usage.as_ref().map(response_usage),
                     usage.as_ref().map(quantities).unwrap_or_default(),
                     UsageTotal::Final,
                     now,
                 );
-                self.or_drop(reported);
+                drop_refusal(&mut frame, reported);
                 let Some(status) = status else {
                     unread.insert(
                         0,
                         "`response.done` lacks the string field `status`".to_owned(),
                     );
                     let what = unread.join("; ");
-                    if let Err(refusal) = self.ledger.response_ended_unread(id, &what, now) {
-                        self.ledger.dropped(refusal);
-                        self.ledger.read_in_part(mark, what, now);
+                    if let Err(refusal) = frame.response_ended_unread(id, &what, now) {
+                        frame.dropped(refusal);
+                        frame.read_in_part(what, now);
                     }
                     return;
                 };
                 let ended = match status {
-                    ResponseStatus::Completed => self.ledger.response_completed(id, now),
-                    ResponseStatus::Cancelled => self.ledger.response_cancelled(id, now),
+                    ResponseStatus::Completed => frame.response_completed(id, now),
+                    ResponseStatus::Cancelled => frame.response_cancelled(id, now),
                     ResponseStatus::InProgress => Ok(()),
                     ResponseStatus::Failed
                     | ResponseStatus::Incomplete
-                    | ResponseStatus::Other(_) => self.ledger.response_failed(
+                    | ResponseStatus::Other(_) => frame.response_failed(
                         id,
                         SessionFailure {
                             kind: SessionFailureKind::ProviderError,
@@ -962,8 +968,8 @@ impl OpenAiRealtimeSession {
                         now,
                     ),
                 };
-                self.or_drop(ended);
-                self.unread(&unread, mark, now);
+                drop_refusal(&mut frame, ended);
+                resolve(frame, &unread, now);
             }
             ServerEvent::Error(error) => {
                 let refused_commit = error
@@ -984,6 +990,23 @@ impl OpenAiRealtimeSession {
             | ServerEvent::UnreadableResponseDone { .. }
             | ServerEvent::Unknown { .. } => {}
         }
+    }
+}
+
+/// A ledger refusal the binding drops: it changed nothing, and the ledger counts it
+/// ([`SessionLedger::dropped`]).
+fn drop_refusal(ledger: &mut SessionLedger, result: Result<(), SessionError>) {
+    if let Err(refusal) = result {
+        ledger.dropped(refusal);
+    }
+}
+
+/// Resolves a frame the binding recorded: `unread` names each field it could not read. With
+/// none the frame was readable; otherwise it is counted once and leaves the liveness bound where
+/// it stood before the frame ([`ProviderFrame::read_in_part`]).
+fn resolve(frame: ProviderFrame<'_>, unread: &[String], now: Instant) {
+    if !unread.is_empty() {
+        frame.read_in_part(unread.join("; "), now);
     }
 }
 
