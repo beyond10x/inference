@@ -19,7 +19,9 @@
 //! the number of unknown quantities, the number of records that carried the kind and how many of
 //! those were partial, their `final` false; a kind is complete only when none of its quantities
 //! was unknown and none of its records partial. An unknown quantity is counted as unknown, never
-//! added as zero, and a partial count is counted, never taken for a final one. The total is a value its holder keeps, such as a session over its runs; the
+//! added as zero, and a partial count is counted, never taken for a final one. A total its holder
+//! could not count whole names the nodes whose usage it may miss, and is not complete. The total
+//! is a value its holder keeps, such as a session over its runs; the
 //! specification declares no entity for it.
 //!
 //! A [`CostRecord`] prices one usage record with one price document: the document's currency,
@@ -31,7 +33,7 @@
 //! record holds what the pricing crate wrote, as a usage record holds what its contract crate
 //! counted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
@@ -518,11 +520,13 @@ impl KindTotal {
 /// The usage of several calls added up, kind by kind; see the module documentation. A kind no
 /// record carried has no [`KindTotal`]. A total is complete only when every kind is: no quantity
 /// unknown and no record partial, so a total over counts the provider may still change never
-/// reads as settled.
+/// reads as settled; and only when it names no node whose usage its holder could not count
+/// ([`UsageTotal::mark_uncounted`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UsageTotal {
     records: u64,
     kinds: BTreeMap<QuantityKind, KindTotal>,
+    uncounted: BTreeSet<NodeId>,
 }
 
 impl UsageTotal {
@@ -572,11 +576,24 @@ impl UsageTotal {
         self.kinds.iter().map(|(kind, total)| (*kind, *total))
     }
 
+    /// Marks the total partial: the usage of the node `node_id` may be missing from it, since its
+    /// holder had no way to read it, such as a subgraph node with no `usage` port over a child
+    /// whose model node's `usage` port has no edge. Marking a node twice marks it once.
+    pub fn mark_uncounted(&mut self, node_id: NodeId) {
+        self.uncounted.insert(node_id);
+    }
+
+    /// The nodes whose usage the total may miss ([`UsageTotal::mark_uncounted`]), in identity
+    /// order.
+    pub fn uncounted(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.uncounted.iter().copied()
+    }
+
     /// Whether every kind is complete: no quantity the total took was unknown and no record it
-    /// took was partial.
+    /// took was partial; and whether the total names no node whose usage it may miss.
     #[must_use]
     pub fn complete(&self) -> bool {
-        self.kinds.values().all(KindTotal::complete)
+        self.uncounted.is_empty() && self.kinds.values().all(KindTotal::complete)
     }
 }
 
@@ -964,6 +981,30 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&event).expect("serializes"))
                 .expect("the event reads back");
         assert_eq!(read, event);
+    }
+
+    #[test]
+    fn a_total_marked_uncounted_names_the_node_once_and_is_not_complete() {
+        let mut total = UsageTotal::new();
+        total.add(
+            &[Quantity::provider_reported(
+                QuantityKind::InputTextTokens,
+                3,
+            )],
+            true,
+        );
+        assert!(total.complete());
+        let node = NodeId::generate();
+        total.mark_uncounted(node);
+        total.mark_uncounted(node);
+        assert_eq!(total.uncounted().collect::<Vec<_>>(), [node]);
+        assert!(!total.complete(), "a total that may miss a node's usage");
+        assert!(
+            total
+                .kind(QuantityKind::InputTextTokens)
+                .is_some_and(|kind| kind.complete()),
+            "what it counted stays as counted"
+        );
     }
 
     #[test]

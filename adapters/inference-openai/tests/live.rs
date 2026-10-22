@@ -113,10 +113,11 @@ async fn collect(client: &mut RealtimeClient, want_input: bool) -> Outcome {
             ServerEvent::AudioDelta { audio, .. } => outcome.audio_bytes += audio.len(),
             ServerEvent::OutputTranscriptDelta { delta, .. } => outcome.transcript.push_str(&delta),
             ServerEvent::InputTranscript { transcript, .. } => {
-                outcome.input_transcript = Some(transcript);
+                outcome.input_transcript = transcript.or(outcome.input_transcript.take());
             }
             ServerEvent::ResponseDone { status, usage, .. } => {
-                outcome.status = Some(status);
+                outcome.status =
+                    Some(status.unwrap_or_else(|| ResponseStatus::Other(String::new())));
                 outcome.usage = usage;
             }
             ServerEvent::Error(error) => panic!("server error: {error}"),

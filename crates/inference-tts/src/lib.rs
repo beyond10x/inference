@@ -967,9 +967,15 @@ impl SynthesisOutput {
 
     /// The Unicode scalar values of the text of every segment the implementation has taken, a
     /// segment discarded after it was taken among them.
+    /// Beyond `i64::MAX` it reads `i64::MAX`; the usage record then carries them as unknown.
     #[must_use]
     pub fn input_characters(&self) -> i64 {
-        i64::try_from(self.characters_taken).unwrap_or(i64::MAX)
+        self.characters().unwrap_or(i64::MAX)
+    }
+
+    /// The characters of [`Self::input_characters`]; `None` beyond `i64::MAX`.
+    fn characters(&self) -> Option<i64> {
+        i64::try_from(self.characters_taken).ok()
     }
 
     /// Milliseconds of audio emitted by the synthesis so far, of a segment discarded since among
@@ -977,9 +983,15 @@ impl SynthesisOutput {
     /// rate, summed as an exact fraction and rounded down to the millisecond once, at the end.
     /// Should that fraction not fit `u128`, which takes several sample rates with no common
     /// divisor in one synthesis, each rate's milliseconds are rounded down on their own and
-    /// summed.
+    /// summed. Beyond `i64::MAX` it reads `i64::MAX`; the usage record then carries the
+    /// milliseconds as unknown.
     #[must_use]
     pub fn output_audio_ms(&self) -> i64 {
+        self.emitted_ms().unwrap_or(i64::MAX)
+    }
+
+    /// The milliseconds of [`Self::output_audio_ms`]; `None` beyond `i64::MAX`.
+    fn emitted_ms(&self) -> Option<i64> {
         let exact = self.emitted_samples.iter().try_fold(
             (0_u128, 1_u128),
             |(numerator, denominator), (&rate, &samples)| {
@@ -998,7 +1010,7 @@ impl SynthesisOutput {
             },
             |(numerator, denominator)| numerator / denominator,
         );
-        i64::try_from(ms).unwrap_or(i64::MAX)
+        i64::try_from(ms).ok()
     }
 
     /// Runs `inference.usage.RecordUsage` for the synthesis and returns its
@@ -1041,8 +1053,8 @@ impl SynthesisOutput {
             self.started_at_ms,
             wall_clock_ms().max(self.started_at_ms),
             vec![
-                Quantity::measured(QuantityKind::InputCharacters, self.input_characters()),
-                Quantity::measured(QuantityKind::OutputAudioMs, self.output_audio_ms()),
+                measured(QuantityKind::InputCharacters, self.characters()),
+                measured(QuantityKind::OutputAudioMs, self.emitted_ms()),
                 Quantity::measured(QuantityKind::Requests, 1),
                 local_compute,
             ],
@@ -1205,6 +1217,14 @@ fn add_fraction(left: (u128, u128), right: (u128, u128)) -> Option<(u128, u128)>
     Some((numerator / common, denominator / common))
 }
 
+/// The quantity `kind` as measured: `count`, or unknown when it lies beyond the ESS `Integer`,
+/// since no number recorded in its place would be the count.
+fn measured(kind: QuantityKind, count: Option<i64>) -> Quantity {
+    count.map_or(Quantity::unknown(kind), |count| {
+        Quantity::measured(kind, count)
+    })
+}
+
 /// Now, in Unix epoch milliseconds on the wall clock; 0 before the epoch.
 fn wall_clock_ms() -> i64 {
     SystemTime::now()
@@ -1283,4 +1303,62 @@ pub trait SynthesisHandle: Iterator<Item = SynthesisEvent> {
     ///
     /// The [`DiscardRefused`] of [`SynthesisOutput::discard`]; nothing moves.
     fn discard(&mut self, segment_id: SegmentId) -> Result<SegmentDiscarded, DiscardRefused>;
+}
+
+#[cfg(test)]
+mod tests {
+    use inference_core::model::{DeclareAdapter, ExecutionForm, Locality};
+
+    use super::*;
+
+    fn adapter() -> Adapter {
+        Adapter::declare(DeclareAdapter {
+            model_id: ModelId::generate(),
+            backend: "test".to_owned(),
+            contract_revision: CONTRACT_REVISION.to_owned(),
+            execution_form: ExecutionForm::InProcess,
+            locality: Locality::SameProcess,
+            capabilities: Vec::new(),
+            max_concurrency: 1,
+        })
+        .expect("one is positive")
+        .0
+    }
+
+    fn recorded(output: &mut SynthesisOutput) -> UsageRecorded {
+        output.end_utterance().expect("the utterance ends once");
+        match output.usage().expect("the utterance has ended") {
+            SynthesisEvent::Usage(recorded) => recorded,
+            other => panic!("a usage record, not {other:?}"),
+        }
+    }
+
+    fn value(recorded: &UsageRecorded, kind: QuantityKind) -> Option<i64> {
+        recorded
+            .quantities
+            .iter()
+            .find(|quantity| quantity.kind() == kind)
+            .unwrap_or_else(|| panic!("no {kind:?}"))
+            .value()
+    }
+
+    /// Characters and milliseconds above `i64::MAX` are unknown in the usage record, never a
+    /// number clamped to `i64::MAX`; counts at `i64::MAX` are recorded as they are.
+    #[test]
+    fn counts_above_i64_max_are_unknown_in_the_usage_record() {
+        let largest = u128::try_from(i64::MAX).expect("i64::MAX fits a u128");
+        let mut output = SynthesisOutput::start(&adapter());
+        output.characters_taken = largest + 1;
+        output.emitted_samples.insert(1_000, largest + 1);
+        let usage = recorded(&mut output);
+        assert_eq!(value(&usage, QuantityKind::InputCharacters), None);
+        assert_eq!(value(&usage, QuantityKind::OutputAudioMs), None);
+
+        let mut output = SynthesisOutput::start(&adapter());
+        output.characters_taken = largest;
+        output.emitted_samples.insert(1_000, largest);
+        let usage = recorded(&mut output);
+        assert_eq!(value(&usage, QuantityKind::InputCharacters), Some(i64::MAX));
+        assert_eq!(value(&usage, QuantityKind::OutputAudioMs), Some(i64::MAX));
+    }
 }

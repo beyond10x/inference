@@ -1,0 +1,164 @@
+# The SDK's own nouns (docs/design/sdk.md): a stack binds each role to one adapter under one
+# deployment profile, and a recipe is a named topology that, instantiated over a stack, declares and
+# plans one pipeline. Everything else the SDK offers (agents, chats, events, tools) is a view over
+# the session, graph, stream and tools domains and declares nothing here.
+# UNMAPPED: the commands that resolve a stack and instantiate a recipe, with their refusals
+# (a role the recipe needs that the stack does not bind; an adapter whose feature is not
+# compiled in), are the stories' to declare: story:sdk-stack and story:sdk-recipes.
+# InstantiateRecipe's outcomes are instantiated, role-unbound and profile-denies, the last a
+# bound adapter whose locality the stack's profile does not admit (inference.graph.PlanPipeline
+# locality-denied, carried as the SDK's ProfileDenies). RegisterRecipe, also story:sdk-recipes',
+# has the outcomes registered and name-taken (a name a built-in or an earlier registration holds).
+# read from: docs/design/sdk.md §3.3, §4
+domain: inference.sdk
+
+summary: >-
+  A Stack binds each role (stt, llm, tts, speech) to one adapter and names the deployment profile it
+  runs under; it records where each binding came from. A Recipe is a named, parameterised topology
+  in one interaction mode that needs a set of roles. An Instantiation is one recipe planned over one
+  stack into one pipeline.
+
+naming:
+  wire: sdk
+  display: SDK
+
+types:
+  - name: inference.sdk.StackId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.sdk.StackBindingId
+    kind: newtype
+    of: Uuid
+
+  - name: inference.sdk.InstantiationId
+    kind: newtype
+    of: Uuid
+
+  # A recipe's registered name, such as `voice_cascade`.
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.RecipeName
+    kind: newtype
+    of: String
+
+  # read from: docs/design/sdk.md §4.1
+  - name: inference.sdk.Role
+    kind: enum
+    variants: [stt, llm, tts, speech]
+
+  # Where a binding came from, first found wins in this order.
+  # read from: docs/design/sdk.md §4.2
+  - name: inference.sdk.BindingSource
+    kind: enum
+    variants: [builder, environment, stack_file, working_directory_file, user_config_file]
+
+entities:
+  # read from: docs/design/sdk.md §4.1
+  # read from: docs/design/sdk.md §4.3
+  - name: inference.sdk.Stack
+    naming:
+      summary: One adapter per role under one deployment profile.
+    identity:
+      name: stack_id
+      type: inference.sdk.StackId
+    fields:
+      - name: profile_id
+        type: inference.policy.ProfileId
+    relations:
+      - name: profile
+        kind: references
+        target: inference.policy.DeploymentProfile
+        cardinality: one
+        via: profile_id
+      - name: bindings
+        kind: owns
+        target: inference.sdk.StackBinding
+        cardinality: many
+        via: stack_id
+    lifecycle:
+      initial: Resolved
+      states: [Resolved]
+      terminal: [Resolved]
+
+  # At most one binding per role and stack: the constraint is the resolve command's, not yet
+  # declared (UNMAPPED above).
+  # read from: docs/design/sdk.md §4.1-4.2
+  - name: inference.sdk.StackBinding
+    naming:
+      summary: One role of a stack bound to one adapter, and where that came from.
+    identity:
+      name: stack_binding_id
+      type: inference.sdk.StackBindingId
+    fields:
+      - name: stack_id
+        type: inference.sdk.StackId
+      - name: role
+        type: inference.sdk.Role
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: source
+        type: inference.sdk.BindingSource
+    relations:
+      - name: adapter
+        kind: references
+        target: inference.model.Adapter
+        cardinality: one
+        via: adapter_id
+    lifecycle:
+      initial: Bound
+      states: [Bound]
+      terminal: [Bound]
+
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.Recipe
+    naming:
+      summary: A named, parameterised topology in one interaction mode that needs a set of roles.
+    identity:
+      name: name
+      type: inference.sdk.RecipeName
+    fields:
+      - name: mode
+        type: inference.graph.InteractionMode
+      - name: roles
+        type: List<inference.sdk.Role>
+    lifecycle:
+      initial: Registered
+      states: [Registered]
+      terminal: [Registered]
+
+  # One recipe planned over one stack into one pipeline. A pipeline declared without a recipe has
+  # no instantiation, so the graph domain is unchanged.
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.Instantiation
+    naming:
+      summary: One recipe planned over one stack into one pipeline.
+    identity:
+      name: instantiation_id
+      type: inference.sdk.InstantiationId
+    fields:
+      - name: recipe
+        type: inference.sdk.RecipeName
+      - name: stack_id
+        type: inference.sdk.StackId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+    relations:
+      - name: recipe
+        kind: references
+        target: inference.sdk.Recipe
+        cardinality: one
+        via: recipe
+      - name: stack
+        kind: references
+        target: inference.sdk.Stack
+        cardinality: one
+        via: stack_id
+      - name: pipeline
+        kind: references
+        target: inference.graph.Pipeline
+        cardinality: one
+        via: pipeline_id
+    lifecycle:
+      initial: Planned
+      states: [Planned]
+      terminal: [Planned]

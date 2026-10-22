@@ -30,8 +30,11 @@
 //! too (`inference.graph.Exposure`): the node whose port is exposed is handed the inner end, the
 //! receiver of an ingress or the sender of an egress, after its edges', and the caller takes the
 //! outer ends by exposure name through [`RunController::exposed`]. The caller is an ingress's
-//! source: the `stop` it sends there ends the run's input as a source node's does. An end the
-//! caller never took is dropped with the run's end. Its public methods are `async` over the boxed
+//! source: the `stop` it sends there ends the run's input as a source node's does. A node's
+//! `usage` port that no edge leaves and no exposure carries is handed a sink
+//! ([`crate::usage_sink`]) that never refuses, and the caller takes its reading end with the
+//! exposures' ([`ExposedEnds::usage`]), so that usage no edge carries still reaches the caller to
+//! count. An end the caller never took is dropped with the run's end. Its public methods are `async` over the boxed
 //! futures of the node trait and commit no caller to one asynchronous executor (line 665).
 //!
 //! Admission is not decided here: `PrepareRun`'s `refused` outcome, which leaves the run
@@ -62,6 +65,7 @@ use crate::run::{
     FailureReason, NodeInstance, NodeInstanceId, NodeInstanceState, NodeInstanceStateConflict, Run,
     RunState, RunStateConflict,
 };
+use crate::usage_sink::{self, UnconnectedUsage};
 
 /// An instance of the run is not in a state the step acts from, so nothing moved. `current` is
 /// the state it holds, none when the node has no instance yet.
@@ -208,7 +212,10 @@ impl Error for FailNodeError {
 
 /// The caller's end of an ingress of the run: where it sends what the exposed input port of
 /// `exposure_id` receives. The caller is the ingress's source: its end of input is the control
-/// event of kind `stop` it sends here.
+/// event of kind `stop` it sends here. Once a drain was asked for while the run was Active, or the
+/// run moved to Draining, the endpoint refuses user content as
+/// [`SendError::Closed`](inference_core::endpoint::SendError::Closed), since the run admits no new
+/// input; a control event, `stop` among them, still passes.
 pub struct Ingress<P> {
     pub exposure_id: ExposureId,
     /// The name the pipeline exposes the port under.
@@ -228,10 +235,16 @@ pub struct Egress<P> {
     pub endpoint: Box<dyn InputEndpoint<P>>,
 }
 
-/// The caller's ends of every exposure of the run, in the declaration order of the exposures.
+/// The caller's ends of every exposure of the run, in the declaration order of the exposures, and
+/// of every `usage` port of the run's nodes that no edge leaves and no exposure carries, in the
+/// declaration order of the ports. A record read off `usage` is delivered nowhere else, so it is
+/// counted once when the caller counts it. A sink holds what it is sent until it is read, with no
+/// bound: a caller that does not count usage drops `usage` (or the whole of these ends) as soon as
+/// it took the ends it needs, and from then on every send there is taken and kept nowhere.
 pub struct ExposedEnds<P> {
     pub ingresses: Vec<Ingress<P>>,
     pub egresses: Vec<Egress<P>>,
+    pub usage: Vec<UnconnectedUsage<P>>,
 }
 
 impl<P> Default for ExposedEnds<P> {
@@ -239,6 +252,7 @@ impl<P> Default for ExposedEnds<P> {
         Self {
             ingresses: Vec::new(),
             egresses: Vec::new(),
+            usage: Vec::new(),
         }
     }
 }
@@ -289,6 +303,7 @@ impl<P> fmt::Debug for ExposedEnds<P> {
                     .map(|egress| egress.name.as_str())
                     .collect::<Vec<_>>(),
             )
+            .field("usage", &self.usage)
             .finish()
     }
 }
@@ -544,6 +559,20 @@ impl<P: Send + 'static> RunController<P> {
                 }
                 None => {}
             }
+        }
+        for (node_id, port_id) in usage_sink::unconnected_ports(declaration, pipeline_id) {
+            let (sender, receiver) = usage_sink::sink();
+            if let Some(endpoints) = Self::endpoints_of(&mut nodes, Some(node_id)) {
+                endpoints.outputs.push(NodeOutput {
+                    port_id,
+                    endpoint: Box::new(sender),
+                });
+            }
+            ends.usage.push(UnconnectedUsage {
+                node_id,
+                port_id,
+                endpoint: Box::new(receiver),
+            });
         }
         let (run, _) = Run::create_as(run_id, planned);
         Ok(Self {
