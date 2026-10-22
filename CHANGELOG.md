@@ -82,6 +82,7 @@
   `AnonymousResolver`, and a server response without a usage chunk reports its tokens from the
   server's timings.
 - CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.66.0 to 0.67.0.
+- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.67.0 to 0.68.0.
 
 ### Fixed
 
