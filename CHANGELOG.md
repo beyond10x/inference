@@ -46,6 +46,12 @@
   the parent run.
 - The documentation site moves from mdBook under `site/` to Docusaurus under `website/`, with
   pages generated from the source by the `inference-docs` crate and checked by `task check`.
+- `ess/domains/usage.yaml` declares the view `UsageRecords`, every usage record with its
+  quantities, answered by the testkit's `UsageDomain::usage_records_view`; synthesis now obliges a
+  scenario for the `Quantity` invariants instead of refusing them (ESS-SYNTH-013). The authored
+  scenario `unknown-quantity-stays-unknown` records a quantity of source `unknown` and checks that
+  the view publishes it with no value, never as zero. The suite grows from 469 to 471 scenarios,
+  9 of them authored, all answered.
 
 ### Changed
 

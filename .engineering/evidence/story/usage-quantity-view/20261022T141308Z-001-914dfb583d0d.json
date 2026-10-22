@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-22T14:13:08Z",
+  "actor": "human:timo",
+  "artifact": "story:usage-quantity-view",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0: 356 suites, 2615 passed, 0 failed, 50 ignored; synthesis 471 scenarios (9 authored), 5 refusals"
+  }
+}
