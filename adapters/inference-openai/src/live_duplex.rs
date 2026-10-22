@@ -1086,4 +1086,77 @@ mod tests {
         assert_eq!(known_sum(&mut sums, None, None), None);
         assert_eq!(known_sum(&mut sums, None, Some(4)), None);
     }
+
+    /// A backend sum onto a response whose usage is already recorded is refused, and the refusal
+    /// is dropped and counted. The binding cannot reach this today: the ledger refuses only an
+    /// unknown or recorded response (`SessionLedger::response_usage_reported`), the sum goes to
+    /// the newest response, which an open session records only once a newer one is created
+    /// (`SessionLedger::response_created`), and GPT-Live takes no cancellation from the caller
+    /// ([`capabilities`]). This test is what holds the branch.
+    #[test]
+    fn a_sum_onto_a_recorded_response_is_dropped_and_counted() {
+        let pcm24 = AudioFormat {
+            encoding: AudioEncoding::PcmS16le,
+            sample_rate: std::num::NonZeroU32::new(24_000).unwrap(),
+            channels: std::num::NonZeroU16::MIN,
+        };
+        let config = SpeechConfig {
+            voice: "marin".to_owned(),
+            instructions: "answer briefly".to_owned(),
+            input_format: pcm24,
+            output_format: pcm24,
+            turn_detection: TurnDetection::SemanticVad,
+            turn_tuning: inference_duplex::TurnTuning::default(),
+            auto_response: true,
+            auto_interrupt: true,
+            tools: Vec::new(),
+            idle_limit: Duration::from_secs(5),
+        };
+        let (adapter, _) = Adapter::declare(DeclareAdapter {
+            model_id: ModelId::generate(),
+            backend: "openai-gpt-live".to_owned(),
+            contract_revision: "1".to_owned(),
+            execution_form: ExecutionForm::HostedService,
+            locality: Locality::ExternalProvider,
+            capabilities: claims(),
+            max_concurrency: 1,
+        })
+        .unwrap();
+        let now = Instant::now();
+        let (mut ledger, _) = SessionLedger::open(
+            SpeechSessionId::generate(),
+            &adapter,
+            &capabilities(),
+            config,
+            now,
+        )
+        .unwrap();
+        let (first, second) = (ResponseId::generate(), ResponseId::generate());
+        ledger.response_created(first, now).unwrap();
+        ledger.response_completed(first, now).unwrap();
+        ledger.response_created(second, now).unwrap();
+        assert!(
+            ledger
+                .usage_records()
+                .iter()
+                .any(|record| record.response_id() == Some(first)),
+            "creating the next response did not record the first one's usage"
+        );
+        let before = ledger.dropped_count();
+        let sum = BackendSum {
+            id: Some(first),
+            sum: ResponseUsage::default(),
+            quantities: Vec::new(),
+        };
+        sum.record(&mut ledger.provider_frame(), now);
+        assert_eq!(ledger.dropped_count(), before + 1);
+        assert!(
+            matches!(
+                ledger.dropped_events().last(),
+                Some(SessionError::ResponseNotInProgress(_))
+            ),
+            "{:?}",
+            ledger.dropped_events()
+        );
+    }
 }
