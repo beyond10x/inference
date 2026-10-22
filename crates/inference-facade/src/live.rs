@@ -43,8 +43,9 @@
 //! A usage record a model node sends on an exposed `usage` port, or a subgraph node forwards on
 //! one from its child run, is delivered as `UsageRecorded` and added to the session's usage view,
 //! a total per run and one over the session ([`LiveSession::usage`], [`crate::usage`]), the
-//! child's record under the run the session holds; with the feature `cost`, a session priced
-//! with `LiveSession::price_with` also prices it. [`LiveSession::record_inputs`] taps the
+//! child's record under the run the session holds. A record sent on a `usage` port with no edge
+//! and no exposure is counted there too and not delivered; with the feature `cost`, a session
+//! priced with `LiveSession::price_with` also prices it. [`LiveSession::record_inputs`] taps the
 //! ingresses of the session's run for a recorder of the runtime, so that the run can be replayed.
 //!
 //! The control events the session writes travel on a stream of its own, produced under an
@@ -70,7 +71,8 @@ use inference_pipeline::{
 use inference_runtime::record::Recorder;
 use inference_runtime::run::{Run, RunCancelled, RunCompleted, RunFailed, RunState};
 use inference_runtime::{
-    CreateControllerError, ExposureWatch, Ingress, QueueWatch, RunController, RunError, RunRequests,
+    CreateControllerError, ExposedEnds, ExposureWatch, Ingress, QueueWatch, RunController,
+    RunError, RunRequests, uncounted_usage,
 };
 use inference_text::SegmentId;
 use inference_tools::ToolCallId;
@@ -208,13 +210,22 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// Counts `recorded`, read off an egress of the run `run_id`, in the session's usage view
-    /// and, with the feature `cost`, prices it.
+    /// Counts `recorded`, read off an egress or a usage sink of the run `run_id`, in the
+    /// session's usage view and, with the feature `cost`, prices it.
     fn count_usage(&self, run_id: RunId, recorded: &UsageRecorded) {
         let mut usage = lock(&self.usage);
         usage.add(run_id, recorded);
         #[cfg(feature = "cost")]
         lock(&self.pricer).read(&mut usage.cost, recorded);
+    }
+
+    /// Marks the total of the run `run_id`, and the session's, partial, naming each node of
+    /// `nodes`, whose usage the session cannot read.
+    fn mark_uncounted(&self, run_id: RunId, nodes: impl IntoIterator<Item = NodeId>) {
+        let mut usage = lock(&self.usage);
+        for node_id in nodes {
+            usage.mark_uncounted(run_id, node_id);
+        }
     }
 
     /// The session's current run is `run_id`: its end is the one the session ends with, and its
@@ -620,16 +631,12 @@ impl LiveSessions {
 
         let (mut controller, run_id) =
             run_session(&shared, declaration, planned, implement).await?;
-        let ends = controller.exposed();
+        let (ingresses, egresses) = outlets(controller.exposed());
         let session = LiveSession {
             shared: Arc::clone(&shared),
             run_id,
-            ingresses: ends.ingresses,
-            egresses: ends
-                .egresses
-                .into_iter()
-                .map(|egress| egress.endpoint)
-                .collect(),
+            ingresses,
+            egresses,
             producer: NodeId::generate(),
             stream_id: StreamId::generate(),
             sequence: AtomicI64::new(0),
@@ -675,6 +682,7 @@ pub(crate) async fn run_session<P: SessionPayload>(
         }
     };
     shared.follow(run_id);
+    shared.mark_uncounted(run_id, uncounted_usage(declaration, planned.pipeline_id()));
     let attached = lock(&shared.sessions).attach_run(
         &Planned {
             declaration,
@@ -728,13 +736,34 @@ fn abandon(shared: &Shared) {
     shared.end(closed.map(SessionEvent::SessionClosed), false);
 }
 
+/// An end the session reads off its run: an egress, whose events it delivers, or the sink of a
+/// `usage` port no edge leaves and no exposure carries, whose usage records it counts and does
+/// not deliver, since the pipeline exposes no port they travel on.
+pub(crate) struct Outlet<P> {
+    pub(crate) endpoint: Box<dyn InputEndpoint<P>>,
+    pub(crate) delivers: bool,
+}
+
+/// The ingresses of `ends` and the ends the session reads: its egresses, then its usage sinks.
+pub(crate) fn outlets<P>(ends: ExposedEnds<P>) -> (Vec<Ingress<P>>, Vec<Outlet<P>>) {
+    let egresses = ends.egresses.into_iter().map(|egress| Outlet {
+        endpoint: egress.endpoint,
+        delivers: true,
+    });
+    let sinks = ends.usage.into_iter().map(|sink| Outlet {
+        endpoint: sink.endpoint,
+        delivers: false,
+    });
+    (ends.ingresses, egresses.chain(sinks).collect())
+}
+
 /// The application's handle on a live session: what it sends, commits and receives, and how it
 /// closes.
 pub struct LiveSession<P> {
     pub(crate) shared: Arc<Shared>,
     pub(crate) run_id: RunId,
     pub(crate) ingresses: Vec<Ingress<P>>,
-    pub(crate) egresses: Vec<Box<dyn InputEndpoint<P>>>,
+    pub(crate) egresses: Vec<Outlet<P>>,
     pub(crate) producer: NodeId,
     pub(crate) stream_id: StreamId,
     pub(crate) sequence: AtomicI64,
@@ -976,11 +1005,12 @@ impl<P: SessionPayload> LiveSession<P> {
             let mut progressed = false;
             let mut index = 0;
             while index < self.egresses.len() {
-                let polled = self.egresses[index].recv().as_mut().poll(cx);
+                let delivers = self.egresses[index].delivers;
+                let polled = self.egresses[index].endpoint.recv().as_mut().poll(cx);
                 match polled {
                     Poll::Ready(Some(envelope)) => {
                         progressed = true;
-                        if let Some(event) = self.deliver(&envelope) {
+                        if let Some(event) = self.read(&envelope, delivers) {
                             return Poll::Ready(Some(event));
                         }
                     }
@@ -998,6 +1028,20 @@ impl<P: SessionPayload> LiveSession<P> {
                 return Poll::Pending;
             }
         }
+    }
+
+    /// What the session does with `envelope`, read off one of its ends: delivers it when the end
+    /// is an egress ([`LiveSession::deliver`]); otherwise, off a usage sink, counts the usage
+    /// record it carries under the envelope's run, as a delivered one is counted, and delivers
+    /// nothing.
+    pub(crate) fn read(&self, envelope: &EventEnvelope<P>, delivers: bool) -> Option<SessionEvent> {
+        if delivers {
+            return self.deliver(envelope);
+        }
+        if let Some(SessionEvent::UsageRecorded(recorded)) = envelope.payload.session_event() {
+            self.shared.count_usage(envelope.run_id, &recorded);
+        }
+        None
     }
 
     /// The session event an envelope of an egress is delivered as, if any. A committed fact the

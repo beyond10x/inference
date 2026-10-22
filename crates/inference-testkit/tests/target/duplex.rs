@@ -4,8 +4,8 @@
 //! Each request field is read on its own ([`Input`]); the outcome, the error and the event come
 //! from what the store returned. `OpenSpeechSession` reads the adapters of the `inference.model`
 //! store and `ProposeSpeechToolCall` the tools of the `inference.tools` store. A move naming a
-//! session, response or call no record carries takes its `wrong-state` outcome, whose error then
-//! carries no `current`.
+//! session, response, call or received event no record carries takes its `wrong-state` outcome,
+//! whose error then carries no `current`.
 //!
 //! A format or a frame is read field by field. One whose sample rate, channel count, sample count
 //! or position an `inference-audio` value cannot hold takes the `format-out-of-range` outcome,
@@ -28,14 +28,14 @@ use ess_conformance::target::{
 use ess_primitives::node::Node;
 use inference_duplex::inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
 use inference_duplex::{
-    OpenSpeechSession, ProposeSpeechToolCall, ResponseId, ResponseState, ResponseUsage,
-    SessionFailure, SpeechCallId, SpeechSessionId, SpeechSessionState, SpeechToolCallState,
-    TranscriptionUsage,
+    OpenSpeechSession, ProposeSpeechToolCall, ReceivedEventId, ReceivedSessionEventState,
+    ResponseId, ResponseState, ResponseUsage, SessionFailure, SpeechCallId, SpeechSessionId,
+    SpeechSessionState, SpeechToolCallState, TranscriptionUsage,
 };
 use inference_testkit::duplex::{
-    AnswerSpeechToolCallError, DuplexDomain, DuplexEvent, OpenSpeechSessionError,
-    ProposeSpeechToolCallError, ResponseCommandError, ResponsesRow, SessionCommandError,
-    SpeechSessionsRow, SpeechToolCallsRow,
+    AnswerSpeechToolCallError, DeliverSessionEventError, DuplexDomain, DuplexEvent,
+    OpenSpeechSessionError, ProposeSpeechToolCallError, ReceivedSessionEventsRow,
+    ResponseCommandError, ResponsesRow, SessionCommandError, SpeechSessionsRow, SpeechToolCallsRow,
 };
 use inference_tools::Json;
 use serde::Serialize;
@@ -68,6 +68,8 @@ const PROPOSE_SPEECH_TOOL_CALL: &str = "inference.duplex.ProposeSpeechToolCall";
 const ANSWER_SPEECH_TOOL_CALL: &str = "inference.duplex.AnswerSpeechToolCall";
 const CLOSE_SPEECH_SESSION: &str = "inference.duplex.CloseSpeechSession";
 const FAIL_SPEECH_SESSION: &str = "inference.duplex.FailSpeechSession";
+const RECEIVE_SESSION_EVENT: &str = "inference.duplex.ReceiveSessionEvent";
+const DELIVER_SESSION_EVENT: &str = "inference.duplex.DeliverSessionEvent";
 
 const SPEECH_SESSION_OPENED: &str = "inference.duplex.SpeechSessionOpened";
 const INPUT_ACCEPTED: &str = "inference.duplex.InputAccepted";
@@ -88,9 +90,11 @@ const SPEECH_TOOL_CALL_PROPOSED: &str = "inference.duplex.SpeechToolCallProposed
 const SPEECH_TOOL_CALL_ANSWERED: &str = "inference.duplex.SpeechToolCallAnswered";
 const SPEECH_SESSION_CLOSED: &str = "inference.duplex.SpeechSessionClosed";
 const SPEECH_SESSION_FAILED: &str = "inference.duplex.SpeechSessionFailed";
+const SESSION_EVENT_RECEIVED: &str = "inference.duplex.SessionEventReceived";
+const SESSION_EVENT_DELIVERED: &str = "inference.duplex.SessionEventDelivered";
 
 /// Every event this module observes.
-const EVENTS: [&str; 19] = [
+const EVENTS: [&str; 21] = [
     SPEECH_SESSION_OPENED,
     INPUT_ACCEPTED,
     INPUT_COMMITTED,
@@ -108,6 +112,8 @@ const EVENTS: [&str; 19] = [
     RESPONSE_USAGE_RECORDED,
     SPEECH_TOOL_CALL_PROPOSED,
     SPEECH_TOOL_CALL_ANSWERED,
+    SESSION_EVENT_RECEIVED,
+    SESSION_EVENT_DELIVERED,
     SPEECH_SESSION_CLOSED,
     SPEECH_SESSION_FAILED,
 ];
@@ -120,13 +126,16 @@ const SPEECH_SESSION_STATE_CONFLICT: &str = "inference.duplex.SpeechSessionState
 const RESPONSE_NOT_FOUND: &str = "inference.duplex.ResponseNotFound";
 const RESPONSE_STATE_CONFLICT: &str = "inference.duplex.ResponseStateConflict";
 const SPEECH_TOOL_CALL_STATE_CONFLICT: &str = "inference.duplex.SpeechToolCallStateConflict";
+const RECEIVED_SESSION_EVENT_STATE_CONFLICT: &str =
+    "inference.duplex.ReceivedSessionEventStateConflict";
 const TOOL_NOT_FOUND: &str = "inference.tools.ToolNotFound";
 
 const SPEECH_SESSIONS: &str = "inference.duplex.SpeechSessions";
 const RESPONSES: &str = "inference.duplex.Responses";
 const SPEECH_TOOL_CALLS: &str = "inference.duplex.SpeechToolCalls";
+const RECEIVED_SESSION_EVENTS: &str = "inference.duplex.ReceivedSessionEvents";
 
-/// The session, response and call stores of one scenario.
+/// The session, response, call and received event stores of one scenario.
 pub type State = DuplexDomain;
 
 pub fn execute_command(
@@ -511,6 +520,45 @@ pub fn execute_command(
                 )?,
             }
         }
+        RECEIVE_SESSION_EVENT => {
+            let session_id = input.named("session_id")?;
+            let kind = input.named("kind")?;
+            let sequence = input.integer("sequence")?;
+            input.finish()?;
+            let answer = stores
+                .duplex
+                .receive_session_event(session_id, kind, sequence);
+            session_answer(
+                command,
+                "received",
+                answer.map(DuplexEvent::SessionEventReceived),
+                request,
+            )?
+        }
+        DELIVER_SESSION_EVENT => {
+            let received_id: ReceivedEventId = input.named("received_id")?;
+            input.finish()?;
+            match stores.duplex.deliver_session_event(received_id) {
+                Ok(event) => accepted(
+                    command,
+                    "delivered",
+                    &DuplexEvent::SessionEventDelivered(event),
+                    request,
+                )?,
+                Err(DeliverSessionEventError::Unknown { .. }) => {
+                    wrong_state::<ReceivedSessionEventState>(
+                        command,
+                        RECEIVED_SESSION_EVENT_STATE_CONFLICT,
+                        None,
+                    )?
+                }
+                Err(DeliverSessionEventError::Conflict(conflict)) => wrong_state(
+                    command,
+                    RECEIVED_SESSION_EVENT_STATE_CONFLICT,
+                    Some(conflict.current),
+                )?,
+            }
+        }
         _ => return Err(unsupported(&name)),
     };
     answered(stores, result)
@@ -871,7 +919,14 @@ pub fn query_view(
     request: &SemanticViewRequest,
 ) -> Result<SemanticViewResult, TargetError> {
     let name = request.view.to_string();
-    if ![SPEECH_SESSIONS, RESPONSES, SPEECH_TOOL_CALLS].contains(&name.as_str()) {
+    if ![
+        SPEECH_SESSIONS,
+        RESPONSES,
+        SPEECH_TOOL_CALLS,
+        RECEIVED_SESSION_EVENTS,
+    ]
+    .contains(&name.as_str())
+    {
         return Err(unsupported(&name));
     }
     stores.require(&name, &request.consistency)?;
@@ -886,6 +941,11 @@ pub fn query_view(
             .responses_view()
             .iter()
             .map(responses_row)
+            .collect::<Result<Vec<_>, _>>()?,
+        RECEIVED_SESSION_EVENTS => domain
+            .received_session_events_view()
+            .iter()
+            .map(received_session_events_row)
             .collect::<Result<Vec<_>, _>>()?,
         _ => domain
             .speech_tool_calls_view()
@@ -974,6 +1034,14 @@ fn duplex_event(event: &DuplexEvent) -> Result<ObservedEvent, TargetError> {
         DuplexEvent::SpeechToolCallAnswered(event) => new(SPEECH_TOOL_CALL_ANSWERED)
             .with("call_id", named_node(&event.call_id)?)
             .with("result", json_node(&event.result)?),
+        DuplexEvent::SessionEventReceived(event) => new(SESSION_EVENT_RECEIVED)
+            .with("received_id", named_node(&event.received_id)?)
+            .with("session_id", named_node(&event.session_id)?)
+            .with("kind", named_node(&event.kind)?)
+            .with("sequence", integer_node(event.sequence)),
+        DuplexEvent::SessionEventDelivered(event) => {
+            new(SESSION_EVENT_DELIVERED).with("received_id", named_node(&event.received_id)?)
+        }
         DuplexEvent::SpeechSessionClosed(event) => {
             new(SPEECH_SESSION_CLOSED).with("session_id", named_node(&event.session_id)?)
         }
@@ -1020,6 +1088,21 @@ fn speech_tool_calls_row(row: &SpeechToolCallsRow) -> Result<ViewRow, TargetErro
         ("response_id".to_owned(), named_node(&row.response_id)?),
         ("tool_id".to_owned(), named_node(&row.tool_id)?),
         ("arguments".to_owned(), json_node(&row.arguments)?),
+        ("state".to_owned(), named_node(&row.state)?),
+    ]))
+}
+
+fn received_session_events_row(row: &ReceivedSessionEventsRow) -> Result<ViewRow, TargetError> {
+    let delivered_before = row
+        .delivered_before
+        .as_ref()
+        .map_or(Ok(Node::Null), named_node)?;
+    Ok(BTreeMap::from([
+        ("received_id".to_owned(), named_node(&row.received_id)?),
+        ("session_id".to_owned(), named_node(&row.session_id)?),
+        ("kind".to_owned(), named_node(&row.kind)?),
+        ("sequence".to_owned(), integer_node(row.sequence)),
+        ("delivered_before".to_owned(), delivered_before),
         ("state".to_owned(), named_node(&row.state)?),
     ]))
 }

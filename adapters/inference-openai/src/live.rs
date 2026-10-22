@@ -55,7 +55,10 @@
 //! * Usage: `session.usage.updated` carries the cumulative voice seconds (a running total, never
 //!   to be summed); `session.closed`, after `session.close`, carries the close `reason` and the
 //!   final seconds. Backend token usage is the `usage` of each nested `response.completed`.
-//!   Without `session.closed` the final usage is unconfirmed.
+//!   Without `session.closed` the final usage is unconfirmed. These events are read field by
+//!   field: `session.closed` without its reason or seconds is still the end of the session, and a
+//!   backend `response.completed`, `response.failed` or `response.incomplete` without its
+//!   response id keeps its usage.
 //! * `error` events carry `error.client_event_id` naming the command they answer; an `error`
 //!   coded `responses_validation_failed` reports a backend setting refused after start, and the
 //!   session stays open.
@@ -84,7 +87,7 @@ use crate::client::{Socket, check_model, close_socket, open_socket, read_text, s
 use crate::config::{DEFAULT_READ_TIMEOUT, Endpoint, FunctionTool};
 use crate::credential::CredentialSource;
 use crate::error::RealtimeError;
-use crate::event::ServerError;
+use crate::event::{ServerError, text_start};
 
 /// The Live model the reference names, `gpt-live-1`.
 pub const LIVE_MODEL: &str = "gpt-live-1";
@@ -93,8 +96,8 @@ pub const LIVE_MODEL: &str = "gpt-live-1";
 /// `session.start`.
 pub const LIVE_URL: &str = "wss://api.openai.com/v1/live/sessions";
 
-/// How long [`LiveClient::close`] waits for `session.closed` when the endpoint's read timeout is
-/// shorter: the guide's examples wait 15 seconds.
+/// How long [`LiveClient::close`] waits for `session.closed`, in all, when the endpoint's read
+/// timeout is shorter: the guide's examples wait 15 seconds.
 pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl Endpoint {
@@ -268,16 +271,18 @@ impl LiveSessionConfig {
 }
 
 /// The token usage of one backend response, from its nested `response.completed` (or failed or
-/// incomplete). The details are `None` when the server did not report them.
+/// incomplete). Each count is `None` when the server did not report it or sent it in another
+/// shape; the total is the server's, else the sum of input and output when both are known and
+/// it does not pass `u64::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct BackendUsage {
-    pub input_tokens: u64,
+    pub input_tokens: Option<u64>,
     /// Input tokens served from the cache, counted inside `input_tokens`.
     pub cached_tokens: Option<u64>,
-    pub output_tokens: u64,
+    pub output_tokens: Option<u64>,
     /// Reasoning tokens, counted inside `output_tokens`.
     pub reasoning_tokens: Option<u64>,
-    pub total_tokens: u64,
+    pub total_tokens: Option<u64>,
 }
 
 impl fmt::Display for BackendUsage {
@@ -288,10 +293,10 @@ impl fmt::Display for BackendUsage {
         write!(
             f,
             "total {} tokens; input {} (cached {}); output {} (reasoning {})",
-            self.total_tokens,
-            self.input_tokens,
+            detail(self.total_tokens),
+            detail(self.input_tokens),
             detail(self.cached_tokens),
-            self.output_tokens,
+            detail(self.output_tokens),
             detail(self.reasoning_tokens),
         )
     }
@@ -310,16 +315,23 @@ pub enum BackendEvent {
         name: String,
         arguments: String,
     },
-    /// `response.completed`, with the usage the server reported.
+    /// `response.completed`, with the usage the server reported; `response_id` is `None` when
+    /// the server left it out. `unreadable_usage` says what of a `usage` the client could not
+    /// read: a `response` or `usage` that is no object gives no usage, and a count missing or in
+    /// another shape is `None` in the usage kept.
     Completed {
-        response_id: String,
+        response_id: Option<String>,
         usage: Option<BackendUsage>,
+        unreadable_usage: Option<String>,
     },
-    /// `response.failed` or `response.incomplete`, with the response's status.
+    /// `response.failed` or `response.incomplete`, with the response's status; `response_id`
+    /// is `None` when the server left it out. `usage` and `unreadable_usage` are read as for
+    /// [`BackendEvent::Completed`].
     Ended {
-        response_id: String,
+        response_id: Option<String>,
         status: String,
         usage: Option<BackendUsage>,
+        unreadable_usage: Option<String>,
     },
     /// Any other nested event, the whole event as received.
     Other { event_type: String, raw: Value },
@@ -373,8 +385,12 @@ pub enum LiveEvent {
         event_type: String,
         client_event_id: Option<String>,
     },
-    /// `session.closed`: why the session ended and its final voice seconds.
-    SessionClosed { reason: String, seconds: f64 },
+    /// `session.closed`: why the session ended and its final voice seconds, each `None` when the
+    /// server left it out or sent it in another shape. It ends the session either way.
+    SessionClosed {
+        reason: Option<String>,
+        seconds: Option<f64>,
+    },
     /// `error`; [`ServerError::event_id`] holds its `client_event_id`.
     Error(ServerError),
     /// `info`.
@@ -387,16 +403,22 @@ impl LiveEvent {
     /// Reads one Live server event from the text of a WebSocket message.
     ///
     /// # Errors
-    /// [`RealtimeError::Protocol`] when the text is not a JSON object with a string `type`, or
-    /// when a typed event lacks a field the reference requires.
+    /// [`RealtimeError::Protocol`] when the text is not a JSON object with a string `type`,
+    /// naming the start of the text, or when a typed event lacks a field the reference requires
+    /// and without which it means nothing. `session.closed` and the backend's response ends,
+    /// which end the session or carry billable usage, are never refused for a field.
     pub fn parse(text: &str) -> Result<Self, RealtimeError> {
         let raw: Value = serde_json::from_str(text).map_err(|error| {
-            RealtimeError::Protocol(format!("server event is not JSON: {error}"))
+            RealtimeError::Protocol(format!(
+                "server event is not JSON ({error}); it begins {:?}",
+                text_start(text)
+            ))
         })?;
         let Some(event_type) = raw.get("type").and_then(Value::as_str) else {
-            return Err(RealtimeError::Protocol(
-                "server event has no string `type`".to_owned(),
-            ));
+            return Err(RealtimeError::Protocol(format!(
+                "server event has no string `type`; it begins {:?}",
+                text_start(text)
+            )));
         };
         let event = Fields {
             event_type,
@@ -451,8 +473,11 @@ impl LiveEvent {
                 client_event_id: event.optional_string("client_event_id")?,
             },
             "session.closed" => Self::SessionClosed {
-                reason: event.string("reason")?,
-                seconds: event.nested("usage")?.number("seconds")?,
+                reason: event.optional_string("reason").ok().flatten(),
+                seconds: event
+                    .nested("usage")
+                    .and_then(|usage| usage.number("seconds"))
+                    .ok(),
             },
             "error" => {
                 let error = event.nested("error")?;
@@ -503,20 +528,26 @@ fn backend(event: Fields<'_>) -> Result<BackendEvent, RealtimeError> {
             }
         }
         "response.completed" => {
-            let response = nested.nested("response")?;
+            let response = nested.nested("response");
+            let (usage, unreadable_usage) = response_usage(&response);
+            let response = response.ok();
             BackendEvent::Completed {
-                response_id: response.string("id")?,
-                usage: response.backend_usage(),
+                response_id: response.and_then(|response| response.lenient_string("id")),
+                usage,
+                unreadable_usage,
             }
         }
         "response.failed" | "response.incomplete" => {
-            let response = nested.nested("response")?;
+            let response = nested.nested("response");
+            let (usage, unreadable_usage) = response_usage(&response);
+            let response = response.ok();
             BackendEvent::Ended {
-                response_id: response.string("id")?,
+                response_id: response.and_then(|response| response.lenient_string("id")),
                 status: response
-                    .optional_string("status")?
+                    .and_then(|response| response.lenient_string("status"))
                     .unwrap_or_else(|| event_type.trim_start_matches("response.").to_owned()),
-                usage: response.backend_usage(),
+                usage,
+                unreadable_usage,
             }
         }
         _ => BackendEvent::Other {
@@ -524,6 +555,18 @@ fn backend(event: Fields<'_>) -> Result<BackendEvent, RealtimeError> {
             raw: event.raw.clone(),
         },
     })
+}
+
+/// The usage of a backend response end's `response` and what of it could not be read; a
+/// `response` missing or not an object has no usage, and that is what could not be read.
+fn response_usage(
+    response: &Result<Fields<'_>, RealtimeError>,
+) -> (Option<BackendUsage>, Option<String>) {
+    match response {
+        Ok(response) => response.backend_usage(),
+        Err(RealtimeError::Protocol(what)) => (None, Some(what.clone())),
+        Err(error) => (None, Some(error.to_string())),
+    }
 }
 
 /// Field access on one JSON object of a typed event; a missing or mistyped field the reference
@@ -536,10 +579,11 @@ struct Fields<'a> {
 
 impl<'a> Fields<'a> {
     fn missing(&self, field: &str, what: &str) -> RealtimeError {
-        RealtimeError::Protocol(format!(
-            "`{}` lacks {what} field `{field}`",
-            self.event_type
-        ))
+        RealtimeError::Protocol(self.lacks(field, what))
+    }
+
+    fn lacks(&self, field: &str, what: &str) -> String {
+        format!("`{}` lacks {what} field `{field}`", self.event_type)
     }
 
     fn get(&self, field: &str) -> Option<&'a Value> {
@@ -557,6 +601,11 @@ impl<'a> Fields<'a> {
             Some(Value::String(value)) => Ok(Some(value.clone())),
             Some(_) => Err(self.missing(field, "the string")),
         }
+    }
+
+    /// A string field, `None` when it is missing or not a string.
+    fn lenient_string(&self, field: &str) -> Option<String> {
+        self.optional_string(field).ok().flatten()
     }
 
     fn number(&self, field: &str) -> Result<f64, RealtimeError> {
@@ -603,13 +652,31 @@ impl<'a> Fields<'a> {
             .map_err(|_| self.missing(field, "the base64"))
     }
 
-    /// The Responses `usage` of a response object; `None` when it has none.
-    fn backend_usage(&self) -> Option<BackendUsage> {
-        let usage = self.get("usage").filter(|usage| usage.is_object())?;
+    /// The Responses `usage` of a response object, read field by field, and what of it could not
+    /// be read: `(None, None)` when it has none; no usage when it is not an object; otherwise
+    /// every count it carries, `input_tokens` or `output_tokens` `None` when missing or not a
+    /// non-negative integer, and then named as what could not be read.
+    fn backend_usage(&self) -> (Option<BackendUsage>, Option<String>) {
+        let Some(usage) = self.get("usage") else {
+            return (None, None);
+        };
+        if !usage.is_object() {
+            return (None, Some(self.lacks("usage", "the object")));
+        }
         let count = |value: Option<&Value>| value.and_then(Value::as_u64);
-        let input_tokens = count(usage.get("input_tokens"))?;
-        let output_tokens = count(usage.get("output_tokens"))?;
-        Some(BackendUsage {
+        let input_tokens = count(usage.get("input_tokens"));
+        let output_tokens = count(usage.get("output_tokens"));
+        let unreadable = match (input_tokens, output_tokens) {
+            (Some(_), Some(_)) => None,
+            (None, Some(_)) => Some(self.lacks("usage.input_tokens", "the non-negative integer")),
+            (Some(_), None) => Some(self.lacks("usage.output_tokens", "the non-negative integer")),
+            (None, None) => Some(format!(
+                "`{}` lacks the non-negative integer fields `usage.input_tokens` and \
+                 `usage.output_tokens`",
+                self.event_type
+            )),
+        };
+        let usage = BackendUsage {
             input_tokens,
             cached_tokens: count(
                 usage
@@ -622,17 +689,23 @@ impl<'a> Fields<'a> {
                     .get("output_tokens_details")
                     .and_then(|details| details.get("reasoning_tokens")),
             ),
-            total_tokens: count(usage.get("total_tokens")).unwrap_or(input_tokens + output_tokens),
-        })
+            total_tokens: count(usage.get("total_tokens")).or_else(|| {
+                input_tokens
+                    .zip(output_tokens)
+                    .and_then(|(input, output)| input.checked_add(output))
+            }),
+        };
+        (Some(usage), unreadable)
     }
 }
 
 /// How a Live session ended, from `session.closed`: the close reason (`close_requested`,
-/// `expired`, `content`, `remote_hangup`, `connection_lost`) and the final voice seconds.
+/// `expired`, `content`, `remote_hangup`, `connection_lost`) and the final voice seconds, each
+/// `None` when the server left it out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveClosed {
-    pub reason: String,
-    pub seconds: f64,
+    pub reason: Option<String>,
+    pub seconds: Option<f64>,
 }
 
 /// One open Live session over its primary WebSocket.
@@ -834,22 +907,44 @@ impl LiveClient {
     }
 
     /// Closes the session gracefully: sends `session.close`, reads until `session.closed`, then
-    /// closes the connection. Events read on the way are dropped.
+    /// closes the connection. Events read on the way are dropped, and so are messages that are not
+    /// GPT-Live events: the client reads on past them.
+    ///
+    /// The whole close, every read and the closing of the connection, takes at most the longer
+    /// of the endpoint's read timeout and [`CLOSE_TIMEOUT`], however often the server sends.
     ///
     /// # Errors
-    /// The errors of [`LiveClient::next_event`] when the connection ends or stalls before
-    /// `session.closed`: the final usage is then unconfirmed. Waits at least
-    /// [`CLOSE_TIMEOUT`].
-    pub async fn close(mut self) -> Result<LiveClosed, RealtimeError> {
+    /// The errors of [`LiveClient::next_event`] when the connection ends before
+    /// `session.closed`, and [`RealtimeError::Stalled`] when that bound passes without it, the
+    /// connection then closed: the final usage is unconfirmed.
+    pub async fn close(self) -> Result<LiveClosed, RealtimeError> {
+        self.close_seeing(|_| {}).await
+    }
+
+    /// [`LiveClient::close`], handing `seen` each event read on the way and each message that
+    /// is not a GPT-Live event, in the order they arrived.
+    pub(crate) async fn close_seeing(
+        mut self,
+        mut seen: impl FnMut(Result<LiveEvent, RealtimeError>),
+    ) -> Result<LiveClosed, RealtimeError> {
+        let bound = self.read_timeout.max(CLOSE_TIMEOUT);
+        let deadline = tokio::time::Instant::now() + bound;
+        self.read_timeout = bound;
         self.request_close().await?;
-        self.read_timeout = self.read_timeout.max(CLOSE_TIMEOUT);
         let closed = loop {
-            if let LiveEvent::SessionClosed { reason, seconds } = self.next_event().await? {
-                break LiveClosed { reason, seconds };
+            match tokio::time::timeout_at(deadline, self.next_event()).await {
+                Err(_) => break Err(RealtimeError::Stalled(bound)),
+                Ok(Ok(LiveEvent::SessionClosed { reason, seconds })) => {
+                    break Ok(LiveClosed { reason, seconds });
+                }
+                Ok(Ok(event)) => seen(Ok(event)),
+                Ok(Err(error @ RealtimeError::Protocol(_))) => seen(Err(error)),
+                Ok(Err(error)) => return Err(error),
             }
         };
-        let _ = close_socket(&mut self.socket, self.read_timeout).await;
-        Ok(closed)
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let _ = close_socket(&mut self.socket, left).await;
+        closed
     }
 
     async fn append(

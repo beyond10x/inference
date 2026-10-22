@@ -708,9 +708,15 @@ impl TranscriptOutput {
     /// at each sample rate, counted exactly, over that rate, summed as an exact fraction and
     /// rounded down to the millisecond once, at the end. Should that fraction not fit `u128`,
     /// which takes several sample rates with no common divisor in one recognition, each rate's
-    /// milliseconds are rounded down on their own and summed.
+    /// milliseconds are rounded down on their own and summed. Beyond `i64::MAX` it reads
+    /// `i64::MAX`; the usage record then carries the milliseconds as unknown.
     #[must_use]
     pub fn input_audio_ms(&self) -> i64 {
+        self.offered_ms().unwrap_or(i64::MAX)
+    }
+
+    /// The milliseconds of [`Self::input_audio_ms`]; `None` beyond `i64::MAX`.
+    fn offered_ms(&self) -> Option<i64> {
         let exact = self.offered_samples.iter().try_fold(
             (0_u128, 1_u128),
             |(numerator, denominator), (&rate, &samples)| {
@@ -729,7 +735,7 @@ impl TranscriptOutput {
             },
             |(numerator, denominator)| numerator / denominator,
         );
-        i64::try_from(ms).unwrap_or(i64::MAX)
+        i64::try_from(ms).ok()
     }
 
     /// Runs `inference.usage.RecordUsage` for the recognition and returns its enveloped
@@ -775,7 +781,7 @@ impl TranscriptOutput {
             self.started_at_ms,
             wall_clock_ms().max(self.started_at_ms),
             vec![
-                Quantity::measured(QuantityKind::InputAudioMs, self.input_audio_ms()),
+                measured(QuantityKind::InputAudioMs, self.offered_ms()),
                 Quantity::measured(QuantityKind::Requests, 1),
                 local_compute,
             ],
@@ -917,6 +923,14 @@ fn add_fraction(left: (u128, u128), right: (u128, u128)) -> Option<(u128, u128)>
     Some((numerator / common, denominator / common))
 }
 
+/// The quantity `kind` as measured: `count`, or unknown when it lies beyond the ESS `Integer`,
+/// since no number recorded in its place would be the count.
+fn measured(kind: QuantityKind, count: Option<i64>) -> Quantity {
+    count.map_or(Quantity::unknown(kind), |count| {
+        Quantity::measured(kind, count)
+    })
+}
+
 /// Now, in Unix epoch milliseconds on the wall clock; 0 before the epoch.
 fn wall_clock_ms() -> i64 {
     SystemTime::now()
@@ -979,4 +993,58 @@ pub trait RecognitionHandle: Iterator<Item = EventEnvelope<TranscriptEvent>> {
     /// The [`RevisionRefused`] of [`TranscriptOutput::revise`]: a recognition whose usage is
     /// recorded, no such span, or a Committed one whose text stays as it was.
     fn revise(&mut self, input: ReviseSpan) -> Result<(), RevisionRefused>;
+}
+
+#[cfg(test)]
+mod tests {
+    use inference_core::model::{DeclareAdapter, ExecutionForm, Locality};
+
+    use super::*;
+
+    fn adapter() -> Adapter {
+        Adapter::declare(DeclareAdapter {
+            model_id: ModelId::generate(),
+            backend: "test".to_owned(),
+            contract_revision: CONTRACT_REVISION.to_owned(),
+            execution_form: ExecutionForm::InProcess,
+            locality: Locality::SameProcess,
+            capabilities: Vec::new(),
+            max_concurrency: 1,
+        })
+        .expect("one is positive")
+        .0
+    }
+
+    fn input_audio_ms(samples: u128) -> Option<i64> {
+        let request = RecognitionRequest::new(
+            RunId::generate(),
+            TurnId::generate(),
+            StreamId::generate(),
+            NodeId::generate(),
+            "text_out",
+        );
+        let mut output = TranscriptOutput::start(&adapter(), request);
+        output.offered_samples.insert(1_000, samples);
+        output.end_input().expect("input ends once");
+        let envelope = output.usage().expect("input has ended");
+        let recorded = match envelope.payload {
+            TranscriptEvent::Usage(recorded) => recorded,
+            other => panic!("a usage record, not {other:?}"),
+        };
+        recorded
+            .quantities
+            .iter()
+            .find(|quantity| quantity.kind() == QuantityKind::InputAudioMs)
+            .expect("the audio offered")
+            .value()
+    }
+
+    /// Milliseconds of audio above `i64::MAX` are unknown in the usage record, never a number
+    /// clamped to `i64::MAX`; `i64::MAX` itself is recorded as it is.
+    #[test]
+    fn audio_above_i64_max_ms_is_unknown_in_the_usage_record() {
+        let largest = u128::try_from(i64::MAX).expect("i64::MAX fits a u128");
+        assert_eq!(input_audio_ms(largest + 1), None);
+        assert_eq!(input_audio_ms(largest), Some(i64::MAX));
+    }
 }

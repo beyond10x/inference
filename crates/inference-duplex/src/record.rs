@@ -1,19 +1,21 @@
-//! The three entities of `ess/domains/duplex.yaml` and their lifecycles. Each transition is a
+//! The four entities of `ess/domains/duplex.yaml` and their lifecycles. Each transition is a
 //! method that returns the moved record and the event its command emits, or the error the
-//! command declares; a refused move changes nothing. Which session, response or call an identity
-//! names is decided by a store or a [`SessionLedger`](crate::SessionLedger) holding them.
+//! command declares; a refused move changes nothing. Which session, response, call or received
+//! event an identity names is decided by a store or a [`SessionLedger`](crate::SessionLedger)
+//! holding them.
 
 use inference_audio::AudioFormat;
 use inference_core::model::AdapterId;
 use inference_tools::{Json, ToolId};
 
 use crate::{
-    NonPositiveIdleLimit, OpenSpeechSession, ProposeSpeechToolCall, ResponseCancelled,
-    ResponseCompleted, ResponseCreated, ResponseFailed, ResponseId, ResponseState,
-    ResponseStateConflict, SessionFailure, SpeechCallId, SpeechSessionClosed, SpeechSessionFailed,
-    SpeechSessionId, SpeechSessionOpened, SpeechSessionState, SpeechSessionStateConflict,
-    SpeechToolCallAnswered, SpeechToolCallProposed, SpeechToolCallState,
-    SpeechToolCallStateConflict, TurnDetection,
+    NonPositiveIdleLimit, OpenSpeechSession, ProposeSpeechToolCall, ReceivedEventId,
+    ReceivedEventKind, ReceivedSessionEventState, ReceivedSessionEventStateConflict,
+    ResponseCancelled, ResponseCompleted, ResponseCreated, ResponseFailed, ResponseId,
+    ResponseState, ResponseStateConflict, SessionEnd, SessionEventDelivered, SessionEventReceived,
+    SessionFailure, SpeechCallId, SpeechSessionClosed, SpeechSessionFailed, SpeechSessionId,
+    SpeechSessionOpened, SpeechSessionState, SpeechSessionStateConflict, SpeechToolCallAnswered,
+    SpeechToolCallProposed, SpeechToolCallState, SpeechToolCallStateConflict, TurnDetection,
 };
 
 /// `inference.duplex.SpeechSession`: a native speech session over one adapter, with the
@@ -348,5 +350,121 @@ impl SpeechToolCall {
             ..self.clone()
         };
         Ok((moved, event))
+    }
+}
+
+/// `inference.duplex.ReceivedSessionEvent`: an event a provider sent an open session, held until
+/// the caller has it. A close or failure of the session delivers every event still held before its
+/// own end event, so nothing received before the end is lost to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceivedSessionEvent {
+    received_id: ReceivedEventId,
+    session_id: SpeechSessionId,
+    kind: ReceivedEventKind,
+    sequence: i64,
+    delivered_before: Option<SessionEnd>,
+    state: ReceivedSessionEventState,
+}
+
+impl ReceivedSessionEvent {
+    /// Runs `inference.duplex.ReceiveSessionEvent` on `session` under `received_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`SpeechSessionStateConflict`] carrying the session's state when it is not Open: what a
+    /// provider sends after the end is not received.
+    pub const fn receive_as(
+        received_id: ReceivedEventId,
+        session: &SpeechSession,
+        kind: ReceivedEventKind,
+        sequence: i64,
+    ) -> Result<(Self, SessionEventReceived), SpeechSessionStateConflict> {
+        if let Err(conflict) = session.require_open() {
+            return Err(conflict);
+        }
+        let session_id = session.session_id();
+        let event = SessionEventReceived {
+            received_id,
+            session_id,
+            kind,
+            sequence,
+        };
+        let received = Self {
+            received_id,
+            session_id,
+            kind,
+            sequence,
+            delivered_before: None,
+            state: ReceivedSessionEventState::Received,
+        };
+        Ok((received, event))
+    }
+
+    #[must_use]
+    pub const fn received_id(&self) -> ReceivedEventId {
+        self.received_id
+    }
+
+    #[must_use]
+    pub const fn session_id(&self) -> SpeechSessionId {
+        self.session_id
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ReceivedEventKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn sequence(&self) -> i64 {
+        self.sequence
+    }
+
+    /// The end event this one was delivered before, when a close or failure delivered it.
+    #[must_use]
+    pub const fn delivered_before(&self) -> Option<SessionEnd> {
+        self.delivered_before
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> ReceivedSessionEventState {
+        self.state
+    }
+
+    /// Runs `inference.duplex.DeliverSessionEvent`: the caller has the event.
+    ///
+    /// # Errors
+    ///
+    /// [`ReceivedSessionEventStateConflict`] carrying the held state when it is not Received.
+    pub const fn deliver(
+        &self,
+    ) -> Result<(Self, SessionEventDelivered), ReceivedSessionEventStateConflict> {
+        if !matches!(self.state, ReceivedSessionEventState::Received) {
+            return Err(ReceivedSessionEventStateConflict {
+                current: self.state,
+            });
+        }
+        let event = SessionEventDelivered {
+            received_id: self.received_id,
+        };
+        let moved = Self {
+            state: ReceivedSessionEventState::Delivered,
+            ..*self
+        };
+        Ok((moved, event))
+    }
+
+    /// The effect of `CloseSpeechSession` or `FailSpeechSession` on an event of its session: one
+    /// still Received is delivered before `end`; one already Delivered is left alone (`None`).
+    #[must_use]
+    pub const fn delivered_before_end(&self, end: SessionEnd) -> Option<Self> {
+        match self.state {
+            ReceivedSessionEventState::Received => Some(Self {
+                delivered_before: Some(end),
+                state: ReceivedSessionEventState::Delivered,
+                ..*self
+            }),
+            ReceivedSessionEventState::Delivered => None,
+        }
     }
 }
