@@ -1,15 +1,13 @@
-//! Adversary cases, pass 11, story `duplex-late-usage-counted` at 895e820: the public
-//! `SessionLedger::liveness_mark` / `read_in_part` pair after the round-9 fix, which restores only
-//! the bound's instant, from the mark or from `heard_before`, and only when the bound stands at
-//! the frame's `now`.
+//! Adversary cases, pass 11, story `duplex-late-usage-counted` at 895e820: frames read only in
+//! part (`ProviderFrame::read_in_part`), recorded one frame at a time.
 //!
-//! Two cases pin lines no suite in the tree kills: the session check, and the
-//! `now > last_heard` guard on `heard_before` for a frame that hears the provider twice at one
-//! instant (a Realtime function-call frame: the binding hears it, then `tool_call` hears it
-//! again). Three cases are red: two frames read in part under marks that overlap, in order and
-//! out of order, and a frame read in part at the instant the provider was last heard, which
-//! starts a bound that waited for the next check. No adapter in this tree overlaps marks or
-//! records a frame at the instant of the last one; the cases pin what the API promises.
+//! A frame that hears the provider twice at its instant (a Realtime function-call frame: the
+//! binding hears it, then `tool_call` hears it again) is taken out whole; two frames read in part
+//! one after the other leave the bound; a readable frame after an answer starts the bound that
+//! waited for the check; and a frame read in part at the instant the provider was last heard
+//! leaves the bound waiting for the check. The pass's cases of a mark of another session and of
+//! two frames under overlapping marks resolved out of order can no longer be written: a frame
+//! borrows its ledger mutably, and overlapping frames do not compile.
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::{Duration, Instant};
@@ -118,11 +116,11 @@ fn awaiting(start: Instant) -> SessionLedger {
 fn a_frame_read_in_part_that_hears_twice_at_its_instant_leaves_the_bound() {
     let start = Instant::now();
     let mut ledger = awaiting(start);
-    let mark = ledger.liveness_mark();
-    let frame = start + LIMIT / 2;
-    ledger.heard(frame);
-    ledger.heard(frame);
-    ledger.read_in_part(mark, "a function call with an unreadable field", frame);
+    let mut frame = ledger.provider_frame();
+    let partial = start + LIMIT / 2;
+    frame.heard(partial);
+    frame.heard(partial);
+    frame.read_in_part("a function call with an unreadable field", partial);
     assert!(
         ledger.check_liveness(start + LIMIT),
         "silent but for a frame read in part for the whole {} s bound and not stalled",
@@ -130,41 +128,20 @@ fn a_frame_read_in_part_that_hears_twice_at_its_instant_leaves_the_bound() {
     );
 }
 
-/// A mark of another session changes nothing: the bound stays where recording this frame put
-/// it, so the session is not stalled a whole bound after `start`.
+/// Two frames read in part, one after the other: neither is a sign of life, so the session
+/// stalls a whole bound after `start`.
 #[test]
-fn a_mark_of_another_session_leaves_the_bound_where_the_frame_put_it() {
+fn two_frames_read_in_part_one_after_the_other_leave_the_bound() {
     let start = Instant::now();
     let mut ledger = awaiting(start);
-    let other = open(start);
-    let frame = start + LIMIT * 3 / 4;
-    ledger.heard(frame);
-    ledger.read_in_part(
-        other.liveness_mark(),
-        "`response.done` lacks `usage`",
-        frame,
-    );
-    assert!(
-        !ledger.check_liveness(start + LIMIT),
-        "a mark of another session moved this session's bound back to {} s before",
-        (LIMIT * 3 / 4).as_secs()
-    );
-}
-
-/// Two frames read in part, each under a mark taken before either was recorded, resolved in
-/// order: neither is a sign of life, so the session stalls a whole bound after `start`.
-#[test]
-fn two_frames_read_in_part_under_overlapping_marks_resolved_in_order_leave_the_bound() {
-    let start = Instant::now();
-    let mut ledger = awaiting(start);
-    let first_mark = ledger.liveness_mark();
-    let second_mark = ledger.liveness_mark();
     let first = start + LIMIT / 4;
     let second = start + LIMIT / 2;
-    ledger.heard(first);
-    ledger.heard(second);
-    ledger.read_in_part(first_mark, "the first frame", first);
-    ledger.read_in_part(second_mark, "the second frame", second);
+    let mut frame = ledger.provider_frame();
+    frame.heard(first);
+    frame.read_in_part("the first frame", first);
+    let mut frame = ledger.provider_frame();
+    frame.heard(second);
+    frame.read_in_part("the second frame", second);
     assert!(
         ledger.check_liveness(start + LIMIT),
         "silent but for two frames read in part for the whole {} s bound and not stalled: \
@@ -173,34 +150,11 @@ fn two_frames_read_in_part_under_overlapping_marks_resolved_in_order_leave_the_b
     );
 }
 
-/// The same two frames resolved out of order: the session still stalls a whole bound after
-/// `start`.
+/// The bound waits for the next check after an answer; a readable frame starts it, and a frame
+/// read in part after that leaves it running from the readable frame: the session stalls a
+/// whole bound after the readable frame, and the check does not start the bound afresh.
 #[test]
-fn two_frames_read_in_part_under_overlapping_marks_resolved_out_of_order_leave_the_bound() {
-    let start = Instant::now();
-    let mut ledger = awaiting(start);
-    let first_mark = ledger.liveness_mark();
-    let second_mark = ledger.liveness_mark();
-    let first = start + LIMIT / 4;
-    let second = start + LIMIT / 2;
-    ledger.heard(first);
-    ledger.heard(second);
-    ledger.read_in_part(second_mark, "the second frame", second);
-    ledger.read_in_part(first_mark, "the first frame", first);
-    assert!(
-        ledger.check_liveness(start + LIMIT),
-        "silent but for two frames read in part for the whole {} s bound and not stalled: \
-         the first frame, read in part, still counts as a sign of life",
-        LIMIT.as_secs()
-    );
-}
-
-/// The bound waits for the next check after an answer; a readable frame heard after the mark
-/// starts it, and a frame read in part after that leaves it running from the readable frame:
-/// the session stalls a whole bound after the readable frame, and the check does not start the
-/// bound afresh.
-#[test]
-fn a_readable_frame_after_the_mark_starts_a_bound_that_waited_for_the_check() {
+fn a_readable_frame_after_an_answer_starts_a_bound_that_waited_for_the_check() {
     let start = Instant::now();
     let mut ledger = open(start);
     let response = ResponseId::generate();
@@ -220,12 +174,12 @@ fn a_readable_frame_after_the_mark_starts_a_bound_that_waited_for_the_check() {
     ledger
         .answer(&SpeechCallId::new("call-1"), json!({"celsius": 21}))
         .expect("answered");
-    let mark = ledger.liveness_mark();
     let readable = start + LIMIT;
-    ledger.heard(readable);
+    ledger.provider_frame().heard(readable);
     let partial = readable + LIMIT / 2;
-    ledger.heard(partial);
-    ledger.read_in_part(mark, "`response.done` lacks `usage`", partial);
+    let mut frame = ledger.provider_frame();
+    frame.heard(partial);
+    frame.read_in_part("`response.done` lacks `usage`", partial);
     assert!(
         ledger.check_liveness(readable + LIMIT),
         "silent for the whole {} s bound after a readable frame and not stalled: the bound \
@@ -259,9 +213,9 @@ fn a_frame_read_in_part_at_the_instant_last_heard_keeps_the_bound_waiting_for_th
     ledger
         .answer(&SpeechCallId::new("call-1"), json!({"celsius": 21}))
         .expect("answered");
-    let mark = ledger.liveness_mark();
-    ledger.heard(start);
-    ledger.read_in_part(mark, "`response.done` lacks `usage`", start);
+    let mut frame = ledger.provider_frame();
+    frame.heard(start);
+    frame.read_in_part("`response.done` lacks `usage`", start);
     let checked = start + LIMIT * 3;
     assert!(
         !ledger.check_liveness(checked),

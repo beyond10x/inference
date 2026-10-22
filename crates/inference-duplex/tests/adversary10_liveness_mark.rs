@@ -1,10 +1,8 @@
-//! Adversary cases, pass 10, story `duplex-late-usage-counted` at b873a7e: the public
-//! `SessionLedger::liveness_mark` / `read_in_part` pair. `read_in_part` assigns the mark's whole
-//! `Liveness` (the instant last heard and the limit) back onto the ledger. Nothing ties a mark to
-//! the ledger that took it, or to the frame being recorded, so a mark taken before a readable
-//! frame rewinds the bound past that frame, and a mark of another session replaces this
-//! session's idle limit and can move its bound forward. No adapter in this tree does either; the
-//! cases pin what the API lets a binding do.
+//! Adversary case, pass 10, story `duplex-late-usage-counted` at b873a7e: a frame read only in
+//! part (`ProviderFrame::read_in_part`) after a readable frame does not rewind the bound past
+//! that readable frame. Frames are recorded one at a time through a frame scope that borrows the
+//! ledger, so a frame cannot carry state of an earlier frame or of another session; the pass's
+//! case of a mark taken from another session can no longer be written and was deleted.
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::{Duration, Instant};
@@ -84,50 +82,30 @@ fn open(now: Instant, idle_limit: Duration) -> SessionLedger {
     .0
 }
 
-/// A mark taken before a readable frame, handed to `read_in_part` for a later frame read in
-/// part: the readable frame was a sign of life, so the bound runs from it, not from the mark.
+/// A readable frame, then a later frame read in part: the readable frame was a sign of life, so
+/// the bound runs from it, and the frame read in part keeps it there.
 #[test]
-fn a_mark_taken_before_a_readable_frame_does_not_undo_it() {
+fn a_frame_read_in_part_after_a_readable_frame_does_not_undo_it() {
     let start = Instant::now();
     let mut ledger = open(start, BOUND);
     ledger.request_response(start).expect("none in progress");
     let response = ResponseId::generate();
     ledger.response_created(response, start).expect("created");
-    let stale = ledger.liveness_mark();
     let readable = start + BOUND * 3 / 4;
-    ledger
+    let mut frame = ledger.provider_frame();
+    frame
         .speech_started(SampleClockPosition::new(0).expect("a position"), readable)
         .expect("open");
-    ledger.read_in_part(
-        stale,
+    drop(frame);
+    ledger.provider_frame().read_in_part(
         "`response.done` lacks the object field `usage`",
         start + BOUND * 7 / 8,
     );
+    assert_eq!(ledger.liveness().limit(), BOUND, "the idle limit changed");
     assert!(
         !ledger.check_liveness(start + BOUND),
         "the session stalled {} ms after a readable frame, inside its {} ms bound",
         (BOUND / 4).as_millis(),
-        BOUND.as_millis()
-    );
-}
-
-/// A mark of another session, with another idle limit and heard later: this session keeps its
-/// own limit, and its bound does not move past what this session heard.
-#[test]
-fn a_mark_of_another_session_changes_neither_the_limit_nor_the_bound() {
-    let start = Instant::now();
-    let mut ledger = open(start, BOUND);
-    ledger.request_response(start).expect("none in progress");
-    let other = open(start + BOUND / 2, Duration::from_secs(10));
-    ledger.read_in_part(
-        other.liveness_mark(),
-        "`response.done` lacks the object field `usage`",
-        start + BOUND / 4,
-    );
-    assert_eq!(ledger.liveness().limit(), BOUND, "the idle limit changed");
-    assert!(
-        ledger.check_liveness(start + BOUND),
-        "silent for the whole {} ms bound and not stalled",
         BOUND.as_millis()
     );
 }

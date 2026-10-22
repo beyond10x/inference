@@ -20,9 +20,11 @@
   close leaves held.
 - `SessionLedger` counts the frames a binding could not read (`unreadable_frame`,
   `unreadable_frames`, `last_unreadable`) and ends a response the provider ended unreadably
-  (`response_ended_unread`). `SessionLedger::liveness_mark` and `SessionLedger::read_in_part`
-  (with `LivenessMark`) count a frame read only in part after what it recorded and leave the
-  liveness bound where it stood before the frame.
+  (`response_ended_unread`). A binding records a frame it may read only in part through
+  `SessionLedger::provider_frame`, one frame at a time: the `ProviderFrame` borrows the ledger,
+  so overlapping frames do not compile. `ProviderFrame::read_in_part` counts the frame after what
+  it recorded and takes every hearing of the frame out of the liveness bound; dropped, the frame
+  was readable.
 - `SessionLedger::usage_awaited` keeps the next response from settling a response whose final
   usage the provider reports in a frame of its own; `SessionLedger::response_usage_unknown`
   settles it unknown when that frame was lost. `SessionLedger::dropped` counts every refusal a
@@ -109,10 +111,11 @@
   `status` but an unreadable `usage`, or a transcription without its transcript or with an
   unreadable `usage`. What such a frame recorded stays recorded. A Realtime `response.done`
   without `status` still starts the bound anew, since the caller then awaits a new response. The
-  bound runs from the latest readable frame and its limit never changes: a readable frame
-  heard after the mark stays, frames read in part under overlapping marks are each taken out in
-  either order, one read in part at the instant last heard leaves a bound that waited for the
-  next check waiting, and a mark of another session changes nothing.
+  bound runs from the latest readable frame and its limit never changes. Frames are recorded one
+  at a time, and a frame read in part is taken out whole however often it heard the provider: a
+  readable frame before it stays, also at the same instant, a request, answer or check while it
+  is open stays, and one read in part at the instant last heard leaves a bound that waited for
+  the next check waiting.
 - A token sum that would pass `u64::MAX` no longer wraps or panics. In a usage record it is
   unknown (GPT-Live backend usage sums and the total of input and output, Nova Sonic usage sums);
   the contract's `ResponseUsage`, which has no unknown, stops at `u64::MAX`, as does an OpenAI
@@ -122,6 +125,9 @@
   (`inference_duplex::reported`), not clamped to `i64::MAX`, and so are TTS input
   characters and output audio milliseconds and STT input audio milliseconds in their usage
   records.
+- The TTS conformance kit (`inference_testkit::tts::conformance::usage_recorded`) expects
+  characters or audio milliseconds above `i64::MAX` as unknown, as `inference-tts` records them,
+  not clamped to `i64::MAX`.
 
 ## [0.7.0] — 2026-10-21
 
