@@ -198,7 +198,8 @@ impl ResponseUsage {
     /// Every count as a quantity the provider reported, mapped as `ess/domains/usage.yaml` maps
     /// them: input text, audio and cached tokens, output text and audio tokens (output cached
     /// tokens have no kind). It is for a provider that reports every count; one that leaves a
-    /// count out builds its quantities from its own fields, so that count stays unknown.
+    /// count out builds its quantities from its own fields, so that count stays unknown. A count
+    /// above `i64::MAX` is unknown ([`reported`]).
     #[must_use]
     pub fn quantities(&self) -> Vec<Quantity> {
         vec![
@@ -224,12 +225,15 @@ impl ResponseUsage {
 }
 
 /// The quantity `kind` as a provider reports it: `count` as `provider_reported`, or `unknown`
-/// when the provider left it out. A count beyond the ESS `Integer` saturates.
+/// when the provider left it out or the count lies beyond the ESS `Integer` (`i64::MAX`), since
+/// no number recorded in its place would be the count.
 #[must_use]
 pub fn reported(kind: QuantityKind, count: Option<u64>) -> Quantity {
-    count.map_or(Quantity::unknown(kind), |count| {
-        Quantity::provider_reported(kind, i64::try_from(count).unwrap_or(i64::MAX))
-    })
+    count
+        .and_then(|count| i64::try_from(count).ok())
+        .map_or(Quantity::unknown(kind), |count| {
+            Quantity::provider_reported(kind, count)
+        })
 }
 
 /// `inference.duplex.TranscriptionUsage`: the usage of transcribing the input.
@@ -242,7 +246,8 @@ pub struct TranscriptionUsage {
 
 impl TranscriptionUsage {
     /// Both counts as quantities the provider reported: the input tokens as
-    /// `input_audio_tokens`, the output tokens as `output_text_tokens`.
+    /// `input_audio_tokens`, the output tokens as `output_text_tokens`. A count above
+    /// `i64::MAX` is unknown ([`reported`]).
     #[must_use]
     pub fn quantities(&self) -> Vec<Quantity> {
         vec![
@@ -771,3 +776,23 @@ impl fmt::Display for DeliverSessionEventError {
 }
 
 impl Error for DeliverSessionEventError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A count up to `i64::MAX` is recorded as sent; one above it is unknown, never a clamped
+    /// number.
+    #[test]
+    fn a_count_above_i64_max_is_unknown() {
+        let kind = QuantityKind::InputTextTokens;
+        let largest = u64::try_from(i64::MAX).expect("i64::MAX fits a u64");
+        assert_eq!(
+            reported(kind, Some(largest)),
+            Quantity::provider_reported(kind, i64::MAX)
+        );
+        assert_eq!(reported(kind, Some(largest + 1)), Quantity::unknown(kind));
+        assert_eq!(reported(kind, Some(u64::MAX)), Quantity::unknown(kind));
+        assert_eq!(reported(kind, None), Quantity::unknown(kind));
+    }
+}

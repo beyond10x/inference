@@ -765,7 +765,7 @@ impl OpenAiLiveSession {
     /// nothing, and one without its reason or seconds is counted as a frame the binding could
     /// not read in full, which leaves the liveness bound where it stood at `mark`, before the
     /// frame.
-    fn confirm(&mut self, closed: LiveClosed, mark: LivenessMark) {
+    fn confirm(&mut self, closed: LiveClosed, mark: LivenessMark, now: Instant) {
         let missing = match (&closed.reason, closed.seconds) {
             (Some(_), Some(_)) => None,
             (None, Some(_)) => Some("the string field `reason`"),
@@ -773,11 +773,8 @@ impl OpenAiLiveSession {
             (None, None) => Some("the fields `reason` and `usage.seconds`"),
         };
         if let Some(missing) = missing {
-            self.ledger.read_in_part(
-                mark,
-                format!("`session.closed` lacks {missing}"),
-                Instant::now(),
-            );
+            self.ledger
+                .read_in_part(mark, format!("`session.closed` lacks {missing}"), now);
         }
         if let Some(seconds) = closed.seconds {
             self.ledger
@@ -884,7 +881,7 @@ impl OpenAiLiveSession {
                     Some(reason) => format!("the provider ended the session: {reason}"),
                     None => "the provider ended the session without a reason".to_owned(),
                 };
-                self.confirm(LiveClosed { reason, seconds }, mark);
+                self.confirm(LiveClosed { reason, seconds }, mark, now);
                 let refused = self.ledger.fail(SessionFailure { kind, detail });
                 self.or_drop(refused);
                 self.current = None;
@@ -962,7 +959,7 @@ impl SpeechSessionHandle for OpenAiLiveSession {
             match self.record_arrived() {
                 Arrived::Closed(closed) => {
                     let mark = self.ledger.liveness_mark();
-                    self.confirm(closed, mark);
+                    self.confirm(closed, mark, Instant::now());
                     self.client = None;
                 }
                 Arrived::Failed(_) => self.client = None,
@@ -980,7 +977,7 @@ impl SpeechSessionHandle for OpenAiLiveSession {
             }
             if let Some(closed) = closed {
                 let mark = self.ledger.liveness_mark();
-                self.confirm(closed, mark);
+                self.confirm(closed, mark, Instant::now());
             }
         }
         self.ledger.close()?;
@@ -1022,5 +1019,27 @@ impl SpeechSessionHandle for OpenAiLiveSession {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sum that a count would carry past `u64::MAX` is unknown from then on, never a number
+    /// stopped at `u64::MAX`; a count left out makes it unknown too.
+    #[test]
+    fn a_sum_past_u64_max_is_unknown_from_then_on() {
+        let mut sums = HashMap::new();
+        assert_eq!(
+            known_sum(&mut sums, None, Some(u64::MAX - 1)),
+            Some(u64::MAX - 1)
+        );
+        assert_eq!(known_sum(&mut sums, None, Some(2)), None);
+        assert_eq!(known_sum(&mut sums, None, Some(0)), None);
+        let mut sums = HashMap::new();
+        assert_eq!(known_sum(&mut sums, None, Some(3)), Some(3));
+        assert_eq!(known_sum(&mut sums, None, None), None);
+        assert_eq!(known_sum(&mut sums, None, Some(4)), None);
     }
 }

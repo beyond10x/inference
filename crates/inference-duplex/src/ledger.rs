@@ -30,11 +30,13 @@ pub struct Liveness {
 }
 
 /// Where the liveness bound of a session stood before a frame was recorded
-/// ([`SessionLedger::liveness_mark`]), so that a frame read only in part leaves it there
-/// ([`SessionLedger::read_in_part`]).
+/// ([`SessionLedger::liveness_mark`]): the session, the instant its provider was last heard
+/// from and whether its bound waited for the next check, so that a frame read only in part
+/// leaves the bound there ([`SessionLedger::read_in_part`]). It carries no limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LivenessMark {
-    liveness: Liveness,
+    session_id: SpeechSessionId,
+    last_heard: Instant,
     clock_pending: bool,
 }
 
@@ -131,6 +133,9 @@ pub struct SessionLedger {
     requested: bool,
     /// The bound was armed without an instant: it starts at the next liveness check.
     clock_pending: bool,
+    /// The instant the bound ran from before it last moved to a later one, so that
+    /// [`SessionLedger::read_in_part`] can undo only what the frame read in part moved.
+    heard_before: Instant,
     /// How many frames the binding could not read, whole or in part
     /// ([`SessionLedger::unreadable_frame`]), and what the last one was.
     unreadable: (u64, Option<String>),
@@ -314,6 +319,7 @@ impl SessionLedger {
             liveness: Liveness::new(idle_limit, now),
             requested: false,
             clock_pending: false,
+            heard_before: now,
             unreadable: (0, None),
             unread_since_readable: false,
             dropped: (0, Vec::new()),
@@ -701,6 +707,9 @@ impl SessionLedger {
     /// The liveness bound runs from `now`.
     fn restart_bound(&mut self, now: Instant) {
         self.tick(now);
+        if now > self.liveness.last_heard {
+            self.heard_before = self.liveness.last_heard;
+        }
         self.liveness.heard(now);
         self.clock_pending = false;
     }
@@ -746,21 +755,34 @@ impl SessionLedger {
     /// Where the liveness bound stands now, taken before a frame is recorded, so that
     /// [`Self::read_in_part`] can leave it there.
     #[must_use]
-    pub const fn liveness_mark(&self) -> LivenessMark {
+    pub fn liveness_mark(&self) -> LivenessMark {
         LivenessMark {
-            liveness: self.liveness,
+            session_id: self.session.session_id(),
+            last_heard: self.liveness.last_heard,
             clock_pending: self.clock_pending,
         }
     }
 
     /// The frame recorded at `now` since `mark` was taken was read only in part: `what` names
     /// what could not be read. What of it was readable stays recorded, but it is no sign of
-    /// life: the liveness bound stands where it stood at `mark`, whatever recording the frame
-    /// restarted it, and the frame is counted as one the binding could not read
+    /// life, and the frame is counted as one the binding could not read
     /// ([`Self::unreadable_frame`]).
+    ///
+    /// When recording the frame moved the bound to `now`, the bound runs again from where it
+    /// ran before: from the mark's instant, or from a frame heard after the mark and before
+    /// `now`, whichever is later, so a readable frame after the mark is never undone. A bound
+    /// that waited for the next check before the frame waits again, unless a frame heard after
+    /// the mark started it. Only the instant changes, never the session's limit, and a mark
+    /// taken at `now` or of another session changes nothing.
     pub fn read_in_part(&mut self, mark: LivenessMark, what: impl Into<String>, now: Instant) {
-        self.liveness = mark.liveness;
-        self.clock_pending = mark.clock_pending;
+        let moved_by_frame = mark.session_id == self.session.session_id()
+            && mark.last_heard < now
+            && self.liveness.last_heard == now;
+        if moved_by_frame {
+            let heard_after_mark = self.heard_before > mark.last_heard;
+            self.liveness.last_heard = mark.last_heard.max(self.heard_before);
+            self.clock_pending = mark.clock_pending && !heard_after_mark;
+        }
         self.unreadable_frame(what, now);
     }
 

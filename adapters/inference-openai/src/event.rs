@@ -412,7 +412,7 @@ impl<'a> Fields<'a> {
             total_tokens: usage.optional_unsigned("total_tokens").or_else(|| {
                 input_tokens
                     .zip(output_tokens)
-                    .map(|(input, output)| input + output)
+                    .and_then(|(input, output)| input.checked_add(output))
             }),
             input_tokens,
             output_tokens,
@@ -423,7 +423,7 @@ impl<'a> Fields<'a> {
 /// The usage of a completed input transcription: tokens of the transcription model, or, for a
 /// model billed by time, the seconds of audio it transcribed. A count the server left out is
 /// `None`, never 0; the total is the sum of the two when the server sent none and both are
-/// known.
+/// known, and unknown when that sum would pass `u64::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TranscriptionUsage {
     Tokens {

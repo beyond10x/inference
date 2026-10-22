@@ -75,7 +75,11 @@
 //! * A message the client cannot read at all (not JSON, no `type`, a binary message, a typed
 //!   event without a field it needs) is dropped and reading goes on. It is counted on the session
 //!   ([`SessionLedger::unreadable_frames`]), and so is a frame of `response.done` or a
-//!   transcription with a field missing or unreadable; none refreshes the liveness bound. A later
+//!   transcription with a field missing or unreadable; none refreshes the liveness bound, with
+//!   one exception: a `response.done` without its `status` that ends its response ends it as
+//!   failed ([`SessionLedger::response_ended_unread`]) and restarts the bound, because the
+//!   caller then awaits a new response. One the ledger refuses to end leaves the bound where it
+//!   stood before the frame ([`SessionLedger::read_in_part`]). A later
 //!   failure of the session names how many there were and the last. Stalled turns into
 //!   ProviderError only when an unreadable frame arrived after the last readable frame. A
 //!   readable frame clears that state. The detail still names the total unreadable count. Every
