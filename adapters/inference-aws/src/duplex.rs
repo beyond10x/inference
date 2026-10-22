@@ -41,7 +41,19 @@
 //!   end. What waits for a next response that never begins is recorded at the session's end, by
 //!   close or failure, before its end event, as usage of the session naming no response, when
 //!   a count of it is above 0 or left out;
-//! - a service error fails the session, a closed stream fails it as `transport_closed`.
+//! - a service error fails the session, a closed stream fails it as `transport_closed`;
+//! - an event is read field by field: one without a field the binding does not need keeps its
+//!   meaning, so a `completionEnd` without its reason still ends the response in progress, and a
+//!   `contentEnd` or interruption notice without its `contentId` applies to the response in
+//!   progress, Nova Sonic streaming one at a time. A frame that is no event at all is dropped and
+//!   reading goes on, but it is counted on the session ([`SessionLedger::unreadable_frames`]), it
+//!   does not refresh the liveness bound, and a later failure of the session names how many there
+//!   were and the start of the last. Stalled turns into ProviderError only when an unreadable
+//!   frame arrived after the last readable frame. A readable frame clears that state. The detail
+//!   still names the total unreadable count. Every other failure keeps its kind, and every
+//!   provider event the ledger refuses is dropped and counted in [`SessionLedger::dropped_count`];
+//!   [`SessionLedger::dropped_events`] keeps the most recent 64. A caller operation after the
+//!   session ended returns its error and drops nothing.
 //!
 //! The response boundaries are inferred from the order of content blocks the Nova 2 user guide
 //! and the AWS samples show (speculative text, audio, then final text ending `END_TURN`), not
@@ -377,10 +389,24 @@ enum Received {
     Event(OutputEvent),
     /// The output stream ended.
     Ended,
-    /// The client failed: an undecodable frame, or the input side closed.
+    /// The client failed: the input side closed.
     Failed(NovaSonicError),
+    /// A frame that is not an event of the reference, named by the decoder. It ends nothing: the
+    /// reader reads on. It is counted on the session and is no sign of life.
+    Undecodable(String),
     /// The stream was quiet for the client's read timeout; not provider traffic.
     Quiet,
+}
+
+impl Received {
+    /// Whether recording it ends the session: the stream's end, a client failure or a service
+    /// error. An undecodable frame does not.
+    fn ends(&self) -> bool {
+        matches!(
+            self,
+            Received::Ended | Received::Failed(_) | Received::Event(OutputEvent::Error(_))
+        )
+    }
 }
 
 /// Forwards the reader's events until the stream ends or the session is gone.
@@ -390,6 +416,7 @@ async fn forward(mut reader: SessionReader, arrived: std_mpsc::Sender<Arrival>) 
             Ok(Some(event)) => Received::Event(event),
             Ok(None) => Received::Ended,
             Err(NovaSonicError::Stall { .. }) => Received::Quiet,
+            Err(error @ NovaSonicError::Decode(_)) => Received::Undecodable(error.to_string()),
             Err(error) => Received::Failed(error),
         };
         let ended = matches!(what, Received::Ended);
@@ -493,7 +520,8 @@ enum Count {
     Unreported,
     /// Every delta counted toward it carried it: their sum is known.
     Reported,
-    /// A delta counted toward it left it out: unknown, whatever the others carried.
+    /// A delta counted toward it left it out, or the sum would have passed `u64::MAX`: unknown,
+    /// whatever the others carried.
     Missing,
 }
 
@@ -527,23 +555,32 @@ struct Tally {
 }
 
 impl Tally {
+    /// Adds an input delta; a sum it would carry past `u64::MAX` is unknown from then on.
     fn add_input(&mut self, delta: nova_sonic::TokenCounts) {
-        add_counts(&mut self.sum.input, delta);
-        self.counts[0] = self.counts[0].add(delta.text.is_some());
-        self.counts[1] = self.counts[1].add(delta.speech.is_some());
+        let [text, speech] = add_counts(&mut self.sum.input, delta);
+        self.counts[0] = self.counts[0].add(delta.text.is_some() && !text);
+        self.counts[1] = self.counts[1].add(delta.speech.is_some() && !speech);
     }
 
+    /// Adds an output delta; a sum it would carry past `u64::MAX` is unknown from then on.
     fn add_output(&mut self, delta: nova_sonic::TokenCounts) {
-        add_counts(&mut self.sum.output, delta);
-        self.counts[2] = self.counts[2].add(delta.text.is_some());
-        self.counts[3] = self.counts[3].add(delta.speech.is_some());
+        let [text, speech] = add_counts(&mut self.sum.output, delta);
+        self.counts[2] = self.counts[2].add(delta.text.is_some() && !text);
+        self.counts[3] = self.counts[3].add(delta.speech.is_some() && !speech);
     }
 
+    /// Takes `other` into this tally; a sum the two would carry past `u64::MAX` is unknown.
     fn merge(&mut self, other: Self) {
-        add_token_counts(&mut self.sum.input, other.sum.input);
-        add_token_counts(&mut self.sum.output, other.sum.output);
-        for (count, other) in self.counts.iter_mut().zip(other.counts) {
-            *count = count.merge(other);
+        let [input_text, input_speech, _] = add_token_counts(&mut self.sum.input, other.sum.input);
+        let [output_text, output_speech, _] =
+            add_token_counts(&mut self.sum.output, other.sum.output);
+        let passed = [input_text, input_speech, output_text, output_speech];
+        for ((count, other), passed) in self.counts.iter_mut().zip(other.counts).zip(passed) {
+            *count = if passed {
+                Count::Missing
+            } else {
+                count.merge(other)
+            };
         }
     }
 
@@ -636,31 +673,70 @@ pub struct NovaSonicSpeechSession {
 }
 
 impl NovaSonicSpeechSession {
+    /// A ledger refusal the binding drops: it changed nothing, and the ledger counts it
+    /// ([`SessionLedger::dropped`]).
+    fn or_drop(&mut self, result: Result<(), SessionError>) {
+        if let Err(refusal) = result {
+            self.ledger.dropped(refusal);
+        }
+    }
+
     fn send(&mut self, command: Command) {
         if self.commands.send(command).is_err() {
+            self.commands_closed();
+        }
+    }
+
+    /// The writer stopped: what already arrived is recorded first, so its usage counts and the
+    /// session fails as the first stream end, client failure or service error among it says;
+    /// failing none, as a closed transport. A session already closed or failed records and
+    /// fails nothing, so a caller operation after its end drops nothing.
+    fn commands_closed(&mut self) {
+        while self.ledger.session().require_open().is_ok() {
+            let Ok(arrival) = self.arrivals.try_recv() else {
+                break;
+            };
+            self.record(arrival);
+        }
+        if self.ledger.session().require_open().is_ok() {
             self.transport_closed();
         }
     }
 
     fn transport_closed(&mut self) {
-        let _ = self.ledger.fail(failure(
+        let refused = self.ledger.fail(failure(
             SessionFailureKind::TransportClosed,
             "the provider's stream closed",
         ));
+        self.or_drop(refused);
     }
 
     fn record(&mut self, arrival: Arrival) {
         let at = arrival.at;
         match arrival.what {
             Received::Quiet => {}
+            Received::Undecodable(what) => self.ledger.unreadable_frame(what, at),
             Received::Ended => self.transport_closed(),
             Received::Failed(error) => {
-                let _ = self.ledger.fail(client_failure(&error));
+                let refused = self.ledger.fail(client_failure(&error));
+                self.or_drop(refused);
             }
             Received::Event(event) => {
                 self.ledger.heard(at);
                 self.translate(event, at);
             }
+        }
+    }
+
+    /// Records every arrival already received, as [`Self::record`] does, up to the first that
+    /// would end the session: the stream's end, a client failure or a service error. An
+    /// undecodable frame is recorded as [`Self::record`] records it, and recording goes on.
+    fn record_arrived(&mut self) {
+        while let Ok(arrival) = self.arrivals.try_recv() {
+            if arrival.what.ends() {
+                return;
+            }
+            self.record(arrival);
         }
     }
 
@@ -674,24 +750,25 @@ impl NovaSonicSpeechSession {
             OutputEvent::ContentEnd(end) => self.content_end(&end, at),
             OutputEvent::Interrupted { content_id, .. } => {
                 self.report_speech(at);
-                let response = self
-                    .turns
-                    .blocks
-                    .get(&content_id)
+                let response = content_id
+                    .and_then(|id| self.turns.blocks.get(&id))
                     .and_then(|block| block.response)
                     .or_else(|| self.ledger.in_progress());
                 if let Some(response) = response {
-                    let _ = self.ledger.response_cancelled(response, at);
+                    let refused = self.ledger.response_cancelled(response, at);
+                    self.or_drop(refused);
                 }
             }
             OutputEvent::Usage(usage) => self.usage(&usage, at),
             OutputEvent::CompletionEnd { .. } => {
                 if let Some(response) = self.ledger.in_progress() {
-                    let _ = self.ledger.response_completed(response, at);
+                    let refused = self.ledger.response_completed(response, at);
+                    self.or_drop(refused);
                 }
             }
             OutputEvent::Error(error) => {
-                let _ = self.ledger.fail(service_failure(&error));
+                let refused = self.ledger.fail(service_failure(&error));
+                self.or_drop(refused);
             }
             OutputEvent::CompletionStart(_) | OutputEvent::Unknown { .. } => {}
         }
@@ -707,8 +784,9 @@ impl NovaSonicSpeechSession {
         }
         let position =
             SampleClockPosition::new(self.turns.input_end).unwrap_or(SampleClockPosition::MAX);
-        if self.ledger.speech_started(position, at).is_ok() {
-            self.turns.speech_reported = true;
+        match self.ledger.speech_started(position, at) {
+            Ok(()) => self.turns.speech_reported = true,
+            Err(refusal) => self.ledger.dropped(refusal),
         }
     }
 
@@ -724,11 +802,15 @@ impl NovaSonicSpeechSession {
             (Role::User, ContentKind::Text) if !block.speculative() => {
                 self.report_speech(at);
                 if let Some(response) = self.ledger.in_progress() {
-                    let _ = self.ledger.response_completed(response, at);
+                    let refused = self.ledger.response_completed(response, at);
+                    self.or_drop(refused);
                 }
-                if self.ledger.input_committed(at).is_ok() {
-                    self.turns.open = true;
-                    self.turns.speech_reported = false;
+                match self.ledger.input_committed(at) {
+                    Ok(()) => {
+                        self.turns.open = true;
+                        self.turns.speech_reported = false;
+                    }
+                    Err(refusal) => self.ledger.dropped(refusal),
                 }
             }
             (Role::User, _) => {}
@@ -768,10 +850,12 @@ impl NovaSonicSpeechSession {
         }
         match (&block.role, block.response) {
             (Role::User, _) => {
-                let _ = self.ledger.input_transcribed(text.content, at);
+                let refused = self.ledger.input_transcribed(text.content, at);
+                self.or_drop(refused);
             }
             (Role::Assistant, Some(response)) => {
-                let _ = self.ledger.output_transcript(response, text.content, at);
+                let refused = self.ledger.output_transcript(response, text.content, at);
+                self.or_drop(refused);
             }
             _ => {}
         }
@@ -801,8 +885,9 @@ impl NovaSonicSpeechSession {
             sample_count: samples,
             data: audio.pcm,
         };
-        if self.ledger.output_audio(response, frame, at).is_ok() {
-            self.turns.emitted += u64::from(samples);
+        match self.ledger.output_audio(response, frame, at) {
+            Ok(()) => self.turns.emitted += u64::from(samples),
+            Err(refusal) => self.ledger.dropped(refusal),
         }
     }
 
@@ -817,35 +902,50 @@ impl NovaSonicSpeechSession {
             return;
         };
         let arguments = serde_json::from_str(&tool.content).unwrap_or(Json::String(tool.content));
-        let _ = self.ledger.tool_call(
+        let refused = self.ledger.tool_call(
             SpeechCallId::new(tool.tool_use_id),
             response,
             &tool.tool_name,
             arguments,
             at,
         );
+        self.or_drop(refused);
     }
 
+    /// Ends the block's response as its stop reason says. An end without its `contentId` applies
+    /// to the response in progress, Nova Sonic streaming one at a time: an interruption cancels it
+    /// and a tool use completes it, but `END_TURN` needs the block's kind, so it ends nothing.
     fn content_end(&mut self, end: &OutputContentEnd, at: Instant) {
-        let Some(block) = self.turns.blocks.get(&end.content_id).cloned() else {
-            return;
+        let (block, response) = match &end.content_id {
+            Some(id) => {
+                let Some(block) = self.turns.blocks.get(id).cloned() else {
+                    return;
+                };
+                let Some(response) = block.response else {
+                    return;
+                };
+                (Some(block), response)
+            }
+            None => {
+                let Some(response) = self.ledger.in_progress() else {
+                    return;
+                };
+                (None, response)
+            }
         };
-        let Some(response) = block.response else {
-            return;
-        };
-        let _ = match end.stop_reason {
+        let final_text = block
+            .as_ref()
+            .is_some_and(|block| block.kind == ContentKind::Text && !block.speculative());
+        let ended = match end.stop_reason {
             Some(StopReason::Interrupted) => {
                 self.report_speech(at);
                 self.ledger.response_cancelled(response, at)
             }
             Some(StopReason::ToolUse) => self.ledger.response_completed(response, at),
-            Some(StopReason::EndTurn)
-                if block.kind == ContentKind::Text && !block.speculative() =>
-            {
-                self.ledger.response_completed(response, at)
-            }
+            Some(StopReason::EndTurn) if final_text => self.ledger.response_completed(response, at),
             _ => Ok(()),
         };
+        self.or_drop(ended);
     }
 
     /// Sums a usage delta per response: into the response in progress, or between responses its
@@ -885,19 +985,21 @@ impl NovaSonicSpeechSession {
         let total = self.turns.totals.entry(response).or_default();
         total.merge(delta);
         let total = *total;
-        let _ = self.ledger.response_usage_reported(
+        let refused = self.ledger.response_usage_reported(
             response,
             (delta.sum != ResponseUsage::default()).then_some(total.sum),
             total.quantities(),
             UsageTotal::Running,
             at,
         );
+        self.or_drop(refused);
     }
 }
 
-/// Adds the counts a delta carried; one it left out adds nothing.
-fn add_counts(total: &mut TokenCounts, delta: nova_sonic::TokenCounts) {
-    add_token_counts(
+/// Adds the counts a delta carried; one it left out adds nothing. Returns whether the text and
+/// the speech sum would have passed `u64::MAX` ([`add_token_counts`]).
+fn add_counts(total: &mut TokenCounts, delta: nova_sonic::TokenCounts) -> [bool; 2] {
+    let [text, speech, _] = add_token_counts(
         total,
         TokenCounts {
             text_tokens: delta.text.unwrap_or(0),
@@ -905,12 +1007,28 @@ fn add_counts(total: &mut TokenCounts, delta: nova_sonic::TokenCounts) {
             cached_tokens: 0,
         },
     );
+    [text, speech]
 }
 
-fn add_token_counts(total: &mut TokenCounts, delta: TokenCounts) {
-    total.text_tokens = total.text_tokens.saturating_add(delta.text_tokens);
-    total.audio_tokens = total.audio_tokens.saturating_add(delta.audio_tokens);
-    total.cached_tokens = total.cached_tokens.saturating_add(delta.cached_tokens);
+/// Adds `delta` to `total`, each sum stopping at `u64::MAX`, since the contract's `TokenCounts`
+/// has no unknown; returns whether the text, audio and cached sums would have passed it, so
+/// that the usage record can carry them as unknown.
+fn add_token_counts(total: &mut TokenCounts, delta: TokenCounts) -> [bool; 3] {
+    let add = |sum: &mut u64, count: u64| match sum.checked_add(count) {
+        Some(added) => {
+            *sum = added;
+            false
+        }
+        None => {
+            *sum = u64::MAX;
+            true
+        }
+    };
+    [
+        add(&mut total.text_tokens, delta.text_tokens),
+        add(&mut total.audio_tokens, delta.audio_tokens),
+        add(&mut total.cached_tokens, delta.cached_tokens),
+    ]
 }
 
 impl SpeechSessionHandle for NovaSonicSpeechSession {
@@ -918,10 +1036,11 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
         &self.ledger
     }
 
-    /// Sends the frame's bytes untouched once the ledger accepts it.
+    /// Sends the frame's bytes untouched once the ledger accepts it. Once the writer stopped, the
+    /// session fails first, after recording what already arrived, and the frame is refused.
     fn append_audio(&mut self, frame: AudioFrame) -> Result<(), SessionError> {
         if self.commands.is_closed() {
-            self.transport_closed();
+            self.commands_closed();
         }
         let pcm = frame.data.clone();
         let end = frame
@@ -959,12 +1078,16 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
     }
 
     /// Sends the result under the provider's `toolUseId`. Nova Sonic takes a JSON object; any
-    /// other value is sent as `{"result": value}`.
+    /// other value is sent as `{"result": value}`. Once the writer stopped, the session fails
+    /// first, after recording what already arrived, and the result is refused.
     fn submit_tool_result(
         &mut self,
         call_id: &SpeechCallId,
         result: Json,
     ) -> Result<(), SessionError> {
+        if self.commands.is_closed() {
+            self.commands_closed();
+        }
         let content = match &result {
             Json::Object(_) => result.to_string(),
             other => serde_json::json!({ "result": other }).to_string(),
@@ -978,9 +1101,16 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
         Ok(())
     }
 
-    /// Closes the session and ends the prompt and the session on the stream; nothing the provider
-    /// sends after is delivered.
+    /// Closes the session and ends the prompt and the session on the stream. What the provider
+    /// sent that already reached the binding is recorded first, so its usage counts and its
+    /// events are delivered after the close, before `SpeechSessionClosed`; from the first stream
+    /// end, client failure or service error among it, nothing is recorded, so an open session
+    /// closes rather than fails. An undecodable frame is none of these: the reader reads on, so
+    /// what follows it is recorded too. Nothing the provider sends after the close is delivered.
     fn close(&mut self) -> Result<(), SessionError> {
+        if self.ledger.session().require_open().is_ok() {
+            self.record_arrived();
+        }
         self.ledger.close()?;
         let _ = self.commands.send(Command::Close);
         Ok(())
@@ -998,9 +1128,16 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match self.arrivals.recv_timeout(remaining) {
                 Ok(arrival) => {
+                    let unreadable = matches!(arrival.what, Received::Undecodable(_));
                     self.record(arrival);
+                    if unreadable {
+                        self.ledger.check_liveness(Instant::now());
+                    }
                     if let Some(event) = self.ledger.next_event() {
                         return Some(event);
+                    }
+                    if Instant::now() >= deadline {
+                        break;
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => break,
@@ -1012,5 +1149,110 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
         }
         self.ledger.check_liveness(Instant::now());
         self.ledger.next_event()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(text: u64, speech: u64) -> nova_sonic::TokenCounts {
+        nova_sonic::TokenCounts {
+            speech: Some(speech),
+            text: Some(text),
+        }
+    }
+
+    fn value(tally: &Tally, kind: QuantityKind) -> Option<i64> {
+        tally
+            .quantities()
+            .into_iter()
+            .find(|quantity| quantity.kind() == kind)
+            .and_then(|quantity| quantity.value())
+    }
+
+    /// Input text tokens summing past `u64::MAX` are unknown in the usage record, the contract's
+    /// sum stops at `u64::MAX`, and the speech tokens beside them stay known.
+    #[test]
+    fn a_delta_carrying_a_sum_past_u64_max_leaves_it_unknown() {
+        let mut tally = Tally::default();
+        tally.add_input(input(u64::MAX, 2));
+        tally.add_input(input(1, 3));
+        assert_eq!(tally.counts[0], Count::Missing);
+        assert_eq!(tally.counts[1], Count::Reported);
+        assert_eq!(value(&tally, QuantityKind::InputTextTokens), None);
+        assert_eq!(value(&tally, QuantityKind::InputAudioTokens), Some(5));
+        assert_eq!(tally.sum.input.text_tokens, u64::MAX);
+    }
+
+    /// Two tallies whose output text sums pass `u64::MAX` taken together: the sum is unknown.
+    #[test]
+    fn tallies_merged_past_u64_max_leave_the_sum_unknown() {
+        let mut first = Tally::default();
+        first.add_output(input(u64::MAX, 1));
+        let mut second = Tally::default();
+        second.add_output(input(1, 1));
+        first.merge(second);
+        assert_eq!(first.counts[2], Count::Missing);
+        assert_eq!(first.counts[3], Count::Reported);
+        assert_eq!(value(&first, QuantityKind::OutputTextTokens), None);
+        assert_eq!(value(&first, QuantityKind::OutputAudioTokens), Some(2));
+        assert_eq!(first.sum.output.text_tokens, u64::MAX);
+    }
+
+    /// A sum below `u64::MAX` that a count would carry past it stops at `u64::MAX`, not where
+    /// it stood, in each of the three sums; the sums it does not pass add as usual.
+    #[test]
+    fn an_overflowing_sum_stops_at_u64_max() {
+        let mut total = TokenCounts {
+            text_tokens: u64::MAX - 1,
+            audio_tokens: u64::MAX - 2,
+            cached_tokens: u64::MAX - 3,
+        };
+        let passed = add_token_counts(
+            &mut total,
+            TokenCounts {
+                text_tokens: 2,
+                audio_tokens: 3,
+                cached_tokens: 4,
+            },
+        );
+        assert_eq!(passed, [true, true, true]);
+        assert_eq!(
+            total,
+            TokenCounts {
+                text_tokens: u64::MAX,
+                audio_tokens: u64::MAX,
+                cached_tokens: u64::MAX,
+            }
+        );
+        let passed = add_token_counts(
+            &mut total,
+            TokenCounts {
+                text_tokens: 0,
+                audio_tokens: 0,
+                cached_tokens: 0,
+            },
+        );
+        assert_eq!(passed, [false, false, false]);
+        let mut tally = Tally::default();
+        tally.add_input(input(u64::MAX - 1, 1));
+        tally.add_input(input(2, 1));
+        assert_eq!(tally.sum.input.text_tokens, u64::MAX);
+        assert_eq!(tally.sum.input.audio_tokens, 2);
+    }
+
+    /// Output speech tokens summing past `u64::MAX` mark the speech count unknown and stop the
+    /// sum at `u64::MAX`; the output text count beside them stays known.
+    #[test]
+    fn output_speech_past_u64_max_is_unknown() {
+        let mut tally = Tally::default();
+        tally.add_output(input(4, u64::MAX - 1));
+        tally.add_output(input(5, 2));
+        assert_eq!(tally.counts[2], Count::Reported);
+        assert_eq!(tally.counts[3], Count::Missing);
+        assert_eq!(value(&tally, QuantityKind::OutputTextTokens), Some(9));
+        assert_eq!(value(&tally, QuantityKind::OutputAudioTokens), None);
+        assert_eq!(tally.sum.output.audio_tokens, u64::MAX);
     }
 }
