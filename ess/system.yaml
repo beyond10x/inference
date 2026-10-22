@@ -30,3 +30,4 @@ domains:
   - inference.audio
   - inference.duplex
   - inference.usage
+  - inference.sdk
