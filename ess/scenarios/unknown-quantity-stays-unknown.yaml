@@ -1,0 +1,58 @@
+type: ess-scenario/1
+domain: inference.usage
+scenario: unknown-quantity-stays-unknown
+summary: A usage record whose provider reported no count for one kind keeps that quantity unknown, and the UsageRecords view publishes it with no value, never as zero, beside the counted quantity.
+arrange:
+  - instance: model
+    entity: inference.model.Model
+  - instance: adapter
+    entity: inference.model.Adapter
+  - instance: usage
+    entity: inference.usage.UsageRecord
+timeline:
+  - at: 2026-01-05T09:00:00Z
+    command: inference.model.DeclareModel
+    input:
+      family: chat
+      checkpoint: hosted
+      code_license: none
+      weight_license: none
+      checksum: none
+      input_modalities: [Text]
+      output_modalities: [Text]
+      provenance: hosted endpoint
+      source_revision: r1
+    outcome: declared
+    capture: {instance: model, event: inference.model.ModelDeclared, field: model_id}
+  - at: 2026-01-05T09:00:01Z
+    command: inference.model.DeclareAdapter
+    input:
+      model_id: {$instance: model}
+      backend: chat
+      contract_revision: r1
+      execution_form: hosted_service
+      locality: external_provider
+      capabilities: [output_streaming]
+      max_concurrency: 1
+    outcome: declared
+    capture: {instance: adapter, event: inference.model.AdapterDeclared, field: adapter_id}
+  - at: 2026-01-05T09:00:02Z
+    command: inference.usage.RecordUsage
+    input:
+      adapter_id: {$instance: adapter}
+      model_id: {$instance: model}
+      started_at_ms: 1000
+      ended_at_ms: 2000
+      final: true
+      quantities:
+        - {kind: output_text_tokens, source: provider_reported, value: 7}
+        - {kind: cached_input_tokens, source: unknown}
+    outcome: recorded
+    capture: {instance: usage, event: inference.usage.UsageRecorded, field: usage_record_id}
+assert:
+  - view: inference.usage.UsageRecords
+    contains:
+      usage_record_id: {$instance: usage}
+      quantities:
+        - {kind: output_text_tokens, source: provider_reported, value: 7}
+        - {kind: cached_input_tokens, source: unknown, value: null}
