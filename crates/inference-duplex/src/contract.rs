@@ -419,7 +419,15 @@ pub trait SpeechSessionHandle {
         result: Json,
     ) -> Result<(), SessionError>;
 
-    /// Closes the session.
+    /// Closes the session: every response in progress ends as cancelled, and the session takes
+    /// nothing more. What the binding received from the provider before the close is recorded
+    /// first, so each of those events, usage included, reaches the caller after the close and
+    /// before [`SpeechSessionClosed`]; a stream end or provider failure among them is not, so an
+    /// open session closes rather than fails. Nothing the provider sends after the close is
+    /// delivered. A caller that counts usage reads [`Self::next_event`] until
+    /// [`SpeechSessionClosed`].
+    ///
+    /// [`SpeechSessionClosed`]: crate::SpeechSessionClosed
     ///
     /// # Errors
     ///
@@ -429,7 +437,11 @@ pub trait SpeechSessionHandle {
     /// The next event, waiting at most `wait` for the provider. `None` means nothing arrived in
     /// `wait` and the session stands as it was. A provider silent beyond the liveness bound
     /// yields [`SpeechSessionFailed`] with [`SessionFailureKind::Stalled`], and a closed transport
-    /// yields it with [`SessionFailureKind::TransportClosed`] at once, never silence.
+    /// yields it with [`SessionFailureKind::TransportClosed`] at once, never silence, after the
+    /// events that arrived before the transport closed. A failure names the frames the binding
+    /// could not read. Stalled turns into ProviderError only when an unreadable frame arrived
+    /// after the last readable frame. A readable frame clears that state. The detail still names
+    /// the total unreadable count.
     ///
     /// [`SessionFailureKind::Stalled`]: crate::SessionFailureKind::Stalled
     /// [`SessionFailureKind::TransportClosed`]: crate::SessionFailureKind::TransportClosed

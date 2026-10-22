@@ -128,8 +128,8 @@ fn text_content_end_carries_the_stop_reason() {
         let OutputEvent::ContentEnd(end) = event else {
             panic!("expected content end, got {event:?}");
         };
-        assert_eq!(end.content_id, "t-1");
-        assert_eq!(end.kind, ContentKind::Text);
+        assert_eq!(end.content_id.as_deref(), Some("t-1"));
+        assert_eq!(end.kind, Some(ContentKind::Text));
         assert_eq!(end.stop_reason, Some(expected));
     }
 }
@@ -180,7 +180,7 @@ fn tool_use_is_typed() {
     let OutputEvent::ContentEnd(end) = end else {
         panic!("expected content end, got {end:?}");
     };
-    assert_eq!(end.kind, ContentKind::Tool);
+    assert_eq!(end.kind, Some(ContentKind::Tool));
     assert_eq!(end.stop_reason, Some(StopReason::ToolUse));
 }
 
@@ -354,7 +354,7 @@ fn completion_end_carries_the_stop_reason() {
         panic!("expected completion end, got {event:?}");
     };
     assert_eq!(ids.completion_id, "c-1");
-    assert_eq!(stop_reason, StopReason::EndTurn);
+    assert_eq!(stop_reason, Some(StopReason::EndTurn));
 }
 
 #[test]
@@ -367,7 +367,7 @@ fn an_unlisted_stop_reason_is_kept() {
     let OutputEvent::CompletionEnd { stop_reason, .. } = event else {
         panic!("expected completion end, got {event:?}");
     };
-    assert_eq!(stop_reason, StopReason::Other("SOMETHING_NEW".into()));
+    assert_eq!(stop_reason, Some(StopReason::Other("SOMETHING_NEW".into())));
 }
 
 #[test]
@@ -423,7 +423,7 @@ fn a_barge_in_notice_is_an_interruption_not_assistant_text() {
             event,
             OutputEvent::Interrupted {
                 completion_id: Some("c-1".into()),
-                content_id: "t-asst".into(),
+                content_id: Some("t-asst".into()),
             },
             "{notice:?}"
         );
@@ -450,5 +450,66 @@ fn text_that_is_not_the_notice_stays_text() {
         };
         assert_eq!(text.content, content);
         assert_eq!(text.role, Some(Role::Assistant));
+    }
+}
+
+/// The fields of an end are read each on its own: a `completionEnd` without its `stopReason` is
+/// still the end of the completion, and a `contentEnd` without its `contentId` or `type` still
+/// carries its `stopReason`.
+#[test]
+fn an_end_without_a_field_is_still_an_end() {
+    let mut decoder = Decoder::default();
+    let event = decode(
+        &mut decoder,
+        json!({"event": {"completionEnd": with_ids(json!({}))}}),
+    );
+    let OutputEvent::CompletionEnd { ids, stop_reason } = event else {
+        panic!("expected completion end, got {event:?}");
+    };
+    assert_eq!(ids.completion_id, "c-1");
+    assert_eq!(stop_reason, None);
+    let event = decode(
+        &mut decoder,
+        json!({"event": {"contentEnd": with_ids(json!({"stopReason": "INTERRUPTED"}))}}),
+    );
+    let OutputEvent::ContentEnd(end) = event else {
+        panic!("expected content end, got {event:?}");
+    };
+    assert_eq!(end.content_id, None);
+    assert_eq!(end.kind, None);
+    assert_eq!(end.stop_reason, Some(StopReason::Interrupted));
+}
+
+/// The barge-in notice without its `contentId` is still the notice.
+#[test]
+fn a_barge_in_notice_without_its_content_id_is_still_the_notice() {
+    let mut decoder = Decoder::default();
+    let event = decode(
+        &mut decoder,
+        json!({"event": {"textOutput": with_ids(json!({"content": "{\"interrupted\": true}"}))}}),
+    );
+    assert_eq!(
+        event,
+        OutputEvent::Interrupted {
+            completion_id: Some("c-1".into()),
+            content_id: None,
+        }
+    );
+}
+
+/// A frame that is not JSON, or JSON without an `event` object, is named by the start of its
+/// text.
+#[test]
+fn a_frame_that_cannot_be_read_is_named_by_its_start() {
+    let mut decoder = Decoder::default();
+    for (frame, start) in [
+        ("<html>bad gateway</html>", "<html>bad gateway"),
+        ("{\"status\": 502}", "status\\\": 502}"),
+    ] {
+        let result = decoder.decode(frame.as_bytes());
+        assert!(
+            matches!(&result, Err(NovaSonicError::Decode(detail)) if detail.contains(start)),
+            "{frame} -> {result:?}"
+        );
     }
 }
