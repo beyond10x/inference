@@ -271,11 +271,11 @@ impl LiveSessionConfig {
 }
 
 /// The token usage of one backend response, from its nested `response.completed` (or failed or
-/// incomplete). The output tokens and the details are `None` when the server did not report
-/// them; the total is the server's, else the sum of input and output when both are known.
+/// incomplete). Each count is `None` when the server did not report it or sent it in another
+/// shape; the total is the server's, else the sum of input and output when both are known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct BackendUsage {
-    pub input_tokens: u64,
+    pub input_tokens: Option<u64>,
     /// Input tokens served from the cache, counted inside `input_tokens`.
     pub cached_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -293,7 +293,7 @@ impl fmt::Display for BackendUsage {
             f,
             "total {} tokens; input {} (cached {}); output {} (reasoning {})",
             detail(self.total_tokens),
-            self.input_tokens,
+            detail(self.input_tokens),
             detail(self.cached_tokens),
             detail(self.output_tokens),
             detail(self.reasoning_tokens),
@@ -316,8 +316,8 @@ pub enum BackendEvent {
     },
     /// `response.completed`, with the usage the server reported; `response_id` is `None` when
     /// the server left it out. `unreadable_usage` says what of a `usage` the client could not
-    /// read: one without `input_tokens` or not an object is `None`, one without `output_tokens`
-    /// is kept with its output tokens `None`.
+    /// read: a `response` or `usage` that is no object gives no usage, and a count missing or in
+    /// another shape is `None` in the usage kept.
     Completed {
         response_id: Option<String>,
         usage: Option<BackendUsage>,
@@ -527,10 +527,9 @@ fn backend(event: Fields<'_>) -> Result<BackendEvent, RealtimeError> {
             }
         }
         "response.completed" => {
-            let response = nested.nested("response").ok();
-            let (usage, unreadable_usage) = response
-                .map(|response| response.backend_usage())
-                .unwrap_or_default();
+            let response = nested.nested("response");
+            let (usage, unreadable_usage) = response_usage(&response);
+            let response = response.ok();
             BackendEvent::Completed {
                 response_id: response.and_then(|response| response.lenient_string("id")),
                 usage,
@@ -538,10 +537,9 @@ fn backend(event: Fields<'_>) -> Result<BackendEvent, RealtimeError> {
             }
         }
         "response.failed" | "response.incomplete" => {
-            let response = nested.nested("response").ok();
-            let (usage, unreadable_usage) = response
-                .map(|response| response.backend_usage())
-                .unwrap_or_default();
+            let response = nested.nested("response");
+            let (usage, unreadable_usage) = response_usage(&response);
+            let response = response.ok();
             BackendEvent::Ended {
                 response_id: response.and_then(|response| response.lenient_string("id")),
                 status: response
@@ -556,6 +554,18 @@ fn backend(event: Fields<'_>) -> Result<BackendEvent, RealtimeError> {
             raw: event.raw.clone(),
         },
     })
+}
+
+/// The usage of a backend response end's `response` and what of it could not be read; a
+/// `response` missing or not an object has no usage, and that is what could not be read.
+fn response_usage(
+    response: &Result<Fields<'_>, RealtimeError>,
+) -> (Option<BackendUsage>, Option<String>) {
+    match response {
+        Ok(response) => response.backend_usage(),
+        Err(RealtimeError::Protocol(what)) => (None, Some(what.clone())),
+        Err(error) => (None, Some(error.to_string())),
+    }
 }
 
 /// Field access on one JSON object of a typed event; a missing or mistyped field the reference
@@ -642,8 +652,9 @@ impl<'a> Fields<'a> {
     }
 
     /// The Responses `usage` of a response object, read field by field, and what of it could not
-    /// be read: `(None, None)` when it has none; no usage when it is not an object or lacks
-    /// `input_tokens`; one with its output tokens `None` when it lacks `output_tokens`.
+    /// be read: `(None, None)` when it has none; no usage when it is not an object; otherwise
+    /// every count it carries, `input_tokens` or `output_tokens` `None` when missing or not a
+    /// non-negative integer, and then named as what could not be read.
     fn backend_usage(&self) -> (Option<BackendUsage>, Option<String>) {
         let Some(usage) = self.get("usage") else {
             return (None, None);
@@ -652,16 +663,18 @@ impl<'a> Fields<'a> {
             return (None, Some(self.lacks("usage", "the object")));
         }
         let count = |value: Option<&Value>| value.and_then(Value::as_u64);
-        let Some(input_tokens) = count(usage.get("input_tokens")) else {
-            return (
-                None,
-                Some(self.lacks("usage.input_tokens", "the non-negative integer")),
-            );
-        };
+        let input_tokens = count(usage.get("input_tokens"));
         let output_tokens = count(usage.get("output_tokens"));
-        let unreadable = output_tokens
-            .is_none()
-            .then(|| self.lacks("usage.output_tokens", "the non-negative integer"));
+        let unreadable = match (input_tokens, output_tokens) {
+            (Some(_), Some(_)) => None,
+            (None, Some(_)) => Some(self.lacks("usage.input_tokens", "the non-negative integer")),
+            (Some(_), None) => Some(self.lacks("usage.output_tokens", "the non-negative integer")),
+            (None, None) => Some(format!(
+                "`{}` lacks the non-negative integer fields `usage.input_tokens` and \
+                 `usage.output_tokens`",
+                self.event_type
+            )),
+        };
         let usage = BackendUsage {
             input_tokens,
             cached_tokens: count(
@@ -675,8 +688,11 @@ impl<'a> Fields<'a> {
                     .get("output_tokens_details")
                     .and_then(|details| details.get("reasoning_tokens")),
             ),
-            total_tokens: count(usage.get("total_tokens"))
-                .or_else(|| output_tokens.map(|output| input_tokens + output)),
+            total_tokens: count(usage.get("total_tokens")).or_else(|| {
+                input_tokens
+                    .zip(output_tokens)
+                    .map(|(input, output)| input + output)
+            }),
         };
         (Some(usage), unreadable)
     }

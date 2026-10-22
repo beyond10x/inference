@@ -52,13 +52,15 @@
 //!   session, recorded at its end before the end event as usage naming no response; each sum
 //!   as text tokens (the backend takes no audio),
 //!   cached tokens inside them; a session without backend work records no `ResponseUsage`. In a
-//!   response's usage record those sums are reported, its audio tokens unknown, and its cached
-//!   or output tokens unknown once one backend response left them out; backend usage may arrive
-//!   after a response's silence gap ended it, so the record waits for the next response or the
-//!   session's end. In the contract's `ResponseUsage` a cached or output count the server left
-//!   out is 0, its absence kept in [`OpenAiLiveSession::backend_usage`]. A backend usage without
-//!   its output tokens counts its input tokens; one without its input tokens, or not an object,
-//!   counts nothing. Either counts its frame once as one the binding could not read in full.
+//!   response's usage record those sums are reported, its audio tokens unknown, and its input,
+//!   cached or output tokens unknown once one backend response left them out; backend usage may
+//!   arrive after a response's silence gap ended it, so the record waits for the next response
+//!   or the session's end. In the contract's `ResponseUsage` a count the server left out is 0,
+//!   its absence kept in [`OpenAiLiveSession::backend_usage`]. A backend usage is read field by
+//!   field: each count it carries is summed, and one missing or in another shape is unknown. A
+//!   backend usage missing its input or output tokens, a `usage` that is not an object and a
+//!   backend response end whose `response` is missing or not an object each count their frame
+//!   once as one the binding could not read in full; the last two count no usage.
 //! * A refused handshake (HTTP 401 or 403) fails the open as rejected, any other failure to
 //!   connect as a closed transport. A `session.closed` the caller did not ask for (expired, a
 //!   safety filter, a remote hangup) fails the session as a provider error, `connection_lost` as
@@ -69,7 +71,7 @@
 //! * A message the client cannot read (not JSON, no `type`, a typed event without a field it
 //!   needs) is dropped and reading goes on. It is counted on the session
 //!   ([`SessionLedger::unreadable_frames`]), so is a `session.closed` lacking a field or a
-//!   backend response end whose `usage` was read only in part, and none
+//!   backend response end whose `response` or `usage` was read only in part, and none
 //!   refreshes the liveness bound. A later failure of the session names how many there were and
 //!   the last. Stalled turns into ProviderError only when an unreadable frame arrived after the
 //!   last readable frame. A readable frame clears that state. The detail still names the total
@@ -416,6 +418,7 @@ impl NativeSpeechModel for OpenAiLive {
             emitted: HashMap::new(),
             usage: HashMap::new(),
             cached: HashMap::new(),
+            input: HashMap::new(),
             output: HashMap::new(),
             backend_usage: Vec::new(),
             voice_seconds: None,
@@ -477,6 +480,8 @@ pub struct OpenAiLiveSession {
     usage: HashMap<Option<ResponseId>, ResponseUsage>,
     /// The cached tokens summed as `usage` is; `None` once a backend response left them out.
     cached: HashMap<Option<ResponseId>, Option<u64>>,
+    /// The input tokens summed as `usage` is; `None` once a backend response left them out.
+    input: HashMap<Option<ResponseId>, Option<u64>>,
     /// The output tokens summed as `usage` is; `None` once a backend response left them out.
     output: HashMap<Option<ResponseId>, Option<u64>>,
     backend_usage: Vec<BackendUsage>,
@@ -704,7 +709,7 @@ impl OpenAiLiveSession {
         let sum = self.usage.entry(id).or_default();
         *sum = ResponseUsage {
             input: TokenCounts {
-                text_tokens: sum.input.text_tokens + usage.input_tokens,
+                text_tokens: sum.input.text_tokens + usage.input_tokens.unwrap_or(0),
                 audio_tokens: 0,
                 cached_tokens: sum.input.cached_tokens + usage.cached_tokens.unwrap_or(0),
             },
@@ -716,9 +721,10 @@ impl OpenAiLiveSession {
         };
         let sum = *sum;
         let cached = known_sum(&mut self.cached, id, usage.cached_tokens);
+        let input = known_sum(&mut self.input, id, usage.input_tokens);
         let output = known_sum(&mut self.output, id, usage.output_tokens);
         let quantities = vec![
-            reported(QuantityKind::InputTextTokens, Some(sum.input.text_tokens)),
+            reported(QuantityKind::InputTextTokens, input),
             reported(QuantityKind::CachedInputTokens, cached),
             reported(QuantityKind::OutputTextTokens, output),
         ];

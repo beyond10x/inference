@@ -1468,7 +1468,11 @@ fn a_backend_usage_without_output_tokens_counts_its_input_and_leaves_the_output_
         .iter()
         .map(|usage| (usage.input_tokens, usage.output_tokens))
         .collect();
-    assert_eq!(outputs, [(12, Some(3)), (20, None)], "{closing:#?}");
+    assert_eq!(
+        outputs,
+        [(Some(12), Some(3)), (Some(20), None)],
+        "{closing:#?}"
+    );
     assert_eq!(
         quantity(&closing, response, QuantityKind::InputTextTokens),
         Some(32)

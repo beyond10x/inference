@@ -198,7 +198,7 @@ fn a_backend_usage_without_output_tokens_is_counted_or_reported() {
     let input: u64 = session
         .backend_usage()
         .iter()
-        .map(|usage| usage.input_tokens)
+        .filter_map(|usage| usage.input_tokens)
         .sum();
     let unreadable = session.ledger().unreadable_frames();
     assert!(
