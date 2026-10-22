@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-22T11:13:37Z",
+  "actor": "human:timo",
+  "artifact": "story:ess-pin-newest",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "a3df986",
+    "review": "review-result:ess-pin-newest-adversary-1",
+    "outcome": "fixed"
+  }
+}

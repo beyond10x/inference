@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-22T11:22:13Z",
+  "actor": "human:timo",
+  "artifact": "story:ess-pin-newest",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0 with ess 0.67.0, no newer warning: 355 suites, 2548 passed, 0 failed, 50 ignored (wave/28 4c2e277)"
+  }
+}

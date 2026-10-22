@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-22T11:22:13Z",
+  "actor": "human:timo",
+  "artifact": "story:realtime-voice-demo",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p realtime-voice exit 0: 7 suites, 28 passed, 0 failed, 1 ignored (wave/28 4c2e277); device run pending"
+  }
+}

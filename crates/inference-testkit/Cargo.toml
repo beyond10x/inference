@@ -30,8 +30,8 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-ess-conformance = { git = "https://github.com/beyond10x/ess", tag = "0.66.0" }
-ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.66.0" }
+ess-conformance = { git = "https://github.com/beyond10x/ess", tag = "0.67.0" }
+ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.67.0" }
 serde.workspace = true
 
 [[test]]

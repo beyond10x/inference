@@ -2,11 +2,34 @@
 format: aep.planning-md/3
 id: story:ess-pin-newest
 kind: story
-status: draft
+status: implemented
 title: The ess pin moves to the newest release in the next wave
 relations:
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: cited
+  path: .github/workflows/check.yml
+- confidence: cited
+  path: .github/workflows/pages.yml
+- confidence: cited
+  path: CHANGELOG.md
+- confidence: cited
+  path: Cargo.lock
+- confidence: cited
+  path: crates/inference-docs/tests/ess_pin.rs
+- confidence: cited
+  path: crates/inference-testkit/Cargo.toml
+- confidence: inferred
+  path: ess
+- confidence: cited
+  path: ess/ess-inputs.yaml
+- confidence: cited
+  path: website/docs/guides/run-the-checks.md
+revision: 13
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-22T10:35:25Z", actor: "human:timo", revision: 9}
+- {from: "proposed", to: "active", at: "2026-10-22T10:35:25Z", actor: "human:timo", revision: 10}
+- {from: "active", to: "implemented", at: "2026-10-22T11:35:30Z", actor: "human:timo", revision: 13, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 ## Context
 
