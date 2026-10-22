@@ -109,16 +109,19 @@
   `status` but an unreadable `usage`, or a transcription without its transcript or with an
   unreadable `usage`. What such a frame recorded stays recorded. A Realtime `response.done`
   without `status` still starts the bound anew, since the caller then awaits a new response. The
-  bound returns only to its instant before the frame, never to an earlier limit; it never
-  undoes a readable frame heard after the mark was taken, and a mark of another session
-  changes nothing.
+  bound runs from the latest readable frame and its limit never changes: a readable frame
+  heard after the mark stays, frames read in part under overlapping marks are each taken out in
+  either order, one read in part at the instant last heard leaves a bound that waited for the
+  next check waiting, and a mark of another session changes nothing.
 - A token sum that would pass `u64::MAX` no longer wraps or panics. In a usage record it is
   unknown (GPT-Live backend usage sums and the total of input and output, Nova Sonic usage sums);
   the contract's `ResponseUsage`, which has no unknown, stops at `u64::MAX`, as does an OpenAI
   Realtime total the server left out. A Realtime transcription total the server left out is
   unknown when its input and output tokens sum past `u64::MAX`.
 - A token count above `i64::MAX` is recorded as unknown in a duplex usage record
-  (`inference_duplex::reported`), not clamped to `i64::MAX`.
+  (`inference_duplex::reported`), not clamped to `i64::MAX`, and so are TTS input
+  characters and output audio milliseconds and STT input audio milliseconds in their usage
+  records.
 
 ## [0.7.0] — 2026-10-21
 

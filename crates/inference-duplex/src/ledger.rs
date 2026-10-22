@@ -30,13 +30,14 @@ pub struct Liveness {
 }
 
 /// Where the liveness bound of a session stood before a frame was recorded
-/// ([`SessionLedger::liveness_mark`]): the session, the instant its provider was last heard
+/// ([`SessionLedger::liveness_mark`]): the session, how many times its provider had been heard
 /// from and whether its bound waited for the next check, so that a frame read only in part
-/// leaves the bound there ([`SessionLedger::read_in_part`]). It carries no limit.
+/// leaves the bound where its readable frames put it ([`SessionLedger::read_in_part`]). It
+/// carries no limit and no instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LivenessMark {
     session_id: SpeechSessionId,
-    last_heard: Instant,
+    hearings: u64,
     clock_pending: bool,
 }
 
@@ -133,9 +134,16 @@ pub struct SessionLedger {
     requested: bool,
     /// The bound was armed without an instant: it starts at the next liveness check.
     clock_pending: bool,
-    /// The instant the bound ran from before it last moved to a later one, so that
-    /// [`SessionLedger::read_in_part`] can undo only what the frame read in part moved.
-    heard_before: Instant,
+    /// The most recent times the provider was heard from, at most
+    /// [`SessionLedger::HEARINGS_KEPT`], oldest first: how many times it had been heard from
+    /// before each, and its instant. A frame read in part takes its own out
+    /// ([`SessionLedger::read_in_part`]), and the bound runs from the latest left.
+    hearings: VecDeque<(u64, Instant)>,
+    /// How many times the provider was heard from.
+    heard_count: u64,
+    /// The latest instant among the hearings no longer kept, and the instant the session opened:
+    /// the bound never runs from earlier than this.
+    heard_floor: Instant,
     /// How many frames the binding could not read, whole or in part
     /// ([`SessionLedger::unreadable_frame`]), and what the last one was.
     unreadable: (u64, Option<String>),
@@ -211,6 +219,10 @@ fn millis(duration: Duration) -> i64 {
 impl SessionLedger {
     /// How many of the most recent dropped refusals [`Self::dropped_events`] keeps.
     pub const DROPPED_EVENTS_KEPT: usize = 64;
+
+    /// How many of the most recent times the provider was heard from the ledger keeps, so that a
+    /// frame read in part can be taken out of the liveness bound ([`Self::read_in_part`]).
+    pub const HEARINGS_KEPT: usize = 64;
 
     /// Runs `inference.duplex.OpenSpeechSession` for `adapter` under `session_id` with `config`,
     /// once `capabilities` admit it; the provider is heard from at `now`.
@@ -319,7 +331,9 @@ impl SessionLedger {
             liveness: Liveness::new(idle_limit, now),
             requested: false,
             clock_pending: false,
-            heard_before: now,
+            hearings: VecDeque::new(),
+            heard_count: 0,
+            heard_floor: now,
             unreadable: (0, None),
             unread_since_readable: false,
             dropped: (0, Vec::new()),
@@ -707,9 +721,13 @@ impl SessionLedger {
     /// The liveness bound runs from `now`.
     fn restart_bound(&mut self, now: Instant) {
         self.tick(now);
-        if now > self.liveness.last_heard {
-            self.heard_before = self.liveness.last_heard;
+        if self.hearings.len() == Self::HEARINGS_KEPT
+            && let Some((_, forgotten)) = self.hearings.pop_front()
+        {
+            self.heard_floor = self.heard_floor.max(forgotten);
         }
+        self.hearings.push_back((self.heard_count, now));
+        self.heard_count = self.heard_count.saturating_add(1);
         self.liveness.heard(now);
         self.clock_pending = false;
     }
@@ -753,12 +771,13 @@ impl SessionLedger {
     }
 
     /// Where the liveness bound stands now, taken before a frame is recorded, so that
-    /// [`Self::read_in_part`] can leave it there.
+    /// [`Self::read_in_part`] can take the frame out of it. Marks may overlap: several taken
+    /// before any of their frames is resolved, resolved in any order.
     #[must_use]
     pub fn liveness_mark(&self) -> LivenessMark {
         LivenessMark {
             session_id: self.session.session_id(),
-            last_heard: self.liveness.last_heard,
+            hearings: self.heard_count,
             clock_pending: self.clock_pending,
         }
     }
@@ -768,20 +787,32 @@ impl SessionLedger {
     /// life, and the frame is counted as one the binding could not read
     /// ([`Self::unreadable_frame`]).
     ///
-    /// When recording the frame moved the bound to `now`, the bound runs again from where it
-    /// ran before: from the mark's instant, or from a frame heard after the mark and before
-    /// `now`, whichever is later, so a readable frame after the mark is never undone. A bound
-    /// that waited for the next check before the frame waits again, unless a frame heard after
-    /// the mark started it. Only the instant changes, never the session's limit, and a mark
-    /// taken at `now` or of another session changes nothing.
+    /// Every time the provider was heard from at `now` since the mark was taken is the frame's
+    /// own and is taken out of the liveness bound, which runs again from the latest time left:
+    /// a readable frame heard after the mark stays, and so does any heard before it. Frames
+    /// read in part under overlapping marks are each taken out, in whatever order they are
+    /// resolved. When none is left since the mark and the bound waited for the next check at
+    /// the mark, it waits again. Only the instant changes, never the session's limit, and a mark
+    /// of another session changes nothing. The ledger keeps the most recent
+    /// [`Self::HEARINGS_KEPT`] times it heard the provider; a frame heard before them stays in
+    /// the bound.
     pub fn read_in_part(&mut self, mark: LivenessMark, what: impl Into<String>, now: Instant) {
-        let moved_by_frame = mark.session_id == self.session.session_id()
-            && mark.last_heard < now
-            && self.liveness.last_heard == now;
-        if moved_by_frame {
-            let heard_after_mark = self.heard_before > mark.last_heard;
-            self.liveness.last_heard = mark.last_heard.max(self.heard_before);
-            self.clock_pending = mark.clock_pending && !heard_after_mark;
+        if mark.session_id == self.session.session_id() {
+            let kept = self.hearings.len();
+            self.hearings
+                .retain(|&(count, at)| count < mark.hearings || at != now);
+            if self.hearings.len() < kept {
+                self.liveness.last_heard = self
+                    .hearings
+                    .iter()
+                    .map(|&(_, at)| at)
+                    .fold(self.heard_floor, Instant::max);
+                let heard_since = self
+                    .hearings
+                    .iter()
+                    .any(|&(count, _)| count >= mark.hearings);
+                self.clock_pending |= mark.clock_pending && !heard_since;
+            }
         }
         self.unreadable_frame(what, now);
     }
