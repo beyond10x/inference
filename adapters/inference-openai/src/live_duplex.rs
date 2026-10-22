@@ -89,7 +89,7 @@ use inference_core::model::{
 };
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
-    NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
+    NativeSpeechModel, OpenError, ProviderFrame, Quantity, QuantityKind, ResponseId, ResponseUsage,
     SessionConfig as SpeechConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
     SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechSessionId,
     TokenCounts, TuningSupport, TurnDetection, Unsupported, UsageTotal, reported,
@@ -475,10 +475,10 @@ struct BackendSum {
 impl BackendSum {
     /// Records the sum as the response's running total, or holds it in the ledger for the
     /// session's end; what the ledger refuses is dropped.
-    fn record(self, ledger: &mut SessionLedger, now: Instant) {
+    fn record(self, frame: &mut ProviderFrame<'_>, now: Instant) {
         match self.id {
             Some(id) => {
-                let refused = ledger.response_usage_reported(
+                let refused = frame.response_usage_reported(
                     id,
                     Some(self.sum),
                     self.quantities,
@@ -486,10 +486,10 @@ impl BackendSum {
                     now,
                 );
                 if let Err(refusal) = refused {
-                    ledger.dropped(refusal);
+                    frame.dropped(refusal);
                 }
             }
-            None => ledger.hold_usage(self.quantities),
+            None => frame.hold_usage(self.quantities),
         }
     }
 }

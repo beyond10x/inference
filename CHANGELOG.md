@@ -22,9 +22,10 @@
   `unreadable_frames`, `last_unreadable`) and ends a response the provider ended unreadably
   (`response_ended_unread`). A binding records a frame it may read only in part through
   `SessionLedger::provider_frame`, one frame at a time: the `ProviderFrame` borrows the ledger,
-  so overlapping frames do not compile. `ProviderFrame::read_in_part` counts the frame after what
-  it recorded and takes every hearing of the frame out of the liveness bound; dropped, the frame
-  was readable.
+  so overlapping frames do not compile. The frame records through methods of its own that
+  forward to the ledger's, and hands out no `&mut SessionLedger`, so the ledger under it cannot
+  be replaced. `ProviderFrame::read_in_part` counts the frame after what it recorded and takes
+  every hearing of the frame out of the liveness bound; dropped, the frame was readable.
 - `SessionLedger::usage_awaited` keeps the next response from settling a response whose final
   usage the provider reports in a frame of its own; `SessionLedger::response_usage_unknown`
   settles it unknown when that frame was lost. `SessionLedger::dropped` counts every refusal a
@@ -114,8 +115,8 @@
   bound runs from the latest readable frame and its limit never changes. Frames are recorded one
   at a time, and a frame read in part is taken out whole however often it heard the provider: a
   readable frame before it stays, also at the same instant, a request, answer or check while it
-  is open stays, and one read in part at the instant last heard leaves a bound that waited for
-  the next check waiting.
+  is open stays, a check inside it starts a bound that waited for that check, and one read in
+  part at the instant last heard leaves a bound that waited for the next check waiting.
 - A token sum that would pass `u64::MAX` no longer wraps or panics. In a usage record it is
   unknown (GPT-Live backend usage sums and the total of input and output, Nova Sonic usage sums);
   the contract's `ResponseUsage`, which has no unknown, stops at `u64::MAX`, as does an OpenAI

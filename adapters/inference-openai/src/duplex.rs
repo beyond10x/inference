@@ -594,7 +594,9 @@ impl OpenAiRealtimeSession {
     /// A ledger refusal the binding drops: it changed nothing, and the ledger counts it
     /// ([`SessionLedger::dropped`]).
     fn or_drop(&mut self, result: Result<(), SessionError>) {
-        drop_refusal(&mut self.ledger, result);
+        if let Err(refusal) = result {
+            self.ledger.dropped(refusal);
+        }
     }
 
     /// The response a `response.done` without its id ends: the oldest awaiting its end that one
@@ -995,9 +997,9 @@ impl OpenAiRealtimeSession {
 
 /// A ledger refusal the binding drops: it changed nothing, and the ledger counts it
 /// ([`SessionLedger::dropped`]).
-fn drop_refusal(ledger: &mut SessionLedger, result: Result<(), SessionError>) {
+fn drop_refusal(frame: &mut ProviderFrame<'_>, result: Result<(), SessionError>) {
     if let Err(refusal) = result {
-        ledger.dropped(refusal);
+        frame.dropped(refusal);
     }
 }
 
