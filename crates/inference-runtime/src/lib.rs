@@ -12,7 +12,8 @@
 //! explicit; a [`NodeInstance`] is described for a run that is Preparing or Active and moves
 //! Described, Prepared, Started, Draining or Cancelling, Stopped, with Failed explicit. A
 //! [`RunController`] builds one queue per edge and per exposure of the run, hands its caller the
-//! outer end of each exposure ([`ExposedEnds`]), drives each node's
+//! outer end of each exposure ([`ExposedEnds`]), and the reading end of each `usage` port no edge
+//! leaves and no exposure carries ([`UnconnectedUsage`], [`usage_sink`]), drives each node's
 //! [`NodeImplementation`](inference_pipeline::NodeImplementation) through its instance as the run
 //! moves, and fails the run with a reason naming a node that returned an error. Its run loop,
 //! [`RunController::drive`], issues `DrainRun` once every source node has sent its end of input,
@@ -45,6 +46,7 @@ pub mod replay;
 pub mod run;
 pub mod subgraph;
 pub mod telemetry;
+pub mod usage_sink;
 
 pub use controller::{
     CreateControllerError, Egress, ExposedEnds, FailNodeError, Ingress, InstanceConflict,
@@ -61,3 +63,4 @@ pub use run::{
     RunStateConflict,
 };
 pub use subgraph::{ChildAtStop, ChildImplementations, SubgraphHandle, SubgraphNode};
+pub use usage_sink::{UnconnectedUsage, uncounted_usage};

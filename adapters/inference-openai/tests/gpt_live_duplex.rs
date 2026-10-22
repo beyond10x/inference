@@ -19,10 +19,11 @@ use inference_core::model::Capability;
 use inference_duplex::conformance::{NativeDuplexProbe, NoNativeDuplex, native_duplex_evidence};
 use inference_duplex::{
     NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage, SessionConfig,
-    SessionError, SessionEvent, SessionFailureKind, SpeechSessionHandle, TokenCounts, TuningOption,
-    TuningSupport, TurnDetection, TurnSensitivity, TurnTuning, Unsupported, UsageRecorded,
+    SessionError, SessionEvent, SessionFailureKind, SpeechSessionHandle, SpeechSessionState,
+    TokenCounts, TuningOption, TuningSupport, TurnDetection, TurnSensitivity, TurnTuning,
+    Unsupported, UsageRecorded,
 };
-use inference_openai::live::{LIVE_MODEL, LiveClosed, LiveFormat};
+use inference_openai::live::{CLOSE_TIMEOUT, LIVE_MODEL, LiveClosed, LiveFormat};
 use inference_openai::live_duplex::{
     DEFAULT_BACKEND_MODEL, OpenAiLive, Segmentation, capabilities, claims, live_format,
     native_duplex_verdict,
@@ -745,8 +746,8 @@ fn voice_seconds_are_the_running_total_and_close_confirms_the_final_usage() {
     assert_eq!(
         session.final_usage(),
         Some(&LiveClosed {
-            reason: "close_requested".to_owned(),
-            seconds: 4.5
+            reason: Some("close_requested".to_owned()),
+            seconds: Some(4.5)
         })
     );
     assert_eq!(session.voice_seconds(), Some(4.5));
@@ -758,8 +759,8 @@ fn voice_seconds_are_the_running_total_and_close_confirms_the_final_usage() {
             [
                 SessionEvent::UsageRecorded(of_response),
                 SessionEvent::ResponseCancelled(_),
-                SessionEvent::SpeechSessionClosed(_),
                 SessionEvent::UsageRecorded(of_session),
+                SessionEvent::SpeechSessionClosed(_),
             ] if of_response.response_id == Some(response) && of_session.response_id.is_none()
         ),
         "{closing:?}"
@@ -828,8 +829,8 @@ fn backend_usage_before_any_response_is_recorded_for_the_session_at_its_end() {
             closing.as_slice(),
             [
                 SessionEvent::UsageRecorded(held),
-                SessionEvent::SpeechSessionClosed(_),
                 SessionEvent::UsageRecorded(seconds),
+                SessionEvent::SpeechSessionClosed(_),
             ] if held.response_id.is_none() && seconds.response_id.is_none()
         ),
         "{closing:?}"
@@ -877,20 +878,21 @@ fn a_session_the_server_ends_or_drops_fails() {
         "{events:?}"
     );
     assert_eq!(
-        session.final_usage().map(|closed| closed.seconds),
+        session.final_usage().and_then(|closed| closed.seconds),
         Some(1800.0)
     );
-    let after: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
     assert!(
         matches!(
-            after.as_slice(),
-            [SessionEvent::UsageRecorded(record)]
+            &events[events.len() - 2],
+            SessionEvent::UsageRecorded(record)
                 if record.response_id.is_none()
                     && record.r#final
                     && record.quantities == [Quantity::provider_reported(QuantityKind::InputAudioMs, 1_800_000)]
         ),
-        "{after:?}"
+        "the seconds session.closed carried, before the failure: {events:?}"
     );
+    let after: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert!(after.is_empty(), "nothing after the failure: {after:?}");
 
     let dropped = Server::start(|mut socket| async move {
         accept_start(&mut socket).await;
@@ -907,17 +909,18 @@ fn a_session_the_server_ends_or_drops_fails() {
         "{events:?}"
     );
     assert_eq!(session.final_usage(), None, "final usage unconfirmed");
-    let after: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
     assert!(
         matches!(
-            after.as_slice(),
-            [SessionEvent::UsageRecorded(record)]
+            &events[events.len() - 2],
+            SessionEvent::UsageRecorded(record)
                 if record.response_id.is_none()
                     && !record.r#final
                     && record.quantities == [Quantity::unknown(QuantityKind::InputAudioMs)]
         ),
-        "no seconds reported, none confirmed: {after:?}"
+        "no seconds reported, none confirmed, before the failure: {events:?}"
     );
+    let after: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert!(after.is_empty(), "nothing after the failure: {after:?}");
 }
 
 #[test]
@@ -1066,4 +1069,425 @@ fn the_evidence_procedure_runs_through_the_segmentation_against_a_replay() {
         "{refused:?}"
     );
     assert!(native_duplex_verdict(&Err(NoNativeDuplex::Silent)).is_err());
+}
+
+/// A server that speaks, completes one backend response with its usage, then does what `then`
+/// says.
+fn spoke_then<F, Fut>(then: F) -> Server
+where
+    F: FnOnce(Socket) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    Server::start(move |mut socket| async move {
+        accept_start(&mut socket).await;
+        send(&mut socket, said(" Hi.", 0)).await;
+        send(
+            &mut socket,
+            backend("del_1", backend_completed("resp_1", 12, 4, 3)),
+        )
+        .await;
+        then(socket).await;
+    })
+}
+
+/// The output text tokens of the usage record of `response` among `events`.
+fn output_text_tokens(events: &[SessionEvent], response: ResponseId) -> Option<i64> {
+    let recorded: Vec<_> = records(events)
+        .into_iter()
+        .filter(|record| record.response_id == Some(response))
+        .collect();
+    assert_eq!(recorded.len(), 1, "{events:#?}");
+    recorded[0]
+        .quantities
+        .iter()
+        .find(|quantity| quantity.kind() == QuantityKind::OutputTextTokens)
+        .and_then(Quantity::value)
+}
+
+/// The backend's usage already reached the binding when the caller closes: the close records
+/// it on the response, before `SpeechSessionClosed`.
+#[test]
+fn backend_usage_that_arrived_before_the_close_is_recorded_before_the_session_closed() {
+    let server = spoke_then(|mut socket| async move {
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::OutputTranscriptDelta(_))
+    });
+    let response = created(&events)[0];
+    std::thread::sleep(Duration::from_millis(300));
+    session.close().expect("open");
+    server.finish();
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert_eq!(session.backend_usage().len(), 1, "{closing:#?}");
+    assert_eq!(output_text_tokens(&closing, response), Some(3));
+    let closed = closing
+        .iter()
+        .position(|event| matches!(event, SessionEvent::SpeechSessionClosed(_)))
+        .expect("the session closed");
+    let of_response = closing
+        .iter()
+        .position(|event| {
+            matches!(event, SessionEvent::UsageRecorded(record) if record.response_id == Some(response))
+        })
+        .expect("the response's record");
+    assert!(
+        of_response < closed && closed == closing.len() - 1,
+        "{closing:#?}"
+    );
+}
+
+/// The connection closed after the backend's usage reached the binding, so a send fails: the
+/// usage is recorded before the session fails, and the failure is the closed connection.
+#[test]
+fn backend_usage_that_arrived_before_a_failed_send_is_recorded_before_the_failure() {
+    let server = spoke_then(|mut socket| async move {
+        let _ = socket.close(None).await;
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::OutputTranscriptDelta(_))
+    });
+    let response = created(&events)[0];
+    server.finish();
+    std::thread::sleep(Duration::from_millis(300));
+    let mut refused = None;
+    for index in 0..20 {
+        if let Err(error) = session.append_audio(input(index * u64::from(FRAME))) {
+            refused = Some(error);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(refused.is_some(), "a send on the closed connection fails");
+    let rest: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert_eq!(session.backend_usage().len(), 1, "{rest:#?}");
+    assert_eq!(output_text_tokens(&rest, response), Some(3));
+    assert!(
+        matches!(
+            rest.last(),
+            Some(SessionEvent::SpeechSessionFailed(failed))
+                if failed.failure.kind == SessionFailureKind::TransportClosed
+        ),
+        "{rest:#?}"
+    );
+}
+
+/// A server that speaks, sends a message that is not a GPT-Live event, completes one backend
+/// response with its usage, then answers the close with another such message and
+/// `session.closed`.
+fn spoke_over_an_undecodable_message() -> Server {
+    Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        send(&mut socket, said(" Hi.", 0)).await;
+        socket.send(Message::text("not json")).await.unwrap();
+        send(
+            &mut socket,
+            backend("del_1", backend_completed("resp_1", 12, 4, 3)),
+        )
+        .await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        socket.send(Message::text("not json")).await.unwrap();
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    })
+}
+
+/// A message that is not a GPT-Live event does not end the session: the client reads on, so the
+/// backend usage after it is recorded and the session stays open until the caller closes it.
+#[test]
+fn an_undecodable_message_does_not_end_the_session() {
+    let server = spoke_over_an_undecodable_message();
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let mut events = until(&mut session, |event| {
+        matches!(event, SessionEvent::OutputTranscriptDelta(_))
+    });
+    let response = created(&events)[0];
+    events.extend(until(&mut session, |_| false));
+    assert_eq!(session.backend_usage().len(), 1, "{events:#?}");
+    assert_eq!(
+        session.ledger().session().state(),
+        SpeechSessionState::Open,
+        "{events:#?}"
+    );
+    session.close().expect("open");
+    assert_eq!(
+        session.final_usage(),
+        Some(&LiveClosed {
+            reason: Some("close_requested".to_owned()),
+            seconds: Some(1.5)
+        }),
+        "session.closed confirmed the seconds past the message that is not an event"
+    );
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert_eq!(output_text_tokens(&closing, response), Some(3));
+    assert!(
+        matches!(closing.last(), Some(SessionEvent::SpeechSessionClosed(_))),
+        "{closing:#?}"
+    );
+    server.finish();
+}
+
+/// The backend usage reached the binding after a message that is not a GPT-Live event, before
+/// the caller closes: that message is not the end of the stream, so the close records the usage
+/// on the response before `SpeechSessionClosed`.
+#[test]
+fn backend_usage_after_an_undecodable_message_is_recorded_by_the_close() {
+    let server = spoke_over_an_undecodable_message();
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::OutputTranscriptDelta(_))
+    });
+    let response = created(&events)[0];
+    std::thread::sleep(Duration::from_millis(300));
+    session.close().expect("open");
+    assert_eq!(
+        session.final_usage(),
+        Some(&LiveClosed {
+            reason: Some("close_requested".to_owned()),
+            seconds: Some(1.5)
+        }),
+        "session.closed confirmed the seconds past the message that is not an event"
+    );
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    assert_eq!(session.backend_usage().len(), 1, "{closing:#?}");
+    assert_eq!(output_text_tokens(&closing, response), Some(3));
+    assert!(
+        matches!(closing.last(), Some(SessionEvent::SpeechSessionClosed(_))),
+        "{closing:#?}"
+    );
+    server.finish();
+}
+
+/// Each message the binding cannot read is counted on the session, the one the close reads past
+/// too, and the last is named by the start of its text.
+#[test]
+fn an_undecodable_message_is_counted_on_the_session() {
+    let server = spoke_over_an_undecodable_message();
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |_| false);
+    assert_eq!(session.ledger().unreadable_frames(), 1, "{events:#?}");
+    let last = session.ledger().last_unreadable().unwrap_or_default();
+    assert!(last.contains("not json"), "{last}");
+    session.close().expect("open");
+    assert_eq!(session.ledger().unreadable_frames(), 2);
+    server.finish();
+}
+
+/// A failure that follows a message the binding could not read keeps its kind, here the closed
+/// transport, and names the message.
+#[test]
+fn a_failure_after_an_undecodable_message_keeps_its_kind_and_names_it() {
+    let server = Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        socket
+            .send(Message::text("<html>bad gateway"))
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::SpeechSessionFailed(_))
+    });
+    let Some(SessionEvent::SpeechSessionFailed(failed)) = events.last() else {
+        panic!("the session did not fail: {events:#?}");
+    };
+    assert_eq!(
+        failed.failure.kind,
+        SessionFailureKind::TransportClosed,
+        "{failed:?}"
+    );
+    assert!(
+        failed.failure.detail.contains("1 frame") && failed.failure.detail.contains("<html>bad"),
+        "{failed:?}"
+    );
+}
+
+/// A `session.closed` without its reason or usage still ends the session: the server ended it,
+/// so it fails as a provider error, and the frame is counted as one the binding could not read in
+/// full. No billed seconds are confirmed.
+#[test]
+fn a_session_closed_without_reason_or_usage_still_ends_the_session() {
+    let server = Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        send(&mut socket, said(" Hi.", 0)).await;
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c"}),
+        )
+        .await;
+        while let Some(Ok(_)) = socket.next().await {}
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::SpeechSessionFailed(_))
+    });
+    let Some(SessionEvent::SpeechSessionFailed(failed)) = events.last() else {
+        panic!("the session did not end: {events:#?}");
+    };
+    assert_eq!(
+        failed.failure.kind,
+        SessionFailureKind::ProviderError,
+        "{failed:?}"
+    );
+    assert_eq!(session.voice_seconds(), None);
+    assert_eq!(session.ledger().unreadable_frames(), 1);
+}
+
+/// The close of a session whose server answers only with a running total and then messages the
+/// binding cannot read returns at `CLOSE_TIMEOUT`, the session closed, with the voice seconds it
+/// saw recorded as the session's usage, unconfirmed.
+#[test]
+fn a_close_that_reaches_its_bound_keeps_the_usage_seen() {
+    let server = Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.usage.updated", "event_id": "evt_u", "usage": {"seconds": 2.5}}),
+        )
+        .await;
+        let until = tokio::time::Instant::now() + CLOSE_TIMEOUT * 3;
+        while tokio::time::Instant::now() < until {
+            if socket.send(Message::text("not json")).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let started = std::time::Instant::now();
+    session.close().expect("open");
+    assert!(
+        started.elapsed() < CLOSE_TIMEOUT + Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        session.ledger().session().state(),
+        SpeechSessionState::Closed
+    );
+    assert_eq!(session.final_usage(), None);
+    assert_eq!(session.voice_seconds(), Some(2.5));
+    assert!(session.ledger().unreadable_frames() > 0);
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    let recorded = records(&closing);
+    let of_session = recorded
+        .iter()
+        .find(|recorded| recorded.response_id.is_none())
+        .unwrap_or_else(|| panic!("no usage of the session: {closing:#?}"));
+    assert_eq!(
+        of_session.quantities,
+        vec![Quantity::provider_reported(
+            QuantityKind::InputAudioMs,
+            2_500
+        )]
+    );
+    assert!(!of_session.r#final);
+    assert!(
+        matches!(closing.last(), Some(SessionEvent::SpeechSessionClosed(_))),
+        "{closing:#?}"
+    );
+}
+
+/// The quantity of `kind` in the usage record of `response` among `events`.
+fn quantity(events: &[SessionEvent], response: ResponseId, kind: QuantityKind) -> Option<i64> {
+    let recorded: Vec<_> = records(events)
+        .into_iter()
+        .filter(|record| record.response_id == Some(response))
+        .collect();
+    assert_eq!(recorded.len(), 1, "{events:#?}");
+    recorded[0]
+        .quantities
+        .iter()
+        .find(|quantity| quantity.kind() == kind)
+        .and_then(Quantity::value)
+}
+
+/// A second backend response reports its input tokens and leaves out `output_tokens`: its input
+/// tokens are summed onto the response, the response's output tokens are unknown from then on,
+/// and the frame is counted once as one the binding could not read in full.
+#[test]
+fn a_backend_usage_without_output_tokens_counts_its_input_and_leaves_the_output_unknown() {
+    let server = spoke_then(|mut socket| async move {
+        send(
+            &mut socket,
+            backend(
+                "del_1",
+                json!({"type": "response.completed", "sequence_number": 10, "response": {
+                    "id": "resp_2", "status": "completed", "output": [],
+                    "usage": {"input_tokens": 20, "input_tokens_details": {"cached_tokens": 0}, "total_tokens": 20}
+                }}),
+            ),
+        )
+        .await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::OutputTranscriptDelta(_))
+    });
+    let response = created(&events)[0];
+    std::thread::sleep(Duration::from_millis(300));
+    session.close().expect("open");
+    server.finish();
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    let outputs: Vec<_> = session
+        .backend_usage()
+        .iter()
+        .map(|usage| (usage.input_tokens, usage.output_tokens))
+        .collect();
+    assert_eq!(
+        outputs,
+        [(Some(12), Some(3)), (Some(20), None)],
+        "{closing:#?}"
+    );
+    assert_eq!(
+        quantity(&closing, response, QuantityKind::InputTextTokens),
+        Some(32)
+    );
+    assert_eq!(
+        quantity(&closing, response, QuantityKind::OutputTextTokens),
+        None
+    );
+    assert_eq!(session.ledger().unreadable_frames(), 1);
+    assert!(
+        session
+            .ledger()
+            .last_unreadable()
+            .is_some_and(|what| what.contains("usage.output_tokens")),
+        "{:?}",
+        session.ledger().last_unreadable()
+    );
 }

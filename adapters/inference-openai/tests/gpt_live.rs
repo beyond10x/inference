@@ -14,8 +14,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
 use inference_openai::live::{
-    BackendEvent, BackendUsage, Delegation, LIVE_MODEL, LIVE_URL, LiveClient, LiveClosed,
-    LiveEvent, LiveFormat, LiveSessionConfig, ResponsesBackend,
+    BackendEvent, BackendUsage, CLOSE_TIMEOUT, Delegation, LIVE_MODEL, LIVE_URL, LiveClient,
+    LiveClosed, LiveEvent, LiveFormat, LiveSessionConfig, ResponsesBackend,
 };
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Endpoint, FunctionTool,
@@ -339,8 +339,8 @@ fn documented_server_events_parse_into_typed_events() {
             json!({"type": "session.closed", "event_id": "evt_closed_001", "client_event_id": "evt_close_001", "reason": "close_requested", "session": {"id": "live_abc123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 45.8}})
         ),
         LiveEvent::SessionClosed {
-            reason: "close_requested".to_owned(),
-            seconds: 45.8
+            reason: Some("close_requested".to_owned()),
+            seconds: Some(45.8)
         }
     );
     let LiveEvent::Error(error) = parse(
@@ -423,14 +423,15 @@ fn nested_responses_events_are_unwrapped() {
             json!({"type": "response.completed", "sequence_number": 9, "response": {"id": "resp_1", "status": "completed", "output": [], "usage": {"input_tokens": 120, "input_tokens_details": {"cached_tokens": 64}, "output_tokens": 30, "output_tokens_details": {"reasoning_tokens": 12}, "total_tokens": 150}}})
         )),
         BackendEvent::Completed {
-            response_id: "resp_1".to_owned(),
+            response_id: Some("resp_1".to_owned()),
             usage: Some(BackendUsage {
-                input_tokens: 120,
+                input_tokens: Some(120),
                 cached_tokens: Some(64),
-                output_tokens: 30,
+                output_tokens: Some(30),
                 reasoning_tokens: Some(12),
-                total_tokens: 150
-            })
+                total_tokens: Some(150)
+            }),
+            unreadable_usage: None
         }
     );
     assert_eq!(
@@ -438,9 +439,10 @@ fn nested_responses_events_are_unwrapped() {
             json!({"type": "response.failed", "sequence_number": 3, "response": {"id": "resp_2", "status": "failed", "output": []}})
         )),
         BackendEvent::Ended {
-            response_id: "resp_2".to_owned(),
+            response_id: Some("resp_2".to_owned()),
             status: "failed".to_owned(),
-            usage: None
+            usage: None,
+            unreadable_usage: None
         }
     );
     assert!(matches!(
@@ -500,8 +502,8 @@ async fn events_flow_after_start_and_close_waits_for_session_closed() {
     assert_eq!(
         client.close().await.expect("finalized"),
         LiveClosed {
-            reason: "close_requested".to_owned(),
-            seconds: 3.5
+            reason: Some("close_requested".to_owned()),
+            seconds: Some(3.5)
         }
     );
 }
@@ -549,4 +551,184 @@ async fn a_model_id_or_url_that_cannot_form_the_request_is_refused_before_connec
             "{endpoint:?}"
         );
     }
+}
+
+/// `LiveClient::close` waits for `session.closed` at most `CLOSE_TIMEOUT` in all, not per read:
+/// a server that answers the close only with messages the client cannot read, one every 100 ms,
+/// is given up at that bound, with the connection closed.
+#[tokio::test]
+async fn close_gives_up_at_its_bound_across_every_read() {
+    let (endpoint, _) = serve(|mut socket| async move {
+        let _ = accept_start(&mut socket).await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        let until = tokio::time::Instant::now() + CLOSE_TIMEOUT * 3;
+        while tokio::time::Instant::now() < until {
+            if socket.send(Message::text("not json")).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let client = LiveClient::connect(
+        &endpoint,
+        &FixedSource,
+        OPENAI_KEY_NAME,
+        &LiveSessionConfig::default(),
+    )
+    .await
+    .expect("the session starts");
+    let started = tokio::time::Instant::now();
+    let closed = tokio::time::timeout(CLOSE_TIMEOUT + Duration::from_secs(3), client.close())
+        .await
+        .expect("close() outlived its bound");
+    assert!(
+        matches!(closed, Err(RealtimeError::Stalled(_))),
+        "{closed:?}"
+    );
+    assert!(started.elapsed() >= CLOSE_TIMEOUT - Duration::from_millis(100));
+}
+
+/// The two fields of `session.closed` are read each on its own: one the server left out is
+/// `None`, and the event is still the session's end.
+#[test]
+fn a_session_closed_without_its_reason_or_usage_is_still_the_end() {
+    assert_eq!(
+        LiveEvent::parse(r#"{"type": "session.closed", "event_id": "e"}"#).unwrap(),
+        LiveEvent::SessionClosed {
+            reason: None,
+            seconds: None
+        }
+    );
+    assert_eq!(
+        LiveEvent::parse(
+            r#"{"type": "session.closed", "event_id": "e", "reason": "expired", "usage": {}}"#
+        )
+        .unwrap(),
+        LiveEvent::SessionClosed {
+            reason: Some("expired".to_owned()),
+            seconds: None
+        }
+    );
+}
+
+/// A backend `response.completed` or `response.failed` whose `response` lacks its id keeps its
+/// usage: the binding sums it onto its own response and never reads the backend's id.
+#[test]
+fn a_backend_end_without_its_id_keeps_its_usage() {
+    let usage = json!({"input_tokens": 5, "output_tokens": 2, "total_tokens": 7});
+    let completed = LiveEvent::parse(
+        &json!({"type": "response.event", "event_id": "e", "event": {"type": "response.completed", "response": {"usage": usage}}})
+            .to_string(),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            &completed,
+            LiveEvent::Backend { event: BackendEvent::Completed { response_id: None, usage: Some(usage), unreadable_usage: None }, .. }
+                if usage.input_tokens == Some(5) && usage.output_tokens == Some(2)
+        ),
+        "{completed:?}"
+    );
+    let failed = LiveEvent::parse(
+        &json!({"type": "response.event", "event_id": "e", "event": {"type": "response.failed", "response": {"usage": usage}}})
+            .to_string(),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            &failed,
+            LiveEvent::Backend {
+                event: BackendEvent::Ended {
+                    response_id: None,
+                    usage: Some(_),
+                    ..
+                },
+                ..
+            }
+        ),
+        "{failed:?}"
+    );
+}
+
+/// A backend usage is read field by field: a count it lacks is unknown and the others are kept;
+/// a usage that is not an object gives none. Each says what could not be read.
+#[test]
+fn a_backend_usage_is_read_field_by_field() {
+    let read = |usage: Value| {
+        let parsed = LiveEvent::parse(
+            &json!({"type": "response.event", "event_id": "e", "event": {"type": "response.completed", "response": {"id": "resp_1", "usage": usage}}})
+                .to_string(),
+        )
+        .unwrap();
+        match parsed {
+            LiveEvent::Backend {
+                event:
+                    BackendEvent::Completed {
+                        usage,
+                        unreadable_usage,
+                        ..
+                    },
+                ..
+            } => (usage, unreadable_usage),
+            other => panic!("{other:?}"),
+        }
+    };
+    let (usage, unreadable) = read(json!({"input_tokens": 20, "total_tokens": 20}));
+    assert_eq!(
+        usage,
+        Some(BackendUsage {
+            input_tokens: Some(20),
+            cached_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: Some(20)
+        })
+    );
+    assert!(
+        unreadable
+            .as_deref()
+            .is_some_and(|what| what.contains("`usage.output_tokens`")),
+        "{unreadable:?}"
+    );
+    let (usage, unreadable) = read(json!({"input_tokens": 20}));
+    assert_eq!(usage.and_then(|usage| usage.total_tokens), None);
+    assert!(unreadable.is_some());
+    let (usage, unreadable) = read(json!({"output_tokens": 2}));
+    assert_eq!(
+        usage,
+        Some(BackendUsage {
+            input_tokens: None,
+            cached_tokens: None,
+            output_tokens: Some(2),
+            reasoning_tokens: None,
+            total_tokens: None
+        })
+    );
+    assert!(
+        unreadable
+            .as_deref()
+            .is_some_and(|what| what.contains("`usage.input_tokens`")),
+        "{unreadable:?}"
+    );
+    let (usage, unreadable) = read(json!("tokens"));
+    assert_eq!(usage, None);
+    assert!(
+        unreadable
+            .as_deref()
+            .is_some_and(|what| what.contains("`usage`")),
+        "{unreadable:?}"
+    );
+    assert_eq!(read(Value::Null), (None, None));
+}
+
+/// A message that is not JSON is named by the start of its text.
+#[test]
+fn a_message_that_is_not_json_is_named_by_its_start() {
+    let refused = LiveEvent::parse("<html>bad gateway</html>");
+    assert!(
+        matches!(&refused, Err(RealtimeError::Protocol(detail)) if detail.contains("<html>bad gateway")),
+        "{refused:?}"
+    );
 }

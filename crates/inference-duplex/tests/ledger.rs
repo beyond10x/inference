@@ -13,8 +13,9 @@ use inference_duplex::inference_core::model::{
 use inference_duplex::inference_core::model::{AdapterId, ModelId};
 use inference_duplex::inference_tools::{DeclareTool, SideEffectClass, Tool};
 use inference_duplex::{
-    OpenError, Quantity, QuantityKind, ResponseId, ResponseState, ResponseStateConflict,
-    ResponseUsage, SessionConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
+    DeliverSessionEventError, OpenError, Quantity, QuantityKind, ReceivedEventKind,
+    ReceivedSessionEventState, ResponseId, ResponseState, ResponseStateConflict, ResponseUsage,
+    SessionConfig, SessionEnd, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
     SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionId, SpeechSessionState,
     SpeechSessionStateConflict, SpeechToolCallState, SpeechToolCallStateConflict, TokenCounts,
     TranscriptionUsage, TuningSupport, TurnDetection, TurnTuning, Unsupported, UsageRecorded,
@@ -1034,6 +1035,188 @@ fn a_transcription_in_seconds_and_a_session_total_are_records_of_the_session() {
         )]
     );
     assert_eq!(ledger.usage_records().len(), 2);
+}
+
+/// A session billed as a whole, such as seconds of session: the latest total is recorded once, as
+/// usage of the session, after the end events of its responses and just before its own, whether
+/// a close, a failure or a stall ends it; given after the end, it records nothing.
+#[test]
+fn a_session_total_is_recorded_just_before_the_session_ends() {
+    let seconds = |ms| vec![Quantity::provider_reported(QuantityKind::InputAudioMs, ms)];
+    let ends: [fn(&mut SessionLedger); 2] = [
+        |ledger| ledger.close().expect("open"),
+        |ledger| {
+            ledger
+                .fail(SessionFailure {
+                    kind: SessionFailureKind::ProviderError,
+                    detail: "the provider ended the session: expired".to_owned(),
+                })
+                .expect("open");
+        },
+    ];
+    for (end, (ended, last)) in ends.into_iter().zip([
+        ("ResponseCancelled", "SpeechSessionClosed"),
+        ("ResponseFailed", "SpeechSessionFailed"),
+    ]) {
+        let start = Instant::now();
+        let mut ledger = open(&full(), config(TurnDetection::Disabled), start);
+        let response = ResponseId::generate();
+        ledger.response_created(response, start).expect("created");
+        ledger.session_usage_at_end(seconds(3_000), false);
+        ledger.session_usage_at_end(seconds(4_500), true);
+        end(&mut ledger);
+        let events = drain(&mut ledger);
+        assert_eq!(
+            kinds(&events),
+            [
+                "ResponseCreated",
+                "UsageRecorded",
+                ended,
+                "UsageRecorded",
+                last
+            ]
+        );
+        let recorded = records(&events);
+        assert_eq!(recorded[0].response_id, Some(response));
+        assert_eq!(recorded[1].response_id, None);
+        assert_eq!(recorded[1].quantities, seconds(4_500), "the latest total");
+        assert!(recorded[1].r#final);
+        ledger.session_usage_at_end(seconds(5_000), true);
+        assert!(drain(&mut ledger).is_empty(), "after the end, nothing");
+        assert_eq!(ledger.usage_records().len(), 2);
+    }
+}
+
+/// The session total is recorded once: given after the end, by a close or a failure, it records
+/// nothing and pushes nothing, however often it is given.
+#[test]
+fn a_session_total_given_after_the_end_records_nothing() {
+    let seconds = |ms| vec![Quantity::provider_reported(QuantityKind::InputAudioMs, ms)];
+    let ends: [fn(&mut SessionLedger); 2] = [
+        |ledger| ledger.close().expect("open"),
+        |ledger| {
+            ledger
+                .fail(SessionFailure {
+                    kind: SessionFailureKind::TransportClosed,
+                    detail: "the provider closed the connection".to_owned(),
+                })
+                .expect("open");
+        },
+    ];
+    for (end, last) in ends
+        .into_iter()
+        .zip(["SpeechSessionClosed", "SpeechSessionFailed"])
+    {
+        let mut ledger = open(&full(), config(TurnDetection::Disabled), Instant::now());
+        ledger.session_usage_at_end(seconds(2_000), true);
+        end(&mut ledger);
+        let events = drain(&mut ledger);
+        assert_eq!(kinds(&events), ["UsageRecorded", last]);
+        ledger.session_usage_at_end(seconds(5_000), true);
+        ledger.session_usage_at_end(seconds(6_000), false);
+        assert!(drain(&mut ledger).is_empty(), "nothing after {last}");
+        assert_eq!(ledger.usage_records().len(), 1, "recorded once");
+        assert_eq!(ledger.usage_records()[0].quantities(), seconds(2_000));
+    }
+}
+
+/// Every provider event the ledger holds has a received record. The caller taking it delivers it
+/// as it is; a close or a failure delivers every one still held before its end event, and leaves
+/// the one the caller already had as it was.
+#[test]
+fn the_end_delivers_every_received_event_still_held_before_it() {
+    let ends: [fn(&mut SessionLedger); 2] = [
+        |ledger| ledger.close().expect("open"),
+        |ledger| {
+            ledger
+                .fail(SessionFailure {
+                    kind: SessionFailureKind::TransportClosed,
+                    detail: "the provider closed the connection".to_owned(),
+                })
+                .expect("open");
+        },
+    ];
+    for (end, (last, stamp)) in ends.into_iter().zip([
+        ("SpeechSessionClosed", SessionEnd::Closed),
+        ("SpeechSessionFailed", SessionEnd::Failed),
+    ]) {
+        let now = Instant::now();
+        let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
+        ledger
+            .input_transcribed("hello".to_owned(), now)
+            .expect("open");
+        assert_eq!(
+            ledger.next_event().as_ref().map(kind),
+            Some("InputTranscribed")
+        );
+        ledger
+            .transcription_usage(
+                TranscriptionUsage {
+                    input_tokens: 4,
+                    output_tokens: 2,
+                },
+                now,
+            )
+            .expect("open");
+        let held: Vec<_> = ledger.received_events()[1..]
+            .iter()
+            .map(|received| (received.state(), received.delivered_before()))
+            .collect();
+        assert_eq!(
+            held,
+            [(ReceivedSessionEventState::Received, None); 2],
+            "held until the caller takes them"
+        );
+        end(&mut ledger);
+        assert_eq!(
+            kinds(&drain(&mut ledger)),
+            ["TranscriptionUsageRecorded", "UsageRecorded", last]
+        );
+        let records: Vec<_> = ledger
+            .received_events()
+            .iter()
+            .map(|received| {
+                (
+                    received.kind(),
+                    received.sequence(),
+                    received.state(),
+                    received.delivered_before(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            records,
+            [
+                (
+                    ReceivedEventKind::InputTranscript,
+                    1,
+                    ReceivedSessionEventState::Delivered,
+                    None
+                ),
+                (
+                    ReceivedEventKind::Usage,
+                    2,
+                    ReceivedSessionEventState::Delivered,
+                    Some(stamp)
+                ),
+                (
+                    ReceivedEventKind::Usage,
+                    3,
+                    ReceivedSessionEventState::Delivered,
+                    Some(stamp)
+                ),
+            ],
+            "{last}"
+        );
+        let first = ledger.received_events()[0].received_id();
+        assert!(
+            matches!(
+                ledger.deliver_event(first),
+                Err(DeliverSessionEventError::Conflict(_))
+            ),
+            "delivered once"
+        );
+    }
 }
 
 /// Usage a provider reported before the response it counts toward began, such as input billed

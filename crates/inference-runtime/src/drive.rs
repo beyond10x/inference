@@ -36,6 +36,19 @@
 //! the check orders the content of a stream. The refused send answers
 //! [`SendError::SequenceNotIncreasing`], and the run records the refusal, read from
 //! [`RunController::refusals`](crate::RunController::refusals).
+//!
+//! `inference.graph.DrainRun` admits no new input; in-flight events complete. So the sender of an
+//! ingress refuses an envelope of user content once a drain was asked for while the run was Active
+//! ([`RunRequests::drain`]), or once the run moved to Draining, whichever came first, read when
+//! the send's future is first polled, so a send built earlier and awaited after the request is
+//! refused too: the envelope never reaches the ingress's queue and the send answers
+//! [`SendError::Closed`], since
+//! nothing of user content sent there is ever delivered again. What the queue took before is in
+//! flight and is still delivered, and a subgraph node's ingress bridge forwards what its parent
+//! edges hold before it ends (`subgraph` module). A control event still passes, `stop` among
+//! them: it carries no input, and the drain of a node that reads the ingress ends on it. The
+//! refusal is the guard's own and not the queue's, so it does not tell the run the consumer is
+//! gone. The edges between nodes are not closed: what a node emits while it drains is in flight.
 
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
@@ -117,6 +130,9 @@ struct State {
     fail: Option<FailureReason>,
     cancel: bool,
     drain: bool,
+    /// The run admits no new input: a drain was asked for while it was Active, or it moved to
+    /// Draining. Never cleared, since a run does not leave Draining for Active.
+    input_closed: bool,
     /// The nodes an edge into which refused an envelope as closed while the run was Active, in
     /// the order the refusals happened.
     gone: VecDeque<NodeId>,
@@ -161,6 +177,7 @@ impl Default for Signals {
                 fail: None,
                 cancel: false,
                 drain: false,
+                input_closed: false,
                 gone: VecDeque::new(),
                 refusals: Vec::new(),
                 waker: None,
@@ -176,10 +193,13 @@ impl Signals {
 
     /// The run is now `run`: a drain asked for is dropped once the run left Active, a node an edge
     /// into which refused an envelope as closed once it left Active and Draining, and every
-    /// request once it is terminal.
+    /// request once it is terminal. A run that is Draining admits no new input.
     pub(crate) fn run_moved(&self, run: RunState) {
         let mut state = self.state();
         state.run = run;
+        if run == RunState::Draining {
+            state.input_closed = true;
+        }
         if run != RunState::Active {
             state.drain = false;
         }
@@ -227,6 +247,12 @@ impl Signals {
     /// not acted on, in the order they were recorded.
     pub(crate) fn take_gone(&self) -> Vec<NodeId> {
         std::mem::take(&mut self.state().gone).into()
+    }
+
+    /// Whether the run still admits new input on its ingresses: not once a drain was asked for
+    /// while it was Active, nor once it moved to Draining.
+    fn admits_input(&self) -> bool {
+        !self.state().input_closed
     }
 
     fn refused(&self, refusal: SequenceNotIncreasing) {
@@ -283,7 +309,10 @@ impl Signals {
                 state.fail.get_or_insert(failure);
             }
             Next::Halt(Halt::Cancel) if !state.run.is_terminal() => state.cancel = true,
-            Next::Drain if state.run == RunState::Active => state.drain = true,
+            Next::Drain if state.run == RunState::Active => {
+                state.drain = true;
+                state.input_closed = true;
+            }
             Next::Halt(_) | Next::Drain | Next::ConsumerGone(_) => return,
         }
         state.wake();
@@ -306,7 +335,9 @@ impl RunRequests {
         self.signals.request(Next::Halt(Halt::Cancel));
     }
 
-    /// Asks for `inference.graph.DrainRun`; dropped unless the run is Active.
+    /// Asks for `inference.graph.DrainRun`; dropped unless the run is Active. A drain taken closes
+    /// the run's ingresses to new input at once, before the loop issues `DrainRun`: see the
+    /// module documentation.
     pub fn drain(&self) {
         self.signals.request(Next::Drain);
     }
@@ -330,7 +361,8 @@ impl fmt::Debug for RunRequests {
 /// it hands it to a node (an egress) or to its caller (an ingress): it refuses user content whose
 /// sequence does not increase on its stream, tells the run's [`Signals`] when the queue refuses an
 /// envelope as closed, naming the node it arrives at, and, on an edge of a source node or an
-/// ingress, once the queue took the end of input.
+/// ingress, once the queue took the end of input. On an ingress it refuses user content once the
+/// run admits no new input, before the queue sees it.
 pub(crate) struct GuardedSender<E> {
     pub(crate) inner: E,
     pub(crate) channel: Channel,
@@ -398,12 +430,13 @@ impl<E> GuardedSender<E> {
 impl<P: Send + 'static, E: OutputEndpoint<P>> OutputEndpoint<P> for GuardedSender<E> {
     fn send(&self, envelope: EventEnvelope<P>) -> EndpointFuture<'_, Result<(), SendError<P>>> {
         let end = self.source.is_some() && envelope.kind == ControlKind::Stop.as_str();
-        let checked = (!is_control_kind(&envelope.kind)).then_some((
-            envelope.stream_id,
-            envelope.sequence,
-            envelope.producer,
-        ));
+        let content = !is_control_kind(&envelope.kind);
+        let guarded = content && matches!(self.source, Some(Feed::Ingress(_)));
+        let checked = content.then_some((envelope.stream_id, envelope.sequence, envelope.producer));
         Box::pin(async move {
+            if guarded && !self.signals.admits_input() {
+                return Err(SendError::Closed(envelope));
+            }
             let mut taken = None;
             if let Some((stream_id, sequence, producer)) = checked {
                 match self.advance(stream_id, sequence) {

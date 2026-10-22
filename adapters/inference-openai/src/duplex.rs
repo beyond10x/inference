@@ -29,7 +29,8 @@
 //!   output tokens) and keeps a count the server left out unknown; a `response.done` without
 //!   usage settles the response with every count unknown. A response the caller cancels is
 //!   recorded when its `response.done` arrives, with the usage of what it generated, or, failing
-//!   that, at the next response or the session's end. The contract's `ResponseUsage`, which has no
+//!   that, with every count unknown when a later response's `response.done` arrives or at the
+//!   session's end; the next `response.created` does not record it. The contract's `ResponseUsage`, which has no
 //!   unknown, still counts an absent detail as 0, or in text where the total says so.
 //! * The server's `input_audio_buffer.committed` that acknowledges a caller's commit is not a
 //!   second commit; one the server's own turn detection makes is. A caller's commit the server
@@ -45,11 +46,50 @@
 //! * Truncation converts the heard sample to `audio_end_ms` of the response's audio item.
 //! * Tool results go back as `function_call_output` items; the caller creates the response that
 //!   uses them.
-//! * A closed connection, a transport or protocol failure fails the session at once; the
-//!   liveness bound fails it when the server is silent while a response is awaited. `error`
-//!   events do not end the session; they are kept in [`OpenAiRealtimeSession::server_errors`].
+//! * `response.done` and `conversation.item.input_audio_transcription.completed` are read field
+//!   by field, so a field missing from them costs no usage and no end. Realtime ends its responses
+//!   in the order it created them. A `response.done` with its id first ends every older response
+//!   still awaiting its `response.done`, each with its usage unknown. One without its id ends the
+//!   oldest response still awaiting its `response.done`, never a newer one, except a response
+//!   after whose creation a message without a readable `type` arrived before the next
+//!   `response.created`, which ended it or followed the caller's cancel of it: that message
+//!   was likely its `response.done`, so only a `response.done` with its id ends it. A message
+//!   whose `type` reads as anything but `response.done` is no lost `response.done` and changes
+//!   nothing here, even when the binding cannot read the rest. One
+//!   without a `status` counts its usage and fails its response as a provider error, and the
+//!   caller still awaits the server. A message that is not JSON but whose `type` reads
+//!   `response.done` ends the oldest response an id-less `response.done` would end, with its
+//!   usage unknown. A transcription without its transcript counts its usage; a `usage` in a shape
+//!   the binding cannot read counts as unknown.
+//! * Realtime runs one response at a time: a `response.created` while a response is still in
+//!   progress means the server ended that one in a frame the binding has not read yet. It fails
+//!   first, as a provider error naming the frames the binding could not read, and the new
+//!   response is accepted. Its usage is not recorded then: its own `response.done`, whenever it
+//!   arrives, records it once; failing that, the session's end records it as unknown, before
+//!   `SpeechSessionClosed` or `SpeechSessionFailed`. The same holds for a response the caller
+//!   cancelled.
+//! * Every provider event the ledger refuses is dropped and counted in
+//!   [`SessionLedger::dropped_count`] ([`SessionLedger::dropped_events`] keeps the most recent
+//!   64); a `response.done` for a response whose usage is already recorded adds no
+//!   `ResponseUsageRecorded`.
+//! * A message the client cannot read at all (not JSON, no `type`, a binary message, a typed
+//!   event without a field it needs) is dropped and reading goes on. It is counted on the session
+//!   ([`SessionLedger::unreadable_frames`]), and so is a frame of `response.done` or a
+//!   transcription with a field missing or unreadable; none refreshes the liveness bound, with
+//!   one exception: a `response.done` without its `status` that ends its response ends it as
+//!   failed ([`SessionLedger::response_ended_unread`]) and restarts the bound, because the
+//!   caller then awaits a new response. One the ledger refuses to end leaves the bound where it
+//!   stood before the frame ([`ProviderFrame::read_in_part`]). A later
+//!   failure of the session names how many there were and the last. Stalled turns into
+//!   ProviderError only when an unreadable frame arrived after the last readable frame. A
+//!   readable frame clears that state. The detail still names the total unreadable count. Every
+//!   other failure keeps its kind. A frame read in part is counted after what it recorded, so it
+//!   leaves the session as an unreadable frame does.
+//! * A closed connection or a transport failure fails the session at once; the liveness bound
+//!   fails it when the server sends nothing readable while a response is awaited. `error` events
+//!   do not end the session; they are kept in [`OpenAiRealtimeSession::server_errors`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
@@ -58,7 +98,7 @@ use inference_core::model::{
 };
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
-    NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
+    NativeSpeechModel, OpenError, ProviderFrame, Quantity, QuantityKind, ResponseId, ResponseUsage,
     SessionConfig as SpeechConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
     SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechSessionId,
     TokenCounts, TranscriptionUsage, TuningOption, TuningSupport,
@@ -359,9 +399,31 @@ impl NativeSpeechModel for OpenAiRealtime {
             audio_items: HashMap::new(),
             emitted: HashMap::new(),
             caller_commits: 0,
+            awaiting_done: VecDeque::new(),
+            undecodable: 0,
             server_errors: Vec::new(),
         })
     }
+}
+
+/// What `read` gives when it completes without waiting: it is polled once, and once more after
+/// one turn of the runtime's drivers, so a message that already reached the socket is read.
+/// `None` when it would still wait; `read` is then dropped, so it must be cancel safe, as reading
+/// the next event is.
+pub(crate) async fn without_waiting<F: std::future::Future>(read: F) -> Option<F::Output> {
+    let mut read = std::pin::pin!(read);
+    for turn in 0..2 {
+        let polled =
+            std::future::poll_fn(|context| std::task::Poll::Ready(read.as_mut().poll(context)))
+                .await;
+        if let std::task::Poll::Ready(output) = polled {
+            return Some(output);
+        }
+        if turn == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    None
 }
 
 /// The contract's failure of a client error.
@@ -400,7 +462,35 @@ pub struct OpenAiRealtimeSession {
     emitted: HashMap<ResponseId, u64>,
     /// Caller commits the server has not acknowledged yet.
     caller_commits: usize,
+    /// The responses the server created and has not ended with `response.done`, oldest first:
+    /// Realtime ends its responses in the order it created them, so a `response.done` without
+    /// its id ends the oldest one it may end ([`Awaiting::by_id_only`]), and one with its id
+    /// ends every older one first, their usage unknown.
+    awaiting_done: VecDeque<Awaiting>,
+    /// How many messages the binding could not read at all: no top-level `type` it can read
+    /// (not JSON, no `type`, a `type` that is no string, a binary message). A message whose
+    /// `type` reads is not among them, even when the binding cannot read the rest of it: a
+    /// `type` other than `response.done` is no lost `response.done`, and an unreadable
+    /// `response.done` ends a response itself.
+    undecodable: u64,
     server_errors: Vec<ServerError>,
+}
+
+/// A response awaiting its `response.done`.
+#[derive(Debug, Clone, Copy)]
+struct Awaiting {
+    id: ResponseId,
+    /// How many messages the binding could not read at all when the server created the response.
+    undecodable_at_creation: u64,
+    /// The caller cancelled the response, and no `response.created` has followed yet to decide
+    /// [`Self::by_id_only`].
+    cancelled: bool,
+    /// A message the binding could not read at all arrived after the response's creation and
+    /// before the next `response.created`, which ended it or followed the caller's cancel of
+    /// it. That message was likely its `response.done`, so a
+    /// `response.done` without its id does not end it: only one with its id does, one with the
+    /// id of a later response, or the session's end.
+    by_id_only: bool,
 }
 
 impl Drop for OpenAiRealtimeSession {
@@ -452,7 +542,9 @@ impl OpenAiRealtimeSession {
                 .map_err(SessionError::NotOpen);
         };
         if let Err(error) = runtime.block_on(operation(client)) {
-            let _ = self.ledger.fail(failure(&error));
+            let error = self.record_arrived().unwrap_or(error);
+            let failed = self.ledger.fail(failure(&error));
+            self.or_drop(failed);
             return self
                 .ledger
                 .session()
@@ -462,15 +554,185 @@ impl OpenAiRealtimeSession {
         Ok(())
     }
 
+    /// Records every server event that already reached the binding, without waiting for more,
+    /// up to the first read that fails, whose error is returned; a session the ledger no longer
+    /// holds open records nothing. A message that is not a Realtime event is no failed read:
+    /// it is recorded as [`SpeechSessionHandle::next_event`] records it, and recording goes on.
+    fn record_arrived(&mut self) -> Option<RealtimeError> {
+        while self.ledger.session().require_open().is_ok() {
+            let (Some(client), Some(runtime)) = (self.client.as_mut(), self.runtime.as_ref())
+            else {
+                return None;
+            };
+            match runtime.block_on(without_waiting(client.next_event())) {
+                Some(Ok(event)) => self.record(event),
+                Some(Err(error @ RealtimeError::Protocol(_))) => self.undecodable(&error),
+                None | Some(Err(RealtimeError::Stalled(_))) => return None,
+                Some(Err(error)) => return Some(error),
+            }
+        }
+        None
+    }
+
+    /// The server sent a message that is not a Realtime event. It ends nothing, since the client
+    /// reads on, but it is no sign of life either: it is dropped, counted on the session as a
+    /// frame the binding could not read, and named by a later failure of the session.
+    /// Only a message without a readable `type` may have been a `response.done`, and only it
+    /// counts toward [`Awaiting::by_id_only`]: one whose `type` reads as another event is none.
+    fn undecodable(&mut self, error: &RealtimeError) {
+        let typed = self
+            .client
+            .as_ref()
+            .is_some_and(|client| client.unparsed_type().is_some());
+        if !typed {
+            self.undecodable = self.undecodable.saturating_add(1);
+        }
+        self.ledger
+            .unreadable_frame(error.to_string(), Instant::now());
+    }
+
+    /// A ledger refusal the binding drops: it changed nothing, and the ledger counts it
+    /// ([`SessionLedger::dropped`]).
+    fn or_drop(&mut self, result: Result<(), SessionError>) {
+        if let Err(refusal) = result {
+            self.ledger.dropped(refusal);
+        }
+    }
+
+    /// The response a `response.done` without its id ends: the oldest awaiting its end that one
+    /// may end.
+    fn oldest_awaiting(&self) -> Option<ResponseId> {
+        self.awaiting_done
+            .iter()
+            .find(|awaiting| !awaiting.by_id_only)
+            .map(|awaiting| awaiting.id)
+    }
+
+    /// A `response.done` with the id of `id` arrived: Realtime ends its responses in the order
+    /// it created them, so every response created before `id` that still awaits its
+    /// `response.done` was ended in a frame the binding did not get. They no longer await it,
+    /// and are returned for their usage to be settled unknown.
+    fn older_than(&mut self, id: ResponseId) -> Vec<ResponseId> {
+        let Some(position) = self
+            .awaiting_done
+            .iter()
+            .position(|awaiting| awaiting.id == id)
+        else {
+            return Vec::new();
+        };
+        self.awaiting_done
+            .drain(..position)
+            .map(|awaiting| awaiting.id)
+            .collect()
+    }
+
+    /// A message that is not JSON but reads as `response.done`: it ends the oldest response a
+    /// `response.done` without its id may end, its usage unknown, and is counted as a frame the
+    /// binding could not read. A response still in progress fails as a provider error naming it.
+    /// With no response to end, it is counted only.
+    fn unreadable_done(&mut self, what: String, now: Instant) {
+        let Some(id) = self.oldest_awaiting() else {
+            self.ledger.unreadable_frame(what, now);
+            return;
+        };
+        self.awaiting_done.retain(|awaiting| awaiting.id != id);
+        let unknown = self.ledger.response_usage_unknown(id, now);
+        self.or_drop(unknown);
+        if let Err(refusal) = self.ledger.response_ended_unread(id, &what, now) {
+            self.ledger.dropped(refusal);
+            self.ledger.unreadable_frame(what, now);
+        }
+    }
+
+    /// The server created the response `next` while `earlier` is still in progress. Realtime runs
+    /// one response at a time, so it ended `earlier` in a frame the binding did not get yet:
+    /// `earlier` fails as a provider error naming the frames the binding could not read. Its
+    /// usage stays unrecorded: its own `response.done` records it when it arrives, or the
+    /// session's end does, as unknown. When a message the binding could not read at all arrived
+    /// while `earlier` was in progress, only a `response.done` with its id ends it from now on;
+    /// a frame read in part does not count.
+    fn ended_unseen(&mut self, earlier: ResponseId, next: &str, now: Instant) {
+        let undecodable = self.undecodable;
+        if let Some(awaiting) = self
+            .awaiting_done
+            .iter_mut()
+            .find(|awaiting| awaiting.id == earlier)
+        {
+            awaiting.by_id_only = undecodable > awaiting.undecodable_at_creation;
+        }
+        let count = self.ledger.unreadable_frames();
+        let unread = match self.ledger.last_unreadable() {
+            Some(last) if count > 0 => {
+                let frames = if count == 1 { "frame" } else { "frames" };
+                format!(
+                    "; the provider had sent {count} {frames} the binding could not read, the \
+                     last: {last}"
+                )
+            }
+            _ => String::new(),
+        };
+        let failed = self.ledger.response_failed(
+            earlier,
+            SessionFailure {
+                kind: SessionFailureKind::ProviderError,
+                detail: format!(
+                    "the provider created the response {next:?} before it ended this one{unread}"
+                ),
+            },
+            now,
+        );
+        self.or_drop(failed);
+    }
+
+    /// The caller cancelled `id`: whether a message the binding could not read at all arrived
+    /// after its creation, before the cancel or after it, decides at the next `response.created`
+    /// whether a `response.done` without its id still ends it
+    /// ([`Self::cancelled_before_created`]).
+    fn cancelled(&mut self, id: ResponseId) {
+        if let Some(awaiting) = self
+            .awaiting_done
+            .iter_mut()
+            .find(|awaiting| awaiting.id == id)
+        {
+            awaiting.cancelled = true;
+        }
+    }
+
+    /// The server is creating a response: every response the caller cancelled since the last
+    /// `response.created` that a message the binding could not read at all followed after its
+    /// creation is ended by a `response.done` with its id only, since that message was likely
+    /// its `response.done`, whether it arrived before the cancel or after it.
+    fn cancelled_before_created(&mut self) {
+        let undecodable = self.undecodable;
+        for awaiting in &mut self.awaiting_done {
+            if std::mem::take(&mut awaiting.cancelled) {
+                awaiting.by_id_only |= undecodable > awaiting.undecodable_at_creation;
+            }
+        }
+    }
+
     /// The contract's id of a provider response, when the session created one under it.
     fn response(&self, provider: &str) -> Option<ResponseId> {
         self.responses.get(provider).copied()
     }
 
-    /// Records one server event through the ledger; what the ledger refuses is dropped.
+    /// Records one server event through the ledger; what the ledger refuses is dropped
+    /// ([`Self::or_drop`]). A frame read whole hears the provider. A transcription or a
+    /// `response.done`, which may be read only in part, is recorded through a frame of its own
+    /// ([`SessionLedger::provider_frame`]), so that a frame read in part leaves the liveness bound
+    /// where it stood before it ([`ProviderFrame::read_in_part`]).
     fn record(&mut self, event: ServerEvent) {
         let now = Instant::now();
-        self.ledger.heard(now);
+        if let ServerEvent::UnreadableResponseDone { what } = event {
+            self.unreadable_done(what, now);
+            return;
+        }
+        if !matches!(
+            event,
+            ServerEvent::InputTranscript { .. } | ServerEvent::ResponseDone { .. }
+        ) {
+            self.ledger.heard(now);
+        }
         let config = self.ledger.session().config().clone();
         let input_rate = u64::from(config.input_format.sample_rate.get());
         let at = |ms: u64| SampleClockPosition::new(ms.saturating_mul(input_rate) / 1_000);
@@ -479,11 +741,25 @@ impl OpenAiRealtimeSession {
                 if self.responses.contains_key(&response_id) {
                     return;
                 }
-                let id = ResponseId::generate();
-                if self.ledger.response_created(id, now).is_ok() {
-                    self.responses.insert(response_id, id);
-                    self.emitted.insert(id, 0);
+                if let Some(earlier) = self.ledger.in_progress() {
+                    self.ended_unseen(earlier, &response_id, now);
                 }
+                self.cancelled_before_created();
+                let id = ResponseId::generate();
+                if let Err(refusal) = self.ledger.response_created(id, now) {
+                    self.ledger.dropped(refusal);
+                    return;
+                }
+                let awaited = self.ledger.usage_awaited(id);
+                self.or_drop(awaited);
+                self.responses.insert(response_id, id);
+                self.emitted.insert(id, 0);
+                self.awaiting_done.push_back(Awaiting {
+                    id,
+                    undecodable_at_creation: self.undecodable,
+                    cancelled: false,
+                    by_id_only: false,
+                });
             }
             ServerEvent::AudioDelta {
                 response_id,
@@ -508,9 +784,12 @@ impl OpenAiRealtimeSession {
                     sample_count,
                     data: audio[..whole].to_vec(),
                 };
-                if self.ledger.output_audio(id, frame, now).is_ok() {
-                    *self.emitted.entry(id).or_insert(0) += u64::from(sample_count);
-                    self.audio_items.insert(id, (item_id, content_index));
+                match self.ledger.output_audio(id, frame, now) {
+                    Ok(()) => {
+                        *self.emitted.entry(id).or_insert(0) += u64::from(sample_count);
+                        self.audio_items.insert(id, (item_id, content_index));
+                    }
+                    Err(refusal) => self.ledger.dropped(refusal),
                 }
             }
             ServerEvent::OutputTranscriptDelta {
@@ -520,13 +799,31 @@ impl OpenAiRealtimeSession {
                 response_id, delta, ..
             } => {
                 if let Some(id) = self.response(&response_id) {
-                    let _ = self.ledger.output_transcript(id, delta, now);
+                    let recorded = self.ledger.output_transcript(id, delta, now);
+                    self.or_drop(recorded);
                 }
             }
             ServerEvent::InputTranscript {
-                transcript, usage, ..
+                transcript,
+                usage,
+                unreadable_usage,
+                ..
             } => {
-                let _ = self.ledger.input_transcribed(transcript, now);
+                let mut frame = self.ledger.provider_frame();
+                frame.heard(now);
+                let mut unread = Vec::new();
+                match transcript {
+                    Some(transcript) => {
+                        let recorded = frame.input_transcribed(transcript, now);
+                        drop_refusal(&mut frame, recorded);
+                    }
+                    None => unread.push(
+                        "`conversation.item.input_audio_transcription.completed` lacks the \
+                         string field `transcript`"
+                            .to_owned(),
+                    ),
+                }
+                unread.extend(unreadable_usage);
                 let (contract, quantities) = match usage {
                     Some(ClientTranscriptionUsage::Tokens {
                         input_tokens,
@@ -548,27 +845,35 @@ impl OpenAiRealtimeSession {
                         None,
                         vec![reported(QuantityKind::InputAudioMs, milliseconds(seconds))],
                     ),
-                    None => return,
+                    None => {
+                        resolve(frame, &unread, now);
+                        return;
+                    }
                 };
-                let _ = self
-                    .ledger
-                    .transcription_usage_reported(contract, quantities, now);
+                let recorded = frame.transcription_usage_reported(contract, quantities, now);
+                drop_refusal(&mut frame, recorded);
+                // Counted after the usage: the frame was read only in part, so it stays the last
+                // frame the binding could not read and leaves the liveness bound where it stood.
+                resolve(frame, &unread, now);
             }
             ServerEvent::SpeechStarted { audio_start_ms, .. } => {
                 if let Some(position) = at(audio_start_ms) {
-                    let _ = self.ledger.speech_started(position, now);
+                    let recorded = self.ledger.speech_started(position, now);
+                    self.or_drop(recorded);
                 }
             }
             ServerEvent::SpeechStopped { audio_end_ms, .. } => {
                 if let Some(position) = at(audio_end_ms) {
-                    let _ = self.ledger.speech_stopped(position, now);
+                    let recorded = self.ledger.speech_stopped(position, now);
+                    self.or_drop(recorded);
                 }
             }
             ServerEvent::AudioCommitted { .. } => {
                 if self.caller_commits > 0 {
                     self.caller_commits -= 1;
                 } else {
-                    let _ = self.ledger.input_committed(now);
+                    let recorded = self.ledger.input_committed(now);
+                    self.or_drop(recorded);
                 }
             }
             ServerEvent::FunctionCall {
@@ -581,37 +886,82 @@ impl OpenAiRealtimeSession {
                 if let Some(id) = self.response(&response_id) {
                     let arguments =
                         serde_json::from_str(&arguments).unwrap_or(Json::String(arguments));
-                    let _ = self.ledger.tool_call(
+                    let recorded = self.ledger.tool_call(
                         SpeechCallId::new(call_id),
                         id,
                         &name,
                         arguments,
                         now,
                     );
+                    self.or_drop(recorded);
                 }
             }
             ServerEvent::ResponseDone {
                 response_id,
                 status,
                 usage,
+                unreadable_usage,
             } => {
-                let Some(id) = self.response(&response_id) else {
+                let mut unread: Vec<String> = unreadable_usage.into_iter().collect();
+                let id = match &response_id {
+                    Some(provider) => self.response(provider),
+                    None => self.oldest_awaiting(),
+                };
+                let Some(id) = id else {
+                    if response_id.is_none() {
+                        unread.insert(
+                            0,
+                            "`response.done` lacks the string field `id`, and no response \
+                             awaits its end"
+                                .to_owned(),
+                        );
+                    }
+                    let mut frame = self.ledger.provider_frame();
+                    frame.heard(now);
+                    resolve(frame, &unread, now);
                     return;
                 };
-                let _ = self.ledger.response_usage_reported(
+                let older = if response_id.is_some() {
+                    self.older_than(id)
+                } else {
+                    Vec::new()
+                };
+                if status != Some(ResponseStatus::InProgress) {
+                    self.awaiting_done.retain(|awaiting| awaiting.id != id);
+                }
+                let mut frame = self.ledger.provider_frame();
+                frame.heard(now);
+                for older in older {
+                    let unknown = frame.response_usage_unknown(older, now);
+                    drop_refusal(&mut frame, unknown);
+                }
+                let reported = frame.response_usage_reported(
                     id,
                     usage.as_ref().map(response_usage),
                     usage.as_ref().map(quantities).unwrap_or_default(),
                     UsageTotal::Final,
                     now,
                 );
-                let _ = match status {
-                    ResponseStatus::Completed => self.ledger.response_completed(id, now),
-                    ResponseStatus::Cancelled => self.ledger.response_cancelled(id, now),
+                drop_refusal(&mut frame, reported);
+                let Some(status) = status else {
+                    unread.insert(
+                        0,
+                        "`response.done` lacks the string field `status`".to_owned(),
+                    );
+                    let what = unread.join("; ");
+                    if let Err(refusal) = frame.response_ended_unread(id, &what, now) {
+                        frame.dropped(refusal);
+                        frame.read_in_part(what, now);
+                    }
+                    return;
+                };
+                let ended = match status {
+                    ResponseStatus::Completed => frame.response_completed(id, now),
+                    ResponseStatus::Cancelled => frame.response_cancelled(id, now),
                     ResponseStatus::InProgress => Ok(()),
                     ResponseStatus::Failed
                     | ResponseStatus::Incomplete
-                    | ResponseStatus::Other(_) => self.ledger.response_failed(
+                    | ResponseStatus::Other(_) => frame.response_failed(
                         id,
                         SessionFailure {
                             kind: SessionFailureKind::ProviderError,
@@ -620,6 +970,8 @@ impl OpenAiRealtimeSession {
                         now,
                     ),
                 };
+                drop_refusal(&mut frame, ended);
+                resolve(frame, &unread, now);
             }
             ServerEvent::Error(error) => {
                 let refused_commit = error
@@ -637,8 +989,26 @@ impl OpenAiRealtimeSession {
             | ServerEvent::OutputTranscriptDone { .. }
             | ServerEvent::InputTranscriptDelta { .. }
             | ServerEvent::ItemTruncated { .. }
+            | ServerEvent::UnreadableResponseDone { .. }
             | ServerEvent::Unknown { .. } => {}
         }
+    }
+}
+
+/// A ledger refusal the binding drops: it changed nothing, and the ledger counts it
+/// ([`SessionLedger::dropped`]).
+fn drop_refusal(frame: &mut ProviderFrame<'_>, result: Result<(), SessionError>) {
+    if let Err(refusal) = result {
+        frame.dropped(refusal);
+    }
+}
+
+/// Resolves a frame the binding recorded: `unread` names each field it could not read. With
+/// none the frame was readable; otherwise it is counted once and leaves the liveness bound where
+/// it stood before the frame ([`ProviderFrame::read_in_part`]).
+fn resolve(frame: ProviderFrame<'_>, unread: &[String], now: Instant) {
+    if !unread.is_empty() {
+        frame.read_in_part(unread.join("; "), now);
     }
 }
 
@@ -712,6 +1082,7 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
 
     fn cancel_response(&mut self, response_id: ResponseId) -> Result<(), SessionError> {
         self.ledger.cancel(response_id)?;
+        self.cancelled(response_id);
         let provider = self.provider_response_id(response_id).map(str::to_owned);
         self.send(|client| {
             Box::pin(async move { client.cancel_response(provider.as_deref()).await })
@@ -748,7 +1119,17 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
         })
     }
 
+    /// Closes the session and the connection. The server events that already reached the
+    /// binding are recorded first, so their usage counts and they are delivered after the close,
+    /// before `SpeechSessionClosed`; from the first read that fails among them nothing is
+    /// recorded, so an open session closes rather than fails. A message that is not a Realtime
+    /// event is no failed read: it is counted, the client reads on, and what follows it is
+    /// recorded too. Nothing
+    /// the server sends after the close is delivered.
     fn close(&mut self) -> Result<(), SessionError> {
+        if self.ledger.session().require_open().is_ok() && self.record_arrived().is_some() {
+            self.client = None;
+        }
         self.ledger.close()?;
         if let (Some(client), Some(runtime)) = (self.client.take(), self.runtime.as_ref()) {
             let _ = runtime.block_on(client.close());
@@ -775,11 +1156,16 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
                 runtime.block_on(async { tokio::time::timeout(left, client.next_event()).await });
             match read {
                 Ok(Ok(event)) => self.record(event),
+                Ok(Err(error @ RealtimeError::Protocol(_))) => {
+                    self.undecodable(&error);
+                    self.ledger.check_liveness(Instant::now());
+                }
                 Ok(Err(RealtimeError::Stalled(_))) | Err(_) => {
                     self.ledger.check_liveness(Instant::now());
                 }
                 Ok(Err(error)) => {
-                    let _ = self.ledger.fail(failure(&error));
+                    let failed = self.ledger.fail(failure(&error));
+                    self.or_drop(failed);
                     self.client = None;
                 }
             }

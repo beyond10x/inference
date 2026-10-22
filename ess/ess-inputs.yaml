@@ -19,3 +19,5 @@ scenarios:
   - scenarios/draining-run-fails.yaml
   - scenarios/input-during-output-continues-response.yaml
   - scenarios/barge-in-cancels-response.yaml
+  - scenarios/close-delivers-received-usage.yaml
+  - scenarios/fail-delivers-received-usage.yaml

@@ -154,7 +154,9 @@ entities:
       type: inference.usage.UsageRecordId
     fields:
       # The run the call was made in. A call inside a subgraph names the child run it was made
-      # in; a parent run's total rolls its child runs up.
+      # in; a parent run's total rolls its child runs up. A record counts in its run's total
+      # whether or not an edge leaves the `usage` port it was sent on; where no port can carry
+      # it out of a child run, the total is marked partial naming the subgraph node.
       # read from: docs/design/inference.md:309
       - name: run_id
         type: Optional<inference.graph.RunId>

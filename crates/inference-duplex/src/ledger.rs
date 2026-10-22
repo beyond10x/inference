@@ -9,13 +9,16 @@ use inference_core::usage::{Quantity, QuantityKind, RecordUsage, UsageRecord};
 use inference_tools::{Json, Tool};
 
 use crate::{
-    InputAccepted, InputCommitted, InputTranscribed, OpenError, OpenSpeechSession, OutputAudio,
-    OutputTranscriptDelta, OutputTruncated, ProposeSpeechToolCall, Response, ResponseId,
-    ResponseIdReused, ResponseNotFound, ResponseStateConflict, ResponseUsage,
-    ResponseUsageRecorded, SessionConfig, SessionError, SessionEvent, SessionFailure,
+    DeliverSessionEventError, InputAccepted, InputCommitted, InputTranscribed,
+    NonPositiveIdleLimit, OpenError, OpenSpeechSession, OutputAudio, OutputTranscriptDelta,
+    OutputTruncated, ProposeSpeechToolCall, ReceivedEventId, ReceivedEventKind,
+    ReceivedSessionEvent, Response, ResponseId, ResponseIdReused, ResponseNotFound,
+    ResponseStateConflict, ResponseUsage, ResponseUsageRecorded, SessionConfig, SessionEnd,
+    SessionError, SessionEvent, SessionEventDelivered, SessionEventReceived, SessionFailure,
     SessionFailureKind, SpeechCallId, SpeechCallIdReused, SpeechCapabilities, SpeechSession,
-    SpeechSessionId, SpeechSessionOpened, SpeechStarted, SpeechStopped, SpeechToolCall,
-    TranscriptionUsage, TranscriptionUsageRecorded, Unsupported, UsageTotal,
+    SpeechSessionId, SpeechSessionOpened, SpeechSessionStateConflict, SpeechStarted, SpeechStopped,
+    SpeechToolCall, TranscriptionUsage, TranscriptionUsageRecorded, TuningSupport, Unsupported,
+    UsageTotal,
 };
 
 /// The liveness bound of a session: when the provider was last heard from, and how long it may
@@ -24,6 +27,256 @@ use crate::{
 pub struct Liveness {
     limit: Duration,
     last_heard: Instant,
+}
+
+/// One frame the provider sent, being recorded ([`SessionLedger::provider_frame`]). What the
+/// frame carries is recorded through the frame's own methods, which forward to the ledger's of
+/// the same name, and every time the provider is heard from while it is open is the frame's own,
+/// exactly. Dropped, the frame was readable and those times stand;
+/// [`ProviderFrame::read_in_part`] takes them out of the liveness bound.
+///
+/// Besides the provider's events, the frame forwards the caller's moves that may land while it
+/// is open: a request, an answer and a liveness check. Through it the ledger can be read, never
+/// replaced: it hands out no `&mut SessionLedger`.
+///
+/// ```compile_fail
+/// # use std::time::Instant;
+/// # use inference_duplex::SessionLedger;
+/// fn swapped(ledger: &mut SessionLedger, other: &mut SessionLedger, now: Instant) {
+///     let mut frame = ledger.provider_frame();
+///     std::mem::swap(&mut *frame, other);
+///     frame.read_in_part("`response.done` lacks `usage`", now);
+/// }
+/// ```
+///
+/// A frame borrows its ledger mutably, so a session's frames are recorded one at a time: a
+/// second frame cannot be opened while the first is still to be resolved.
+///
+/// ```compile_fail,E0499
+/// # use std::time::Instant;
+/// # use inference_duplex::SessionLedger;
+/// fn overlapping(ledger: &mut SessionLedger, now: Instant) {
+///     let mut partial = ledger.provider_frame();
+///     let mut readable = ledger.provider_frame();
+///     partial.heard(now);
+///     readable.heard(now);
+///     partial.read_in_part("`response.done` lacks `usage`", now);
+/// }
+/// ```
+///
+/// One after the other, each frame's hearings are its own:
+///
+/// ```
+/// # use std::time::Instant;
+/// # use inference_duplex::SessionLedger;
+/// fn one_at_a_time(ledger: &mut SessionLedger, now: Instant) {
+///     let mut readable = ledger.provider_frame();
+///     readable.heard(now);
+///     drop(readable);
+///     let mut partial = ledger.provider_frame();
+///     partial.heard(now);
+///     partial.read_in_part("`response.done` lacks `usage`", now);
+/// }
+/// ```
+///
+/// A frame opened through another, while that one is open, is part of it: the outer frame read
+/// in part takes the inner frame's hearings out with its own.
+#[derive(Debug)]
+#[must_use = "a frame dropped at once owns no hearing"]
+pub struct ProviderFrame<'a> {
+    ledger: &'a mut SessionLedger,
+    /// The frame's place among the frames open on the ledger, outermost 0.
+    depth: usize,
+}
+
+/// Where the liveness bound of a session would stand without the hearings of one open
+/// [`ProviderFrame`]: the instant it would run from, and whether it would wait for the next
+/// check. Everything else that moves the bound moves this too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoundWithout {
+    last_heard: Instant,
+    clock_pending: bool,
+}
+
+impl std::ops::Deref for ProviderFrame<'_> {
+    type Target = SessionLedger;
+
+    fn deref(&self) -> &SessionLedger {
+        self.ledger
+    }
+}
+
+/// Forwards each named method of [`SessionLedger`] through a [`ProviderFrame`], recorded as part
+/// of the frame.
+macro_rules! through_frame {
+    (
+        infallible {
+            $(fn $name:ident(&mut self $(, $arg:ident: $ty:ty)* $(,)?) $(-> $ret:ty)?;)*
+        }
+        fallible {
+            $(fn $try_name:ident(&mut self $(, $try_arg:ident: $try_ty:ty)* $(,)?)
+                -> $try_ret:ty;)*
+        }
+    ) => {
+        $(
+            #[doc = concat!(
+                "[`SessionLedger::", stringify!($name), "`], recorded as part of the frame."
+            )]
+            pub fn $name(&mut self $(, $arg: $ty)*) $(-> $ret)? {
+                self.ledger.$name($($arg),*)
+            }
+        )*
+        $(
+            #[doc = concat!(
+                "[`SessionLedger::", stringify!($try_name), "`], recorded as part of the frame."
+            )]
+            ///
+            /// # Errors
+            ///
+            #[doc = concat!("As [`SessionLedger::", stringify!($try_name), "`].")]
+            pub fn $try_name(&mut self $(, $try_arg: $try_ty)*) -> $try_ret {
+                self.ledger.$try_name($($try_arg),*)
+            }
+        )*
+    };
+}
+
+impl ProviderFrame<'_> {
+    through_frame! {
+        infallible {
+            fn heard(&mut self, now: Instant);
+            fn dropped(&mut self, refusal: SessionError);
+            fn hold_usage(&mut self, quantities: Vec<Quantity>);
+            fn session_usage_at_end(&mut self, quantities: Vec<Quantity>, confirmed: bool);
+            fn check_liveness(&mut self, now: Instant) -> bool;
+        }
+        fallible {
+            fn input_committed(&mut self, now: Instant) -> Result<(), SessionError>;
+            fn speech_started(
+                &mut self,
+                position: SampleClockPosition,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn speech_stopped(
+                &mut self,
+                position: SampleClockPosition,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn input_transcribed(&mut self, text: String, now: Instant) -> Result<(), SessionError>;
+            fn transcription_usage(
+                &mut self,
+                usage: TranscriptionUsage,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn transcription_usage_reported(
+                &mut self,
+                usage: Option<TranscriptionUsage>,
+                quantities: Vec<Quantity>,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_created(
+                &mut self,
+                response_id: ResponseId,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn output_audio(
+                &mut self,
+                response_id: ResponseId,
+                frame: AudioFrame,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn output_transcript(
+                &mut self,
+                response_id: ResponseId,
+                text: String,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn tool_call(
+                &mut self,
+                call_id: SpeechCallId,
+                response_id: ResponseId,
+                tool: &str,
+                arguments: Json,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_completed(
+                &mut self,
+                response_id: ResponseId,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_cancelled(
+                &mut self,
+                response_id: ResponseId,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_failed(
+                &mut self,
+                response_id: ResponseId,
+                failure: SessionFailure,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_ended_unread(
+                &mut self,
+                response_id: ResponseId,
+                what: impl Into<String>,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_usage(
+                &mut self,
+                response_id: ResponseId,
+                usage: ResponseUsage,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_usage_reported(
+                &mut self,
+                response_id: ResponseId,
+                usage: Option<ResponseUsage>,
+                quantities: Vec<Quantity>,
+                total: UsageTotal,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn usage_awaited(&mut self, response_id: ResponseId) -> Result<(), SessionError>;
+            fn response_usage_unknown(
+                &mut self,
+                response_id: ResponseId,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn session_usage(
+                &mut self,
+                quantities: Vec<Quantity>,
+                confirmed: bool,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn request_response(&mut self, now: Instant) -> Result<(), SessionError>;
+            fn answer(&mut self, call_id: &SpeechCallId, result: Json) -> Result<(), SessionError>;
+        }
+    }
+
+    /// A frame opened while this one is open, part of it ([`SessionLedger::provider_frame`]):
+    /// this frame read in part takes the inner frame's hearings out with its own.
+    pub fn provider_frame(&mut self) -> ProviderFrame<'_> {
+        self.ledger.provider_frame()
+    }
+
+    /// The frame was read only in part: `what` names what could not be read. What of it was
+    /// readable stays recorded, but it is no sign of life: every time the provider was heard
+    /// from while the frame was open is taken out of the liveness bound, which stands where it
+    /// would without them, its instant and whether it waits for the next check. Anything else
+    /// that moved the bound meanwhile, a request, a commit, an answer or a check, stays. The
+    /// frame is counted as one the binding could not read ([`SessionLedger::unreadable_frame`]).
+    pub fn read_in_part(self, what: impl Into<String>, now: Instant) {
+        if let Some(without) = self.ledger.frames.get(self.depth).copied() {
+            self.ledger.liveness.last_heard = without.last_heard;
+            self.ledger.clock_pending = without.clock_pending;
+        }
+        self.ledger.unreadable_frame(what, now);
+    }
+}
+
+impl Drop for ProviderFrame<'_> {
+    fn drop(&mut self) {
+        self.ledger.frames.truncate(self.depth);
+    }
 }
 
 impl Liveness {
@@ -60,7 +313,7 @@ impl Liveness {
 /// The caller's operations and the provider's events both go through it. Each checks what the
 /// specification and this contract decide, records its event, or returns the [`SessionError`]
 /// and changes nothing; an adapter drops a provider event the ledger refuses, such as late audio
-/// of a cancelled response.
+/// of a cancelled response, and hands the refusal to [`SessionLedger::dropped`].
 ///
 /// Identities are never reused: a response id the adapter issued, or a call id the provider
 /// gave, that the session already holds is refused. Closing the session cancels the response
@@ -70,7 +323,9 @@ impl Liveness {
 /// The liveness bound runs while the caller awaits the provider: from a request for a response,
 /// from a commit of the input when `auto_response` is on, or, when the model creates every
 /// response, from the answer to a call, until the response ends. A session nobody awaits
-/// anything of is idle, not stalled.
+/// anything of is idle, not stalled. A binding that may read a frame only in part records it
+/// through a [`ProviderFrame`] ([`SessionLedger::provider_frame`]), one frame at a time, so that
+/// the frame's own hearings can be taken out of the bound.
 ///
 /// Usage is recorded as `inference.usage` records, [`SessionEvent::UsageRecorded`], each naming
 /// the session's speech session, adapter and the adapter's model, and no run, node or session
@@ -85,7 +340,9 @@ impl Liveness {
 ///   end settles the response it cancels or fails; one settled later is recorded by its final
 ///   report at once, by the next response just before that response's `ResponseCreated`, by the
 ///   session's end before the end events it records. A response with no usage reported is
-///   recorded with every token count unknown.
+///   recorded with every token count unknown. The next response does not settle a response
+///   whose final usage the provider sends in a frame of its own ([`SessionLedger::usage_awaited`]):
+///   that frame does, the binding's word that it was lost does, or the session's end does.
 /// * A transcription's usage is recorded when reported, and so is usage of the whole session
 ///   ([`SessionLedger::session_usage`]); neither names a response.
 /// * Usage no response holds yet ([`SessionLedger::hold_usage`]) is recorded at the session's
@@ -109,16 +366,35 @@ pub struct SessionLedger {
     records: Vec<UsageRecord>,
     /// Usage the provider reported that no response holds yet ([`SessionLedger::hold_usage`]).
     held: Vec<Quantity>,
+    /// The total of the session billed as a whole, recorded just before its end event
+    /// ([`SessionLedger::session_usage_at_end`]), and whether the provider confirmed it final.
+    at_end: Option<(Vec<Quantity>, bool)>,
     calls: Vec<SpeechToolCall>,
     liveness: Liveness,
     requested: bool,
     /// The bound was armed without an instant: it starts at the next liveness check.
     clock_pending: bool,
+    /// For each open [`ProviderFrame`], outermost first, where the bound would stand without
+    /// its hearings ([`ProviderFrame::read_in_part`]).
+    frames: Vec<BoundWithout>,
+    /// How many frames the binding could not read, whole or in part
+    /// ([`SessionLedger::unreadable_frame`]), and what the last one was.
+    unreadable: (u64, Option<String>),
+    /// Whether a frame the binding could not read arrived after the last readable frame.
+    unread_since_readable: bool,
+    /// How many provider events and failures the ledger refused and the binding dropped
+    /// ([`SessionLedger::dropped`]), and the most recent of them, at most
+    /// [`SessionLedger::DROPPED_EVENTS_KEPT`], oldest first.
+    dropped: (u64, Vec<SessionError>),
     /// The instant the session opened, and the wall clock then in Unix epoch milliseconds.
     opened: (Instant, i64),
     /// The latest instant the ledger was given.
     latest: Instant,
-    outbox: VecDeque<SessionEvent>,
+    /// The events recorded and not yet delivered, each with the received event it carries, if any.
+    outbox: VecDeque<(SessionEvent, Option<ReceivedEventId>)>,
+    /// The events the provider sent the open session, in the order received
+    /// ([`SessionLedger::received_events`]).
+    received: Vec<ReceivedSessionEvent>,
 }
 
 /// What the ledger keeps to record one response's usage.
@@ -130,6 +406,9 @@ struct Meter {
     quantities: Vec<Quantity>,
     /// Whether no later report changes them.
     settled: bool,
+    /// Whether the provider reports the response's final usage in a frame of its own, however
+    /// the response ends: the next response does not settle it ([`SessionLedger::usage_awaited`]).
+    awaited: bool,
     recorded: bool,
 }
 
@@ -171,6 +450,9 @@ fn millis(duration: Duration) -> i64 {
 }
 
 impl SessionLedger {
+    /// How many of the most recent dropped refusals [`Self::dropped_events`] keeps.
+    pub const DROPPED_EVENTS_KEPT: usize = 64;
+
     /// Runs `inference.duplex.OpenSpeechSession` for `adapter` under `session_id` with `config`,
     /// once `capabilities` admit it; the provider is heard from at `now`.
     ///
@@ -205,29 +487,88 @@ impl SessionLedger {
         };
         let (session, opened) =
             SpeechSession::open_as(session_id, record).map_err(OpenError::NoLivenessBound)?;
+        let ledger = Self::of(
+            session,
+            adapter.model_id(),
+            capabilities.clone(),
+            config.tools,
+            config.idle_limit,
+            now,
+        );
+        Ok((ledger, opened))
+    }
+
+    /// Runs `inference.duplex.OpenSpeechSession` with `record` as the command gives it, under
+    /// `session_id`, for a store that holds sessions by their record rather than for a binding:
+    /// the record is the whole configuration, so the capabilities are the ones it names, and the
+    /// session offers no tool to call, since the record names its tools only by identity. The
+    /// provider is heard from at `now`.
+    ///
+    /// # Errors
+    ///
+    /// [`NonPositiveIdleLimit`]; nothing is opened.
+    pub fn open_record(
+        session_id: SpeechSessionId,
+        model_id: ModelId,
+        record: OpenSpeechSession,
+        now: Instant,
+    ) -> Result<(Self, SpeechSessionOpened), NonPositiveIdleLimit> {
+        let (session, opened) = SpeechSession::open_as(session_id, record)?;
+        let config = session.config();
+        let capabilities = SpeechCapabilities {
+            input_formats: vec![config.input_format],
+            output_formats: vec![config.output_format],
+            turn_detection: vec![config.turn_detection],
+            turn_tuning: TuningSupport::ALL,
+            manual_commit: true,
+            manual_response: true,
+            manual_interrupt: true,
+            client_cancel: true,
+            truncation: true,
+            tool_calling: true,
+        };
+        let idle_limit = Duration::from_millis(u64::try_from(config.idle_limit_ms).unwrap_or(0));
+        let ledger = Self::of(session, model_id, capabilities, Vec::new(), idle_limit, now);
+        Ok((ledger, opened))
+    }
+
+    /// The ledger of `session`, just opened at `now`.
+    fn of(
+        session: SpeechSession,
+        model_id: ModelId,
+        capabilities: SpeechCapabilities,
+        tools: Vec<Tool>,
+        idle_limit: Duration,
+        now: Instant,
+    ) -> Self {
         let wall = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, millis);
-        let ledger = Self {
+        Self {
             session,
-            model_id: adapter.model_id(),
-            capabilities: capabilities.clone(),
-            tools: config.tools,
+            model_id,
+            capabilities,
+            tools,
             responses: Vec::new(),
             emitted: Vec::new(),
             usage: Vec::new(),
             meters: Vec::new(),
             records: Vec::new(),
             held: Vec::new(),
+            at_end: None,
             calls: Vec::new(),
-            liveness: Liveness::new(config.idle_limit, now),
+            liveness: Liveness::new(idle_limit, now),
             requested: false,
             clock_pending: false,
+            frames: Vec::new(),
+            unreadable: (0, None),
+            unread_since_readable: false,
+            dropped: (0, Vec::new()),
             opened: (now, wall),
             latest: now,
             outbox: VecDeque::new(),
-        };
-        Ok((ledger, opened))
+            received: Vec::new(),
+        }
     }
 
     #[must_use]
@@ -302,9 +643,65 @@ impl SessionLedger {
         self.outbox.len()
     }
 
-    /// The next recorded event not yet delivered.
+    /// The next recorded event not yet delivered. When it carries an event the provider sent the
+    /// open session that is still held, the caller now has that one too:
+    /// `inference.duplex.DeliverSessionEvent`.
     pub fn next_event(&mut self) -> Option<SessionEvent> {
-        self.outbox.pop_front()
+        let (event, received_id) = self.outbox.pop_front()?;
+        if let Some(received_id) = received_id {
+            let _ = self.deliver_event(received_id);
+        }
+        Some(event)
+    }
+
+    /// Every event the provider sent the open session, in the order received: its output, its
+    /// input transcripts, its usage, its tool calls and the ends of its responses, each held
+    /// until the caller has it.
+    #[must_use]
+    pub fn received_events(&self) -> &[ReceivedSessionEvent] {
+        &self.received
+    }
+
+    /// The provider sent the open session an event of `kind`, the `sequence`th it sent, under
+    /// `received_id`: `inference.duplex.ReceiveSessionEvent`. It is held until the caller has it
+    /// ([`Self::deliver_event`]); a close or failure delivers it before its end event. The ledger
+    /// records the events it builds from the provider's traffic this way itself.
+    ///
+    /// # Errors
+    ///
+    /// [`SpeechSessionStateConflict`] when the session is not Open: what a provider sends after
+    /// the end is not received. Nothing is held.
+    pub fn receive_event(
+        &mut self,
+        received_id: ReceivedEventId,
+        kind: ReceivedEventKind,
+        sequence: i64,
+    ) -> Result<SessionEventReceived, SpeechSessionStateConflict> {
+        let (received, event) =
+            ReceivedSessionEvent::receive_as(received_id, &self.session, kind, sequence)?;
+        self.received.push(received);
+        Ok(event)
+    }
+
+    /// The caller has the received event carrying `received_id`:
+    /// `inference.duplex.DeliverSessionEvent`.
+    ///
+    /// # Errors
+    ///
+    /// [`DeliverSessionEventError::Unknown`] when the session received no such event, or
+    /// [`DeliverSessionEventError::Conflict`] when it is no longer held; nothing moved.
+    pub fn deliver_event(
+        &mut self,
+        received_id: ReceivedEventId,
+    ) -> Result<SessionEventDelivered, DeliverSessionEventError> {
+        let slot = self
+            .received
+            .iter_mut()
+            .find(|received| received.received_id() == received_id)
+            .ok_or(DeliverSessionEventError::Unknown { received_id })?;
+        let (moved, event) = slot.deliver().map_err(DeliverSessionEventError::Conflict)?;
+        *slot = moved;
+        Ok(event)
     }
 
     /// The caller sends `frame`: `inference.duplex.AppendInputAudio`, accepted whether or not a
@@ -317,11 +714,10 @@ impl SessionLedger {
         self.require_open()?;
         Self::same_format(*self.session.input_format(), frame.format)?;
         let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::InputAccepted(InputAccepted {
-                session_id,
-                frame,
-            }));
+        self.push(SessionEvent::InputAccepted(InputAccepted {
+            session_id,
+            frame,
+        }));
         Ok(())
     }
 
@@ -416,11 +812,10 @@ impl SessionLedger {
         if heard.get() > emitted {
             return Err(SessionError::BeyondOutput { heard, emitted });
         }
-        self.outbox
-            .push_back(SessionEvent::OutputTruncated(OutputTruncated {
-                response_id,
-                heard,
-            }));
+        self.push(SessionEvent::OutputTruncated(OutputTruncated {
+            response_id,
+            heard,
+        }));
         Ok(())
     }
 
@@ -446,11 +841,13 @@ impl SessionLedger {
             })?;
         let (moved, event) = slot.answer(result).map_err(SessionError::CallConflict)?;
         *slot = moved;
-        self.outbox
-            .push_back(SessionEvent::SpeechToolCallAnswered(event));
+        self.push(SessionEvent::SpeechToolCallAnswered(event));
         if !self.capabilities.manual_response {
             if !self.awaiting() {
                 self.clock_pending = true;
+                for frame in &mut self.frames {
+                    frame.clock_pending = true;
+                }
             }
             self.requested = true;
         }
@@ -458,9 +855,11 @@ impl SessionLedger {
     }
 
     /// The caller closes the session: `inference.duplex.CloseSpeechSession`. The response in
-    /// progress is cancelled first, its `ResponseCancelled` just before `SpeechSessionClosed`;
-    /// every response not yet recorded, and any usage held for no response, is recorded before
-    /// both.
+    /// progress is cancelled first, its `ResponseCancelled` just before the total of the session
+    /// ([`Self::session_usage_at_end`]) and `SpeechSessionClosed`; every response not yet
+    /// recorded, and any usage held for no response, is recorded before both. Every event the
+    /// provider sent that is still held is delivered before `SpeechSessionClosed`
+    /// (`delivered_before: closed`), and stays in order before it.
     ///
     /// # Errors
     ///
@@ -471,22 +870,35 @@ impl SessionLedger {
         if let Some(response_id) = self.in_progress() {
             self.cancel_response(response_id, self.latest)?;
         }
+        self.record_at_end();
+        self.deliver_held(SessionEnd::Closed);
         self.session = moved;
         self.requested = false;
-        self.outbox
-            .push_back(SessionEvent::SpeechSessionClosed(event));
+        self.push(SessionEvent::SpeechSessionClosed(event));
         Ok(())
     }
 
     /// The session fails with `failure`: `inference.duplex.FailSpeechSession`, for a closed
     /// transport, an error the provider reported or a stall. The response in progress fails with
-    /// it first, its `ResponseFailed` just before `SpeechSessionFailed`; every response not yet
-    /// recorded, and any usage held for no response, is recorded before both.
+    /// it first, its `ResponseFailed` just before the total of the session
+    /// ([`Self::session_usage_at_end`]) and `SpeechSessionFailed`; every response not yet
+    /// recorded, and any usage held for no response, is recorded before both. Every event the
+    /// provider sent that is still held is delivered before `SpeechSessionFailed`
+    /// (`delivered_before: failed`), and stays in order before it.
+    ///
+    /// When the provider had sent frames the binding could not read
+    /// ([`Self::unreadable_frame`]), the failure's detail names how many and the last one. Its
+    /// kind stays what the binding or the provider stated, except
+    /// [`SessionFailureKind::Stalled`]: a stall turns into [`SessionFailureKind::ProviderError`]
+    /// only when an unreadable frame arrived after the last readable frame, since a provider
+    /// whose last frames could not be read was not silent. A readable frame clears that state.
+    /// The detail still names the total unreadable count.
     ///
     /// # Errors
     ///
     /// [`SessionError::NotOpen`].
     pub fn fail(&mut self, failure: SessionFailure) -> Result<(), SessionError> {
+        let failure = self.after_unreadable(failure);
         let (moved, event) = self
             .session
             .fail(failure.clone())
@@ -495,22 +907,31 @@ impl SessionLedger {
         if let Some(response_id) = self.in_progress() {
             self.fail_response(response_id, failure, self.latest)?;
         }
+        self.record_at_end();
+        self.deliver_held(SessionEnd::Failed);
         self.session = moved;
         self.requested = false;
-        self.outbox
-            .push_back(SessionEvent::SpeechSessionFailed(event));
+        self.push(SessionEvent::SpeechSessionFailed(event));
         Ok(())
     }
 
     /// Fails an open session as stalled when the caller awaits the provider and it has been
-    /// silent for the whole bound at `now`; returns whether it did.
+    /// silent for the whole bound at `now`; returns whether it did. A check made while a
+    /// [`ProviderFrame`] is open starts, for that frame read in part, a bound that would have
+    /// waited for it without the frame's hearings.
     pub fn check_liveness(&mut self, now: Instant) -> bool {
         self.tick(now);
         if self.session.require_open().is_err() || !self.awaiting() {
             return false;
         }
+        for frame in &mut self.frames {
+            if frame.clock_pending {
+                frame.last_heard = frame.last_heard.max(now);
+                frame.clock_pending = false;
+            }
+        }
         if self.clock_pending {
-            self.heard(now);
+            self.restart_bound(now);
             return false;
         }
         if !self.liveness.expired(now) {
@@ -520,7 +941,7 @@ impl SessionLedger {
         self.fail(SessionFailure {
             kind: SessionFailureKind::Stalled,
             detail: format!(
-                "the provider sent nothing for {} ms, the bound is {} ms",
+                "the provider sent nothing readable for {} ms, the bound is {} ms",
                 silent.as_millis(),
                 self.liveness.limit.as_millis()
             ),
@@ -528,11 +949,114 @@ impl SessionLedger {
         .is_ok()
     }
 
-    /// The provider was heard from at `now`, whatever it sent.
+    /// The provider was heard from at `now`, with a frame the binding could read, whatever it
+    /// sent. A stall after it is a stall again, whatever frames before it could not be read.
+    /// Heard while a [`ProviderFrame`] is open, it is that frame's own.
     pub fn heard(&mut self, now: Instant) {
         self.tick(now);
         self.liveness.heard(now);
         self.clock_pending = false;
+        self.unread_since_readable = false;
+    }
+
+    /// The liveness bound runs from `now`, by the caller's request or a check rather than by
+    /// the provider: no open frame owns it, so a frame read in part leaves it.
+    fn restart_bound(&mut self, now: Instant) {
+        self.tick(now);
+        self.liveness.heard(now);
+        self.clock_pending = false;
+        for frame in &mut self.frames {
+            frame.last_heard = frame.last_heard.max(now);
+            frame.clock_pending = false;
+        }
+    }
+
+    /// The binding dropped a provider event, or a failure, that the ledger refused with
+    /// `refusal`: it changed nothing. It is counted ([`Self::dropped_count`]) and kept in
+    /// [`Self::dropped_events`], which forgets the oldest refusal beyond
+    /// [`Self::DROPPED_EVENTS_KEPT`].
+    pub fn dropped(&mut self, refusal: SessionError) {
+        self.dropped.0 = self.dropped.0.saturating_add(1);
+        if self.dropped.1.len() == Self::DROPPED_EVENTS_KEPT {
+            self.dropped.1.remove(0);
+        }
+        self.dropped.1.push(refusal);
+    }
+
+    /// How many refusals the binding dropped over the session ([`Self::dropped`]).
+    #[must_use]
+    pub const fn dropped_count(&self) -> u64 {
+        self.dropped.0
+    }
+
+    /// The most recent refusals the binding dropped ([`Self::dropped`]), oldest first: at most
+    /// [`Self::DROPPED_EVENTS_KEPT`] (64), so a session dropping events without end holds no more.
+    /// [`Self::dropped_count`] counts every one.
+    #[must_use]
+    pub fn dropped_events(&self) -> &[SessionError] {
+        &self.dropped.1
+    }
+
+    /// The provider sent, at `now`, a frame the binding could not read, whole or in part;
+    /// `what` names it: its type, or the start of its text. The binding reads on past it, and
+    /// it ends nothing, but it is no sign of life: the liveness bound runs on as if the provider
+    /// had sent nothing. It is counted, and a later failure of the session names it
+    /// ([`Self::fail`]).
+    pub fn unreadable_frame(&mut self, what: impl Into<String>, now: Instant) {
+        self.tick(now);
+        self.unreadable.0 = self.unreadable.0.saturating_add(1);
+        self.unreadable.1 = Some(what.into());
+        self.unread_since_readable = true;
+    }
+
+    /// Opens the next frame the provider sent, to be recorded through the [`ProviderFrame`]
+    /// returned and resolved as readable, by dropping it, or as read only in part
+    /// ([`ProviderFrame::read_in_part`]). Every time the provider is heard from while it is
+    /// open is the frame's own; a session's frames are recorded one at a time.
+    pub fn provider_frame(&mut self) -> ProviderFrame<'_> {
+        let depth = self.frames.len();
+        self.frames.push(BoundWithout {
+            last_heard: self.liveness.last_heard,
+            clock_pending: self.clock_pending,
+        });
+        ProviderFrame {
+            ledger: self,
+            depth,
+        }
+    }
+
+    /// How many frames the binding could not read ([`Self::unreadable_frame`]).
+    #[must_use]
+    pub const fn unreadable_frames(&self) -> u64 {
+        self.unreadable.0
+    }
+
+    /// What the last frame the binding could not read was.
+    #[must_use]
+    pub fn last_unreadable(&self) -> Option<&str> {
+        self.unreadable.1.as_deref()
+    }
+
+    /// `failure` as the session reports it, naming the frames the binding could not read when
+    /// there were any: a stall becomes a provider error when an unreadable frame arrived after
+    /// the last readable frame, every other kind stays.
+    fn after_unreadable(&self, failure: SessionFailure) -> SessionFailure {
+        let (count, Some(last)) = (self.unreadable.0, self.unreadable.1.as_deref()) else {
+            return failure;
+        };
+        let frames = if count == 1 { "frame" } else { "frames" };
+        SessionFailure {
+            kind: match failure.kind {
+                SessionFailureKind::Stalled if self.unread_since_readable => {
+                    SessionFailureKind::ProviderError
+                }
+                kind => kind,
+            },
+            detail: format!(
+                "{}; the provider had sent {count} {frames} the binding could not read, the last: {last}",
+                failure.detail
+            ),
+        }
     }
 
     /// The provider's turn detection committed the input. With `auto_response` on it owes a
@@ -561,11 +1085,10 @@ impl SessionLedger {
         self.require_open()?;
         self.heard(now);
         let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::SpeechStarted(SpeechStarted {
-                session_id,
-                position,
-            }));
+        self.push(SessionEvent::SpeechStarted(SpeechStarted {
+            session_id,
+            position,
+        }));
         Ok(())
     }
 
@@ -582,11 +1105,10 @@ impl SessionLedger {
         self.require_open()?;
         self.heard(now);
         let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::SpeechStopped(SpeechStopped {
-                session_id,
-                position,
-            }));
+        self.push(SessionEvent::SpeechStopped(SpeechStopped {
+            session_id,
+            position,
+        }));
         Ok(())
     }
 
@@ -599,11 +1121,10 @@ impl SessionLedger {
         self.require_open()?;
         self.heard(now);
         let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::InputTranscribed(InputTranscribed {
-                session_id,
-                text,
-            }));
+        self.push_received(
+            ReceivedEventKind::InputTranscript,
+            SessionEvent::InputTranscribed(InputTranscribed { session_id, text }),
+        );
         Ok(())
     }
 
@@ -653,9 +1174,10 @@ impl SessionLedger {
             ended: None,
             quantities: Vec::new(),
             settled: false,
+            awaited: false,
             recorded: false,
         });
-        self.outbox.push_back(SessionEvent::ResponseCreated(event));
+        self.push(SessionEvent::ResponseCreated(event));
         Ok(())
     }
 
@@ -676,11 +1198,10 @@ impl SessionLedger {
         Self::same_format(*self.session.output_format(), frame.format)?;
         self.heard(now);
         self.emitted[index] += u64::from(frame.sample_count);
-        self.outbox
-            .push_back(SessionEvent::OutputAudio(OutputAudio {
-                response_id,
-                frame,
-            }));
+        self.push_received(
+            ReceivedEventKind::OutputAudio,
+            SessionEvent::OutputAudio(OutputAudio { response_id, frame }),
+        );
         Ok(())
     }
 
@@ -698,11 +1219,10 @@ impl SessionLedger {
     ) -> Result<(), SessionError> {
         self.in_progress_index(response_id)?;
         self.heard(now);
-        self.outbox
-            .push_back(SessionEvent::OutputTranscriptDelta(OutputTranscriptDelta {
-                response_id,
-                text,
-            }));
+        self.push_received(
+            ReceivedEventKind::OutputTranscript,
+            SessionEvent::OutputTranscriptDelta(OutputTranscriptDelta { response_id, text }),
+        );
         Ok(())
     }
 
@@ -725,8 +1245,10 @@ impl SessionLedger {
         self.heard(now);
         self.responses[index] = moved;
         self.ended(index, now);
-        self.outbox
-            .push_back(SessionEvent::ResponseCompleted(event));
+        self.push_received(
+            ReceivedEventKind::ResponseEnd,
+            SessionEvent::ResponseCompleted(event),
+        );
         Ok(())
     }
 
@@ -745,6 +1267,39 @@ impl SessionLedger {
         self.require_open()?;
         self.fail_response(response_id, failure, now)?;
         self.heard(now);
+        Ok(())
+    }
+
+    /// The provider ended a response at `now` with a frame whose outcome the binding could not
+    /// read; `what` names what it lacked. The response fails as a provider error naming it, and
+    /// the frame is counted as one the binding could not read ([`Self::unreadable_frame`]).
+    /// Whether the provider meant the response to be done is unknown, so the caller still awaits
+    /// it: the liveness bound runs on from `now` until the provider creates a response, and a
+    /// provider that stays silent fails the session.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::NotOpen`], [`SessionError::UnknownResponse`], then
+    /// [`SessionError::ResponseNotInProgress`].
+    pub fn response_ended_unread(
+        &mut self,
+        response_id: ResponseId,
+        what: impl Into<String>,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        self.require_open()?;
+        let what = what.into();
+        self.fail_response(
+            response_id,
+            SessionFailure {
+                kind: SessionFailureKind::ProviderError,
+                detail: format!("the provider ended the response unreadably: {what}"),
+            },
+            now,
+        )?;
+        self.heard(now);
+        self.unreadable_frame(what, now);
+        self.requested = true;
         Ok(())
     }
 
@@ -776,11 +1331,10 @@ impl SessionLedger {
         self.heard(now);
         self.usage[index] = Some(usage);
         let response_id = self.responses[index].response_id();
-        self.outbox
-            .push_back(SessionEvent::ResponseUsageRecorded(ResponseUsageRecorded {
-                response_id,
-                usage,
-            }));
+        self.push_received(
+            ReceivedEventKind::Usage,
+            SessionEvent::ResponseUsageRecorded(ResponseUsageRecorded { response_id, usage }),
+        );
     }
 
     /// The provider reported the usage of a response as `quantities`, built from its own fields
@@ -791,7 +1345,8 @@ impl SessionLedger {
     /// # Errors
     ///
     /// [`SessionError::UnknownResponse`], then [`SessionError::ResponseNotInProgress`] when the
-    /// response's usage was already recorded; `usage` is recorded all the same.
+    /// response's usage was already recorded: then nothing is recorded, not `usage` either, so
+    /// no `ResponseUsageRecorded` gives counts its usage record does not carry.
     pub fn response_usage_reported(
         &mut self,
         response_id: ResponseId,
@@ -801,16 +1356,60 @@ impl SessionLedger {
         now: Instant,
     ) -> Result<(), SessionError> {
         let index = self.index_of(response_id)?;
+        self.require_unrecorded(index)?;
         match usage {
             Some(usage) => self.record_response_usage(index, usage, now),
             None => self.heard(now),
         }
+        self.count(index, quantities, total);
+        Ok(())
+    }
+
+    /// The provider reports the final usage of the response in a frame of its own, however the
+    /// response ends, and may send it after the next response was created: that response does
+    /// not settle it. Its final report does ([`Self::response_usage_reported`] with
+    /// [`UsageTotal::Final`]), [`Self::response_usage_unknown`] does, or the session's end does,
+    /// recording every count it did not report as unknown before the end events.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::UnknownResponse`], then [`SessionError::ResponseNotInProgress`] when the
+    /// response's usage was already recorded.
+    pub fn usage_awaited(&mut self, response_id: ResponseId) -> Result<(), SessionError> {
+        let index = self.index_of(response_id)?;
+        self.require_unrecorded(index)?;
+        self.meters[index].awaited = true;
+        Ok(())
+    }
+
+    /// The frame that carried the response's final usage was lost or could not be read: its
+    /// usage is settled at `now` with every count the provider did not report unknown, and
+    /// recorded once it ended. This is no sign of life: the liveness bound runs on.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::UnknownResponse`], then [`SessionError::ResponseNotInProgress`] when the
+    /// response's usage was already recorded.
+    pub fn response_usage_unknown(
+        &mut self,
+        response_id: ResponseId,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        let index = self.index_of(response_id)?;
+        self.require_unrecorded(index)?;
+        self.tick(now);
+        let quantities = std::mem::take(&mut self.meters[index].quantities);
+        self.count(index, quantities, UsageTotal::Final);
+        Ok(())
+    }
+
+    /// Refuses a report for the response at `index` once its usage is recorded.
+    fn require_unrecorded(&self, index: usize) -> Result<(), SessionError> {
         if self.meters[index].recorded {
             return Err(SessionError::ResponseNotInProgress(ResponseStateConflict {
                 current: self.responses[index].state(),
             }));
         }
-        self.count(index, quantities, total);
         Ok(())
     }
 
@@ -830,10 +1429,13 @@ impl SessionLedger {
         self.heard(now);
         let session_id = self.session.session_id();
         if let Some(usage) = usage {
-            self.outbox
-                .push_back(SessionEvent::TranscriptionUsageRecorded(
-                    TranscriptionUsageRecorded { session_id, usage },
-                ));
+            self.push_received(
+                ReceivedEventKind::Usage,
+                SessionEvent::TranscriptionUsageRecorded(TranscriptionUsageRecorded {
+                    session_id,
+                    usage,
+                }),
+            );
         }
         self.record_of_session(quantities, true, now, now);
         Ok(())
@@ -873,6 +1475,18 @@ impl SessionLedger {
         self.held = quantities;
     }
 
+    /// The provider bills the session as a whole, such as seconds of session, and reported its
+    /// total so far as `quantities`; `confirmed` is false while the provider has not confirmed
+    /// them final. They replace the total given before and are recorded once, as usage of the
+    /// session naming no response, when a close, a failure or a stall ends it: after the end
+    /// events of its responses, just before its own. Given after the end, they record nothing
+    /// and push nothing: the total was recorded once, at the end.
+    pub fn session_usage_at_end(&mut self, quantities: Vec<Quantity>, confirmed: bool) {
+        if self.session.require_open().is_ok() {
+            self.at_end = Some((quantities, confirmed));
+        }
+    }
+
     /// Every usage record of the session, in the order they were recorded.
     #[must_use]
     pub fn usage_records(&self) -> &[UsageRecord] {
@@ -899,25 +1513,34 @@ impl SessionLedger {
     }
 
     /// Records every response that ended and is not recorded yet: the next response, or the
-    /// session's end, settles them.
+    /// session's end, settles them; the next response does not settle one whose final usage is
+    /// awaited ([`Self::usage_awaited`]).
     fn settle_ended(&mut self) {
         for index in 0..self.meters.len() {
-            if self.meters[index].ended.is_some() {
+            let meter = &self.meters[index];
+            if meter.ended.is_some() && (meter.settled || !meter.awaited) {
                 self.record_response(index);
             }
         }
     }
 
-    /// The session ends: every response that ended is recorded, and the one in progress is
-    /// settled, so that its end records it just before its end event.
+    /// The session ends: every response settles, every one that ended is recorded, and the one
+    /// in progress is recorded by its end, just before its end event.
     fn settle_for_end(&mut self) {
-        self.settle_ended();
         for meter in &mut self.meters {
             meter.settled = true;
         }
+        self.settle_ended();
         let held = std::mem::take(&mut self.held);
         if !held.is_empty() {
             self.record_of_session(held, true, self.opened.0, self.latest);
+        }
+    }
+
+    /// Records the total of the session billed as a whole, if one was given, once.
+    fn record_at_end(&mut self) {
+        if let Some((quantities, confirmed)) = self.at_end.take() {
+            self.record_of_session(quantities, confirmed, self.opened.0, self.latest);
         }
     }
 
@@ -965,7 +1588,36 @@ impl SessionLedger {
     fn push_record(&mut self, usage: RecordUsage) {
         let (record, event) = UsageRecord::record(usage);
         self.records.push(record);
-        self.outbox.push_back(SessionEvent::UsageRecorded(event));
+        self.push_received(ReceivedEventKind::Usage, SessionEvent::UsageRecorded(event));
+    }
+
+    /// Records `event` for the caller; it carries nothing the provider sent.
+    fn push(&mut self, event: SessionEvent) {
+        self.outbox.push_back((event, None));
+    }
+
+    /// Records `event`, built from what the provider sent, for the caller: while the session is
+    /// open it is received as an event of `kind`, the next in sequence, and held until
+    /// [`Self::next_event`] delivers it or the session's end does. After the end nothing is
+    /// received, and the event carries none.
+    fn push_received(&mut self, kind: ReceivedEventKind, event: SessionEvent) {
+        let sequence = i64::try_from(self.received.len())
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let received_id = ReceivedEventId::generate();
+        let received = self.receive_event(received_id, kind, sequence).ok();
+        self.outbox
+            .push_back((event, received.map(|received| received.received_id)));
+    }
+
+    /// The session ends with `end`: every event the provider sent that is still held is
+    /// delivered before the end event, which the caller records next.
+    fn deliver_held(&mut self, end: SessionEnd) {
+        for slot in &mut self.received {
+            if let Some(moved) = slot.delivered_before_end(end) {
+                *slot = moved;
+            }
+        }
     }
 
     /// `at` on the wall clock, in Unix epoch milliseconds, placed relative to the opening.
@@ -1022,8 +1674,10 @@ impl SessionLedger {
         .map_err(SessionError::ResponseNotInProgress)?;
         self.heard(now);
         self.calls.push(call);
-        self.outbox
-            .push_back(SessionEvent::SpeechToolCallProposed(event));
+        self.push_received(
+            ReceivedEventKind::ToolCall,
+            SessionEvent::SpeechToolCallProposed(event),
+        );
         Ok(())
     }
 
@@ -1035,7 +1689,7 @@ impl SessionLedger {
     /// The caller awaits a response from `now`, unless it already awaits one.
     fn await_response(&mut self, now: Instant) {
         if !self.awaiting() {
-            self.heard(now);
+            self.restart_bound(now);
         }
         self.requested = true;
     }
@@ -1045,8 +1699,7 @@ impl SessionLedger {
             self.await_response(now);
         }
         let session_id = self.session.session_id();
-        self.outbox
-            .push_back(SessionEvent::InputCommitted(InputCommitted { session_id }));
+        self.push(SessionEvent::InputCommitted(InputCommitted { session_id }));
     }
 
     fn cancel_response(
@@ -1060,8 +1713,7 @@ impl SessionLedger {
             .map_err(SessionError::ResponseNotInProgress)?;
         self.responses[index] = moved;
         self.ended(index, at);
-        self.outbox
-            .push_back(SessionEvent::ResponseCancelled(event));
+        self.push(SessionEvent::ResponseCancelled(event));
         Ok(())
     }
 
@@ -1077,7 +1729,7 @@ impl SessionLedger {
             .map_err(SessionError::ResponseNotInProgress)?;
         self.responses[index] = moved;
         self.ended(index, at);
-        self.outbox.push_back(SessionEvent::ResponseFailed(event));
+        self.push(SessionEvent::ResponseFailed(event));
         Ok(())
     }
 
