@@ -39,7 +39,8 @@ pub trait OutputEndpoint<P>: Send + Sync {
     ///
     /// [`SendError`] carrying `envelope` when the edge refused it: [`SendError::Full`] when the
     /// edge is full under the overload policy `fail`, [`SendError::Closed`] when the receiving
-    /// side is gone, [`SendError::SequenceNotIncreasing`] when the edge checks the order of each
+    /// side is gone or no longer admits what was sent, such as a run's ingress once the run
+    /// drains, [`SendError::SequenceNotIncreasing`] when the edge checks the order of each
     /// stream and the envelope's sequence does not increase on its stream.
     fn send(&self, envelope: EventEnvelope<P>) -> EndpointFuture<'_, Result<(), SendError<P>>>;
 }
@@ -58,7 +59,9 @@ pub enum SendError<P> {
     /// The edge is full and its overload policy is `fail`: deliver or return an explicit
     /// failure, never silently discard.
     Full(EventEnvelope<P>),
-    /// The receiving side is gone; nothing sent along the edge can be delivered.
+    /// The receiving side is gone, or admits nothing more of what was sent, as a run's ingress
+    /// refuses user content once the run drains; nothing more of it sent along the edge can be
+    /// delivered.
     Closed(EventEnvelope<P>),
     /// The envelope's `sequence` is not greater than `last`, the last one the edge took on the
     /// envelope's `stream_id`: a repeated or decreasing sequence never reaches the edge.

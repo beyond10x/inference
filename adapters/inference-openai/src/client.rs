@@ -35,6 +35,9 @@ pub struct RealtimeClient {
     input_format: WireFormat,
     session: Value,
     pending: VecDeque<ServerEvent>,
+    /// The top-level `type` of the message the last read could not take as a Realtime event,
+    /// when that message is JSON whose `type` is a string.
+    unparsed_type: Option<String>,
 }
 
 impl fmt::Debug for RealtimeClient {
@@ -77,6 +80,7 @@ impl RealtimeClient {
             input_format: session.input_format,
             session: Value::Null,
             pending: VecDeque::new(),
+            unparsed_type: None,
         };
         client
             .await_setup(|event| matches!(event, ServerEvent::SessionCreated { .. }))
@@ -113,6 +117,14 @@ impl RealtimeClient {
     /// [`RealtimeClient::connect`].
     pub fn session(&self) -> &Value {
         &self.session
+    }
+
+    /// The top-level `type` of the message the last read from the socket could not take as a
+    /// Realtime event ([`RealtimeError::Protocol`]), when that message is JSON whose `type` is a
+    /// string; `None` after a read that gave an event, and for a message without a readable
+    /// `type`: not JSON, a binary message, or no string `type`.
+    pub fn unparsed_type(&self) -> Option<&str> {
+        self.unparsed_type.as_deref()
     }
 
     /// Sends `session.update` with `session`. Later appends follow its input format; the
@@ -274,8 +286,13 @@ impl RealtimeClient {
     }
 
     async fn read_event(&mut self) -> Result<ServerEvent, RealtimeError> {
+        self.unparsed_type = None;
         let text = read_text(&mut self.socket, self.read_timeout).await?;
-        ServerEvent::parse(&text)
+        let event = ServerEvent::parse(&text);
+        if event.is_err() {
+            self.unparsed_type = top_level_type(&text);
+        }
+        event
     }
 
     async fn send(&mut self, event: Value) -> Result<(), RealtimeError> {
@@ -390,6 +407,15 @@ pub(crate) async fn close_socket(
             Ok(Some(Err(error))) => return Err(RealtimeError::Transport(error.to_string())),
         }
     }
+}
+
+/// The top-level `type` of `text` when it is JSON whose `type` is a string.
+fn top_level_type(text: &str) -> Option<String> {
+    serde_json::from_str::<Value>(text)
+        .ok()?
+        .get("type")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Refuses a model id outside the characters model ids use.

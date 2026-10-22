@@ -122,10 +122,10 @@ pub struct ToolUse {
 pub struct OutputContentEnd {
     /// `completionId`, when present.
     pub completion_id: Option<String>,
-    /// `contentId`.
-    pub content_id: String,
-    /// `type`.
-    pub kind: ContentKind,
+    /// `contentId`, when present: an end without it still carries its stop reason.
+    pub content_id: Option<String>,
+    /// `type`, when present.
+    pub kind: Option<ContentKind>,
     /// `stopReason`, when present.
     pub stop_reason: Option<StopReason>,
 }
@@ -180,12 +180,12 @@ pub enum OutputEvent {
     ToolUse(ToolUse),
     /// `contentEnd`.
     ContentEnd(OutputContentEnd),
-    /// `completionEnd`: a response ends.
+    /// `completionEnd`: a response ends, whether or not the event carries its reason.
     CompletionEnd {
         /// The response's identifiers.
         ids: CompletionIds,
-        /// `stopReason`.
-        stop_reason: StopReason,
+        /// `stopReason`, when present.
+        stop_reason: Option<StopReason>,
     },
     /// The barge-in notice: the user spoke over the assistant, which stopped. The service sends it
     /// as a `textOutput` whose content is `{ "interrupted" : true }` (the interruption check of the
@@ -194,8 +194,8 @@ pub enum OutputEvent {
     Interrupted {
         /// `completionId`, when present.
         completion_id: Option<String>,
-        /// The `contentId` of the text block that carried the notice.
-        content_id: String,
+        /// The `contentId` of the text block that carried the notice, when present.
+        content_id: Option<String>,
     },
     /// `usageEvent`.
     Usage(Usage),
@@ -219,13 +219,26 @@ pub struct Decoder {
 
 impl Decoder {
     /// The event one `chunk` of the bidirectional stream carries.
+    ///
+    /// Each field is read on its own: an event that lacks one the event does not need to keep its
+    /// meaning decodes with that field `None`, so an end without its reason is still an end. A
+    /// frame that is not an event at all is refused with the start of its text.
     pub fn decode(&mut self, frame: &[u8]) -> Result<OutputEvent, NovaSonicError> {
-        let value: Value = serde_json::from_slice(frame)
-            .map_err(|error| NovaSonicError::Decode(format!("not JSON: {error}")))?;
+        let value: Value = serde_json::from_slice(frame).map_err(|error| {
+            NovaSonicError::Decode(format!(
+                "not JSON ({error}); it begins {:?}",
+                text_start(frame)
+            ))
+        })?;
         let event = value
             .get("event")
             .and_then(Value::as_object)
-            .ok_or_else(|| NovaSonicError::Decode("no `event` object".into()))?;
+            .ok_or_else(|| {
+                NovaSonicError::Decode(format!(
+                    "no `event` object; it begins {:?}",
+                    text_start(frame)
+                ))
+            })?;
         let (name, body) = event
             .iter()
             .next()
@@ -252,14 +265,14 @@ impl Decoder {
                 OutputEvent::ContentStart(start)
             }
             "textOutput" => {
-                let content_id = required(name, body, "contentId")?;
                 let content = required(name, body, "content")?;
                 if is_interruption_notice(&content) {
                     return Ok(OutputEvent::Interrupted {
                         completion_id: optional(body, "completionId"),
-                        content_id,
+                        content_id: optional(body, "contentId"),
                     });
                 }
+                let content_id = required(name, body, "contentId")?;
                 let (role, stage) = match self.starts.get(&content_id) {
                     Some((role, stage)) => (Some(role.clone()), stage.clone()),
                     None => (None, None),
@@ -295,19 +308,21 @@ impl Decoder {
                 },
             }),
             "contentEnd" => {
-                let content_id = required(name, body, "contentId")?;
-                self.starts.remove(&content_id);
+                let content_id = optional(body, "contentId");
+                if let Some(content_id) = &content_id {
+                    self.starts.remove(content_id);
+                }
                 OutputEvent::ContentEnd(OutputContentEnd {
                     completion_id: optional(body, "completionId"),
                     content_id,
-                    kind: ContentKind::parse(&required(name, body, "type")?),
+                    kind: optional(body, "type").map(|kind| ContentKind::parse(&kind)),
                     stop_reason: optional(body, "stopReason")
                         .map(|reason| StopReason::parse(&reason)),
                 })
             }
             "completionEnd" => OutputEvent::CompletionEnd {
                 ids: ids(body),
-                stop_reason: StopReason::parse(&required(name, body, "stopReason")?),
+                stop_reason: optional(body, "stopReason").map(|reason| StopReason::parse(&reason)),
             },
             "usageEvent" => OutputEvent::Usage(Usage {
                 completion_id: optional(body, "completionId"),
@@ -366,6 +381,12 @@ fn is_interruption_notice(content: &str) -> bool {
     content.starts_with('{')
         && serde_json::from_str::<Value>(content)
             .is_ok_and(|notice| notice.get("interrupted") == Some(&Value::Bool(true)))
+}
+
+/// The first 32 characters of a frame's text, which name a frame the decoder cannot read.
+fn text_start(frame: &[u8]) -> String {
+    let text = String::from_utf8_lossy(&frame[..frame.len().min(128)]);
+    text.chars().take(32).collect()
 }
 
 fn missing(event: &str, field: &str) -> NovaSonicError {

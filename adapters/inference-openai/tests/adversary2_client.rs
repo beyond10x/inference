@@ -27,7 +27,7 @@ fn a_response_done_whose_usage_lacks_the_totals_is_not_a_protocol_violation() {
     assert!(
         matches!(
             &parsed,
-            Ok(ServerEvent::ResponseDone { response_id, status: ResponseStatus::Cancelled, usage })
+            Ok(ServerEvent::ResponseDone { response_id: Some(response_id), status: Some(ResponseStatus::Cancelled), usage, unreadable_usage: None })
                 if response_id == "resp_1"
                     && usage.is_none_or(|usage: Usage| usage.output_audio_tokens == Some(0))
         ),
