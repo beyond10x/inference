@@ -1,0 +1,14 @@
+{
+  "model": "gpt-live-1",
+  "binding": "inference_openai::live_duplex::OpenAiLive",
+  "features": ["duplex", "gpt-live"],
+  "claims": [
+    "output_streaming",
+    "incremental_input",
+    "concurrent_input_output",
+    "native_duplex",
+    "tool_calling"
+  ],
+  "held_by": "claims_record::the_gpt_live_record_holds_the_claims_of_the_binding",
+  "adapter_revision": "0.7.0"
+}

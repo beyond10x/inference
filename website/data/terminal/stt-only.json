@@ -1,0 +1,12 @@
+{
+  "entries": [
+    {
+      "command": "cargo run -p stt-only --example stt_only",
+      "exitCode": 0,
+      "output": "committed: hello there\ncommitted: how are you"
+    }
+  ],
+  "format": "b10x-terminal/1",
+  "recordedWith": "inference-docs, from stt_only::run(), fixed by examples/stt-only/tests/output.rs",
+  "title": "stt-only"
+}

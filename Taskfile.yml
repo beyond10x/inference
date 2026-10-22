@@ -6,14 +6,25 @@ tasks:
       - task: check
 
   check:
-    desc: The verified sherpa-onnx native library, specification and planning store validation, then format, lint and tests of the workspace.
+    desc: The verified sherpa-onnx native library, specification and planning store validation, the documentation drift check, then format, lint and tests of the workspace.
     cmds:
       - task: sherpa-onnx-archive
       - ess specify validate --path ess
       - aep plan artifact validate
+      - task: docs-check
       - cargo fmt --all --check
       - cargo clippy --workspace --all-targets --all-features -- -D warnings
       - cargo test --workspace --all-features
+
+  docs-generate:
+    desc: Regenerates the derived pages and data of the documentation site under website/.
+    cmds:
+      - cargo run -q -p inference-docs -- generate
+
+  docs-check:
+    desc: Fails when a generated page or data file of the documentation site is missing, stale or edited by hand, or a page fails its checks.
+    cmds:
+      - cargo run -q -p inference-docs -- generate --check
 
   sherpa-onnx-archive:
     desc: Fetches the sherpa-onnx native library archive without TTS, checks its pinned sha256 and unpacks it where .cargo/config.toml points SHERPA_ONNX_LIB_DIR.
