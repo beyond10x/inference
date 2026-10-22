@@ -29,10 +29,25 @@ pub struct Liveness {
     last_heard: Instant,
 }
 
-/// One frame the provider sent, being recorded ([`SessionLedger::provider_frame`]). The ledger's
-/// operations run through it, and every time the provider is heard from while it is open is the
-/// frame's own, exactly. Dropped, the frame was readable and those times stand;
+/// One frame the provider sent, being recorded ([`SessionLedger::provider_frame`]). What the
+/// frame carries is recorded through the frame's own methods, which forward to the ledger's of
+/// the same name, and every time the provider is heard from while it is open is the frame's own,
+/// exactly. Dropped, the frame was readable and those times stand;
 /// [`ProviderFrame::read_in_part`] takes them out of the liveness bound.
+///
+/// Besides the provider's events, the frame forwards the caller's moves that may land while it
+/// is open: a request, an answer and a liveness check. Through it the ledger can be read, never
+/// replaced: it hands out no `&mut SessionLedger`.
+///
+/// ```compile_fail
+/// # use std::time::Instant;
+/// # use inference_duplex::SessionLedger;
+/// fn swapped(ledger: &mut SessionLedger, other: &mut SessionLedger, now: Instant) {
+///     let mut frame = ledger.provider_frame();
+///     std::mem::swap(&mut *frame, other);
+///     frame.read_in_part("`response.done` lacks `usage`", now);
+/// }
+/// ```
 ///
 /// A frame borrows its ledger mutably, so a session's frames are recorded one at a time: a
 /// second frame cannot be opened while the first is still to be resolved.
@@ -91,13 +106,158 @@ impl std::ops::Deref for ProviderFrame<'_> {
     }
 }
 
-impl std::ops::DerefMut for ProviderFrame<'_> {
-    fn deref_mut(&mut self) -> &mut SessionLedger {
-        self.ledger
-    }
+/// Forwards each named method of [`SessionLedger`] through a [`ProviderFrame`], recorded as part
+/// of the frame.
+macro_rules! through_frame {
+    (
+        infallible {
+            $(fn $name:ident(&mut self $(, $arg:ident: $ty:ty)* $(,)?) $(-> $ret:ty)?;)*
+        }
+        fallible {
+            $(fn $try_name:ident(&mut self $(, $try_arg:ident: $try_ty:ty)* $(,)?)
+                -> $try_ret:ty;)*
+        }
+    ) => {
+        $(
+            #[doc = concat!(
+                "[`SessionLedger::", stringify!($name), "`], recorded as part of the frame."
+            )]
+            pub fn $name(&mut self $(, $arg: $ty)*) $(-> $ret)? {
+                self.ledger.$name($($arg),*)
+            }
+        )*
+        $(
+            #[doc = concat!(
+                "[`SessionLedger::", stringify!($try_name), "`], recorded as part of the frame."
+            )]
+            ///
+            /// # Errors
+            ///
+            #[doc = concat!("As [`SessionLedger::", stringify!($try_name), "`].")]
+            pub fn $try_name(&mut self $(, $try_arg: $try_ty)*) -> $try_ret {
+                self.ledger.$try_name($($try_arg),*)
+            }
+        )*
+    };
 }
 
 impl ProviderFrame<'_> {
+    through_frame! {
+        infallible {
+            fn heard(&mut self, now: Instant);
+            fn dropped(&mut self, refusal: SessionError);
+            fn hold_usage(&mut self, quantities: Vec<Quantity>);
+            fn session_usage_at_end(&mut self, quantities: Vec<Quantity>, confirmed: bool);
+            fn check_liveness(&mut self, now: Instant) -> bool;
+        }
+        fallible {
+            fn input_committed(&mut self, now: Instant) -> Result<(), SessionError>;
+            fn speech_started(
+                &mut self,
+                position: SampleClockPosition,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn speech_stopped(
+                &mut self,
+                position: SampleClockPosition,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn input_transcribed(&mut self, text: String, now: Instant) -> Result<(), SessionError>;
+            fn transcription_usage(
+                &mut self,
+                usage: TranscriptionUsage,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn transcription_usage_reported(
+                &mut self,
+                usage: Option<TranscriptionUsage>,
+                quantities: Vec<Quantity>,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_created(
+                &mut self,
+                response_id: ResponseId,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn output_audio(
+                &mut self,
+                response_id: ResponseId,
+                frame: AudioFrame,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn output_transcript(
+                &mut self,
+                response_id: ResponseId,
+                text: String,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn tool_call(
+                &mut self,
+                call_id: SpeechCallId,
+                response_id: ResponseId,
+                tool: &str,
+                arguments: Json,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_completed(
+                &mut self,
+                response_id: ResponseId,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_cancelled(
+                &mut self,
+                response_id: ResponseId,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_failed(
+                &mut self,
+                response_id: ResponseId,
+                failure: SessionFailure,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_ended_unread(
+                &mut self,
+                response_id: ResponseId,
+                what: impl Into<String>,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_usage(
+                &mut self,
+                response_id: ResponseId,
+                usage: ResponseUsage,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn response_usage_reported(
+                &mut self,
+                response_id: ResponseId,
+                usage: Option<ResponseUsage>,
+                quantities: Vec<Quantity>,
+                total: UsageTotal,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn usage_awaited(&mut self, response_id: ResponseId) -> Result<(), SessionError>;
+            fn response_usage_unknown(
+                &mut self,
+                response_id: ResponseId,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn session_usage(
+                &mut self,
+                quantities: Vec<Quantity>,
+                confirmed: bool,
+                now: Instant,
+            ) -> Result<(), SessionError>;
+            fn request_response(&mut self, now: Instant) -> Result<(), SessionError>;
+            fn answer(&mut self, call_id: &SpeechCallId, result: Json) -> Result<(), SessionError>;
+        }
+    }
+
+    /// A frame opened while this one is open, part of it ([`SessionLedger::provider_frame`]):
+    /// this frame read in part takes the inner frame's hearings out with its own.
+    pub fn provider_frame(&mut self) -> ProviderFrame<'_> {
+        self.ledger.provider_frame()
+    }
+
     /// The frame was read only in part: `what` names what could not be read. What of it was
     /// readable stays recorded, but it is no sign of life: every time the provider was heard
     /// from while the frame was open is taken out of the liveness bound, which stands where it
@@ -756,11 +916,19 @@ impl SessionLedger {
     }
 
     /// Fails an open session as stalled when the caller awaits the provider and it has been
-    /// silent for the whole bound at `now`; returns whether it did.
+    /// silent for the whole bound at `now`; returns whether it did. A check made while a
+    /// [`ProviderFrame`] is open starts, for that frame read in part, a bound that would have
+    /// waited for it without the frame's hearings.
     pub fn check_liveness(&mut self, now: Instant) -> bool {
         self.tick(now);
         if self.session.require_open().is_err() || !self.awaiting() {
             return false;
+        }
+        for frame in &mut self.frames {
+            if frame.clock_pending {
+                frame.last_heard = frame.last_heard.max(now);
+                frame.clock_pending = false;
+            }
         }
         if self.clock_pending {
             self.restart_bound(now);
