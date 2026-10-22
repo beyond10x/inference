@@ -1,0 +1,14 @@
+{
+  "model": "amazon.nova-2-sonic-v1:0",
+  "binding": "inference_aws::duplex::NovaSonicSpeech",
+  "features": ["duplex"],
+  "claims": [
+    "output_streaming",
+    "incremental_input",
+    "concurrent_input_output",
+    "tool_calling",
+    "interruptible"
+  ],
+  "held_by": "claims_record::the_nova_sonic_record_holds_the_claims_of_the_binding",
+  "adapter_revision": "0.7.0"
+}

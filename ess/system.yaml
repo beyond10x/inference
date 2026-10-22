@@ -3,13 +3,14 @@ system: inference
 version: v1
 
 summary: >-
-  The nouns of the inference design (docs/design/inference.md, v0.2) and their relations: the
-  models and adapters that can compute, the typed graph of nodes, ports and edges a pipeline
-  declares and the run that executes it, the provisional and committed spans and segments that
-  stream through it, the tool calls a generation proposes, the session an application opens above
-  runs, and the deployment profile that admits compute and egress. Every declaration cites the
-  design line it was read from; no code exists yet, and a relation the design does not settle
-  carries an UNMAPPED marker instead of a guess.
+  The nouns of the inference workspace and their relations: the models and adapters that can
+  compute, the typed graph of nodes, ports and edges a pipeline declares and the run that executes
+  it, the provisional and committed spans and segments that stream through it, the tool calls a
+  generation proposes, the native speech sessions of duplex adapters, the usage each model call
+  records, the session an application opens above runs, and the deployment profile that admits
+  compute and egress. The crates implement every domain, and the scenarios under ess/scenarios
+  run as the conformance suite of task check. A declaration cites the design line it was read
+  from; a relation the design does not settle is left undeclared and says so in a comment.
 
 # UNMAPPED: no domain declares the STT, LLM and TTS contracts (design 355-389), though stage P0
 # delivers them (1158); inference.audio declares the audio vocabulary they share (293). Their

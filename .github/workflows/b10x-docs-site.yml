@@ -1,0 +1,38 @@
+name: Documentation site
+
+on:
+  workflow_run:
+    workflows: [Documentation validation]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: b10x-docs-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.actor == 'b10x-bot[bot]'
+      && github.triggering_actor == 'b10x-bot[bot]'
+      && github.repository == 'beyond10x/inference'
+      && github.ref == 'refs/heads/main'
+      && (github.event_name == 'workflow_dispatch'
+        || (github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push'
+          && github.event.workflow_run.head_branch == 'main'))
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
+    uses: beyond10x/website/.github/workflows/project-site.yml@7d3d414d6f0680507cf48cfb79522f0886922702
+    with:
+      repository: inference
+      control_sha: ${{ github.event.workflow_run.head_sha || github.sha }}
+      route_base: /inference/
+      build_workflow: pages.yml
+      artifact: b10x-project-site
