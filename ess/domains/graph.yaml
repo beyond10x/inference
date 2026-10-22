@@ -1554,10 +1554,12 @@ commands:
       # exception, the usage roll-up: the node's structured output port `usage` also matches every
       # egress of the child that exposes a structured output port `usage` and whose name no port
       # of the node carries, and the node forwards the usage records of all of them on that port,
-      # so a run's usage total includes its child runs' (inference.usage.UsageRecord, run_id) when
-      # the node's `usage` port has an edge. With no edge on it, the child's usage is read and
-      # dropped, as a model node's usage is on a `usage` port with no edge, and the parent's total
-      # does not include it. Such a `usage` port matching no exposure at all is a
+      # so a run's usage total includes its child runs' (inference.usage.UsageRecord, run_id),
+      # whether or not the node's `usage` port has an edge: usage on a `usage` port with no edge,
+      # a model node's or a subgraph node's, is still counted in its run's total. Only a subgraph
+      # node with no `usage` port, over a child holding a `usage` port with no edge, has no way to
+      # pass that usage on, and the total is marked partial naming the node. Such a `usage` port
+      # matching no exposure at all is a
       # mismatch. The rule compares the node's Port rows with the child's Exposure rows and their
       # Port rows, sets of rows two references away, which no guard in ess 0.60.0 compares, so the
       # refusal is the planner's to decide and names what it found, as locality-denied is.

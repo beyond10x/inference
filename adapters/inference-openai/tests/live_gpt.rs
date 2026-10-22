@@ -265,7 +265,7 @@ async fn the_client_hears_speech_and_answers_with_audio_and_transcript() {
     println!("last running usage: {seconds:?} s");
     let closed = closed.expect("session.closed confirms the final usage");
     println!(
-        "final usage: {} s, reason {}",
+        "final usage: {:?} s, reason {:?}",
         closed.seconds, closed.reason
     );
     assert!(voiced_bytes > 0, "spoken audio out");
@@ -375,7 +375,7 @@ fn one_spoken_exchange_through_the_duplex_contract() {
     println!("voice seconds while open: {running:?}");
     match session.final_usage() {
         Some(closed) => println!(
-            "final usage: {} voice seconds, reason {}",
+            "final usage: {:?} voice seconds, reason {:?}",
             closed.seconds, closed.reason
         ),
         None => println!("final usage: unconfirmed, no session.closed"),
@@ -414,7 +414,7 @@ fn one_spoken_exchange_through_the_duplex_contract() {
         1,
         "one usage record of the response"
     );
-    let seconds = session.final_usage().map(|closed| closed.seconds);
+    let seconds = session.final_usage().and_then(|closed| closed.seconds);
     let of_session: Vec<_> = records
         .iter()
         .filter(|record| record.response_id().is_none())

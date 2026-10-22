@@ -114,6 +114,24 @@ types:
       - name: output_tokens
         type: Integer
 
+  - name: inference.duplex.ReceivedEventId
+    kind: newtype
+    of: Uuid
+
+  # What a binding received from the provider for an open session and has yet to hand the caller:
+  # usage, the input transcript, output audio or transcript, a tool call, or a response's end.
+  # read from: docs/design/inference.md:718
+  - name: inference.duplex.ReceivedEventKind
+    kind: enum
+    variants: [usage, input_transcript, output_audio, output_transcript, tool_call, response_end]
+
+  # The end event a received event was delivered before: the session's closed or failed event.
+  # read from: docs/design/inference.md:718
+  # read from: docs/design/inference.md:1006
+  - name: inference.duplex.SessionEnd
+    kind: enum
+    variants: [closed, failed]
+
 entities:
   # One native speech session over one adapter: the single multiport node of topology D, never an
   # STT, an LLM and a TTS node in disguise.
@@ -293,6 +311,45 @@ entities:
           from: [Proposed]
           to: Answered
 
+  # One event a binding received from the provider for an open session, in arrival order, until
+  # the caller has it. The caller reads it on the session, or the session's end delivers it: a
+  # close or a failure hands the caller every event still held, in order, before the end event, so
+  # usage the provider reported before the close is billed. Nothing is received after the end.
+  # read from: docs/design/inference.md:718
+  # read from: docs/design/inference.md:1006
+  - name: inference.duplex.ReceivedSessionEvent
+    naming:
+      summary: An event a speech session received from its provider.
+    identity:
+      name: received_id
+      type: inference.duplex.ReceivedEventId
+    fields:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: kind
+        type: inference.duplex.ReceivedEventKind
+      # The arrival order within the session; the caller has the session's events in this order.
+      - name: sequence
+        type: Integer
+      # The end event it was delivered before, absent where the caller read it while the session
+      # was open.
+      - name: delivered_before
+        type: Optional<inference.duplex.SessionEnd>
+    relations:
+      - name: session
+        kind: references
+        target: inference.duplex.SpeechSession
+        cardinality: one
+        via: session_id
+    lifecycle:
+      initial: Received
+      states: [Received, Delivered]
+      terminal: [Delivered]
+      transitions:
+        - name: deliver
+          from: [Received]
+          to: Delivered
+
 errors:
   # read from: docs/design/inference.md:99
   - name: inference.duplex.AdapterNotFound
@@ -365,6 +422,12 @@ errors:
     fields:
       - name: call_id
         type: inference.duplex.SpeechCallId
+
+  - name: inference.duplex.ReceivedSessionEventStateConflict
+    summary: The received event is not held for the caller, so nothing was delivered.
+    fields:
+      - name: current
+        type: inference.duplex.ReceivedSessionEvent.State
 
 commands:
   # read from: docs/design/inference.md:394
@@ -987,14 +1050,85 @@ commands:
           inference.duplex.SpeechToolCallStateConflict:
             current: {subject: state}
 
+  # A binding receives the provider's events for an open session in order and holds each until
+  # the caller has it. Once the session is closed or failed nothing the provider sends is received.
+  # read from: docs/design/inference.md:718
+  - name: inference.duplex.ReceiveSessionEvent
+    input:
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: kind
+        type: inference.duplex.ReceivedEventKind
+      - name: sequence
+        type: Integer
+    outcomes:
+      - name: unknown-session
+        when_related: {via: input.session_id, exists: false}
+        error: inference.duplex.SpeechSessionNotFound
+        payload:
+          inference.duplex.SpeechSessionNotFound:
+            session_id: input.session_id
+        summary: No session carries this identity; nothing was received.
+
+      - name: session-not-open
+        when_related: {via: input.session_id, predicate: state != Open}
+        error: inference.duplex.SpeechSessionStateConflict
+        summary: The session is closed or failed; what the provider sends now is not received.
+
+      - name: received
+        creates: inference.duplex.ReceivedSessionEvent
+        instance: received_id
+        sets:
+          session_id: input.session_id
+          kind: input.kind
+          sequence: input.sequence
+        emits:
+          - inference.duplex.SessionEventReceived
+        payload:
+          inference.duplex.SessionEventReceived:
+            received_id: {generated: true}
+            session_id: input.session_id
+            kind: input.kind
+            sequence: input.sequence
+        summary: The event is held for the caller under a new id.
+
+  # The caller reads a held event on the open session.
+  # read from: docs/design/inference.md:718
+  - name: inference.duplex.DeliverSessionEvent
+    input:
+      - name: received_id
+        type: inference.duplex.ReceivedEventId
+    outcomes:
+      - name: delivered
+        moves: inference.duplex.ReceivedSessionEvent.deliver
+        instance: received_id
+        emits:
+          - inference.duplex.SessionEventDelivered
+        payload:
+          inference.duplex.SessionEventDelivered:
+            received_id: input.received_id
+        summary: The caller has the event.
+      - name: wrong-state
+        wrong_state: true
+        error: inference.duplex.ReceivedSessionEventStateConflict
+        payload:
+          inference.duplex.ReceivedSessionEventStateConflict:
+            current: {subject: state}
+
   # Closing ends every response in progress as cancelled, and failing ends each as failed, their
-  # events before the session's; no output of the session is recorded after.
-  # read from: docs/design/inference.md:719
+  # events before the session's; no output of the session is recorded after. Every event the
+  # binding received before the close and the caller has yet to read, usage included, is
+  # delivered before SpeechSessionClosed, marked as delivered before it; nothing the provider
+  # sends after the close is received.
+  # read from: docs/design/inference.md:718
   # read from: docs/design/inference.md:630-641
   # UNMAPPED: the cascade to the session's responses, and the refusal of output of a response
   # whose session is closed or failed, are the contract crate's (SessionLedger::close and
   # SessionLedger::fail; SessionError::NotOpen on output). An `affects:` here is refused by
   # ess 0.60.0 synthesis (ESS-SYNTH-001: no witness), and a guard reads no row two relations away.
+  # The delivery `affects` below is refused the same way, its rows being created by a guarded
+  # command, so this `closed` and the `failed` of FailSpeechSession have no synthesized scenario;
+  # scenarios/close-delivers-received-usage.yaml and fail-delivers-received-usage.yaml run both.
   - name: inference.duplex.CloseSpeechSession
     input:
       - name: session_id
@@ -1005,10 +1139,16 @@ commands:
         instance: session_id
         emits:
           - inference.duplex.SpeechSessionClosed
+        affects:
+          - entity: inference.duplex.ReceivedSessionEvent
+            where: session_id == input.session_id
+            moves: inference.duplex.ReceivedSessionEvent.deliver
+            sets:
+              delivered_before: closed
         payload:
           inference.duplex.SpeechSessionClosed:
             session_id: input.session_id
-        summary: The session is closed with every response in progress cancelled, and takes nothing more.
+        summary: The session is closed with every response in progress cancelled and every event already received delivered before it, and takes nothing more.
       - name: wrong-state
         wrong_state: true
         error: inference.duplex.SpeechSessionStateConflict
@@ -1017,8 +1157,12 @@ commands:
             current: {subject: state}
 
   # A stalled provider or a closed transport fails the session with a typed failure, never with
-  # silence.
+  # silence. As at a close, every event received before the failure is delivered before it.
+  # A failure names the frames the binding could not read. Stalled turns into ProviderError only
+  # when an unreadable frame arrived after the last readable frame. A readable frame clears that
+  # state. The detail still names the total unreadable count.
   # read from: docs/design/inference.md:1006
+  # read from: docs/design/inference.md:718
   - name: inference.duplex.FailSpeechSession
     input:
       - name: session_id
@@ -1031,11 +1175,17 @@ commands:
         instance: session_id
         emits:
           - inference.duplex.SpeechSessionFailed
+        affects:
+          - entity: inference.duplex.ReceivedSessionEvent
+            where: session_id == input.session_id
+            moves: inference.duplex.ReceivedSessionEvent.deliver
+            sets:
+              delivered_before: failed
         payload:
           inference.duplex.SpeechSessionFailed:
             session_id: input.session_id
             failure: input.failure
-        summary: The session failed with a typed failure, every response in progress with it, and takes nothing more.
+        summary: The session failed with a typed failure, every response in progress with it and every event already received delivered before it, and takes nothing more.
       - name: wrong-state
         wrong_state: true
         error: inference.duplex.SpeechSessionStateConflict
@@ -1167,6 +1317,22 @@ events:
       - name: result
         type: Json
 
+  - name: inference.duplex.SessionEventReceived
+    fields:
+      - name: received_id
+        type: inference.duplex.ReceivedEventId
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: kind
+        type: inference.duplex.ReceivedEventKind
+      - name: sequence
+        type: Integer
+
+  - name: inference.duplex.SessionEventDelivered
+    fields:
+      - name: received_id
+        type: inference.duplex.ReceivedEventId
+
   - name: inference.duplex.SpeechSessionClosed
     fields:
       - name: session_id
@@ -1234,3 +1400,22 @@ views:
         type: Json
       - name: state
         type: inference.duplex.SpeechToolCall.State
+
+  # What the session received, in arrival order by sequence, and whether the caller has it; a row
+  # delivered by the session's end names the end event it came before.
+  - name: inference.duplex.ReceivedSessionEvents
+    source: inference.duplex.ReceivedSessionEvent
+    consistency: read_your_writes
+    fields:
+      - name: received_id
+        type: inference.duplex.ReceivedEventId
+      - name: session_id
+        type: inference.duplex.SpeechSessionId
+      - name: kind
+        type: inference.duplex.ReceivedEventKind
+      - name: sequence
+        type: Integer
+      - name: delivered_before
+        type: Optional<inference.duplex.SessionEnd>
+      - name: state
+        type: inference.duplex.ReceivedSessionEvent.State

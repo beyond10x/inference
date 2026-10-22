@@ -51,8 +51,8 @@ pub use contract::{
     NativeSpeechModel, OpenError, SessionConfig, SessionError, SessionEvent, SpeechCapabilities,
     SpeechSessionHandle, TuningOption, TuningSupport, TurnTuning, Unsupported,
 };
-pub use ledger::{Liveness, SessionLedger};
-pub use record::{Response, SpeechSession, SpeechToolCall};
+pub use ledger::{Liveness, ProviderFrame, SessionLedger};
+pub use record::{ReceivedSessionEvent, Response, SpeechSession, SpeechToolCall};
 
 /// The `inference.usage` vocabulary a session's usage records are written in, re-exported from
 /// `inference_core::usage`.
@@ -198,7 +198,8 @@ impl ResponseUsage {
     /// Every count as a quantity the provider reported, mapped as `ess/domains/usage.yaml` maps
     /// them: input text, audio and cached tokens, output text and audio tokens (output cached
     /// tokens have no kind). It is for a provider that reports every count; one that leaves a
-    /// count out builds its quantities from its own fields, so that count stays unknown.
+    /// count out builds its quantities from its own fields, so that count stays unknown. A count
+    /// above `i64::MAX` is unknown ([`reported`]).
     #[must_use]
     pub fn quantities(&self) -> Vec<Quantity> {
         vec![
@@ -224,12 +225,15 @@ impl ResponseUsage {
 }
 
 /// The quantity `kind` as a provider reports it: `count` as `provider_reported`, or `unknown`
-/// when the provider left it out. A count beyond the ESS `Integer` saturates.
+/// when the provider left it out or the count lies beyond the ESS `Integer` (`i64::MAX`), since
+/// no number recorded in its place would be the count.
 #[must_use]
 pub fn reported(kind: QuantityKind, count: Option<u64>) -> Quantity {
-    count.map_or(Quantity::unknown(kind), |count| {
-        Quantity::provider_reported(kind, i64::try_from(count).unwrap_or(i64::MAX))
-    })
+    count
+        .and_then(|count| i64::try_from(count).ok())
+        .map_or(Quantity::unknown(kind), |count| {
+            Quantity::provider_reported(kind, count)
+        })
 }
 
 /// `inference.duplex.TranscriptionUsage`: the usage of transcribing the input.
@@ -242,7 +246,8 @@ pub struct TranscriptionUsage {
 
 impl TranscriptionUsage {
     /// Both counts as quantities the provider reported: the input tokens as
-    /// `input_audio_tokens`, the output tokens as `output_text_tokens`.
+    /// `input_audio_tokens`, the output tokens as `output_text_tokens`. A count above
+    /// `i64::MAX` is unknown ([`reported`]).
     #[must_use]
     pub fn quantities(&self) -> Vec<Quantity> {
         vec![
@@ -649,3 +654,145 @@ impl fmt::Display for SpeechToolCallStateConflict {
 }
 
 impl Error for SpeechToolCallStateConflict {}
+
+inference_core::uuid_newtype!(
+    /// `inference.duplex.ReceivedEventId`: identifies a [`ReceivedSessionEvent`].
+    ReceivedEventId
+);
+
+/// `inference.duplex.ReceivedEventKind`: what a session received from its provider. Serialized as
+/// written in ESS (`input_transcript`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceivedEventKind {
+    /// Usage of a response, a transcription or the session.
+    Usage,
+    /// The transcript of the input.
+    InputTranscript,
+    /// Output audio of a response.
+    OutputAudio,
+    /// Output transcript of a response.
+    OutputTranscript,
+    /// A tool call a response proposed.
+    ToolCall,
+    /// The end of a response.
+    ResponseEnd,
+}
+
+impl ReceivedEventKind {
+    /// Every kind, in the order `ess/domains/duplex.yaml` lists them.
+    pub const ALL: [Self; 6] = [
+        Self::Usage,
+        Self::InputTranscript,
+        Self::OutputAudio,
+        Self::OutputTranscript,
+        Self::ToolCall,
+        Self::ResponseEnd,
+    ];
+}
+
+/// `inference.duplex.SessionEnd`: the end event a received event was delivered before. Serialized
+/// as written in ESS (`closed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionEnd {
+    /// `SpeechSessionClosed`.
+    Closed,
+    /// `SpeechSessionFailed`.
+    Failed,
+}
+
+impl SessionEnd {
+    /// Every end, in the order `ess/domains/duplex.yaml` lists them.
+    pub const ALL: [Self; 2] = [Self::Closed, Self::Failed];
+}
+
+/// `inference.duplex.ReceivedSessionEvent.State`. Serialized as written in ESS (`Received`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReceivedSessionEventState {
+    /// Received from the provider; the caller does not have it yet.
+    Received,
+    /// The caller has it.
+    Delivered,
+}
+
+impl ReceivedSessionEventState {
+    /// Every state, in the order `ess/domains/duplex.yaml` lists them.
+    pub const ALL: [Self; 2] = [Self::Received, Self::Delivered];
+}
+
+/// `inference.duplex.SessionEventReceived`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEventReceived {
+    pub received_id: ReceivedEventId,
+    pub session_id: SpeechSessionId,
+    pub kind: ReceivedEventKind,
+    pub sequence: i64,
+}
+
+/// `inference.duplex.SessionEventDelivered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEventDelivered {
+    pub received_id: ReceivedEventId,
+}
+
+/// `inference.duplex.ReceivedSessionEventStateConflict`: the received event is not held for the
+/// caller. `current` is the state it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceivedSessionEventStateConflict {
+    pub current: ReceivedSessionEventState,
+}
+
+impl fmt::Display for ReceivedSessionEventStateConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the received event is {:?}, which this command does not deliver it from",
+            self.current
+        )
+    }
+}
+
+impl Error for ReceivedSessionEventStateConflict {}
+
+/// Why `inference.duplex.DeliverSessionEvent` moved nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliverSessionEventError {
+    /// No received event carries the identity: the `wrong-state` outcome with no state.
+    Unknown { received_id: ReceivedEventId },
+    /// The `wrong-state` outcome.
+    Conflict(ReceivedSessionEventStateConflict),
+}
+
+impl fmt::Display for DeliverSessionEventError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown { received_id } => {
+                write!(f, "no received event carries the identity {received_id}")
+            }
+            Self::Conflict(conflict) => conflict.fmt(f),
+        }
+    }
+}
+
+impl Error for DeliverSessionEventError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A count up to `i64::MAX` is recorded as sent; one above it is unknown, never a clamped
+    /// number.
+    #[test]
+    fn a_count_above_i64_max_is_unknown() {
+        let kind = QuantityKind::InputTextTokens;
+        let largest = u64::try_from(i64::MAX).expect("i64::MAX fits a u64");
+        assert_eq!(
+            reported(kind, Some(largest)),
+            Quantity::provider_reported(kind, i64::MAX)
+        );
+        assert_eq!(reported(kind, Some(largest + 1)), Quantity::unknown(kind));
+        assert_eq!(reported(kind, Some(u64::MAX)), Quantity::unknown(kind));
+        assert_eq!(reported(kind, None), Quantity::unknown(kind));
+    }
+}

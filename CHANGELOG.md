@@ -1,5 +1,135 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `ess/domains/duplex.yaml` models what a session receives from its provider:
+  `ReceiveSessionEvent` and `DeliverSessionEvent` over the entity `ReceivedSessionEvent` and its
+  view `ReceivedSessionEvents`. `CloseSpeechSession` and `FailSpeechSession` deliver every event
+  still held before their end event, and nothing is received after it. `inference-duplex` carries
+  the record. `SessionLedger` keeps one for every provider event it holds
+  (`received_events`, `receive_event`, `deliver_event`, `DeliverSessionEventError`), delivers it
+  when the caller takes the event and stamps every one still held at a close or failure. The
+  testkit `DuplexDomain` holds each session in a `SessionLedger` (`SessionLedger::open_record`),
+  so the conformance suite runs the bindings' ledger. Two authored scenarios
+  (`close-delivers-received-usage`, `fail-delivers-received-usage`) stand for the `closed` and
+  `failed` outcomes, which ess 0.60.0 synthesis refuses (ESS-SYNTH-001). Each holds two events at
+  the end and one the caller already had. The close's scenario also has the caller take one event
+  out of order before the close, and a second open session holding one of its own, which the
+  close leaves held.
+- `SessionLedger` counts the frames a binding could not read (`unreadable_frame`,
+  `unreadable_frames`, `last_unreadable`) and ends a response the provider ended unreadably
+  (`response_ended_unread`). A binding records a frame it may read only in part through
+  `SessionLedger::provider_frame`, one frame at a time: the `ProviderFrame` borrows the ledger,
+  so overlapping frames do not compile. The frame records through methods of its own that
+  forward to the ledger's, and hands out no `&mut SessionLedger`, so the ledger under it cannot
+  be replaced. `ProviderFrame::read_in_part` counts the frame after what it recorded and takes
+  every hearing of the frame out of the liveness bound; dropped, the frame was readable.
+- `SessionLedger::usage_awaited` keeps the next response from settling a response whose final
+  usage the provider reports in a frame of its own; `SessionLedger::response_usage_unknown`
+  settles it unknown when that frame was lost. `SessionLedger::dropped` counts every refusal a
+  binding drops (`dropped_count`), and `dropped_events` keeps the most recent
+  `SessionLedger::DROPPED_EVENTS_KEPT` (64) of them; the Realtime, GPT-Live and Nova Sonic
+  bindings hand every one to it.
+- OpenAI Realtime `RealtimeClient::unparsed_type` gives the top-level `type` of the last message
+  the client could not take as an event, when that message has one.
+- `SessionLedger::session_usage_at_end` takes the total of a session billed as a whole and records
+  it once, just before the session's end event. Given after the end, it records nothing.
+
+### Changed
+
+- **Breaking:** `SpeechSessionHandle::close` delivers every event the binding received before the
+  close, usage included, after the close and before `SpeechSessionClosed`, and nothing the provider
+  sends after it; a caller that counts usage reads `next_event` until `SpeechSessionClosed`. Nova
+  Sonic, OpenAI Realtime and GPT-Live now record what already arrived before closing.
+- GPT-Live records the billed session seconds after the end events of its responses and just
+  before `SpeechSessionClosed` or `SpeechSessionFailed`, not as they arrive.
+- **Breaking:** provider events are decoded field by field, so a field an event may lack is an
+  `Option`: OpenAI Realtime `ServerEvent::ResponseDone` (`response_id`, `status`, `usage`) and
+  `ServerEvent::InputTranscript` (`item_id`, `transcript`), both of which also gain
+  `unreadable_usage`, saying why a `usage` in another shape could not be read; GPT-Live `BackendEvent::Completed` and
+  `BackendEvent::Ended` (`response_id`), both of which also gain `unreadable_usage`,
+  `BackendUsage` (`input_tokens`, `output_tokens`, `total_tokens`), `LiveEvent::SessionClosed` and `LiveClosed` (`reason`,
+  `seconds`); Nova Sonic `OutputEvent::CompletionEnd` (`stop_reason`), `OutputContentEnd`
+  (`content_id`, `kind`) and `OutputEvent::Interrupted` (`content_id`).
+- `LiveClient::close` waits for `session.closed` for `CLOSE_TIMEOUT` in all, or the read timeout
+  if longer, not per read. A GPT-Live session whose close reaches that bound still closes, with
+  the usage the server sent meanwhile recorded, unconfirmed.
+- A stall now reads "the provider sent nothing readable for … ms".
+- **Breaking:** `SessionLedger::response_usage_reported` for a response whose usage is already
+  recorded changes nothing: it no longer records `ResponseUsageRecorded`. OpenAI Realtime
+  `ServerEvent` gains the variant `UnreadableResponseDone`.
+
+### Fixed
+
+- A speech session whose transport closed under a command (Nova Sonic `append_audio`, `send` and
+  `submit_tool_result`; a failed send on OpenAI Realtime and GPT-Live) records what had already
+  arrived first, so its usage counts, and fails as the first stream end, client failure or service
+  error among it, else as `TransportClosed`.
+- A frame or message a binding cannot decode no longer ends a speech session (Nova Sonic, OpenAI
+  Realtime, GPT-Live, and `LiveClient::close`). The binding drops it and reads on, so usage the
+  provider sends after it is still recorded by `next_event` and by the close.
+- Such a frame is no longer dropped silently: the session counts it and keeps the last one's
+  type or the start of its text, and it does not refresh the liveness bound. A later failure of
+  the session names that count and the last frame. Stalled turns into ProviderError only when an
+  unreadable frame arrived after the last readable frame. A readable frame clears that state. The
+  detail still names the total unreadable count. Every other failure keeps the kind the transport
+  or the provider stated, so a GPT-Live `connection_lost` without its seconds is still
+  `TransportClosed`.
+- An event that lacks a field the binding does not need keeps its usage and its end. A Realtime
+  `response.done` without `status` ends its response, which fails as a provider error, and still
+  counts its usage. One without its id ends the oldest response still awaiting its
+  `response.done`, never a newer one, so it no longer blocks the next. A `usage` in a shape the
+  binding cannot read counts as unknown, and its frame is counted as unreadable. A transcription
+  without its transcript still counts its usage. A Realtime `response.created` while a response is
+  still in progress ends that one first, as a provider error naming the unreadable frames, and the
+  new response is accepted. Its usage, like a cancelled response's, is recorded once by its own
+  `response.done` whenever it arrives, else with every count unknown when a later response's
+  `response.done` carrying its id ends it (Realtime ends responses in creation order) or at the
+  session's end, before `SpeechSessionClosed` or `SpeechSessionFailed`. A message that is not
+  JSON but whose `type` reads `response.done` (`ServerEvent::UnreadableResponseDone`) ends the
+  oldest response awaiting its end, its usage unknown. An id-less `response.done` skips a
+  response only when a message without a readable top-level `type` may have been its
+  `response.done`: one that arrived after its creation and before the next `response.created`,
+  which ended it or followed the caller's cancel of it, the message before the cancel or after
+  it. A message
+  whose `type` reads as another event, even one the binding cannot decode, does not make it skip
+  one. A frame read in part, such as a transcription without its transcript, does not either, and it
+  leaves the session as an unreadable frame does, so a stall after it is a provider error. A Nova
+  Sonic `append_audio` or `submit_tool_result` after the session ended returns `NotOpen` and
+  drops nothing. A GPT-Live backend usage is read field by field: each count it carries counts,
+  and one it lacks or sends in another shape leaves that count of the response unknown; the frame
+  counts once as read in part. A backend usage that is not an object, and a backend response end
+  whose `response` is missing or not an object, count no usage and their frame once as
+  unreadable. A GPT-Live
+  backend end without its id, and a `session.closed` without its reason or seconds, keep their
+  meaning. A Nova Sonic `completionEnd` without `stopReason` ends the response in progress, and a
+  `contentEnd` or interruption notice without `contentId` applies to it.
+- A frame read only in part no longer refreshes the liveness bound, as the bindings document: a
+  GPT-Live backend response end whose `response` or `usage` was read in part or not at all, a
+  GPT-Live `session.closed` lacking a field, and an OpenAI Realtime `response.done` with its
+  `status` but an unreadable `usage`, or a transcription without its transcript or with an
+  unreadable `usage`. What such a frame recorded stays recorded. A Realtime `response.done`
+  without `status` still starts the bound anew, since the caller then awaits a new response. The
+  bound runs from the latest readable frame and its limit never changes. Frames are recorded one
+  at a time, and a frame read in part is taken out whole however often it heard the provider: a
+  readable frame before it stays, also at the same instant, a request, answer or check while it
+  is open stays, a check inside it starts a bound that waited for that check, and one read in
+  part at the instant last heard leaves a bound that waited for the next check waiting.
+- A token sum that would pass `u64::MAX` no longer wraps or panics. In a usage record it is
+  unknown (GPT-Live backend usage sums and the total of input and output, Nova Sonic usage sums);
+  the contract's `ResponseUsage`, which has no unknown, stops at `u64::MAX`, as does an OpenAI
+  Realtime total the server left out. A Realtime transcription total the server left out is
+  unknown when its input and output tokens sum past `u64::MAX`.
+- A token count above `i64::MAX` is recorded as unknown in a duplex usage record
+  (`inference_duplex::reported`), not clamped to `i64::MAX`, and so are TTS input
+  characters and output audio milliseconds and STT input audio milliseconds in their usage
+  records.
+- The TTS conformance kit (`inference_testkit::tts::conformance::usage_recorded`) expects
+  characters or audio milliseconds above `i64::MAX` as unknown, as `inference-tts` records them,
+  not clamped to `i64::MAX`.
+
 ## [0.7.0] — 2026-10-21
 
 ### Added
