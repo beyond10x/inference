@@ -29,6 +29,15 @@ pub struct Liveness {
     last_heard: Instant,
 }
 
+/// Where the liveness bound of a session stood before a frame was recorded
+/// ([`SessionLedger::liveness_mark`]), so that a frame read only in part leaves it there
+/// ([`SessionLedger::read_in_part`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LivenessMark {
+    liveness: Liveness,
+    clock_pending: bool,
+}
+
 impl Liveness {
     /// A bound of `limit`, the provider heard from at `now`.
     #[must_use]
@@ -732,6 +741,27 @@ impl SessionLedger {
         self.unreadable.0 = self.unreadable.0.saturating_add(1);
         self.unreadable.1 = Some(what.into());
         self.unread_since_readable = true;
+    }
+
+    /// Where the liveness bound stands now, taken before a frame is recorded, so that
+    /// [`Self::read_in_part`] can leave it there.
+    #[must_use]
+    pub const fn liveness_mark(&self) -> LivenessMark {
+        LivenessMark {
+            liveness: self.liveness,
+            clock_pending: self.clock_pending,
+        }
+    }
+
+    /// The frame recorded at `now` since `mark` was taken was read only in part: `what` names
+    /// what could not be read. What of it was readable stays recorded, but it is no sign of
+    /// life: the liveness bound stands where it stood at `mark`, whatever recording the frame
+    /// restarted it, and the frame is counted as one the binding could not read
+    /// ([`Self::unreadable_frame`]).
+    pub fn read_in_part(&mut self, mark: LivenessMark, what: impl Into<String>, now: Instant) {
+        self.liveness = mark.liveness;
+        self.clock_pending = mark.clock_pending;
+        self.unreadable_frame(what, now);
     }
 
     /// How many frames the binding could not read ([`Self::unreadable_frame`]).

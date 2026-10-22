@@ -272,7 +272,8 @@ impl LiveSessionConfig {
 
 /// The token usage of one backend response, from its nested `response.completed` (or failed or
 /// incomplete). Each count is `None` when the server did not report it or sent it in another
-/// shape; the total is the server's, else the sum of input and output when both are known.
+/// shape; the total is the server's, else the sum of input and output when both are known and
+/// it does not pass `u64::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct BackendUsage {
     pub input_tokens: Option<u64>,
@@ -691,7 +692,7 @@ impl<'a> Fields<'a> {
             total_tokens: count(usage.get("total_tokens")).or_else(|| {
                 input_tokens
                     .zip(output_tokens)
-                    .map(|(input, output)| input + output)
+                    .and_then(|(input, output)| input.checked_add(output))
             }),
         };
         (Some(usage), unreadable)

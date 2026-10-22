@@ -20,7 +20,9 @@
   close leaves held.
 - `SessionLedger` counts the frames a binding could not read (`unreadable_frame`,
   `unreadable_frames`, `last_unreadable`) and ends a response the provider ended unreadably
-  (`response_ended_unread`).
+  (`response_ended_unread`). `SessionLedger::liveness_mark` and `SessionLedger::read_in_part`
+  (with `LivenessMark`) count a frame read only in part after what it recorded and leave the
+  liveness bound where it stood before the frame.
 - `SessionLedger::usage_awaited` keeps the next response from settling a response whose final
   usage the provider reports in a frame of its own; `SessionLedger::response_usage_unknown`
   settles it unknown when that frame was lost. `SessionLedger::dropped` counts every refusal a
@@ -101,6 +103,16 @@
   backend end without its id, and a `session.closed` without its reason or seconds, keep their
   meaning. A Nova Sonic `completionEnd` without `stopReason` ends the response in progress, and a
   `contentEnd` or interruption notice without `contentId` applies to it.
+- A frame read only in part no longer refreshes the liveness bound, as the bindings document: a
+  GPT-Live backend response end whose `response` or `usage` was read in part or not at all, a
+  GPT-Live `session.closed` lacking a field, and an OpenAI Realtime `response.done` with its
+  `status` but an unreadable `usage`, or a transcription without its transcript or with an
+  unreadable `usage`. What such a frame recorded stays recorded. A Realtime `response.done`
+  without `status` still starts the bound anew, since the caller then awaits a new response.
+- A token sum that would pass `u64::MAX` no longer wraps or panics. In a usage record it is
+  unknown (GPT-Live backend usage sums and the total of input and output, Nova Sonic usage sums);
+  the contract's `ResponseUsage`, which has no unknown, stops at `u64::MAX`, as does an OpenAI
+  Realtime total the server left out.
 
 ## [0.7.0] — 2026-10-21
 

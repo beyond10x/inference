@@ -11,8 +11,9 @@ use inference_duplex::inference_core::model::{
     Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_duplex::{
-    ResponseId, ResponseState, SessionConfig, SessionEvent, SessionFailure, SessionFailureKind,
-    SessionLedger, SpeechCapabilities, SpeechSessionId, TuningSupport, TurnDetection, TurnTuning,
+    QuantityKind, ResponseId, ResponseState, SessionConfig, SessionEvent, SessionFailure,
+    SessionFailureKind, SessionLedger, SpeechCapabilities, SpeechSessionId, TuningSupport,
+    TurnDetection, TurnTuning, UsageTotal, reported,
 };
 
 const BOUND: Duration = Duration::from_millis(400);
@@ -209,6 +210,57 @@ fn a_response_ended_with_an_unread_outcome_fails_and_the_bound_runs_on() {
         "{failure:?}"
     );
     assert!(failure.detail.contains("response.done"), "{failure:?}");
+}
+
+/// A frame read only in part: what it carried is recorded, yet it is no sign of life. The bound
+/// stands where it stood before the frame, and the stall after it is a provider error.
+#[test]
+fn a_frame_read_in_part_records_what_it_carried_and_does_not_refresh_the_bound() {
+    let start = Instant::now();
+    let mut ledger = open(start);
+    ledger.request_response(start).expect("none in progress");
+    let response = ResponseId::generate();
+    ledger.response_created(response, start).expect("created");
+    let partial = start + BOUND / 2;
+    let mark = ledger.liveness_mark();
+    ledger
+        .response_usage_reported(
+            response,
+            None,
+            vec![reported(QuantityKind::InputTextTokens, Some(7))],
+            UsageTotal::Running,
+            partial,
+        )
+        .expect("in progress");
+    ledger.read_in_part(
+        mark,
+        "`response.completed` lacks the non-negative integer field `usage.output_tokens`",
+        partial,
+    );
+    assert_eq!(ledger.unreadable_frames(), 1);
+    assert!(
+        ledger.check_liveness(start + BOUND),
+        "the frame read in part restarted the bound"
+    );
+    let events: Vec<_> = std::iter::from_fn(|| ledger.next_event()).collect();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::UsageRecorded(record)
+                if record.response_id == Some(response)
+                    && record.quantities.iter().any(|quantity| {
+                        quantity.kind() == QuantityKind::InputTextTokens
+                            && quantity.value() == Some(7)
+                    })
+        )),
+        "{events:#?}"
+    );
+    let failure = failure(&events);
+    assert_eq!(
+        failure.kind,
+        SessionFailureKind::ProviderError,
+        "{failure:?}"
+    );
 }
 
 #[test]

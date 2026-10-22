@@ -520,7 +520,8 @@ enum Count {
     Unreported,
     /// Every delta counted toward it carried it: their sum is known.
     Reported,
-    /// A delta counted toward it left it out: unknown, whatever the others carried.
+    /// A delta counted toward it left it out, or the sum would have passed `u64::MAX`: unknown,
+    /// whatever the others carried.
     Missing,
 }
 
@@ -554,23 +555,32 @@ struct Tally {
 }
 
 impl Tally {
+    /// Adds an input delta; a sum it would carry past `u64::MAX` is unknown from then on.
     fn add_input(&mut self, delta: nova_sonic::TokenCounts) {
-        add_counts(&mut self.sum.input, delta);
-        self.counts[0] = self.counts[0].add(delta.text.is_some());
-        self.counts[1] = self.counts[1].add(delta.speech.is_some());
+        let [text, speech] = add_counts(&mut self.sum.input, delta);
+        self.counts[0] = self.counts[0].add(delta.text.is_some() && !text);
+        self.counts[1] = self.counts[1].add(delta.speech.is_some() && !speech);
     }
 
+    /// Adds an output delta; a sum it would carry past `u64::MAX` is unknown from then on.
     fn add_output(&mut self, delta: nova_sonic::TokenCounts) {
-        add_counts(&mut self.sum.output, delta);
-        self.counts[2] = self.counts[2].add(delta.text.is_some());
-        self.counts[3] = self.counts[3].add(delta.speech.is_some());
+        let [text, speech] = add_counts(&mut self.sum.output, delta);
+        self.counts[2] = self.counts[2].add(delta.text.is_some() && !text);
+        self.counts[3] = self.counts[3].add(delta.speech.is_some() && !speech);
     }
 
+    /// Takes `other` into this tally; a sum the two would carry past `u64::MAX` is unknown.
     fn merge(&mut self, other: Self) {
-        add_token_counts(&mut self.sum.input, other.sum.input);
-        add_token_counts(&mut self.sum.output, other.sum.output);
-        for (count, other) in self.counts.iter_mut().zip(other.counts) {
-            *count = count.merge(other);
+        let [input_text, input_speech, _] = add_token_counts(&mut self.sum.input, other.sum.input);
+        let [output_text, output_speech, _] =
+            add_token_counts(&mut self.sum.output, other.sum.output);
+        let passed = [input_text, input_speech, output_text, output_speech];
+        for ((count, other), passed) in self.counts.iter_mut().zip(other.counts).zip(passed) {
+            *count = if passed {
+                Count::Missing
+            } else {
+                count.merge(other)
+            };
         }
     }
 
@@ -986,9 +996,10 @@ impl NovaSonicSpeechSession {
     }
 }
 
-/// Adds the counts a delta carried; one it left out adds nothing.
-fn add_counts(total: &mut TokenCounts, delta: nova_sonic::TokenCounts) {
-    add_token_counts(
+/// Adds the counts a delta carried; one it left out adds nothing. Returns whether the text and
+/// the speech sum would have passed `u64::MAX` ([`add_token_counts`]).
+fn add_counts(total: &mut TokenCounts, delta: nova_sonic::TokenCounts) -> [bool; 2] {
+    let [text, speech, _] = add_token_counts(
         total,
         TokenCounts {
             text_tokens: delta.text.unwrap_or(0),
@@ -996,12 +1007,28 @@ fn add_counts(total: &mut TokenCounts, delta: nova_sonic::TokenCounts) {
             cached_tokens: 0,
         },
     );
+    [text, speech]
 }
 
-fn add_token_counts(total: &mut TokenCounts, delta: TokenCounts) {
-    total.text_tokens = total.text_tokens.saturating_add(delta.text_tokens);
-    total.audio_tokens = total.audio_tokens.saturating_add(delta.audio_tokens);
-    total.cached_tokens = total.cached_tokens.saturating_add(delta.cached_tokens);
+/// Adds `delta` to `total`, each sum stopping at `u64::MAX`, since the contract's `TokenCounts`
+/// has no unknown; returns whether the text, audio and cached sums would have passed it, so
+/// that the usage record can carry them as unknown.
+fn add_token_counts(total: &mut TokenCounts, delta: TokenCounts) -> [bool; 3] {
+    let add = |sum: &mut u64, count: u64| match sum.checked_add(count) {
+        Some(added) => {
+            *sum = added;
+            false
+        }
+        None => {
+            *sum = u64::MAX;
+            true
+        }
+    };
+    [
+        add(&mut total.text_tokens, delta.text_tokens),
+        add(&mut total.audio_tokens, delta.audio_tokens),
+        add(&mut total.cached_tokens, delta.cached_tokens),
+    ]
 }
 
 impl SpeechSessionHandle for NovaSonicSpeechSession {
@@ -1122,5 +1149,50 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
         }
         self.ledger.check_liveness(Instant::now());
         self.ledger.next_event()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(text: u64, speech: u64) -> nova_sonic::TokenCounts {
+        nova_sonic::TokenCounts {
+            speech: Some(speech),
+            text: Some(text),
+        }
+    }
+
+    fn value(tally: &Tally, kind: QuantityKind) -> Option<i64> {
+        tally
+            .quantities()
+            .into_iter()
+            .find(|quantity| quantity.kind() == kind)
+            .and_then(|quantity| quantity.value())
+    }
+
+    /// Input text tokens summing past `u64::MAX` are unknown in the usage record, the contract's
+    /// sum stops at `u64::MAX`, and the speech tokens beside them stay known.
+    #[test]
+    fn a_delta_carrying_a_sum_past_u64_max_leaves_it_unknown() {
+        let mut tally = Tally::default();
+        tally.add_input(input(u64::MAX, 2));
+        tally.add_input(input(1, 3));
+        assert_eq!(value(&tally, QuantityKind::InputTextTokens), None);
+        assert_eq!(value(&tally, QuantityKind::InputAudioTokens), Some(5));
+        assert_eq!(tally.sum.input.text_tokens, u64::MAX);
+    }
+
+    /// Two tallies whose output text sums pass `u64::MAX` taken together: the sum is unknown.
+    #[test]
+    fn tallies_merged_past_u64_max_leave_the_sum_unknown() {
+        let mut first = Tally::default();
+        first.add_output(input(u64::MAX, 1));
+        let mut second = Tally::default();
+        second.add_output(input(1, 1));
+        first.merge(second);
+        assert_eq!(value(&first, QuantityKind::OutputTextTokens), None);
+        assert_eq!(value(&first, QuantityKind::OutputAudioTokens), Some(2));
+        assert_eq!(first.sum.output.text_tokens, u64::MAX);
     }
 }
