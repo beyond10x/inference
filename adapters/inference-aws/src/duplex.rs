@@ -1178,6 +1178,8 @@ mod tests {
         let mut tally = Tally::default();
         tally.add_input(input(u64::MAX, 2));
         tally.add_input(input(1, 3));
+        assert_eq!(tally.counts[0], Count::Missing);
+        assert_eq!(tally.counts[1], Count::Reported);
         assert_eq!(value(&tally, QuantityKind::InputTextTokens), None);
         assert_eq!(value(&tally, QuantityKind::InputAudioTokens), Some(5));
         assert_eq!(tally.sum.input.text_tokens, u64::MAX);
@@ -1191,8 +1193,66 @@ mod tests {
         let mut second = Tally::default();
         second.add_output(input(1, 1));
         first.merge(second);
+        assert_eq!(first.counts[2], Count::Missing);
+        assert_eq!(first.counts[3], Count::Reported);
         assert_eq!(value(&first, QuantityKind::OutputTextTokens), None);
         assert_eq!(value(&first, QuantityKind::OutputAudioTokens), Some(2));
         assert_eq!(first.sum.output.text_tokens, u64::MAX);
+    }
+
+    /// A sum below `u64::MAX` that a count would carry past it stops at `u64::MAX`, not where
+    /// it stood, in each of the three sums; the sums it does not pass add as usual.
+    #[test]
+    fn an_overflowing_sum_stops_at_u64_max() {
+        let mut total = TokenCounts {
+            text_tokens: u64::MAX - 1,
+            audio_tokens: u64::MAX - 2,
+            cached_tokens: u64::MAX - 3,
+        };
+        let passed = add_token_counts(
+            &mut total,
+            TokenCounts {
+                text_tokens: 2,
+                audio_tokens: 3,
+                cached_tokens: 4,
+            },
+        );
+        assert_eq!(passed, [true, true, true]);
+        assert_eq!(
+            total,
+            TokenCounts {
+                text_tokens: u64::MAX,
+                audio_tokens: u64::MAX,
+                cached_tokens: u64::MAX,
+            }
+        );
+        let passed = add_token_counts(
+            &mut total,
+            TokenCounts {
+                text_tokens: 0,
+                audio_tokens: 0,
+                cached_tokens: 0,
+            },
+        );
+        assert_eq!(passed, [false, false, false]);
+        let mut tally = Tally::default();
+        tally.add_input(input(u64::MAX - 1, 1));
+        tally.add_input(input(2, 1));
+        assert_eq!(tally.sum.input.text_tokens, u64::MAX);
+        assert_eq!(tally.sum.input.audio_tokens, 2);
+    }
+
+    /// Output speech tokens summing past `u64::MAX` mark the speech count unknown and stop the
+    /// sum at `u64::MAX`; the output text count beside them stays known.
+    #[test]
+    fn output_speech_past_u64_max_is_unknown() {
+        let mut tally = Tally::default();
+        tally.add_output(input(4, u64::MAX - 1));
+        tally.add_output(input(5, 2));
+        assert_eq!(tally.counts[2], Count::Reported);
+        assert_eq!(tally.counts[3], Count::Missing);
+        assert_eq!(value(&tally, QuantityKind::OutputTextTokens), Some(9));
+        assert_eq!(value(&tally, QuantityKind::OutputAudioTokens), None);
+        assert_eq!(tally.sum.output.audio_tokens, u64::MAX);
     }
 }
