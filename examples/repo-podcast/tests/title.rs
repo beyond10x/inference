@@ -1,15 +1,16 @@
-//! The project's name in the title, read from a git checkout's files alone. Each test removes
-//! the checkouts it made, so no nested `.git` stays behind in the target directory.
+//! The project's name in the title, read from a git checkout's files alone. Each checkout lives
+//! in a directory whose guard removes it on drop, so no nested `.git` stays behind in the target
+//! directory, whether the test passes or panics.
 
-use std::path::{Path, PathBuf};
+mod fixture;
 
+use std::path::Path;
+
+use fixture::Scratch;
 use repo_podcast::{project_name, repository_name};
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("repo-podcast-title-{name}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("the test directory is made");
-    dir
+fn scratch(name: &str) -> Scratch {
+    Scratch::new(&format!("repo-podcast-title-{name}"))
 }
 
 #[test]
@@ -46,7 +47,6 @@ fn a_worktree_is_named_by_its_origin_remote() {
     assert_eq!(project_name(&tree), "inference");
     assert_eq!(project_name(&tree.join("examples")), "inference/examples");
     assert_eq!(project_name(&main), "inference");
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -59,7 +59,24 @@ fn a_checkout_without_origin_is_named_by_its_top_level_directory() {
     let plain = root.join("not-a-checkout");
     std::fs::create_dir_all(&plain).expect("made");
     assert_ne!(project_name(&plain), "");
-    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_panicking_test_leaves_no_checkout_behind() {
+    let mut made = None;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let root = scratch("unwind");
+        std::fs::create_dir_all(root.join("checkout").join(".git")).expect("made");
+        made = Some(root.to_path_buf());
+        panic!("a failing assertion inside a fixture");
+    }));
+    assert!(outcome.is_err(), "the closure panicked");
+    let made = made.expect("the fixture was made");
+    assert!(
+        !made.exists(),
+        "{} stays behind after a panic",
+        made.display()
+    );
 }
 
 #[test]
