@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: release-plan:release-0-8-0
 kind: release-plan
-status: approved
+status: implemented
 title: Release 0.8.0
 summary: 'Source release 0.8.0: three breaking changes in native speech usage, ess 0.68.0'
-revision: 2
+revision: 3
 transitions:
 - {from: "draft", to: "approved", at: "2026-10-23T12:05:01Z", actor: "human:timo", revision: 2}
+- {from: "approved", to: "implemented", at: "2026-10-23T12:59:50Z", actor: "human:timo", revision: 3}
 ---
 # Release 0.8.0
 

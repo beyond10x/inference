@@ -2,12 +2,16 @@
 format: aep.planning-md/3
 id: story:repo-podcast-fixtures-removed-on-failure
 kind: story
-status: draft
+status: implemented
 title: A failing repo-podcast test leaves no git checkout under target/tmp
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 2
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T12:40:04Z", actor: "human:timo", revision: 4}
+- {from: "proposed", to: "active", at: "2026-10-23T12:40:04Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-23T12:59:43Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
@@ -40,3 +44,17 @@ after `cargo test -p repo-podcast`, `find target/tmp -name .git` prints nothing.
 ## Acceptance
 
 After any run of the workspace tests, passing or failing, no `.git` exists below `target/tmp`.
+
+## Scope
+
+- `examples/repo-podcast/tests/title.rs`: its two fixtures.
+- A guard type local to `examples/repo-podcast/tests/` (a shared test module), and the new test
+  of "Expected before" beside it.
+- No other test writes a `.git` below `CARGO_TARGET_TMPDIR` (grep on 2026-10-23: `title.rs` only).
+
+## Decision, 2026-10-23
+
+This story stops new leftovers only. The eight trees retained before it stay as they are: each
+still holds `target/tmp/repo-podcast-title-no-origin/my-project/.git`, and `worktree gc` retains
+them as `worktree-hidden-state`. They are about 12M each, which is not worth deleting data for.
+They are freed when `worktree` can archive a finished tree with a nested fixture repository.
