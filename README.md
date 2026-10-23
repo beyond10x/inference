@@ -7,7 +7,7 @@ Rust contracts, adapters, pipelines and a runtime for AI inference: speech-to-te
 models and text-to-speech as interchangeable typed nodes, composed into validated streaming graphs.
 Self-hosted and open-source first; hosted providers are opt-in adapters.
 
-**Status: released as 0.7.0 (see [CHANGELOG.md](CHANGELOG.md)).** The contracts, pipelines,
+**Status: released as 0.8.0 (see [CHANGELOG.md](CHANGELOG.md)).** The contracts, pipelines,
 runtime, session facade and native speech contract are implemented under `crates/`; hosted and
 local adapters are under `adapters/`, runnable examples under `examples/`. The
 [status page](https://beyond10x.github.io/inference/docs/status) lists what has shipped, what is on

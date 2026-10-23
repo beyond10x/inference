@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-23
+
 ### Added
 
 - `ess/domains/duplex.yaml` models what a session receives from its provider:

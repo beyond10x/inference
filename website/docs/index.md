@@ -5,7 +5,7 @@ sidebar_label: Overview
 sidebar_position: 1
 description: What inference is, what it is not, and where it sits among its neighbours.
 lede: inference is a set of Rust libraries for speech and language products whose models you can change without rewriting the product.
-source: crates/, adapters/ and examples/ in the inference repository at 0.7.0, CHANGELOG.md
+source: crates/, adapters/ and examples/ in the inference repository at 0.8.0, CHANGELOG.md
 ---
 
 # inference

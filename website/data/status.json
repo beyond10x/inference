@@ -1,5 +1,5 @@
 {
-  "asOf": "2026-10-22",
+  "asOf": "2026-10-23",
   "format": "b10x-status/1",
   "items": [
     {
@@ -231,6 +231,34 @@
       "detail": "Since 0.7.0: one usage record per response and per reported transcription; usage no response owns is kept as a session record.",
       "href": "/docs/concepts/usage",
       "label": "Native speech usage per response",
+      "status": "shipped"
+    },
+    {
+      "area": "Usage and cost",
+      "detail": "Since 0.8.0: the facade delivers each usage record as an event and totals a run and a session kind by kind.",
+      "href": "/docs/concepts/usage",
+      "label": "Run and session usage totals",
+      "status": "shipped"
+    },
+    {
+      "area": "Usage and cost",
+      "detail": "Since 0.8.0: behind feature cost, the facade prices each usage record from a price document the caller supplies; no prices are built in.",
+      "href": "/docs/guides/estimate-cost-from-a-price-table",
+      "label": "Cost records from a price document",
+      "status": "shipped"
+    },
+    {
+      "area": "Usage and cost",
+      "detail": "Since 0.8.0: a cancelled or superseded LLM turn still yields its usage record.",
+      "href": "/docs/concepts/usage",
+      "label": "Usage of a cancelled generation",
+      "status": "shipped"
+    },
+    {
+      "area": "Usage and cost",
+      "detail": "Since 0.8.0: an LLM inside a subgraph is counted once in the parent run's and the session's totals.",
+      "href": "/docs/concepts/usage",
+      "label": "Subgraph usage roll-up",
       "status": "shipped"
     },
     {
