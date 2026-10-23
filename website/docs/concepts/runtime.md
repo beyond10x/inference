@@ -41,10 +41,10 @@ stream, and the run records the refusal (`SequenceNotIncreasing`).
 
 A `SubgraphNode` runs its child pipeline as a child run nested under its own instance, bridges its
 ports to the child's exposures, and keeps the run boundary as the cancellation and tracing
-boundary. On main, in the next release: a nested drain waits for the ingress bridges to forward
+boundary. Since 0.8.0, a nested drain waits for the ingress bridges to forward
 what they hold; an output port of a subgraph node with no edge no longer fails the run; egress
 bridges end with the child run, and an edge that refuses what a bridge forwards fails the drain
-(`CHANGELOG.md`, Unreleased).
+(`CHANGELOG.md`, 0.8.0).
 
 ## Replay and telemetry
 

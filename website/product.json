@@ -31,7 +31,7 @@
         {"title": "Conversations that behave", "description": "Commit gates hold back hypotheses; a barge-in discards unplayed speech and stops the speaker.", "status": "shipped", "href": "/docs/concepts/streams"},
         {"title": "Offline, egress denied", "description": "offline_strict refuses a remote model before anything opens; on Linux the egress watch fails the run on any other connection.", "status": "shipped", "href": "/docs/concepts/deployment-profiles"},
         {"title": "Usage per model call", "description": "One usage record per STT, LLM, TTS and native speech call; a count the provider leaves out stays unknown.", "status": "shipped", "href": "/docs/concepts/usage"},
-        {"title": "Session totals and pricing", "description": "In the next release, on main today: run and session usage totals, and cost records from a price document you supply.", "href": "/docs/status#on-main-in-the-next-release"},
+        {"title": "Session totals and pricing", "description": "Run and session usage totals, and cost records from a price document you supply.", "status": "shipped", "href": "/docs/concepts/usage"},
         {"title": "Local text-to-speech", "description": "A local TTS adapter; the offline cascade speaks through a mock until then.", "status": "planned", "href": "/docs/status"}
       ]
     },

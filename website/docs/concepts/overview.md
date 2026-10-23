@@ -41,6 +41,5 @@ The behaviour is written down first as an executable specification in
 [ESS](https://beyond10x.github.io/ess/), under `ess/`, one domain per layer: `audio`, `duplex`,
 `graph`, `model`, `policy`, `session`, `stream`, `tools` and `usage`. Each error a domain declares
 is listed in [Errors](../reference/errors.md). The specification's scenarios run as a conformance
-suite in `task check`. At 0.7.0 the testkit's target answers all 460 scenarios of the synthesized
-suite (`CHANGELOG.md`, 0.7.0); on main, with the cost record, the suite has 462 and all are
-answered.
+suite in `task check`. At 0.8.0 the suite has 471 scenarios, 9 of them authored, and the testkit's target answers
+all of them (`CHANGELOG.md`, 0.8.0).
