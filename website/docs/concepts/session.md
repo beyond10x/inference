@@ -36,7 +36,7 @@ its host implements. The facade runs in-process, over no executor in particular.
 
 ## Usage totals and cost
 
-On main, in the next release. A live session delivers each usage record of its run as
+Since 0.8.0, a live session delivers each usage record of its run as
 `SessionEvent::UsageRecorded`, and `LiveSession::usage` returns a `SessionUsage`: a total per run
 the session held, in the order it attached them, and one over the session, across switches. A
 record counts when the session reads it, whether or not it is delivered, so an interrupt or a

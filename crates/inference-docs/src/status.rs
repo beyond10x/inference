@@ -22,7 +22,7 @@ pub const DATA: &str = "website/data/status.json";
 pub const PAGE: &str = "website/docs/status.mdx";
 
 /// The date the statuses below were last checked against `main`.
-const AS_OF: &str = "2026-10-22";
+const AS_OF: &str = "2026-10-23";
 
 /// The status of an item that is on `main` and in no release yet. `b10x-status/1` has no word for
 /// it, so it never reaches the status document.
@@ -83,7 +83,9 @@ const fn live(
     }
 }
 
-/// An item on `main`, held by a test, and in no release yet.
+/// An item on `main`, held by a test, and in no release yet. Unused from a release until the next
+/// item lands on `main`.
+#[allow(dead_code)]
 const fn next(
     area: &'static str,
     label: &'static str,
@@ -354,31 +356,31 @@ pub const CAPABILITIES: &[Capability] = &[
         "crates/inference-duplex/tests/ledger.rs::usage_per_response_and_of_transcription_is_recorded_for_a_meter",
         "/docs/concepts/usage",
     ),
-    next(
+    shipped(
         "Usage and cost",
         "Run and session usage totals",
-        "The facade delivers each usage record as an event and totals a run and a session kind by kind.",
+        "Since 0.8.0: the facade delivers each usage record as an event and totals a run and a session kind by kind.",
         "crates/inference-facade/tests/usage.rs::a_spoken_turn_delivers_one_usage_record_per_model_call_and_totals_them_kind_by_kind",
         "/docs/concepts/usage",
     ),
-    next(
+    shipped(
         "Usage and cost",
         "Cost records from a price document",
-        "Behind feature cost, the facade prices each usage record from a price document the caller supplies; no prices are built in.",
+        "Since 0.8.0: behind feature cost, the facade prices each usage record from a price document the caller supplies; no prices are built in.",
         "crates/inference-facade/tests/cost.rs::a_voice_cascade_priced_for_its_llm_only_has_one_cost_record_per_usage_record",
         "/docs/guides/estimate-cost-from-a-price-table",
     ),
-    next(
+    shipped(
         "Usage and cost",
         "Usage of a cancelled generation",
-        "A cancelled or superseded LLM turn still yields its usage record.",
+        "Since 0.8.0: a cancelled or superseded LLM turn still yields its usage record.",
         "crates/inference-testkit/tests/usage_on_cancel.rs::a_cancel_during_an_llm_turn_still_yields_the_turns_usage_record",
         "/docs/concepts/usage",
     ),
-    next(
+    shipped(
         "Usage and cost",
         "Subgraph usage roll-up",
-        "An LLM inside a subgraph is counted once in the parent run's and the session's totals.",
+        "Since 0.8.0: an LLM inside a subgraph is counted once in the parent run's and the session's totals.",
         "crates/inference-facade/tests/usage_subgraph.rs::an_llm_inside_a_subgraph_node_is_counted_once_in_the_parent_run_and_session_totals",
         "/docs/concepts/usage",
     ),
@@ -567,6 +569,9 @@ pub fn page(root: &Path, version: &str) -> Result<String> {
             test_link(capability.evidence)
         ));
     }
+    if next.is_empty() {
+        next = format!("Nothing yet: everything on `main` is in `{version}`.\n");
+    }
     let mut evidence = String::new();
     for capability in CAPABILITIES.iter().filter(|c| c.status != "planned") {
         let tests = if capability.live.is_empty() {
@@ -691,7 +696,6 @@ mod tests {
         let document: serde_json::Value = serde_json::from_str(&data(&root).unwrap()).unwrap();
         let items = document["items"].as_array().unwrap();
         let on_main: Vec<_> = CAPABILITIES.iter().filter(|c| c.status == NEXT).collect();
-        assert!(!on_main.is_empty());
         assert_eq!(items.len(), CAPABILITIES.len() - on_main.len());
         for item in items {
             let status = item["status"].as_str().unwrap();

@@ -8,7 +8,7 @@ source: examples/realtime-voice (src/usage.rs, examples/talk.rs), examples/repo-
 
 # Estimate cost from a price table
 
-The released voice examples estimate cost from a price table you supply. On main, the session
+The voice examples estimate cost from a price table you supply. Since 0.8.0, the session
 facade's `cost` feature turns the same idea into cost records priced with
 [llm](https://beyond10x.github.io/llm/)'s price book; see the last section.
 
@@ -64,7 +64,7 @@ counter reads them.
 
 ## Cost records in the facade
 
-On main, in the next release, behind the `inference-facade` feature `cost`:
+Since 0.8.0, behind the `inference-facade` feature `cost`:
 
 - `Pricing` holds an `llm-cost` `PriceBook`, built from a versioned price document (revision,
   source, as-of time, currency, digest), and a `PriceBinding` per adapter that names the quantity

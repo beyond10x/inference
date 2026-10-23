@@ -3,7 +3,7 @@ title: Getting started
 sidebar_position: 2
 description: Run the first example with no model and no network, build and check the workspace, and add inference to your own project.
 lede: One contract and a mock recogniser print two committed spans; the rest of the workspace builds after one pinned native archive is fetched.
-source: examples/stt-only, Taskfile.yml, .cargo/config.toml, Cargo.toml, CHANGELOG.md 0.7.0
+source: examples/stt-only, Taskfile.yml, .cargo/config.toml, Cargo.toml, CHANGELOG.md 0.8.0
 ---
 
 # Getting started
@@ -60,28 +60,29 @@ the adapter that implements it, and switch on the adapter features you use:
 
 ```toml
 [dependencies]
-inference-stt = { git = "https://github.com/beyond10x/inference", tag = "0.7.0" }
-inference-duplex = { git = "https://github.com/beyond10x/inference", tag = "0.7.0" }
-inference-openai = { git = "https://github.com/beyond10x/inference", tag = "0.7.0", features = ["duplex", "keychain"] }
+inference-stt = { git = "https://github.com/beyond10x/inference", tag = "0.8.0" }
+inference-duplex = { git = "https://github.com/beyond10x/inference", tag = "0.8.0" }
+inference-openai = { git = "https://github.com/beyond10x/inference", tag = "0.8.0", features = ["duplex", "keychain"] }
 ```
 
 Every crate, its features and what it holds is listed in [Crates](reference/crates.md); which
 feature turns on which adapter binding is in [Adapters](reference/adapters.md).
 
-## Upgrading to 0.7.0
+## Upgrading to 0.8.0
 
-0.7.0 adds a usage record at the end of every recognition and synthesis, and that changes two
-signatures:
+0.8.0 keeps the usage a native speech session received before it ends, and decodes provider
+events field by field. Three changes break a caller of `inference-duplex` or a hosted binding:
 
-| Before 0.7.0 | From 0.7.0 |
+| Change | What a caller does |
 |---|---|
-| `TranscriptEvent::span_id` returns a `SpanId` | returns `Option<SpanId>`: the `Usage` event that ends a recognition names no span |
-| `SynthesisEvent::segment_id` returns a `SegmentId` | returns `Option<SegmentId>`: the `Usage` event that ends a synthesis names no segment |
+| `SpeechSessionHandle::close` delivers every event the binding received before the close, usage included, after the close and before `SpeechSessionClosed` | a caller that counts usage reads `next_event` until `SpeechSessionClosed` |
+| a field a provider event may lack is an `Option`: OpenAI Realtime `ServerEvent::ResponseDone` (`response_id`, `status`, `usage`) and `ServerEvent::InputTranscript` (`item_id`, `transcript`); GPT-Live `BackendEvent::Completed` and `BackendEvent::Ended` (`response_id`), `BackendUsage` (`input_tokens`, `output_tokens`, `total_tokens`), `LiveEvent::SessionClosed` and `LiveClosed` (`reason`, `seconds`); Nova Sonic `OutputEvent::CompletionEnd` (`stop_reason`), `OutputContentEnd` (`content_id`, `kind`) and `OutputEvent::Interrupted` (`content_id`) | handle the `None` case |
+| `SessionLedger::response_usage_reported` for a response whose usage is already recorded changes nothing | do not expect a second `ResponseUsageRecorded` |
 
-After a recognition's usage record, any further move on it is refused with `RecognitionEnded`;
-after a synthesis's, with `SynthesisEnded`. The record itself is refused while a span is still
-uncommitted or a segment is not synthesized, unless the call failed. A caller that matched on
-every `TranscriptEvent` or `SynthesisEvent` variant also has a new `Usage` variant to handle.
+A caller that matches every variant or destructures every field also meets new ones: OpenAI
+Realtime `ServerEvent::UnreadableResponseDone`, and the field `unreadable_usage` on Realtime
+`ServerEvent::ResponseDone` and `ServerEvent::InputTranscript` and on GPT-Live
+`BackendEvent::Completed` and `BackendEvent::Ended`.
 
 ## Next
 
