@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-23T15:00:00Z",
+  "actor": "human:timo",
+  "artifact": "story:repo-podcast-fixtures-removed-on-failure",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check: 2616 passed, 0 failed; a_panicking_test_leaves_no_checkout_behind red before the guard, green after; find target/tmp -name .git empty"
+  }
+}
