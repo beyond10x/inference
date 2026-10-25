@@ -57,7 +57,7 @@ ess specify validate --path ess
 cargo test -p inference-testkit --features run --test conform
 ```
 
-With ess 0.68.0, the release CI installs, the validation prints the following. Long lines are
+With ess 0.69.2, the release CI installs, the validation prints the following. Long lines are
 wrapped here, and their continuation lines are indented four spaces:
 
 ```text
@@ -77,7 +77,7 @@ The last lines of the test run:
 ```text
 test the_suite_runs_against_the_testkit_target ... ok
 
-test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.00s
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.10s
 ```
 
 ## Tests that need a model, a server or a key

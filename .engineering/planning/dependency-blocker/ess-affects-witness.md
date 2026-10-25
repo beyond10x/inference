@@ -3,10 +3,10 @@ format: aep.planning-md/3
 id: dependency-blocker:ess-affects-witness
 kind: dependency-blocker
 status: open
-title: ess synthesis and the interpreted target leave five refusals, one unsupported and one failed scenario
+title: ess synthesis and the interpreted target leave one refusal and one unsupported scenario
 relations:
 - blocks: story:ess-defect-fixes
-revision: 8
+revision: 10
 ---
 ## What is blocked
 
@@ -63,3 +63,29 @@ is verified.
 and here, in one pull request, with no build. ESS answered the same day with the two story ids
 above and placed the `Quantity` refusal in this repository; the usage view is the next unit because
 the testkit target must answer it.
+
+## Under ess 0.69.2
+
+Read on 2026-10-25 with the pin moved to ess 0.69.2, against ess 0.68.0 on the same specification:
+
+| run | ess 0.68.0 | ess 0.69.2 |
+|---|---|---|
+| `ess verify conform synthesize --path ess --scenarios ess/scenarios` | 471 scenarios, 5 refusals | 475 scenarios, 1 refusal |
+| `ess verify conform run … --target interpreted --report-format 2` | 469 passed, 1 failed, 1 unsupported | 474 passed, 0 failed, 1 unsupported |
+
+- Synthesized now: `inference.duplex.CloseSpeechSession/outcome/closed`,
+  `inference.duplex.FailSpeechSession/outcome/failed`,
+  `inference.stream.CancelGeneration/outcome/cancelled` and
+  `inference.stream.SupersedeGeneration/outcome/superseded` (ess `CHANGELOG.md` § 0.69.0, Fixed: "A
+  moving `affects:` entry gets its scenario when the rows it moves are created by a branch below a
+  `when:` refusal, or below a `when_related:` refusal of a state the related row is not held in").
+- Still refused, ESS-SYNTH-001: `inference.graph.CancelRun/outcome/cancelled`, "`cancelled.affects[0]`
+  is `inference.stream.Generation` and created only by `inference.stream.StartGeneration/started`,
+  which no arrangement takes for a row the filter selects with the rows the scenario holds when it is
+  sent". Its authored scenario `cancel-run-discards-unplayed.yaml` stays.
+- `inference.usage/authored/unknown-quantity-stays-unknown` passes the interpreted run (ess
+  `CHANGELOG.md` § 0.69.0, Fixed: "an asserted `value: null` matches a row that omits `value`").
+- Still unsupported: `inference.graph.AddSubgraphNode/outcome/added` (ESS-CF-TARGET).
+
+The blocker stays open: one refusal and one unsupported scenario remain, both owned by the ESS
+stories above (ess 0.70.0). The four authored cascade scenarios stay until the last refusal clears.

@@ -251,8 +251,8 @@ fn every_deferred_generation_and_segment_scenario_passes_against_the_stream_modu
         .collect();
     assert_eq!(
         kept.len(),
-        58,
-        "the 62 ids of the story less StartGeneration's 4"
+        60,
+        "the 62 ids of the story less StartGeneration's 4, and the cancelled and superseded outcomes ess 0.69.0 synthesizes"
     );
     suite["scenarios"] = json!(kept);
     let admitted = AdmittedSuite::from_json(&suite.to_string())
@@ -274,10 +274,10 @@ fn every_deferred_generation_and_segment_scenario_passes_against_the_stream_modu
             )
         })
         .collect();
-    assert_eq!(run.scenarios.len(), 58);
+    assert_eq!(run.scenarios.len(), 60);
     assert!(
         not_passed.is_empty(),
-        "{} of 58 did not pass:\n{}",
+        "{} of 60 did not pass:\n{}",
         not_passed.len(),
         not_passed.join("\n")
     );
