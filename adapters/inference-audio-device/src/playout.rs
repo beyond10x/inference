@@ -310,7 +310,10 @@ impl PlayoutBuffer {
         self.underruns.load(Ordering::Relaxed)
     }
 
-    fn push(&self, frame: &AudioFrame) -> Result<(), PushError> {
+    /// Queues `frame`; with `since`, only if no stop happened after the stop count `since`. The
+    /// count is read under the queue's lock, which [`PlayoutBuffer::stop`] holds while it
+    /// clears the queue, so a stop is never missed between the check and the queuing.
+    fn push(&self, frame: &AudioFrame, since: Option<u64>) -> Result<(), PushError> {
         let mut samples = decode(frame).map_err(PushError::Malformed)?;
         for sample in &mut samples {
             *sample = playable(*sample);
@@ -324,6 +327,9 @@ impl PlayoutBuffer {
             }
         }
         let mut queue = self.lock();
+        if since.is_some_and(|since| self.stops() != since) {
+            return Err(PushError::Stopped);
+        }
         let capacity = match queue.rate {
             Some(expected) if expected != rate => {
                 return Err(PushError::RateChanged {
@@ -474,7 +480,7 @@ impl Speaker {
     ///
     /// [`PushError`]; nothing of the frame is queued.
     pub fn try_push(&self, frame: &AudioFrame) -> Result<(), PushError> {
-        self.buffer.push(frame)
+        self.buffer.push(frame, None)
     }
 
     /// Queues `frame`, waiting at most `patience` for room.
@@ -490,7 +496,7 @@ impl Speaker {
             if self.buffer.stops() != stops {
                 return Err(PushError::Stopped);
             }
-            match self.buffer.push(frame) {
+            match self.buffer.push(frame, Some(stops)) {
                 Err(PushError::Full) => {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if left.is_zero() {
