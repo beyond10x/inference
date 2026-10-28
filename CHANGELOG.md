@@ -4,7 +4,7 @@
 
 ### Changed
 
-- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.68.0 to 0.72.0.
+- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.68.0 to 0.74.0.
 
 ### Fixed
 
