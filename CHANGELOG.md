@@ -1,10 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.1] — 2026-10-29
+
+No breaking changes.
 
 ### Changed
 
-- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.68.0 to 0.75.0.
+- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.68.0 to 0.76.0.
 
 ### Fixed
 

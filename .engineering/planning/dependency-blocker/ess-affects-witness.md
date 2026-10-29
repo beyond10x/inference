@@ -6,7 +6,7 @@ status: open
 title: ess synthesis and the interpreted target leave one refusal and one unsupported scenario
 relations:
 - blocks: story:ess-defect-fixes
-revision: 10
+revision: 11
 ---
 ## What is blocked
 
@@ -89,3 +89,22 @@ Read on 2026-10-25 with the pin moved to ess 0.69.2, against ess 0.68.0 on the s
 
 The blocker stays open: one refusal and one unsupported scenario remain, both owned by the ESS
 stories above (ess 0.70.0). The four authored cascade scenarios stay until the last refusal clears.
+
+## Under ess 0.76.0
+
+Read on 2026-10-29 with the pin moved to ess 0.76.0, same specification:
+
+| run | ess 0.69.2 | ess 0.76.0 |
+|---|---|---|
+| `ess verify conform synthesize --path ess --scenarios ess/scenarios` | 475 scenarios, 1 refusal | 475 scenarios, 1 refusal |
+| `ess verify conform run … --target interpreted --report-format 2` | 474 passed, 0 failed, 1 unsupported | 474 passed, 0 failed, 1 unsupported |
+
+- Still refused, ESS-SYNTH-001: `inference.graph.CancelRun/outcome/cancelled`, with the same reason
+  as under 0.69.2 ("created only by `inference.stream.StartGeneration/started`, which no arrangement
+  takes for a row the filter selects with the rows the scenario holds when it is sent"). ESS
+  story:a-cascade-onto-rows-of-a-guarded-creator-is-witnessed is implemented in ESS and does not
+  witness this cascade; the case is reported to ESS again with this specification as the repro.
+- Still unsupported: `inference.graph.AddSubgraphNode/outcome/added` (ESS-CF-TARGET). ESS
+  story:an-unfillable-required-field-is-named-by-validate-and-the-view is a draft in ESS.
+
+The blocker stays open. The four authored cascade scenarios stay.
