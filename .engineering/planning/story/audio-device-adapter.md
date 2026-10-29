@@ -13,7 +13,7 @@ scope:
   path: Cargo.toml
 - confidence: cited
   path: adapters/inference-audio-device
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T21:13:04Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T21:13:04Z", actor: "human:timo", revision: 4}
@@ -58,3 +58,18 @@ through the default output; the ignored hardware test passes on a laptop with a 
 
 Echo cancellation and noise suppression (the operator's headset or the provider handles them);
 the realtime voice demo that wires the device to a native speech model (`story:realtime-voice-demo`).
+
+## Re-check 2026-10-29
+
+Re-checked against `origin/main` at `de88601` on 2026-10-29 for the wave that moved `ess` to 0.76.0,
+and left out of that wave.
+
+- Built on `main`: `adapters/inference-audio-device` (capture, playout with played position and stop,
+  device listing, source and sink nodes, the fake device), the `mic-loopback` example and the
+  ignored hardware test `tests/hardware.rs` behind feature `device`.
+- The part of the acceptance a machine without audio hardware can show passes in that wave's full
+  gate (`task check`, `cargo test --workspace --all-features`, which includes
+  `cargo test -p inference-audio-device --all-features`).
+- Open: the two device parts of the acceptance, `mic-loopback` heard on a laptop and the ignored
+  hardware test run with a microphone. Both need the operator at a laptop with a microphone and a
+  speaker; no code is planned for them. The story stays active until that run is recorded here.

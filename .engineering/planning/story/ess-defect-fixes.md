@@ -22,7 +22,7 @@ scope:
   path: ess/domains/tools.yaml
 - confidence: cited
   path: ess/system.yaml
-revision: 12
+revision: 13
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-18T23:48:27Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-18T23:48:27Z", actor: "human:timo", revision: 3}
@@ -168,3 +168,18 @@ arrangement, so the 54 such ids of `story:outbound-text-generations-and-segments
 `story:inbound-text-spans-and-envelope` pass with `story:run-lifecycle`, 9 ids of `story:pipeline-declaration`
 pass with `story:pipeline-validation`, and `story:tool-call-lifecycle` depends on `story:run-lifecycle`. Scope prose
 counts were left as the scoper wrote them; the typed `scope` entries are unchanged.
+
+## Re-check 2026-10-29
+
+Re-checked on 2026-10-29 with ess 0.76.0 on the specification of `origin/main` at `de88601`, and
+left out of that wave because `dependency-blocker:ess-affects-witness` is still open:
+
+- `ess specify validate --path ess`: exit 0, 11 files, 9 scenarios, one warning (ESS-ENTITY-019 on
+  `inference.session.HistoryEntry.call_id`, as under 0.75.0).
+- `ess verify conform synthesize --path ess --scenarios ess/scenarios`: 475 scenarios (9 authored),
+  1 refusal, ESS-SYNTH-001 `inference.graph.CancelRun/outcome/cancelled`.
+- `ess verify conform run --path ess --scenarios ess/scenarios --target interpreted --report-format 2`:
+  474 passed, 0 failed, 0 error, 1 unsupported (`inference.graph.AddSubgraphNode/outcome/added`).
+
+The acceptance needs 0 refusals. Both remaining results are owned by ESS; nothing in this
+repository clears them.
