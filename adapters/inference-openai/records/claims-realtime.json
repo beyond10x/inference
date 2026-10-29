@@ -10,5 +10,5 @@
     "interruptible"
   ],
   "held_by": "claims_record::the_realtime_record_holds_the_claims_of_the_binding",
-  "adapter_revision": "0.8.0"
+  "adapter_revision": "0.8.1"
 }

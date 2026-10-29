@@ -14,7 +14,7 @@ relations:
 scope:
 - confidence: inferred
   path: examples/realtime-voice
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T22:29:55Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T22:29:55Z", actor: "human:timo", revision: 4}
@@ -37,3 +37,16 @@ provider bindings exist, one example wires them: microphone, native speech model
 
 On a laptop with a headset, the operator holds a spoken conversation with each provider, interrupts
 it mid-answer and hears it stop, and asks for the time and hears the tool's answer.
+
+## Re-check 2026-10-29
+
+Re-checked against `origin/main` at `de88601` on 2026-10-29 for the wave that moved `ess` to 0.76.0,
+and left out of that wave.
+
+- Built on `main`: `examples/realtime-voice` with the `talk` example (`--provider openai`,
+  `openai-live` or `nova`), barge-in that stops playout and truncates at the heard position, and the
+  `local_time` tool. Its tests that need no device or key run in that wave's full gate.
+- `dependency-blocker:nova-bedrock-access` is cleared (2026-10-21).
+- Open: the acceptance itself, a spoken conversation on a laptop with a headset with each provider,
+  an interruption and the tool's answer heard. It needs the operator at a laptop with a headset; no
+  code is planned for it. The story stays active until that run is recorded here.
