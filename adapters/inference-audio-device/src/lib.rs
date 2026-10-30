@@ -12,6 +12,8 @@
 //!   where a barge-in truncates a model's output.
 //! * Between each device callback and its consumer sits a bounded buffer the callback never
 //!   blocks on and never allocates in: capture counts the audio it drops, playout its underruns.
+//! * [`loopback::run`] plays a microphone back through a speaker with a fixed delay, on any
+//!   host; the `mic-loopback` example runs it on the default devices.
 //!
 //! Devices are reached through [`AudioHost`]: `CpalHost` (feature `device`, on by default)
 //! over cpal, and [`fake::FakeHost`], which tests drive callback by callback without audio
@@ -31,6 +33,7 @@ pub mod convert;
 mod cpal_host;
 pub mod fake;
 pub mod host;
+pub mod loopback;
 #[cfg(feature = "pipeline")]
 pub mod node;
 pub mod playout;
