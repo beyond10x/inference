@@ -5,7 +5,7 @@
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -111,12 +111,10 @@ fn pushed_positions(seen: &[LoopbackEvent], delay: bool) -> Vec<u64> {
 
 // --- A delay longer than the speaker's queue -------------------------------------------------
 
-/// A stop set before the loop starts ends it at once: the stop flag is the deterministic way a
-/// caller ends the loop. With a delay longer than the speaker's queue and a speaker that does
-/// not drain, the delay phase waits a second for room for each frame that does not fit, and
-/// neither the stop flag nor the run is looked at until the delay is queued.
+/// A delay longer than the speaker's queue could only be queued by waiting on the speaker while
+/// nothing reads the microphone; the loop refuses it before it opens a device.
 #[test]
-fn a_stop_set_before_the_first_frame_ends_the_loop_without_waiting_out_the_delay() {
+fn a_stop_set_before_the_first_frame_with_a_delay_longer_than_the_queue_is_refused() {
     let host = mono(16_000);
     let stop = AtomicBool::new(true);
     let config = LoopbackConfig {
@@ -129,45 +127,56 @@ fn a_stop_set_before_the_first_frame_ends_the_loop_without_waiting_out_the_delay
         ..LoopbackConfig::default()
     };
     let started = Instant::now();
-    let report = loopback::run(&host, &config, &stop, |_| {}).expect("the loop ran");
+    let refused = loopback::run(&host, &config, &stop, |_| {});
+    let took = started.elapsed();
+
+    assert!(
+        matches!(refused, Err(DeviceError::InvalidConfig(_))),
+        "story:audio-device-adapter: a delay longer than the playout buffer is refused, got \
+         {refused:?}"
+    );
+    assert!(took < Duration::from_secs(2), "the refusal took {took:?}");
+    assert!(!host.input_open() && !host.output_open());
+}
+
+/// A stop set before the loop starts ends it at once, before the delay: the stop flag is the
+/// deterministic way a caller ends the loop, and the delay phase looks at it between frames.
+#[test]
+fn a_stop_set_before_the_first_frame_ends_the_loop_without_queuing_the_delay() {
+    let host = mono(16_000);
+    let stop = AtomicBool::new(true);
+    let config = LoopbackConfig {
+        delay: Duration::from_millis(500),
+        run: Duration::from_secs(60),
+        drain: Duration::from_secs(5),
+        ..LoopbackConfig::default()
+    };
+    let mut seen = Vec::new();
+    let started = Instant::now();
+    let report = loopback::run(&host, &config, &stop, |event| seen.push(event)).expect("ran");
     let took = started.elapsed();
 
     assert_eq!(report.ended, Ended::Stopped);
     assert!(
         took < Duration::from_secs(2),
-        "a stop set before the first frame took {took:?} to end the loop: the delay phase never \
-         looks at the stop flag (or the run) and waited a second for each of the {} delay frames \
-         the 100 ms queue refused",
-        report.delay_refused
+        "a stop set before the first frame took {took:?} to end the loop"
     );
+    assert!(
+        pushed_positions(&seen, true).is_empty(),
+        "a stop set before the first frame queued delay frames"
+    );
+    assert_eq!(report.delay_samples, 0);
+    assert!(!host.input_open() && !host.output_open());
 }
 
-/// On a device that plays in real time, a delay longer than the speaker's queue makes the delay
-/// phase wait for the speaker while nothing reads the microphone, so its ring overflows and the
-/// captured audio is lost before the loop forwards its first frame.
+/// On a device that plays in real time, a delay longer than the speaker's queue would make the
+/// delay phase wait for the speaker while nothing reads the microphone, so its ring would
+/// overflow before the loop forwards its first frame; the loop refuses the config instead, before
+/// it opens a device.
 #[test]
-fn a_delay_longer_than_the_speaker_queue_loses_no_microphone_audio() {
+fn a_delay_longer_than_the_speaker_queue_is_refused_before_any_device_opens() {
     let host = mono(16_000);
-    let stop = Arc::new(AtomicBool::new(false));
-    let done = Arc::new(AtomicBool::new(false));
-    let devices = {
-        let host = host.clone();
-        let done = Arc::clone(&done);
-        thread::spawn(move || {
-            let tick = Duration::from_millis(20);
-            let mut next = Instant::now();
-            let mut sent = 0_usize;
-            while !done.load(Ordering::Relaxed) {
-                let chunk = signal(sent + 320);
-                if host.feed(&chunk[sent..]) {
-                    sent += 320;
-                }
-                let _played = host.pull(320);
-                next += tick;
-                thread::sleep(next.saturating_duration_since(Instant::now()));
-            }
-        })
-    };
+    let stop = AtomicBool::new(false);
     let config = LoopbackConfig {
         delay: Duration::from_millis(1_500),
         playout: PlayoutConfig {
@@ -178,22 +187,16 @@ fn a_delay_longer_than_the_speaker_queue_loses_no_microphone_audio() {
         drain: Duration::from_secs(3),
         ..LoopbackConfig::default()
     };
-    let (handle, _received) = start(&host, config, &stop);
-    let report = handle.join().expect("the loop ends").expect("the loop ran");
-    done.store(true, Ordering::Relaxed);
-    devices.join().expect("the fake devices stop");
+    let mut seen = Vec::new();
+    let refused = loopback::run(&host, &config, &stop, |event| seen.push(event));
 
-    assert_eq!(
-        report.delay_refused, 0,
-        "every delay frame found room in time"
+    assert!(
+        matches!(refused, Err(DeviceError::InvalidConfig(_))),
+        "story:audio-device-adapter: a delay longer than the playout buffer is refused, got \
+         {refused:?}"
     );
-    assert_eq!(
-        report.capture.dropped_device_frames, 0,
-        "the microphone dropped {} samples: a 1.5 s delay does not fit a 0.5 s speaker queue, the \
-         delay phase blocked on the speaker for about a second without reading the microphone, \
-         and its 0.5 s ring overflowed; the config is accepted without a word",
-        report.capture.dropped_device_frames
-    );
+    assert!(seen.is_empty(), "no device opened: {seen:?}");
+    assert!(!host.input_open() && !host.output_open());
 }
 
 // --- The delay's rounding ------------------------------------------------------------------
@@ -401,10 +404,11 @@ fn the_reported_played_position_counts_only_what_the_speaker_played() {
     );
 }
 
-/// The unit's own tests assert `delay_refused` only as 0: a speaker queue of three frames that
-/// nobody pulls refuses the delay's other two, each after waiting its patience.
+/// A speaker queue of three frames cannot hold a delay of five: the loop refuses the config
+/// before it opens a device, where it used to refuse the delay's last two frames one by one,
+/// each after waiting its patience.
 #[test]
-fn refused_delay_frames_are_counted_and_still_take_their_place_on_the_clock() {
+fn a_delay_of_more_frames_than_the_speaker_queue_holds_is_refused() {
     let host = mono(16_000);
     let stop = AtomicBool::new(false);
     let config = LoopbackConfig {
@@ -416,23 +420,15 @@ fn refused_delay_frames_are_counted_and_still_take_their_place_on_the_clock() {
         ..config(0)
     };
     let mut seen = Vec::new();
-    let report = loopback::run(&host, &config, &stop, |event| seen.push(event)).expect("ran");
+    let refused = loopback::run(&host, &config, &stop, |event| seen.push(event));
 
-    assert_eq!(report.delay_samples, 5 * 320, "refused ones included");
-    assert_eq!(report.delay_refused, 2);
-    assert_eq!(pushed_positions(&seen, true), vec![0, 320, 640]);
-    let refused: Vec<u64> = seen
-        .iter()
-        .filter_map(|event| match event {
-            LoopbackEvent::Refused {
-                position,
-                delay: true,
-                error: PushError::Full,
-            } => Some(position.get()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(refused, vec![960, 1_280]);
+    assert!(
+        matches!(refused, Err(DeviceError::InvalidConfig(_))),
+        "story:audio-device-adapter: a delay longer than the playout buffer is refused, got \
+         {refused:?}"
+    );
+    assert!(seen.is_empty(), "no device opened: {seen:?}");
+    assert!(!host.input_open() && !host.output_open());
 }
 
 // --- The microphone mid-run ----------------------------------------------------------------
