@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.0] — 2026-10-30
+
+No breaking changes.
+
+### Added
+
+- `inference_audio_device::loopback::run` plays a microphone back through a speaker with a fixed
+  delay on any `AudioHost`; `mic-loopback` uses it, and the hardware test's flow also runs against
+  the fake host on every test run.
+
+### Changed
+
+- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.76.0 to 0.77.0.
+
 ## [0.8.1] — 2026-10-29
 
 No breaking changes.
