@@ -8,8 +8,9 @@
 //! speaker's position less the delay is always the microphone's own position, and the refused
 //! samples are a gap the speaker skips. The loop stops when the run has elapsed or the stop flag
 //! is set, both looked at between frames of the delay too, or after a given number of captured
-//! frames, whichever comes first; then it [finishes](Speaker::finish) the speaker, waits for it to
-//! play out, and closes both devices. What happened on the way reaches the caller as
+//! frames, whichever comes first; then it reads the microphone's stats and closes it, so nothing
+//! it drops while unread counts as lost loopback audio, [finishes](Speaker::finish) the speaker,
+//! waits for it to play out, and closes the speaker. What happened on the way reaches the caller as
 //! [`LoopbackEvent`]s, and the end as a [`LoopbackReport`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,12 +97,12 @@ pub enum LoopbackEvent {
         samples: u32,
         delay: bool,
     },
-    /// The speaker refused a frame, which is not played but keeps its place on the clock: one of
-    /// the delay's silence, or a captured one.
+    /// The speaker refused a frame, which is not played but keeps its place on the clock. In
+    /// practice only a captured frame: the delay fits the speaker's queue, checked before the
+    /// devices open, so each of its frames finds room.
     Refused {
         position: SampleClockPosition,
         error: PushError,
-        delay: bool,
     },
     /// What both devices have done so far, and how many samples the speaker has queued.
     Progress {
@@ -120,10 +121,8 @@ pub struct LoopbackReport {
     pub microphone: ResolvedDevice,
     /// The device played on.
     pub speaker: ResolvedDevice,
-    /// The samples of silence the delay took on the clock, refused ones included.
+    /// The samples of silence the delay took on the clock.
     pub delay_samples: u64,
-    /// The frames of the delay the speaker refused.
-    pub delay_refused: u64,
     /// The frames the microphone produced.
     pub captured: u64,
     /// The captured frames the speaker queued.
@@ -140,7 +139,7 @@ pub struct LoopbackReport {
     /// The speaker's own played position on the loop's clock ([`Speaker::played`]), refused
     /// frames' gaps included: the delay plus the microphone's position.
     pub speaker_played: Option<SampleClockPosition>,
-    /// What the microphone did.
+    /// What the microphone did up to the end of forwarding, when the loop closed it.
     pub capture: CaptureStats,
     /// What the speaker did.
     pub playout: PlayoutStats,
@@ -188,7 +187,6 @@ pub fn run<H: AudioHost>(
     let silence = encode(&vec![0.0; frame_samples as usize], format.encoding);
     let mut next = 0_u64;
     let mut gaps: Vec<(u64, u64)> = Vec::new();
-    let mut delay_refused = 0_u64;
     let mut ended_in_delay = None;
     for _ in 0..delay_frames {
         ended_in_delay = ended_by(None);
@@ -208,12 +206,10 @@ pub fn run<H: AudioHost>(
                 delay: true,
             },
             Err(error) => {
-                delay_refused += 1;
                 gaps.push((next, u64::from(frame_samples)));
                 LoopbackEvent::Refused {
                     position: frame.position,
                     error,
-                    delay: true,
                 }
             }
         });
@@ -247,7 +243,6 @@ pub fn run<H: AudioHost>(
                 LoopbackEvent::Refused {
                     position: frame.position,
                     error,
-                    delay: false,
                 }
             }
         });
@@ -262,6 +257,9 @@ pub fn run<H: AudioHost>(
         }
     };
 
+    let capture = microphone.stats();
+    let microphone_device = microphone.device().clone();
+    drop(microphone);
     speaker.finish();
     observe(LoopbackEvent::Draining {
         ended,
@@ -270,10 +268,9 @@ pub fn run<H: AudioHost>(
     let played_out = speaker.wait_played(config.drain);
     let speaker_played = speaker.played();
     Ok(LoopbackReport {
-        microphone: microphone.device().clone(),
+        microphone: microphone_device,
         speaker: speaker.device().clone(),
         delay_samples,
-        delay_refused,
         captured,
         forwarded,
         refused,
@@ -281,7 +278,7 @@ pub fn run<H: AudioHost>(
         played_out,
         played: speaker_played.map(|position| clock(unskipped(position.get(), &gaps))),
         speaker_played,
-        capture: microphone.stats(),
+        capture,
         playout: speaker.stats(),
     })
 }
