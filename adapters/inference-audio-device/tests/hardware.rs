@@ -5,98 +5,60 @@
 //! ```text
 //! cargo test -p inference-audio-device --test hardware -- --ignored --nocapture
 //! ```
+//!
+//! The same flow (`record_and_play`) runs on every test run against a fake laptop, whose
+//! microphone a thread feeds with a tone and whose speaker it pulls, both in device-sized chunks.
+
+mod record_and_play;
 
 use std::f32::consts::TAU;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::Duration;
 
-use inference_audio::{AudioEncoding, AudioFrame, SampleClockPosition};
-use inference_audio_device::convert::{decode, encode};
-use inference_audio_device::{
-    AudioHost, CaptureConfig, CpalHost, DeviceSelector, Microphone, PlayoutConfig, Speaker,
-};
-
-const RATE: u32 = 16_000;
-const FRAME: usize = 320;
+use inference_audio_device::CpalHost;
+use inference_audio_device::fake::FakeHost;
 
 #[test]
 #[ignore = "opens the default microphone and speaker; run it by hand on a laptop"]
 fn records_two_seconds_and_plays_a_tone_and_the_recording_back() {
-    let host = CpalHost::new();
-    for device in host.devices().expect("the host lists its devices") {
-        println!(
-            "device {:?}: input {} output {} default input {} default output {}",
-            device.name, device.input, device.output, device.default_input, device.default_output
-        );
-    }
+    record_and_play::records_two_seconds_and_plays_a_tone_and_the_recording_back(&CpalHost::new());
+}
 
-    let mut microphone =
-        Microphone::open(&host, &DeviceSelector::Default, CaptureConfig::default())
-            .expect("the default input opens");
-    println!("recording two seconds from {:?}", microphone.device());
-    let mut recording: Vec<AudioFrame> = Vec::new();
-    while recording.len() < 100 {
-        let frame = microphone
-            .next_frame(Duration::from_secs(2))
-            .expect("the microphone delivers a frame within two seconds");
-        recording.push(frame);
+/// Plays the devices of the fake laptop, 48 kHz stereo both, until `done`: every millisecond
+/// it feeds ten milliseconds of a 220 Hz tone into the microphone while one is open and pulls
+/// ten milliseconds from the speaker while one is open.
+fn play_the_devices(host: FakeHost, done: Arc<AtomicBool>) {
+    const CHUNK: usize = 480;
+    let mut sample = 0_usize;
+    while !done.load(Ordering::Relaxed) {
+        let chunk: Vec<f32> = (sample..sample + CHUNK)
+            .flat_map(|n| {
+                let level = (TAU * 220.0 * n as f32 / 48_000.0).sin() * 0.3;
+                [level, level]
+            })
+            .collect();
+        if host.feed(&chunk) {
+            sample += CHUNK;
+        }
+        let _played = host.pull(CHUNK);
+        thread::sleep(Duration::from_millis(1));
     }
-    let capture = microphone.stats();
-    drop(microphone);
-    println!("capture: {capture:?}");
-    for (index, frame) in recording.iter().enumerate() {
-        assert_eq!(frame.position.get(), index as u64 * FRAME as u64);
-    }
-    let samples: Vec<f32> = recording
-        .iter()
-        .flat_map(|frame| decode(frame).expect("a well-formed frame"))
-        .collect();
-    let level = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
-    println!("recorded level (rms, full scale 1): {level:.5}");
-    assert!(
-        level > 0.0,
-        "a live microphone records more than digital silence"
-    );
+}
 
-    let speaker = Speaker::open(&host, &DeviceSelector::Default, PlayoutConfig::default())
-        .expect("the default output opens");
-    println!("playing a one-second 440 Hz tone on {:?}", speaker.device());
-    let tone: Vec<f32> = (0..RATE as usize)
-        .map(|n| (TAU * 440.0 * n as f32 / RATE as f32).sin() * 0.2)
-        .collect();
-    for (index, chunk) in tone.chunks(FRAME).enumerate() {
-        let frame = AudioFrame {
-            format: recording[0].format,
-            position: SampleClockPosition::new((index * FRAME) as u64).expect("a position"),
-            sample_count: FRAME as u32,
-            data: encode(chunk, AudioEncoding::PcmS16le),
-        };
-        speaker
-            .push(&frame, Duration::from_secs(5))
-            .expect("the speaker takes the tone");
-    }
-    speaker.finish();
-    assert!(
-        speaker.wait_played(Duration::from_secs(5)),
-        "the tone plays out"
-    );
-    assert_eq!(speaker.stop(), SampleClockPosition::new(u64::from(RATE)));
-
-    println!("playing the recording back");
-    for frame in &recording {
-        speaker
-            .push(frame, Duration::from_secs(5))
-            .expect("the speaker takes the recording");
-    }
-    speaker.finish();
-    assert!(
-        speaker.wait_played(Duration::from_secs(5)),
-        "the recording plays out"
-    );
-    assert_eq!(
-        speaker.played(),
-        SampleClockPosition::new(100 * FRAME as u64)
-    );
-    let playout = speaker.stats();
-    println!("playout: {playout:?}");
-    assert_eq!(playout.stream_errors, 0, "{:?}", playout.last_error);
+#[test]
+fn the_hardware_flow_passes_on_a_fake_laptop() {
+    let host = FakeHost::laptop();
+    let done = Arc::new(AtomicBool::new(false));
+    let devices = {
+        let host = host.clone();
+        let done = Arc::clone(&done);
+        thread::spawn(move || play_the_devices(host, done))
+    };
+    record_and_play::records_two_seconds_and_plays_a_tone_and_the_recording_back(&host);
+    done.store(true, Ordering::Relaxed);
+    devices.join().expect("the fake devices stop");
+    assert!(!host.input_open());
+    assert!(!host.output_open());
 }
