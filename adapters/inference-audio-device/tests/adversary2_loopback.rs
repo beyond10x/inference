@@ -124,11 +124,7 @@ fn pushed_positions(seen: &[LoopbackEvent], delay: bool) -> Vec<u64> {
 fn refused_positions(seen: &[LoopbackEvent]) -> Vec<u64> {
     seen.iter()
         .filter_map(|event| match event {
-            LoopbackEvent::Refused {
-                position,
-                delay: false,
-                ..
-            } => Some(position.get()),
+            LoopbackEvent::Refused { position, .. } => Some(position.get()),
             _ => None,
         })
         .collect()
@@ -189,7 +185,6 @@ fn a_delay_whose_whole_frames_fill_the_speaker_queue_exactly_is_accepted() {
         let report = loopback::run(&host, &accepted, &AtomicBool::new(false), |_| {})
             .unwrap_or_else(|error| panic!("{case}: a delay that fits was refused: {error:?}"));
         assert_eq!(report.delay_samples, samples, "{case}");
-        assert_eq!(report.delay_refused, 0, "{case}");
         assert!(!host.input_open() && !host.output_open(), "{case}");
     }
 }

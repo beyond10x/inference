@@ -50,14 +50,7 @@ fn main() -> Result<(), DeviceError> {
                 speaker.config.sample_rate,
                 DELAY.as_millis()
             ),
-            LoopbackEvent::Refused {
-                error, delay: true, ..
-            } => println!("the delay was not queued: {error}"),
-            LoopbackEvent::Refused {
-                error,
-                delay: false,
-                ..
-            } => println!("a frame was not played: {error}"),
+            LoopbackEvent::Refused { error, .. } => println!("a frame was not played: {error}"),
             LoopbackEvent::Progress {
                 capture,
                 playout,
