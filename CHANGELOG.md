@@ -1,6 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.0] — 2026-10-30
+
+No breaking changes.
+
+### Added
+
+- `inference_audio_device::loopback::run` plays a microphone back through a speaker with a fixed
+  delay on any `AudioHost`; `mic-loopback` uses it, and the hardware test's flow also runs against
+  the fake host on every test run.
 
 ### Changed
 
