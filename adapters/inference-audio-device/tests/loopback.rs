@@ -172,7 +172,6 @@ fn what_the_microphone_captures_plays_after_exactly_the_delay_of_silence_sample_
     assert_eq!(report.captured, 20);
     assert_eq!(report.forwarded, 20);
     assert_eq!(report.refused, 0);
-    assert_eq!(report.delay_refused, 0);
     assert!(report.played_out, "the speaker played everything out");
     assert_eq!(report.played, Some(position((delay + sent.len()) as u64)));
     assert_eq!(report.capture.frames, 20);

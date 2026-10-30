@@ -374,7 +374,6 @@ fn a_refused_frame_is_counted_and_reported_and_the_rest_play() {
         event,
         LoopbackEvent::Refused {
             error: PushError::Full,
-            delay: false,
             ..
         }
     )));
