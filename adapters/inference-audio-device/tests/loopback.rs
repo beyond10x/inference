@@ -15,7 +15,9 @@ use inference_audio_device::fake::{FakeDevice, FakeHost};
 use inference_audio_device::loopback::{
     self, Ended, LoopbackConfig, LoopbackEvent, LoopbackReport,
 };
-use inference_audio_device::{DeviceError, DeviceSelector, Direction};
+use inference_audio_device::{
+    CaptureConfig, DeviceError, DeviceSelector, Direction, PlayoutConfig,
+};
 
 /// How long a test waits for the loop's next event before it fails.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -263,6 +265,9 @@ fn a_stopped_loop_closes_both_devices() {
         "the loop runs both devices"
     );
     assert!(host.feed(&signal(5 * 320)), "the loop's microphone runs");
+    until(&received, &mut seen, |event| {
+        matches!(event, LoopbackEvent::Pushed { delay: false, .. })
+    });
     stop.store(true, Ordering::Relaxed);
     let report = handle.join().expect("the loop ends").expect("the loop ran");
 
@@ -309,4 +314,119 @@ fn a_speaker_that_does_not_open_leaves_the_microphone_closed() {
     );
     assert!(!host.input_open());
     assert!(!host.output_open());
+}
+
+#[test]
+fn a_run_that_elapses_during_the_delay_ends_the_loop_before_the_delay_is_queued() {
+    let host = mono_16k();
+    let stop = AtomicBool::new(false);
+    let elapsed = LoopbackConfig {
+        run: Duration::ZERO,
+        drain: Duration::from_secs(5),
+        ..LoopbackConfig::default()
+    };
+    let mut seen = Vec::new();
+    let report = loopback::run(&host, &elapsed, &stop, |event| seen.push(event)).expect("ran");
+
+    assert_eq!(report.ended, Ended::Elapsed);
+    let (delay, forwarded) = pushed(&seen);
+    assert!(delay.is_empty() && forwarded.is_empty(), "{seen:?}");
+    assert_eq!(report.delay_samples, 0);
+    assert!(report.played_out, "nothing was queued");
+    assert!(!host.input_open() && !host.output_open());
+}
+
+/// Every config whose audio cannot fit the speaker's queue is refused before a device opens:
+/// a delay as long as the queue, a delay that its rounding to whole frames makes longer than the
+/// queue holds, and a captured frame longer than the queue.
+#[test]
+fn a_config_whose_audio_does_not_fit_the_speaker_queue_is_refused_before_a_device_opens() {
+    let one_sample = CaptureConfig {
+        frame: Duration::from_nanos(62_500),
+        ..CaptureConfig::default()
+    };
+    let refusals = [
+        (
+            "a delay as long as the queue",
+            LoopbackConfig {
+                delay: Duration::from_millis(500),
+                playout: PlayoutConfig {
+                    buffer: Duration::from_millis(500),
+                },
+                ..config(1)
+            },
+        ),
+        (
+            "a delay of 8001 one-sample frames for a queue of 8000 samples",
+            LoopbackConfig {
+                capture: one_sample,
+                delay: Duration::from_micros(500_005),
+                playout: PlayoutConfig {
+                    buffer: Duration::from_micros(500_010),
+                },
+                ..config(1)
+            },
+        ),
+        (
+            "a 20 ms frame for a 10 ms queue",
+            LoopbackConfig {
+                delay: Duration::ZERO,
+                playout: PlayoutConfig {
+                    buffer: Duration::from_millis(10),
+                },
+                ..config(1)
+            },
+        ),
+    ];
+    for (case, refused) in refusals {
+        let host = mono_16k();
+        let mut seen = Vec::new();
+        let answer = loopback::run(&host, &refused, &AtomicBool::new(false), |event| {
+            seen.push(event);
+        });
+        assert!(
+            matches!(answer, Err(DeviceError::InvalidConfig(_))),
+            "{case}: {answer:?}"
+        );
+        assert!(seen.is_empty(), "{case}: no device opened: {seen:?}");
+        assert!(!host.input_open() && !host.output_open(), "{case}");
+    }
+}
+
+/// A frame the speaker refuses keeps its place on the loop's clock, so the speaker's position
+/// less the delay stays the microphone's position; `played` counts only what the speaker played,
+/// `speaker_played` is the speaker's own position on that clock.
+#[test]
+fn a_refused_frame_keeps_its_place_on_the_clock_and_is_not_counted_as_played() {
+    let host = mono_16k();
+    let stop = Arc::new(AtomicBool::new(false));
+    let tight = LoopbackConfig {
+        delay: Duration::ZERO,
+        playout: PlayoutConfig {
+            buffer: Duration::from_millis(20),
+        },
+        ..config(3)
+    };
+    let (handle, received) = start(&host, tight, &stop);
+    let mut seen = Vec::new();
+    until(&received, &mut seen, |event| {
+        matches!(event, LoopbackEvent::Opened { .. })
+    });
+    assert!(host.feed(&signal(3 * 320)));
+    until(&received, &mut seen, |event| {
+        matches!(event, LoopbackEvent::Refused { .. })
+    });
+    let _first = host.pull(320).expect("the speaker runs");
+    until(&received, &mut seen, |event| {
+        matches!(event, LoopbackEvent::Draining { .. })
+    });
+    let _third = host.pull(320).expect("the speaker runs");
+    let report = handle.join().expect("the loop ends").expect("the loop ran");
+    seen.extend(received.try_iter());
+
+    let (_, forwarded) = pushed(&seen);
+    assert_eq!(forwarded, vec![(0, 320), (640, 320)]);
+    assert_eq!(report.refused, 1);
+    assert_eq!(report.speaker_played, Some(position(960)));
+    assert_eq!(report.played, Some(position(640)));
 }
