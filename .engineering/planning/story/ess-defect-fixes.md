@@ -22,7 +22,7 @@ scope:
   path: ess/domains/tools.yaml
 - confidence: cited
   path: ess/system.yaml
-revision: 13
+revision: 14
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-18T23:48:27Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-18T23:48:27Z", actor: "human:timo", revision: 3}
@@ -183,3 +183,22 @@ left out of that wave because `dependency-blocker:ess-affects-witness` is still 
 
 The acceptance needs 0 refusals. Both remaining results are owned by ESS; nothing in this
 repository clears them.
+
+## Re-check 2026-10-30
+
+Re-checked on 2026-10-30 with ess 0.77.0 on the specification of `origin/main` at `5ff03a6`, for the
+wave that moves the pin to 0.77.0 (approval-record:wave-0-9-0), and left out of it because
+`dependency-blocker:ess-affects-witness` is still open:
+
+- `ess specify validate --path ess`: exit 0, 11 files, 9 scenarios, one warning (ESS-ENTITY-019 on
+  `inference.session.HistoryEntry.call_id`, as under 0.76.0).
+- `ess verify conform synthesize --path ess --scenarios ess/scenarios`: 475 scenarios (9 authored),
+  1 refusal, ESS-SYNTH-001 `inference.graph.CancelRun/outcome/cancelled`, with the same reason as
+  under 0.76.0.
+- `ess verify conform run --path ess --scenarios ess/scenarios --target interpreted --report-format 2`:
+  474 passed, 0 failed, 0 error, 1 unsupported (`inference.graph.AddSubgraphNode/outcome/added`), exit 1.
+
+The acceptance needs 0 refusals. Both remaining results are owned by ESS (ESS
+story:a-command-with-two-related-selectors-arranges-both and
+story:an-unfillable-required-field-is-named-by-validate-and-the-view, both draft in ESS on
+2026-10-30); nothing in this repository clears them.

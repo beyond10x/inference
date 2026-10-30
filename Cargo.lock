@@ -1548,8 +1548,8 @@ dependencies = [
 
 [[package]]
 name = "ess-compiler"
-version = "0.76.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.76.0#d5c00e9c73e72d792a390091b8442b22702640b0"
+version = "0.77.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.77.0#f692aabbb0fcd321eca0a9eef86e12b25a7601f4"
 dependencies = [
  "ess-domain",
  "ess-primitives",
@@ -1560,8 +1560,8 @@ dependencies = [
 
 [[package]]
 name = "ess-conformance"
-version = "0.76.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.76.0#d5c00e9c73e72d792a390091b8442b22702640b0"
+version = "0.77.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.77.0#f692aabbb0fcd321eca0a9eef86e12b25a7601f4"
 dependencies = [
  "ess-compiler",
  "ess-domain",
@@ -1575,8 +1575,8 @@ dependencies = [
 
 [[package]]
 name = "ess-domain"
-version = "0.76.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.76.0#d5c00e9c73e72d792a390091b8442b22702640b0"
+version = "0.77.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.77.0#f692aabbb0fcd321eca0a9eef86e12b25a7601f4"
 dependencies = [
  "ess-primitives",
  "ess-yaml",
@@ -1588,8 +1588,8 @@ dependencies = [
 
 [[package]]
 name = "ess-gen"
-version = "0.76.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.76.0#d5c00e9c73e72d792a390091b8442b22702640b0"
+version = "0.77.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.77.0#f692aabbb0fcd321eca0a9eef86e12b25a7601f4"
 dependencies = [
  "ess-compiler",
  "ess-domain",
@@ -1605,8 +1605,8 @@ dependencies = [
 
 [[package]]
 name = "ess-http"
-version = "0.76.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.76.0#d5c00e9c73e72d792a390091b8442b22702640b0"
+version = "0.77.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.77.0#f692aabbb0fcd321eca0a9eef86e12b25a7601f4"
 dependencies = [
  "ess-compiler",
  "ess-domain",
@@ -1619,8 +1619,8 @@ dependencies = [
 
 [[package]]
 name = "ess-primitives"
-version = "0.76.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.76.0#d5c00e9c73e72d792a390091b8442b22702640b0"
+version = "0.77.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.77.0#f692aabbb0fcd321eca0a9eef86e12b25a7601f4"
 dependencies = [
  "ess-yaml",
  "schemars",
@@ -1631,8 +1631,8 @@ dependencies = [
 
 [[package]]
 name = "ess-transport"
-version = "0.76.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.76.0#d5c00e9c73e72d792a390091b8442b22702640b0"
+version = "0.77.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.77.0#f692aabbb0fcd321eca0a9eef86e12b25a7601f4"
 dependencies = [
  "ess-compiler",
  "ess-domain",
@@ -1643,8 +1643,8 @@ dependencies = [
 
 [[package]]
 name = "ess-yaml"
-version = "0.76.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.76.0#d5c00e9c73e72d792a390091b8442b22702640b0"
+version = "0.77.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.77.0#f692aabbb0fcd321eca0a9eef86e12b25a7601f4"
 dependencies = [
  "serde",
  "serde_norway",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "inference-audio"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -2215,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "inference-audio-device"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "cpal",
  "inference-audio",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "inference-aws"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "aws-config",
  "aws-sdk-bedrockruntime",
@@ -2241,7 +2241,7 @@ dependencies = [
 
 [[package]]
 name = "inference-core"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-audio",
  "serde",
@@ -2251,7 +2251,7 @@ dependencies = [
 
 [[package]]
 name = "inference-docs"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "clap",
  "inference-core",
@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "inference-duplex"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2273,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "inference-facade"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "b10x-llm-core",
  "b10x-llm-cost",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "inference-llama-server"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "b10x-llm-blocking",
  "b10x-llm-chat",
@@ -2310,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "inference-llm"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "b10x-llm-core",
  "inference-core",
@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "inference-openai"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -2343,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "inference-pipeline"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "inference-runtime"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-core",
  "inference-llm",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "inference-sherpa-onnx"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -2381,7 +2381,7 @@ dependencies = [
 
 [[package]]
 name = "inference-stt"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2390,7 +2390,7 @@ dependencies = [
 
 [[package]]
 name = "inference-testkit"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "ess-conformance",
  "ess-primitives",
@@ -2411,7 +2411,7 @@ dependencies = [
 
 [[package]]
 name = "inference-text"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-core",
  "serde",
@@ -2420,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tools"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-core",
  "inference-text",
@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tts"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "inference-whispercpp"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -2659,7 +2659,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "local-voice-cascade"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "clap",
  "inference-audio",
@@ -3431,7 +3431,7 @@ dependencies = [
 
 [[package]]
 name = "realtime-voice"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "clap",
@@ -3489,7 +3489,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "repo-podcast"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "clap",
  "inference-audio-device",
@@ -4054,7 +4054,7 @@ dependencies = [
 
 [[package]]
 name = "stt-only"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -4062,7 +4062,7 @@ dependencies = [
 
 [[package]]
 name = "stt-sherpa-onnx"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "clap",
  "inference-sherpa-onnx",

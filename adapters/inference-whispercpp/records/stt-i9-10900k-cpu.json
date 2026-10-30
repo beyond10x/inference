@@ -14,5 +14,5 @@
     "cpu_real_time_factor_milli": 202,
     "gpu_memory_mib": null
   },
-  "adapter_revision": "0.8.1"
+  "adapter_revision": "0.9.0"
 }
