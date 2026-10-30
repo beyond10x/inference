@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-30T18:19:40Z",
+  "actor": "human:timo",
+  "artifact": "story:realtime-voice-demo",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p realtime-voice --test acceptance",
+    "reference": "base 5ff03a6: no acceptance target vs 7761004: 3 passed; six one-at-a-time breaks of src/lib.rs each turned at least one red"
+  }
+}

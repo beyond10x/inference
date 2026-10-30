@@ -13,7 +13,9 @@ scope:
   path: Cargo.toml
 - confidence: cited
   path: adapters/inference-audio-device
-revision: 5
+- confidence: cited
+  path: adapters/inference-audio-device/src/loopback.rs
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-19T21:13:04Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-19T21:13:04Z", actor: "human:timo", revision: 4}
@@ -73,3 +75,27 @@ and left out of that wave.
 - Open: the two device parts of the acceptance, `mic-loopback` heard on a laptop and the ignored
   hardware test run with a microphone. Both need the operator at a laptop with a microphone and a
   speaker; no code is planned for them. The story stays active until that run is recorded here.
+
+## Covered without a device 2026-10-30
+
+Covered without a device on 2026-10-30 (approval-record:wave-0-9-0), in release 0.9.0:
+
+- `inference_audio_device::loopback::run` holds what `mic-loopback` does, generic over `AudioHost`;
+  the example calls it on the cpal host. A delay or a frame the playout queue cannot hold is refused
+  before any device opens; the stop flag and the run are checked during the delay; the delay is
+  counted in samples, short by less than one frame; the microphone is closed when forwarding ends,
+  before the speaker drains.
+- The hardware test's flow (record, positions, level, tone, stop position, playback, no stream
+  error) runs on the fake host on every test run (`the_hardware_flow_passes_on_a_fake_laptop`);
+  the device run stays ignored.
+- Two adversary passes (review-result:adversary-audio-loopback-pass-1, 4 findings;
+  review-result:adversary-audio-loopback-pass-2, 2 new, 0 carried; ledger compared by hand because
+  `aep plan artifact findings` paired pass 2 with an older review of this story). All six fixed.
+
+Open: the device parts of the acceptance. They are the operator's run on a laptop with a microphone
+and a speaker:
+
+```
+cargo run -p inference-audio-device --example mic-loopback --features device
+cargo test -p inference-audio-device --features device --test hardware -- --ignored --nocapture
+```

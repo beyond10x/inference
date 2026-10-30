@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-30T18:14:05Z",
+  "actor": "human:timo",
+  "artifact": "story:audio-device-adapter",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-audio-device --all-features --test loopback --test hardware",
+    "reference": "base 5ff03a6: unresolved import inference_audio_device::loopback (exit 101) vs a5732a3: loopback 6 passed, hardware 1 passed 1 ignored"
+  }
+}
