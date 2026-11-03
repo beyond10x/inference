@@ -24,6 +24,10 @@
   unless the binding's provider reports it, as `cached_input_tokens` is carried today.
 - A price binding that charges `cached_input_audio_tokens` gets a `price_unknown` line:
   `llm-cost` has no unit for it.
+- A model price charges as cached input only the cached text tokens: `cached_input_tokens`
+  less a known `cached_input_audio_tokens`, stopping at 0, so a Realtime record whose cached
+  input is mostly audio is priced instead of refused as invalid usage; with the audio share
+  unknown, the whole cached input is charged as before.
 
 ## [0.10.0] — 2026-11-03
 
