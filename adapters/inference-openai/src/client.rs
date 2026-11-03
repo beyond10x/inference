@@ -313,7 +313,8 @@ impl RealtimeClient {
     }
 
     /// Sends `response.create` with no `event_id` and no `response` object, exactly
-    /// `{"type": "response.create"}`: the response takes every setting from the session. It is
+    /// `{"type": "response.create"}`: the response takes its instructions, tool choice and tools
+    /// from the session, reads the conversation's items and joins the default conversation. It is
     /// [`RealtimeClient::create_response_with`] with [`ResponseOptions::default`].
     ///
     /// # Errors
@@ -606,22 +607,28 @@ impl ResponseConversation {
 
 /// The per-response options of `response.create`, for [`RealtimeClient::create_response_with`].
 /// `event_id` goes at the top level of the event, every other field into its `response` object;
-/// each is left out when `None`, and the session's value applies.
+/// each is left out when `None`, with the meaning its field states.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResponseOptions {
-    /// The client event's `event_id`, which a server `error` caused by this event names.
+    /// The client event's `event_id`, which a server `error` caused by this event names; `None`
+    /// sends no `event_id`.
     pub event_id: Option<String>,
-    /// `response.instructions`: the instructions for this response only.
+    /// `response.instructions`: the instructions for this response only; `None` keeps the
+    /// session's `instructions`.
     pub instructions: Option<String>,
-    /// `response.tool_choice`: which tools the model may call in this response.
+    /// `response.tool_choice`: which tools the model may call in this response; `None` keeps the
+    /// session's `tool_choice`.
     pub tool_choice: Option<ToolChoice>,
-    /// `response.conversation`: `"auto"`, or `"none"` for an out-of-band response.
+    /// `response.conversation`: `"auto"`, or `"none"` for an out-of-band response; `None` adds
+    /// the output to the default conversation, as `"auto"` does.
     pub conversation: Option<ResponseConversation>,
     /// `response.input`: the items the response reads, as an array of item objects in the shape
-    /// of `conversation.item.create`'s `item`.
+    /// of `conversation.item.create`'s `item`; `None` has the response read the conversation's
+    /// items.
     pub input: Option<Vec<ConversationItem>>,
-    /// `response.tools`: the function tools of this response. `Some(vec![])` sends `[]`, which
-    /// gives this response no tools whatever the session holds.
+    /// `response.tools`: the function tools of this response; `None` keeps the session's
+    /// `tools`. `Some(vec![])` sends `[]`, which gives this response no tools whatever the
+    /// session holds.
     pub tools: Option<Vec<FunctionTool>>,
 }
 
