@@ -237,6 +237,10 @@ fn telephony_session() -> SessionConfig {
             }),
         }],
         speed: None,
+        noise_reduction: None,
+        transcription_language: None,
+        transcription_prompt: None,
+        tool_choice: None,
     }
 }
 
