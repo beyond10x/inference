@@ -38,6 +38,61 @@ pub struct RealtimeClient {
     /// The top-level `type` of the message the last read could not take as a Realtime event,
     /// when that message is JSON whose `type` is a string.
     unparsed_type: Option<String>,
+    /// The names of `function_call` output items read, for calls the server sends without one.
+    call_names: CallNames,
+}
+
+/// The `item.name` of each `function_call` item of a `response.output_item.added` or
+/// `response.output_item.done` read, by `item.id`, oldest first and at most [`CallNames::KEPT`]:
+/// the oldest is forgotten first, and an entry once the call of its item is read.
+#[derive(Debug, Default)]
+struct CallNames(VecDeque<(String, String)>);
+
+impl CallNames {
+    const KEPT: usize = 64;
+
+    /// Remembers the name of `event`'s item when it is a `function_call` output item.
+    fn remember(&mut self, event: &ServerEvent) {
+        let ServerEvent::Unknown { event_type, raw } = event else {
+            return;
+        };
+        if !matches!(
+            event_type.as_str(),
+            "response.output_item.added" | "response.output_item.done"
+        ) {
+            return;
+        }
+        let item = &raw["item"];
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            return;
+        }
+        let (Some(id), Some(name)) = (
+            item.get("id").and_then(Value::as_str),
+            item.get("name").and_then(Value::as_str),
+        ) else {
+            return;
+        };
+        if let Some(entry) = self.0.iter_mut().find(|(item_id, _)| item_id == id) {
+            name.clone_into(&mut entry.1);
+            return;
+        }
+        if self.0.len() == Self::KEPT {
+            self.0.pop_front();
+        }
+        self.0.push_back((id.to_owned(), name.to_owned()));
+    }
+
+    /// `event`, a function call without its name named from the item of its `item_id`. The
+    /// entry of that item is forgotten once its call is read, named or not.
+    fn fill(&mut self, mut event: ServerEvent) -> ServerEvent {
+        if let ServerEvent::FunctionCall { item_id, name, .. } = &mut event
+            && let Some(at) = self.0.iter().position(|(item, _)| item == item_id)
+            && let Some((_, remembered)) = self.0.remove(at)
+        {
+            name.get_or_insert(remembered);
+        }
+        event
+    }
 }
 
 impl fmt::Debug for RealtimeClient {
@@ -81,6 +136,7 @@ impl RealtimeClient {
             session: Value::Null,
             pending: VecDeque::new(),
             unparsed_type: None,
+            call_names: CallNames::default(),
         };
         client
             .await_setup(|event| matches!(event, ServerEvent::SessionCreated { .. }))
@@ -288,11 +344,16 @@ impl RealtimeClient {
     async fn read_event(&mut self) -> Result<ServerEvent, RealtimeError> {
         self.unparsed_type = None;
         let text = read_text(&mut self.socket, self.read_timeout).await?;
-        let event = ServerEvent::parse(&text);
-        if event.is_err() {
-            self.unparsed_type = top_level_type(&text);
+        match ServerEvent::parse(&text) {
+            Ok(event) => {
+                self.call_names.remember(&event);
+                Ok(self.call_names.fill(event))
+            }
+            Err(error) => {
+                self.unparsed_type = top_level_type(&text);
+                Err(error)
+            }
         }
-        event
     }
 
     async fn send(&mut self, event: Value) -> Result<(), RealtimeError> {

@@ -17,9 +17,9 @@ use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPositio
 use inference_duplex::conformance::{NativeDuplexProbe, NoNativeDuplex, native_duplex_evidence};
 use inference_duplex::{
     NativeSpeechModel, OpenError, QuantityKind, QuantitySource, ResponseId, ResponseUsage,
-    SessionConfig, SessionEvent, SessionFailureKind, SpeechSessionHandle, SpeechSessionState,
-    TokenCounts, TuningOption, TurnDetection, TurnSensitivity, TurnTuning, Unsupported,
-    UsageRecorded,
+    SessionConfig, SessionError, SessionEvent, SessionFailureKind, SpeechSessionHandle,
+    SpeechSessionState, TokenCounts, TuningOption, TurnDetection, TurnSensitivity, TurnTuning,
+    Unsupported, UsageRecorded,
 };
 use inference_openai::duplex::{OpenAiRealtime, capabilities, claims, wire_format};
 use inference_openai::{
@@ -1791,4 +1791,67 @@ fn a_transcription_frame_missing_a_required_field_does_not_make_an_id_less_done_
         "{events:#?}"
     );
     assert_eq!(transcript(&events, ids[1]), "World", "{events:#?}");
+}
+
+/// A `response.function_call_arguments.done` without its `name`, and no `function_call` output
+/// item that names it, is refused as a call of a tool the session does not offer: the binding
+/// drops and counts the refusal, proposes no call, and the session answers the next response.
+#[test]
+fn duplex_call_without_any_name_is_not_offered() {
+    let server = Server::start(|mut socket| async move {
+        let session = accept_session(&mut socket).await;
+        assert_eq!(session["tools"][0]["name"], "weather");
+        assert_eq!(
+            receive(&mut socket).await,
+            json!({"type": "response.create"})
+        );
+        send(&mut socket, response_created("resp_1")).await;
+        send(
+            &mut socket,
+            json!({"type": "response.function_call_arguments.done", "event_id": "event_fc", "response_id": "resp_1", "item_id": "item_fc", "output_index": 0, "call_id": "call_abc", "arguments": "{\"city\":\"Berlin\"}"}),
+        )
+        .await;
+        send(&mut socket, response_done("resp_1", "completed")).await;
+        assert_eq!(
+            receive(&mut socket).await,
+            json!({"type": "response.create"})
+        );
+        send(&mut socket, response_created("resp_2")).await;
+        send(
+            &mut socket,
+            transcript_delta("resp_2", "item_o2", "Still here"),
+        )
+        .await;
+        send(&mut socket, response_done("resp_2", "completed")).await;
+        let _ = socket.next().await;
+    });
+    let mut model = server.model();
+    let mut tooled = config(TurnDetection::Disabled, false);
+    tooled.tools = vec![weather()];
+    let mut session = model.open(tooled).expect("the session opens");
+    session.create_response().expect("none in progress");
+    let events = until(&mut session, any_completed);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SpeechToolCallProposed(_))),
+        "{events:#?}"
+    );
+    assert_eq!(session.ledger().dropped_count(), 1);
+    assert_eq!(
+        session.ledger().dropped_events(),
+        [SessionError::ToolNotOffered {
+            name: String::new()
+        }]
+    );
+    session
+        .create_response()
+        .expect("the first response completed");
+    let answer = until(&mut session, any_completed);
+    let second = created(&answer);
+    assert_eq!(second.len(), 1, "{answer:#?}");
+    assert_eq!(transcript(&answer, second[0]), "Still here");
+    assert_eq!(session.ledger().session().state(), SpeechSessionState::Open);
+    session.close().expect("open");
+    server.finish();
 }
