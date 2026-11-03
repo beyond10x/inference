@@ -759,6 +759,19 @@ pub(crate) async fn open_socket(
     Ok(socket)
 }
 
+/// `future`'s output, or `None` when `start + bound` passes first. A sum too large for an
+/// `Instant` is a bound that never passes, so `future` then runs without a deadline.
+pub(crate) async fn within<F: Future>(
+    start: tokio::time::Instant,
+    bound: std::time::Duration,
+    future: F,
+) -> Option<F::Output> {
+    match start.checked_add(bound) {
+        Some(deadline) => tokio::time::timeout_at(deadline, future).await.ok(),
+        None => Some(future.await),
+    }
+}
+
 /// The text of the next text message, waiting at most until `last_message + read_timeout`, the
 /// stall bound, however many calls it spans: `last_message` is when the reader last read a text
 /// or binary message (the end of the handshake before the first), and each such message read
@@ -773,9 +786,7 @@ pub(crate) async fn read_text(
     last_message: &mut tokio::time::Instant,
 ) -> Result<String, RealtimeError> {
     loop {
-        let Ok(message) =
-            tokio::time::timeout_at(*last_message + read_timeout, socket.next()).await
-        else {
+        let Some(message) = within(*last_message, read_timeout, socket.next()).await else {
             *last_message = tokio::time::Instant::now();
             return Err(RealtimeError::Stalled(read_timeout));
         };
@@ -982,17 +993,19 @@ pub(crate) async fn close_socket(
     read_timeout: std::time::Duration,
 ) -> Result<(), RealtimeError> {
     use tokio_tungstenite::tungstenite::Error;
-    let deadline = tokio::time::Instant::now() + read_timeout;
-    tokio::time::timeout_at(deadline, sink.close())
+    let started = tokio::time::Instant::now();
+    within(started, read_timeout, sink.close())
         .await
-        .map_err(|_| RealtimeError::Stalled(read_timeout))?
+        .ok_or(RealtimeError::Stalled(read_timeout))?
         .map_err(|error| RealtimeError::Transport(error.to_string()))?;
     loop {
-        match tokio::time::timeout_at(deadline, socket.next()).await {
-            Err(_) => return Err(RealtimeError::Stalled(read_timeout)),
-            Ok(None | Some(Err(Error::ConnectionClosed | Error::AlreadyClosed))) => return Ok(()),
-            Ok(Some(Ok(_))) => {}
-            Ok(Some(Err(error))) => return Err(RealtimeError::Transport(error.to_string())),
+        match within(started, read_timeout, socket.next()).await {
+            None => return Err(RealtimeError::Stalled(read_timeout)),
+            Some(None | Some(Err(Error::ConnectionClosed | Error::AlreadyClosed))) => {
+                return Ok(());
+            }
+            Some(Some(Ok(_))) => {}
+            Some(Some(Err(error))) => return Err(RealtimeError::Transport(error.to_string())),
         }
     }
 }

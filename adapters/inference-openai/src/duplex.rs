@@ -1170,12 +1170,14 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
     }
 
     fn next_event(&mut self, wait: Duration) -> Option<SessionEvent> {
-        let deadline = Instant::now() + wait;
+        let deadline = Instant::now().checked_add(wait);
         loop {
             if let Some(event) = self.ledger.next_event() {
                 return Some(event);
             }
-            let left = deadline.saturating_duration_since(Instant::now());
+            let left = deadline.map_or(wait, |deadline| {
+                deadline.saturating_duration_since(Instant::now())
+            });
             if left.is_zero() || self.ledger.session().require_open().is_err() {
                 self.ledger.check_liveness(Instant::now());
                 return self.ledger.next_event();
