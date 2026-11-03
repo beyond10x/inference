@@ -239,6 +239,34 @@ async fn item_event_id_is_sent() {
 }
 
 #[tokio::test]
+async fn create_item_sends_a_system_item() {
+    let (endpoint, task) = serve(|mut socket| async move {
+        accept_session(&mut socket).await;
+        assert_eq!(
+            receive(&mut socket).await,
+            json!({
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": "Answer in German from now on."}],
+                },
+            })
+        );
+    })
+    .await;
+    let mut client = connect(&endpoint).await;
+    client
+        .create_item(
+            &ConversationItem::SystemText("Answer in German from now on.".to_owned()),
+            &ItemOptions::default(),
+        )
+        .await
+        .unwrap();
+    finish(task).await;
+}
+
+#[tokio::test]
 async fn send_text_wire_shape_unchanged() {
     let (endpoint, task) = serve(|mut socket| async move {
         accept_session(&mut socket).await;

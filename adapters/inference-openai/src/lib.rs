@@ -4,8 +4,9 @@
 //! session ([`RealtimeClient::connect`]) with a model id and a [`SessionConfig`], sends client
 //! events (input audio, commit, response create and cancel, truncation of played audio, text items
 //! and tool results) and receives server events as typed [`ServerEvent`] values. A server event
-//! the client has no type for is kept as [`ServerEvent::Unknown`], never dropped. A read that waits
-//! longer than the endpoint's read timeout is [`RealtimeError::Stalled`].
+//! the client has no type for is kept as [`ServerEvent::Unknown`], never dropped. No message for
+//! the endpoint's read timeout, measured from the last message read across every read, is
+//! [`RealtimeError::Stalled`].
 //!
 //! Event shapes follow the published Realtime API reference, client events
 //! (`https://developers.openai.com/api/reference/resources/realtime/client-events`) and server

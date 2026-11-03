@@ -738,6 +738,9 @@ pub struct LiveSender {
 pub struct LiveReceiver {
     stream: SocketStream,
     read_timeout: Duration,
+    /// When the last message was read, the end of the handshake before the first: the stall
+    /// bound runs from it, across reads.
+    last_message: tokio::time::Instant,
     session: Value,
     pending: VecDeque<LiveEvent>,
 }
@@ -798,6 +801,7 @@ impl LiveClient {
         let mut receiver = LiveReceiver {
             stream,
             read_timeout: endpoint.read_timeout,
+            last_message: tokio::time::Instant::now(),
             session: Value::Null,
             pending: VecDeque::new(),
         };
@@ -967,8 +971,15 @@ impl LiveClient {
 
     /// The next server event, events kept during start first.
     ///
+    /// The read timeout is a stall bound that holds across calls: it runs from the last message
+    /// read (a text or binary message; pings and other control frames do not count), from the end
+    /// of the handshake before the first, not from this call. A caller that drops the read (a
+    /// `select!`, or a shorter timeout around it) and calls again still sees the stall once the
+    /// read timeout has passed since the last message. A message that already arrived is returned
+    /// even when the bound has passed. After a stall the bound runs again from the stall.
+    ///
     /// # Errors
-    /// [`RealtimeError::Stalled`] when no event arrives within the endpoint's read timeout;
+    /// [`RealtimeError::Stalled`] when no message arrived for the endpoint's read timeout;
     /// [`RealtimeError::Closed`] when the server closed the connection;
     /// [`RealtimeError::Transport`] when the read fails; [`RealtimeError::Protocol`] for a
     /// message that is not a Live event.
@@ -998,12 +1009,16 @@ impl LiveClient {
         mut seen: impl FnMut(Result<LiveEvent, RealtimeError>),
     ) -> Result<LiveClosed, RealtimeError> {
         let bound = self.receiver.read_timeout.max(CLOSE_TIMEOUT);
-        let deadline = tokio::time::Instant::now() + bound;
+        let started = tokio::time::Instant::now();
+        let deadline = started + bound;
         self.receiver.read_timeout = bound;
+        self.receiver.last_message = started;
         self.sender.request_close().await?;
         let closed = loop {
             match tokio::time::timeout_at(deadline, self.receiver.next_event()).await {
-                Err(_) => break Err(RealtimeError::Stalled(bound)),
+                Err(_) | Ok(Err(RealtimeError::Stalled(_))) => {
+                    break Err(RealtimeError::Stalled(bound));
+                }
                 Ok(Ok(LiveEvent::SessionClosed { reason, seconds })) => {
                     break Ok(LiveClosed { reason, seconds });
                 }
@@ -1154,7 +1169,8 @@ impl LiveReceiver {
     }
 
     /// [`LiveClient::next_event`] on this half: the next server event, events kept during start
-    /// first. A write pending on the sender does not hold it up.
+    /// first. A write pending on the sender does not hold it up. The stall bound runs from the
+    /// last message this half read, across calls, as [`LiveClient::next_event`] states.
     ///
     /// # Errors
     /// The errors of [`LiveClient::next_event`].
@@ -1166,7 +1182,7 @@ impl LiveReceiver {
     }
 
     async fn read_event(&mut self) -> Result<LiveEvent, RealtimeError> {
-        let text = read_text(&mut self.stream, self.read_timeout).await?;
+        let text = read_text(&mut self.stream, self.read_timeout, &mut self.last_message).await?;
         LiveEvent::parse(&text)
     }
 }
