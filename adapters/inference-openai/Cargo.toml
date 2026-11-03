@@ -63,5 +63,9 @@ required-features = ["live", "gpt-live"]
 name = "gpt_live_ping"
 required-features = ["gpt-live"]
 
+[[test]]
+name = "adversary15_u2_live_ping"
+required-features = ["gpt-live"]
+
 [lints]
 workspace = true
