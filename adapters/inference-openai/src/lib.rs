@@ -28,6 +28,9 @@
 //! ([`encode_pcm16_24k`]), or as G.711 mu-law or A-law at 8 kHz, passed through
 //! ([`RealtimeClient::append_encoded`]).
 //!
+//! [`RealtimeClient::into_split`] splits a session into a [`RealtimeSender`] and a
+//! [`RealtimeReceiver`] that two tasks own, so server events are read while a write is pending.
+//!
 //! With feature `duplex` ([`duplex`]), the client is an `inference-duplex` native speech model:
 //! [`duplex::OpenAiRealtime`] opens sessions through the contract and records every server
 //! event through its `SessionLedger`.
@@ -53,7 +56,8 @@ pub mod live_duplex;
 
 pub use audio::encode_pcm16_24k;
 pub use client::{
-    ConversationItem, ItemOptions, RealtimeClient, ResponseConversation, ResponseOptions,
+    ConversationItem, ItemOptions, RealtimeClient, RealtimeReceiver, RealtimeSender,
+    ResponseConversation, ResponseOptions, ReuniteError,
 };
 pub use config::{
     DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL, Eagerness, Endpoint, FunctionTool,
