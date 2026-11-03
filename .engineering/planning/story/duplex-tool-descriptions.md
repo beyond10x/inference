@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:duplex-tool-descriptions
 kind: story
-status: active
+status: implemented
 title: Duplex bindings send each tool's description
 summary: Tool gains a specified description that both OpenAI duplex bindings send.
 tags:
@@ -20,10 +20,11 @@ scope:
   path: crates/inference-tools/src/lib.rs
 - confidence: cited
   path: ess/domains/tools.yaml
-revision: 8
+revision: 9
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T15:55:02Z", actor: "human:operator", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-03T15:55:03Z", actor: "human:operator", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:39Z", actor: "human:operator", revision: 9, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 

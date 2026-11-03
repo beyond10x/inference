@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-03T18:16:39Z",
+  "actor": "human:operator",
+  "artifact": "story:realtime-assistant-item-placement",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "https://github.com/beyond10x/inference/actions/runs/41632922728",
+    "reference": "task check green on main 07ccab8 (Merge #18), shipped in tag 0.10.0"
+  }
+}
