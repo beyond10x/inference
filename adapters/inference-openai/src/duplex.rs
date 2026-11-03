@@ -890,10 +890,12 @@ impl OpenAiRealtimeSession {
                 if let Some(id) = self.response(&response_id) {
                     let arguments =
                         serde_json::from_str(&arguments).unwrap_or(Json::String(arguments));
+                    // A call neither the server nor the client could name names no tool the
+                    // session offers: the ledger refuses it as `ToolNotOffered`.
                     let recorded = self.ledger.tool_call(
                         SpeechCallId::new(call_id),
                         id,
-                        &name,
+                        name.as_deref().unwrap_or_default(),
                         arguments,
                         now,
                     );

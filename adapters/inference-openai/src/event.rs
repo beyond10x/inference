@@ -67,20 +67,29 @@ pub enum ServerEvent {
     },
     /// `input_audio_buffer.speech_stopped`.
     SpeechStopped { item_id: String, audio_end_ms: u64 },
-    /// `input_audio_buffer.committed`.
-    AudioCommitted { item_id: String },
+    /// `input_audio_buffer.committed`: `item_id` is the user item the buffer became, and
+    /// `previous_item_id` the item it follows in the conversation, `None` when the server sent
+    /// `null` or left it out.
+    AudioCommitted {
+        item_id: String,
+        previous_item_id: Option<String>,
+    },
     /// `conversation.item.truncated`.
     ItemTruncated {
         item_id: String,
         content_index: u32,
         audio_end_ms: u64,
     },
-    /// `response.function_call_arguments.done`: a complete function call.
+    /// `response.function_call_arguments.done`: a complete function call. The server may omit
+    /// `name`: [`RealtimeClient::next_event`](crate::RealtimeClient::next_event) fills it from
+    /// the `function_call` item of the `response.output_item.added` or
+    /// `response.output_item.done` whose `item.id` is `item_id`, when it read one; it is `None`
+    /// otherwise.
     FunctionCall {
         response_id: String,
         item_id: String,
         call_id: String,
-        name: String,
+        name: Option<String>,
         arguments: String,
     },
     /// `response.done`, with the response's final status and the usage the server reported. It
@@ -197,6 +206,7 @@ impl ServerEvent {
             },
             "input_audio_buffer.committed" => Self::AudioCommitted {
                 item_id: event.string("item_id")?,
+                previous_item_id: event.optional_string("previous_item_id")?,
             },
             "conversation.item.truncated" => Self::ItemTruncated {
                 item_id: event.string("item_id")?,
@@ -207,7 +217,7 @@ impl ServerEvent {
                 response_id: event.string("response_id")?,
                 item_id: event.string("item_id")?,
                 call_id: event.string("call_id")?,
-                name: event.string("name")?,
+                name: event.optional_string("name")?,
                 arguments: event.string("arguments")?,
             },
             "response.done" => {
