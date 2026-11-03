@@ -191,6 +191,7 @@ fn declare(
 ) -> Tool {
     Tool::declare(DeclareTool {
         name: name.to_owned(),
+        description: String::new(),
         schema,
         schema_revision: "1".to_owned(),
         side_effect,

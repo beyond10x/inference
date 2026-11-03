@@ -307,6 +307,7 @@ fn planned(generator: &MockGenerator) -> (Declaration, PlannedPipeline, Ids) {
 fn tool(name: &str, side_effect: SideEffectClass, confirmed: bool) -> Tool {
     Tool::declare(DeclareTool {
         name: name.to_owned(),
+        description: String::new(),
         schema: json!({
             "type": "object",
             "properties": {"city": {"type": "string"}},

@@ -225,6 +225,7 @@ fn failed_run(end_first: bool) -> (Result<(), RunError>, NodeId, NodeId, Option<
 
     let lookup = Tool::declare(DeclareTool {
         name: "lookup".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object"}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,

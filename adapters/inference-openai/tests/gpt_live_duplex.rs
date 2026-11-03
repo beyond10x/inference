@@ -230,6 +230,7 @@ fn input(position: u64) -> AudioFrame {
 fn weather() -> Tool {
     Tool::declare(DeclareTool {
         name: "weather".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,
@@ -412,6 +413,61 @@ fn a_configuration_maps_onto_session_start_with_tools_on_the_responses_backend()
         plain["delegation"],
         json!({"type": "responses", "responses": {"model": DEFAULT_BACKEND_MODEL}})
     );
+}
+
+#[test]
+fn live_duplex_sends_each_tool_description() {
+    let server = Server::start(|mut socket| async move {
+        let session = accept_start(&mut socket).await;
+        let tools = session["delegation"]["responses"]["tools"]
+            .as_array()
+            .expect("the Responses backend's tools")
+            .clone();
+        let described: Vec<(&str, &str)> = tools
+            .iter()
+            .map(|tool| {
+                (
+                    tool["name"].as_str().expect("a name"),
+                    tool["description"].as_str().expect("a description"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            described,
+            [
+                ("weather", "The current weather in the city named."),
+                ("local_time", "The local date and time; takes no arguments."),
+            ]
+        );
+        let _ = socket.close(None).await;
+    });
+    let declared = |name: &str, description: &str, schema: Value| {
+        Tool::declare(DeclareTool {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            schema,
+            schema_revision: "1".to_owned(),
+            side_effect: SideEffectClass::ReadOnly,
+            requires_confirmation: false,
+        })
+        .0
+    };
+    let mut tooled = config();
+    tooled.tools = vec![
+        declared(
+            "weather",
+            "The current weather in the city named.",
+            json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+        ),
+        declared(
+            "local_time",
+            "The local date and time; takes no arguments.",
+            json!({"type": "object", "properties": {}}),
+        ),
+    ];
+    let mut model = server.model();
+    let _session = model.open(tooled).expect("the session opens");
+    server.finish();
 }
 
 #[test]

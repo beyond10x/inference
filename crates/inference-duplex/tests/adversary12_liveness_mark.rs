@@ -52,6 +52,7 @@ fn adapter() -> Adapter {
 fn weather() -> Tool {
     Tool::declare(DeclareTool {
         name: "weather".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object"}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,

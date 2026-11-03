@@ -15,6 +15,7 @@ use serde_json::json;
 fn declare(requires_confirmation: bool) -> Tool {
     Tool::declare(DeclareTool {
         name: "transfer".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object"}),
         schema_revision: "7".to_owned(),
         side_effect: SideEffectClass::NonIdempotentWrite,

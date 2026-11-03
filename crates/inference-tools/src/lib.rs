@@ -184,6 +184,9 @@ impl ToolCallState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeclareTool {
     pub name: String,
+    /// What the tool does, in the words a model reads to choose it; the empty string declares a
+    /// tool without one.
+    pub description: String,
     pub schema: Json,
     pub schema_revision: String,
     pub side_effect: SideEffectClass,
@@ -395,6 +398,7 @@ impl Error for ConfirmationRequired {}
 pub struct Tool {
     tool_id: ToolId,
     name: String,
+    description: String,
     schema: Json,
     schema_revision: String,
     side_effect: SideEffectClass,
@@ -421,6 +425,7 @@ impl Tool {
         let tool = Self {
             tool_id,
             name: input.name,
+            description: input.description,
             schema: input.schema,
             schema_revision: input.schema_revision,
             side_effect: input.side_effect,
@@ -437,6 +442,13 @@ impl Tool {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// What the tool does, as declared; the empty string for a tool declared without one. An
+    /// adapter sends it as the provider's tool description.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
     }
 
     #[must_use]
