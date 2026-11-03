@@ -17,7 +17,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use zeroize::Zeroizing;
 
 use crate::audio::encode_pcm16_24k;
-use crate::config::{Endpoint, SessionConfig, WireFormat};
+use crate::config::{Endpoint, FunctionTool, SessionConfig, ToolChoice, WireFormat};
 use crate::credential::{CredentialError, CredentialSource};
 use crate::error::{ConnectError, RealtimeError};
 use crate::event::ServerEvent;
@@ -38,6 +38,81 @@ pub struct RealtimeClient {
     /// The top-level `type` of the message the last read could not take as a Realtime event,
     /// when that message is JSON whose `type` is a string.
     unparsed_type: Option<String>,
+    /// The names of `function_call` output items read, for calls the server sends without one.
+    call_names: CallNames,
+}
+
+/// The `item.name` of each `function_call` item of a `response.output_item.added` or
+/// `response.output_item.done` read, by `item.id`, oldest first and at most [`CallNames::KEPT`]:
+/// the oldest is forgotten first, and an entry once the call of its item is read. The ids of the
+/// last [`CallNames::KEPT`] items whose call was read are kept too, so an output item that
+/// arrives after its call names nothing again.
+#[derive(Debug, Default)]
+struct CallNames {
+    names: VecDeque<(String, String)>,
+    read: VecDeque<String>,
+}
+
+impl CallNames {
+    const KEPT: usize = 64;
+
+    /// Remembers the name of `event`'s item when it is a `function_call` output item with a
+    /// non-empty name whose call has not been read.
+    fn remember(&mut self, event: &ServerEvent) {
+        let ServerEvent::Unknown { event_type, raw } = event else {
+            return;
+        };
+        if !matches!(
+            event_type.as_str(),
+            "response.output_item.added" | "response.output_item.done"
+        ) {
+            return;
+        }
+        let item = &raw["item"];
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            return;
+        }
+        let (Some(id), Some(name)) = (
+            item.get("id").and_then(Value::as_str),
+            item.get("name").and_then(Value::as_str),
+        ) else {
+            return;
+        };
+        if name.is_empty() || self.read.iter().any(|item_id| item_id == id) {
+            return;
+        }
+        if let Some(entry) = self.names.iter_mut().find(|(item_id, _)| item_id == id) {
+            name.clone_into(&mut entry.1);
+            return;
+        }
+        bounded_push(&mut self.names, (id.to_owned(), name.to_owned()));
+    }
+
+    /// `event`, a function call without its name named from the item of its `item_id`. The
+    /// entry of that item is forgotten once its call is read, named or not, and the item is not
+    /// remembered again.
+    fn fill(&mut self, mut event: ServerEvent) -> ServerEvent {
+        if let ServerEvent::FunctionCall { item_id, name, .. } = &mut event {
+            if let Some(at) = self.names.iter().position(|(item, _)| item == item_id)
+                && let Some((_, remembered)) = self.names.remove(at)
+            {
+                name.get_or_insert(remembered);
+            }
+            if !self.read.iter().any(|read| read == item_id) {
+                bounded_push(&mut self.read, item_id.clone());
+            }
+        }
+        event
+    }
+}
+
+/// Appends `entry` to `queue`, first forgetting its oldest entry when it holds
+/// [`CallNames::KEPT`].
+fn bounded_push<T>(queue: &mut VecDeque<T>, entry: T) {
+    if queue.len() == CallNames::KEPT {
+        queue.pop_front();
+    }
+    queue.push_back(entry);
 }
 
 impl fmt::Debug for RealtimeClient {
@@ -81,6 +156,7 @@ impl RealtimeClient {
             session: Value::Null,
             pending: VecDeque::new(),
             unparsed_type: None,
+            call_names: CallNames::default(),
         };
         client
             .await_setup(|event| matches!(event, ServerEvent::SessionCreated { .. }))
@@ -185,23 +261,59 @@ impl RealtimeClient {
         self.send(json!({"type": "input_audio_buffer.clear"})).await
     }
 
-    /// Sends `conversation.item.create` with a user message of one `input_text` part.
+    /// Writes one WebSocket ping frame carrying `payload`, a keepalive for an idle session.
+    ///
+    /// The caller schedules pings; the client runs no timer. The server's pong is not a server
+    /// event: [`RealtimeClient::next_event`] skips it, and it does not reset the read timeout.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when `payload` is longer than the 125 bytes a control frame
+    /// carries (RFC 6455, section 5.5), refused before anything is written, or when the write
+    /// fails.
+    pub async fn ping(&mut self, payload: &[u8]) -> Result<(), RealtimeError> {
+        send_ping(&mut self.socket, payload).await
+    }
+
+    /// Sends `conversation.item.create` with `item` as its `item`, and with `options.event_id` as
+    /// the event's `event_id` and `options.previous_item_id` as its `previous_item_id`, each at the
+    /// top level of the event and left out when `None`. The server's answer, and an `error`
+    /// naming the `event_id` when the event is refused, arrive through
+    /// [`RealtimeClient::next_event`].
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn create_item(
+        &mut self,
+        item: &ConversationItem,
+        options: &ItemOptions,
+    ) -> Result<(), RealtimeError> {
+        let mut event = json!({"type": "conversation.item.create", "item": item.to_json()});
+        if let Some(event_id) = &options.event_id {
+            event["event_id"] = json!(event_id);
+        }
+        if let Some(previous_item_id) = &options.previous_item_id {
+            event["previous_item_id"] = json!(previous_item_id);
+        }
+        self.send(event).await
+    }
+
+    /// Sends `conversation.item.create` with a user message of one `input_text` part: a
+    /// [`ConversationItem::UserText`] through [`RealtimeClient::create_item`] with no
+    /// `event_id` and no `previous_item_id`.
     ///
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn send_text(&mut self, text: &str) -> Result<(), RealtimeError> {
-        self.send(json!({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": text}],
-            },
-        }))
+        self.create_item(
+            &ConversationItem::UserText(text.to_owned()),
+            &ItemOptions::default(),
+        )
         .await
     }
 
-    /// Sends `conversation.item.create` with a `function_call_output` item answering `call_id`.
+    /// Sends `conversation.item.create` with a `function_call_output` item answering `call_id`:
+    /// a [`ConversationItem::FunctionCallOutput`] through [`RealtimeClient::create_item`] with no
+    /// `event_id` and no `previous_item_id`.
     ///
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
@@ -210,19 +322,52 @@ impl RealtimeClient {
         call_id: &str,
         output: &str,
     ) -> Result<(), RealtimeError> {
-        self.send(json!({
-            "type": "conversation.item.create",
-            "item": {"type": "function_call_output", "call_id": call_id, "output": output},
-        }))
+        self.create_item(
+            &ConversationItem::FunctionCallOutput {
+                call_id: call_id.to_owned(),
+                output: output.to_owned(),
+            },
+            &ItemOptions::default(),
+        )
         .await
     }
 
-    /// Sends `response.create`.
+    /// Sends `response.create` with no `event_id` and no `response` object, exactly
+    /// `{"type": "response.create"}`: the response takes its instructions, tool choice and tools
+    /// from the session, reads the conversation's items and joins the default conversation. It is
+    /// [`RealtimeClient::create_response_with`] with [`ResponseOptions::default`].
     ///
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn create_response(&mut self) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "response.create"})).await
+        self.create_response_with(&ResponseOptions::default()).await
+    }
+
+    /// Sends `response.create` with `options.event_id` as the event's top-level `event_id`, and a
+    /// `response` object holding only the options that are set: `instructions`, `tool_choice`,
+    /// `conversation`, `input` (an array of item objects) and `tools` (an array of function
+    /// tools). Each applies to this response only and leaves the session's configuration as it
+    /// is. When no option inside `response` is set, no `response` key is sent.
+    ///
+    /// A response with [`ResponseConversation::None`] is out of band: its output items are not
+    /// added to the default conversation. Its server events still arrive through
+    /// [`RealtimeClient::next_event`], told apart from other responses' by their `response_id`.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn create_response_with(
+        &mut self,
+        options: &ResponseOptions,
+    ) -> Result<(), RealtimeError> {
+        let mut event = json!({"type": "response.create"});
+        if let Some(event_id) = &options.event_id {
+            event["event_id"] = json!(event_id);
+        }
+        let response = options.response_json();
+        if !response.is_empty() {
+            event["response"] = Value::Object(response);
+        }
+        self.send(event).await
     }
 
     /// Sends `response.cancel`, for `response_id` or, when `None`, the response in progress. The
@@ -288,11 +433,16 @@ impl RealtimeClient {
     async fn read_event(&mut self) -> Result<ServerEvent, RealtimeError> {
         self.unparsed_type = None;
         let text = read_text(&mut self.socket, self.read_timeout).await?;
-        let event = ServerEvent::parse(&text);
-        if event.is_err() {
-            self.unparsed_type = top_level_type(&text);
+        match ServerEvent::parse(&text) {
+            Ok(event) => {
+                self.call_names.remember(&event);
+                Ok(self.call_names.fill(event))
+            }
+            Err(error) => {
+                self.unparsed_type = top_level_type(&text);
+                Err(error)
+            }
         }
-        event
     }
 
     async fn send(&mut self, event: Value) -> Result<(), RealtimeError> {
@@ -386,6 +536,145 @@ pub(crate) async fn send_json(socket: &mut Socket, event: &Value) -> Result<(), 
         .send(Message::text(event.to_string()))
         .await
         .map_err(|error| RealtimeError::Transport(error.to_string()))
+}
+
+/// The most payload a ping frame carries: RFC 6455, section 5.5, caps every control frame's
+/// payload at 125 bytes.
+pub(crate) const MAX_PING_PAYLOAD: usize = 125;
+
+/// Writes one ping frame carrying `payload` on `socket`; a payload over [`MAX_PING_PAYLOAD`] is
+/// refused before anything is written.
+pub(crate) async fn send_ping(socket: &mut Socket, payload: &[u8]) -> Result<(), RealtimeError> {
+    if payload.len() > MAX_PING_PAYLOAD {
+        return Err(RealtimeError::Transport(format!(
+            "a ping payload of {} bytes; a control frame carries at most {MAX_PING_PAYLOAD}",
+            payload.len()
+        )));
+    }
+    socket
+        .send(Message::Ping(payload.to_vec().into()))
+        .await
+        .map_err(|error| RealtimeError::Transport(error.to_string()))
+}
+
+/// One item of `conversation.item.create`'s `item`, as the client events reference gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationItem {
+    /// A `message` item with `role: "user"` and one content part of type `input_text`.
+    UserText(String),
+    /// A `message` item with `role: "assistant"` and one content part of type `output_text`: a
+    /// line the application already played or scripts, added to the conversation as said.
+    AssistantText(String),
+    /// A `function_call_output` item: `output` answers the function call `call_id`.
+    FunctionCallOutput {
+        /// The `call_id` of the function call this answers.
+        call_id: String,
+        /// The `output`, the function's result as the model reads it, usually JSON text.
+        output: String,
+    },
+}
+
+impl ConversationItem {
+    /// The `item` object of `conversation.item.create`.
+    pub(crate) fn to_json(&self) -> Value {
+        match self {
+            Self::UserText(text) => json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            }),
+            Self::AssistantText(text) => json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            }),
+            Self::FunctionCallOutput { call_id, output } => {
+                json!({"type": "function_call_output", "call_id": call_id, "output": output})
+            }
+        }
+    }
+}
+
+/// The top-level fields of `conversation.item.create` beside its `item`; each is left out of the
+/// event when `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemOptions {
+    /// The client event's `event_id`, which a server `error` caused by this event names.
+    pub event_id: Option<String>,
+    /// The `previous_item_id`: the id of the item the new item is inserted after.
+    pub previous_item_id: Option<String>,
+}
+
+/// Which conversation a response's output joins, `response.conversation` of `response.create`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResponseConversation {
+    /// `"auto"`: the output is added to the default conversation, as without the option.
+    Auto,
+    /// `"none"`: an out-of-band response; its output items are not added to the default
+    /// conversation.
+    None,
+}
+
+impl ResponseConversation {
+    /// The `conversation` value in the reference's shape: `"auto"` or `"none"`.
+    fn to_json(self) -> Value {
+        match self {
+            Self::Auto => json!("auto"),
+            Self::None => json!("none"),
+        }
+    }
+}
+
+/// The per-response options of `response.create`, for [`RealtimeClient::create_response_with`].
+/// `event_id` goes at the top level of the event, every other field into its `response` object;
+/// each is left out when `None`, with the meaning its field states.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResponseOptions {
+    /// The client event's `event_id`, which a server `error` caused by this event names; `None`
+    /// sends no `event_id`.
+    pub event_id: Option<String>,
+    /// `response.instructions`: the instructions for this response only; `None` keeps the
+    /// session's `instructions`.
+    pub instructions: Option<String>,
+    /// `response.tool_choice`: which tools the model may call in this response; `None` keeps the
+    /// session's `tool_choice`.
+    pub tool_choice: Option<ToolChoice>,
+    /// `response.conversation`: `"auto"`, or `"none"` for an out-of-band response; `None` adds
+    /// the output to the default conversation, as `"auto"` does.
+    pub conversation: Option<ResponseConversation>,
+    /// `response.input`: the items the response reads, as an array of item objects in the shape
+    /// of `conversation.item.create`'s `item`; `None` has the response read the conversation's
+    /// items.
+    pub input: Option<Vec<ConversationItem>>,
+    /// `response.tools`: the function tools of this response; `None` keeps the session's
+    /// `tools`. `Some(vec![])` sends `[]`, which gives this response no tools whatever the
+    /// session holds.
+    pub tools: Option<Vec<FunctionTool>>,
+}
+
+impl ResponseOptions {
+    /// The `response` object of `response.create`: only the options that are set.
+    fn response_json(&self) -> serde_json::Map<String, Value> {
+        let mut response = serde_json::Map::new();
+        if let Some(instructions) = &self.instructions {
+            response.insert("instructions".to_owned(), json!(instructions));
+        }
+        if let Some(tool_choice) = &self.tool_choice {
+            response.insert("tool_choice".to_owned(), tool_choice.to_json());
+        }
+        if let Some(conversation) = self.conversation {
+            response.insert("conversation".to_owned(), conversation.to_json());
+        }
+        if let Some(input) = &self.input {
+            let items = input.iter().map(ConversationItem::to_json).collect();
+            response.insert("input".to_owned(), Value::Array(items));
+        }
+        if let Some(tools) = &self.tools {
+            let tools = tools.iter().map(FunctionTool::to_json).collect();
+            response.insert("tools".to_owned(), Value::Array(tools));
+        }
+        response
+    }
 }
 
 /// Sends a close frame on `socket` and waits at most `read_timeout` for the server's.

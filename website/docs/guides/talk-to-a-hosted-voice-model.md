@@ -106,6 +106,15 @@ value outside that range to its nearer end, 0.25 or 1.5, and treats a value that
 as unset, so the server's default applies. The client sends `SessionConfig::speed` as given and
 leaves the range to the server.
 
+Since 0.10.0 `SessionConfig` also sends input noise reduction (`NoiseReduction`), the input
+transcription's language and prompt beside its model, and a session `tool_choice`
+(`ToolChoice`); each unset field is left out of `session.update`. On the open client,
+`RealtimeClient::create_item` adds a user, assistant or function-output item with an optional
+`event_id` and a `previous_item_id` placement, `RealtimeClient::create_response_with` creates a
+response with its own instructions, tool choice, tools and input, or out of band with
+conversation `none`, and `RealtimeClient::ping` and `LiveClient::ping` send a WebSocket ping
+for a keepalive the caller schedules.
+
 ## Next
 
 - [Compare voice providers](compare-voice-providers.md) on latency and usage

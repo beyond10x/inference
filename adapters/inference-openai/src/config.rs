@@ -131,6 +131,34 @@ pub struct FunctionTool {
     pub parameters: Value,
 }
 
+/// Noise reduction on the input audio, `audio.input.noise_reduction` of the session
+/// configuration in `session.update`: filtered before turn detection and the model hear it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NoiseReduction {
+    /// Off: sent as an explicit `null`, which turns the server's noise reduction off.
+    Off,
+    /// `{"type": "near_field"}`: for a close-talking microphone such as a headset.
+    NearField,
+    /// `{"type": "far_field"}`: for a far-field microphone such as a laptop or conference room
+    /// microphone.
+    FarField,
+}
+
+/// Which tools the model may call: `tool_choice` of the session configuration in
+/// `session.update`, and `response.tool_choice` of `response.create` for one response, written
+/// by [`RealtimeClient::create_response_with`](crate::RealtimeClient::create_response_with).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ToolChoice {
+    /// `"auto"`: the model decides whether to call a tool.
+    Auto,
+    /// `"none"`: the model calls no tool.
+    None,
+    /// `"required"`: the model calls one or more tools.
+    Required,
+    /// `{"type": "function", "name": ...}`: the model calls the named function.
+    Function { name: String },
+}
+
 /// The session configuration sent in `session.update`. `None` fields keep the server's value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionConfig {
@@ -146,6 +174,17 @@ pub struct SessionConfig {
     /// The speed of the spoken output as a multiple of the model's own, `audio.output.speed`
     /// (0.25 to 1.5, the server's default 1.0); `None` leaves it out.
     pub speed: Option<f32>,
+    /// Noise reduction on the input audio, `audio.input.noise_reduction`; `None` leaves it out.
+    pub noise_reduction: Option<NoiseReduction>,
+    /// The language of the input audio as an ISO-639-1 code such as `en`,
+    /// `audio.input.transcription.language`. Sent only when `input_transcription` (the model) is
+    /// set; `None` leaves it out.
+    pub transcription_language: Option<String>,
+    /// Text that guides the transcription model, `audio.input.transcription.prompt`. Sent only
+    /// when `input_transcription` (the model) is set; `None` leaves it out.
+    pub transcription_prompt: Option<String>,
+    /// Which tools the model may call, `tool_choice`; `None` leaves it out.
+    pub tool_choice: Option<ToolChoice>,
 }
 
 impl Default for SessionConfig {
@@ -162,6 +201,10 @@ impl Default for SessionConfig {
             input_transcription: None,
             tools: Vec::new(),
             speed: None,
+            noise_reduction: None,
+            transcription_language: None,
+            transcription_prompt: None,
+            tool_choice: None,
         }
     }
 }
@@ -169,9 +212,11 @@ impl Default for SessionConfig {
 impl SessionConfig {
     /// The `session` object of a `session.update` client event, in the reference's session
     /// configuration shape: `type` `realtime`, `output_modalities`, `instructions`, `audio.input`
-    /// (`format`, `transcription`, `turn_detection`), `audio.output` (`format`, `voice`,
-    /// `speed`) and `tools`. Turn detection off is an explicit `null`; other unset fields are
-    /// left out. A speed is sent as the shortest decimal that reads back as the same `f32`.
+    /// (`format`, `noise_reduction`, `transcription` with its `model`, `language` and `prompt`,
+    /// `turn_detection`), `audio.output` (`format`, `voice`, `speed`), `tools` and
+    /// `tool_choice`. Turn detection off and noise reduction off are an explicit `null`; other
+    /// unset fields are left out, and the transcription language and prompt are left out with the
+    /// model. A speed is sent as the shortest decimal that reads back as the same `f32`.
     pub fn to_session_json(&self) -> Value {
         let modality = match self.output_modality {
             OutputModality::Audio => "audio",
@@ -182,8 +227,18 @@ impl SessionConfig {
             session["instructions"] = json!(instructions);
         }
         let mut input = json!({"format": self.input_format.to_json()});
+        if let Some(noise_reduction) = self.noise_reduction {
+            input["noise_reduction"] = noise_reduction.to_json();
+        }
         if let Some(model) = &self.input_transcription {
-            input["transcription"] = json!({"model": model});
+            let mut transcription = json!({"model": model});
+            if let Some(language) = &self.transcription_language {
+                transcription["language"] = json!(language);
+            }
+            if let Some(prompt) = &self.transcription_prompt {
+                transcription["prompt"] = json!(prompt);
+            }
+            input["transcription"] = transcription;
         }
         input["turn_detection"] = self.turn_detection.to_json();
         let mut output = json!({"format": self.output_format.to_json()});
@@ -200,7 +255,33 @@ impl SessionConfig {
         if !self.tools.is_empty() {
             session["tools"] = self.tools.iter().map(FunctionTool::to_json).collect();
         }
+        if let Some(tool_choice) = &self.tool_choice {
+            session["tool_choice"] = tool_choice.to_json();
+        }
         session
+    }
+}
+
+impl NoiseReduction {
+    fn to_json(self) -> Value {
+        match self {
+            Self::Off => Value::Null,
+            Self::NearField => json!({"type": "near_field"}),
+            Self::FarField => json!({"type": "far_field"}),
+        }
+    }
+}
+
+impl ToolChoice {
+    /// The `tool_choice` value in the reference's shape: `"auto"`, `"none"`, `"required"`, or
+    /// `{"type": "function", "name": ...}`.
+    pub(crate) fn to_json(&self) -> Value {
+        match self {
+            Self::Auto => json!("auto"),
+            Self::None => json!("none"),
+            Self::Required => json!("required"),
+            Self::Function { name } => json!({"type": "function", "name": name}),
+        }
     }
 }
 

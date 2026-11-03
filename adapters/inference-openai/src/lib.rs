@@ -52,10 +52,13 @@ pub mod live;
 pub mod live_duplex;
 
 pub use audio::encode_pcm16_24k;
-pub use client::RealtimeClient;
+pub use client::{
+    ConversationItem, ItemOptions, RealtimeClient, ResponseConversation, ResponseOptions,
+};
 pub use config::{
     DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL, Eagerness, Endpoint, FunctionTool,
-    MODEL_VARIABLE, OutputModality, SessionConfig, TurnDetection, WireFormat,
+    MODEL_VARIABLE, NoiseReduction, OutputModality, SessionConfig, ToolChoice, TurnDetection,
+    WireFormat,
 };
 #[cfg(feature = "keychain")]
 pub use credential::KeychainSource;
