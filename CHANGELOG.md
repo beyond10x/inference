@@ -9,7 +9,8 @@
   `QuantityKind::ALL` twelve kinds; a `match` that names every kind adds it.
 - `inference_tools::DeclareTool` has a new public field `description`, the text a model reads to
   choose the tool, kept by `Tool::description`; a literal adds it (`String::new()` declares a
-  tool without one). `inference_testkit::tools::ToolsRow` carries it too.
+  tool without one), and a serialized `DeclareTool` without `description` no longer
+  deserializes. `inference_testkit::tools::ToolsRow` carries it too.
 
 ### Added
 
