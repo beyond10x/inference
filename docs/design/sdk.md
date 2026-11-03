@@ -548,7 +548,7 @@ the file and key, `Device` the selector and the device names the host reports, `
   libraries (`AGENTS.md`, Rules). A transport crate is a separate decision.
 - Bindings for other languages: running code here is Rust.
 - Automatic provider fallback, retries across providers, and routing by price.
-- Structured output (`chat.ask::<T>()`): depends on what `b10x-llm-core` 0.8.3 exposes; not checked.
+- Structured output (`chat.ask::<T>()`): depends on what `llm-core` 0.20.0 exposes; not checked.
 
 ## 12. Open questions
 
