@@ -4,8 +4,9 @@
 //! session ([`RealtimeClient::connect`]) with a model id and a [`SessionConfig`], sends client
 //! events (input audio, commit, response create and cancel, truncation of played audio, text items
 //! and tool results) and receives server events as typed [`ServerEvent`] values. A server event
-//! the client has no type for is kept as [`ServerEvent::Unknown`], never dropped. A read that waits
-//! longer than the endpoint's read timeout is [`RealtimeError::Stalled`].
+//! the client has no type for is kept as [`ServerEvent::Unknown`], never dropped. No message for
+//! the endpoint's read timeout, measured from the last message read across every read, is
+//! [`RealtimeError::Stalled`].
 //!
 //! Event shapes follow the published Realtime API reference, client events
 //! (`https://developers.openai.com/api/reference/resources/realtime/client-events`) and server
@@ -27,6 +28,9 @@
 //! Audio goes in either as PCM16 at 24 kHz, resampled from `inference-audio` frames where needed
 //! ([`encode_pcm16_24k`]), or as G.711 mu-law or A-law at 8 kHz, passed through
 //! ([`RealtimeClient::append_encoded`]).
+//!
+//! [`RealtimeClient::into_split`] splits a session into a [`RealtimeSender`] and a
+//! [`RealtimeReceiver`] that two tasks own, so server events are read while a write is pending.
 //!
 //! With feature `duplex` ([`duplex`]), the client is an `inference-duplex` native speech model:
 //! [`duplex::OpenAiRealtime`] opens sessions through the contract and records every server
@@ -53,7 +57,8 @@ pub mod live_duplex;
 
 pub use audio::encode_pcm16_24k;
 pub use client::{
-    ConversationItem, ItemOptions, RealtimeClient, ResponseConversation, ResponseOptions,
+    ConversationItem, ItemOptions, RealtimeClient, RealtimeReceiver, RealtimeSender,
+    ResponseConversation, ResponseOptions, ReuniteError,
 };
 pub use config::{
     DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL, Eagerness, Endpoint, FunctionTool,

@@ -379,6 +379,13 @@ impl<'a> Fields<'a> {
         };
         let input_text_tokens = detail(input, "text_tokens");
         let input_audio_tokens = detail(input, "audio_tokens");
+        let cached_details = input
+            .and_then(|input| input.get("cached_tokens_details"))
+            .filter(|raw| raw.is_object())
+            .map(|raw| Fields {
+                event_type: self.event_type,
+                raw,
+            });
         let output_text_tokens = detail(output, "text_tokens");
         let output_audio_tokens = detail(output, "audio_tokens");
         let input_tokens = usage.optional_unsigned("input_tokens").unwrap_or_else(|| {
@@ -400,6 +407,7 @@ impl<'a> Fields<'a> {
             input_text_tokens,
             input_audio_tokens,
             cached_input_tokens: detail(input, "cached_tokens"),
+            cached_input_audio_tokens: detail(cached_details, "audio_tokens"),
             output_text_tokens,
             output_audio_tokens,
         }))
@@ -474,8 +482,8 @@ pub enum ResponseStatus {
 }
 
 /// The token usage of a response, from `response.done`. The details are `None` when the server
-/// did not report them. A total the server left out is the sum of its parts, stopping at
-/// `u64::MAX`.
+/// did not report them, or sent them in a shape that is not a non-negative integer. A total the
+/// server left out is the sum of its parts, stopping at `u64::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Usage {
     pub total_tokens: u64,
@@ -484,6 +492,9 @@ pub struct Usage {
     pub input_text_tokens: Option<u64>,
     pub input_audio_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    /// `input_token_details.cached_tokens_details.audio_tokens`: the audio input tokens served
+    /// from the cache, counted inside both `cached_input_tokens` and `input_audio_tokens`.
+    pub cached_input_audio_tokens: Option<u64>,
     pub output_text_tokens: Option<u64>,
     pub output_audio_tokens: Option<u64>,
 }
@@ -495,12 +506,13 @@ impl fmt::Display for Usage {
         }
         write!(
             f,
-            "total {} tokens; input {} (text {}, audio {}, cached {}); output {} (text {}, audio {})",
+            "total {} tokens; input {} (text {}, audio {}, cached {}, cached audio {}); output {} (text {}, audio {})",
             self.total_tokens,
             self.input_tokens,
             detail(self.input_text_tokens),
             detail(self.input_audio_tokens),
             detail(self.cached_input_tokens),
+            detail(self.cached_input_audio_tokens),
             self.output_tokens,
             detail(self.output_text_tokens),
             detail(self.output_audio_tokens),

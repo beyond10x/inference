@@ -284,6 +284,7 @@ fn declare_tool(
     let mut input = Input::of(request);
     let declare = DeclareTool {
         name: input.text("name")?,
+        description: input.text("description")?,
         schema: json(input.node("schema")?)?,
         schema_revision: input.text("schema_revision")?,
         side_effect: input.named("side_effect")?,
@@ -487,6 +488,7 @@ fn tools_row(row: &ToolsRow) -> Result<ViewRow, TargetError> {
     Ok(BTreeMap::from([
         ("tool_id".to_owned(), named_node(&row.tool_id)?),
         ("name".to_owned(), text_node(&row.name)),
+        ("description".to_owned(), text_node(&row.description)),
         ("schema".to_owned(), json_node(&row.schema)?),
         (
             "schema_revision".to_owned(),
@@ -634,6 +636,7 @@ mod tests {
             "inference.tools.DeclareTool",
             &[
                 ("name", text("book")),
+                ("description", text("Books a table for the day it names.")),
                 ("schema", schema()),
                 ("schema_revision", text("1")),
                 ("side_effect", text(side_effect)),
@@ -699,6 +702,10 @@ mod tests {
         let tools = rows(&mut stores, "inference.tools.Tools");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["schema"], schema());
+        assert_eq!(
+            tools[0]["description"],
+            text("Books a table for the day it names.")
+        );
         assert_eq!(tools[0]["requires_confirmation"], Node::Bool(true));
         let calls = rows(&mut stores, "inference.tools.ToolCalls");
         assert_eq!(calls[0]["arguments"], schema());

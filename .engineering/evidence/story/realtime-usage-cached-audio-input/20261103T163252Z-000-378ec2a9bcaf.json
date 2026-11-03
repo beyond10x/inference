@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-03T16:32:52Z",
+  "actor": "human:timo",
+  "artifact": "story:realtime-usage-cached-audio-input",
+  "kind": "story",
+  "revision": 8,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-core --all-features; cargo test -p inference-openai --all-features --test offline --test duplex",
+    "reference": "VERIFIED, new behaviour: base e7b511b quantity_kind_all_matches_the_specification fails (11 kinds), offline and duplex fail to compile (E0609); 14a28d3 inference-core 74 passed, offline 22 passed, duplex 30 passed"
+  }
+}

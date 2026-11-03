@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-03T17:01:20Z",
+  "actor": "human:timo",
+  "artifact": "story:realtime-live-into-split",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "cargo test -p inference-openai --all-features --test adversary16_u1_split --test adversary16_u1_live_split",
+    "reference": "both red cases green on 17f8b9b (6 passed, 2 passed); close-frame write inside the close deadline",
+    "review": "review-result:adversary-realtime-live-into-split-pass-1",
+    "outcome": "fixed"
+  }
+}

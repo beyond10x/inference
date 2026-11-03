@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-03T16:56:59Z",
+  "actor": "human:timo",
+  "artifact": "story:realtime-system-item",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-openai --all-features --test response_options --test items_and_ping",
+    "reference": "VERIFIED, new behaviour: ConversationItem::SystemText does not exist on e6f8119; on 06c715c response_options 5 passed and items_and_ping 8 passed, the system-role item scenarios included (implementor's run)"
+  }
+}

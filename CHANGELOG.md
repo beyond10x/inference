@@ -1,5 +1,73 @@
 # Changelog
 
+## [0.11.0] — 2026-11-03
+
+### Breaking
+
+- `inference_openai::Usage` has a new public field `cached_input_audio_tokens`; a literal that
+  lists every field adds it. `QuantityKind` has a new variant `CachedInputAudioTokens` and
+  `QuantityKind::ALL` twelve kinds; a `match` that names every kind adds it.
+- `inference_tools::DeclareTool` has a new public field `description`, the text a model reads to
+  choose the tool, kept by `Tool::description`; a literal adds it (`String::new()` declares a
+  tool without one), and a serialized `DeclareTool` without `description` no longer
+  deserializes. `inference_testkit::tools::ToolsRow` carries it too.
+- `inference_openai::ConversationItem` has a new variant `SystemText`; a `match` that names every
+  variant adds it.
+
+### Added
+
+- `RealtimeClient::into_split` and `LiveClient::into_split` split an open session into a sender
+  (`RealtimeSender`, `LiveSender`: every send method) and a receiver (`RealtimeReceiver`,
+  `LiveReceiver`: `next_event`, `session` and the events kept during setup) that two tasks own,
+  so server events are read while a write the peer does not drain is pending.
+  `RealtimeClient::reunite` and `LiveClient::reunite` put the halves back together for `close`,
+  and refuse halves of two sessions with `ReuniteError`, which hands both back. The whole
+  clients keep their API.
+- The `cached_input_audio_tokens` quantity kind: audio input tokens the provider served from its
+  cache, counted inside both `cached_input_tokens` and `input_audio_tokens`, never added to
+  either. The Realtime client reads it from `response.done`'s
+  `usage.input_token_details.cached_tokens_details.audio_tokens` into
+  `Usage::cached_input_audio_tokens`, `None` when the server leaves it out or sends it in
+  another shape, and `Usage`'s `Display` shows it. The Realtime duplex binding records it,
+  provider-reported when sent and unknown when not.
+- `ConversationItem::SystemText`, a `message` item with `role: "system"` and one `input_text`
+  part, for `create_item` and `ResponseOptions::input`: an out-of-band response
+  (`conversation: "none"`) can carry instructions in context without adding them to the
+  conversation.
+
+### Changed
+
+- Every duplex response usage record carries a `cached_input_audio_tokens` quantity, unknown
+  unless the binding's provider reports it, as `cached_input_tokens` is carried today.
+- A price binding that charges `cached_input_audio_tokens` gets a `price_unknown` line:
+  `llm-cost` has no unit for it.
+- A model price charges as cached input only the cached text tokens: `cached_input_tokens`
+  less a known `cached_input_audio_tokens`, stopping at 0, so a Realtime record whose cached
+  input is mostly audio is priced instead of refused as invalid usage; with the audio share
+  unknown, the whole cached input is charged as before.
+- The Nova Sonic duplex binding describes a tool by its declared description, and
+  `inference_llm::tools::tool_spec` by `name: description`; a tool declared without one is still
+  described by its name.
+
+### Fixed
+
+- Both OpenAI duplex bindings, Realtime and GPT-Live, send each tool's declared description in
+  its function tool instead of an empty one.
+- The Realtime and GPT-Live read timeout holds across reads: `next_event` on `RealtimeClient`,
+  `LiveClient` and their receivers reports `RealtimeError::Stalled` once the read timeout has
+  passed since the last message read (text or binary; pings and pongs do not count), starting at
+  the end of the handshake, however many calls that spans. Before, each call restarted the
+  bound, so a caller that dropped its read (a `select!` or a shorter timeout around
+  `next_event`) and called again never saw `Stalled`. A message already received is still
+  returned after the bound passed, and after a stall the bound runs again from the stall.
+- `RealtimeClient::close` and `LiveClient::close` return `RealtimeError::Stalled` within their
+  documented bound (the read timeout; the longer of the read timeout and `CLOSE_TIMEOUT`) when
+  the peer stops draining the socket. Before, they waited for the close-frame or
+  `session.close` write forever, outside that bound.
+- A read timeout too large to add to the current instant (such as `Duration::MAX`) no longer
+  panics: reads and `close` on the Realtime and GPT-Live clients wait without a deadline. A wait
+  that large passed to either duplex binding's `next_event` no longer panics either.
+
 ## [0.10.0] — 2026-11-03
 
 ### Breaking

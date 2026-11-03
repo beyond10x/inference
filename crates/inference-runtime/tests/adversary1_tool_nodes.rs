@@ -177,6 +177,7 @@ fn planned(capacity: [usize; 3]) -> (Declaration, PlannedPipeline, Nodes) {
 fn declare(name: &str, schema: Json, side_effect: SideEffectClass, confirm: bool) -> Tool {
     Tool::declare(DeclareTool {
         name: name.to_owned(),
+        description: String::new(),
         schema,
         schema_revision: "1".to_owned(),
         side_effect,
