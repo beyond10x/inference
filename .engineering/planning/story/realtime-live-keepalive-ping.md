@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-live-keepalive-ping
 kind: story
-status: active
+status: implemented
 title: Realtime and GPT-Live clients send a keepalive ping
 summary: A ping method on RealtimeClient and LiveClient writes one WebSocket ping frame.
 tags:
@@ -16,10 +16,11 @@ scope:
   path: adapters/inference-openai/src/client.rs
 - confidence: cited
   path: adapters/inference-openai/src/live.rs
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T11:16:00Z", actor: "human:timo", revision: 2, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
 - {from: "proposed", to: "active", at: "2026-11-03T11:16:00Z", actor: "human:timo", revision: 3, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:40Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 ## Context
 

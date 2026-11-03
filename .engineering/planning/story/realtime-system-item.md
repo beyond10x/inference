@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-system-item
 kind: story
-status: active
+status: implemented
 title: An out-of-band Realtime response can carry a system-role item
 summary: ConversationItem::SystemText, a message item with role system, for create_item and response input.
 tags:
@@ -14,10 +14,11 @@ relations:
 scope:
 - confidence: cited
   path: adapters/inference-openai/src/client.rs
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T15:55:03Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-03T15:55:03Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:39Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 

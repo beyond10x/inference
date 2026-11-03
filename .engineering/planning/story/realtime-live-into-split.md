@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-live-into-split
 kind: story
-status: active
+status: implemented
 title: Realtime and GPT-Live clients split into a sender and a receiver
 summary: An optional into_split so one task reads events while another writes.
 tags:
@@ -18,10 +18,11 @@ scope:
   path: adapters/inference-openai/src/lib.rs
 - confidence: cited
   path: adapters/inference-openai/src/live.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T15:55:02Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-03T15:55:02Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:39Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 

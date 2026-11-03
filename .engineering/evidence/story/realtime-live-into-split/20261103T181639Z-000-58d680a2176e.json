@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-03T18:16:39Z",
+  "actor": "human:timo",
+  "artifact": "story:realtime-live-into-split",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "https://github.com/beyond10x/inference/actions/runs/41689031052",
+    "reference": "task check green on main 62bf4c0, tag 0.11.0; local staged gate on 0ff03ec: 385 suites, 2779 passed, 0 failed"
+  }
+}
