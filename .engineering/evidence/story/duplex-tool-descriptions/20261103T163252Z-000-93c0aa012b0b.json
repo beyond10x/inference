@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-03T16:32:52Z",
+  "actor": "human:operator",
+  "artifact": "story:duplex-tool-descriptions",
+  "kind": "story",
+  "revision": 8,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-openai --all-features --test duplex --test gpt_live_duplex; cargo test -p inference-tools --all-features",
+    "reference": "VERIFIED: base e7b511b realtime_duplex_sends_each_tool_description and live_duplex_sends_each_tool_description fail with empty descriptions; cfca591 duplex 30 passed, gpt_live_duplex 22 passed, inference-tools 13 passed"
+  }
+}

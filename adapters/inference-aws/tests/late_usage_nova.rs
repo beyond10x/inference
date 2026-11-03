@@ -456,6 +456,7 @@ fn an_undecodable_frame_does_not_end_the_session() {
 fn weather() -> Tool {
     Tool::declare(DeclareTool {
         name: "weather".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,

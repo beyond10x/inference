@@ -311,6 +311,7 @@ fn one_cancel(declaration: &Declaration, node_id: NodeId, lookup: &Tool) -> Vec<
 fn adversary3_the_answer_to_the_cancel_is_not_sent_after_the_cancel() {
     let lookup = Tool::declare(DeclareTool {
         name: "lookup".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object"}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,

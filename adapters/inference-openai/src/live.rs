@@ -81,9 +81,13 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 
-use crate::client::{Socket, check_model, close_socket, open_socket, read_text, send_json};
+use crate::client::{
+    ReuniteError, SocketSink, SocketStream, check_model, close_socket, open_socket, read_text,
+    send_json, within,
+};
 use crate::config::{DEFAULT_READ_TIMEOUT, Endpoint, FunctionTool};
 use crate::credential::CredentialSource;
 use crate::error::RealtimeError;
@@ -713,9 +717,30 @@ pub struct LiveClosed {
 /// Every send method writes one client event and returns once it is written; answers arrive as
 /// server events through [`LiveClient::next_event`]. The client holds no credential after the
 /// handshake.
+///
+/// Every method takes the whole client, so a write the peer does not drain holds up every read.
+/// [`LiveClient::into_split`] gives a [`LiveSender`] and a [`LiveReceiver`] that two tasks own
+/// instead.
 pub struct LiveClient {
-    socket: Socket,
+    sender: LiveSender,
+    receiver: LiveReceiver,
+}
+
+/// The sending half of a Live session, from [`LiveClient::into_split`]: every send method of
+/// [`LiveClient`]. A write it has pending does not hold up its [`LiveReceiver`].
+pub struct LiveSender {
+    sink: SocketSink,
+}
+
+/// The receiving half of a Live session, from [`LiveClient::into_split`]:
+/// [`LiveReceiver::next_event`] with the events kept during start, [`LiveReceiver::session`],
+/// [`LiveReceiver::session_id`] and the read timeout.
+pub struct LiveReceiver {
+    stream: SocketStream,
     read_timeout: Duration,
+    /// When the last message was read, the end of the handshake before the first: the stall
+    /// bound runs from it, across reads.
+    last_message: tokio::time::Instant,
     session: Value,
     pending: VecDeque<LiveEvent>,
 }
@@ -723,6 +748,22 @@ pub struct LiveClient {
 impl fmt::Debug for LiveClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LiveClient")
+            .field("read_timeout", &self.receiver.read_timeout)
+            .field("session_id", &self.session_id())
+            .field("pending", &self.receiver.pending.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for LiveSender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LiveSender").finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for LiveReceiver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LiveReceiver")
             .field("read_timeout", &self.read_timeout)
             .field("session_id", &self.session_id())
             .field("pending", &self.pending.len())
@@ -753,14 +794,18 @@ impl LiveClient {
                 "the Live URL takes no query; the model goes in session.start".to_owned(),
             ));
         }
-        let socket = open_socket(&endpoint.url, source, credential).await?;
-        let mut client = Self {
-            socket,
+        let (sink, stream) = open_socket(&endpoint.url, source, credential)
+            .await?
+            .split();
+        let mut sender = LiveSender { sink };
+        let mut receiver = LiveReceiver {
+            stream,
             read_timeout: endpoint.read_timeout,
+            last_message: tokio::time::Instant::now(),
             session: Value::Null,
             pending: VecDeque::new(),
         };
-        client
+        sender
             .send(json!({
                 "type": "session.start",
                 "event_id": "session_start",
@@ -768,25 +813,52 @@ impl LiveClient {
             }))
             .await?;
         loop {
-            match client.read_event().await? {
+            match receiver.read_event().await? {
                 LiveEvent::SessionStarted { session } => {
-                    client.session = session;
-                    return Ok(client);
+                    receiver.session = session;
+                    return Ok(Self { sender, receiver });
                 }
                 LiveEvent::Error(error) => return Err(RealtimeError::Server(error)),
-                other => client.pending.push_back(other),
+                other => receiver.pending.push_back(other),
             }
+        }
+    }
+
+    /// Splits the session into a sender, which every send method of the client is on, and a
+    /// receiver, which reads the server events, so that two tasks own them: a write the peer
+    /// does not drain then holds up no read. The receiver returns the events kept during start
+    /// first and holds the session and the read timeout.
+    ///
+    /// [`LiveClient::reunite`] puts the halves back together, for [`LiveClient::close`], which
+    /// needs both: it sends `session.close` and reads `session.closed`.
+    pub fn into_split(self) -> (LiveSender, LiveReceiver) {
+        (self.sender, self.receiver)
+    }
+
+    /// The client `sender` and `receiver` were split from by [`LiveClient::into_split`].
+    ///
+    /// # Errors
+    /// A boxed [`ReuniteError`], handing both halves back, when they are not the halves of one
+    /// client.
+    pub fn reunite(
+        sender: LiveSender,
+        receiver: LiveReceiver,
+    ) -> Result<Self, Box<ReuniteError<LiveSender, LiveReceiver>>> {
+        if sender.sink.is_pair_of(&receiver.stream) {
+            Ok(Self { sender, receiver })
+        } else {
+            Err(Box::new(ReuniteError { sender, receiver }))
         }
     }
 
     /// The session as `session.started` resolved it.
     pub fn session(&self) -> &Value {
-        &self.session
+        self.receiver.session()
     }
 
     /// The session id `session.started` gave.
     pub fn session_id(&self) -> Option<&str> {
-        self.session.get("id").and_then(Value::as_str)
+        self.receiver.session_id()
     }
 
     /// Sends `session.input_audio.append` with `audio` as it is: raw bytes in the session's
@@ -795,8 +867,7 @@ impl LiveClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn append_audio(&mut self, audio: &[u8]) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "session.input_audio.append", "audio": STANDARD.encode(audio)}))
-            .await
+        self.sender.append_audio(audio).await
     }
 
     /// Sends `session.input_audio.mute`; `session.input_audio.muted` acknowledges it.
@@ -804,7 +875,7 @@ impl LiveClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn mute(&mut self) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "session.input_audio.mute"})).await
+        self.sender.mute().await
     }
 
     /// Sends `session.input_audio.unmute`; `session.input_audio.unmuted` acknowledges it.
@@ -812,8 +883,7 @@ impl LiveClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn unmute(&mut self) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "session.input_audio.unmute"}))
-            .await
+        self.sender.unmute().await
     }
 
     /// Sends `session.instructions.append`: instructions for the running conversation, about
@@ -826,7 +896,8 @@ impl LiveClient {
         delegation_id: Option<&str>,
         content: &str,
     ) -> Result<(), RealtimeError> {
-        self.append("session.instructions.append", delegation_id, content)
+        self.sender
+            .append_instructions(delegation_id, content)
             .await
     }
 
@@ -839,8 +910,7 @@ impl LiveClient {
         delegation_id: Option<&str>,
         content: &str,
     ) -> Result<(), RealtimeError> {
-        self.append("session.thinking.append", delegation_id, content)
-            .await
+        self.sender.append_thinking(delegation_id, content).await
     }
 
     /// Sends `session.commentary.append`: a result the model should say, in its own words.
@@ -852,8 +922,7 @@ impl LiveClient {
         delegation_id: Option<&str>,
         content: &str,
     ) -> Result<(), RealtimeError> {
-        self.append("session.commentary.append", delegation_id, content)
-            .await
+        self.sender.append_commentary(delegation_id, content).await
     }
 
     /// Sends `response.item.create` with a `function_call_output` item answering `call_id`. The
@@ -866,11 +935,7 @@ impl LiveClient {
         call_id: &str,
         output: &str,
     ) -> Result<(), RealtimeError> {
-        self.send(json!({
-            "type": "response.item.create",
-            "item": {"type": "function_call_output", "call_id": call_id, "output": output},
-        }))
-        .await
+        self.sender.send_function_output(call_id, output).await
     }
 
     /// Sends `response.create`: starts or continues Responses backend work. It needs Responses
@@ -879,7 +944,7 @@ impl LiveClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn create_response(&mut self) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "response.create"})).await
+        self.sender.create_response().await
     }
 
     /// Writes one WebSocket ping frame carrying `payload`, a keepalive for an idle session.
@@ -892,7 +957,7 @@ impl LiveClient {
     /// carries (RFC 6455, section 5.5), refused before anything is written, or when the write
     /// fails.
     pub async fn ping(&mut self, payload: &[u8]) -> Result<(), RealtimeError> {
-        crate::client::send_ping(&mut self.socket, payload).await
+        self.sender.ping(payload).await
     }
 
     /// Sends `session.close` without waiting; `session.closed` arrives through
@@ -901,30 +966,34 @@ impl LiveClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn request_close(&mut self) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "session.close", "event_id": "session_close"}))
-            .await
+        self.sender.request_close().await
     }
 
     /// The next server event, events kept during start first.
     ///
+    /// The read timeout is a stall bound that holds across calls: it runs from the last message
+    /// read (a text or binary message; pings and other control frames do not count), from the end
+    /// of the handshake before the first, not from this call. A caller that drops the read (a
+    /// `select!`, or a shorter timeout around it) and calls again still sees the stall once the
+    /// read timeout has passed since the last message. A message that already arrived is returned
+    /// even when the bound has passed. After a stall the bound runs again from the stall.
+    ///
     /// # Errors
-    /// [`RealtimeError::Stalled`] when no event arrives within the endpoint's read timeout;
+    /// [`RealtimeError::Stalled`] when no message arrived for the endpoint's read timeout;
     /// [`RealtimeError::Closed`] when the server closed the connection;
     /// [`RealtimeError::Transport`] when the read fails; [`RealtimeError::Protocol`] for a
     /// message that is not a Live event.
     pub async fn next_event(&mut self) -> Result<LiveEvent, RealtimeError> {
-        match self.pending.pop_front() {
-            Some(event) => Ok(event),
-            None => self.read_event().await,
-        }
+        self.receiver.next_event().await
     }
 
     /// Closes the session gracefully: sends `session.close`, reads until `session.closed`, then
     /// closes the connection. Events read on the way are dropped, and so are messages that are not
     /// GPT-Live events: the client reads on past them.
     ///
-    /// The whole close, every read and the closing of the connection, takes at most the longer
-    /// of the endpoint's read timeout and [`CLOSE_TIMEOUT`], however often the server sends.
+    /// The whole close, the write of `session.close`, every read and the closing of the
+    /// connection, takes at most the longer of the endpoint's read timeout and [`CLOSE_TIMEOUT`],
+    /// however often the server sends and whether or not it drains the socket.
     ///
     /// # Errors
     /// The errors of [`LiveClient::next_event`] when the connection ends before
@@ -940,24 +1009,139 @@ impl LiveClient {
         mut self,
         mut seen: impl FnMut(Result<LiveEvent, RealtimeError>),
     ) -> Result<LiveClosed, RealtimeError> {
-        let bound = self.read_timeout.max(CLOSE_TIMEOUT);
-        let deadline = tokio::time::Instant::now() + bound;
-        self.read_timeout = bound;
-        self.request_close().await?;
+        let bound = self.receiver.read_timeout.max(CLOSE_TIMEOUT);
+        let started = tokio::time::Instant::now();
+        self.receiver.read_timeout = bound;
+        self.receiver.last_message = started;
+        within(started, bound, self.sender.request_close())
+            .await
+            .ok_or(RealtimeError::Stalled(bound))??;
         let closed = loop {
-            match tokio::time::timeout_at(deadline, self.next_event()).await {
-                Err(_) => break Err(RealtimeError::Stalled(bound)),
-                Ok(Ok(LiveEvent::SessionClosed { reason, seconds })) => {
+            match within(started, bound, self.receiver.next_event()).await {
+                None | Some(Err(RealtimeError::Stalled(_))) => {
+                    break Err(RealtimeError::Stalled(bound));
+                }
+                Some(Ok(LiveEvent::SessionClosed { reason, seconds })) => {
                     break Ok(LiveClosed { reason, seconds });
                 }
-                Ok(Ok(event)) => seen(Ok(event)),
-                Ok(Err(error @ RealtimeError::Protocol(_))) => seen(Err(error)),
-                Ok(Err(error)) => return Err(error),
+                Some(Ok(event)) => seen(Ok(event)),
+                Some(Err(error @ RealtimeError::Protocol(_))) => seen(Err(error)),
+                Some(Err(error)) => return Err(error),
             }
         };
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let _ = close_socket(&mut self.socket, left).await;
+        let left = bound.saturating_sub(started.elapsed());
+        let _ = close_socket(&mut self.sender.sink, &mut self.receiver.stream, left).await;
         closed
+    }
+}
+
+impl LiveSender {
+    /// [`LiveClient::append_audio`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn append_audio(&mut self, audio: &[u8]) -> Result<(), RealtimeError> {
+        self.send(json!({"type": "session.input_audio.append", "audio": STANDARD.encode(audio)}))
+            .await
+    }
+
+    /// [`LiveClient::mute`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn mute(&mut self) -> Result<(), RealtimeError> {
+        self.send(json!({"type": "session.input_audio.mute"})).await
+    }
+
+    /// [`LiveClient::unmute`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn unmute(&mut self) -> Result<(), RealtimeError> {
+        self.send(json!({"type": "session.input_audio.unmute"}))
+            .await
+    }
+
+    /// [`LiveClient::append_instructions`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn append_instructions(
+        &mut self,
+        delegation_id: Option<&str>,
+        content: &str,
+    ) -> Result<(), RealtimeError> {
+        self.append("session.instructions.append", delegation_id, content)
+            .await
+    }
+
+    /// [`LiveClient::append_thinking`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn append_thinking(
+        &mut self,
+        delegation_id: Option<&str>,
+        content: &str,
+    ) -> Result<(), RealtimeError> {
+        self.append("session.thinking.append", delegation_id, content)
+            .await
+    }
+
+    /// [`LiveClient::append_commentary`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn append_commentary(
+        &mut self,
+        delegation_id: Option<&str>,
+        content: &str,
+    ) -> Result<(), RealtimeError> {
+        self.append("session.commentary.append", delegation_id, content)
+            .await
+    }
+
+    /// [`LiveClient::send_function_output`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn send_function_output(
+        &mut self,
+        call_id: &str,
+        output: &str,
+    ) -> Result<(), RealtimeError> {
+        self.send(json!({
+            "type": "response.item.create",
+            "item": {"type": "function_call_output", "call_id": call_id, "output": output},
+        }))
+        .await
+    }
+
+    /// [`LiveClient::create_response`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn create_response(&mut self) -> Result<(), RealtimeError> {
+        self.send(json!({"type": "response.create"})).await
+    }
+
+    /// [`LiveClient::ping`] on this half; the server's pong is skipped by the receiver.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when `payload` is longer than 125 bytes, refused before
+    /// anything is written, or when the write fails.
+    pub async fn ping(&mut self, payload: &[u8]) -> Result<(), RealtimeError> {
+        crate::client::send_ping(&mut self.sink, payload).await
+    }
+
+    /// [`LiveClient::request_close`] on this half: sends `session.close` without waiting;
+    /// `session.closed` arrives through [`LiveReceiver::next_event`].
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn request_close(&mut self) -> Result<(), RealtimeError> {
+        self.send(json!({"type": "session.close", "event_id": "session_close"}))
+            .await
     }
 
     async fn append(
@@ -970,12 +1154,37 @@ impl LiveClient {
             .await
     }
 
-    async fn read_event(&mut self) -> Result<LiveEvent, RealtimeError> {
-        let text = read_text(&mut self.socket, self.read_timeout).await?;
-        LiveEvent::parse(&text)
+    async fn send(&mut self, event: Value) -> Result<(), RealtimeError> {
+        send_json(&mut self.sink, &event).await
+    }
+}
+
+impl LiveReceiver {
+    /// [`LiveClient::session`]: the session as `session.started` resolved it.
+    pub fn session(&self) -> &Value {
+        &self.session
     }
 
-    async fn send(&mut self, event: Value) -> Result<(), RealtimeError> {
-        send_json(&mut self.socket, &event).await
+    /// [`LiveClient::session_id`]: the session id `session.started` gave.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session.get("id").and_then(Value::as_str)
+    }
+
+    /// [`LiveClient::next_event`] on this half: the next server event, events kept during start
+    /// first. A write pending on the sender does not hold it up. The stall bound runs from the
+    /// last message this half read, across calls, as [`LiveClient::next_event`] states.
+    ///
+    /// # Errors
+    /// The errors of [`LiveClient::next_event`].
+    pub async fn next_event(&mut self) -> Result<LiveEvent, RealtimeError> {
+        match self.pending.pop_front() {
+            Some(event) => Ok(event),
+            None => self.read_event().await,
+        }
+    }
+
+    async fn read_event(&mut self) -> Result<LiveEvent, RealtimeError> {
+        let text = read_text(&mut self.stream, self.read_timeout, &mut self.last_message).await?;
+        LiveEvent::parse(&text)
     }
 }

@@ -14,8 +14,11 @@ pub const MODEL_VARIABLE: &str = "INFERENCE_OPENAI_REALTIME_MODEL";
 /// The Realtime WebSocket URL; the model id goes in its `model` query parameter.
 pub const DEFAULT_URL: &str = "wss://api.openai.com/v1/realtime";
 
-/// How long [`RealtimeClient::next_event`](crate::RealtimeClient::next_event) waits for a server
-/// event before it reports a stall.
+/// How long a session may go without a server message before
+/// [`RealtimeClient::next_event`](crate::RealtimeClient::next_event) reports a stall. The bound runs
+/// from the last message read, across `next_event` calls, not per call. A read timeout too large
+/// to add to the current instant, such as `Duration::MAX`, is no bound: reads and `close` wait
+/// without a deadline.
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Where a session connects: the WebSocket URL, the model id and the read timeout.

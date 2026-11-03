@@ -25,13 +25,15 @@
 //!   never reused. `response.done` ends the response as completed, cancelled (the caller's
 //!   cancellation already recorded is not recorded again), or failed for `failed` and
 //!   `incomplete`. Its `usage` is the response's final total. The usage record of the response
-//!   takes each count from its own field (text, audio and cached input tokens, text and audio
-//!   output tokens) and keeps a count the server left out unknown; a `response.done` without
+//!   takes each count from its own field (text, audio and cached input tokens, the cached audio
+//!   input tokens of `cached_tokens_details`, text and audio output tokens) and keeps a count the
+//!   server left out unknown; a `response.done` without
 //!   usage settles the response with every count unknown. A response the caller cancels is
 //!   recorded when its `response.done` arrives, with the usage of what it generated, or, failing
 //!   that, with every count unknown when a later response's `response.done` arrives or at the
 //!   session's end; the next `response.created` does not record it. The contract's `ResponseUsage`, which has no
-//!   unknown, still counts an absent detail as 0, or in text where the total says so.
+//!   unknown, still counts an absent detail as 0, or in text where the total says so, and has
+//!   no cached audio count: the cached audio is in the usage record only.
 //! * The server's `input_audio_buffer.committed` that acknowledges a caller's commit is not a
 //!   second commit; one the server's own turn detection makes is. A caller's commit the server
 //!   refuses (an `error` whose code begins `input_audio_buffer_commit`) is owed no
@@ -345,7 +347,7 @@ impl OpenAiRealtime {
                 .iter()
                 .map(|tool| FunctionTool {
                     name: tool.name().to_owned(),
-                    description: String::new(),
+                    description: tool.description().to_owned(),
                     parameters: tool.schema().clone(),
                 })
                 .collect(),
@@ -1045,6 +1047,10 @@ fn quantities(usage: &Usage) -> Vec<Quantity> {
         reported(QuantityKind::InputTextTokens, usage.input_text_tokens),
         reported(QuantityKind::InputAudioTokens, usage.input_audio_tokens),
         reported(QuantityKind::CachedInputTokens, usage.cached_input_tokens),
+        reported(
+            QuantityKind::CachedInputAudioTokens,
+            usage.cached_input_audio_tokens,
+        ),
         reported(QuantityKind::OutputTextTokens, usage.output_text_tokens),
         reported(QuantityKind::OutputAudioTokens, usage.output_audio_tokens),
     ]
@@ -1164,12 +1170,14 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
     }
 
     fn next_event(&mut self, wait: Duration) -> Option<SessionEvent> {
-        let deadline = Instant::now() + wait;
+        let deadline = Instant::now().checked_add(wait);
         loop {
             if let Some(event) = self.ledger.next_event() {
                 return Some(event);
             }
-            let left = deadline.saturating_duration_since(Instant::now());
+            let left = deadline.map_or(wait, |deadline| {
+                deadline.saturating_duration_since(Instant::now())
+            });
             if left.is_zero() || self.ledger.session().require_open().is_err() {
                 self.ledger.check_liveness(Instant::now());
                 return self.ledger.next_event();

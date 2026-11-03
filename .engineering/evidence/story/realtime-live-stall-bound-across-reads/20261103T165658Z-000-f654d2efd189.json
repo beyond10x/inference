@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-03T16:56:58Z",
+  "actor": "human:operator",
+  "artifact": "story:realtime-live-stall-bound-across-reads",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-openai --all-features --test stall_bound --test gpt_live_stall_bound",
+    "reference": "VERIFIED, new behaviour: on the U3 base e6f8119 both targets 0 passed 6 failed; on 06c715c 6 passed and 6 passed; the other 11 inference-openai targets of the unit gate stay green (implementor's run)"
+  }
+}

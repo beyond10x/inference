@@ -385,6 +385,7 @@ fn the_session_records_one_usage_record_per_response_and_per_transcription() {
             Quantity::provider_reported(QuantityKind::InputTextTokens, 20),
             Quantity::provider_reported(QuantityKind::InputAudioTokens, 50),
             Quantity::provider_reported(QuantityKind::CachedInputTokens, 0),
+            Quantity::unknown(QuantityKind::CachedInputAudioTokens),
             Quantity::provider_reported(QuantityKind::OutputTextTokens, 8),
             Quantity::provider_reported(QuantityKind::OutputAudioTokens, 30),
             Quantity::measured(QuantityKind::Requests, 1),

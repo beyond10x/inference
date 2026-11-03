@@ -197,6 +197,7 @@ fn a_service_failure_records_the_unsettled_response_before_the_sessions_failure(
             Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
             Quantity::provider_reported(QuantityKind::InputAudioTokens, 50),
             Quantity::unknown(QuantityKind::CachedInputTokens),
+            Quantity::unknown(QuantityKind::CachedInputAudioTokens),
             Quantity::provider_reported(QuantityKind::OutputTextTokens, 0),
             Quantity::provider_reported(QuantityKind::OutputAudioTokens, 30),
             Quantity::measured(QuantityKind::Requests, 1),

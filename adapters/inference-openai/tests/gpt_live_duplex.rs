@@ -230,6 +230,7 @@ fn input(position: u64) -> AudioFrame {
 fn weather() -> Tool {
     Tool::declare(DeclareTool {
         name: "weather".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,
@@ -412,6 +413,61 @@ fn a_configuration_maps_onto_session_start_with_tools_on_the_responses_backend()
         plain["delegation"],
         json!({"type": "responses", "responses": {"model": DEFAULT_BACKEND_MODEL}})
     );
+}
+
+#[test]
+fn live_duplex_sends_each_tool_description() {
+    let server = Server::start(|mut socket| async move {
+        let session = accept_start(&mut socket).await;
+        let tools = session["delegation"]["responses"]["tools"]
+            .as_array()
+            .expect("the Responses backend's tools")
+            .clone();
+        let described: Vec<(&str, &str)> = tools
+            .iter()
+            .map(|tool| {
+                (
+                    tool["name"].as_str().expect("a name"),
+                    tool["description"].as_str().expect("a description"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            described,
+            [
+                ("weather", "The current weather in the city named."),
+                ("local_time", "The local date and time; takes no arguments."),
+            ]
+        );
+        let _ = socket.close(None).await;
+    });
+    let declared = |name: &str, description: &str, schema: Value| {
+        Tool::declare(DeclareTool {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            schema,
+            schema_revision: "1".to_owned(),
+            side_effect: SideEffectClass::ReadOnly,
+            requires_confirmation: false,
+        })
+        .0
+    };
+    let mut tooled = config();
+    tooled.tools = vec![
+        declared(
+            "weather",
+            "The current weather in the city named.",
+            json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+        ),
+        declared(
+            "local_time",
+            "The local date and time; takes no arguments.",
+            json!({"type": "object", "properties": {}}),
+        ),
+    ];
+    let mut model = server.model();
+    let _session = model.open(tooled).expect("the session opens");
+    server.finish();
 }
 
 #[test]
@@ -709,6 +765,7 @@ fn a_function_call_of_the_responses_backend_is_proposed_answered_and_its_usage_r
             Quantity::provider_reported(QuantityKind::InputTextTokens, 320),
             Quantity::unknown(QuantityKind::InputAudioTokens),
             Quantity::provider_reported(QuantityKind::CachedInputTokens, 64),
+            Quantity::unknown(QuantityKind::CachedInputAudioTokens),
             Quantity::provider_reported(QuantityKind::OutputTextTokens, 50),
             Quantity::unknown(QuantityKind::OutputAudioTokens),
             Quantity::measured(QuantityKind::Requests, 1),
@@ -1492,5 +1549,31 @@ fn a_backend_usage_without_output_tokens_counts_its_input_and_leaves_the_output_
             .is_some_and(|what| what.contains("usage.output_tokens")),
         "{:?}",
         session.ledger().last_unreadable()
+    );
+}
+/// `next_event` takes any wait, so a caller that wants to wait for the next event however long it
+/// takes passes `Duration::MAX`. A deadline too large to represent never passes: the wait ends
+/// with the next event, here the failure of a closed transport, instead of panicking.
+#[test]
+fn a_wait_of_duration_max_ends_with_the_next_event() {
+    let server = Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        let _ = socket.close(None).await;
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let mut events = Vec::new();
+    while !matches!(events.last(), Some(SessionEvent::SpeechSessionFailed(_))) {
+        let event = session.next_event(Duration::MAX);
+        events.push(event.expect("an event before the failure"));
+    }
+    server.finish();
+    assert!(
+        matches!(
+            events.last(),
+            Some(SessionEvent::SpeechSessionFailed(failed))
+                if failed.failure.kind == SessionFailureKind::TransportClosed
+        ),
+        "{events:#?}"
     );
 }

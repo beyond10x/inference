@@ -22,9 +22,10 @@
 //! binding match stays unknown with `llm-cost`'s reason, and the counts of a record whose `final`
 //! is false, its compute among them, give a lower bound marked `usage_incomplete`. The input line counts the input tokens neither
 //! read from nor written to the cache, as `llm-cost` prices them, which a cache split known only
-//! in part leaves unknown. A charged kind `llm-cost` has no unit for (audio tokens, audio
-//! milliseconds, characters, requests), or a charged kind with no price of its family in the
-//! binding, gets a `price_unknown` line. Quantities of one kind are added up, each checked first:
+//! in part leaves unknown. The cached input it reads is the cached text: `cached_input_tokens`
+//! less a known `cached_input_audio_tokens`, the whole cached input when that share is unknown. A charged kind `llm-cost` has no unit for (audio tokens, cached audio
+//! input tokens, audio milliseconds, characters, requests), or a charged kind with no price of
+//! its family in the binding, gets a `price_unknown` line. Quantities of one kind are added up, each checked first:
 //! one unknown or negative value, or a sum beyond `i64`, makes the kind's count unknown, never
 //! netted.
 //!
@@ -305,6 +306,17 @@ fn unsigned(recorded: &UsageRecorded, kind: QuantityKind) -> Option<u64> {
     count(recorded, kind).and_then(|value| u64::try_from(value).ok())
 }
 
+/// The cached input tokens `llm-cost` prices as the cached share of the input text tokens: the
+/// cached input less its known cached audio, stopping at 0, or the whole cached input when the
+/// record carries no known cached audio count.
+fn cached_text(recorded: &UsageRecorded) -> Option<u64> {
+    let cached = unsigned(recorded, QuantityKind::CachedInputTokens);
+    match unsigned(recorded, QuantityKind::CachedInputAudioTokens) {
+        Some(audio) => cached.map(|cached| cached.saturating_sub(audio)),
+        None => cached,
+    }
+}
+
 /// An identity of this crate as an identifier `llm-cost` takes: a Uuid is printable ASCII.
 fn identity(value: impl fmt::Display) -> Id {
     Id::new(value.to_string()).expect("a Uuid is 36 printable ASCII bytes")
@@ -342,7 +354,7 @@ fn attempt(model: &ModelPriceBinding, recorded: &UsageRecorded) -> AttemptUsage 
         usage: Usage {
             input_tokens: unsigned(recorded, QuantityKind::InputTextTokens),
             output_tokens: unsigned(recorded, QuantityKind::OutputTextTokens),
-            cached_input_tokens: unsigned(recorded, QuantityKind::CachedInputTokens),
+            cached_input_tokens: cached_text(recorded),
             cache_creation_input_tokens: unsigned(recorded, QuantityKind::CacheCreationInputTokens),
             reasoning_output_tokens: None,
         },

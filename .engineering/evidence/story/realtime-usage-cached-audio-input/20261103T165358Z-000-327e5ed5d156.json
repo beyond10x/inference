@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-03T16:53:58Z",
+  "actor": "human:operator",
+  "artifact": "story:realtime-usage-cached-audio-input",
+  "kind": "story",
+  "revision": 8,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-realtime-usage-cached-audio-input-pass-1",
+    "review": "review-result:adversary-realtime-usage-cached-audio-input-pass-1",
+    "outcome": "fixed"
+  }
+}

@@ -248,6 +248,7 @@ fn planned(generator: &MockGenerator) -> (Declaration, PlannedPipeline, Ids) {
 fn lookup() -> Tool {
     Tool::declare(DeclareTool {
         name: "lookup".to_owned(),
+        description: String::new(),
         schema: json!({
             "type": "object",
             "properties": {"city": {"type": "string"}},

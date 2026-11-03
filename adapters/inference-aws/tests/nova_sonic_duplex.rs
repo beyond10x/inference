@@ -65,6 +65,7 @@ fn saying(format: AudioFormat, position: u64, text: &str) -> AudioFrame {
 fn weather() -> Tool {
     Tool::declare(DeclareTool {
         name: "weather".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,
@@ -908,6 +909,34 @@ fn the_session_configuration_reaches_the_provider() {
     );
 }
 
+#[test]
+fn nova_sonic_duplex_sends_each_tool_description() {
+    let replay = Replay::new(vec![turn("hi", "Hello")]);
+    let described = Tool::declare(DeclareTool {
+        name: "weather".to_owned(),
+        description: "The current weather in the city named.".to_owned(),
+        schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+        schema_revision: "1".to_owned(),
+        side_effect: SideEffectClass::ReadOnly,
+        requires_confirmation: false,
+    })
+    .0;
+    let mut tooled = config();
+    tooled.tools = vec![described, weather()];
+    let _session = model(&replay).open(tooled).expect("opens");
+
+    let prompt = &wire(&replay, "promptStart", 1)[0];
+    let tools = &prompt["toolConfiguration"]["tools"];
+    assert_eq!(
+        tools[0]["toolSpec"]["description"],
+        "The current weather in the city named."
+    );
+    assert_eq!(
+        tools[1]["toolSpec"]["description"], "weather",
+        "a tool declared without a description is described by its name"
+    );
+}
+
 /// Nova Sonic reports usage as deltas; a response's usage is their running total, the input
 /// reported before it began counted as its input.
 #[test]
@@ -989,6 +1018,7 @@ fn usage_is_a_running_total_per_response() {
                 Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
                 Quantity::provider_reported(QuantityKind::InputAudioTokens, 50),
                 Quantity::unknown(QuantityKind::CachedInputTokens),
+                Quantity::unknown(QuantityKind::CachedInputAudioTokens),
                 Quantity::provider_reported(QuantityKind::OutputTextTokens, 8),
                 Quantity::provider_reported(QuantityKind::OutputAudioTokens, 30),
                 Quantity::measured(QuantityKind::Requests, 1),
@@ -1080,6 +1110,7 @@ fn a_count_nova_sonic_leaves_out_is_recorded_unknown_never_zero() {
             Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
             Quantity::provider_reported(QuantityKind::InputAudioTokens, 50),
             Quantity::unknown(QuantityKind::CachedInputTokens),
+            Quantity::unknown(QuantityKind::CachedInputAudioTokens),
             Quantity::provider_reported(QuantityKind::OutputTextTokens, 8),
             Quantity::provider_reported(QuantityKind::OutputAudioTokens, 30),
             Quantity::measured(QuantityKind::Requests, 1),

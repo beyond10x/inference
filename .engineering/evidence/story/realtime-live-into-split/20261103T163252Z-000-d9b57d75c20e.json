@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-03T16:32:52Z",
+  "actor": "human:operator",
+  "artifact": "story:realtime-live-into-split",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-openai --all-features --test split --test gpt_live_split",
+    "reference": "VERIFIED, new behaviour: base e7b511b fails to compile (E0599 no method into_split); a3d03e8 4 passed and 3 passed, the stalled-write scenarios included"
+  }
+}

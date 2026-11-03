@@ -44,13 +44,17 @@ pub fn tool_id(name: &ToolName) -> Option<ToolId> {
         .filter(|tool_id| tool_name(*tool_id) == *name)
 }
 
-/// `tool` as the model is offered it: named by its [`ToolId`], described by its name, its schema
-/// the input schema.
+/// `tool` as the model is offered it: named by its [`ToolId`], described by its name and, when it
+/// was declared with one, its description (`name: description`), its schema the input schema.
 #[must_use]
 pub fn tool_spec(tool: &Tool) -> ToolSpec {
     ToolSpec {
         name: tool_name(tool.tool_id()),
-        description: tool.name().to_owned(),
+        description: if tool.description().is_empty() {
+            tool.name().to_owned()
+        } else {
+            format!("{}: {}", tool.name(), tool.description())
+        },
         input_schema: tool.schema().clone(),
     }
 }
