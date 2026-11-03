@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use inference_audio::AudioFrame;
 use serde_json::{Value, json};
@@ -24,15 +25,43 @@ use crate::event::ServerEvent;
 
 pub(crate) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// The writing half of a [`Socket`].
+pub(crate) type SocketSink = SplitSink<Socket, Message>;
+
+/// The reading half of a [`Socket`]. A write pending on its [`SocketSink`] does not hold it: each
+/// poll of either half takes the socket only for that poll.
+pub(crate) type SocketStream = SplitStream<Socket>;
+
 /// One open Realtime session over WebSocket.
 ///
 /// Every send method writes one client event and returns once it is written; answers arrive as
 /// server events through [`RealtimeClient::next_event`]. The client holds no credential after the
 /// handshake.
+///
+/// Every method takes the whole client, so a write the peer does not drain holds up every read.
+/// [`RealtimeClient::into_split`] gives a [`RealtimeSender`] and a [`RealtimeReceiver`] that two
+/// tasks own instead.
 pub struct RealtimeClient {
-    socket: Socket,
-    read_timeout: std::time::Duration,
+    sender: RealtimeSender,
+    receiver: RealtimeReceiver,
+}
+
+/// The sending half of a Realtime session, from [`RealtimeClient::into_split`]: every send
+/// method of [`RealtimeClient`], and the input format [`RealtimeSender::update_session`] sets and
+/// [`RealtimeSender::append_audio`] follows.
+///
+/// A write it has pending does not hold up its [`RealtimeReceiver`].
+pub struct RealtimeSender {
+    sink: SocketSink,
     input_format: WireFormat,
+}
+
+/// The receiving half of a Realtime session, from [`RealtimeClient::into_split`]:
+/// [`RealtimeReceiver::next_event`] with the events kept during setup, the function call names
+/// read, [`RealtimeReceiver::unparsed_type`], [`RealtimeReceiver::session`] and the read timeout.
+pub struct RealtimeReceiver {
+    stream: SocketStream,
+    read_timeout: std::time::Duration,
     session: Value,
     pending: VecDeque<ServerEvent>,
     /// The top-level `type` of the message the last read could not take as a Realtime event,
@@ -41,6 +70,30 @@ pub struct RealtimeClient {
     /// The names of `function_call` output items read, for calls the server sends without one.
     call_names: CallNames,
 }
+
+/// A sender and a receiver that [`RealtimeClient::reunite`] (or `LiveClient::reunite`, with
+/// feature `gpt-live`) refused because they are not the halves of one client; both are handed
+/// back as they were.
+pub struct ReuniteError<S, R> {
+    /// The sender as it was passed.
+    pub sender: S,
+    /// The receiver as it was passed.
+    pub receiver: R,
+}
+
+impl<S, R> fmt::Debug for ReuniteError<S, R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReuniteError").finish_non_exhaustive()
+    }
+}
+
+impl<S, R> fmt::Display for ReuniteError<S, R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the sender and the receiver are not halves of one client")
+    }
+}
+
+impl<S, R> std::error::Error for ReuniteError<S, R> {}
 
 /// The `item.name` of each `function_call` item of a `response.output_item.added` or
 /// `response.output_item.done` read, by `item.id`, oldest first and at most [`CallNames::KEPT`]:
@@ -118,8 +171,25 @@ fn bounded_push<T>(queue: &mut VecDeque<T>, entry: T) {
 impl fmt::Debug for RealtimeClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RealtimeClient")
-            .field("read_timeout", &self.read_timeout)
+            .field("read_timeout", &self.receiver.read_timeout)
+            .field("input_format", &self.sender.input_format)
+            .field("pending", &self.receiver.pending.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for RealtimeSender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RealtimeSender")
             .field("input_format", &self.input_format)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for RealtimeReceiver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RealtimeReceiver")
+            .field("read_timeout", &self.read_timeout)
             .field("pending", &self.pending.len())
             .finish_non_exhaustive()
     }
@@ -147,52 +217,65 @@ impl RealtimeClient {
         session: &SessionConfig,
     ) -> Result<Self, RealtimeError> {
         let url = request_url(endpoint)?;
-        let socket = open_socket(&url, source, credential).await?;
+        let (sink, stream) = open_socket(&url, source, credential).await?.split();
 
-        let mut client = Self {
-            socket,
-            read_timeout: endpoint.read_timeout,
+        let mut sender = RealtimeSender {
+            sink,
             input_format: session.input_format,
+        };
+        let mut receiver = RealtimeReceiver {
+            stream,
+            read_timeout: endpoint.read_timeout,
             session: Value::Null,
             pending: VecDeque::new(),
             unparsed_type: None,
             call_names: CallNames::default(),
         };
-        client
+        receiver
             .await_setup(|event| matches!(event, ServerEvent::SessionCreated { .. }))
             .await?;
-        client.update_session(session).await?;
-        if let ServerEvent::SessionUpdated { session } = client
+        sender.update_session(session).await?;
+        if let ServerEvent::SessionUpdated { session } = receiver
             .await_setup(|event| matches!(event, ServerEvent::SessionUpdated { .. }))
             .await?
         {
-            client.session = session;
+            receiver.session = session;
         }
-        Ok(client)
+        Ok(Self { sender, receiver })
     }
 
-    /// Reads until an event `wanted` accepts, keeping every other event for
-    /// [`RealtimeClient::next_event`]; an `error` event fails setup.
-    async fn await_setup(
-        &mut self,
-        wanted: impl Fn(&ServerEvent) -> bool,
-    ) -> Result<ServerEvent, RealtimeError> {
-        loop {
-            let event = self.read_event().await?;
-            if wanted(&event) {
-                return Ok(event);
-            }
-            if let ServerEvent::Error(error) = event {
-                return Err(RealtimeError::Server(error));
-            }
-            self.pending.push_back(event);
+    /// Splits the session into a sender, which every send method of the client is on, and a
+    /// receiver, which reads the server events, so that two tasks own them: a write the peer
+    /// does not drain then holds up no read. The receiver returns the events kept during setup
+    /// first and holds the session, the read timeout and what the client remembered of the reads
+    /// so far; the sender holds the input format.
+    ///
+    /// [`RealtimeClient::reunite`] puts the halves back together, for
+    /// [`RealtimeClient::close`].
+    pub fn into_split(self) -> (RealtimeSender, RealtimeReceiver) {
+        (self.sender, self.receiver)
+    }
+
+    /// The client `sender` and `receiver` were split from by [`RealtimeClient::into_split`].
+    ///
+    /// # Errors
+    /// A boxed [`ReuniteError`], handing both halves back, when they are not the halves of one
+    /// client.
+    pub fn reunite(
+        sender: RealtimeSender,
+        receiver: RealtimeReceiver,
+    ) -> Result<Self, Box<ReuniteError<RealtimeSender, RealtimeReceiver>>> {
+        if sender.sink.is_pair_of(&receiver.stream) {
+            Ok(Self { sender, receiver })
+        } else {
+            Err(Box::new(ReuniteError { sender, receiver }))
         }
     }
 
     /// The session as the server confirmed it in `session.updated` during
     /// [`RealtimeClient::connect`].
     pub fn session(&self) -> &Value {
-        &self.session
+        self.receiver.session()
     }
 
     /// The top-level `type` of the message the last read from the socket could not take as a
@@ -200,7 +283,7 @@ impl RealtimeClient {
     /// string; `None` after a read that gave an event, and for a message without a readable
     /// `type`: not JSON, a binary message, or no string `type`.
     pub fn unparsed_type(&self) -> Option<&str> {
-        self.unparsed_type.as_deref()
+        self.receiver.unparsed_type()
     }
 
     /// Sends `session.update` with `session`. Later appends follow its input format; the
@@ -209,10 +292,7 @@ impl RealtimeClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn update_session(&mut self, session: &SessionConfig) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "session.update", "session": session.to_session_json()}))
-            .await?;
-        self.input_format = session.input_format;
-        Ok(())
+        self.sender.update_session(session).await
     }
 
     /// Sends `input_audio_buffer.append` with `frame` as PCM16 at 24 kHz, resampled and mixed
@@ -223,14 +303,7 @@ impl RealtimeClient {
     /// [`RealtimeClient::append_encoded`]) or the frame is malformed;
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn append_audio(&mut self, frame: &AudioFrame) -> Result<(), RealtimeError> {
-        if self.input_format != WireFormat::Pcm16 {
-            return Err(RealtimeError::Audio(format!(
-                "the session takes {:?} input; send it encoded with append_encoded",
-                self.input_format
-            )));
-        }
-        let pcm = encode_pcm16_24k(frame)?;
-        self.append_encoded(&pcm).await
+        self.sender.append_audio(frame).await
     }
 
     /// Sends `input_audio_buffer.append` with `audio` as it is: bytes already in the session's
@@ -239,8 +312,7 @@ impl RealtimeClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn append_encoded(&mut self, audio: &[u8]) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "input_audio_buffer.append", "audio": STANDARD.encode(audio)}))
-            .await
+        self.sender.append_encoded(audio).await
     }
 
     /// Sends `input_audio_buffer.commit`: the buffered input becomes a user item. With turn
@@ -249,8 +321,7 @@ impl RealtimeClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn commit_audio(&mut self) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "input_audio_buffer.commit"}))
-            .await
+        self.sender.commit_audio().await
     }
 
     /// Sends `input_audio_buffer.clear`.
@@ -258,7 +329,7 @@ impl RealtimeClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn clear_audio(&mut self) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "input_audio_buffer.clear"})).await
+        self.sender.clear_audio().await
     }
 
     /// Writes one WebSocket ping frame carrying `payload`, a keepalive for an idle session.
@@ -271,7 +342,7 @@ impl RealtimeClient {
     /// carries (RFC 6455, section 5.5), refused before anything is written, or when the write
     /// fails.
     pub async fn ping(&mut self, payload: &[u8]) -> Result<(), RealtimeError> {
-        send_ping(&mut self.socket, payload).await
+        self.sender.ping(payload).await
     }
 
     /// Sends `conversation.item.create` with `item` as its `item`, and with `options.event_id` as
@@ -287,14 +358,7 @@ impl RealtimeClient {
         item: &ConversationItem,
         options: &ItemOptions,
     ) -> Result<(), RealtimeError> {
-        let mut event = json!({"type": "conversation.item.create", "item": item.to_json()});
-        if let Some(event_id) = &options.event_id {
-            event["event_id"] = json!(event_id);
-        }
-        if let Some(previous_item_id) = &options.previous_item_id {
-            event["previous_item_id"] = json!(previous_item_id);
-        }
-        self.send(event).await
+        self.sender.create_item(item, options).await
     }
 
     /// Sends `conversation.item.create` with a user message of one `input_text` part: a
@@ -304,11 +368,7 @@ impl RealtimeClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn send_text(&mut self, text: &str) -> Result<(), RealtimeError> {
-        self.create_item(
-            &ConversationItem::UserText(text.to_owned()),
-            &ItemOptions::default(),
-        )
-        .await
+        self.sender.send_text(text).await
     }
 
     /// Sends `conversation.item.create` with a `function_call_output` item answering `call_id`:
@@ -322,14 +382,7 @@ impl RealtimeClient {
         call_id: &str,
         output: &str,
     ) -> Result<(), RealtimeError> {
-        self.create_item(
-            &ConversationItem::FunctionCallOutput {
-                call_id: call_id.to_owned(),
-                output: output.to_owned(),
-            },
-            &ItemOptions::default(),
-        )
-        .await
+        self.sender.send_function_output(call_id, output).await
     }
 
     /// Sends `response.create` with no `event_id` and no `response` object, exactly
@@ -340,7 +393,7 @@ impl RealtimeClient {
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn create_response(&mut self) -> Result<(), RealtimeError> {
-        self.create_response_with(&ResponseOptions::default()).await
+        self.sender.create_response().await
     }
 
     /// Sends `response.create` with `options.event_id` as the event's top-level `event_id`, and a
@@ -359,6 +412,194 @@ impl RealtimeClient {
         &mut self,
         options: &ResponseOptions,
     ) -> Result<(), RealtimeError> {
+        self.sender.create_response_with(options).await
+    }
+
+    /// Sends `response.cancel`, for `response_id` or, when `None`, the response in progress. The
+    /// server answers with `response.done` of status `cancelled`.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn cancel_response(
+        &mut self,
+        response_id: Option<&str>,
+    ) -> Result<(), RealtimeError> {
+        self.sender.cancel_response(response_id).await
+    }
+
+    /// Sends `conversation.item.truncate`: the assistant audio of `item_id` is cut at
+    /// `audio_end_ms`, the position the listener heard, and its transcript with it.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn truncate(
+        &mut self,
+        item_id: &str,
+        content_index: u32,
+        audio_end_ms: u32,
+    ) -> Result<(), RealtimeError> {
+        self.sender
+            .truncate(item_id, content_index, audio_end_ms)
+            .await
+    }
+
+    /// The next server event, events kept during setup first.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Stalled`] when no event arrives within the endpoint's read timeout, pings
+    /// and other frames that are not events counted in it;
+    /// [`RealtimeError::Closed`] when the server closed the connection;
+    /// [`RealtimeError::Transport`] when the read fails; [`RealtimeError::Protocol`] for a
+    /// message that is not a Realtime event.
+    pub async fn next_event(&mut self) -> Result<ServerEvent, RealtimeError> {
+        self.receiver.next_event().await
+    }
+
+    /// Sends a close frame and waits for the server's.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the close handshake fails;
+    /// [`RealtimeError::Stalled`] when the server does not close within the read timeout.
+    pub async fn close(mut self) -> Result<(), RealtimeError> {
+        close_socket(
+            &mut self.sender.sink,
+            &mut self.receiver.stream,
+            self.receiver.read_timeout,
+        )
+        .await
+    }
+}
+
+impl RealtimeSender {
+    /// [`RealtimeClient::update_session`] on this half: sends `session.update`, and later
+    /// appends follow its input format.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn update_session(&mut self, session: &SessionConfig) -> Result<(), RealtimeError> {
+        self.send(json!({"type": "session.update", "session": session.to_session_json()}))
+            .await?;
+        self.input_format = session.input_format;
+        Ok(())
+    }
+
+    /// [`RealtimeClient::append_audio`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Audio`] when the session's input format is not PCM16 or the frame is
+    /// malformed; [`RealtimeError::Transport`] when the write fails.
+    pub async fn append_audio(&mut self, frame: &AudioFrame) -> Result<(), RealtimeError> {
+        if self.input_format != WireFormat::Pcm16 {
+            return Err(RealtimeError::Audio(format!(
+                "the session takes {:?} input; send it encoded with append_encoded",
+                self.input_format
+            )));
+        }
+        let pcm = encode_pcm16_24k(frame)?;
+        self.append_encoded(&pcm).await
+    }
+
+    /// [`RealtimeClient::append_encoded`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn append_encoded(&mut self, audio: &[u8]) -> Result<(), RealtimeError> {
+        self.send(json!({"type": "input_audio_buffer.append", "audio": STANDARD.encode(audio)}))
+            .await
+    }
+
+    /// [`RealtimeClient::commit_audio`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn commit_audio(&mut self) -> Result<(), RealtimeError> {
+        self.send(json!({"type": "input_audio_buffer.commit"}))
+            .await
+    }
+
+    /// [`RealtimeClient::clear_audio`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn clear_audio(&mut self) -> Result<(), RealtimeError> {
+        self.send(json!({"type": "input_audio_buffer.clear"})).await
+    }
+
+    /// [`RealtimeClient::ping`] on this half; the server's pong is skipped by the receiver.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when `payload` is longer than 125 bytes, refused before
+    /// anything is written, or when the write fails.
+    pub async fn ping(&mut self, payload: &[u8]) -> Result<(), RealtimeError> {
+        send_ping(&mut self.sink, payload).await
+    }
+
+    /// [`RealtimeClient::create_item`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn create_item(
+        &mut self,
+        item: &ConversationItem,
+        options: &ItemOptions,
+    ) -> Result<(), RealtimeError> {
+        let mut event = json!({"type": "conversation.item.create", "item": item.to_json()});
+        if let Some(event_id) = &options.event_id {
+            event["event_id"] = json!(event_id);
+        }
+        if let Some(previous_item_id) = &options.previous_item_id {
+            event["previous_item_id"] = json!(previous_item_id);
+        }
+        self.send(event).await
+    }
+
+    /// [`RealtimeClient::send_text`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn send_text(&mut self, text: &str) -> Result<(), RealtimeError> {
+        self.create_item(
+            &ConversationItem::UserText(text.to_owned()),
+            &ItemOptions::default(),
+        )
+        .await
+    }
+
+    /// [`RealtimeClient::send_function_output`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn send_function_output(
+        &mut self,
+        call_id: &str,
+        output: &str,
+    ) -> Result<(), RealtimeError> {
+        self.create_item(
+            &ConversationItem::FunctionCallOutput {
+                call_id: call_id.to_owned(),
+                output: output.to_owned(),
+            },
+            &ItemOptions::default(),
+        )
+        .await
+    }
+
+    /// [`RealtimeClient::create_response`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn create_response(&mut self) -> Result<(), RealtimeError> {
+        self.create_response_with(&ResponseOptions::default()).await
+    }
+
+    /// [`RealtimeClient::create_response_with`] on this half.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn create_response_with(
+        &mut self,
+        options: &ResponseOptions,
+    ) -> Result<(), RealtimeError> {
         let mut event = json!({"type": "response.create"});
         if let Some(event_id) = &options.event_id {
             event["event_id"] = json!(event_id);
@@ -370,8 +611,7 @@ impl RealtimeClient {
         self.send(event).await
     }
 
-    /// Sends `response.cancel`, for `response_id` or, when `None`, the response in progress. The
-    /// server answers with `response.done` of status `cancelled`.
+    /// [`RealtimeClient::cancel_response`] on this half.
     ///
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
@@ -386,8 +626,7 @@ impl RealtimeClient {
         self.send(event).await
     }
 
-    /// Sends `conversation.item.truncate`: the assistant audio of `item_id` is cut at
-    /// `audio_end_ms`, the position the listener heard, and its transcript with it.
+    /// [`RealtimeClient::truncate`] on this half.
     ///
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
@@ -406,14 +645,46 @@ impl RealtimeClient {
         .await
     }
 
-    /// The next server event, events kept during setup first.
+    async fn send(&mut self, event: Value) -> Result<(), RealtimeError> {
+        send_json(&mut self.sink, &event).await
+    }
+}
+
+impl RealtimeReceiver {
+    /// Reads until an event `wanted` accepts, keeping every other event for
+    /// [`RealtimeReceiver::next_event`]; an `error` event fails setup.
+    async fn await_setup(
+        &mut self,
+        wanted: impl Fn(&ServerEvent) -> bool,
+    ) -> Result<ServerEvent, RealtimeError> {
+        loop {
+            let event = self.read_event().await?;
+            if wanted(&event) {
+                return Ok(event);
+            }
+            if let ServerEvent::Error(error) = event {
+                return Err(RealtimeError::Server(error));
+            }
+            self.pending.push_back(event);
+        }
+    }
+
+    /// [`RealtimeClient::session`]: the session as `session.updated` confirmed it during setup.
+    pub fn session(&self) -> &Value {
+        &self.session
+    }
+
+    /// [`RealtimeClient::unparsed_type`]: the top-level `type` of the message the last read
+    /// could not take as a Realtime event, when it is JSON whose `type` is a string.
+    pub fn unparsed_type(&self) -> Option<&str> {
+        self.unparsed_type.as_deref()
+    }
+
+    /// [`RealtimeClient::next_event`] on this half: the next server event, events kept during
+    /// setup first. A write pending on the sender does not hold it up.
     ///
     /// # Errors
-    /// [`RealtimeError::Stalled`] when no event arrives within the endpoint's read timeout, pings
-    /// and other frames that are not events counted in it;
-    /// [`RealtimeError::Closed`] when the server closed the connection;
-    /// [`RealtimeError::Transport`] when the read fails; [`RealtimeError::Protocol`] for a
-    /// message that is not a Realtime event.
+    /// The errors of [`RealtimeClient::next_event`].
     pub async fn next_event(&mut self) -> Result<ServerEvent, RealtimeError> {
         match self.pending.pop_front() {
             Some(event) => Ok(event),
@@ -421,18 +692,9 @@ impl RealtimeClient {
         }
     }
 
-    /// Sends a close frame and waits for the server's.
-    ///
-    /// # Errors
-    /// [`RealtimeError::Transport`] when the close handshake fails;
-    /// [`RealtimeError::Stalled`] when the server does not close within the read timeout.
-    pub async fn close(mut self) -> Result<(), RealtimeError> {
-        close_socket(&mut self.socket, self.read_timeout).await
-    }
-
     async fn read_event(&mut self) -> Result<ServerEvent, RealtimeError> {
         self.unparsed_type = None;
-        let text = read_text(&mut self.socket, self.read_timeout).await?;
+        let text = read_text(&mut self.stream, self.read_timeout).await?;
         match ServerEvent::parse(&text) {
             Ok(event) => {
                 self.call_names.remember(&event);
@@ -443,10 +705,6 @@ impl RealtimeClient {
                 Err(error)
             }
         }
-    }
-
-    async fn send(&mut self, event: Value) -> Result<(), RealtimeError> {
-        send_json(&mut self.socket, &event).await
     }
 }
 
@@ -490,7 +748,7 @@ pub(crate) async fn open_socket(
 /// The text of the next text message, waiting at most `read_timeout`; pings and other frames
 /// that are not messages count in the wait.
 pub(crate) async fn read_text(
-    socket: &mut Socket,
+    socket: &mut SocketStream,
     read_timeout: std::time::Duration,
 ) -> Result<String, RealtimeError> {
     let deadline = tokio::time::Instant::now() + read_timeout;
@@ -531,7 +789,7 @@ pub(crate) async fn read_text(
 }
 
 /// Writes `event` as one text message.
-pub(crate) async fn send_json(socket: &mut Socket, event: &Value) -> Result<(), RealtimeError> {
+pub(crate) async fn send_json(socket: &mut SocketSink, event: &Value) -> Result<(), RealtimeError> {
     socket
         .send(Message::text(event.to_string()))
         .await
@@ -544,7 +802,10 @@ pub(crate) const MAX_PING_PAYLOAD: usize = 125;
 
 /// Writes one ping frame carrying `payload` on `socket`; a payload over [`MAX_PING_PAYLOAD`] is
 /// refused before anything is written.
-pub(crate) async fn send_ping(socket: &mut Socket, payload: &[u8]) -> Result<(), RealtimeError> {
+pub(crate) async fn send_ping(
+    socket: &mut SocketSink,
+    payload: &[u8],
+) -> Result<(), RealtimeError> {
     if payload.len() > MAX_PING_PAYLOAD {
         return Err(RealtimeError::Transport(format!(
             "a ping payload of {} bytes; a control frame carries at most {MAX_PING_PAYLOAD}",
@@ -677,14 +938,15 @@ impl ResponseOptions {
     }
 }
 
-/// Sends a close frame on `socket` and waits at most `read_timeout` for the server's.
+/// Sends a close frame on `sink` and waits at most `read_timeout` for the server's on `socket`,
+/// the reading half of the same socket.
 pub(crate) async fn close_socket(
-    socket: &mut Socket,
+    sink: &mut SocketSink,
+    socket: &mut SocketStream,
     read_timeout: std::time::Duration,
 ) -> Result<(), RealtimeError> {
     use tokio_tungstenite::tungstenite::Error;
-    socket
-        .close(None)
+    sink.close()
         .await
         .map_err(|error| RealtimeError::Transport(error.to_string()))?;
     let deadline = tokio::time::Instant::now() + read_timeout;
