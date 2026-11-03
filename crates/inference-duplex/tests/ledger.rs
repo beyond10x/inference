@@ -627,10 +627,11 @@ fn a_closed_transport_fails_the_session_at_once_and_a_closed_session_takes_nothi
 }
 
 /// The token kinds every response record carries, unknown where the provider left them out.
-const RESPONSE_TOKENS: [QuantityKind; 5] = [
+const RESPONSE_TOKENS: [QuantityKind; 6] = [
     QuantityKind::InputTextTokens,
     QuantityKind::InputAudioTokens,
     QuantityKind::CachedInputTokens,
+    QuantityKind::CachedInputAudioTokens,
     QuantityKind::OutputTextTokens,
     QuantityKind::OutputAudioTokens,
 ];
@@ -722,6 +723,7 @@ fn a_response_ending_with_its_final_usage_is_recorded_once_just_before_its_end()
     for kind in [
         QuantityKind::InputAudioTokens,
         QuantityKind::CachedInputTokens,
+        QuantityKind::CachedInputAudioTokens,
         QuantityKind::OutputTextTokens,
     ] {
         assert_eq!(
@@ -734,7 +736,7 @@ fn a_response_ending_with_its_final_usage_is_recorded_once_just_before_its_end()
         quantity(record, QuantityKind::Requests),
         Quantity::measured(QuantityKind::Requests, 1)
     );
-    assert_eq!(record.quantities.len(), 6, "{record:#?}");
+    assert_eq!(record.quantities.len(), 7, "{record:#?}");
     assert_eq!(ledger.usage_records().len(), 1);
     assert_eq!(&ledger.usage_records()[0].recorded(), record);
 
@@ -955,6 +957,7 @@ fn the_contracts_usage_forms_are_recorded_as_reported_quantities() {
             Quantity::provider_reported(QuantityKind::InputTextTokens, 12),
             Quantity::provider_reported(QuantityKind::InputAudioTokens, 40),
             Quantity::provider_reported(QuantityKind::CachedInputTokens, 8),
+            Quantity::unknown(QuantityKind::CachedInputAudioTokens),
             Quantity::provider_reported(QuantityKind::OutputTextTokens, 5),
             Quantity::provider_reported(QuantityKind::OutputAudioTokens, 60),
             Quantity::measured(QuantityKind::Requests, 1),

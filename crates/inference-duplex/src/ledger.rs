@@ -413,11 +413,14 @@ struct Meter {
 }
 
 /// The token kinds every response record carries, in this order, `unknown` where the provider
-/// left a count out.
-const RESPONSE_TOKENS: [QuantityKind; 5] = [
+/// left a count out. `cached_input_audio_tokens` has no count in [`ResponseUsage`]: a binding
+/// whose provider reports it records it from its own fields, and every other record has it
+/// unknown.
+const RESPONSE_TOKENS: [QuantityKind; 6] = [
     QuantityKind::InputTextTokens,
     QuantityKind::InputAudioTokens,
     QuantityKind::CachedInputTokens,
+    QuantityKind::CachedInputAudioTokens,
     QuantityKind::OutputTextTokens,
     QuantityKind::OutputAudioTokens,
 ];
