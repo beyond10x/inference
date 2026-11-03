@@ -115,6 +115,14 @@ response with its own instructions, tool choice, tools and input, or out of band
 conversation `none`, and `RealtimeClient::ping` and `LiveClient::ping` send a WebSocket ping
 for a keepalive the caller schedules.
 
+On main, in the next release, `RealtimeClient::into_split` and `LiveClient::into_split` split an
+open session into a sender (`RealtimeSender`, `LiveSender`), which holds every send method, and a
+receiver (`RealtimeReceiver`, `LiveReceiver`), which holds `next_event`, `session` and the events
+kept during setup. Two tasks own them, so events keep arriving while an audio write the peer does
+not drain is pending. `RealtimeClient::reunite` and `LiveClient::reunite` put the halves back
+together for `close`; halves of two sessions are refused with `ReuniteError`, which hands both
+back.
+
 ## Next
 
 - [Compare voice providers](compare-voice-providers.md) on latency and usage

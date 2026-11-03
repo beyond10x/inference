@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `RealtimeClient::into_split` and `LiveClient::into_split` split an open session into a sender
+  (`RealtimeSender`, `LiveSender`: every send method) and a receiver (`RealtimeReceiver`,
+  `LiveReceiver`: `next_event`, `session` and the events kept during setup) that two tasks own,
+  so server events are read while a write the peer does not drain is pending.
+  `RealtimeClient::reunite` and `LiveClient::reunite` put the halves back together for `close`,
+  and refuse halves of two sessions with `ReuniteError`, which hands both back. The whole
+  clients keep their API.
+
 ## [0.10.0] — 2026-11-03
 
 ### Breaking
