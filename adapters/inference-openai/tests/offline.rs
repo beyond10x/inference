@@ -1068,3 +1068,190 @@ fn the_openai_environment_source_binds_the_key_name_to_openai_api_key() {
         EnvironmentSource::new([("openai-api-key".to_owned(), "OPENAI_API_KEY".to_owned())])
     );
 }
+
+/// The `usage` of a `response.done` read through [`ServerEvent::parse`].
+fn done_usage(event: &Value) -> inference_openai::Usage {
+    match ServerEvent::parse(&event.to_string()).expect("read") {
+        ServerEvent::ResponseDone {
+            usage: Some(usage),
+            unreadable_usage: None,
+            ..
+        } => usage,
+        other => panic!("not a response.done with a readable usage: {other:?}"),
+    }
+}
+
+/// `response.done`, server events page, its example copied whole.
+fn published_response_done() -> Value {
+    json!({
+      "type": "response.done",
+      "event_id": "event_CCXHxcMy86rrKhBLDdqCh",
+      "response": {
+        "object": "realtime.response",
+        "id": "resp_CCXHw0UJld10EzIUXQCNh",
+        "status": "completed",
+        "status_details": null,
+        "output": [
+          {
+            "id": "item_CCXHwGjjDUfOXbiySlK7i",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_audio",
+                "transcript": "Loud and clear! I can hear you perfectly. How can I help you today?"
+              }
+            ]
+          }
+        ],
+        "conversation_id": "conv_CCXHsurMKcaVxIZvaCI5m",
+        "output_modalities": [
+          "audio"
+        ],
+        "max_output_tokens": "inf",
+        "audio": {
+          "output": {
+            "format": {
+              "type": "audio/pcm",
+              "rate": 24000
+            },
+            "voice": "alloy"
+          }
+        },
+        "usage": {
+          "total_tokens": 253,
+          "input_tokens": 132,
+          "output_tokens": 121,
+          "input_token_details": {
+            "text_tokens": 119,
+            "audio_tokens": 13,
+            "image_tokens": 0,
+            "cached_tokens": 64,
+            "cached_tokens_details": {
+              "text_tokens": 64,
+              "audio_tokens": 0,
+              "image_tokens": 0
+            }
+          },
+          "output_token_details": {
+            "text_tokens": 30,
+            "audio_tokens": 91
+          }
+        },
+        "metadata": null
+      }
+    })
+}
+
+/// `input_token_details.cached_tokens_details.audio_tokens` of `response.done` is the cached
+/// audio input: the published example's 0 is a 0 the server sent, and a count the server sends
+/// is read as it is.
+#[test]
+fn response_done_reads_cached_audio_input_tokens() {
+    let usage = done_usage(&published_response_done());
+    assert_eq!(usage.cached_input_tokens, Some(64));
+    assert_eq!(
+        usage.cached_input_audio_tokens,
+        Some(0),
+        "the example sends audio_tokens 0 in cached_tokens_details"
+    );
+
+    let mut event = published_response_done();
+    let details = &mut event["response"]["usage"]["input_token_details"];
+    details["cached_tokens"] = json!(64);
+    details["cached_tokens_details"] =
+        json!({"text_tokens": 40, "audio_tokens": 24, "image_tokens": 0});
+    let usage = done_usage(&event);
+    assert_eq!(usage.cached_input_audio_tokens, Some(24));
+    assert_eq!(
+        (
+            usage.input_text_tokens,
+            usage.input_audio_tokens,
+            usage.cached_input_tokens
+        ),
+        (Some(119), Some(13), Some(64)),
+        "the cached audio is inside the cached and the audio input, which keep their own counts"
+    );
+    assert_eq!(
+        usage.to_string(),
+        "total 253 tokens; input 132 (text 119, audio 13, cached 64, cached audio 24); output 121 (text 30, audio 91)"
+    );
+}
+
+/// A `response.done` whose usage leaves out `cached_tokens_details`, or its `audio_tokens`, or
+/// sends either in another shape, keeps the cached audio input unknown, never 0, and the other
+/// counts as they were sent.
+#[test]
+fn response_done_without_cached_details_keeps_cached_audio_unknown() {
+    let shapes = [
+        ("no cached_tokens_details", None),
+        ("cached_tokens_details null", Some(Value::Null)),
+        (
+            "no audio_tokens",
+            Some(json!({"text_tokens": 64, "image_tokens": 0})),
+        ),
+        (
+            "audio_tokens null",
+            Some(json!({"text_tokens": 64, "audio_tokens": null})),
+        ),
+        (
+            "audio_tokens a string",
+            Some(json!({"text_tokens": 64, "audio_tokens": "24"})),
+        ),
+        (
+            "audio_tokens negative",
+            Some(json!({"text_tokens": 64, "audio_tokens": -1})),
+        ),
+        (
+            "audio_tokens a fraction",
+            Some(json!({"text_tokens": 64, "audio_tokens": 2.5})),
+        ),
+        (
+            "cached_tokens_details an array",
+            Some(json!([{"audio_tokens": 24}])),
+        ),
+        ("cached_tokens_details a number", Some(json!(24))),
+    ];
+    for (shape, details) in shapes {
+        let mut event = published_response_done();
+        let input = event["response"]["usage"]["input_token_details"]
+            .as_object_mut()
+            .expect("an object");
+        match details {
+            Some(details) => {
+                input.insert("cached_tokens_details".to_owned(), details);
+            }
+            None => {
+                input.remove("cached_tokens_details");
+            }
+        }
+        let usage = done_usage(&event);
+        assert_eq!(usage.cached_input_audio_tokens, None, "{shape}");
+        assert_eq!(
+            (
+                usage.input_text_tokens,
+                usage.input_audio_tokens,
+                usage.cached_input_tokens
+            ),
+            (Some(119), Some(13), Some(64)),
+            "{shape}"
+        );
+        assert!(
+            usage.to_string().contains("cached 64, cached audio -)"),
+            "{shape}: {usage}"
+        );
+    }
+
+    let mut event = published_response_done();
+    event["response"]["usage"]
+        .as_object_mut()
+        .expect("an object")
+        .remove("input_token_details");
+    let usage = done_usage(&event);
+    assert_eq!(
+        (usage.cached_input_tokens, usage.cached_input_audio_tokens),
+        (None, None),
+        "no input_token_details at all"
+    );
+}

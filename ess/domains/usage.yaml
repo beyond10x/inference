@@ -22,8 +22,9 @@ summary: >-
   the provider reported serving, the run, node, session, native speech session and response it was
   made for where there is one, when it started and ended on the wall clock, whether the provider
   marked its counts final, and its quantities. Each quantity names its kind (text tokens in and
-  out, cached and cache-creation input tokens, audio tokens and audio milliseconds in and out,
-  input characters, requests, local compute milliseconds), its source (reported by the provider,
+  out, cached and cache-creation input tokens, the cached input audio tokens among the cached,
+  audio tokens and audio milliseconds in and out, input characters, requests, local compute
+  milliseconds), its source (reported by the provider,
   measured locally, or unknown) and its value, none exactly when the source is unknown. A record
   is created once, when its call ends, and never changes. A CostRecord prices one usage record
   with one caller-supplied price document: its currency, revision and digest, a line per charged
@@ -40,21 +41,27 @@ types:
     of: Uuid
 
   # What a quantity counts. Cached and cache-creation input tokens are a subset of the input
-  # tokens, never added to them. The native speech usage types map onto these kinds:
+  # tokens, never added to them. Cached input audio tokens are the audio input tokens the provider
+  # served from its cache, counted inside both cached_input_tokens and input_audio_tokens and never
+  # added to either; a provider that does not split its cached input by modality leaves the kind
+  # unknown. The native speech usage types map onto these kinds:
   # inference.duplex.ResponseUsage input text_tokens to input_text_tokens, input audio_tokens to
   # input_audio_tokens, input cached_tokens to cached_input_tokens, output text_tokens to
   # output_text_tokens and output audio_tokens to output_audio_tokens (output cached_tokens has no
-  # kind: no provider caches output); inference.duplex.TranscriptionUsage input_tokens to
-  # input_audio_tokens and output_tokens to output_text_tokens.
+  # kind: no provider caches output; ResponseUsage has no cached audio count, so a binding whose
+  # provider reports one records it from its own fields); inference.duplex.TranscriptionUsage
+  # input_tokens to input_audio_tokens and output_tokens to output_text_tokens.
   # read from: docs/design/inference.md:367
   # read from: docs/design/inference.md:373
   # read from: docs/design/inference.md:439
+  # read from: https://developers.openai.com/api/reference/resources/realtime/server-events (response.done, usage.input_token_details.cached_tokens_details.audio_tokens)
   - name: inference.usage.QuantityKind
     kind: enum
     variants:
       - input_text_tokens
       - output_text_tokens
       - cached_input_tokens
+      - cached_input_audio_tokens
       - cache_creation_input_tokens
       - input_audio_tokens
       - output_audio_tokens
