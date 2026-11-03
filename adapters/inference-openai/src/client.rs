@@ -44,14 +44,20 @@ pub struct RealtimeClient {
 
 /// The `item.name` of each `function_call` item of a `response.output_item.added` or
 /// `response.output_item.done` read, by `item.id`, oldest first and at most [`CallNames::KEPT`]:
-/// the oldest is forgotten first, and an entry once the call of its item is read.
+/// the oldest is forgotten first, and an entry once the call of its item is read. The ids of the
+/// last [`CallNames::KEPT`] items whose call was read are kept too, so an output item that
+/// arrives after its call names nothing again.
 #[derive(Debug, Default)]
-struct CallNames(VecDeque<(String, String)>);
+struct CallNames {
+    names: VecDeque<(String, String)>,
+    read: VecDeque<String>,
+}
 
 impl CallNames {
     const KEPT: usize = 64;
 
-    /// Remembers the name of `event`'s item when it is a `function_call` output item.
+    /// Remembers the name of `event`'s item when it is a `function_call` output item with a
+    /// non-empty name whose call has not been read.
     fn remember(&mut self, event: &ServerEvent) {
         let ServerEvent::Unknown { event_type, raw } = event else {
             return;
@@ -72,27 +78,41 @@ impl CallNames {
         ) else {
             return;
         };
-        if let Some(entry) = self.0.iter_mut().find(|(item_id, _)| item_id == id) {
+        if name.is_empty() || self.read.iter().any(|item_id| item_id == id) {
+            return;
+        }
+        if let Some(entry) = self.names.iter_mut().find(|(item_id, _)| item_id == id) {
             name.clone_into(&mut entry.1);
             return;
         }
-        if self.0.len() == Self::KEPT {
-            self.0.pop_front();
-        }
-        self.0.push_back((id.to_owned(), name.to_owned()));
+        bounded_push(&mut self.names, (id.to_owned(), name.to_owned()));
     }
 
     /// `event`, a function call without its name named from the item of its `item_id`. The
-    /// entry of that item is forgotten once its call is read, named or not.
+    /// entry of that item is forgotten once its call is read, named or not, and the item is not
+    /// remembered again.
     fn fill(&mut self, mut event: ServerEvent) -> ServerEvent {
-        if let ServerEvent::FunctionCall { item_id, name, .. } = &mut event
-            && let Some(at) = self.0.iter().position(|(item, _)| item == item_id)
-            && let Some((_, remembered)) = self.0.remove(at)
-        {
-            name.get_or_insert(remembered);
+        if let ServerEvent::FunctionCall { item_id, name, .. } = &mut event {
+            if let Some(at) = self.names.iter().position(|(item, _)| item == item_id)
+                && let Some((_, remembered)) = self.names.remove(at)
+            {
+                name.get_or_insert(remembered);
+            }
+            if !self.read.iter().any(|read| read == item_id) {
+                bounded_push(&mut self.read, item_id.clone());
+            }
         }
         event
     }
+}
+
+/// Appends `entry` to `queue`, first forgetting its oldest entry when it holds
+/// [`CallNames::KEPT`].
+fn bounded_push<T>(queue: &mut VecDeque<T>, entry: T) {
+    if queue.len() == CallNames::KEPT {
+        queue.pop_front();
+    }
+    queue.push_back(entry);
 }
 
 impl fmt::Debug for RealtimeClient {
