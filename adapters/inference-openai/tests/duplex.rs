@@ -999,6 +999,7 @@ fn each_response_and_transcription_is_one_usage_record_with_absent_counts_unknow
             (QuantityKind::InputTextTokens, Some(5)),
             (QuantityKind::InputAudioTokens, Some(20)),
             (QuantityKind::CachedInputTokens, None),
+            (QuantityKind::CachedInputAudioTokens, None),
             (QuantityKind::OutputTextTokens, None),
             (QuantityKind::OutputAudioTokens, None),
             (QuantityKind::Requests, Some(1)),
@@ -1028,6 +1029,7 @@ fn each_response_and_transcription_is_one_usage_record_with_absent_counts_unknow
             (QuantityKind::InputTextTokens, None),
             (QuantityKind::InputAudioTokens, None),
             (QuantityKind::CachedInputTokens, None),
+            (QuantityKind::CachedInputAudioTokens, None),
             (QuantityKind::OutputTextTokens, None),
             (QuantityKind::OutputAudioTokens, None),
             (QuantityKind::Requests, Some(1)),
@@ -1084,6 +1086,7 @@ fn the_callers_cancellation_is_recorded_with_the_usage_its_response_done_reports
             (QuantityKind::InputTextTokens, Some(5)),
             (QuantityKind::InputAudioTokens, Some(20)),
             (QuantityKind::CachedInputTokens, Some(4)),
+            (QuantityKind::CachedInputAudioTokens, None),
             (QuantityKind::OutputTextTokens, Some(3)),
             (QuantityKind::OutputAudioTokens, Some(12)),
             (QuantityKind::Requests, Some(1)),
@@ -1854,4 +1857,115 @@ fn duplex_call_without_any_name_is_not_offered() {
     assert_eq!(session.ledger().session().state(), SpeechSessionState::Open);
     session.close().expect("open");
     server.finish();
+}
+
+/// The usage record of a response carries `cached_input_audio_tokens`: provider-reported with
+/// the count `input_token_details.cached_tokens_details.audio_tokens` of its `response.done`
+/// carries, unknown with no value when that count is left out or the `response.done` has no
+/// usage at all. The cached audio is inside the cached and the audio input tokens, which keep
+/// their own counts.
+#[test]
+fn realtime_duplex_records_cached_audio_input_tokens() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(
+            &mut socket,
+            json!({"type": "response.done", "event_id": "event_rd1", "response": {
+                "id": "resp_1", "object": "realtime.response", "status": "completed", "output": [],
+                "usage": {
+                    "total_tokens": 40, "input_tokens": 25, "output_tokens": 15,
+                    "input_token_details": {
+                        "text_tokens": 5, "audio_tokens": 20, "image_tokens": 0, "cached_tokens": 16,
+                        "cached_tokens_details": {"text_tokens": 4, "audio_tokens": 12, "image_tokens": 0}
+                    },
+                    "output_token_details": {"text_tokens": 3, "audio_tokens": 12}
+                }
+            }}),
+        )
+        .await;
+        send(&mut socket, committed("item_2")).await;
+        send(&mut socket, response_created("resp_2")).await;
+        send(&mut socket, response_done("resp_2", "completed")).await;
+        send(&mut socket, committed("item_3")).await;
+        send(&mut socket, response_created("resp_3")).await;
+        send(
+            &mut socket,
+            json!({"type": "response.done", "event_id": "event_rd3", "response": {
+                "id": "resp_3", "object": "realtime.response", "status": "completed", "output": [],
+                "usage": null
+            }}),
+        )
+        .await;
+        let _ = socket.next().await;
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let seen = std::cell::Cell::new(0);
+    let events = until(&mut session, |event| {
+        if matches!(event, SessionEvent::UsageRecorded(_)) {
+            seen.set(seen.get() + 1);
+        }
+        seen.get() == 3
+    });
+    session.close().expect("open");
+    server.finish();
+
+    let responses = created(&events);
+    let recorded = records(&events);
+    assert_eq!((responses.len(), recorded.len()), (3, 3), "{events:#?}");
+    assert_eq!(
+        recorded
+            .iter()
+            .map(|record| record.response_id)
+            .collect::<Vec<_>>(),
+        responses.iter().copied().map(Some).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        quantities(recorded[0]),
+        [
+            (QuantityKind::InputTextTokens, Some(5)),
+            (QuantityKind::InputAudioTokens, Some(20)),
+            (QuantityKind::CachedInputTokens, Some(16)),
+            (QuantityKind::CachedInputAudioTokens, Some(12)),
+            (QuantityKind::OutputTextTokens, Some(3)),
+            (QuantityKind::OutputAudioTokens, Some(12)),
+            (QuantityKind::Requests, Some(1)),
+        ],
+        "the cached audio the server sent, provider-reported"
+    );
+    let cached_audio = |record: &UsageRecorded| {
+        record
+            .quantities
+            .iter()
+            .filter(|quantity| quantity.kind() == QuantityKind::CachedInputAudioTokens)
+            .map(|quantity| (quantity.source(), quantity.value()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        cached_audio(recorded[0]),
+        [(QuantitySource::ProviderReported, Some(12))]
+    );
+    assert_eq!(
+        cached_audio(recorded[1]),
+        [(QuantitySource::Unknown, None)],
+        "a usage without cached_tokens_details: unknown, never 0"
+    );
+    assert_eq!(
+        quantities(recorded[1])[..4],
+        [
+            (QuantityKind::InputTextTokens, Some(5)),
+            (QuantityKind::InputAudioTokens, Some(20)),
+            (QuantityKind::CachedInputTokens, Some(4)),
+            (QuantityKind::CachedInputAudioTokens, None),
+        ]
+    );
+    assert_eq!(
+        cached_audio(recorded[2]),
+        [(QuantitySource::Unknown, None)],
+        "a response.done with no usage: unknown, as every count of it"
+    );
 }

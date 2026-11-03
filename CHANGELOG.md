@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- `inference_openai::Usage` has a new public field `cached_input_audio_tokens`; a literal that
+  lists every field adds it. `QuantityKind` has a new variant `CachedInputAudioTokens` and
+  `QuantityKind::ALL` twelve kinds; a `match` that names every kind adds it.
+
 ### Added
 
 - `RealtimeClient::into_split` and `LiveClient::into_split` split an open session into a sender
@@ -11,6 +17,20 @@
   `RealtimeClient::reunite` and `LiveClient::reunite` put the halves back together for `close`,
   and refuse halves of two sessions with `ReuniteError`, which hands both back. The whole
   clients keep their API.
+- The `cached_input_audio_tokens` quantity kind: audio input tokens the provider served from its
+  cache, counted inside both `cached_input_tokens` and `input_audio_tokens`, never added to
+  either. The Realtime client reads it from `response.done`'s
+  `usage.input_token_details.cached_tokens_details.audio_tokens` into
+  `Usage::cached_input_audio_tokens`, `None` when the server leaves it out or sends it in
+  another shape, and `Usage`'s `Display` shows it. The Realtime duplex binding records it,
+  provider-reported when sent and unknown when not.
+
+### Changed
+
+- Every duplex response usage record carries a `cached_input_audio_tokens` quantity, unknown
+  unless the binding's provider reports it, as `cached_input_tokens` is carried today.
+- A price binding that charges `cached_input_audio_tokens` gets a `price_unknown` line:
+  `llm-cost` has no unit for it.
 
 ## [0.10.0] — 2026-11-03
 

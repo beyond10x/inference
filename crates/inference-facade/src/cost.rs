@@ -22,9 +22,9 @@
 //! binding match stays unknown with `llm-cost`'s reason, and the counts of a record whose `final`
 //! is false, its compute among them, give a lower bound marked `usage_incomplete`. The input line counts the input tokens neither
 //! read from nor written to the cache, as `llm-cost` prices them, which a cache split known only
-//! in part leaves unknown. A charged kind `llm-cost` has no unit for (audio tokens, audio
-//! milliseconds, characters, requests), or a charged kind with no price of its family in the
-//! binding, gets a `price_unknown` line. Quantities of one kind are added up, each checked first:
+//! in part leaves unknown. A charged kind `llm-cost` has no unit for (audio tokens, cached audio
+//! input tokens, audio milliseconds, characters, requests), or a charged kind with no price of
+//! its family in the binding, gets a `price_unknown` line. Quantities of one kind are added up, each checked first:
 //! one unknown or negative value, or a sum beyond `i64`, makes the kind's count unknown, never
 //! netted.
 //!

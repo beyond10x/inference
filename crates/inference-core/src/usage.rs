@@ -48,8 +48,9 @@ uuid_newtype!(
 );
 
 /// `inference.usage.QuantityKind`: what a [`Quantity`] counts. Cached and cache-creation input
-/// tokens are a subset of the input tokens, never added to them. Serialized as written in ESS
-/// (`input_text_tokens`, `local_compute_ms`).
+/// tokens are a subset of the input tokens, never added to them; cached input audio tokens are a
+/// subset of both the cached input tokens and the input audio tokens, never added to either.
+/// Serialized as written in ESS (`input_text_tokens`, `local_compute_ms`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuantityKind {
@@ -59,6 +60,9 @@ pub enum QuantityKind {
     OutputTextTokens,
     /// Input tokens the provider served from its cache, counted inside the input tokens.
     CachedInputTokens,
+    /// Audio input tokens the provider served from its cache, counted inside both the cached input
+    /// tokens and the input audio tokens.
+    CachedInputAudioTokens,
     /// Input tokens the provider wrote to its cache, counted inside the input tokens.
     CacheCreationInputTokens,
     /// Audio tokens the model read.
@@ -79,10 +83,11 @@ pub enum QuantityKind {
 
 impl QuantityKind {
     /// Every kind, in the order `ess/domains/usage.yaml` lists them.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::InputTextTokens,
         Self::OutputTextTokens,
         Self::CachedInputTokens,
+        Self::CachedInputAudioTokens,
         Self::CacheCreationInputTokens,
         Self::InputAudioTokens,
         Self::OutputAudioTokens,
@@ -925,6 +930,7 @@ mod tests {
                 "input_text_tokens",
                 "output_text_tokens",
                 "cached_input_tokens",
+                "cached_input_audio_tokens",
                 "cache_creation_input_tokens",
                 "input_audio_tokens",
                 "output_audio_tokens",
