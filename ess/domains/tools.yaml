@@ -87,11 +87,14 @@ entities:
       - name: name
         type: String
       # What the tool does, in the words a model reads to choose it; an adapter that offers the
-      # tool to a provider sends it as the provider's tool description. The empty string is a
-      # tool declared without one: it is kept as declared, and an adapter sends no other text in
-      # its place than the tool's own name.
+      # tool to a provider sends it in the provider's tool description, or, where the provider's
+      # tool has no description of its own, folded into the text the provider reads. The empty
+      # string is a tool declared without one: it is kept as declared, and an adapter sends no
+      # other text in its place than the tool's own name.
       # read from: docs/design/inference.md:847
       # read from: docs/design/inference.md:859
+      # UNMAPPED: the design names no tool description; the field answers a downstream adopter's
+      # report that the duplex bindings offered every tool with an empty one.
       - name: description
         type: String
       # The argument schema of the tool. Arguments are validated against it after the proposal
