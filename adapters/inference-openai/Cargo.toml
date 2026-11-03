@@ -59,5 +59,9 @@ required-features = ["gpt-live", "duplex"]
 name = "live_gpt"
 required-features = ["live", "gpt-live"]
 
+[[test]]
+name = "gpt_live_ping"
+required-features = ["gpt-live"]
+
 [lints]
 workspace = true
