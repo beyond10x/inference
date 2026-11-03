@@ -86,7 +86,7 @@ use serde_json::{Value, json};
 
 use crate::client::{
     ReuniteError, SocketSink, SocketStream, check_model, close_socket, open_socket, read_text,
-    send_json,
+    send_json, within,
 };
 use crate::config::{DEFAULT_READ_TIMEOUT, Endpoint, FunctionTool};
 use crate::credential::CredentialSource;
@@ -1011,26 +1011,25 @@ impl LiveClient {
     ) -> Result<LiveClosed, RealtimeError> {
         let bound = self.receiver.read_timeout.max(CLOSE_TIMEOUT);
         let started = tokio::time::Instant::now();
-        let deadline = started + bound;
         self.receiver.read_timeout = bound;
         self.receiver.last_message = started;
-        tokio::time::timeout_at(deadline, self.sender.request_close())
+        within(started, bound, self.sender.request_close())
             .await
-            .map_err(|_| RealtimeError::Stalled(bound))??;
+            .ok_or(RealtimeError::Stalled(bound))??;
         let closed = loop {
-            match tokio::time::timeout_at(deadline, self.receiver.next_event()).await {
-                Err(_) | Ok(Err(RealtimeError::Stalled(_))) => {
+            match within(started, bound, self.receiver.next_event()).await {
+                None | Some(Err(RealtimeError::Stalled(_))) => {
                     break Err(RealtimeError::Stalled(bound));
                 }
-                Ok(Ok(LiveEvent::SessionClosed { reason, seconds })) => {
+                Some(Ok(LiveEvent::SessionClosed { reason, seconds })) => {
                     break Ok(LiveClosed { reason, seconds });
                 }
-                Ok(Ok(event)) => seen(Ok(event)),
-                Ok(Err(error @ RealtimeError::Protocol(_))) => seen(Err(error)),
-                Ok(Err(error)) => return Err(error),
+                Some(Ok(event)) => seen(Ok(event)),
+                Some(Err(error @ RealtimeError::Protocol(_))) => seen(Err(error)),
+                Some(Err(error)) => return Err(error),
             }
         };
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let left = bound.saturating_sub(started.elapsed());
         let _ = close_socket(&mut self.sender.sink, &mut self.receiver.stream, left).await;
         closed
     }

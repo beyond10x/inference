@@ -64,6 +64,9 @@
   documented bound (the read timeout; the longer of the read timeout and `CLOSE_TIMEOUT`) when
   the peer stops draining the socket. Before, they waited for the close-frame or
   `session.close` write forever, outside that bound.
+- A read timeout too large to add to the current instant (such as `Duration::MAX`) no longer
+  panics: reads and `close` on the Realtime and GPT-Live clients wait without a deadline. A wait
+  that large passed to either duplex binding's `next_event` no longer panics either.
 
 ## [0.10.0] — 2026-11-03
 

@@ -76,6 +76,10 @@ name = "gpt_live_stall_bound"
 required-features = ["gpt-live"]
 
 [[test]]
+name = "adversary16_u3_live_stall"
+required-features = ["gpt-live"]
+
+[[test]]
 name = "adversary15_u2_live_ping"
 required-features = ["gpt-live"]
 

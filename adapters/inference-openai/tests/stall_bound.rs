@@ -300,3 +300,21 @@ async fn the_bound_runs_again_from_a_stall() {
     drop(client);
     task.abort();
 }
+
+/// `Endpoint::with_read_timeout` takes any bound, so a caller that wants none sets `Duration::MAX`.
+/// A close deadline too large to represent never passes: `close` waits for the close frame
+/// instead of panicking.
+#[tokio::test]
+async fn close_with_a_read_timeout_of_duration_max_waits_for_the_close_frame() {
+    let (endpoint, task) = serve(|mut socket| async move {
+        accept_session(&mut socket).await;
+        hold_open(socket).await;
+    })
+    .await;
+    let client = connect(&endpoint.with_read_timeout(Duration::MAX)).await;
+    tokio::time::timeout(Duration::from_secs(10), client.close())
+        .await
+        .expect("the server answered the close frame at once")
+        .expect("the close completes");
+    task.abort();
+}

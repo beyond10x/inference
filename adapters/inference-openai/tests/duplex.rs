@@ -2022,3 +2022,32 @@ fn realtime_duplex_records_cached_audio_input_tokens() {
         "a response.done with no usage: unknown, as every count of it"
     );
 }
+
+/// `next_event` takes any wait, so a caller that wants to wait for the next event however long it
+/// takes passes `Duration::MAX`. A deadline too large to represent never passes: the wait ends
+/// with the next event, here the failure of a closed transport, instead of panicking.
+#[test]
+fn a_wait_of_duration_max_ends_with_the_next_event() {
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        socket.close(None).await.unwrap();
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::Disabled, false))
+        .expect("the session opens");
+    let mut events = Vec::new();
+    while !matches!(events.last(), Some(SessionEvent::SpeechSessionFailed(_))) {
+        let event = session.next_event(Duration::MAX);
+        events.push(event.expect("an event before the failure"));
+    }
+    server.finish();
+    assert!(
+        matches!(
+            events.last(),
+            Some(SessionEvent::SpeechSessionFailed(failed))
+                if failed.failure.kind == SessionFailureKind::TransportClosed
+        ),
+        "{events:#?}"
+    );
+}
