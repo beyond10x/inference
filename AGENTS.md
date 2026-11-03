@@ -6,7 +6,7 @@ on this repository. `README.md` is for people.
 ## Serves
 
 - **O4 — products run on the foundation.** `inference-llm` runs model turns over the released `llm`
-  contract (`b10x-llm-core`, pinned by tag), and the crates are held to their ESS specification in
+  contract (`llm-core`, pinned by tag), and the crates are held to their ESS specification in
   `ess/`; nothing comes from the predecessor monorepo.
 
 ## Start here
@@ -80,11 +80,11 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   checkpoint. Tests download no weights and start no model server: a test that needs one reads
   its path or URL from an environment variable and is ignored without it.
 - `inference-llm` is a thin wrapper over the `llm` repository's model contract
-  (`b10x-llm-core`, `llm_core::Model`) at a release tag, 0.8.3 now, and the workspace's
+  (`llm-core`, `llm_core::Model`) at a release tag, 0.20.0 now, and the workspace's
   `rust-version` is what that tag requires, 1.98 (owner decision, 2026-10-20, reversing the
   2026-10-18 rule for `llm` only). Its request, items, tool calls and usage are `llm`'s; the
   wrapper adds only graph concerns, and `llm`'s wire crates, being provider implementations, stay
-  out of the contract crates. `b10x-llm-cost` at the same tag, its `sqlite` feature off, is the
+  out of the contract crates. `llm-cost` at the same tag, its `sqlite` feature off, is the
   one other `llm` crate admitted, for pricing only and only behind `inference-facade`'s `cost`
   feature: its price document format, exact decimal money and unknown-preserving arithmetic are
   versioned there, and a second implementation here would fork the price document format (owner
