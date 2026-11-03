@@ -18,6 +18,7 @@ use serde_json::json;
 fn tool(side_effect: SideEffectClass, requires_confirmation: bool) -> Tool {
     Tool::declare(DeclareTool {
         name: "book".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object"}),
         schema_revision: "1".to_owned(),
         side_effect,
@@ -377,6 +378,31 @@ fn serialized_names_are_the_ess_names() {
             "Failed",
             "Rejected"
         ]
+    );
+}
+
+#[test]
+fn declare_tool_keeps_its_description() {
+    let declare = |description: &str| DeclareTool {
+        name: "book".to_owned(),
+        description: description.to_owned(),
+        schema: json!({"type": "object"}),
+        schema_revision: "1".to_owned(),
+        side_effect: SideEffectClass::IdempotentWrite,
+        requires_confirmation: false,
+    };
+    let (described, declared) = Tool::declare(declare("Books a table for the day it names."));
+    assert_eq!(
+        described.description(),
+        "Books a table for the day it names."
+    );
+    assert_eq!(declared.name, "book");
+
+    let (bare, _) = Tool::declare(declare(""));
+    assert_eq!(
+        bare.description(),
+        "",
+        "an empty description is kept as declared"
     );
 }
 

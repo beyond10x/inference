@@ -366,6 +366,7 @@ fn declared_tools() -> (Tool, Tool) {
     let mut declare = |name: &str, side_effect| {
         let declared = tools.declare_tool(DeclareTool {
             name: name.to_owned(),
+            description: String::new(),
             schema: json!({
                 "type": "object",
                 "properties": {"day": {"type": "string"}},

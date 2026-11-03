@@ -345,7 +345,7 @@ impl OpenAiRealtime {
                 .iter()
                 .map(|tool| FunctionTool {
                     name: tool.name().to_owned(),
-                    description: String::new(),
+                    description: tool.description().to_owned(),
                     parameters: tool.schema().clone(),
                 })
                 .collect(),

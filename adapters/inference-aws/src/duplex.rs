@@ -307,7 +307,11 @@ impl<C: Connector> NovaSonicSpeech<C> {
             .iter()
             .map(|tool| ToolSpec {
                 name: tool.name().to_owned(),
-                description: tool.name().to_owned(),
+                description: if tool.description().is_empty() {
+                    tool.name().to_owned()
+                } else {
+                    tool.description().to_owned()
+                },
                 input_schema: tool.schema().clone(),
             })
             .collect();

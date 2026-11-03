@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Breaking: `inference_tools::DeclareTool` has a new public field `description`, the text a model
+  reads to choose the tool, kept by `Tool::description`; a literal adds it (`String::new()`
+  declares a tool without one). `inference_testkit::tools::ToolsRow` carries it too.
+- The Nova Sonic duplex binding describes a tool by its declared description, and
+  `inference_llm::tools::tool_spec` by `name: description`; a tool declared without one is still
+  described by its name.
+
+### Fixed
+
+- Both OpenAI duplex bindings, Realtime and GPT-Live, send each tool's declared description in
+  its function tool instead of an empty one.
+
 ## [0.10.0] — 2026-11-03
 
 ### Breaking

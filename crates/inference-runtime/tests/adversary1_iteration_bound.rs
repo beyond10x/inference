@@ -175,6 +175,7 @@ fn planned() -> (Declaration, PlannedPipeline, Nodes) {
 fn tool(name: &str) -> Tool {
     Tool::declare(DeclareTool {
         name: name.to_owned(),
+        description: String::new(),
         schema: json!({"type": "object"}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,
