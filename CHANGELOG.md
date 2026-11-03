@@ -60,6 +60,10 @@
   bound, so a caller that dropped its read (a `select!` or a shorter timeout around
   `next_event`) and called again never saw `Stalled`. A message already received is still
   returned after the bound passed, and after a stall the bound runs again from the stall.
+- `RealtimeClient::close` and `LiveClient::close` return `RealtimeError::Stalled` within their
+  documented bound (the read timeout; the longer of the read timeout and `CLOSE_TIMEOUT`) when
+  the peer stops draining the socket. Before, they waited for the close-frame or
+  `session.close` write forever, outside that bound.
 
 ## [0.10.0] — 2026-11-03
 

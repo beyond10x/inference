@@ -991,8 +991,9 @@ impl LiveClient {
     /// closes the connection. Events read on the way are dropped, and so are messages that are not
     /// GPT-Live events: the client reads on past them.
     ///
-    /// The whole close, every read and the closing of the connection, takes at most the longer
-    /// of the endpoint's read timeout and [`CLOSE_TIMEOUT`], however often the server sends.
+    /// The whole close, the write of `session.close`, every read and the closing of the
+    /// connection, takes at most the longer of the endpoint's read timeout and [`CLOSE_TIMEOUT`],
+    /// however often the server sends and whether or not it drains the socket.
     ///
     /// # Errors
     /// The errors of [`LiveClient::next_event`] when the connection ends before
@@ -1013,7 +1014,9 @@ impl LiveClient {
         let deadline = started + bound;
         self.receiver.read_timeout = bound;
         self.receiver.last_message = started;
-        self.sender.request_close().await?;
+        tokio::time::timeout_at(deadline, self.sender.request_close())
+            .await
+            .map_err(|_| RealtimeError::Stalled(bound))??;
         let closed = loop {
             match tokio::time::timeout_at(deadline, self.receiver.next_event()).await {
                 Err(_) | Ok(Err(RealtimeError::Stalled(_))) => {
