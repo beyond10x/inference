@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-03T11:49:00Z",
+  "actor": "human:operator",
+  "artifact": "story:realtime-committed-previous-item",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check steps with ess 0.84.0 exit 0 (sherpa-onnx archive, ess validate, aep validate, docs check, fmt, clippy --workspace --all-targets --all-features); cargo test --workspace --all-features --no-fail-fast: 371 suites, 2719 passed, 0 failed, 50 ignored (wave/0.10.0 5329844)"
+  }
+}
