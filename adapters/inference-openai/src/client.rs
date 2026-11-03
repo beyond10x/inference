@@ -17,7 +17,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use zeroize::Zeroizing;
 
 use crate::audio::encode_pcm16_24k;
-use crate::config::{Endpoint, SessionConfig, WireFormat};
+use crate::config::{Endpoint, FunctionTool, SessionConfig, ToolChoice, WireFormat};
 use crate::credential::{CredentialError, CredentialSource};
 use crate::error::{ConnectError, RealtimeError};
 use crate::event::ServerEvent;
@@ -312,12 +312,41 @@ impl RealtimeClient {
         .await
     }
 
-    /// Sends `response.create`.
+    /// Sends `response.create` with no `event_id` and no `response` object, exactly
+    /// `{"type": "response.create"}`: the response takes every setting from the session. It is
+    /// [`RealtimeClient::create_response_with`] with [`ResponseOptions::default`].
     ///
     /// # Errors
     /// [`RealtimeError::Transport`] when the write fails.
     pub async fn create_response(&mut self) -> Result<(), RealtimeError> {
-        self.send(json!({"type": "response.create"})).await
+        self.create_response_with(&ResponseOptions::default()).await
+    }
+
+    /// Sends `response.create` with `options.event_id` as the event's top-level `event_id`, and a
+    /// `response` object holding only the options that are set: `instructions`, `tool_choice`,
+    /// `conversation`, `input` (an array of item objects) and `tools` (an array of function
+    /// tools). Each applies to this response only and leaves the session's configuration as it
+    /// is. When no option inside `response` is set, no `response` key is sent.
+    ///
+    /// A response with [`ResponseConversation::None`] is out of band: its output items are not
+    /// added to the default conversation. Its server events still arrive through
+    /// [`RealtimeClient::next_event`], told apart from other responses' by their `response_id`.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when the write fails.
+    pub async fn create_response_with(
+        &mut self,
+        options: &ResponseOptions,
+    ) -> Result<(), RealtimeError> {
+        let mut event = json!({"type": "response.create"});
+        if let Some(event_id) = &options.event_id {
+            event["event_id"] = json!(event_id);
+        }
+        let response = options.response_json();
+        if !response.is_empty() {
+            event["response"] = Value::Object(response);
+        }
+        self.send(event).await
     }
 
     /// Sends `response.cancel`, for `response_id` or, when `None`, the response in progress. The
@@ -553,6 +582,72 @@ pub struct ItemOptions {
     pub event_id: Option<String>,
     /// The `previous_item_id`: the id of the item the new item is inserted after.
     pub previous_item_id: Option<String>,
+}
+
+/// Which conversation a response's output joins, `response.conversation` of `response.create`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResponseConversation {
+    /// `"auto"`: the output is added to the default conversation, as without the option.
+    Auto,
+    /// `"none"`: an out-of-band response; its output items are not added to the default
+    /// conversation.
+    None,
+}
+
+impl ResponseConversation {
+    /// The `conversation` value in the reference's shape: `"auto"` or `"none"`.
+    fn to_json(self) -> Value {
+        match self {
+            Self::Auto => json!("auto"),
+            Self::None => json!("none"),
+        }
+    }
+}
+
+/// The per-response options of `response.create`, for [`RealtimeClient::create_response_with`].
+/// `event_id` goes at the top level of the event, every other field into its `response` object;
+/// each is left out when `None`, and the session's value applies.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResponseOptions {
+    /// The client event's `event_id`, which a server `error` caused by this event names.
+    pub event_id: Option<String>,
+    /// `response.instructions`: the instructions for this response only.
+    pub instructions: Option<String>,
+    /// `response.tool_choice`: which tools the model may call in this response.
+    pub tool_choice: Option<ToolChoice>,
+    /// `response.conversation`: `"auto"`, or `"none"` for an out-of-band response.
+    pub conversation: Option<ResponseConversation>,
+    /// `response.input`: the items the response reads, as an array of item objects in the shape
+    /// of `conversation.item.create`'s `item`.
+    pub input: Option<Vec<ConversationItem>>,
+    /// `response.tools`: the function tools of this response. `Some(vec![])` sends `[]`, which
+    /// gives this response no tools whatever the session holds.
+    pub tools: Option<Vec<FunctionTool>>,
+}
+
+impl ResponseOptions {
+    /// The `response` object of `response.create`: only the options that are set.
+    fn response_json(&self) -> serde_json::Map<String, Value> {
+        let mut response = serde_json::Map::new();
+        if let Some(instructions) = &self.instructions {
+            response.insert("instructions".to_owned(), json!(instructions));
+        }
+        if let Some(tool_choice) = &self.tool_choice {
+            response.insert("tool_choice".to_owned(), tool_choice.to_json());
+        }
+        if let Some(conversation) = self.conversation {
+            response.insert("conversation".to_owned(), conversation.to_json());
+        }
+        if let Some(input) = &self.input {
+            let items = input.iter().map(ConversationItem::to_json).collect();
+            response.insert("input".to_owned(), Value::Array(items));
+        }
+        if let Some(tools) = &self.tools {
+            let tools = tools.iter().map(FunctionTool::to_json).collect();
+            response.insert("tools".to_owned(), Value::Array(tools));
+        }
+        response
+    }
 }
 
 /// Sends a close frame on `socket` and waits at most `read_timeout` for the server's.
