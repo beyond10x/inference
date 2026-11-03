@@ -317,3 +317,29 @@ async fn live_close_after_a_silence_still_reads_session_closed() {
     assert_eq!(closed.seconds, Some(1.5));
     task.abort();
 }
+
+/// `Endpoint::with_read_timeout` takes any bound, so a caller that wants none sets `Duration::MAX`.
+/// A close deadline too large to represent never passes: `close` waits for `session.closed`
+/// instead of panicking.
+#[tokio::test]
+async fn live_close_with_a_read_timeout_of_duration_max_reads_session_closed() {
+    let (endpoint, task) = serve(|mut socket| async move {
+        accept_start(&mut socket).await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "e_closed", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    })
+    .await;
+    let client = connect(&endpoint.with_read_timeout(Duration::MAX)).await;
+    let closed = tokio::time::timeout(Duration::from_secs(10), client.close())
+        .await
+        .expect("the server answered the close at once")
+        .expect("the close reads session.closed");
+    assert_eq!(closed.reason.as_deref(), Some("close_requested"));
+    task.abort();
+}
