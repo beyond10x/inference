@@ -144,8 +144,9 @@ pub enum NoiseReduction {
     FarField,
 }
 
-/// Which tools the model may call, `tool_choice` of the session configuration in
-/// `session.update`.
+/// Which tools the model may call: `tool_choice` of the session configuration in
+/// `session.update`, and `response.tool_choice` of `response.create` for one response, written
+/// by [`RealtimeClient::create_response_with`](crate::RealtimeClient::create_response_with).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ToolChoice {
     /// `"auto"`: the model decides whether to call a tool.
