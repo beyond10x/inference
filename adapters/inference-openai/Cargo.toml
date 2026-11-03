@@ -59,5 +59,9 @@ required-features = ["gpt-live", "duplex"]
 name = "live_gpt"
 required-features = ["live", "gpt-live"]
 
+[[test]]
+name = "adversary15_u3_duplex"
+required-features = ["duplex"]
+
 [lints]
 workspace = true
