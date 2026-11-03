@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-assistant-item-placement
 kind: story
-status: active
+status: implemented
 title: Realtime client adds an assistant item, placed by previous_item_id, with its own event_id
 summary: conversation.item.create for user, assistant and function-output items with optional previous_item_id and event_id.
 tags:
@@ -16,10 +16,11 @@ scope:
   path: adapters/inference-openai/src/client.rs
 - confidence: inferred
   path: adapters/inference-openai/src/lib.rs
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T11:15:59Z", actor: "human:timo", revision: 2, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
 - {from: "proposed", to: "active", at: "2026-11-03T11:15:59Z", actor: "human:timo", revision: 3, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:39Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 ## Context
 
