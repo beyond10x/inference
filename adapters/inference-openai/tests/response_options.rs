@@ -283,3 +283,48 @@ async fn empty_tools_list_is_sent_as_an_empty_array() {
         .unwrap();
     finish(task).await;
 }
+
+/// The Realtime guide's out-of-band shape: a response with conversation `"none"` whose `input`
+/// carries a system-role message, instructions in context that join no conversation.
+#[tokio::test]
+async fn out_of_band_response_carries_a_system_item() {
+    let (endpoint, task) = serve(|mut socket| async move {
+        accept_session(&mut socket).await;
+        let event = receive(&mut socket).await;
+        assert_eq!(
+            event,
+            json!({
+                "type": "response.create",
+                "response": {
+                    "conversation": "none",
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "system",
+                            "content": [{"type": "input_text", "text": "Summarise the call so far in one line."}],
+                        },
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "I need a new card."}],
+                        },
+                    ],
+                },
+            })
+        );
+    })
+    .await;
+    let mut client = connect(&endpoint).await;
+    client
+        .create_response_with(&ResponseOptions {
+            conversation: Some(ResponseConversation::None),
+            input: Some(vec![
+                ConversationItem::SystemText("Summarise the call so far in one line.".to_owned()),
+                ConversationItem::UserText("I need a new card.".to_owned()),
+            ]),
+            ..ResponseOptions::default()
+        })
+        .await
+        .unwrap();
+    finish(task).await;
+}

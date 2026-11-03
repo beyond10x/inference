@@ -11,6 +11,8 @@
   choose the tool, kept by `Tool::description`; a literal adds it (`String::new()` declares a
   tool without one), and a serialized `DeclareTool` without `description` no longer
   deserializes. `inference_testkit::tools::ToolsRow` carries it too.
+- `inference_openai::ConversationItem` has a new variant `SystemText`; a `match` that names every
+  variant adds it.
 
 ### Added
 
@@ -28,6 +30,10 @@
   `Usage::cached_input_audio_tokens`, `None` when the server leaves it out or sends it in
   another shape, and `Usage`'s `Display` shows it. The Realtime duplex binding records it,
   provider-reported when sent and unknown when not.
+- `ConversationItem::SystemText`, a `message` item with `role: "system"` and one `input_text`
+  part, for `create_item` and `ResponseOptions::input`: an out-of-band response
+  (`conversation: "none"`) can carry instructions in context without adding them to the
+  conversation.
 
 ### Changed
 
@@ -47,6 +53,13 @@
 
 - Both OpenAI duplex bindings, Realtime and GPT-Live, send each tool's declared description in
   its function tool instead of an empty one.
+- The Realtime and GPT-Live read timeout holds across reads: `next_event` on `RealtimeClient`,
+  `LiveClient` and their receivers reports `RealtimeError::Stalled` once the read timeout has
+  passed since the last message read (text or binary; pings and pongs do not count), starting at
+  the end of the handshake, however many calls that spans. Before, each call restarted the
+  bound, so a caller that dropped its read (a `select!` or a shorter timeout around
+  `next_event`) and called again never saw `Stalled`. A message already received is still
+  returned after the bound passed, and after a stall the bound runs again from the stall.
 
 ## [0.10.0] — 2026-11-03
 
