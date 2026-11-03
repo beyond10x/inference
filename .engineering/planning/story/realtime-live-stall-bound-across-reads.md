@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-live-stall-bound-across-reads
 kind: story
-status: active
+status: implemented
 title: The Realtime and GPT-Live stall bound holds across reads
 summary: The read deadline runs from the last message, not from each call, so a caller that drops and repeats reads still sees Stalled.
 tags:
@@ -17,10 +17,11 @@ scope:
   path: adapters/inference-openai/src/client.rs
 - confidence: cited
   path: adapters/inference-openai/src/live.rs
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T15:55:03Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-03T15:55:03Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:39Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 

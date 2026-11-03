@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-usage-cached-audio-input
 kind: story
-status: active
+status: implemented
 title: Usage reports cached audio input tokens when the provider sends them
 summary: A cached_input_audio_tokens quantity kind, read from response.done, unknown when not sent.
 tags:
@@ -22,10 +22,11 @@ scope:
   path: crates/inference-facade/src/cost.rs
 - confidence: cited
   path: ess/domains/usage.yaml
-revision: 8
+revision: 9
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T15:55:03Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-03T15:55:03Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:39Z", actor: "human:operator", revision: 9, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 

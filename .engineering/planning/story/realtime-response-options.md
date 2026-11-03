@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-response-options
 kind: story
-status: active
+status: implemented
 title: Realtime response.create takes per-response options
 summary: create_response with instructions, tool_choice, conversation none, input items, tools and event_id.
 tags:
@@ -16,10 +16,11 @@ relations:
 scope:
 - confidence: cited
   path: adapters/inference-openai/src/client.rs
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T11:15:59Z", actor: "human:operator", revision: 2, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
 - {from: "proposed", to: "active", at: "2026-11-03T11:15:59Z", actor: "human:operator", revision: 3, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:40Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 ## Context
 

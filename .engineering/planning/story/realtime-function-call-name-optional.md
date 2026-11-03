@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-function-call-name-optional
 kind: story
-status: active
+status: implemented
 title: A function call without a name is read, its name carried from the output item
 summary: FunctionCall.name is optional and filled from the matching function_call output item when the server sent one.
 tags:
@@ -18,10 +18,11 @@ scope:
   path: adapters/inference-openai/src/duplex.rs
 - confidence: cited
   path: adapters/inference-openai/src/event.rs
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T11:16:00Z", actor: "human:operator", revision: 2, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
 - {from: "proposed", to: "active", at: "2026-11-03T11:16:00Z", actor: "human:operator", revision: 3, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:40Z", actor: "human:operator", revision: 7, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 ## Context
 

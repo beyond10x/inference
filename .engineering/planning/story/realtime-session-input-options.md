@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-session-input-options
 kind: story
-status: active
+status: implemented
 title: 'Realtime session config: noise reduction, transcription language and prompt, tool choice'
 summary: SessionConfig sends audio.input.noise_reduction, transcription language and prompt, and session tool_choice.
 tags:
@@ -16,10 +16,11 @@ scope:
   path: adapters/inference-openai/src/config.rs
 - confidence: cited
   path: adapters/inference-openai/src/duplex.rs
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T11:15:59Z", actor: "human:operator", revision: 2, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
 - {from: "proposed", to: "active", at: "2026-11-03T11:15:59Z", actor: "human:operator", revision: 3, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:40Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 ## Context
 

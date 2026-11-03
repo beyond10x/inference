@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-committed-previous-item
 kind: story
-status: active
+status: implemented
 title: AudioCommitted keeps previous_item_id
 summary: input_audio_buffer.committed is read with its previous_item_id.
 tags:
@@ -14,10 +14,11 @@ relations:
 scope:
 - confidence: cited
   path: adapters/inference-openai/src/event.rs
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-03T11:16:00Z", actor: "human:operator", revision: 2, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
 - {from: "proposed", to: "active", at: "2026-11-03T11:16:00Z", actor: "human:operator", revision: 3, executor: "agent:inference-wave-0-10-0", correlation: "wave-0-10-0"}
+- {from: "active", to: "implemented", at: "2026-11-03T18:16:39Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 ## Context
 
