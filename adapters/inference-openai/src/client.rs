@@ -62,6 +62,9 @@ pub struct RealtimeSender {
 pub struct RealtimeReceiver {
     stream: SocketStream,
     read_timeout: std::time::Duration,
+    /// When the last message was read, the end of the handshake before the first: the stall
+    /// bound runs from it, across reads.
+    last_message: tokio::time::Instant,
     session: Value,
     pending: VecDeque<ServerEvent>,
     /// The top-level `type` of the message the last read could not take as a Realtime event,
@@ -226,6 +229,7 @@ impl RealtimeClient {
         let mut receiver = RealtimeReceiver {
             stream,
             read_timeout: endpoint.read_timeout,
+            last_message: tokio::time::Instant::now(),
             session: Value::Null,
             pending: VecDeque::new(),
             unparsed_type: None,
@@ -445,9 +449,16 @@ impl RealtimeClient {
 
     /// The next server event, events kept during setup first.
     ///
+    /// The read timeout is a stall bound that holds across calls: it runs from the last message
+    /// read (a text or binary message; pings and other control frames do not count), from the end
+    /// of the handshake before the first, not from this call. A caller that drops the read (a
+    /// `select!`, or a shorter timeout around it) and calls again still sees the stall once the
+    /// read timeout has passed since the last message. A message that already arrived is returned
+    /// even when the bound has passed. After a stall the bound runs again from the stall.
+    ///
     /// # Errors
-    /// [`RealtimeError::Stalled`] when no event arrives within the endpoint's read timeout, pings
-    /// and other frames that are not events counted in it;
+    /// [`RealtimeError::Stalled`] when no message arrived for the endpoint's read timeout, pings
+    /// and other frames that are not messages counted in it;
     /// [`RealtimeError::Closed`] when the server closed the connection;
     /// [`RealtimeError::Transport`] when the read fails; [`RealtimeError::Protocol`] for a
     /// message that is not a Realtime event.
@@ -681,7 +692,8 @@ impl RealtimeReceiver {
     }
 
     /// [`RealtimeClient::next_event`] on this half: the next server event, events kept during
-    /// setup first. A write pending on the sender does not hold it up.
+    /// setup first. A write pending on the sender does not hold it up. The stall bound runs from
+    /// the last message this half read, across calls, as [`RealtimeClient::next_event`] states.
     ///
     /// # Errors
     /// The errors of [`RealtimeClient::next_event`].
@@ -694,7 +706,7 @@ impl RealtimeReceiver {
 
     async fn read_event(&mut self) -> Result<ServerEvent, RealtimeError> {
         self.unparsed_type = None;
-        let text = read_text(&mut self.stream, self.read_timeout).await?;
+        let text = read_text(&mut self.stream, self.read_timeout, &mut self.last_message).await?;
         match ServerEvent::parse(&text) {
             Ok(event) => {
                 self.call_names.remember(&event);
@@ -745,17 +757,26 @@ pub(crate) async fn open_socket(
     Ok(socket)
 }
 
-/// The text of the next text message, waiting at most `read_timeout`; pings and other frames
-/// that are not messages count in the wait.
+/// The text of the next text message, waiting at most until `last_message + read_timeout`, the
+/// stall bound, however many calls it spans: `last_message` is when the reader last read a text
+/// or binary message (the end of the handshake before the first), and each such message read
+/// moves it. Pings and other frames that are not messages count in the wait and move nothing. A
+/// message that already arrived is returned even when the bound has passed, since the socket is
+/// polled before the bound. A stall moves `last_message` to the stall, so the next read waits one
+/// read timeout more instead of failing at once. Cancel safe: `last_message` moves only together
+/// with the message or the stall that is returned.
 pub(crate) async fn read_text(
     socket: &mut SocketStream,
     read_timeout: std::time::Duration,
+    last_message: &mut tokio::time::Instant,
 ) -> Result<String, RealtimeError> {
-    let deadline = tokio::time::Instant::now() + read_timeout;
     loop {
-        let message = tokio::time::timeout_at(deadline, socket.next())
-            .await
-            .map_err(|_| RealtimeError::Stalled(read_timeout))?;
+        let Ok(message) =
+            tokio::time::timeout_at(*last_message + read_timeout, socket.next()).await
+        else {
+            *last_message = tokio::time::Instant::now();
+            return Err(RealtimeError::Stalled(read_timeout));
+        };
         let message = match message {
             None => {
                 return Err(RealtimeError::Closed {
@@ -768,7 +789,10 @@ pub(crate) async fn read_text(
             }
         };
         match message {
-            Message::Text(text) => return Ok(text.as_str().to_owned()),
+            Message::Text(text) => {
+                *last_message = tokio::time::Instant::now();
+                return Ok(text.as_str().to_owned());
+            }
             Message::Close(frame) => {
                 return Err(RealtimeError::Closed {
                     code: frame.as_ref().map(|frame| u16::from(frame.code)),
@@ -779,6 +803,7 @@ pub(crate) async fn read_text(
             }
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
             Message::Binary(data) => {
+                *last_message = tokio::time::Instant::now();
                 return Err(RealtimeError::Protocol(format!(
                     "a binary message of {} bytes; the API sends text",
                     data.len()
@@ -823,6 +848,10 @@ pub(crate) async fn send_ping(
 pub enum ConversationItem {
     /// A `message` item with `role: "user"` and one content part of type `input_text`.
     UserText(String),
+    /// A `message` item with `role: "system"` and one content part of type `input_text`:
+    /// instructions in context, for example in the `input` of an out-of-band response
+    /// ([`ResponseConversation::None`]), which then joins no conversation.
+    SystemText(String),
     /// A `message` item with `role: "assistant"` and one content part of type `output_text`: a
     /// line the application already played or scripts, added to the conversation as said.
     AssistantText(String),
@@ -842,6 +871,11 @@ impl ConversationItem {
             Self::UserText(text) => json!({
                 "type": "message",
                 "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            }),
+            Self::SystemText(text) => json!({
+                "type": "message",
+                "role": "system",
                 "content": [{"type": "input_text", "text": text}],
             }),
             Self::AssistantText(text) => json!({

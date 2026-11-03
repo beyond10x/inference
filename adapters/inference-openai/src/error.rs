@@ -21,7 +21,9 @@ pub enum RealtimeError {
     Transport(String),
     /// The server closed the connection, with its close code and reason when it gave one.
     Closed { code: Option<u16>, reason: String },
-    /// No server event arrived within the read timeout, which this carries.
+    /// No message arrived for the read timeout, which this carries, measured from the last
+    /// message read (the end of the handshake before the first) across every read, not from
+    /// the read that reports it. Pings and other control frames do not count as messages.
     Stalled(Duration),
     /// The server sent something that is not a Realtime event: a binary frame, text that is not a
     /// JSON object with a `type`, or a typed event missing a field the reference requires.

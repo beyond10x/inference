@@ -7,6 +7,8 @@
 - `inference_openai::Usage` has a new public field `cached_input_audio_tokens`; a literal that
   lists every field adds it. `QuantityKind` has a new variant `CachedInputAudioTokens` and
   `QuantityKind::ALL` twelve kinds; a `match` that names every kind adds it.
+- `inference_openai::ConversationItem` has a new variant `SystemText`; a `match` that names every
+  variant adds it.
 
 ### Added
 
@@ -24,6 +26,10 @@
   `Usage::cached_input_audio_tokens`, `None` when the server leaves it out or sends it in
   another shape, and `Usage`'s `Display` shows it. The Realtime duplex binding records it,
   provider-reported when sent and unknown when not.
+- `ConversationItem::SystemText`, a `message` item with `role: "system"` and one `input_text`
+  part, for `create_item` and `ResponseOptions::input`: an out-of-band response
+  (`conversation: "none"`) can carry instructions in context without adding them to the
+  conversation.
 
 ### Changed
 
@@ -31,6 +37,16 @@
   unless the binding's provider reports it, as `cached_input_tokens` is carried today.
 - A price binding that charges `cached_input_audio_tokens` gets a `price_unknown` line:
   `llm-cost` has no unit for it.
+
+### Fixed
+
+- The Realtime and GPT-Live read timeout holds across reads: `next_event` on `RealtimeClient`,
+  `LiveClient` and their receivers reports `RealtimeError::Stalled` once the read timeout has
+  passed since the last message read (text or binary; pings and pongs do not count), starting at
+  the end of the handshake, however many calls that spans. Before, each call restarted the
+  bound, so a caller that dropped its read (a `select!` or a shorter timeout around
+  `next_event`) and called again never saw `Stalled`. A message already received is still
+  returned after the bound passed, and after a stall the bound runs again from the stall.
 
 ## [0.10.0] — 2026-11-03
 
