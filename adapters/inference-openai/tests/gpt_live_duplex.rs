@@ -709,6 +709,7 @@ fn a_function_call_of_the_responses_backend_is_proposed_answered_and_its_usage_r
             Quantity::provider_reported(QuantityKind::InputTextTokens, 320),
             Quantity::unknown(QuantityKind::InputAudioTokens),
             Quantity::provider_reported(QuantityKind::CachedInputTokens, 64),
+            Quantity::unknown(QuantityKind::CachedInputAudioTokens),
             Quantity::provider_reported(QuantityKind::OutputTextTokens, 50),
             Quantity::unknown(QuantityKind::OutputAudioTokens),
             Quantity::measured(QuantityKind::Requests, 1),

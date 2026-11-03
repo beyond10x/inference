@@ -699,6 +699,61 @@ fn price_an_unbound_adapter_gives_one_price_unknown_line_per_quantity() {
     assert_eq!(cost.total.complete_total, None, "unknown, never zero");
 }
 
+/// `llm-cost` has no unit for cached audio input: a binding that charges it gets a
+/// `price_unknown` line with the count, never a zero amount, and the total stays incomplete.
+#[test]
+fn price_a_charged_cached_input_audio_kind_is_price_unknown_never_zero() {
+    let adapter = AdapterId::generate();
+    let pricing = Pricing::new(book("EUR", "1")).bind(
+        adapter,
+        PriceBinding {
+            charges: vec![
+                QuantityKind::CachedInputAudioTokens,
+                QuantityKind::OutputTextTokens,
+            ],
+            ..llm_binding()
+        },
+    );
+    let mut quantities = tokens();
+    quantities.push(Quantity::provider_reported(
+        QuantityKind::CachedInputAudioTokens,
+        120,
+    ));
+    let cost = price(&pricing, &recorded(adapter, quantities, Some(UPSTREAM))).expect("priced");
+
+    assert_eq!(
+        cost.lines,
+        [
+            CostLine {
+                kind: QuantityKind::OutputTextTokens,
+                quantity: Some(500),
+                amount: Some("0.004".to_owned()),
+                unknown: None,
+            },
+            unknown_line(
+                QuantityKind::CachedInputAudioTokens,
+                Some(120),
+                UnknownReason::PriceUnknown
+            ),
+        ],
+        "in the order of the kinds"
+    );
+    assert_eq!(cost.total.known_subtotal, "0.004");
+    assert_eq!(cost.total.unknown_lines, 1);
+    assert_eq!(cost.total.complete_total, None, "unknown, never zero");
+
+    let unreported = price(&pricing, &recorded(adapter, tokens(), Some(UPSTREAM))).expect("priced");
+    assert_eq!(
+        unreported.lines[1],
+        unknown_line(
+            QuantityKind::CachedInputAudioTokens,
+            None,
+            UnknownReason::PriceUnknown
+        ),
+        "a record that carries no cached audio: no count, no amount"
+    );
+}
+
 #[test]
 fn price_charges_only_the_bound_kinds_and_marks_a_kind_without_a_unit_price_unknown() {
     let adapter = AdapterId::generate();

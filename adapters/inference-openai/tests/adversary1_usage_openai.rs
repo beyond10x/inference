@@ -198,10 +198,11 @@ fn records(events: &[SessionEvent]) -> Vec<&UsageRecorded> {
         .collect()
 }
 
-const TOKENS: [QuantityKind; 5] = [
+const TOKENS: [QuantityKind; 6] = [
     QuantityKind::InputTextTokens,
     QuantityKind::InputAudioTokens,
     QuantityKind::CachedInputTokens,
+    QuantityKind::CachedInputAudioTokens,
     QuantityKind::OutputTextTokens,
     QuantityKind::OutputAudioTokens,
 ];
