@@ -68,6 +68,10 @@ name = "gpt_live_split"
 required-features = ["gpt-live"]
 
 [[test]]
+name = "adversary16_u1_live_split"
+required-features = ["gpt-live"]
+
+[[test]]
 name = "gpt_live_stall_bound"
 required-features = ["gpt-live"]
 

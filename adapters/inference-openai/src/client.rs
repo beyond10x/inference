@@ -466,11 +466,13 @@ impl RealtimeClient {
         self.receiver.next_event().await
     }
 
-    /// Sends a close frame and waits for the server's.
+    /// Sends a close frame and waits for the server's. Writing the frame and waiting for the
+    /// server's together take at most the read timeout, counted from this call.
     ///
     /// # Errors
     /// [`RealtimeError::Transport`] when the close handshake fails;
-    /// [`RealtimeError::Stalled`] when the server does not close within the read timeout.
+    /// [`RealtimeError::Stalled`] when the server does not close within the read timeout, or
+    /// does not drain the close frame within it.
     pub async fn close(mut self) -> Result<(), RealtimeError> {
         close_socket(
             &mut self.sender.sink,
@@ -972,18 +974,19 @@ impl ResponseOptions {
     }
 }
 
-/// Sends a close frame on `sink` and waits at most `read_timeout` for the server's on `socket`,
-/// the reading half of the same socket.
+/// Sends a close frame on `sink` and waits for the server's on `socket`, the reading half of the
+/// same socket; the write and the wait together take at most `read_timeout`.
 pub(crate) async fn close_socket(
     sink: &mut SocketSink,
     socket: &mut SocketStream,
     read_timeout: std::time::Duration,
 ) -> Result<(), RealtimeError> {
     use tokio_tungstenite::tungstenite::Error;
-    sink.close()
-        .await
-        .map_err(|error| RealtimeError::Transport(error.to_string()))?;
     let deadline = tokio::time::Instant::now() + read_timeout;
+    tokio::time::timeout_at(deadline, sink.close())
+        .await
+        .map_err(|_| RealtimeError::Stalled(read_timeout))?
+        .map_err(|error| RealtimeError::Transport(error.to_string()))?;
     loop {
         match tokio::time::timeout_at(deadline, socket.next()).await {
             Err(_) => return Err(RealtimeError::Stalled(read_timeout)),
