@@ -86,6 +86,14 @@ entities:
     fields:
       - name: name
         type: String
+      # What the tool does, in the words a model reads to choose it; an adapter that offers the
+      # tool to a provider sends it as the provider's tool description. The empty string is a
+      # tool declared without one: it is kept as declared, and an adapter sends no other text in
+      # its place than the tool's own name.
+      # read from: docs/design/inference.md:847
+      # read from: docs/design/inference.md:859
+      - name: description
+        type: String
       # The argument schema of the tool. Arguments are validated against it after the proposal
       # and before authorization (the §15.1 diagram), so no proposal outcome reads it.
       # read from: docs/design/inference.md:838
@@ -229,6 +237,10 @@ commands:
     input:
       - name: name
         type: String
+      # read from: docs/design/inference.md:847
+      # read from: docs/design/inference.md:859
+      - name: description
+        type: String
       # read from: docs/design/inference.md:848
       - name: schema
         type: Json
@@ -244,6 +256,7 @@ commands:
         instance: tool_id
         sets:
           name: input.name
+          description: input.description
           schema: input.schema
           schema_revision: input.schema_revision
           side_effect: input.side_effect
@@ -640,6 +653,9 @@ views:
       - name: tool_id
         type: inference.tools.ToolId
       - name: name
+        type: String
+      # read from: docs/design/inference.md:847
+      - name: description
         type: String
       - name: schema
         type: Json

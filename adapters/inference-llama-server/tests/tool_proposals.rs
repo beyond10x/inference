@@ -59,6 +59,7 @@ fn local_time() -> Tool {
         tool_id(),
         DeclareTool {
             name: "local_time".to_owned(),
+            description: String::new(),
             schema: json!({
                 "type": "object",
                 "properties": {"city": {"type": "string"}},

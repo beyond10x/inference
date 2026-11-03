@@ -90,6 +90,7 @@ fn a_running_server_proposes_a_tool_call_and_completes_after_its_result_on_one_g
         .expect("the binding declares what the adapter claims");
     let (tool, _) = Tool::declare(DeclareTool {
         name: "local_time".to_owned(),
+        description: String::new(),
         schema: json!({
             "type": "object",
             "properties": {"city": {"type": "string"}},

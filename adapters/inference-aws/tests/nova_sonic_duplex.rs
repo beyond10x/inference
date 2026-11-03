@@ -65,6 +65,7 @@ fn saying(format: AudioFormat, position: u64, text: &str) -> AudioFrame {
 fn weather() -> Tool {
     Tool::declare(DeclareTool {
         name: "weather".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,
@@ -905,6 +906,34 @@ fn the_session_configuration_reaches_the_provider() {
         audio
             .iter()
             .all(|frame| frame.format == pcm(8_000) && frame.sample_count == 160)
+    );
+}
+
+#[test]
+fn nova_sonic_duplex_sends_each_tool_description() {
+    let replay = Replay::new(vec![turn("hi", "Hello")]);
+    let described = Tool::declare(DeclareTool {
+        name: "weather".to_owned(),
+        description: "The current weather in the city named.".to_owned(),
+        schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+        schema_revision: "1".to_owned(),
+        side_effect: SideEffectClass::ReadOnly,
+        requires_confirmation: false,
+    })
+    .0;
+    let mut tooled = config();
+    tooled.tools = vec![described, weather()];
+    let _session = model(&replay).open(tooled).expect("opens");
+
+    let prompt = &wire(&replay, "promptStart", 1)[0];
+    let tools = &prompt["toolConfiguration"]["tools"];
+    assert_eq!(
+        tools[0]["toolSpec"]["description"],
+        "The current weather in the city named."
+    );
+    assert_eq!(
+        tools[1]["toolSpec"]["description"], "weather",
+        "a tool declared without a description is described by its name"
     );
 }
 
