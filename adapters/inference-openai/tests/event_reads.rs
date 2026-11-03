@@ -220,7 +220,8 @@ fn function_call_without_name_parses() {
     let missing = parse(&arguments_done("fc_001", "call_001", None));
     let mut null = arguments_done("fc_001", "call_001", None);
     null["name"] = Value::Null;
-    for call in [missing, parse(&null)] {
+    let empty = parse(&arguments_done("fc_001", "call_001", Some("")));
+    for call in [missing, parse(&null), empty] {
         assert_eq!(
             call,
             ServerEvent::FunctionCall {
@@ -361,6 +362,16 @@ async fn a_carried_name_fills_one_call_only() {
         )
         .await;
         send(&mut socket, arguments_done("fc_001", "call_001", None)).await;
+        send(
+            &mut socket,
+            function_call_item(
+                "response.output_item.done",
+                "fc_001",
+                "call_001",
+                "get_weather",
+            ),
+        )
+        .await;
         send(&mut socket, arguments_done("fc_001", "call_001", None)).await;
         send(&mut socket, arguments_done("fc_other", "call_009", None)).await;
         let _ = socket.next().await;
@@ -372,7 +383,12 @@ async fn a_carried_name_fills_one_call_only() {
         call_name(&client.next_event().await.unwrap()),
         Some("get_weather")
     );
-    assert_eq!(call_name(&client.next_event().await.unwrap()), None);
+    let _done = client.next_event().await.unwrap();
+    assert_eq!(
+        call_name(&client.next_event().await.unwrap()),
+        None,
+        "an output_item.done after its call was read does not name the item again"
+    );
     assert_eq!(
         call_name(&client.next_event().await.unwrap()),
         None,

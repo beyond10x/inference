@@ -890,15 +890,35 @@ impl OpenAiRealtimeSession {
                 if let Some(id) = self.response(&response_id) {
                     let arguments =
                         serde_json::from_str(&arguments).unwrap_or(Json::String(arguments));
-                    // A call neither the server nor the client could name names no tool the
-                    // session offers: the ledger refuses it as `ToolNotOffered`.
-                    let recorded = self.ledger.tool_call(
+                    // A call neither the server nor the client could name is a call of no tool.
+                    // It is looked up under a name no offered tool has, even one named empty, so
+                    // the ledger makes its checks in their order and refuses it as
+                    // `ToolNotOffered`, recorded with the empty name.
+                    let named = name.is_some();
+                    let lookup = name.unwrap_or_else(|| {
+                        let mut unoffered = String::new();
+                        while self
+                            .ledger
+                            .tools()
+                            .iter()
+                            .any(|tool| tool.name() == unoffered)
+                        {
+                            unoffered.push('\0');
+                        }
+                        unoffered
+                    });
+                    let mut recorded = self.ledger.tool_call(
                         SpeechCallId::new(call_id),
                         id,
-                        name.as_deref().unwrap_or_default(),
+                        &lookup,
                         arguments,
                         now,
                     );
+                    if !named
+                        && let Err(SessionError::ToolNotOffered { name: refused }) = &mut recorded
+                    {
+                        refused.clear();
+                    }
                     self.or_drop(recorded);
                 }
             }
