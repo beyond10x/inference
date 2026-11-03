@@ -81,10 +81,10 @@ pub enum ServerEvent {
         audio_end_ms: u64,
     },
     /// `response.function_call_arguments.done`: a complete function call. The server may omit
-    /// `name`: [`RealtimeClient::next_event`](crate::RealtimeClient::next_event) fills it from
-    /// the `function_call` item of the `response.output_item.added` or
-    /// `response.output_item.done` whose `item.id` is `item_id`, when it read one; it is `None`
-    /// otherwise.
+    /// `name`, and a `name` that is `null` or the empty string is read as omitted:
+    /// [`RealtimeClient::next_event`](crate::RealtimeClient::next_event) fills it from the
+    /// `function_call` item of the `response.output_item.added` or `response.output_item.done`
+    /// whose `item.id` is `item_id`, when it read one before the call; it is `None` otherwise.
     FunctionCall {
         response_id: String,
         item_id: String,
@@ -217,7 +217,9 @@ impl ServerEvent {
                 response_id: event.string("response_id")?,
                 item_id: event.string("item_id")?,
                 call_id: event.string("call_id")?,
-                name: event.optional_string("name")?,
+                name: event
+                    .optional_string("name")?
+                    .filter(|name| !name.is_empty()),
                 arguments: event.string("arguments")?,
             },
             "response.done" => {
