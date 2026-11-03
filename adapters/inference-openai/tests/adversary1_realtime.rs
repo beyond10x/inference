@@ -442,7 +442,8 @@ fn reference_examples_of_the_untested_typed_events_decode() {
     assert_eq!(
         committed,
         ServerEvent::AudioCommitted {
-            item_id: "msg_002".to_owned()
+            item_id: "msg_002".to_owned(),
+            previous_item_id: Some("msg_001".to_owned())
         }
     );
     let truncated = ServerEvent::parse(

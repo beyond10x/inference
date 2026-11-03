@@ -237,6 +237,10 @@ fn telephony_session() -> SessionConfig {
             }),
         }],
         speed: None,
+        noise_reduction: None,
+        transcription_language: None,
+        transcription_prompt: None,
+        tool_choice: None,
     }
 }
 
@@ -688,7 +692,7 @@ async fn a_function_call_is_answered_with_its_output() {
         }
     }
     let (call_id, name, arguments) = call.unwrap();
-    assert_eq!(name, "get_weather");
+    assert_eq!(name.as_deref(), Some("get_weather"));
     assert_eq!(arguments, "{\"location\": \"San Francisco\"}");
     client
         .send_function_output(&call_id, "{\"temperature_c\": 18}")

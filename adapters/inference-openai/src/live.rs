@@ -882,6 +882,19 @@ impl LiveClient {
         self.send(json!({"type": "response.create"})).await
     }
 
+    /// Writes one WebSocket ping frame carrying `payload`, a keepalive for an idle session.
+    ///
+    /// The caller schedules pings; the client runs no timer. The server's pong is not a server
+    /// event: [`LiveClient::next_event`] skips it, and it does not reset the read timeout.
+    ///
+    /// # Errors
+    /// [`RealtimeError::Transport`] when `payload` is longer than the 125 bytes a control frame
+    /// carries (RFC 6455, section 5.5), refused before anything is written, or when the write
+    /// fails.
+    pub async fn ping(&mut self, payload: &[u8]) -> Result<(), RealtimeError> {
+        crate::client::send_ping(&mut self.socket, payload).await
+    }
+
     /// Sends `session.close` without waiting; `session.closed` arrives through
     /// [`LiveClient::next_event`].
     ///
