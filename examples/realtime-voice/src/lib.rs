@@ -85,6 +85,7 @@ pub fn pcm16(rate: u32) -> AudioFormat {
 pub fn time_tool() -> Tool {
     Tool::declare(DeclareTool {
         name: TIME_TOOL.to_owned(),
+        description: "The local date and time with the UTC offset; takes no arguments.".to_owned(),
         schema: serde_json::json!({"type": "object", "properties": {}}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,

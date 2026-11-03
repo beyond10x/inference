@@ -294,6 +294,7 @@ fn run(
 fn lookup() -> Tool {
     Tool::declare(DeclareTool {
         name: "lookup".to_owned(),
+        description: String::new(),
         schema: json!({"type": "object"}),
         schema_revision: "1".to_owned(),
         side_effect: SideEffectClass::ReadOnly,

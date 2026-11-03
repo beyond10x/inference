@@ -347,7 +347,7 @@ impl OpenAiLive {
             .tools
             .extend(config.tools.iter().map(|tool| FunctionTool {
                 name: tool.name().to_owned(),
-                description: String::new(),
+                description: tool.description().to_owned(),
                 parameters: tool.schema().clone(),
             }));
         if !backend.tools.is_empty() && backend.tool_choice.is_none() {

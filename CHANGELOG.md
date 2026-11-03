@@ -7,6 +7,9 @@
 - `inference_openai::Usage` has a new public field `cached_input_audio_tokens`; a literal that
   lists every field adds it. `QuantityKind` has a new variant `CachedInputAudioTokens` and
   `QuantityKind::ALL` twelve kinds; a `match` that names every kind adds it.
+- `inference_tools::DeclareTool` has a new public field `description`, the text a model reads to
+  choose the tool, kept by `Tool::description`; a literal adds it (`String::new()` declares a
+  tool without one). `inference_testkit::tools::ToolsRow` carries it too.
 
 ### Added
 
@@ -31,6 +34,14 @@
   unless the binding's provider reports it, as `cached_input_tokens` is carried today.
 - A price binding that charges `cached_input_audio_tokens` gets a `price_unknown` line:
   `llm-cost` has no unit for it.
+- The Nova Sonic duplex binding describes a tool by its declared description, and
+  `inference_llm::tools::tool_spec` by `name: description`; a tool declared without one is still
+  described by its name.
+
+### Fixed
+
+- Both OpenAI duplex bindings, Realtime and GPT-Live, send each tool's declared description in
+  its function tool instead of an empty one.
 
 ## [0.10.0] — 2026-11-03
 

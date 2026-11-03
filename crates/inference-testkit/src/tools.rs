@@ -261,6 +261,7 @@ impl Error for AuthorizeToolCallError {
 pub struct ToolsRow {
     pub tool_id: ToolId,
     pub name: String,
+    pub description: String,
     pub schema: Json,
     pub schema_revision: String,
     pub side_effect: SideEffectClass,
@@ -570,6 +571,7 @@ impl ToolsDomain {
             .map(|tool| ToolsRow {
                 tool_id: tool.tool_id(),
                 name: tool.name().to_owned(),
+                description: tool.description().to_owned(),
                 schema: tool.schema().clone(),
                 schema_revision: tool.schema_revision().to_owned(),
                 side_effect: tool.side_effect(),
@@ -631,6 +633,7 @@ mod tests {
         domain
             .declare_tool(DeclareTool {
                 name: "book".to_owned(),
+                description: String::new(),
                 schema: json!({"type": "object"}),
                 schema_revision: "1".to_owned(),
                 side_effect,
