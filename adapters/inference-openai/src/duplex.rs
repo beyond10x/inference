@@ -336,6 +336,10 @@ impl OpenAiRealtime {
             turn_detection,
             input_transcription: self.transcription.clone(),
             speed: self.speed,
+            noise_reduction: None,
+            transcription_language: None,
+            transcription_prompt: None,
+            tool_choice: None,
             tools: config
                 .tools
                 .iter()
