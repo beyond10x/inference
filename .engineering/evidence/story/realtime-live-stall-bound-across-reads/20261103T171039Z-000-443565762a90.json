@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-03T17:10:39Z",
+  "actor": "human:operator",
+  "artifact": "story:realtime-live-stall-bound-across-reads",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "cargo test -p inference-openai --all-features --test adversary16_u3_stall --test adversary16_u3_live_stall --test stall_bound --test gpt_live_stall_bound --test duplex --test gpt_live_duplex",
+    "reference": "both red cases and four further Duration::MAX cases green on 84a6029 (4, 2, 7, 7, 32, 23 passed); config.rs rustdoc fixed",
+    "review": "review-result:adversary-realtime-live-stall-bound-pass-1",
+    "outcome": "fixed"
+  }
+}

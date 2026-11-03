@@ -26,8 +26,8 @@ a kind and a source:
 
 **Unknown is never zero.** A quantity's value is absent exactly when its source is `unknown`; a
 record whose value and source disagree is refused (`QuantityMismatch`). Cached and cache-creation
-input tokens are counted inside the input tokens, never added to them. On main, in the next
-release: cached input audio tokens are counted inside both the cached input tokens and the input
+input tokens are counted inside the input tokens, never added to them. Since 0.11.0,
+cached input audio tokens are counted inside both the cached input tokens and the input
 audio tokens, never added to either.
 
 ## Who records it
