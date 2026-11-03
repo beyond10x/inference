@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.10.0] — 2026-11-03
+
+### Breaking
+
+- `inference_openai::SessionConfig` has four new public fields; a literal that lists every field
+  adds `noise_reduction`, `transcription_language`, `transcription_prompt` and `tool_choice`
+  (`None` keeps the 0.9.0 `session.update`).
+- `ServerEvent::FunctionCall::name` is `Option<String>` and `ServerEvent::AudioCommitted` has a
+  new field `previous_item_id`.
+
+### Added
+
+- `SessionConfig` sends input noise reduction (`NoiseReduction`), the input transcription's
+  language and prompt, and a session `tool_choice` (`ToolChoice`).
+- `RealtimeClient::create_item` adds a user, assistant or function-output `ConversationItem`,
+  with an optional `event_id` and a `previous_item_id` placement (`ItemOptions`).
+- `RealtimeClient::create_response_with` sends `response.create` with per-response
+  `ResponseOptions`: instructions, tool choice, conversation `none` for an out-of-band response,
+  input items, tools and an `event_id`.
+- `RealtimeClient::ping` and `LiveClient::ping` write one WebSocket ping frame, for a keepalive
+  the caller schedules.
+- `ServerEvent::AudioCommitted` carries the server's `previous_item_id`.
+
+### Changed
+
+- A `response.function_call_arguments.done` without `name`, or with an empty one, is read instead
+  of refused; the client fills the name from the `function_call` output item it saw for the same
+  item id before the call, and the duplex binding drops a call with no name as a tool not offered,
+  even when a tool is declared with the empty name.
+- CI, `ess` and the testkit's `ess-conformance` and `ess-primitives` move from 0.77.0 to 0.84.0.
+
 ## [0.9.0] — 2026-10-30
 
 No breaking changes.
