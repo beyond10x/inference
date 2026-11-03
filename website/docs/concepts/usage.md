@@ -22,11 +22,13 @@ a kind and a source:
 
 | Kinds | Sources |
 |---|---|
-| input and output text tokens, cached input tokens, cache-creation input tokens, input and output audio tokens, input and output audio milliseconds, input characters, requests, local compute milliseconds | `provider_reported`, `measured`, `unknown` |
+| input and output text tokens, cached input tokens, cached input audio tokens, cache-creation input tokens, input and output audio tokens, input and output audio milliseconds, input characters, requests, local compute milliseconds | `provider_reported`, `measured`, `unknown` |
 
 **Unknown is never zero.** A quantity's value is absent exactly when its source is `unknown`; a
 record whose value and source disagree is refused (`QuantityMismatch`). Cached and cache-creation
-input tokens are counted inside the input tokens, never added to them.
+input tokens are counted inside the input tokens, never added to them. On main, in the next
+release: cached input audio tokens are counted inside both the cached input tokens and the input
+audio tokens, never added to either.
 
 ## Who records it
 
