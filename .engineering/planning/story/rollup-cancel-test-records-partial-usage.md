@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:rollup-cancel-test-records-partial-usage
 kind: story
-status: draft
+status: active
 title: A parent cancel's rollup test sees the child's partial usage every run
 relations:
 - decomposes: epic:usage-and-cost
@@ -10,7 +10,10 @@ relations:
 scope:
 - confidence: cited
   path: crates/inference-runtime/tests/adversary1_subgraph_usage_rollup.rs
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-04T03:53:28Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-11-04T03:53:28Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 

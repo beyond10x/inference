@@ -6,7 +6,7 @@ status: open
 title: ess synthesis and the interpreted target leave one refusal and one unsupported scenario
 relations:
 - blocks: story:ess-defect-fixes
-revision: 13
+revision: 14
 ---
 ## What is blocked
 
@@ -147,5 +147,22 @@ Read on 2026-11-04 with the pin on ess 0.84.0 (`origin/main` at `cc560fb`), same
   0.85.0.
 - ess 0.85.0 is tagged and has no GitHub release with assets yet, so CI cannot pin it; its
   CHANGELOG names no change to either case (inferred from the CHANGELOG, not run).
+
+The blocker stays open. The four authored cascade scenarios stay.
+
+## Under ess 0.85.0
+
+Read on 2026-11-04 with the released ess 0.85.0 binary (its GitHub Release published that day),
+same specification, for the wave that moves the pin to 0.85.0:
+
+| run | ess 0.84.0 | ess 0.85.0 |
+|---|---|---|
+| `ess specify validate --path ess` | valid, 1 warning (ESS-ENTITY-019) | valid, 1 warning (ESS-ENTITY-019) |
+| `ess verify conform synthesize --path ess --scenarios ess/scenarios` | 475 scenarios (9 authored), 1 refusal | 475 scenarios (9 authored), 1 refusal |
+| `ess verify conform run … --target interpreted --report-format 2` | 474 passed, 0 failed, 0 error, 1 unsupported | 474 passed, 0 failed, 0 error, 1 unsupported |
+
+- Still refused, ESS-SYNTH-001: `inference.graph.CancelRun/outcome/cancelled`, with the same reason
+  as under 0.84.0.
+- Still unsupported: `inference.graph.AddSubgraphNode/outcome/added` (ESS-CF-TARGET).
 
 The blocker stays open. The four authored cascade scenarios stay.
