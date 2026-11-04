@@ -27,6 +27,13 @@
 //! any response queued behind it at its first sample. A model that takes neither, such as one that
 //! cancels on its own side, only has its playout stopped.
 //!
+//! With `auto_interrupt` on, a model that takes no truncation also has its playout stopped when
+//! the user's transcript arrives over audio still to play, and nothing is cancelled: such a
+//! model may report no speech start and mark no interruption, as GPT-Live, whose transcript
+//! streams while the user speaks, and its own speech stops on its side. A model that takes
+//! truncation reports speech itself, and its transcript may arrive after the answer to it has
+//! begun, so its transcript stops nothing.
+//!
 //! The demo tool, [`time_tool`], is answered by call id with what the conversation's clock says.
 //! Once the response that proposed it ends, the conversation asks for the next response when the
 //! model takes responses from the caller; a model that creates every response continues itself.
@@ -422,7 +429,14 @@ impl<S: SpeechSessionHandle> Conversation<S> {
     fn handle(&mut self, event: SessionEvent, notes: &mut Vec<Note>) {
         match event {
             SessionEvent::SpeechStarted(_) => self.barge_in(None, notes),
-            SessionEvent::InputTranscribed(input) => notes.push(Note::Heard(input.text)),
+            SessionEvent::InputTranscribed(input) => {
+                notes.push(Note::Heard(input.text));
+                if !self.capabilities.truncation
+                    && self.session.ledger().session().config().auto_interrupt
+                {
+                    self.barge_in(None, notes);
+                }
+            }
             SessionEvent::OutputTranscriptDelta(delta) => notes.push(Note::Said {
                 response_id: delta.response_id,
                 text: delta.text,
@@ -497,7 +511,8 @@ impl<S: SpeechSessionHandle> Conversation<S> {
         }
     }
 
-    /// A barge-in: the user started speaking, or the provider cancelled `cancelled`. With
+    /// A barge-in: the user started speaking, or was heard over audio still to play by a model
+    /// that interrupts itself and takes no truncation, or the provider cancelled `cancelled`. With
     /// `auto_interrupt` off the caller cancels the response in progress itself. Audio still to
     /// play is stopped at once; a model that takes truncation is told where its listener stopped
     /// hearing the response played, and that the responses queued behind it were not heard.
