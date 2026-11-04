@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:transport-closed-keeps-arrivals
 kind: story
-status: active
+status: implemented
 title: A send that finds the stream closed still records what already arrived
 relations:
 - decomposes: epic:usage-and-cost
@@ -12,10 +12,11 @@ scope:
   path: adapters/inference-aws/src/duplex.rs
 - confidence: cited
   path: adapters/inference-aws/tests/transport_closed_arrivals.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T03:53:28Z", actor: "human:operator", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-04T03:53:29Z", actor: "human:operator", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-04T06:16:32Z", actor: "human:operator", revision: 8, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 
