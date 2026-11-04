@@ -39,7 +39,10 @@
 //!   timeline, so an input fragment whose `start_ms` lies inside what the response in progress
 //!   has spoken (its first output fragment's `start_ms` to its latest fragment's `end_ms`) is
 //!   the user speaking over it, and `SpeechStarted` precedes that fragment's `InputTranscribed`,
-//!   once per response, at the fragment's start on the input. A fragment starting before that
+//!   at the fragment's start on the input, once per interruption: later fragments extend the
+//!   user's speech until an output fragment of the response starts at or after its latest
+//!   `end_ms`, the model speaking again, and the next fragment inside then is reported again
+//!   (a pause shorter than [`Segmentation::gap`] keeps one response). A fragment starting before that
 //!   interval, the tail of the question the response answers, or after it, in the response's
 //!   trailing silence, reports none; nor does any while the response has no output transcript.
 //!   That the two transcripts share one timeline is read from the protocol documents, not
@@ -447,8 +450,9 @@ struct Spoken {
     response: ResponseId,
     start_ms: u64,
     end_ms: u64,
-    /// Speech over the response was reported.
-    interrupted: bool,
+    /// Speech over the response was reported and the response has not spoken since: the end of
+    /// that speech so far, the latest `end_ms` of the input fragments from the reported one on.
+    interrupted: Option<u64>,
 }
 
 /// How reading what already reached the binding ended.
@@ -693,20 +697,24 @@ impl OpenAiLiveSession {
     }
 
     /// Reports speech started at `start_ms` of the input when an input transcript fragment
-    /// starting there lies inside what the response in progress has spoken
-    /// ([`Spoken`]), once per response.
-    fn speech_over(&mut self, start_ms: u64, now: Instant) {
+    /// over `[start_ms, end_ms)` starts inside what the response in progress has spoken
+    /// ([`Spoken`]), once per interruption: while the response has not spoken since the
+    /// reported speech ended, a fragment only extends that speech.
+    fn speech_over(&mut self, start_ms: u64, end_ms: u64, now: Instant) {
         let Some(spoken) = self.spoken.as_mut() else {
             return;
         };
-        if self.current != Some(spoken.response)
-            || spoken.interrupted
-            || start_ms < spoken.start_ms
-            || start_ms >= spoken.end_ms
-        {
+        if self.current != Some(spoken.response) {
             return;
         }
-        spoken.interrupted = true;
+        if let Some(speech_end) = spoken.interrupted {
+            spoken.interrupted = Some(speech_end.max(end_ms));
+            return;
+        }
+        if start_ms < spoken.start_ms || start_ms >= spoken.end_ms {
+            return;
+        }
+        spoken.interrupted = Some(end_ms);
         let rate = u64::from(self.format.sample_rate());
         let position = SampleClockPosition::new(start_ms.saturating_mul(rate) / 1_000)
             .unwrap_or(SampleClockPosition::MAX);
@@ -927,13 +935,16 @@ impl OpenAiLiveSession {
                         Some(spoken) if spoken.response == id => Spoken {
                             start_ms: spoken.start_ms.min(start_ms),
                             end_ms: spoken.end_ms.max(end_ms),
+                            interrupted: spoken
+                                .interrupted
+                                .filter(|&speech_end| start_ms < speech_end),
                             ..spoken
                         },
                         _ => Spoken {
                             response: id,
                             start_ms,
                             end_ms,
-                            interrupted: false,
+                            interrupted: None,
                         },
                     });
                     let refused = self.ledger.output_transcript(id, delta, now);
@@ -941,9 +952,11 @@ impl OpenAiLiveSession {
                 }
             }
             LiveEvent::InputTranscript {
-                delta, start_ms, ..
+                delta,
+                start_ms,
+                end_ms,
             } => {
-                self.speech_over(start_ms, now);
+                self.speech_over(start_ms, end_ms, now);
                 let refused = self.ledger.input_transcribed(delta, now);
                 self.or_drop(refused);
             }
