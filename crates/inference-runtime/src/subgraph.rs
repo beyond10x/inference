@@ -852,6 +852,13 @@ enum Merged<P> {
 /// every ingress bridge has ended, which `open` counts: a child that is itself a subgraph node's
 /// parent would otherwise drain that node, whose ingress bridge then finds nothing on its edge and
 /// sends `stop`, before this bridge has forwarded what it took.
+///
+/// The bridge reads whether the node drains before it polls its edges, and ends for the drain only
+/// when every edge was then empty. The parent drains the node only once everything it admitted
+/// before is on the node's edges, so an edge found empty after the drain was read holds nothing
+/// more. Read the other way round, an envelope the parent put on an edge between the bridge's poll
+/// of it and the read of the drain would stay on the edge and be dropped with it
+/// (`story:subgraph-nested-drain-residual-loss`).
 async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
     parents: Vec<Box<dyn InputEndpoint<P>>>,
     ingress: Box<dyn OutputEndpoint<P>>,
@@ -885,15 +892,20 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
             {
                 return Poll::Ready(Merged::End);
             }
+            let draining = bridges
+                .read(cx, |state| state.drain.then_some(()))
+                .is_some();
             for index in 0..pending.len() {
                 if let Poll::Ready((input, received)) = pending[index].as_mut().poll(cx) {
                     drop(pending.swap_remove(index));
                     return Poll::Ready(Merged::Received(input, received.map(Box::new)));
                 }
             }
-            bridges
-                .read(cx, |state| state.drain.then_some(()))
-                .map_or(Poll::Pending, |()| Poll::Ready(Merged::Drain))
+            if draining {
+                Poll::Ready(Merged::Drain)
+            } else {
+                Poll::Pending
+            }
         })
         .await;
         match next {
