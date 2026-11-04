@@ -8,11 +8,15 @@ relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
 scope:
-- confidence: inferred
+- confidence: cited
+  path: adapters/inference-openai/src/live_duplex.rs
+- confidence: cited
+  path: adapters/inference-openai/tests/gpt_live_speech_over_output.rs
+- confidence: cited
   path: examples/realtime-voice/src/lib.rs
 - confidence: cited
   path: examples/realtime-voice/tests/acceptance.rs
-revision: 5
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T03:53:28Z", actor: "human:operator", revision: 4}
 - {from: "proposed", to: "active", at: "2026-11-04T03:53:28Z", actor: "human:operator", revision: 5}
@@ -39,3 +43,20 @@ today's behaviour by `gpt_live_conversation_is_interrupted_and_answers_the_time`
 `cargo test -p realtime-voice --test acceptance` passes with the GPT-Live case asserting that the
 fake speaker's queue is empty after speech over an answer, and the OpenAI Realtime and Nova Sonic
 cases unchanged.
+
+## Scope
+
+Confirmed against the merged diff (0.13.0 wave, d2fccdf to 0365212).
+
+| path | planned | landed |
+|---|---|---|
+| `examples/realtime-voice/src/lib.rs` | inferred | cited: module comment only; the transcript rule of the first attempt was reverted |
+| `examples/realtime-voice/tests/acceptance.rs` | cited | cited |
+| `adapters/inference-openai/src/live_duplex.rs` | not planned | cited: the fix (`Spoken`, `speech_over`) |
+| `adapters/inference-openai/tests/gpt_live_speech_over_output.rs` | not planned | cited, new |
+| `adapters/inference-openai/tests/adversary1_gpt_live_speech_over_timing.rs` | not planned | cited, new (adversary) |
+| `examples/realtime-voice/tests/adversary1_gpt_live_transcript.rs` | not planned | cited, new (adversary) |
+
+Correction: the planned surface was the conversation in `realtime-voice`; the change landed in
+the GPT-Live binding, because an untimed transcript cannot tell the question's tail from speech
+over the answer.

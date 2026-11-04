@@ -10,7 +10,7 @@ relations:
 scope:
 - confidence: cited
   path: crates/inference-runtime/tests/adversary1_subgraph_usage_rollup.rs
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T03:53:28Z", actor: "human:operator", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-04T03:53:28Z", actor: "human:operator", revision: 4}
@@ -48,3 +48,14 @@ partial usage, so only the first turn's final usage is there. 0 of 1 local runs 
 
 `cargo test -p inference-runtime --test adversary1_subgraph_usage_rollup` passes 2000 runs in a row
 with the assertion `finals == [true, false]` unchanged.
+
+## Scope
+
+Confirmed against the merged diff (0.13.0 wave, d4cef5f to 245173c).
+
+| path | planned | landed |
+|---|---|---|
+| `crates/inference-runtime/tests/adversary1_subgraph_usage_rollup.rs` | cited | cited: the cancel cases wait for `TextSegmentCommitted` |
+
+No runtime change. The model node's behaviour on a send refused before its cancel is
+`story:refused-send-before-cancel-keeps-partial-usage` (draft).
