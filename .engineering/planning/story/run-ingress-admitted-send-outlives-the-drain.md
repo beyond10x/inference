@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:run-ingress-admitted-send-outlives-the-drain
 kind: story
-status: draft
+status: active
 title: A send a run ingress admitted before its drain is delivered or reported
 summary: Measure whether a send admitted under the pause policy can still wait when the drain ends the bridge, and close the gap if it can.
 tags:
@@ -10,7 +10,15 @@ tags:
 relations:
 - decomposes: epic:session-facade
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: cited
+  path: crates/inference-runtime/src/drive.rs
+- confidence: inferred
+  path: crates/inference-runtime/src/queue.rs
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 
