@@ -2,12 +2,23 @@
 format: aep.planning-md/3
 id: story:subgraph-nested-drain-residual-loss
 kind: story
-status: draft
+status: implemented
 title: Text sent before stop is not lost two subgraphs deep under load
 relations:
 - decomposes: epic:session-facade
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: cited
+  path: crates/inference-runtime/src/subgraph.rs
+- confidence: cited
+  path: crates/inference-runtime/tests/subgraph_drain_window.rs
+- confidence: cited
+  path: crates/inference-runtime/tests/subgraph_nested_drain.rs
+revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-04T03:53:29Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-04T03:53:29Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-04T06:16:32Z", actor: "human:operator", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 
@@ -45,3 +56,17 @@ parallel). Every later run of the gate passed. Not reproduced on demand yet.
 
 - `subgraph_nested_drain` passes 20 000 runs per depth under the measured load with 0 losses.
 - The measurement that found the window is recorded as evidence.
+
+## Scope
+
+Confirmed against the merged diff (0.13.0 wave, 245173c to 8b47266).
+
+| path | planned | landed |
+|---|---|---|
+| `crates/inference-runtime/src/subgraph.rs` | cited | cited: `ingress_bridge` reads the drain before it polls its edges; not `drain_child` and not the OpenIngress guard, the story's two candidates |
+| `crates/inference-runtime/tests/subgraph_nested_drain.rs` | cited | unchanged, RUNS stays 200; it is the acceptance loop |
+| `crates/inference-runtime/tests/subgraph_drain_window.rs` | not planned | cited, new: the window forced without a sleep |
+
+The adversary case `crates/inference-runtime/tests/adversary1_drain_window_edges.rs` is on the
+unit branch at `7498ad9` and not merged; it belongs to
+`story:drain-treats-a-pending-receive-as-an-empty-edge`.

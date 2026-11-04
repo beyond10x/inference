@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T06:15:40Z",
+  "actor": "human:operator",
+  "artifact": "story:subgraph-nested-drain-residual-loss",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference-runtime: subgraph_drain_window, subgraph_nested_drain, adversary1_nested_ingress_drain, drain_admits_no_new_input, adversary1_drain_admits, subgraph, adversary11_subgraph_bridges, subgraph_usage, lib; clippy and fmt clean",
+    "reference": "impl/subgraph-nested-drain-residual-loss at 8b47266"
+  }
+}

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:rollup-cancel-test-records-partial-usage
 kind: story
-status: draft
+status: implemented
 title: A parent cancel's rollup test sees the child's partial usage every run
 relations:
 - decomposes: epic:usage-and-cost
@@ -10,7 +10,11 @@ relations:
 scope:
 - confidence: cited
   path: crates/inference-runtime/tests/adversary1_subgraph_usage_rollup.rs
-revision: 2
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-04T03:53:28Z", actor: "human:operator", revision: 3}
+- {from: "proposed", to: "active", at: "2026-11-04T03:53:28Z", actor: "human:operator", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-04T06:16:32Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 
@@ -45,3 +49,14 @@ partial usage, so only the first turn's final usage is there. 0 of 1 local runs 
 
 `cargo test -p inference-runtime --test adversary1_subgraph_usage_rollup` passes 2000 runs in a row
 with the assertion `finals == [true, false]` unchanged.
+
+## Scope
+
+Confirmed against the merged diff (0.13.0 wave, d4cef5f to 245173c).
+
+| path | planned | landed |
+|---|---|---|
+| `crates/inference-runtime/tests/adversary1_subgraph_usage_rollup.rs` | cited | cited: the cancel cases wait for `TextSegmentCommitted` |
+
+No runtime change. The model node's behaviour on a send refused before its cancel is
+`story:refused-send-before-cancel-keeps-partial-usage` (draft).

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T05:31:16Z",
+  "actor": "human:operator",
+  "artifact": "story:rollup-cancel-test-records-partial-usage",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference-runtime: adversary1_subgraph_usage_rollup 12, subgraph_usage 1, adversary1_unconnected_usage_port 8",
+    "reference": "impl/rollup-cancel-test-records-partial-usage at fd9b112"
+  }
+}
