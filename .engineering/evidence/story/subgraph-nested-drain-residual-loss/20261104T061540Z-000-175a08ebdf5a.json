@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T06:15:40Z",
+  "actor": "human:timo",
+  "artifact": "story:subgraph-nested-drain-residual-loss",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --test subgraph_drain_window; subgraph_nested_drain looped, RUNS=200",
+    "reference": "base 245173c: subgraph_drain_window red 20 of 20, nested drain lost 1 in 130,800 (two levels) and 1 in 163,200 (three); unit 8b47266: green 20 of 20, 0 lost in 20,000 runs per depth and in 1,687,600 and 1,348,000 longer runs"
+  }
+}

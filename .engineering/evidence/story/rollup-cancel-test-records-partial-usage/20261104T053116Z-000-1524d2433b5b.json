@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T05:31:16Z",
+  "actor": "human:timo",
+  "artifact": "story:rollup-cancel-test-records-partial-usage",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "the single test a_cancel_of_the_parent_with_its_usage_port_connected_to_nothing_cancels_the_child, run sequentially from one binary",
+    "reference": "base d4cef5f: 1 failure in 38,839 runs; unit fd9b112: 0 failures in 171,395 + 16,133 runs"
+  }
+}

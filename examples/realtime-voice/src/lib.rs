@@ -27,6 +27,13 @@
 //! any response queued behind it at its first sample. A model that takes neither, such as one that
 //! cancels on its own side, only has its playout stopped.
 //!
+//! Every binding reports the speech start the conversation stops on, in its own way: OpenAI
+//! Realtime from the server's voice activity detection, Nova Sonic at the provider's
+//! interruption notice or the turn's first transcript, GPT-Live, which marks no interruption,
+//! when the user's transcript starts inside what the answer in progress has spoken. A
+//! transcript alone stops nothing: the tail of the question an answer is already answering
+//! arrives the same way.
+//!
 //! The demo tool, [`time_tool`], is answered by call id with what the conversation's clock says.
 //! Once the response that proposed it ends, the conversation asks for the next response when the
 //! model takes responses from the caller; a model that creates every response continues itself.

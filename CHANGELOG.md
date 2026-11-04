@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.13.0] — 2026-11-04
+
+### Changed
+
+- The ESS pin moves from 0.84.0 to 0.85.0: the CI download, the `inference-testkit`
+  `ess-conformance` and `ess-primitives` tags and `ess/ess-inputs.yaml`'s `requires: ess 0.85`.
+  `task check` needs `ess` 0.85.0 on `PATH`.
+
+### Fixed
+
+- GPT-Live: speech over a response stops its playout. The binding reports `SpeechStarted`, just
+  before the fragment's `InputTranscribed`, when an input transcript fragment starts inside the
+  stretch of the session timeline the response's output transcript covers, once for each
+  interruption of one response; `Conversation` with `auto_interrupt` then stops playout as it
+  does for every other binding. A trailing fragment of the question the response answers, or
+  speech in the response's trailing silence, reports none. That both transcripts share one
+  session timeline is read from the protocol documents, not observed on the hosted service.
+- A subgraph node that is drained right after its parent put an envelope on one of its edges
+  no longer drops that envelope. The ingress bridge read the drain after finding its edges empty,
+  so an envelope arriving between the two reads stayed on the edge; it now reads the drain first.
+  Measured before the fix: 1 run in 130,800 at two levels of nesting, 1 in 163,200 at three.
+
+### Tests
+
+- Nova Sonic: `append_audio` and `submit_tool_result` on a closed command stream keep the usage
+  that already arrived before failing as `TransportClosed` (`transport_closed_arrivals`).
+- The subgraph usage-rollup cancel cases wait for the held turn's `TextSegmentCommitted` before
+  cancelling, which removes a 1-in-38,839 failure of the test, not of the runtime.
+
 ## [0.12.0] — 2026-11-04
 
 ### Breaking
