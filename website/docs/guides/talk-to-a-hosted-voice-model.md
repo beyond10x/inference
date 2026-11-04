@@ -82,7 +82,9 @@ ends the conversation and prints the session's usage totals and its duration; Ct
 without them.
 
 GPT-Live decides itself when to speak and when it is interrupted, so the conversation never
-cancels or truncates it; it bills the voice in seconds, which are printed with the totals.
+cancels or truncates it; it bills the voice in seconds, which are printed with the totals. When you
+speak over its answer, the binding reports the speech start from where your transcript falls on
+the session timeline, and the answer's queued audio stops playing.
 
 No output is shown here: every run is a live, billed session with a microphone. The conversation
 logic is tested against the duplex mock and a fake audio host in

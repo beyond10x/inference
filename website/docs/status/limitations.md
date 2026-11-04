@@ -40,7 +40,10 @@ The three native speech adapters are hosted services. A self-hosted native speec
 - GPT-Live decides itself when to speak. It has no responses, commits, cancellation or truncation
   on its voice side, so a caller's commit, response creation, cancel and truncation are refused, and
   it does not claim `interruptible`. The API marks neither the end of a spoken answer nor an
-  interruption, so a response the listener cut short ends as completed.
+  interruption, so a response the listener cut short ends as completed. The binding reports
+  speech over an answer when an input transcript fragment starts inside the stretch the answer's
+  output transcript covers; that both transcripts share one timeline is read from the protocol
+  documents, not observed on the hosted service.
 - OpenAI keys are injected, sent once in the handshake and never logged by the adapter. The
   WebSocket library below it, `tungstenite`, logs the raw handshake, the key included, at trace
   level. Keep `tungstenite` targets at debug or lower, for example `RUST_LOG=tungstenite=debug`.
