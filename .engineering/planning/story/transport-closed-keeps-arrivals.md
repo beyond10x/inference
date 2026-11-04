@@ -7,7 +7,10 @@ title: A send that finds the stream closed still records what already arrived
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 4
+scope:
+- confidence: cited
+  path: adapters/inference-aws/src/duplex.rs
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T03:53:28Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-04T03:53:29Z", actor: "human:timo", revision: 4}

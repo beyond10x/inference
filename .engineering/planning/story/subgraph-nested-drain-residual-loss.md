@@ -7,7 +7,12 @@ title: Text sent before stop is not lost two subgraphs deep under load
 relations:
 - decomposes: epic:session-facade
 - serves: vision:inference
-revision: 3
+scope:
+- confidence: cited
+  path: crates/inference-runtime/src/subgraph.rs
+- confidence: cited
+  path: crates/inference-runtime/tests/subgraph_nested_drain.rs
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T03:53:29Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-04T03:53:29Z", actor: "human:timo", revision: 3}
