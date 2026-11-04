@@ -3,8 +3,9 @@
 //!
 //! The session here records what `adapters/inference-openai/src/live_duplex.rs` records for each
 //! server event, through the same ledger calls and nothing else: an input transcript fragment is
-//! one `InputTranscribed`, at any time, its `start_ms` and `end_ms` dropped (`record`,
-//! `LiveEvent::InputTranscript`); an output transcript fragment or a voiced output frame begins a
+//! one `InputTranscribed`, at any time (`record`, `LiveEvent::InputTranscript`), preceded by one
+//! `SpeechStarted` when its `start_ms` lies inside what the response in progress has spoken, once
+//! per response (`speech_over`); an output transcript fragment or a voiced output frame begins a
 //! response when none is in progress (`begin`, `output`); silent output is delivered on the
 //! response in progress until the silence gap completes it; a backend function call is proposed on
 //! the response in progress. The test pushes the server's events and steps the conversation.
@@ -38,8 +39,11 @@ const FRAME_ON_DEVICE: usize = 4_800;
 /// One server event, as the binding reads it.
 #[derive(Debug, Clone)]
 enum Server {
-    /// `session.input_transcript.delta`.
+    /// `session.input_transcript.delta` starting outside what the response in progress has
+    /// spoken.
     Heard(&'static str),
+    /// `session.input_transcript.delta` starting inside it, the first such of the response.
+    HeardOver(&'static str),
     /// `session.output_transcript.delta`.
     Said(&'static str),
     /// `session.output_audio.delta` of 100 ms at or above the silence peak.
@@ -148,6 +152,14 @@ impl LiveSession {
                 .ledger
                 .input_transcribed(text.to_owned(), now)
                 .expect("open"),
+            Server::HeardOver(text) => {
+                self.ledger
+                    .speech_started(SampleClockPosition::new(0).unwrap(), now)
+                    .expect("open");
+                self.ledger
+                    .input_transcribed(text.to_owned(), now)
+                    .expect("open");
+            }
             Server::Said(text) => {
                 let id = self.begin();
                 self.ledger
@@ -381,7 +393,7 @@ fn repeated_fragments_stop_the_answer_once_and_later_audio_plays() {
     ]);
     let answer = run.in_progress().expect("in progress");
     notes.extend(run.server(&[
-        Server::Heard("wait"),
+        Server::HeardOver("wait"),
         Server::Heard(" a"),
         Server::Heard(" moment"),
     ]));
@@ -414,7 +426,7 @@ fn a_transcript_during_the_tool_round_trip_leaves_the_answer_to_play() {
         vec![SpeechCallId::new("call_1")]
     );
     assert_eq!(run.queued(), FRAME);
-    notes.extend(run.server(&[Server::Heard("hmm")]));
+    notes.extend(run.server(&[Server::HeardOver("hmm")]));
     assert_eq!(run.queued(), 0, "the filler stopped");
     notes.extend(run.server(&[
         Server::Said(" It is 12:34."),

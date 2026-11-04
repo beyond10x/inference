@@ -34,7 +34,16 @@
 //!   response is what `conformance::native_duplex_evidence` measures on this segmentation; the
 //!   hosted model gave that evidence, so [`claims`] include `native_duplex`.
 //! * Input transcript fragments become one `InputTranscribed` each, in delivery order; the API
-//!   has no complete per-turn transcript. Speech start and stop and commits are never reported.
+//!   has no complete per-turn transcript. Speech stop and commits are never reported. Speech
+//!   start is reported only over a response: both transcripts are timed on the session
+//!   timeline, so an input fragment whose `start_ms` lies inside what the response in progress
+//!   has spoken (its first output fragment's `start_ms` to its latest fragment's `end_ms`) is
+//!   the user speaking over it, and `SpeechStarted` precedes that fragment's `InputTranscribed`,
+//!   once per response, at the fragment's start on the input. A fragment starting before that
+//!   interval, the tail of the question the response answers, or after it, in the response's
+//!   trailing silence, reports none; nor does any while the response has no output transcript.
+//!   That the two transcripts share one timeline is read from the protocol documents, not
+//!   observed on the hosted service.
 //! * Tools go to a Responses backend ([`DEFAULT_BACKEND_MODEL`] unless
 //!   [`OpenAiLive::with_backend`] names another) as function tools. A function call the backend
 //!   completes is proposed on the response in progress, or on a new response when none is. The
@@ -418,6 +427,7 @@ impl NativeSpeechModel for OpenAiLive {
             current: None,
             silent_run: 0,
             emitted: HashMap::new(),
+            spoken: None,
             usage: HashMap::new(),
             cached: HashMap::new(),
             input: HashMap::new(),
@@ -428,6 +438,17 @@ impl NativeSpeechModel for OpenAiLive {
             server_errors: Vec::new(),
         })
     }
+}
+
+/// The interval of the session timeline a response's output transcript covers, from its first
+/// fragment's start to its latest fragment's end, in milliseconds.
+#[derive(Debug, Clone, Copy)]
+struct Spoken {
+    response: ResponseId,
+    start_ms: u64,
+    end_ms: u64,
+    /// Speech over the response was reported.
+    interrupted: bool,
 }
 
 /// How reading what already reached the binding ended.
@@ -511,6 +532,8 @@ pub struct OpenAiLiveSession {
     silent_run: u64,
     /// The output samples each response emitted, the position of its next frame.
     emitted: HashMap<ResponseId, u64>,
+    /// What the latest response with an output transcript has spoken, on the session timeline.
+    spoken: Option<Spoken>,
     /// The backend usage summed onto each response, under `None` onto the session before the
     /// first response.
     usage: HashMap<Option<ResponseId>, ResponseUsage>,
@@ -667,6 +690,28 @@ impl OpenAiLiveSession {
         self.silent_run = 0;
         self.emitted.insert(id, 0);
         Some(id)
+    }
+
+    /// Reports speech started at `start_ms` of the input when an input transcript fragment
+    /// starting there lies inside what the response in progress has spoken
+    /// ([`Spoken`]), once per response.
+    fn speech_over(&mut self, start_ms: u64, now: Instant) {
+        let Some(spoken) = self.spoken.as_mut() else {
+            return;
+        };
+        if self.current != Some(spoken.response)
+            || spoken.interrupted
+            || start_ms < spoken.start_ms
+            || start_ms >= spoken.end_ms
+        {
+            return;
+        }
+        spoken.interrupted = true;
+        let rate = u64::from(self.format.sample_rate());
+        let position = SampleClockPosition::new(start_ms.saturating_mul(rate) / 1_000)
+            .unwrap_or(SampleClockPosition::MAX);
+        let refused = self.ledger.speech_started(position, now);
+        self.or_drop(refused);
     }
 
     fn output(&mut self, audio: Vec<u8>, now: Instant) {
@@ -871,14 +916,34 @@ impl OpenAiLiveSession {
         }
         match event {
             LiveEvent::OutputAudio { audio } => self.output(audio, now),
-            LiveEvent::OutputTranscript { delta, .. } => {
+            LiveEvent::OutputTranscript {
+                delta,
+                start_ms,
+                end_ms,
+            } => {
                 if let Some(id) = self.begin(now) {
                     self.silent_run = 0;
+                    self.spoken = Some(match self.spoken {
+                        Some(spoken) if spoken.response == id => Spoken {
+                            start_ms: spoken.start_ms.min(start_ms),
+                            end_ms: spoken.end_ms.max(end_ms),
+                            ..spoken
+                        },
+                        _ => Spoken {
+                            response: id,
+                            start_ms,
+                            end_ms,
+                            interrupted: false,
+                        },
+                    });
                     let refused = self.ledger.output_transcript(id, delta, now);
                     self.or_drop(refused);
                 }
             }
-            LiveEvent::InputTranscript { delta, .. } => {
+            LiveEvent::InputTranscript {
+                delta, start_ms, ..
+            } => {
+                self.speech_over(start_ms, now);
                 let refused = self.ledger.input_transcribed(delta, now);
                 self.or_drop(refused);
             }
