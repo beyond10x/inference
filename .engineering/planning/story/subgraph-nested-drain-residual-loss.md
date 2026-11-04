@@ -2,12 +2,15 @@
 format: aep.planning-md/3
 id: story:subgraph-nested-drain-residual-loss
 kind: story
-status: draft
+status: active
 title: Text sent before stop is not lost two subgraphs deep under load
 relations:
 - decomposes: epic:session-facade
 - serves: vision:inference
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-04T03:53:29Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-04T03:53:29Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:gpt-live-speech-over-playout-stops-it
 kind: story
-status: draft
+status: active
 title: Speech over a GPT-Live answer stops local playout
 relations:
 - decomposes: epic:native-voice
@@ -12,7 +12,10 @@ scope:
   path: examples/realtime-voice/src/lib.rs
 - confidence: cited
   path: examples/realtime-voice/tests/acceptance.rs
-revision: 3
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-04T03:53:28Z", actor: "human:operator", revision: 4}
+- {from: "proposed", to: "active", at: "2026-11-04T03:53:28Z", actor: "human:operator", revision: 5}
 ---
 ## Context
 

@@ -2,12 +2,15 @@
 format: aep.planning-md/3
 id: story:transport-closed-keeps-arrivals
 kind: story
-status: draft
+status: active
 title: A send that finds the stream closed still records what already arrived
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-04T03:53:28Z", actor: "human:operator", revision: 3}
+- {from: "proposed", to: "active", at: "2026-11-04T03:53:29Z", actor: "human:operator", revision: 4}
 ---
 ## Context
 
