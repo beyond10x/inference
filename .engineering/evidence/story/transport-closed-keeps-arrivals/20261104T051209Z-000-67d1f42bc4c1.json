@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T05:12:09Z",
+  "actor": "human:operator",
+  "artifact": "story:transport-closed-keeps-arrivals",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-aws --features duplex --test transport_closed_arrivals",
+    "reference": "base 56b635e already holds (7 passed); mutant transport_closed before the drain in commands_closed: 0 passed, 7 failed; unit cc6fefe 7 passed"
+  }
+}
