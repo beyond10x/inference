@@ -1,5 +1,5 @@
 format: ess-inputs/2
-requires: ess 0.84
+requires: ess 0.85
 specification:
   - system.yaml
   - domains/model.yaml
