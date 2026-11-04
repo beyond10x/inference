@@ -6,7 +6,7 @@ status: open
 title: ess synthesis and the interpreted target leave one refusal and one unsupported scenario
 relations:
 - blocks: story:ess-defect-fixes
-revision: 12
+revision: 13
 ---
 ## What is blocked
 
@@ -124,5 +124,28 @@ Read on 2026-10-30 with the pin moved to ess 0.77.0, same specification:
   story:a-command-with-two-related-selectors-arranges-both (draft in ESS, inferred there).
 - Still unsupported: `inference.graph.AddSubgraphNode/outcome/added` (ESS-CF-TARGET). ESS
   story:an-unfillable-required-field-is-named-by-validate-and-the-view is still a draft in ESS.
+
+The blocker stays open. The four authored cascade scenarios stay.
+
+## Under ess 0.84.0
+
+Read on 2026-11-04 with the pin on ess 0.84.0 (`origin/main` at `cc560fb`), same specification:
+
+| run | ess 0.77.0 | ess 0.84.0 |
+|---|---|---|
+| `ess verify conform synthesize --path ess --scenarios ess/scenarios` | 475 scenarios, 1 refusal | 475 scenarios (9 authored), 1 refusal |
+| `ess verify conform run … --target interpreted --report-format 2` | 474 passed, 0 failed, 1 unsupported | 474 passed, 0 failed, 0 error, 1 unsupported |
+
+- Still refused, ESS-SYNTH-001: `inference.graph.CancelRun/outcome/cancelled`. The reason now names
+  the guard that answers first: "`cancelled.affects[0]` is `inference.stream.Generation` and created
+  only by `inference.stream.StartGeneration/started`, answered first on the subject the scenario
+  holds by `inference.stream.StartGeneration/run-not-active`, which no arrangement takes for a row
+  the filter selects with the rows the scenario holds when it is sent". ESS
+  story:a-command-with-two-related-selectors-arranges-both is implemented in ESS and does not clear it.
+- Still unsupported: `inference.graph.AddSubgraphNode/outcome/added` (ESS-CF-TARGET). ESS
+  story:an-unfillable-required-field-is-named-by-validate-and-the-view is a draft in ESS at its tag
+  0.85.0.
+- ess 0.85.0 is tagged and has no GitHub release with assets yet, so CI cannot pin it; its
+  CHANGELOG names no change to either case (inferred from the CHANGELOG, not run).
 
 The blocker stays open. The four authored cascade scenarios stay.
