@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T05:07:58Z",
+  "actor": "human:timo",
+  "artifact": "story:gpt-live-speech-over-playout-stops-it",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p realtime-voice --test acceptance (GPT-Live case: nothing plays after speech over the answer)",
+    "reference": "base d2fccdf red (playout stopped where the device was: Heard(wait) then Completed) vs unit 2229847 green, 3 passed"
+  }
+}
