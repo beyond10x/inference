@@ -20,7 +20,10 @@
 //! holds, the turn the cancel cut among them, given up if its model has not returned from the
 //! cancel and then recorded as one request with every token count unknown, not final; scripted
 //! to emit after the cancel, it emits once into the cancelled generation, which refuses it as
-//! stale.
+//! stale. A send an output edge refuses as closed, as when the run's cancel ended the node it
+//! sends to before the cancel reached this node, ends the exchange: the node lets its input edges
+//! go and waits for the runtime's next signal. Cancelled, it ends as a cancelled node does, the
+//! turn the refusal cut among the records it sends; drained, it fails with the refusal.
 //! Given a usage port ([`ModelNode::with_usage`]), the output port its pipeline declares under the
 //! name `usage`, the node sends on the edge or exposure leaving it the usage record of each turn
 //! of its generation that ended, a failed one among them, as `inference-llm` delivers it after the
@@ -117,6 +120,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future;
 use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -241,6 +245,9 @@ enum Ended {
     Completed,
     Cancelled,
     Failed(String),
+    /// An output edge refused a send as closed, failing the exchange with this error; whether
+    /// the node failed or is cancelled is the runtime's next signal.
+    Refused(String),
 }
 
 /// The tools a [`ModelNode`] was given, and its two tool ports.
@@ -629,6 +636,8 @@ struct Exchanging<P> {
     input_ended: bool,
     /// Whether the node's input edge is closed.
     input_closed: bool,
+    /// Whether an output edge refused a send of the node as closed.
+    closed: AtomicBool,
 }
 
 /// What starts the generation of a node: its generator and the request, which carries the tools
@@ -683,6 +692,22 @@ fn carry<P: ModelPayload>(envelope: EventEnvelope<PipelinePayload>) -> EventEnve
             }
             PipelinePayload::Control(kind) => P::from(kind),
         },
+    }
+}
+
+/// An output edge that notes in its flag a send it refused as closed, so that the exchange tells
+/// such a refusal, which a cancel of the run may follow, from any other failure.
+struct Noting<'a, P>(&'a dyn OutputEndpoint<P>, &'a AtomicBool);
+
+impl<P: Send> OutputEndpoint<P> for Noting<'_, P> {
+    fn send(&self, envelope: EventEnvelope<P>) -> EndpointFuture<'_, Result<(), SendError<P>>> {
+        Box::pin(async move {
+            let sent = self.0.send(envelope).await;
+            if matches!(sent, Err(SendError::Closed(_))) {
+                self.1.store(true, Ordering::Relaxed);
+            }
+            sent
+        })
     }
 }
 
@@ -818,7 +843,7 @@ impl<P: ModelPayload> Exchanging<P> {
             }
         };
         emit(
-            &Carrying(self.output.as_ref(), &self.signal),
+            &Carrying(&Noting(self.output.as_ref(), &self.closed), &self.signal),
             &mut self.emitter,
             event,
         )
@@ -856,7 +881,12 @@ impl<P: ModelPayload> Exchanging<P> {
         match usage.output.send(envelope).await {
             Ok(()) => Ok(()),
             Err(SendError::Closed(_)) if self.signal.read(|signal| signal.cancel) => Ok(()),
-            Err(refused) => Err(refused.to_string()),
+            Err(refused) => {
+                if matches!(refused, SendError::Closed(_)) {
+                    self.closed.store(true, Ordering::Relaxed);
+                }
+                Err(refused.to_string())
+            }
         }
     }
 
@@ -908,7 +938,7 @@ impl<P: ModelPayload> Exchanging<P> {
                 event: ToolCallEvent::Proposed(event),
             });
             send_unless(
-                tool_loop.output.as_ref(),
+                &Noting(tool_loop.output.as_ref(), &self.closed),
                 &self.signal,
                 |signal| signal.cancel,
                 envelope,
@@ -966,7 +996,7 @@ impl<P: ModelPayload> Exchanging<P> {
         event: StreamEvent,
     ) -> Result<(), String> {
         emit(
-            &Carrying(self.output.as_ref(), &self.signal),
+            &Carrying(&Noting(self.output.as_ref(), &self.closed), &self.signal),
             &mut self.emitter,
             event.clone(),
         )
@@ -978,7 +1008,7 @@ impl<P: ModelPayload> Exchanging<P> {
                 P::stream(event),
             );
             send_unless(
-                tool_loop.output.as_ref(),
+                &Noting(tool_loop.output.as_ref(), &self.closed),
                 &self.signal,
                 |signal| signal.cancel,
                 envelope,
@@ -1108,7 +1138,7 @@ impl<P: ModelPayload> Exchanging<P> {
                 P::from(ControlKind::Stop),
             );
             send_unless(
-                usage.output.as_ref(),
+                &Noting(usage.output.as_ref(), &self.closed),
                 &self.signal,
                 |signal| signal.cancel,
                 end,
@@ -1117,7 +1147,7 @@ impl<P: ModelPayload> Exchanging<P> {
         }
         let end = carry(self.emitter.control(ControlKind::Stop));
         send_unless(
-            self.output.as_ref(),
+            &Noting(self.output.as_ref(), &self.closed),
             &self.signal,
             |signal| signal.cancel,
             end,
@@ -1126,7 +1156,7 @@ impl<P: ModelPayload> Exchanging<P> {
         if let Some(tool_loop) = self.tool_loop.as_mut() {
             let end = tool_loop.end();
             send_unless(
-                tool_loop.output.as_ref(),
+                &Noting(tool_loop.output.as_ref(), &self.closed),
                 &self.signal,
                 |signal| signal.cancel,
                 end,
@@ -1139,8 +1169,42 @@ impl<P: ModelPayload> Exchanging<P> {
     async fn exchange(&mut self) -> Ended {
         match self.exchanged().await {
             Ok(ended) => ended,
+            Err(failure) if self.closed.load(Ordering::Relaxed) => Ended::Refused(failure),
             Err(failure) => Ended::Failed(failure),
         }
+    }
+
+    /// Whether the node, whose send an output edge refused as closed, is cancelled rather than
+    /// failed: it lets its input edges go, so that a producer still sending to it is refused as
+    /// a producer sending to a failed node is, and waits for the runtime's next signal. A cancel,
+    /// already taken or arriving right after, as when the run's cancel ended the node's consumer
+    /// before it reached this node, says it is; a drain says it is not.
+    async fn cancelled_after_refusal(&mut self) -> bool {
+        self.inputs.clear();
+        self.signal
+            .until(|signal| {
+                if signal.cancel {
+                    Some(true)
+                } else if signal.drain {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+            .await
+    }
+
+    /// Ends the node as cancelled: cancels the generation and sends every usage record it still
+    /// holds, the turn the cancel cut among them; answers the refusal of the late text, if any.
+    fn cancelled(&mut self) -> Option<GenerationStateConflict> {
+        let late = self.cancel();
+        let held = self.held_usage();
+        block_on(async {
+            for recorded in held {
+                let _ = self.send_usage(recorded).await;
+            }
+        });
+        late
     }
 
     /// Whether the host asked for a supersede or a cancel of the generation, taken or not: from
@@ -1351,17 +1415,15 @@ impl<P: ModelPayload> Exchanging<P> {
         let ended = block_on(self.exchange());
         let (late_refusal, failure) = match ended {
             Ended::Completed => (None, None),
-            Ended::Cancelled => {
-                let late = self.cancel();
-                let held = self.held_usage();
-                block_on(async {
-                    for recorded in held {
-                        let _ = self.send_usage(recorded).await;
-                    }
-                });
-                (late, None)
-            }
+            Ended::Cancelled => (self.cancelled(), None),
             Ended::Failed(failure) => (None, Some(failure)),
+            Ended::Refused(failure) => {
+                if block_on(self.cancelled_after_refusal()) {
+                    (self.cancelled(), None)
+                } else {
+                    (None, Some(failure))
+                }
+            }
         };
         let dropped = std::mem::take(&mut self.dropped);
         let not_reinjected = std::mem::take(&mut self.not_reinjected);
@@ -1566,6 +1628,7 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
                     requests: 0,
                     input_ended: false,
                     input_closed: false,
+                    closed: AtomicBool::new(false),
                 };
                 self.exchange.spawn(move || exchanging.run());
                 Ok(())
