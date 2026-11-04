@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:refused-send-before-cancel-keeps-partial-usage
 kind: story
-status: draft
+status: active
 title: A model node whose send is refused just before its cancel keeps the cut turn's usage
 summary: A send refused while the run is cancelled ends the turn as cancelled with its partial usage, not as a failure.
 tags:
@@ -10,7 +10,13 @@ tags:
 relations:
 - decomposes: epic:usage-and-cost
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: cited
+  path: crates/inference-testkit/src/llm/node.rs
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-04T07:29:54Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-04T07:29:54Z", actor: "human:timo", revision: 3}
 ---
 ## Context
 
