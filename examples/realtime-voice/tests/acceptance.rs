@@ -14,6 +14,7 @@
 //! device callback made by the test. Speech is a constant sample of -0.25, which the mock hears
 //! as speech it cannot read, so what it heard is the script's; silence is zero.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use inference_audio_device::fake::FakeHost;
@@ -21,8 +22,8 @@ use inference_duplex::inference_audio::{AudioFrame, SampleClockPosition};
 use inference_duplex::inference_core::model::Adapter;
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseCompleted, ResponseId, ResponseState, SessionConfig,
-    SessionError, SessionEvent, SessionLedger, SpeechCallId, SpeechCapabilities,
+    InputTranscribed, NativeSpeechModel, OpenError, ResponseCompleted, ResponseId, ResponseState,
+    SessionConfig, SessionError, SessionEvent, SessionLedger, SpeechCallId, SpeechCapabilities,
     SpeechSessionHandle, SpeechToolCallState,
 };
 use inference_testkit::duplex::mock::{MockSpeechModel, Reply, ScriptedTurn};
@@ -84,6 +85,10 @@ enum Shape {
     /// no speech start or stop and no commit (`live_duplex.rs:37`), a response the listener cut
     /// short completed, never cancelled (`live_duplex.rs:31-34`), and after a tool result the
     /// next response started by the provider (`live_duplex.rs:38-42`, `live_duplex.rs:980-992`).
+    /// The user's transcript arrives while the user speaks, where the mock reports the speech
+    /// start, not at a turn end GPT-Live does not mark: `session.input_transcript.delta` is
+    /// timed on the session timeline and there is no turn (`live.rs:39-41`), and the binding
+    /// records each fragment as it arrives (`live_duplex.rs:36`, `live_duplex.rs:881-884`).
     GptLive,
 }
 
@@ -177,6 +182,7 @@ impl NativeSpeechModel for Provider {
             shape: self.shape,
             log: Log::default(),
             owed: false,
+            heard: script().into_iter().map(|turn| turn.heard).collect(),
         })
     }
 }
@@ -200,6 +206,9 @@ struct Session {
     log: Log,
     /// A tool result was sent that the provider answers in a response it starts itself.
     owed: bool,
+    /// What the user says in each turn still to come, as [`Shape::GptLive`] delivers it while
+    /// the user speaks.
+    heard: VecDeque<String>,
 }
 
 impl SpeechSessionHandle for Session {
@@ -275,9 +284,17 @@ impl SpeechSessionHandle for Session {
                 return Some(event);
             }
             match event {
-                SessionEvent::SpeechStarted(_)
-                | SessionEvent::SpeechStopped(_)
-                | SessionEvent::InputCommitted(_) => {}
+                SessionEvent::SpeechStarted(started) => {
+                    if let Some(text) = self.heard.pop_front() {
+                        return Some(SessionEvent::InputTranscribed(InputTranscribed {
+                            session_id: started.session_id,
+                            text,
+                        }));
+                    }
+                }
+                SessionEvent::SpeechStopped(_)
+                | SessionEvent::InputCommitted(_)
+                | SessionEvent::InputTranscribed(_) => {}
                 SessionEvent::ResponseCancelled(cancelled) => {
                     return Some(SessionEvent::ResponseCompleted(ResponseCompleted {
                         response_id: cancelled.response_id,
@@ -585,9 +602,10 @@ fn openai_realtime_conversation_is_interrupted_and_answers_the_time() {
 }
 
 /// GPT-Live: the model takes its turns, its interruptions and its responses itself and reports
-/// no speech, so the conversation gets no sign of the interruption. The model stops speaking;
-/// the conversation neither cancels nor truncates, and what the speaker had queued still
-/// plays. It asks for no response after the call: the binding asks the backend to continue.
+/// no speech start; the user's transcript, arriving over the answer still playing, is the sign
+/// of the interruption, so the conversation stops playout at once. It neither cancels nor
+/// truncates, which GPT-Live takes neither of, and the model stops speaking on its own side. It
+/// asks for no response after the call: the binding asks the backend to continue.
 #[test]
 fn gpt_live_conversation_is_interrupted_and_answers_the_time() {
     let host = FakeHost::laptop();
@@ -599,13 +617,30 @@ fn gpt_live_conversation_is_interrupted_and_answers_the_time() {
     let mut conversation = open(&mut provider, config, &host);
 
     let answer = first_answer_plays(&host, &mut conversation);
-    let queued = conversation.speaker().queued();
+    let heard = output_position(TEN_MS_FRAMES);
 
     speak(&host, 40);
-    let mut notes = Vec::new();
+    let mut notes = conversation.step();
+    assert!(
+        notes.contains(&Note::Heard("wait".to_owned())),
+        "the user's transcript over the answer: {notes:#?}"
+    );
+    assert!(
+        notes.contains(&Note::BargeIn {
+            response_id: Some(answer),
+            heard: Some(heard),
+        }),
+        "playout stopped where the device was: {notes:#?}"
+    );
+    assert_eq!(conversation.speaker().queued(), 0, "nothing more plays");
     for _ in 0..5 {
         notes.extend(conversation.step());
     }
+    assert_eq!(
+        conversation.speaker().played(),
+        None,
+        "nothing of the answer reached the speaker after the stop: {notes:#?}"
+    );
     assert!(
         notes.contains(&Note::Ended {
             response_id: answer,
@@ -613,16 +648,10 @@ fn gpt_live_conversation_is_interrupted_and_answers_the_time() {
         }),
         "the model stopped the answer; the binding records it completed: {notes:#?}"
     );
-    assert_eq!(
-        conversation.speaker().queued(),
-        queued,
-        "no further audio of the answer reached the speaker, and the conversation, given no \
-         sign of the interruption, left what was queued to play: {notes:#?}"
-    );
     assert!(
         !notes
             .iter()
-            .any(|note| matches!(note, Note::BargeIn { .. } | Note::Truncated { .. })),
+            .any(|note| matches!(note, Note::Truncated { .. })),
         "{notes:#?}"
     );
     assert!(conversation.session().log.cancels.is_empty());
