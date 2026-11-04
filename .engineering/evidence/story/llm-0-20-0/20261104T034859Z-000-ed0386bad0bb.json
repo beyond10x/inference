@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T03:48:59Z",
+  "actor": "human:timo",
+  "artifact": "story:llm-0-20-0",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference / check (task check) on main",
+    "reference": "https://github.com/beyond10x/inference/actions/runs/41750484590 at cc560fb"
+  }
+}
