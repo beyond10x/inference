@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T05:07:58Z",
+  "actor": "human:operator",
+  "artifact": "story:gpt-live-speech-over-playout-stops-it",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "realtime-voice acceptance 3, adversary1_gpt_live_transcript 6; inference-openai adversary1_gpt_live_speech_over_timing 5, gpt_live_speech_over_output 3, gpt_live_duplex 23",
+    "reference": "impl/gpt-live-speech-over-playout-stops-it at 2229847"
+  }
+}
