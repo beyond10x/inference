@@ -1,5 +1,5 @@
-//! The `llm` release the adapter is built on (`story:llm-0-8-3`): every `b10x-llm-*` package in
-//! its tree is at 0.8.3, and the resolver its client is handed is `llm`'s `AnonymousResolver`, not
+//! The `llm` release the adapter is built on (`story:llm-0-20-0`): every `llm-*` package in
+//! its tree is at 0.20.0, and the resolver its client is handed is `llm`'s `AnonymousResolver`, not
 //! one of the adapter's own. `cargo tree -p inference-llama-server -e normal --all-features` is
 //! read so that the packages the `tools` feature pulls count too.
 
@@ -7,8 +7,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-/// The release of `llm` every `b10x-llm-*` package of the tree is at.
-const RELEASE: &str = "0.8.3";
+/// The release of `llm` every `llm-*` package of the tree is at.
+const RELEASE: &str = "0.20.0";
 
 #[test]
 fn every_llm_package_of_the_adapter_is_at_the_pinned_release() {
@@ -38,15 +38,15 @@ fn every_llm_package_of_the_adapter_is_at_the_pinned_release() {
             let mut words = line.split_whitespace();
             let name = words.next()?;
             let version = words.next()?;
-            name.starts_with("b10x-llm-").then_some((name, version))
+            name.starts_with("llm-").then_some((name, version))
         })
         .collect();
     for name in [
-        "b10x-llm-blocking",
-        "b10x-llm-chat",
-        "b10x-llm-core",
-        "b10x-llm-credentials",
-        "b10x-llm-http",
+        "llm-blocking",
+        "llm-chat",
+        "llm-core",
+        "llm-credentials",
+        "llm-http",
     ] {
         assert!(
             llm.iter().any(|(listed, _)| *listed == name),
@@ -60,7 +60,7 @@ fn every_llm_package_of_the_adapter_is_at_the_pinned_release() {
         .collect();
     assert!(
         elsewhere.is_empty(),
-        "every b10x-llm package is at {RELEASE}, these are not: {elsewhere:?}\n{tree}"
+        "every llm package is at {RELEASE}, these are not: {elsewhere:?}\n{tree}"
     );
 }
 

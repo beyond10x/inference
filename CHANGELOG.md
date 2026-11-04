@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.12.0] — 2026-11-04
+
+### Breaking
+
+- `llm` moves from 0.8.3 to 0.20.0, so the `llm_core` types in the public API (re-exported by
+  `inference-llm`, `Generator::new`'s model, `inference-facade`'s `cost` feature) are 0.20.0's.
+  A crate that also depends on `llm` moves to 0.20.0, where the packages have lost their
+  `b10x-` prefix (`llm-core`, not `b10x-llm-core`). See the `llm` changelog for its own changes,
+  among them new variants of `Item`, `StreamEvent`, `Protocol` and `Advisory` and new fields of
+  `Error`, `Controls` and `Hints`.
+
+### Changed
+
+- A model's refusal text, which `llm` 0.20.0 carries apart from its answer
+  (`StreamEvent::RefusalDelta`, `Item::AssistantRefusal`), adds no text segment to a generation;
+  it stays in the turn's items.
+
 ## [0.11.0] — 2026-11-03
 
 ### Breaking

@@ -705,97 +705,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "b10x-llm-blocking"
-version = "0.8.3"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
-dependencies = [
- "b10x-llm-core",
- "tokio",
-]
-
-[[package]]
-name = "b10x-llm-chat"
-version = "0.8.3"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
-dependencies = [
- "b10x-llm-core",
- "b10x-llm-credentials",
- "b10x-llm-http",
- "b10x-llm-providers",
- "http",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "b10x-llm-core"
-version = "0.8.3"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio-util",
-]
-
-[[package]]
-name = "b10x-llm-cost"
-version = "0.8.3"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
-dependencies = [
- "b10x-llm-core",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.21",
- "toml",
-]
-
-[[package]]
-name = "b10x-llm-credentials"
-version = "0.8.3"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
-dependencies = [
- "b10x-llm-core",
- "serde",
- "thiserror 2.0.21",
- "tokio",
- "zeroize",
-]
-
-[[package]]
-name = "b10x-llm-http"
-version = "0.8.3"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
-dependencies = [
- "b10x-llm-core",
- "bytes",
- "httpdate",
- "reqwest",
- "serde_json",
- "tokio",
- "zeroize",
-]
-
-[[package]]
-name = "b10x-llm-providers"
-version = "0.8.3"
-source = "git+https://github.com/beyond10x/llm?tag=0.8.3#3aab7a783a9bc075f871ad95f496fb2ac0e24e33"
-dependencies = [
- "b10x-llm-core",
- "b10x-llm-credentials",
- "http",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "toml",
- "url",
- "zeroize",
-]
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2206,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "inference-audio"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -2215,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "inference-audio-device"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "cpal",
  "inference-audio",
@@ -2226,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "inference-aws"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "aws-config",
  "aws-sdk-bedrockruntime",
@@ -2241,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "inference-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-audio",
  "serde",
@@ -2251,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "inference-docs"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "clap",
  "inference-core",
@@ -2262,7 +2171,7 @@ dependencies = [
 
 [[package]]
 name = "inference-duplex"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2273,10 +2182,8 @@ dependencies = [
 
 [[package]]
 name = "inference-facade"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
- "b10x-llm-core",
- "b10x-llm-cost",
  "inference-audio",
  "inference-core",
  "inference-llm",
@@ -2285,19 +2192,16 @@ dependencies = [
  "inference-testkit",
  "inference-text",
  "inference-tools",
+ "llm-core",
+ "llm-cost",
  "serde_json",
  "uuid",
 ]
 
 [[package]]
 name = "inference-llama-server"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
- "b10x-llm-blocking",
- "b10x-llm-chat",
- "b10x-llm-core",
- "b10x-llm-credentials",
- "b10x-llm-http",
  "inference-core",
  "inference-llm",
  "inference-pipeline",
@@ -2305,23 +2209,28 @@ dependencies = [
  "inference-testkit",
  "inference-text",
  "inference-tools",
+ "llm-blocking",
+ "llm-chat",
+ "llm-core",
+ "llm-credentials",
+ "llm-http",
  "serde_json",
 ]
 
 [[package]]
 name = "inference-llm"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
- "b10x-llm-core",
  "inference-core",
  "inference-text",
  "inference-tools",
+ "llm-core",
  "serde_json",
 ]
 
 [[package]]
 name = "inference-openai"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -2343,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "inference-pipeline"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2357,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "inference-runtime"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-core",
  "inference-llm",
@@ -2371,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "inference-sherpa-onnx"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -2381,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "inference-stt"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2390,7 +2299,7 @@ dependencies = [
 
 [[package]]
 name = "inference-testkit"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "ess-conformance",
  "ess-primitives",
@@ -2411,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "inference-text"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-core",
  "serde",
@@ -2420,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tools"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-core",
  "inference-text",
@@ -2430,7 +2339,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tts"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2439,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "inference-whispercpp"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -2658,8 +2567,100 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
+name = "llm-blocking"
+version = "0.20.0"
+source = "git+https://github.com/beyond10x/llm?tag=0.20.0#541a831e6bfe6fd075c050956bf72d885af0b6d6"
+dependencies = [
+ "llm-core",
+ "tokio",
+]
+
+[[package]]
+name = "llm-chat"
+version = "0.20.0"
+source = "git+https://github.com/beyond10x/llm?tag=0.20.0#541a831e6bfe6fd075c050956bf72d885af0b6d6"
+dependencies = [
+ "http",
+ "llm-core",
+ "llm-credentials",
+ "llm-http",
+ "llm-providers",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "llm-core"
+version = "0.20.0"
+source = "git+https://github.com/beyond10x/llm?tag=0.20.0#541a831e6bfe6fd075c050956bf72d885af0b6d6"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio-util",
+]
+
+[[package]]
+name = "llm-cost"
+version = "0.20.0"
+source = "git+https://github.com/beyond10x/llm?tag=0.20.0#541a831e6bfe6fd075c050956bf72d885af0b6d6"
+dependencies = [
+ "llm-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
+name = "llm-credentials"
+version = "0.20.0"
+source = "git+https://github.com/beyond10x/llm?tag=0.20.0#541a831e6bfe6fd075c050956bf72d885af0b6d6"
+dependencies = [
+ "llm-core",
+ "serde",
+ "thiserror 2.0.21",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "llm-http"
+version = "0.20.0"
+source = "git+https://github.com/beyond10x/llm?tag=0.20.0#541a831e6bfe6fd075c050956bf72d885af0b6d6"
+dependencies = [
+ "bytes",
+ "httpdate",
+ "llm-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "llm-providers"
+version = "0.20.0"
+source = "git+https://github.com/beyond10x/llm?tag=0.20.0#541a831e6bfe6fd075c050956bf72d885af0b6d6"
+dependencies = [
+ "http",
+ "llm-core",
+ "llm-credentials",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "toml",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "local-voice-cascade"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "clap",
  "inference-audio",
@@ -3431,7 +3432,7 @@ dependencies = [
 
 [[package]]
 name = "realtime-voice"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "clap",
@@ -3489,7 +3490,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "repo-podcast"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "clap",
  "inference-audio-device",
@@ -4054,7 +4055,7 @@ dependencies = [
 
 [[package]]
 name = "stt-only"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -4062,7 +4063,7 @@ dependencies = [
 
 [[package]]
 name = "stt-sherpa-onnx"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "clap",
  "inference-sherpa-onnx",
