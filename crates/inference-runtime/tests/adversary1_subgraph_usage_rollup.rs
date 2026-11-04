@@ -472,11 +472,9 @@ fn is_stop(envelope: &EventEnvelope<PipelinePayload>) -> bool {
     envelope.kind == ControlKind::Stop.as_str()
 }
 
-fn is_text(envelope: &EventEnvelope<PipelinePayload>) -> bool {
-    matches!(
-        envelope.kind.as_str(),
-        "inference.stream.TextDelta" | "inference.stream.TextSegmentCommitted"
-    )
+/// Whether `envelope` commits a segment, the last text event a model sends for a turn's piece.
+fn is_committed(envelope: &EventEnvelope<PipelinePayload>) -> bool {
+    envelope.kind == "inference.stream.TextSegmentCommitted"
 }
 
 /// A run of `planned` made by `implement`, prepared and activated, its loop on a thread.
@@ -553,13 +551,15 @@ fn holding() -> MockGenerator {
     generator().reporting([Some(usage(20))]).holding(0)
 }
 
-/// Sends one text to the model behind `user text`, waits until its held turn streamed, cancels
+/// Sends one text to the model behind `user text`, waits until its held turn streamed and
+/// committed its segment, the last text the model sends before it waits for the cancel, cancels
 /// the run, waits for its end and answers what the `usage` egress received, the run's state and
-/// the run.
+/// the run. A cancel taken on the `TextDelta` alone can close the `reply` edge while the model
+/// still sends the commit, and a model whose send is refused before its cancel fails instead.
 fn cancelled_mid_turn(mut running: Running) -> (Received, RunState, RunId) {
     let mut application = Application::new(running.run_id);
     running.send("user text", application.text("user text", "1"));
-    until(running.egress("reply"), is_text).expect("the held turn streams");
+    until(running.egress("reply"), is_committed).expect("the held turn streams");
     running.requests.cancel();
     let state = running.drive.join().expect("the loop does not panic");
     let usage = running.egresses.get_mut(USAGE_PORT).expect("the egress");
@@ -1216,7 +1216,11 @@ fn three_levels_with_the_middle_usage_port_connected_to_nothing_complete() {
 /// model reports usage for a first turn that ends before the cancel and holds the second, which
 /// the cancel cuts; it sends both records, the cut one after its own cancel, and the node reads
 /// the usage egress through the cancel until it closes, so the child run is cancelled, not
-/// failed, and its recorder holds both records.
+/// failed, and its recorder holds both records. The cancel waits for the held turn's
+/// `TextSegmentCommitted`, the last text the model sends before it waits for the cancel: a
+/// cancel taken after the `TextDelta` alone ends the `reply` bridge while the model may still be
+/// sending that commit, which the closed edge refuses before the child's cancel reaches the
+/// model, so the model fails instead of being cancelled and sends no record of the cut turn.
 #[test]
 fn a_cancel_of_the_parent_with_its_usage_port_connected_to_nothing_cancels_the_child() {
     bounded(|| {
@@ -1273,7 +1277,7 @@ fn a_cancel_of_the_parent_with_its_usage_port_connected_to_nothing_cancels_the_c
             thread::sleep(Duration::from_millis(5));
         }
         running.send("user text", application.text("user text", "2"));
-        let _held = until(running.egress("reply"), is_text);
+        until(running.egress("reply"), committed).expect("the held turn's text is committed");
         running.requests.cancel();
         let state = running.drive.join().expect("the loop does not panic");
         assert_eq!(state, RunState::Cancelled);
