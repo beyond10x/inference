@@ -82,13 +82,14 @@ enum Shape {
     /// As the mock delivers them: the binding delivers the same kinds of event.
     AsScripted,
     /// As the GPT-Live binding records them (`adapters/inference-openai/src/live_duplex.rs`):
-    /// no speech start or stop and no commit (`live_duplex.rs:37`), a response the listener cut
+    /// no speech stop and no commit (`live_duplex.rs:36-46`), a response the listener cut
     /// short completed, never cancelled (`live_duplex.rs:31-34`), and after a tool result the
-    /// next response started by the provider (`live_duplex.rs:38-42`, `live_duplex.rs:980-992`).
+    /// next response started by the provider (`live_duplex.rs:47-51`, `live_duplex.rs:1045-1057`).
     /// The user's transcript arrives while the user speaks, where the mock reports the speech
     /// start, not at a turn end GPT-Live does not mark: `session.input_transcript.delta` is
-    /// timed on the session timeline and there is no turn (`live.rs:39-41`), and the binding
-    /// records each fragment as it arrives (`live_duplex.rs:36`, `live_duplex.rs:881-884`).
+    /// timed on the session timeline and there is no turn (`live.rs:39-41`). Speech start is
+    /// reported, just before that transcript, only when the user speaks over a response that has
+    /// said something, the binding's `speech_over` (`live_duplex.rs:698`).
     GptLive,
 }
 
@@ -183,6 +184,8 @@ impl NativeSpeechModel for Provider {
             log: Log::default(),
             owed: false,
             heard: script().into_iter().map(|turn| turn.heard).collect(),
+            answering: None,
+            pending: VecDeque::new(),
         })
     }
 }
@@ -209,6 +212,11 @@ struct Session {
     /// What the user says in each turn still to come, as [`Shape::GptLive`] delivers it while
     /// the user speaks.
     heard: VecDeque<String>,
+    /// The response in progress, as the events delivered so far say, and whether it said
+    /// anything yet.
+    answering: Option<(ResponseId, bool)>,
+    /// Events [`Shape::GptLive`] delivers before the next of the mock's.
+    pending: VecDeque<SessionEvent>,
 }
 
 impl SpeechSessionHandle for Session {
@@ -273,6 +281,9 @@ impl SpeechSessionHandle for Session {
 
     fn next_event(&mut self, wait: Duration) -> Option<SessionEvent> {
         loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Some(event);
+            }
             if self.owed && self.inner.ledger().in_progress().is_none() {
                 self.owed = false;
                 self.inner
@@ -285,22 +296,52 @@ impl SpeechSessionHandle for Session {
             }
             match event {
                 SessionEvent::SpeechStarted(started) => {
-                    if let Some(text) = self.heard.pop_front() {
-                        return Some(SessionEvent::InputTranscribed(InputTranscribed {
-                            session_id: started.session_id,
-                            text,
-                        }));
+                    let Some(text) = self.heard.pop_front() else {
+                        continue;
+                    };
+                    let transcript = SessionEvent::InputTranscribed(InputTranscribed {
+                        session_id: started.session_id,
+                        text,
+                    });
+                    if matches!(self.answering, Some((_, true))) {
+                        self.pending.push_back(transcript);
+                        return Some(SessionEvent::SpeechStarted(started));
                     }
+                    return Some(transcript);
                 }
                 SessionEvent::SpeechStopped(_)
                 | SessionEvent::InputCommitted(_)
                 | SessionEvent::InputTranscribed(_) => {}
+                SessionEvent::ResponseCreated(created) => {
+                    self.answering = Some((created.response_id, false));
+                    return Some(SessionEvent::ResponseCreated(created));
+                }
+                SessionEvent::OutputTranscriptDelta(delta) => {
+                    if let Some((response_id, said)) = self.answering.as_mut()
+                        && *response_id == delta.response_id
+                    {
+                        *said = true;
+                    }
+                    return Some(SessionEvent::OutputTranscriptDelta(delta));
+                }
                 SessionEvent::ResponseCancelled(cancelled) => {
+                    self.answering = None;
                     return Some(SessionEvent::ResponseCompleted(ResponseCompleted {
                         response_id: cancelled.response_id,
                     }));
                 }
-                event => return Some(event),
+                event => {
+                    if let SessionEvent::ResponseCompleted(ResponseCompleted { response_id })
+                    | SessionEvent::ResponseFailed(inference_duplex::ResponseFailed {
+                        response_id,
+                        ..
+                    }) = &event
+                        && self.answering.is_some_and(|(id, _)| id == *response_id)
+                    {
+                        self.answering = None;
+                    }
+                    return Some(event);
+                }
             }
         }
     }
@@ -601,9 +642,9 @@ fn openai_realtime_conversation_is_interrupted_and_answers_the_time() {
     time_answer_plays(&host, &mut conversation, 1);
 }
 
-/// GPT-Live: the model takes its turns, its interruptions and its responses itself and reports
-/// no speech start; the user's transcript, arriving over the answer still playing, is the sign
-/// of the interruption, so the conversation stops playout at once. It neither cancels nor
+/// GPT-Live: the model takes its turns, its interruptions and its responses itself and marks
+/// no interruption; the binding reports speech started when the user's transcript starts inside
+/// what the answer has spoken, so the conversation stops playout at once. It neither cancels nor
 /// truncates, which GPT-Live takes neither of, and the model stops speaking on its own side. It
 /// asks for no response after the call: the binding asks the backend to continue.
 #[test]
