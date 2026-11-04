@@ -23,7 +23,9 @@
 //! stale. A send an output edge refuses as closed, as when the run's cancel ended the node it
 //! sends to before the cancel reached this node, ends the exchange: the node lets its input edges
 //! go and waits for the runtime's next signal. Cancelled, it ends as a cancelled node does, the
-//! turn the refusal cut among the records it sends; drained, it fails with the refusal.
+//! turn the refusal cut among the records it sends; drained, while that drain is awaited, it
+//! fails with the refusal. A drain given up before or during the wait, as a run gives up its drain
+//! for the cancel or failure that then cancels the node, does not end it.
 //! Given a usage port ([`ModelNode::with_usage`]), the output port its pipeline declares under the
 //! name `usage`, the node sends on the edge or exposure leaving it the usage record of each turn
 //! of its generation that ended, a failed one among them, as `inference-llm` delivers it after the
@@ -196,6 +198,9 @@ impl ModelPayload for PipelinePayload {
 #[derive(Debug, Default)]
 struct Signal {
     drain: bool,
+    /// How many drains of the node are awaited: a drain's future counts until it is dropped,
+    /// done or given up, as a run gives up its drain when a cancel or a failure is asked.
+    drains_awaited: usize,
     cancel: bool,
     /// The host asked for `SupersedeGeneration`: whether it did, and whether the node took it.
     supersede: bool,
@@ -1178,14 +1183,17 @@ impl<P: ModelPayload> Exchanging<P> {
     /// failed: it lets its input edges go, so that a producer still sending to it is refused as
     /// a producer sending to a failed node is, and waits for the runtime's next signal. A cancel,
     /// already taken or arriving right after, as when the run's cancel ended the node's consumer
-    /// before it reached this node, says it is; a drain says it is not.
+    /// before it reached this node, says it is; a drain the runtime awaits says it is not, and
+    /// ends the wait at once, as the runtime waits on it. A drain given up, its future dropped,
+    /// as a run gives up its drain for a cancel or a failure, which then cancels the node, does
+    /// not end the wait.
     async fn cancelled_after_refusal(&mut self) -> bool {
         self.inputs.clear();
         self.signal
             .until(|signal| {
                 if signal.cancel {
                     Some(true)
-                } else if signal.drain {
+                } else if signal.drain && signal.drains_awaited > 0 {
                     Some(false)
                 } else {
                     None
@@ -1535,6 +1543,16 @@ impl<P: ModelPayload> ModelNode<P> {
     }
 }
 
+/// Counts one drain of the node as awaited while its future lives.
+struct DrainAwaited(Arc<Watched<Signal>>);
+
+impl Drop for DrainAwaited {
+    fn drop(&mut self) {
+        self.0
+            .update(|signal| signal.drains_awaited = signal.drains_awaited.saturating_sub(1));
+    }
+}
+
 impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
     fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
         self.node_id = Some(node.node_id());
@@ -1638,8 +1656,13 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
     }
 
     fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
-        self.signal.update(|signal| signal.drain = true);
+        self.signal.update(|signal| {
+            signal.drain = true;
+            signal.drains_awaited += 1;
+        });
+        let awaited = DrainAwaited(Arc::clone(&self.signal));
         Box::pin(async move {
+            let _awaited = awaited;
             self.exchange.finished().await;
             self.exchange.panic()?;
             self.failure()
