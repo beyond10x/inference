@@ -74,6 +74,7 @@
 use std::fmt;
 use std::future::{self, Future};
 use std::pin::{Pin, pin};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};
@@ -843,6 +844,36 @@ enum Merged<P> {
     End,
 }
 
+/// Polls each pending receive once with `cx` and answers the first that is ready.
+fn next_received<P>(pending: &mut Vec<Receiving<P>>, cx: &mut Context<'_>) -> Option<Merged<P>> {
+    for index in 0..pending.len() {
+        if let Poll::Ready((input, received)) = pending[index].as_mut().poll(cx) {
+            drop(pending.swap_remove(index));
+            return Some(Merged::Received(input, received.map(Box::new)));
+        }
+    }
+    None
+}
+
+/// The waker an ingress bridge polls its edges with while the node drains: it wakes the bridge's
+/// task and records that it was woken, so that a receive that answered `Pending` and woke its own
+/// task in the same poll, asking to be polled again, is not taken for an empty edge.
+struct Woken {
+    woken: AtomicBool,
+    task: Waker,
+}
+
+impl Wake for Woken {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, Ordering::Release);
+        self.task.wake_by_ref();
+    }
+}
+
 /// Forwards what the parent sends into the subgraph node's input port, along every parent edge
 /// arriving at it, into the child's ingress of its name. An edge ends at its `stop` or when it
 /// closes; once every edge ended, `stop` crosses if every one of them ended with `stop`, and none
@@ -859,6 +890,13 @@ enum Merged<P> {
 /// more. Read the other way round, an envelope the parent put on an edge between the bridge's poll
 /// of it and the read of the drain would stay on the edge and be dropped with it
 /// (`story:subgraph-nested-drain-residual-loss`).
+///
+/// While the node drains, an edge counts as empty only when its receive answered `Pending`
+/// without waking the bridge's task in the same poll. A receive that answers `Pending` and wakes
+/// its own task has asked to be polled again, not waited for an envelope, so the bridge polls it
+/// again before it reads the edge as empty; `InputEndpoint::recv` waits only while the edge is
+/// empty, and the senders of the parent's edges are not gone when it drains the node, so no
+/// answer of `None` can be waited for (`story:drain-treats-a-pending-receive-as-an-empty-edge`).
 async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
     parents: Vec<Box<dyn InputEndpoint<P>>>,
     ingress: Box<dyn OutputEndpoint<P>>,
@@ -895,16 +933,21 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
             let draining = bridges
                 .read(cx, |state| state.drain.then_some(()))
                 .is_some();
-            for index in 0..pending.len() {
-                if let Poll::Ready((input, received)) = pending[index].as_mut().poll(cx) {
-                    drop(pending.swap_remove(index));
-                    return Poll::Ready(Merged::Received(input, received.map(Box::new)));
-                }
+            if !draining {
+                return next_received(&mut pending, cx).map_or(Poll::Pending, Poll::Ready);
             }
-            if draining {
-                Poll::Ready(Merged::Drain)
-            } else {
+            let woken = Arc::new(Woken {
+                woken: AtomicBool::new(false),
+                task: cx.waker().clone(),
+            });
+            let waker = Waker::from(Arc::clone(&woken));
+            if let Some(merged) = next_received(&mut pending, &mut Context::from_waker(&waker)) {
+                return Poll::Ready(merged);
+            }
+            if woken.woken.load(Ordering::Acquire) {
                 Poll::Pending
+            } else {
+                Poll::Ready(Merged::Drain)
             }
         })
         .await;
