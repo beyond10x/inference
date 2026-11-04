@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T05:12:09Z",
+  "actor": "human:timo",
+  "artifact": "story:transport-closed-keeps-arrivals",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference-aws (duplex): transport_closed_arrivals 7, late_usage_nova 12, nova_sonic_duplex 24, adversary1_session 4, lib 8",
+    "reference": "impl/transport-closed-keeps-arrivals at cc6fefe"
+  }
+}
