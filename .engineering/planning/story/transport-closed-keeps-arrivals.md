@@ -10,7 +10,9 @@ relations:
 scope:
 - confidence: cited
   path: adapters/inference-aws/src/duplex.rs
-revision: 5
+- confidence: cited
+  path: adapters/inference-aws/tests/transport_closed_arrivals.rs
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T03:53:28Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-04T03:53:29Z", actor: "human:timo", revision: 4}
@@ -46,3 +48,14 @@ the measurement below settles; the fix, if one is needed, uses the same path.
 When a send finds the provider's stream closed, usage the binding received before that point is
 in the session's usage records and counted once, and the session's failure is the first failure
 among the received arrivals, or TransportClosed when there is none.
+
+## Scope
+
+Confirmed against the merged diff (0.13.0 wave, 0365212 to d4cef5f).
+
+| path | planned | landed |
+|---|---|---|
+| `adapters/inference-aws/src/duplex.rs` | cited | unchanged: `commands_closed` already records the arrivals before failing |
+| `adapters/inference-aws/tests/transport_closed_arrivals.rs` | not planned | cited, new (7 cases) |
+
+Correction: no source change; the story's surface is a test file.
