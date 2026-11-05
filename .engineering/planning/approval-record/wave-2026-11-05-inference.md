@@ -9,7 +9,7 @@ relations:
 - decides: story:long-talk-over-does-not-resume-the-cut-answer
 - decides: story:elevenlabs-streaming-tts-adapter
 - decides: story:voice-topology-latency-per-step
-revision: 2
+revision: 3
 ---
 ## Decision
 
@@ -91,3 +91,18 @@ The coordinator decided on 2026-11-05 how the talk-over unit's finding is handle
   runs, waiting for the interruption. Before the gate, its cause is either explained and fixed in
   the test or harness, or the case is made deterministic. No case is newly ignored without the
   coordinator's word.
+
+## Outcome
+
+U1, U2 and U3 merged into the wave's integration branch, each after its adversary pass and its
+one correction.
+
+U4, story:voice-topology-latency-per-step, left the wave:
+
+- After its one correction, the adversary's blocker case is still red. While a binding blocks, the
+  cascade arm stops sending input, and the barge-in to stop it reports shrinks.
+- The fix is a worker-thread design, which also needs a test-side change to the adversary's case.
+  It goes to the next wave, where the story is recorded with that design.
+- Its work stays unmerged on its branch.
+
+Release 0.16.0 ships U1, U2 and U3. The staged gate runs on the integration branch without U4.
