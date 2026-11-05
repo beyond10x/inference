@@ -48,7 +48,15 @@
 //! edges hold before it ends (`subgraph` module). A control event still passes, `stop` among
 //! them: it carries no input, and the drain of a node that reads the ingress ends on it. The
 //! refusal is the guard's own and not the queue's, so it does not tell the run the consumer is
-//! gone. The edges between nodes are not closed: what a node emits while it drains is in flight.
+//! gone. The guard does not close the edges between nodes: what a node emits while it drains is
+//! in flight.
+//!
+//! A send admitted before the drain may still wait for room when the drain runs. The run's own
+//! ingress, read by a plain node, delivers it once the node takes. A subgraph node's ingress
+//! bridge closes the run's ingress to its senders at the drain, so such a send is refused as
+//! closed with its envelope rather than landing on an edge nobody reads; that refusal does not
+//! tell the run the consumer is gone either. An edge between two nodes is never closed that way:
+//! a node on a feedback cycle through the subgraph node drains with it and may still send.
 
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
@@ -63,7 +71,7 @@ use inference_core::envelope::{ControlKind, EventEnvelope, is_control_kind};
 use inference_core::id::{NodeId, StreamId};
 use inference_pipeline::ExposureId;
 
-use crate::queue::Channel;
+use crate::queue::{Channel, QueueSender};
 use crate::run::{FailureReason, RunState};
 
 /// What feeds the run's input: a source node, over each of its output edges, or the caller, over
@@ -362,7 +370,11 @@ impl fmt::Debug for RunRequests {
 /// sequence does not increase on its stream, tells the run's [`Signals`] when the queue refuses an
 /// envelope as closed, naming the node it arrives at, and, on an edge of a source node or an
 /// ingress, once the queue took the end of input. On an ingress it refuses user content once the
-/// run admits no new input, before the queue sees it.
+/// run admits no new input, before the queue sees it. A refusal as closed by a queue its reader
+/// closed to senders
+/// ([`close_to_senders`](inference_core::endpoint::InputEndpoint::close_to_senders)) is a send
+/// that was not delivered: its sequence is given back, as for every refusal, and the node is
+/// draining, not gone, so the run is not told.
 pub(crate) struct GuardedSender<E> {
     pub(crate) inner: E,
     pub(crate) channel: Channel,
@@ -376,14 +388,22 @@ pub(crate) struct GuardedSender<E> {
     pub(crate) sequences: Mutex<HashMap<StreamId, i64>>,
 }
 
-impl<E> GuardedSender<E> {
+impl<P> GuardedSender<QueueSender<P>> {
+    /// The guard of `inner`, the sender of the queue `channel` names. The queue of an edge
+    /// between two nodes is kept open to its senders
+    /// ([`QueueSender::keep_open_to_senders`]): a node on a feedback cycle through a subgraph
+    /// node drains with it and may still send into it, so only a run's exposures, its ingress
+    /// among them, are closed by a reader at its drain.
     pub(crate) fn new(
-        inner: E,
+        inner: QueueSender<P>,
         channel: Channel,
         source: Option<Feed>,
         consumer: Option<NodeId>,
         signals: Arc<Signals>,
     ) -> Self {
+        if matches!(channel, Channel::Edge(_)) {
+            inner.keep_open_to_senders();
+        }
         Self {
             inner,
             channel,
@@ -427,7 +447,7 @@ impl<E> GuardedSender<E> {
     }
 }
 
-impl<P: Send + 'static, E: OutputEndpoint<P>> OutputEndpoint<P> for GuardedSender<E> {
+impl<P: Send + 'static> OutputEndpoint<P> for GuardedSender<QueueSender<P>> {
     fn send(&self, envelope: EventEnvelope<P>) -> EndpointFuture<'_, Result<(), SendError<P>>> {
         let end = self.source.is_some() && envelope.kind == ControlKind::Stop.as_str();
         let content = !is_control_kind(&envelope.kind);
@@ -457,7 +477,9 @@ impl<P: Send + 'static, E: OutputEndpoint<P>> OutputEndpoint<P> for GuardedSende
                 if let Some((stream_id, sequence, previous)) = taken {
                     self.restore(stream_id, sequence, previous);
                 }
-                if let (SendError::Closed(_), Some(node_id)) = (&refused, self.consumer) {
+                if let (SendError::Closed(_), Some(node_id)) = (&refused, self.consumer)
+                    && !self.inner.is_closed_to_senders()
+                {
                     self.signals.consumer_gone(node_id);
                 }
                 return Err(refused);
