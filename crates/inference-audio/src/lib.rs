@@ -4,10 +4,34 @@
 //! [`AudioFrame`] is a bounded binary buffer of samples in one [`AudioFormat`], placed on the
 //! stream's sample clock by the [`SampleClockPosition`] of its first sample. A sample clock
 //! position is audio frame time, distinct from inference execution time, wall time and playback
-//! time. The crate carries no codec, resampler or format conversion. Serialized names are the ESS
-//! names, and serialized values stay within the ESS primitives: every `Integer` fits an `i64`, and
-//! `Bytes` is a padded standard base64 string. A field the specification does not declare is
-//! refused.
+//! time. Serialized names are the ESS names, and serialized values stay within the ESS primitives:
+//! every `Integer` fits an `i64`, and `Bytes` is a padded standard base64 string. A field the
+//! specification does not declare is refused.
+//!
+//! # Codec
+//!
+//! [`encode_mulaw`], [`decode_mulaw`], [`encode_alaw`] and [`decode_alaw`] are ITU-T G.711 between
+//! a 16-bit linear sample and the one-byte code word of `pcm_mulaw` and `pcm_alaw`, by the
+//! standard's segment tables. [`AudioFrame::to_encoding`] converts a frame between `pcm_s16le`,
+//! `pcm_mulaw` and `pcm_alaw`, sample by sample and for any channel count, and refuses a frame
+//! whose data does not match its sample count with a [`ConversionError`]. It does not convert
+//! `pcm_f32le`, and it does not change a frame's rate or channel count.
+//!
+//! # Resampler
+//!
+//! [`Resampler`] converts a stream of 16-bit mono PCM between 8, 16, 24 and 48 kHz
+//! ([`RESAMPLER_RATES`]) through a polyphase Kaiser-windowed sinc low-pass at 0.9 of the lower
+//! rate's Nyquist frequency, so content above it is attenuated rather than folded back. It keeps
+//! its state across frames, so a stream cut into frames gives the output of the whole stream, and
+//! its output lags its input by [`Resampler::delay`]. It takes no other rate, no stereo and no
+//! encoding but `pcm_s16le`: convert a G.711 frame with [`AudioFrame::to_encoding`] first. It is
+//! not a sample-rate converter for drifting clocks; the ratio is fixed.
+
+mod g711;
+mod resample;
+
+pub use g711::{ConversionError, decode_alaw, decode_mulaw, encode_alaw, encode_mulaw};
+pub use resample::{RESAMPLER_RATES, ResampleError, Resampler};
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;

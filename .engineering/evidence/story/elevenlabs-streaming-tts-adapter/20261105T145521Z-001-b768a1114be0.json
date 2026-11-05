@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T14:55:21Z",
+  "actor": "human:operator",
+  "artifact": "story:elevenlabs-streaming-tts-adapter",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference-elevenlabs --tests --all-features green on three runs at 3e86e7a (lib 8, adversary1_attack 13, auth 4, cancel 3, claims_record 1, closed_stream 9, conformance 6, first_audio 3, fixtures 2, output_formats 5); 26 red before the handle was implemented; clippy and fmt clean",
+    "reference": "git:3e86e7a"
+  }
+}

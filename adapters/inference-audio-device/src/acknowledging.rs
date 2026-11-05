@@ -38,7 +38,10 @@
 //! before any of it played; a generation that began before it and is never superseded, its output
 //! all played, makes no interruption. An `inference.stream.GenerationSuperseded` on the audio
 //! edge makes its generation stale the same way, and stops the speaker if the sink holds a segment
-//! of it. A frame of a stale generation that reaches the sink later is dropped and recorded
+//! of it. The two edges are not ordered with each other: a supersede taken before the opening of
+//! the turn that cut its generation keeps what its stop observed, and that opening, finding the
+//! generation stale and nothing left to stop, records the turn's interruption from that stop, its
+//! time the time the supersede was taken. A frame of a stale generation that reaches the sink later is dropped and recorded
 //! ([`StaleFrame`], with the played position when it was), never pushed, and the completion of a
 //! segment whose frames were dropped is ignored, so no receipt is ever made of it (step 4: stale
 //! results are rejected at the irreversible sink). A frame whose envelope names no generation is
@@ -248,6 +251,19 @@ struct Held {
     generation_id: Option<GenerationId>,
 }
 
+/// What a supersede taken ahead of the opening of the turn it answers observed: the generation,
+/// when the sink took it, how long the speaker's stop took, the samples it cleared, the played
+/// position it answered and the one read after it.
+#[derive(Debug, Clone, Copy)]
+struct CutAhead {
+    generation_id: GenerationId,
+    at: Instant,
+    stop: Duration,
+    cleared: usize,
+    position: Option<SampleClockPosition>,
+    played_after: Option<SampleClockPosition>,
+}
+
 /// One started exchange of an [`AcknowledgingSink`].
 struct Playing<P> {
     run_id: RunId,
@@ -276,6 +292,9 @@ struct Playing<P> {
     /// The interruption of the turn opened last when no audio was left to stop, recorded once a
     /// generation that began before it is superseded.
     awaiting: Option<Interruption>,
+    /// The stop of a generation superseded before the turn whose opening cut it, as the
+    /// supersede found it, recorded as that turn's interruption at its opening.
+    cut_ahead: Option<CutAhead>,
     /// The segments whose frames the sink dropped, which it never acknowledges.
     dropped: HashSet<SegmentId>,
     input_ended: bool,
@@ -425,6 +444,24 @@ impl<P: PlaybackPayload> Playing<P> {
             }
         }
         self.forget_held();
+        let cut_ahead = self.cut_ahead.take();
+        if !unplayed
+            && let Some(cut) = cut_ahead
+            && self.stale.contains(&cut.generation_id)
+        {
+            self.awaiting = None;
+            self.shared.update(|state| {
+                state.interruptions.push(Interruption {
+                    turn_id,
+                    at: cut.at,
+                    stop: cut.stop,
+                    cleared: cut.cleared,
+                    position: cut.position,
+                    played_after: cut.played_after,
+                });
+            });
+            return;
+        }
         if !unplayed {
             let played = self.speaker.played();
             self.awaiting = Some(Interruption {
@@ -457,17 +494,34 @@ impl<P: PlaybackPayload> Playing<P> {
     /// The generation `generation_id` was superseded: its frames are stale, and audio of it still
     /// to play is stopped at once. A generation that began before the turn opened last, which
     /// found no audio to stop, was cut before it played: the interruption of that turn is
-    /// recorded.
+    /// recorded. A generation superseded ahead of the opening of the turn that cuts it, the
+    /// supersede and the opening arriving on two edges in either order, keeps what its stop
+    /// observed, and that turn's opening records its interruption from it.
     fn superseded(&mut self, generation_id: GenerationId) {
+        let at = Instant::now();
         let by_turn = self.is_stale(Some(generation_id));
         self.stale.insert(generation_id);
         let holds = self
             .held
             .values()
             .any(|held| held.generation_id == Some(generation_id));
-        if holds {
-            let _unplayed_is_dropped = self.speaker.stop();
+        let (cleared, position) = if holds {
+            let cleared = self.speaker.queued();
+            let position = self.speaker.stop();
             self.forget_held();
+            (cleared, position)
+        } else {
+            (0, self.speaker.played())
+        };
+        if !by_turn {
+            self.cut_ahead = Some(CutAhead {
+                generation_id,
+                at,
+                stop: at.elapsed(),
+                cleared,
+                position,
+                played_after: self.speaker.played(),
+            });
         }
         if by_turn && let Some(interruption) = self.awaiting.take() {
             self.shared
@@ -807,6 +861,7 @@ impl<P: PlaybackPayload> NodeImplementation<P> for AcknowledgingSink {
                 epochs: HashMap::new(),
                 opened: 0,
                 awaiting: None,
+                cut_ahead: None,
                 dropped: HashSet::new(),
                 input_ended: false,
             };

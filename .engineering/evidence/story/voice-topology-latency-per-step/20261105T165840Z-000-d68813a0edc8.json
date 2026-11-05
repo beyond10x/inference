@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T16:58:40Z",
+  "actor": "human:operator",
+  "artifact": "story:voice-topology-latency-per-step",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "adversary1_topology_busy_step::barge_in_to_stop_does_not_shrink_while_the_llm_is_busy_on_its_next_segment red after correction 1 (barge_in_stop 10ms, needs 30-50); realtime-voice and local-voice-cascade otherwise 79 passed, 1 ignored",
+    "reference": "git:2ff98aa"
+  }
+}
