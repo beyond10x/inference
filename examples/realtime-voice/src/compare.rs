@@ -30,15 +30,41 @@
 //! [`Plan::quiet`] after the barge-in; an answer whose voiced audio had finished playing before
 //! the barge-in is not measured, and the run says so.
 //!
+//! [`run_cascade`] runs the same plan over the other topology, a [`Cascade`] of a recogniser, an
+//! LLM and a synthesiser, with the same turns, pace and clock. The cascade has no session to
+//! report the end of speech: its detector is the arm's own, a frame being voiced as [`Plan`]
+//! says. The recogniser takes the frames of a turn until [`Cascade::hold`] of silence follows
+//! speech, then its input ends; its committed spans are the turn's text, asked of the generator
+//! as user text; each committed segment of the answer is offered to the synthesiser as it
+//! arrives, and each frame of the synthesis is handed to the [`Playout`] as it arrives. The steps
+//! run one after the other on the caller's thread, each read on the caller's clock when it hands
+//! its event over. Four measures of the cascade's own steps run from the end of input speech:
+//!
+//! * final transcript: the recogniser's last committed span of the turn;
+//! * first token: the answer's first text delta;
+//! * TTS first audio: the synthesis's first frame;
+//! * playout start: the return of the playout's first [`Playout::play`].
+//!
+//! Its shared measures keep their names: first audio is the playout start, the instant the
+//! answer can be heard, as a native model's first audio is played at its receipt; response end is
+//! the synthesis's last event; barge-in to output stop runs from the barge-in's first voiced frame
+//! to the return of [`Playout::stop`], which the arm calls once [`Cascade::attack`] of voiced
+//! input opened a turn while the answer still played. The cascade has no first transcript of the
+//! answer apart from its first token, and a native model has none of the cascade's steps: the
+//! table shows such a cell as `n/a`, never as 0. [`hosted_tts`] makes the hosted synthesiser the
+//! `compare` example binds, or says why there is none.
+//!
 //! [`Comparison`] collects the runs of each provider, or why it was skipped, and prints the
 //! median and the spread (lowest and highest) of each measure over the runs that measured it, and
 //! the usage of each run as the provider reports it: tokens, and seconds for a provider that
 //! bills by the second.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use inference_audio_device::convert::{LinearResampler, decode, encode};
@@ -46,6 +72,17 @@ use inference_duplex::inference_audio::{AudioFormat, AudioFrame, SampleClockPosi
 use inference_duplex::{
     NativeSpeechModel, OpenError, ResponseId, SessionConfig, SessionEvent, SpeechSessionHandle,
 };
+use inference_elevenlabs::{
+    CredentialSource, ELEVENLABS_KEY_NAME, ElevenLabsSynthesiser, Endpoint, OutputFormat,
+    VoiceConfig,
+};
+use inference_llm::llm_core::{Item, TurnRequest};
+use inference_llm::{GenerationEvent, GenerationHandle, GenerationRequest, Generator};
+use inference_stt::inference_core::generation::{Generation, StartGeneration};
+use inference_stt::inference_core::id::{NodeId, RunId, StreamId};
+use inference_stt::inference_text::{OutputSegment, SegmentId, TurnId};
+use inference_stt::{Recogniser, RecognitionHandle, RecognitionRequest, TranscriptEvent};
+use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
 
 use crate::{Ending, Note, Reported, Tally, Totals, Usage};
 
@@ -225,9 +262,33 @@ impl<S> Billing<S> {
     }
 }
 
-/// What one run measured. A measure is `None` when the run did not reach it; `notes` say why.
+/// How a provider answers speech: a native speech model, or a cascade of STT, LLM and TTS.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Topology {
+    /// One model hears speech and speaks its answer.
+    #[default]
+    Native,
+    /// A recogniser, a text model and a synthesiser, one after the other.
+    Cascade,
+}
+
+impl Topology {
+    /// The topology's name in the table.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Cascade => "cascade",
+        }
+    }
+}
+
+/// What one run measured. A measure is `None` when the run did not reach it or its topology has
+/// no such step; `notes` say why a measure it has is missing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Measured {
+    /// The topology of the provider the run measured.
+    pub topology: Topology,
     /// End of input speech to the answer's first audio.
     pub first_audio: Option<Duration>,
     /// End of input speech to the answer's first transcript.
@@ -236,6 +297,14 @@ pub struct Measured {
     pub response_end: Option<Duration>,
     /// The barge-in's first voiced frame sent to the end of the answer's playout.
     pub barge_in_stop: Option<Duration>,
+    /// End of input speech to the recogniser's final transcript, for a cascade.
+    pub final_transcript: Option<Duration>,
+    /// End of input speech to the LLM's first token, for a cascade.
+    pub first_token: Option<Duration>,
+    /// End of input speech to the TTS's first audio, for a cascade.
+    pub tts_first_audio: Option<Duration>,
+    /// End of input speech to the start of the answer's playout, for a cascade.
+    pub playout_start: Option<Duration>,
     /// The usage the session reported over the run.
     pub usage: Totals,
     /// The seconds the provider billed, for one that bills by the second.
@@ -389,6 +458,26 @@ struct Runner<'a, S> {
     measured: Measured,
 }
 
+/// The frames of the plan's question and barge-in in `format`, the question's last voiced frame
+/// and the barge-in's first marked, and the silence the barge-in sends before its first voiced
+/// frame.
+fn inputs(plan: &Plan, format: AudioFormat) -> (Vec<Input>, Option<Vec<Input>>, Duration) {
+    let mut question = plan.question.frames(format, plan.frame, plan.voiced);
+    if let Some(last) = question.iter_mut().rev().find(|input| input.voiced) {
+        last.mark = Mark::QuestionEnd;
+    }
+    let mut barge_lead = Duration::ZERO;
+    let barge_in = plan.barge_in.as_ref().map(|clip| {
+        let mut frames = clip.frames(format, plan.frame, plan.voiced);
+        if let Some(lead) = frames.iter().position(|input| input.voiced) {
+            frames[lead].mark = Mark::BargeStart;
+            barge_lead = plan.frame * u32::try_from(lead).unwrap_or(u32::MAX);
+        }
+        frames
+    });
+    (question, barge_in, barge_lead)
+}
+
 /// Runs the plan once over a new session of `model` opened with `config`, on `clock`, and
 /// returns what it measured and the usage the session reported, `billing` saying how to read it.
 ///
@@ -405,19 +494,7 @@ pub fn run<M: NativeSpeechModel>(
 ) -> Result<Measured, OpenError> {
     let format = config.input_format;
     let cancel_on_speech = !config.auto_interrupt && model.capabilities().client_cancel;
-    let mut question = plan.question.frames(format, plan.frame, plan.voiced);
-    if let Some(last) = question.iter_mut().rev().find(|input| input.voiced) {
-        last.mark = Mark::QuestionEnd;
-    }
-    let mut barge_lead = Duration::ZERO;
-    let barge_in = plan.barge_in.as_ref().map(|clip| {
-        let mut frames = clip.frames(format, plan.frame, plan.voiced);
-        if let Some(lead) = frames.iter().position(|input| input.voiced) {
-            frames[lead].mark = Mark::BargeStart;
-            barge_lead = plan.frame * u32::try_from(lead).unwrap_or(u32::MAX);
-        }
-        frames
-    });
+    let (question, barge_in, barge_lead) = inputs(plan, format);
     let session = model.open(config)?;
     let now = clock();
     let mut runner = Runner {
@@ -702,22 +779,690 @@ impl<S: SpeechSessionHandle> Runner<'_, S> {
     }
 }
 
+/// The bindings of a cascade arm: its recogniser, its LLM and its synthesiser, the format the
+/// recogniser is offered input in, and the arm's detector.
+#[derive(Debug)]
+pub struct Cascade<R, S> {
+    pub recogniser: R,
+    pub generator: Generator,
+    pub synthesiser: S,
+    /// The format the recogniser is offered input in.
+    pub input_format: AudioFormat,
+    /// The voiced input that opens a turn: at a barge-in, the playout stops once this much of
+    /// the barge-in's voiced input was sent.
+    pub attack: Duration,
+    /// The silence after speech that ends the recogniser's input.
+    pub hold: Duration,
+}
+
+impl<R, S> Cascade<R, S> {
+    /// The cascade of `recogniser`, `generator` and `synthesiser`, the recogniser offered
+    /// `input_format`, its detector's attack and hold those of the local voice cascade,
+    /// [`local_voice_cascade::VAD`].
+    #[must_use]
+    pub const fn new(
+        recogniser: R,
+        generator: Generator,
+        synthesiser: S,
+        input_format: AudioFormat,
+    ) -> Self {
+        Self {
+            recogniser,
+            generator,
+            synthesiser,
+            input_format,
+            attack: local_voice_cascade::VAD.attack,
+            hold: local_voice_cascade::VAD.hold,
+        }
+    }
+}
+
+/// Where a cascade arm plays the answer's audio.
+pub trait Playout {
+    /// Plays `frame` after the frames before it; the playout has started once the first call
+    /// returns.
+    fn play(&mut self, frame: &AudioFrame);
+
+    /// Stops playout and drops what is queued; it has stopped once the call returns.
+    fn stop(&mut self);
+}
+
+/// The playout of a client without a speaker: nothing is played, and each frame is timed as the
+/// client would play it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClientPlayout;
+
+impl Playout for ClientPlayout {
+    fn play(&mut self, _frame: &AudioFrame) {}
+
+    fn stop(&mut self) {}
+}
+
+/// The reason, and the start of every reason, a cascade arm without a hosted synthesiser is
+/// skipped for.
+pub const NO_HOSTED_TTS: &str = "no hosted TTS configured";
+
+/// The variable naming the ElevenLabs voice the cascade arm speaks with.
+pub const VOICE_VARIABLE: &str = "ELEVENLABS_VOICE_ID";
+
+/// The ElevenLabs synthesiser of `voice` in `format` at `endpoint`, its key resolved through
+/// `source` under `ELEVENLABS_KEY_NAME`, when that key resolves at once. Making it sends
+/// nothing.
+///
+/// # Errors
+///
+/// A reason beginning with [`NO_HOSTED_TTS`]: the key did not resolve, no voice is named, or the
+/// configuration was refused.
+pub fn hosted_tts(
+    endpoint: Endpoint,
+    source: Arc<dyn CredentialSource>,
+    voice: Option<&str>,
+    format: OutputFormat,
+) -> Result<ElevenLabsSynthesiser, String> {
+    let resolved = {
+        let mut future = source.resolve(ELEVENLABS_KEY_NAME);
+        let mut context = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(Ok(_)) => Ok(()),
+            Poll::Ready(Err(error)) => Err(format!("the ElevenLabs key did not resolve: {error}")),
+            Poll::Pending => Err("the ElevenLabs key did not resolve at once".to_owned()),
+        }
+    };
+    resolved.map_err(|why| format!("{NO_HOSTED_TTS}: {why}"))?;
+    let voice = voice
+        .map(str::trim)
+        .filter(|voice| !voice.is_empty())
+        .ok_or_else(|| format!("{NO_HOSTED_TTS}: {VOICE_VARIABLE} names no voice"))?;
+    ElevenLabsSynthesiser::new(
+        endpoint,
+        VoiceConfig::new(voice, format),
+        source,
+        ELEVENLABS_KEY_NAME,
+    )
+    .map_err(|error| format!("{NO_HOSTED_TTS}: {error}"))
+}
+
+/// What a cascade arm measured of one turn, each an instant on the caller's clock.
+#[derive(Debug, Default)]
+struct Steps {
+    speech_end: Option<Instant>,
+    final_transcript: Option<Instant>,
+    first_token: Option<Instant>,
+    tts_first_audio: Option<Instant>,
+    playout_start: Option<Instant>,
+    /// The synthesis's last event.
+    ended: Option<Instant>,
+    /// Where the playout of the answer's audio received so far ends.
+    cursor: Option<Instant>,
+    /// Whether the turn is over: answered, refused or failed.
+    done: bool,
+}
+
+impl Steps {
+    fn since_speech_end(&self, at: Option<Instant>) -> Option<Duration> {
+        Some(at?.saturating_duration_since(self.speech_end?))
+    }
+}
+
+/// Where a cascade arm's turn stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// No step runs.
+    Idle,
+    /// The recogniser takes the turn's input.
+    Listening,
+    /// The recogniser's input ended; its last events are read.
+    Recognising,
+    /// The generator answers and the synthesiser speaks the answer.
+    Answering,
+}
+
+struct CascadeRunner<'a, R: Recogniser, S: Synthesiser> {
+    cascade: &'a mut Cascade<R, S>,
+    plan: &'a Plan,
+    clock: &'a dyn Fn() -> Instant,
+    wait: &'a dyn Fn(Duration),
+    playout: &'a mut dyn Playout,
+    run_id: RunId,
+    stt: NodeId,
+    llm: NodeId,
+    epoch: i64,
+    question: Vec<Input>,
+    barge_in: Option<Vec<Input>>,
+    barge_lead: Duration,
+    queue: VecDeque<Input>,
+    position: u64,
+    phase: Phase,
+    turn_started: Instant,
+    latency: Steps,
+    barge: Steps,
+    barge_queued: bool,
+    barge_start: Option<Instant>,
+    /// The barge-in's voiced input sent so far.
+    barge_voiced: Duration,
+    stage: Stage,
+    recognition: Option<R::Handle>,
+    heard: Vec<String>,
+    /// Whether the turn's input was voiced yet, and the silence sent since its last voiced frame.
+    voiced: bool,
+    silent_for: Duration,
+    generation: Option<GenerationHandle>,
+    record: Option<Generation>,
+    tentative: HashMap<SegmentId, OutputSegment>,
+    synthesis: Option<S::Handle>,
+    utterance_ended: bool,
+    measured: Measured,
+}
+
+/// Runs the plan once over `cascade`, on `clock`, waiting with `wait` until the next frame is
+/// due when no step has anything to hand over, and playing the answer's audio on `playout`, and
+/// returns what it measured; see the module documentation. Every failure is a note of the run.
+pub fn run_cascade<R: Recogniser, S: Synthesiser>(
+    cascade: &mut Cascade<R, S>,
+    plan: &Plan,
+    clock: &dyn Fn() -> Instant,
+    wait: &dyn Fn(Duration),
+    playout: &mut dyn Playout,
+) -> Measured {
+    let (question, barge_in, barge_lead) = inputs(plan, cascade.input_format);
+    let now = clock();
+    let mut runner = CascadeRunner {
+        cascade,
+        plan,
+        clock,
+        wait,
+        playout,
+        run_id: RunId::generate(),
+        stt: NodeId::generate(),
+        llm: NodeId::generate(),
+        epoch: 0,
+        queue: question.iter().cloned().collect(),
+        question,
+        barge_in,
+        barge_lead,
+        position: 0,
+        phase: Phase::Latency,
+        turn_started: now,
+        latency: Steps::default(),
+        barge: Steps::default(),
+        barge_queued: false,
+        barge_start: None,
+        barge_voiced: Duration::ZERO,
+        stage: Stage::Idle,
+        recognition: None,
+        heard: Vec::new(),
+        voiced: false,
+        silent_for: Duration::ZERO,
+        generation: None,
+        record: None,
+        tentative: HashMap::new(),
+        synthesis: None,
+        utterance_ended: false,
+        measured: Measured {
+            topology: Topology::Cascade,
+            ..Measured::default()
+        },
+    };
+    runner.listen();
+    runner.drive(now);
+    runner.cut();
+    let latency = &runner.latency;
+    let mut measured = std::mem::take(&mut runner.measured);
+    measured.first_audio = latency.since_speech_end(latency.playout_start);
+    measured.response_end = latency.since_speech_end(latency.ended);
+    measured.final_transcript = latency.since_speech_end(latency.final_transcript);
+    measured.first_token = latency.since_speech_end(latency.first_token);
+    measured.tts_first_audio = latency.since_speech_end(latency.tts_first_audio);
+    measured.playout_start = latency.since_speech_end(latency.playout_start);
+    measured
+}
+
+impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
+    fn drive(&mut self, start: Instant) {
+        let mut next_send = start + self.plan.frame;
+        loop {
+            let now = (self.clock)();
+            self.decide(now);
+            if self.phase == Phase::Done {
+                return;
+            }
+            if now >= next_send {
+                self.send(now);
+                next_send += self.plan.frame;
+                continue;
+            }
+            if !self.work() {
+                (self.wait)(next_send - now);
+            }
+        }
+    }
+
+    fn note(&mut self, note: String) {
+        self.measured.notes.push(note);
+    }
+
+    /// The turn the run is in.
+    const fn steps(&mut self) -> Option<&mut Steps> {
+        match self.phase {
+            Phase::Latency => Some(&mut self.latency),
+            Phase::BargeIn => Some(&mut self.barge),
+            _ => None,
+        }
+    }
+
+    /// Moves the run on once what it waits for is there.
+    fn decide(&mut self, now: Instant) {
+        let limit = self.plan.limit;
+        let late = now.saturating_duration_since(self.turn_started) > limit;
+        match self.phase {
+            Phase::Latency => {
+                if self.latency.done {
+                    self.phase = match (self.latency.ended, &self.barge_in) {
+                        (Some(ended), Some(_)) => {
+                            let played = self
+                                .latency
+                                .cursor
+                                .map_or(ended, |cursor| cursor.max(ended));
+                            Phase::Pause(played + self.plan.pause)
+                        }
+                        _ => Phase::Done,
+                    };
+                } else if late {
+                    self.note(format!("no end of the answer within {limit:?}"));
+                    self.phase = Phase::Done;
+                }
+            }
+            Phase::Pause(until) => {
+                if now >= until {
+                    self.queue.extend(self.question.iter().cloned());
+                    self.turn_started = now;
+                    self.phase = Phase::BargeIn;
+                    self.listen();
+                }
+            }
+            Phase::BargeIn => {
+                if !self.barge_queued
+                    && let Some(first) = self.barge.playout_start
+                    && now + self.barge_lead >= first + self.plan.barge_after
+                    && let Some(frames) = &self.barge_in
+                {
+                    self.queue.extend(frames.iter().cloned());
+                    self.barge_queued = true;
+                }
+                if self.barge.done && self.barge.playout_start.is_none() {
+                    self.note("barge-in: the answer had no audio".to_owned());
+                    self.phase = Phase::Done;
+                } else if late {
+                    self.note(format!("barge-in: not measured within {limit:?}"));
+                    self.phase = Phase::Done;
+                }
+            }
+            Phase::Drain(_) | Phase::Done => self.phase = Phase::Done,
+        }
+    }
+
+    /// Starts the recognition of a turn, after dropping every step of the one before.
+    fn listen(&mut self) {
+        self.cut();
+        self.voiced = false;
+        self.silent_for = Duration::ZERO;
+        self.heard.clear();
+        let request = RecognitionRequest::new(
+            self.run_id,
+            TurnId::generate(),
+            StreamId::generate(),
+            self.stt,
+            "transcript",
+        );
+        match self.cascade.recogniser.start(request) {
+            Ok(recognition) => {
+                self.recognition = Some(recognition);
+                self.stage = Stage::Listening;
+            }
+            Err(error) => {
+                self.note(format!("the recogniser refused the turn: {error}"));
+                self.finish();
+            }
+        }
+    }
+
+    /// Drops every step that runs.
+    fn cut(&mut self) {
+        self.recognition = None;
+        self.generation = None;
+        self.record = None;
+        self.tentative.clear();
+        self.synthesis = None;
+        self.utterance_ended = false;
+        self.stage = Stage::Idle;
+    }
+
+    /// Ends the turn and drops its steps.
+    fn finish(&mut self) {
+        if let Some(steps) = self.steps() {
+            steps.done = true;
+        }
+        self.cut();
+    }
+
+    /// Sends the next frame of input, silence when none is queued, to the recogniser while it
+    /// takes the turn's input and to the arm's detector.
+    fn send(&mut self, now: Instant) {
+        let input = self.queue.pop_front().unwrap_or_else(|| {
+            let format = self.cascade.input_format;
+            let samples = samples_in(self.plan.frame, format.sample_rate).max(1);
+            Input {
+                data: encode(&vec![0.0; samples], format.encoding),
+                samples: samples as u32,
+                voiced: false,
+                mark: Mark::None,
+            }
+        });
+        let Some(position) = SampleClockPosition::new(self.position) else {
+            self.phase = Phase::Done;
+            return;
+        };
+        let frame = AudioFrame {
+            format: self.cascade.input_format,
+            position,
+            sample_count: input.samples,
+            data: input.data,
+        };
+        let length = frame.duration();
+        self.position += u64::from(input.samples);
+        match input.mark {
+            Mark::QuestionEnd => {
+                if let Some(steps) = self.steps() {
+                    steps.speech_end = Some(now);
+                }
+            }
+            Mark::BargeStart => self.barge_start = Some(now),
+            Mark::None => {}
+        }
+        if self.stage == Stage::Listening {
+            if let Some(recognition) = self.recognition.as_mut()
+                && let Err(error) = recognition.offer_frame(frame)
+            {
+                self.note(format!("the recogniser refused input: {error}"));
+            }
+            if input.voiced {
+                self.voiced = true;
+                self.silent_for = Duration::ZERO;
+            } else if self.voiced {
+                self.silent_for += length;
+                if self.silent_for >= self.cascade.hold {
+                    if let Some(recognition) = self.recognition.as_mut()
+                        && let Err(error) = recognition.end_input()
+                    {
+                        self.note(format!("the recogniser's input did not end: {error}"));
+                    }
+                    self.stage = Stage::Recognising;
+                }
+            }
+        }
+        if self.phase == Phase::BargeIn && self.barge_start.is_some() && input.voiced {
+            self.barge_voiced += length;
+            if self.barge_voiced >= self.cascade.attack {
+                self.interrupt(now);
+            }
+        }
+    }
+
+    /// The detector opened a turn at the barge-in, at `now`: stops the playout if the answer still
+    /// plays, measures the stop, and drops every step of the answer.
+    fn interrupt(&mut self, now: Instant) {
+        let Some(barge) = self.barge_start else {
+            return;
+        };
+        match self.barge.cursor {
+            Some(cursor) if cursor > now => {
+                self.playout.stop();
+                let stopped = (self.clock)();
+                self.measured.barge_in_stop = Some(stopped.saturating_duration_since(barge));
+            }
+            cursor => {
+                let after = |at: Instant| {
+                    self.barge
+                        .playout_start
+                        .map_or(0, |first| at.saturating_duration_since(first).as_millis())
+                };
+                let note = format!(
+                    "barge-in: the answer had finished playing before the barge-in: it ended {} \
+                     ms after its first audio, the barge-in's speech started {} ms after it",
+                    cursor.map_or(0, after),
+                    after(barge)
+                );
+                self.note(note);
+            }
+        }
+        self.cut();
+        self.phase = Phase::Done;
+    }
+
+    /// Takes one event of the step that runs; whether there was one, or the step moved on.
+    fn work(&mut self) -> bool {
+        match self.stage {
+            Stage::Idle => false,
+            Stage::Listening => match self.recognition.as_mut().and_then(Iterator::next) {
+                Some(event) => {
+                    self.transcribed(event.payload);
+                    true
+                }
+                None => false,
+            },
+            Stage::Recognising => {
+                match self.recognition.as_mut().and_then(Iterator::next) {
+                    Some(event) => self.transcribed(event.payload),
+                    None => self.recognised(),
+                }
+                true
+            }
+            Stage::Answering => {
+                self.answer();
+                true
+            }
+        }
+    }
+
+    fn transcribed(&mut self, event: TranscriptEvent) {
+        if let TranscriptEvent::Committed(committed) = event {
+            let at = (self.clock)();
+            self.heard.push(committed.text);
+            if let Some(steps) = self.steps() {
+                steps.final_transcript = Some(at);
+            }
+        }
+    }
+
+    /// The recognition ended: asks the generator for an answer to its text and starts the
+    /// synthesis of the answer.
+    fn recognised(&mut self) {
+        self.recognition = None;
+        let text = self.heard.join(" ").trim().to_owned();
+        if text.is_empty() {
+            self.note("the recogniser committed no text".to_owned());
+            self.finish();
+            return;
+        }
+        self.epoch += 1;
+        let model = self
+            .cascade
+            .generator
+            .model()
+            .provenance()
+            .model
+            .as_str()
+            .to_owned();
+        let request = GenerationRequest {
+            run_id: self.run_id,
+            node_id: self.llm,
+            epoch: self.epoch,
+            turn: TurnRequest::new(model.as_str(), vec![Item::user(text)]),
+        };
+        match self.cascade.generator.start(request) {
+            Ok(generation) => self.generation = Some(generation),
+            Err(error) => {
+                self.note(format!("the generator refused the turn: {error}"));
+                self.finish();
+                return;
+            }
+        }
+        match self.cascade.synthesiser.start() {
+            Ok(synthesis) => self.synthesis = Some(synthesis),
+            Err(error) => {
+                self.note(format!("the synthesiser refused the turn: {error}"));
+                self.finish();
+                return;
+            }
+        }
+        self.utterance_ended = false;
+        self.stage = Stage::Answering;
+    }
+
+    /// Takes the synthesis's next event, or else the generation's, or ends the turn once the
+    /// synthesis of the whole answer ended.
+    fn answer(&mut self) {
+        if let Some(event) = self.synthesis.as_mut().and_then(Iterator::next) {
+            self.spoken(event);
+            return;
+        }
+        if self.utterance_ended {
+            if self
+                .steps()
+                .is_some_and(|steps| steps.tts_first_audio.is_none())
+            {
+                self.note("the synthesis gave no audio".to_owned());
+            }
+            self.finish();
+            return;
+        }
+        match self.generation.as_mut().and_then(Iterator::next) {
+            Some(event) => self.generated(event),
+            None => self.end_utterance(),
+        }
+    }
+
+    fn generated(&mut self, event: GenerationEvent) {
+        match event {
+            GenerationEvent::Started(started) => {
+                let (record, _) = Generation::start_as(
+                    started.generation_id,
+                    StartGeneration {
+                        run_id: started.run_id,
+                        node_id: self.llm,
+                        epoch: started.epoch,
+                    },
+                );
+                self.record = Some(record);
+            }
+            GenerationEvent::TextDelta(delta) => {
+                let at = (self.clock)();
+                if let Some(steps) = self.steps() {
+                    steps.first_token.get_or_insert(at);
+                }
+                let Some(record) = self.record.as_ref() else {
+                    return;
+                };
+                match OutputSegment::emit_as(delta.segment_id, record, delta.sequence, delta.text) {
+                    Ok((segment, _)) => {
+                        self.tentative.insert(delta.segment_id, segment);
+                    }
+                    Err(refused) => self.note(format!("a delta was refused: {refused:?}")),
+                }
+            }
+            GenerationEvent::SegmentCommitted(committed) => {
+                let Some(segment) = self.tentative.remove(&committed.segment_id) else {
+                    return;
+                };
+                let refused = match segment.commit() {
+                    Ok((segment, _)) => self
+                        .synthesis
+                        .as_mut()
+                        .and_then(|synthesis| synthesis.offer_segment(segment).err())
+                        .map(|refused| format!("the synthesiser refused a segment: {refused:?}")),
+                    Err(refused) => Some(format!("a segment did not commit: {refused:?}")),
+                };
+                if let Some(refused) = refused {
+                    self.note(refused);
+                }
+            }
+            GenerationEvent::Completed(_) => self.end_utterance(),
+            GenerationEvent::Cancelled(..) => {
+                let failure = self
+                    .generation
+                    .as_ref()
+                    .and_then(GenerationHandle::failure)
+                    .map_or_else(
+                        || "no failure given".to_owned(),
+                        |error| format!("{error:?}"),
+                    );
+                self.note(format!("the generation was cancelled: {failure}"));
+                self.end_utterance();
+            }
+            GenerationEvent::Usage(_) => {}
+        }
+    }
+
+    /// The answer is complete: the synthesis's utterance ends.
+    fn end_utterance(&mut self) {
+        if self.utterance_ended {
+            return;
+        }
+        self.utterance_ended = true;
+        if let Some(synthesis) = self.synthesis.as_mut()
+            && let Err(error) = synthesis.end_utterance()
+        {
+            self.note(format!("the synthesis's utterance did not end: {error}"));
+        }
+    }
+
+    /// Takes an event of the synthesis: a frame is handed to the playout as it arrives.
+    fn spoken(&mut self, event: SynthesisEvent) {
+        let at = (self.clock)();
+        if let Some(steps) = self.steps() {
+            steps.ended = Some(at);
+        }
+        let SynthesisEvent::Audio(audio) = event else {
+            return;
+        };
+        self.playout.play(audio.frame());
+        let played = (self.clock)();
+        let length = audio.frame().duration();
+        if let Some(steps) = self.steps() {
+            steps.tts_first_audio.get_or_insert(at);
+            steps.playout_start.get_or_insert(played);
+            let start = steps.cursor.map_or(played, |cursor| cursor.max(played));
+            steps.cursor = Some(start + length);
+        }
+    }
+}
+
 /// A measure of a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Measure {
     FirstAudio,
     FirstTranscript,
+    /// The turn latency: end of speech to the answer's end.
     ResponseEnd,
     BargeInStop,
+    FinalTranscript,
+    FirstToken,
+    TtsFirstAudio,
+    PlayoutStart,
 }
 
 impl Measure {
-    /// Every measure, in the order the table shows them.
-    pub const ALL: [Self; 4] = [
+    /// Every measure, in the order the table shows them: those of a native model, then the
+    /// cascade's steps.
+    pub const ALL: [Self; 8] = [
         Self::FirstAudio,
         Self::FirstTranscript,
         Self::ResponseEnd,
         Self::BargeInStop,
+        Self::FinalTranscript,
+        Self::FirstToken,
+        Self::TtsFirstAudio,
+        Self::PlayoutStart,
     ];
 
     /// The measure's column heading.
@@ -728,17 +1473,42 @@ impl Measure {
             Self::FirstTranscript => "first transcript",
             Self::ResponseEnd => "response end",
             Self::BargeInStop => "barge-in to stop",
+            Self::FinalTranscript => "final transcript",
+            Self::FirstToken => "first token",
+            Self::TtsFirstAudio => "tts first audio",
+            Self::PlayoutStart => "playout start",
         }
     }
 
-    /// The measure of `run`.
+    /// Whether a provider of `topology` has the step the measure ends at: first audio, response
+    /// end and barge-in to stop both have; the first transcript of the answer is a native
+    /// model's, and the four steps after it the cascade's.
+    #[must_use]
+    pub const fn applies(self, topology: Topology) -> bool {
+        match self {
+            Self::FirstAudio | Self::ResponseEnd | Self::BargeInStop => true,
+            Self::FirstTranscript => matches!(topology, Topology::Native),
+            Self::FinalTranscript | Self::FirstToken | Self::TtsFirstAudio | Self::PlayoutStart => {
+                matches!(topology, Topology::Cascade)
+            }
+        }
+    }
+
+    /// The measure of `run`; `None` as well when its topology has no such step.
     #[must_use]
     pub const fn of(self, run: &Measured) -> Option<Duration> {
+        if !self.applies(run.topology) {
+            return None;
+        }
         match self {
             Self::FirstAudio => run.first_audio,
             Self::FirstTranscript => run.first_transcript,
             Self::ResponseEnd => run.response_end,
             Self::BargeInStop => run.barge_in_stop,
+            Self::FinalTranscript => run.final_transcript,
+            Self::FirstToken => run.first_token,
+            Self::TtsFirstAudio => run.tts_first_audio,
+            Self::PlayoutStart => run.playout_start,
         }
     }
 }
@@ -806,7 +1576,7 @@ pub enum Outcome {
 /// The runs of each provider, in the order they were added, and the table of them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Comparison {
-    providers: Vec<(String, Outcome)>,
+    providers: Vec<(String, Topology, Outcome)>,
 }
 
 impl Comparison {
@@ -818,16 +1588,27 @@ impl Comparison {
         }
     }
 
-    /// Adds the runs of `provider`.
+    /// Adds the runs of `provider`, of the topology its first run names.
     pub fn ran(&mut self, provider: &str, runs: Vec<Measured>) {
+        let topology = runs
+            .first()
+            .map_or_else(Topology::default, |run| run.topology);
         self.providers
-            .push((provider.to_owned(), Outcome::Ran(runs)));
+            .push((provider.to_owned(), topology, Outcome::Ran(runs)));
     }
 
-    /// Adds `provider` as skipped for `reason`.
+    /// Adds `provider`, a native model, as skipped for `reason`.
     pub fn skipped(&mut self, provider: &str, reason: &str) {
-        self.providers
-            .push((provider.to_owned(), Outcome::Skipped(reason.to_owned())));
+        self.skipped_as(provider, Topology::Native, reason);
+    }
+
+    /// Adds `provider` of `topology` as skipped for `reason`.
+    pub fn skipped_as(&mut self, provider: &str, topology: Topology, reason: &str) {
+        self.providers.push((
+            provider.to_owned(),
+            topology,
+            Outcome::Skipped(reason.to_owned()),
+        ));
     }
 
     /// What became of `provider`.
@@ -835,12 +1616,21 @@ impl Comparison {
     pub fn outcome(&self, provider: &str) -> Option<&Outcome> {
         self.providers
             .iter()
-            .find(|(name, _)| name == provider)
-            .map(|(_, outcome)| outcome)
+            .find(|(name, _, _)| name == provider)
+            .map(|(_, _, outcome)| outcome)
     }
 
-    /// The spread of `measure` over the runs of `provider`; `None` when it was skipped or no run
-    /// measured it.
+    /// The topology of `provider`.
+    #[must_use]
+    pub fn topology(&self, provider: &str) -> Option<Topology> {
+        self.providers
+            .iter()
+            .find(|(name, _, _)| name == provider)
+            .map(|&(_, topology, _)| topology)
+    }
+
+    /// The spread of `measure` over the runs of `provider`; `None` when it was skipped, its
+    /// topology has no such step or no run measured it.
     #[must_use]
     pub fn spread(&self, provider: &str, measure: Measure) -> Option<Spread> {
         match self.outcome(provider)? {
@@ -857,7 +1647,7 @@ impl Comparison {
         let mut ranked: Vec<(&str, Duration)> = self
             .providers
             .iter()
-            .filter_map(|(name, _)| Some((name.as_str(), self.spread(name, measure)?.median)))
+            .filter_map(|(name, _, _)| Some((name.as_str(), self.spread(name, measure)?.median)))
             .collect();
         ranked.sort_by_key(|&(_, median)| median);
         ranked.into_iter().map(|(name, _)| name).collect()
@@ -870,42 +1660,51 @@ impl fmt::Display for Comparison {
         let width = self
             .providers
             .iter()
-            .map(|(name, _)| name.len())
+            .map(|(name, _, _)| name.len())
             .chain(["provider".len()])
             .max()
             .unwrap_or(0);
+        let kind = "topology".len();
         writeln!(
             f,
-            "times in ms, taken on the client at the receipt of each duplex event: \
-             median [lowest-highest] measured/runs"
+            "times in ms, taken on the client at the receipt of each event: \
+             median [lowest-highest] measured/runs; n/a: a step the topology does not have"
         )?;
         writeln!(
             f,
-            "from the end of the question's speech; barge-in from the barge-in's first voiced frame"
+            "from the end of the question's speech; barge-in from the barge-in's first voiced \
+             frame; response end is the turn latency"
         )?;
-        let mut heading = format!("{:<width$}", "provider");
+        let mut heading = format!("{:<width$}  {:<kind$}", "provider", "topology");
         for measure in Measure::ALL {
             heading.push_str(&format!("  {:<20}", measure.name()));
         }
         writeln!(f, "{}", heading.trim_end())?;
-        for (name, outcome) in &self.providers {
+        for (name, topology, outcome) in &self.providers {
+            let label = topology.name();
             match outcome {
                 Outcome::Ran(runs) => {
-                    let mut row = format!("{name:<width$}");
+                    let mut row = format!("{name:<width$}  {label:<kind$}");
                     for measure in Measure::ALL {
-                        let cell = self.spread(name, measure).map_or_else(
-                            || format!("- 0/{}", runs.len()),
-                            |spread| spread.to_string(),
-                        );
+                        let cell = if !measure.applies(*topology) {
+                            "n/a".to_owned()
+                        } else {
+                            self.spread(name, measure).map_or_else(
+                                || format!("- 0/{}", runs.len()),
+                                |spread| spread.to_string(),
+                            )
+                        };
                         row.push_str(&format!("  {cell:<20}"));
                     }
                     writeln!(f, "{}", row.trim_end())?;
                 }
-                Outcome::Skipped(reason) => writeln!(f, "{name:<width$}  skipped: {reason}")?,
+                Outcome::Skipped(reason) => {
+                    writeln!(f, "{name:<width$}  {label:<kind$}  skipped: {reason}")?;
+                }
             }
         }
         writeln!(f, "usage per run, as each provider reports it")?;
-        for (name, outcome) in &self.providers {
+        for (name, _, outcome) in &self.providers {
             let Outcome::Ran(runs) = outcome else {
                 continue;
             };
