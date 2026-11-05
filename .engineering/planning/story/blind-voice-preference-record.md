@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:blind-voice-preference-record
 kind: story
-status: draft
+status: proposed
 title: Record a blind A/B voice preference
 summary: Render two voices on the same texts, vote under shuffled labels and total the votes.
 tags:
@@ -10,7 +10,9 @@ tags:
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 1
+revision: 2
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-05T13:07:49Z", actor: "human:timo", revision: 2}
 ---
 ## Context
 

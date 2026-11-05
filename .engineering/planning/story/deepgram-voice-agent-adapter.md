@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:deepgram-voice-agent-adapter
 kind: story
-status: draft
+status: proposed
 title: Deepgram Voice Agent as a duplex binding
 summary: A bundled hosted agent beside the native speech models in compare.
 tags:
@@ -10,7 +10,9 @@ tags:
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 1
+revision: 2
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-05T13:07:48Z", actor: "human:timo", revision: 2}
 ---
 ## Context
 
