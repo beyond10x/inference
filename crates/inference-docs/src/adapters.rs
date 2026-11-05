@@ -78,6 +78,15 @@ const BINDINGS: &[Binding] = &[
         licence: "hosted service: audio leaves the machine",
     },
     Binding {
+        name: "ElevenLabs streaming TTS",
+        package: "inference-elevenlabs",
+        runs: "TTS, streaming; hosted, WebSocket (`stream-input`), one connection per segment",
+        features: &[],
+        record: Record::Claims("records/claims-tts.json"),
+        environment: "`ELEVENLABS_API_KEY`, or the keychain secret `elevenlabs-api-key` with feature `keychain`",
+        licence: "hosted service: text leaves the machine",
+    },
+    Binding {
         name: "sherpa-onnx streaming STT",
         package: "inference-sherpa-onnx",
         runs: "STT, streaming; in process, native library",
