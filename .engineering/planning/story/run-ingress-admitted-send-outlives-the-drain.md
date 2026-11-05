@@ -13,9 +13,9 @@ relations:
 scope:
 - confidence: cited
   path: crates/inference-runtime/src/drive.rs
-- confidence: inferred
+- confidence: cited
   path: crates/inference-runtime/src/queue.rs
-revision: 5
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T07:29:54Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-04T07:29:54Z", actor: "human:timo", revision: 3}
