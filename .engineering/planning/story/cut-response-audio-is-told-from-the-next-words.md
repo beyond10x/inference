@@ -11,7 +11,7 @@ relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
 - depends_on: story:long-talk-over-does-not-resume-the-cut-answer
-revision: 2
+revision: 3
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-05T14:22:42Z", actor: "human:operator", revision: 2}
 ---
@@ -53,3 +53,27 @@ There is no breaking contract change.
 - `adversary1_gpt_live_transcript.rs` stays green: audio the model speaks after the stop on the
   same response plays.
 - Every existing `inference-duplex` implementer compiles unchanged.
+
+## Scope after the talk-over unit
+
+Narrowed by the coordinator at the talk-over unit's close, after its adversary pass, which read
+the bindings:
+
+- **GPT-Live:** in scope. After speech is heard, its response stays current, so later audio
+  arrives on the same response. Nothing on the event tells the rest of the cut sentence from the
+  model's next words.
+- **Nova Sonic:** out of scope. It cannot reach the state: its interruption notice records the
+  speech and cancels the response in one call, and the ledger refuses audio for a response that
+  is not in progress.
+- **Realtime with `auto_interrupt` on, truncated by `Conversation`:** fixed in the talk-over unit.
+  `Conversation` drops later audio of a response it truncated.
+- **Added to scope:** with `auto_interrupt` on, the speaker can already be empty when speech
+  starts. Then nothing is truncated, and audio deltas still in flight for that response would
+  play. This is the same class as GPT-Live.
+
+The acceptance reads accordingly:
+
+- The pinned GPT-Live tests flip.
+- A case with `auto_interrupt` on and an empty speaker at the speech start plays no in-flight
+  audio of the cut response.
+- `adversary1_gpt_live_transcript.rs` stays green.
