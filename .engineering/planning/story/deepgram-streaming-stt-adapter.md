@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:deepgram-streaming-stt-adapter
 kind: story
-status: proposed
+status: active
 title: Deepgram streaming STT as a hosted STT adapter
 summary: A hosted STT layer for a phone-audio cascade.
 tags:
@@ -61,9 +61,10 @@ scope:
   path: website/docs/reference/environment.md
 - confidence: inferred
   path: website/docs/status.mdx
-revision: 28
+revision: 29
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-05T13:07:49Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-05T16:11:00Z", actor: "human:timo", revision: 29}
 ---
 ## Context
 

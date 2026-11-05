@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:cut-response-audio-is-told-from-the-next-words
 kind: story
-status: proposed
+status: active
 title: Audio of a cut response is told from the next words
 summary: Mark duplex output audio so the cut part of a response is dropped and the model's next words on it still play
 tags:
@@ -32,9 +32,10 @@ scope:
   path: examples/realtime-voice/tests/talk_over.rs
 - confidence: inferred
   path: website/docs/guides/talk-to-a-hosted-voice-model.md
-revision: 14
+revision: 15
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-05T14:22:42Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-05T16:11:00Z", actor: "human:timo", revision: 15}
 ---
 ## Context
 
