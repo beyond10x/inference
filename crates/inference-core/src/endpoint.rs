@@ -69,6 +69,20 @@ pub trait InputEndpoint<P>: Send {
     fn known_contents(&self) -> KnownContents {
         KnownContents::Unknown
     }
+
+    /// Closes the edge to its senders and, in the same step, says what it still holds. After
+    /// it, every send into the edge, a new one at once and one still waiting for room at its
+    /// next poll, is refused as [`SendError::Closed`] with its envelope, and `recv` hands over
+    /// what the edge held and then answers `None` without waiting. The default answers
+    /// [`ClosedToSenders::Unsupported`] and closes nothing, so an endpoint that keeps it behaves
+    /// as before, and a caller given that answer decides as it would without this method.
+    ///
+    /// A caller closes only while no `recv` future of the endpoint is alive, as it asks
+    /// [`known_contents`](Self::known_contents). That condition binds only an endpoint that
+    /// overrides this method: one that keeps the default is asked nothing new.
+    fn close_to_senders(&mut self) -> ClosedToSenders {
+        ClosedToSenders::Unsupported
+    }
 }
 
 /// What an [`InputEndpoint`] knows, without waiting, about whether its edge holds an envelope
@@ -81,6 +95,18 @@ pub enum KnownContents {
     NotEmpty,
     /// The endpoint does not know.
     Unknown,
+}
+
+/// What an [`InputEndpoint`] answers when asked to close its edge to senders
+/// ([`InputEndpoint::close_to_senders`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosedToSenders {
+    /// Closed, holding nothing.
+    Empty,
+    /// Closed, holding at least one envelope.
+    Holding,
+    /// Not closed.
+    Unsupported,
 }
 
 /// Why an edge refused an envelope. Each variant carries the refused envelope, so the producer
