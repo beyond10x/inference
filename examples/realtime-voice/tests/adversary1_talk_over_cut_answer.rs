@@ -453,13 +453,22 @@ impl ResumingSession {
         }
         self.resumed = true;
         let heard = self.heard.get().unwrap_or(0);
+        // The resume comes on a response of its own, as a provider that speaks the cut sentence
+        // again would send it: audio of the response `Conversation` truncated is dropped since
+        // the truncation fix, so a resume on that response would not reach the speaker at all.
+        let resumed = ResponseId::generate();
         self.cut
             .iter()
             .filter(|audio| {
                 audio.frame.position.get() + u64::from(audio.frame.sample_count) > heard
             })
             .cloned()
-            .map(SessionEvent::OutputAudio)
+            .map(|audio| {
+                SessionEvent::OutputAudio(OutputAudio {
+                    response_id: resumed,
+                    frame: audio.frame,
+                })
+            })
             .collect()
     }
 }
