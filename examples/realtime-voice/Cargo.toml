@@ -8,10 +8,18 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+local = ["local-voice-cascade/local"]
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 inference-audio-device = { path = "../../adapters/inference-audio-device", default-features = false }
 inference-duplex = { path = "../../crates/inference-duplex" }
+inference-elevenlabs = { path = "../../adapters/inference-elevenlabs" }
+inference-llm = { path = "../../crates/inference-llm" }
+inference-stt = { path = "../../crates/inference-stt" }
+inference-tts = { path = "../../crates/inference-tts" }
+local-voice-cascade = { path = "../local-voice-cascade" }
 serde_json.workspace = true
 
 [dev-dependencies]
@@ -19,7 +27,7 @@ clap = { version = "4", default-features = false, features = ["derive", "error-c
 inference-audio-device = { path = "../../adapters/inference-audio-device" }
 inference-aws = { path = "../../adapters/inference-aws", features = ["duplex"] }
 inference-openai = { path = "../../adapters/inference-openai", features = ["gpt-live", "live"] }
-inference-testkit = { path = "../../crates/inference-testkit", features = ["duplex"] }
+inference-testkit = { path = "../../crates/inference-testkit", features = ["duplex", "llm", "stt", "tts"] }
 
 [lints]
 workspace = true

@@ -3459,8 +3459,13 @@ dependencies = [
  "inference-audio-device",
  "inference-aws",
  "inference-duplex",
+ "inference-elevenlabs",
+ "inference-llm",
  "inference-openai",
+ "inference-stt",
  "inference-testkit",
+ "inference-tts",
+ "local-voice-cascade",
  "serde_json",
 ]
 
