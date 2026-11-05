@@ -50,6 +50,31 @@ pub trait InputEndpoint<P>: Send {
     /// Receives the next envelope of the edge, waiting while the edge is empty. Completes with
     /// `None` once the edge is empty and every sending side is gone, so nothing more can arrive.
     fn recv(&mut self) -> EndpointFuture<'_, Option<EventEnvelope<P>>>;
+
+    /// What the endpoint knows, without waiting, about whether its edge holds an envelope right
+    /// now. The default answers [`KnownContents::Unknown`], and a caller given that answer
+    /// decides as it would without this method, so an endpoint that does not implement it
+    /// behaves as before.
+    ///
+    /// A caller asks only while no `recv` future of the endpoint is alive, so one that relies
+    /// on the answer drops a pending `recv` future to ask; an endpoint that answers anything but
+    /// [`KnownContents::Unknown`] loses nothing when a `recv` future of it is dropped before it
+    /// completed.
+    fn known_contents(&self) -> KnownContents {
+        KnownContents::Unknown
+    }
+}
+
+/// What an [`InputEndpoint`] knows, without waiting, about whether its edge holds an envelope
+/// right now ([`InputEndpoint::known_contents`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownContents {
+    /// The edge holds no envelope now.
+    Empty,
+    /// The edge holds at least one envelope now, which a `recv` hands over.
+    NotEmpty,
+    /// The endpoint does not know.
+    Unknown,
 }
 
 /// Why an edge refused an envelope. Each variant carries the refused envelope, so the producer
