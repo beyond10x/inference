@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T13:52:57Z",
+  "actor": "human:timo",
+  "artifact": "story:g711-codec-and-anti-aliased-resampler",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference-audio --lib --tests 54 passed on 1463575; 6 kHz 48 to 8 kHz at least 87 dB down (asserted 80); 24 to 8 kHz mu-law chain 36.9 dB from reference; clippy and fmt clean",
+    "reference": "git:744ebb7"
+  }
+}
