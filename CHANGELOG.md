@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.15.0] — 2026-11-05
+
+### Added
+
+- `InputEndpoint::close_to_senders`, a provided method, and `ClosedToSenders` (`Empty`,
+  `Holding`, `Unsupported`) in `inference_core::endpoint`. An endpoint closes its edge to senders
+  and says, in the same step, whether it still holds an envelope. After that, every send into the
+  edge is refused `Closed` with its envelope, and `recv` hands over what the edge held, then
+  answers `None`.
+  - It is called only while no `recv` future of the endpoint is alive.
+  - The default answers `Unsupported` and closes nothing, so no implementer has to change.
+  - `QueueReceiver` implements it. The queue of an edge between two nodes of a run answers
+    `Unsupported`.
+
+### Fixed
+
+- A send admitted into a subgraph node's run ingress before the drain and waiting for room no
+  longer answers `Ok` and is then discarded. This was the known issue of 0.14.0.
+  - The ingress bridge closes the run's ingress to senders at the drain, in one step with
+    reading what it holds, so such a send is received or refused `Closed` with its envelope.
+  - That refusal does not mark the node gone.
+  - An edge between two nodes, such as one from a node on a feedback cycle through the subgraph
+    node, is not closed and behaves as before.
+
 ## [0.14.0] — 2026-11-05
 
 ### Added
