@@ -1067,7 +1067,9 @@ impl Wake for Woken {
 /// bridge never waits for its caller to poll it
 /// (`story:run-ingress-admitted-send-outlives-the-drain`). An edge closed holding nothing ends for
 /// the drain, and one closed holding something is received until its receive answers `None`. An
-/// edge whose receive stays in flight, and one whose endpoint does not close, are read as follows.
+/// edge whose receive stays in flight, and one whose endpoint does not close, are read as follows;
+/// the parent run's edge from another of its nodes is one that does not close, since a node on a
+/// feedback cycle through this one drains with it and may still send.
 ///
 /// The senders of the parent's edges are not gone when it drains the node, so the bridge cannot
 /// wait for a receive to answer `None` (`story:drain-treats-a-pending-receive-as-an-empty-edge`).

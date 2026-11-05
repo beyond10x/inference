@@ -53,9 +53,10 @@
 //!
 //! A send admitted before the drain may still wait for room when the drain runs. The run's own
 //! ingress, read by a plain node, delivers it once the node takes. A subgraph node's ingress
-//! bridge closes each parent edge to its senders at the drain, so such a send is refused as
+//! bridge closes the run's ingress to its senders at the drain, so such a send is refused as
 //! closed with its envelope rather than landing on an edge nobody reads; that refusal does not
-//! tell the run the consumer is gone either.
+//! tell the run the consumer is gone either. An edge between two nodes is never closed that way:
+//! a node on a feedback cycle through the subgraph node drains with it and may still send.
 
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
@@ -387,14 +388,22 @@ pub(crate) struct GuardedSender<E> {
     pub(crate) sequences: Mutex<HashMap<StreamId, i64>>,
 }
 
-impl<E> GuardedSender<E> {
+impl<P> GuardedSender<QueueSender<P>> {
+    /// The guard of `inner`, the sender of the queue `channel` names. The queue of an edge
+    /// between two nodes is kept open to its senders
+    /// ([`QueueSender::keep_open_to_senders`]): a node on a feedback cycle through a subgraph
+    /// node drains with it and may still send into it, so only a run's exposures, its ingress
+    /// among them, are closed by a reader at its drain.
     pub(crate) fn new(
-        inner: E,
+        inner: QueueSender<P>,
         channel: Channel,
         source: Option<Feed>,
         consumer: Option<NodeId>,
         signals: Arc<Signals>,
     ) -> Self {
+        if matches!(channel, Channel::Edge(_)) {
+            inner.keep_open_to_senders();
+        }
         Self {
             inner,
             channel,

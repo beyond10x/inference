@@ -214,6 +214,9 @@ struct State<P> {
     receiver: bool,
     /// The receiver closed the queue to its senders ([`InputEndpoint::close_to_senders`]).
     closed_to_senders: bool,
+    /// Whether the receiver closes the queue to its senders when asked; not for the queue of an
+    /// edge between two nodes of a run ([`QueueSender::keep_open_to_senders`]).
+    closes: bool,
     waiting_senders: Vec<Waker>,
     waiting_receiver: Option<Waker>,
 }
@@ -384,6 +387,7 @@ impl<P> Shared<P> {
             senders: 1,
             receiver: true,
             closed_to_senders: false,
+            closes: true,
             waiting_senders: Vec::new(),
             waiting_receiver: None,
         };
@@ -580,6 +584,13 @@ impl<P> QueueSender<P> {
     pub(crate) fn is_closed_to_senders(&self) -> bool {
         self.shared.state().closed_to_senders
     }
+
+    /// Makes the receiver answer [`ClosedToSenders::Unsupported`] when asked to close the queue
+    /// to its senders, and close nothing: for the queue of an edge between two nodes of a run,
+    /// called when the run wraps the queue's sender for its producer (the `drive` module).
+    pub(crate) fn keep_open_to_senders(&self) {
+        self.shared.state().closes = false;
+    }
 }
 
 impl<P> Clone for QueueSender<P> {
@@ -673,8 +684,17 @@ impl<P: Send> InputEndpoint<P> for QueueReceiver<P> {
     /// answers from what the queue holds. A send that pushed its envelope before the step was
     /// taken, and what it pushed is still handed over; one that had not is refused, so none
     /// answers `Ok` for an envelope the receiver never sees.
+    ///
+    /// The queue of an edge between two nodes of a run, which the run controller builds, is not
+    /// closed: it answers [`ClosedToSenders::Unsupported`] and keeps every send as before, since a
+    /// node that drains with its consumer, on a feedback cycle, may still send into it. Every
+    /// other queue closes: a run's exposures, its ingress among them, and a queue built with
+    /// [`EdgeQueue::new`] and split outside a run.
     fn close_to_senders(&mut self) -> ClosedToSenders {
         let mut state = self.shared.state();
+        if !state.closes {
+            return ClosedToSenders::Unsupported;
+        }
         state.closed_to_senders = true;
         let answer = if state.items.is_empty() {
             ClosedToSenders::Empty
