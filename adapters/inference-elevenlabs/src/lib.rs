@@ -28,8 +28,10 @@
 //! endpoint's connect timeout, every read and write by its read timeout.
 //!
 //! The handle is a blocking iterator, as the contract defines it. It drives its connection on a
-//! runtime of its own, so it is iterated on a thread that runs no async runtime; called on one,
-//! it fails with [`ElevenLabsError::InsideRuntime`] instead of panicking.
+//! runtime of its own. On a thread where an async runtime is current, a `spawn_blocking` thread
+//! or an async worker alike, that runtime is driven on a scoped thread of its own while the
+//! caller waits, so no thread panics or is refused; an async worker is still blocked meanwhile,
+//! so iterate the handle from `tokio::task::spawn_blocking` or a plain thread.
 //!
 //! The key is never read by the binding itself: the caller injects a [`CredentialSource`] and
 //! names the secret ([`EnvironmentSource::elevenlabs`] reads `ELEVENLABS_API_KEY`; with feature

@@ -74,11 +74,8 @@ pub enum ElevenLabsError {
     /// The server answered with an error message instead of audio: the `message`, `error` or
     /// `detail` it sent, at most 256 characters of it.
     Server(String),
-    /// A method of the synthesis was called on a thread that runs an async runtime. The
-    /// synthesis blocks while it waits for the server; run it on a thread of its own, such as
-    /// one from `tokio::task::spawn_blocking`.
-    InsideRuntime,
-    /// The runtime the synthesis drives its connection on could not be built.
+    /// The runtime the synthesis drives its connection on could not be built, or the thread
+    /// that drives it on a caller's runtime thread could not be started or panicked.
     Runtime(String),
 }
 
@@ -95,10 +92,7 @@ impl fmt::Display for ElevenLabsError {
             Self::Stalled(waited) => write!(f, "no server message within {waited:?}"),
             Self::Protocol(detail) => write!(f, "protocol violation: {detail}"),
             Self::Server(message) => write!(f, "server error: {message}"),
-            Self::InsideRuntime => f.write_str(
-                "the synthesis blocks and was called inside an async runtime; run it on a blocking thread",
-            ),
-            Self::Runtime(detail) => write!(f, "runtime could not be built: {detail}"),
+            Self::Runtime(detail) => write!(f, "the synthesis's runtime failed: {detail}"),
         }
     }
 }

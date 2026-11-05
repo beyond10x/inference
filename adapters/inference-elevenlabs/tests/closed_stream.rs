@@ -182,7 +182,7 @@ fn a_segment_offered_after_a_failure_is_not_spoken_and_the_record_still_comes() 
 }
 
 #[test]
-fn a_synthesis_driven_inside_an_async_runtime_fails_instead_of_panicking() {
+fn a_synthesis_driven_inside_an_async_runtime_runs_instead_of_panicking() {
     let server = FixtureServer::start(FORMAT, Script::Serve);
     let mut synthesiser = server.synthesiser(FORMAT);
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -195,7 +195,22 @@ fn a_synthesis_driven_inside_an_async_runtime_fails_instead_of_panicking() {
     handle.end_utterance().unwrap();
     let events: Vec<SynthesisEvent> =
         runtime.block_on(async { handle.by_ref().take(100).collect() });
-    assert_eq!(handle.failure(), Some(&ElevenLabsError::InsideRuntime));
-    assert!(matches!(events.as_slice(), [SynthesisEvent::Usage(record)] if !record.r#final));
+    assert_eq!(
+        handle.failure(),
+        None,
+        "story:elevenlabs-streaming-tts-adapter: inside a runtime the synthesis runs on a thread of its own"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SynthesisEvent::Audio(_)))
+            .count(),
+        4,
+        "story:elevenlabs-streaming-tts-adapter: every chunk is spoken inside a runtime"
+    );
+    assert!(
+        matches!(events.last(), Some(SynthesisEvent::Usage(record)) if record.r#final),
+        "story:elevenlabs-streaming-tts-adapter: the record of a synthesis inside a runtime is final"
+    );
     runtime.block_on(async { drop(handle) });
 }

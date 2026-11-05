@@ -354,15 +354,22 @@ impl ElevenLabsSynthesis {
     }
 }
 
-/// Runs `future` to its end on the synthesis's own runtime, built on first use. Refused on a
-/// thread that runs an async runtime, where blocking would panic.
-fn run<F: Future>(
+/// Runs `future` to its end on the synthesis's own runtime, built on first use, and blocks the
+/// calling thread until it has.
+///
+/// On a thread where a runtime handle is current, blocking on another runtime panics on an
+/// async worker and not on a `spawn_blocking` thread, and tokio gives no public way to tell the
+/// two apart. So on any such thread the synthesis's runtime is driven on a scoped thread of its
+/// own while the caller waits, and no thread is refused. The caller's thread is still blocked:
+/// on an async worker that holds up the worker's other tasks.
+fn run<F>(
     runtime: &mut Option<tokio::runtime::Runtime>,
     future: F,
-) -> Result<F::Output, ElevenLabsError> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        return Err(ElevenLabsError::InsideRuntime);
-    }
+) -> Result<F::Output, ElevenLabsError>
+where
+    F: Future + Send,
+    F::Output: Send,
+{
     let runtime = match runtime {
         Some(runtime) => runtime,
         None => runtime.insert(
@@ -372,7 +379,20 @@ fn run<F: Future>(
                 .map_err(|error| ElevenLabsError::Runtime(error.to_string()))?,
         ),
     };
-    Ok(runtime.block_on(future))
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Ok(runtime.block_on(future));
+    }
+    let runtime = &*runtime;
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("inference-elevenlabs".to_owned())
+            .spawn_scoped(scope, move || runtime.block_on(future))
+            .map_err(|error| ElevenLabsError::Runtime(error.to_string()))?
+            .join()
+            .map_err(|_| {
+                ElevenLabsError::Runtime("the thread driving the connection panicked".to_owned())
+            })
+    })
 }
 
 /// A refusal of the TTS contract, which a well-formed segment of this binding never meets.
