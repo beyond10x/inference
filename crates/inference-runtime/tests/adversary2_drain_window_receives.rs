@@ -23,7 +23,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 use std::time::{Duration, Instant};
 
-use inference_core::endpoint::{EndpointFuture, InputEndpoint};
+use inference_core::endpoint::{EndpointFuture, InputEndpoint, KnownContents};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::model::{Adapter, AdapterId};
@@ -174,8 +174,19 @@ enum Kind {
     SelfWaking,
     /// Hands a text over only once a worker thread of its own has finished with it: the first
     /// poll that finds a text starts the worker and answers `Pending`; the worker wakes the
-    /// receive's latest waker when done. A `stop` it hands over at once.
+    /// receive's latest waker when done. A `stop` it hands over at once. Its endpoint says,
+    /// from what the edge holds, whether the edge is empty ([`InputEndpoint::known_contents`]);
+    /// its state is the edge's, so a dropped receive loses nothing.
     Worked,
+    /// A [`Kind::Worked`] receive whose endpoint does not say whether its edge holds anything.
+    WorkedUnknowing,
+}
+
+impl Kind {
+    /// Whether the endpoint says what its edge holds; the others answer `Unknown`.
+    fn knows(self) -> bool {
+        self == Self::Worked
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,7 +281,7 @@ impl Edge {
             .queued
             .front()
             .is_some_and(|front| front.kind != ControlKind::Stop.as_str());
-        if self.kind == Kind::Worked && holds_text {
+        if matches!(self.kind, Kind::Worked | Kind::WorkedUnknowing) && holds_text {
             match state.work {
                 Work::Idle => {
                     state.work = Work::Running;
@@ -303,6 +314,16 @@ struct Receiver(Arc<Edge>);
 impl InputEndpoint<PipelinePayload> for Receiver {
     fn recv(&mut self) -> EndpointFuture<'_, Option<EventEnvelope<PipelinePayload>>> {
         Box::pin(std::future::poll_fn(|cx| self.0.poll_recv(cx)))
+    }
+
+    fn known_contents(&self) -> KnownContents {
+        if !self.0.kind.knows() {
+            KnownContents::Unknown
+        } else if self.0.left() == 0 {
+            KnownContents::Empty
+        } else {
+            KnownContents::NotEmpty
+        }
     }
 }
 
@@ -642,7 +663,7 @@ fn a_cancel_after_a_held_drain_ends_the_node() {
 /// An edge whose receive holds a text while a worker thread of its own finishes with it, and is
 /// woken by that thread: the text was on the edge when the node drained, so it is to cross
 /// (the story's acceptance: an envelope an edge's receive holds when the node drains reaches the
-/// child).
+/// child). The edge's endpoint says that the edge holds the text.
 #[test]
 fn a_text_a_receive_holds_until_its_worker_wakes_it_crosses_at_the_drain() {
     let ended = run("worked edge", &[Kind::Worked], |edges: &[Arc<Edge>]| {
@@ -653,5 +674,30 @@ fn a_text_a_receive_holds_until_its_worker_wakes_it_crosses_at_the_drain() {
         drained_with(&ended, &["1"]),
         "the text the edge's receive held while its worker ran, woken from the worker's thread \
          after {WORK:?}, did not cross into the child: {ended:?}"
+    );
+}
+
+/// The same edge, its endpoint not saying what the edge holds: the bridge cannot tell the
+/// receive that holds the text from a receive of an empty edge, so it ends for the drain and the
+/// text and its `stop` stay on the edge, the limit `ingress_bridge` documents.
+#[test]
+fn a_text_a_receive_holds_until_its_worker_wakes_it_stays_on_the_edge_when_its_endpoint_does_not_know()
+ {
+    let ended = run(
+        "worked edge, endpoint does not know",
+        &[Kind::WorkedUnknowing],
+        |edges: &[Arc<Edge>]| {
+            edges[0].put(text(1, "1"));
+            edges[0].put(stop(2));
+        },
+    );
+    assert!(
+        matches!(ended.drained, Some(Ok(())))
+            && ended.texts.is_empty()
+            && ended.left_on_the_edges == 2,
+        "story:drain-treats-a-pending-receive-as-an-empty-edge: an endpoint that answers \
+         `Unknown` and whose receive holds a text until a worker thread wakes it is documented \
+         to end the drain with the text left on the edge; the drain is to end at once with \
+         nothing across and both envelopes left: {ended:?}"
     );
 }
