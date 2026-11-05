@@ -15,7 +15,7 @@ scope:
   path: crates/inference-runtime/src/drive.rs
 - confidence: cited
   path: crates/inference-runtime/src/queue.rs
-revision: 12
+revision: 13
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 3}
@@ -211,3 +211,53 @@ close (`close_to_senders` on `main`'s `QueueReceiver`): a waiting send then land
 and is received, or is refused `Closed` after it. The reserved-place queue serves requirement 5
 and the pre-existing order and sequence findings, which need concurrent sends on one sender and
 can be stories of their own.
+
+## Design D (0.15.0, third attempt)
+
+Third attempt, set by the coordinator on 2026-11-05 after the second went out on a red
+plain-node case. It replaces the choice above for the 0.15.0 wave.
+
+- **No reserved places.** The queue stays as on `main`: a waiting send pushes its envelope on its
+  own next poll. The reserved-place queue of `f54cb70`, the order of waiting sends and the
+  sequence give-back go to story:waiting-sends-land-in-the-order-they-started-waiting and
+  story:withdrawn-ingress-send-gives-back-its-sequence.
+- **Public surface:**
+  - `InputEndpoint::close_to_senders` and `ClosedToSenders` (`Empty`, `Holding`, `Unsupported`), as
+    above;
+  - the default answers `Unsupported` and closes nothing;
+  - a caller calls the method only while no `recv` future of the endpoint is alive.
+- **`QueueReceiver` overrides it on `main`'s queue.** In one step under the queue's lock, it marks
+  the queue closed to senders, wakes every waiting send and answers from what the queue holds.
+  After that:
+  - every send is refused `Closed` with its envelope, at its next poll for one that was waiting;
+  - `recv` hands over what the queue held, then answers `None`, and never waits;
+  - `known_contents` answers from what the queue holds.
+- **The bridge** calls it once per parent edge held as known, at its first read of the drain:
+  - `Empty` ends that edge;
+  - `Holding` receives until `None`;
+  - an edge in its receiving state, or one that answers `Unsupported`, keeps the 0.14.0 path.
+- **A plain node** never calls it. Its run ingress behaves as on `main`.
+- **The ingress guard** takes a `Closed` from a queue closed to senders as a send that was not
+  delivered. It gives the send's sequence back, as `main` does for a refusal, and does not mark
+  the consumer gone.
+
+Why this holds the requirements:
+
+- A waiting send lands either before the bridge's close, and the bridge receives it, or after,
+  and is refused with its envelope. Nothing answers `Ok` and is then discarded (2).
+- Nothing waits on a caller, because nothing is reserved (3).
+- A plain node is untouched (4).
+- A send dropped before its poll pushed nothing (1).
+
+### Acceptance (0.15.0, third attempt)
+
+1. `held_send_at_drain.rs` (`630b8d7`) is green for the plain node and the subgraph node.
+2. The close races a landing send from another thread for 4,000 rounds under each of `pause` and
+   `drop_stale_epochs`. Each send is received or refused `Closed` with its own envelope; none
+   answers otherwise.
+3. The defect's own case is green: a send admitted before the drain into a subgraph node, landing
+   while the bridge sends `stop`, is received or refused.
+4. `inference-core`, `inference-runtime` and `inference-facade` pass whole, with clippy and fmt.
+   The adversary files of `f54cb70` are out of scope.
+5. One adversary pass, then at most one correction. If this attempt is red too, the send and
+   drain work stops and stays the documented known issue.
