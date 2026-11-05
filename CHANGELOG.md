@@ -17,6 +17,20 @@
   - keeps its state across frames, and its output lags its input by `Resampler::delay`;
   - `resample_frame` refuses a frame of the wrong format, a data length mismatch or a gap in the
     sample clock with a `ResampleError`.
+- `inference-elevenlabs`, the first hosted TTS adapter: ElevenLabs streaming text-to-speech over
+  its WebSocket text input, as an `inference-tts` `Synthesiser` at locality
+  `external_provider`.
+  - It claims `output_streaming` and `incremental_input`.
+  - Output formats: `ulaw_8000` and `alaw_8000` as G.711 at 8 kHz, and `pcm_16000`, `pcm_22050`,
+    `pcm_24000` and `pcm_44100` as 16-bit mono PCM. MP3 and Opus are refused.
+  - Each segment is spoken on its own connection. A cancel closes that connection, and no frame
+    of the segment follows.
+  - The key comes from an injected credential source, `ELEVENLABS_API_KEY` or the keychain, and
+    is sent only in the `xi-api-key` header. A `ws://` base URL is accepted only for a loopback
+    host.
+  - The live check is
+    `cargo run -p inference-elevenlabs --features live --example live`. It needs
+    `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`.
 
 ### Fixed
 
