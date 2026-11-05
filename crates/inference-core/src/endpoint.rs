@@ -59,7 +59,13 @@ pub trait InputEndpoint<P>: Send {
     /// A caller asks only while no `recv` future of the endpoint is alive, so one that relies
     /// on the answer drops a pending `recv` future to ask; an endpoint that answers anything but
     /// [`KnownContents::Unknown`] loses nothing when a `recv` future of it is dropped before it
-    /// completed.
+    /// completed. That condition binds only an endpoint that overrides this method: one that
+    /// keeps the default is asked nothing new.
+    ///
+    /// Answering costs the endpoint a `recv` future per poll: a caller that relies on the answer,
+    /// as the runtime's subgraph ingress bridge does, makes a new one each time it polls the
+    /// edge, where it keeps one alive across polls for an endpoint that answers
+    /// [`KnownContents::Unknown`].
     fn known_contents(&self) -> KnownContents {
         KnownContents::Unknown
     }

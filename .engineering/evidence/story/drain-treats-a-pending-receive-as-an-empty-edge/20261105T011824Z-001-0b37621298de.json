@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T01:18:24Z",
+  "actor": "human:operator",
+  "artifact": "story:drain-treats-a-pending-receive-as-an-empty-edge",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference-runtime: lib 15, adversary1_drain_window_edges 3, adversary2_drain_window_receives 6, adversary3_drain_known_edges 5, drain_known_contents 4, subgraph_drain_window 1, subgraph_nested_drain 2, adversary1_nested_ingress_drain 5, drain_admits_no_new_input 4, adversary1_drain_admits 2, subgraph 5, adversary11_subgraph_bridges 4, subgraph_usage 1; inference-core 76; nested-drain loop 40,000 runs 0 lost",
+    "reference": "impl/drain-treats-a-pending-receive-as-an-empty-edge at a1b8ea3"
+  }
+}
