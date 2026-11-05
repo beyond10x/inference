@@ -31,7 +31,8 @@ pub const MAX_INACTIVITY_TIMEOUT: u32 = 180;
 /// Where a synthesis connects: the base URL and the bounds on the handshake and on every read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
-    /// `wss://` or `ws://`, scheme and host (and port), no path, query or trailing slash needed.
+    /// Scheme and host (and port), no path, query or trailing slash needed: `wss://` to any host,
+    /// `ws://` only to a loopback host, since the key would travel in the clear.
     pub url: String,
     pub read_timeout: Duration,
     pub connect_timeout: Duration,

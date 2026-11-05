@@ -65,8 +65,12 @@
 //! - **`output_format` on the WebSocket.** The WebSocket pages give it no type or list; the
 //!   binding sends the REST names it maps, as a query parameter.
 //! - **Errors on the WebSocket.** No error frame or close code is defined. A JSON object that
-//!   carries `message`, `error` or `detail` and no audio is read as the server's error; a close
-//!   before the final message is a failure carrying the close code and reason.
+//!   carries `message`, `error` or `detail` and no audio (no `audio`, or one that is null or
+//!   empty) is read as the server's error; a close before the final message is a failure
+//!   carrying the close code and reason.
+//! - **Plaintext.** The key travels in a header, so `ws://` would send it in the clear. The
+//!   binding takes `ws://` only to a loopback host (`127.0.0.0/8`, `::1`, `localhost`), as a
+//!   local test server is, and `wss://` to any host.
 //! - **Cancel.** The single stream has no cancel message, and closing it makes the endpoint
 //!   generate whatever it still holds. The binding cancels by sending a close frame and dropping
 //!   the connection without reading anything more from it.
@@ -94,12 +98,20 @@ pub const SERVER_MESSAGE_LIMIT: usize = 256;
 /// The URL a synthesis connects to for `config` at `endpoint`.
 ///
 /// # Errors
-/// [`ConfigError::InvalidUrl`] when the base URL is not `ws://` or `wss://` or carries a query.
+/// [`ConfigError::InvalidUrl`] when the base URL is not `wss://`, or `ws://` to a loopback host
+/// (`127.0.0.0/8`, `::1`, `localhost`), or carries a query.
 pub fn request_url(endpoint: &Endpoint, config: &VoiceConfig) -> Result<String, ConfigError> {
     let base = endpoint.url.trim_end_matches('/');
-    if !(base.starts_with("wss://") || base.starts_with("ws://")) {
+    if let Some(rest) = base.strip_prefix("ws://") {
+        if !is_loopback(rest) {
+            return Err(ConfigError::InvalidUrl(
+                "ws:// would send the key in the clear; it is taken only to a loopback host, use wss://"
+                    .to_owned(),
+            ));
+        }
+    } else if !base.starts_with("wss://") {
         return Err(ConfigError::InvalidUrl(
-            "the scheme must be wss:// or ws://".to_owned(),
+            "the scheme must be wss://, or ws:// to a loopback host".to_owned(),
         ));
     }
     if base.contains('?') || base.contains('#') {
@@ -120,6 +132,27 @@ pub fn request_url(endpoint: &Endpoint, config: &VoiceConfig) -> Result<String, 
         url.push_str(&format!("&inactivity_timeout={seconds}"));
     }
     Ok(url)
+}
+
+/// Whether the authority at the start of `rest`, what follows `ws://`, names a loopback host:
+/// `localhost`, an IPv4 address in `127.0.0.0/8` or `[::1]`, with or without a port. A user
+/// part (`user@host`) is refused, since it could make a host read as another.
+fn is_loopback(rest: &str) -> bool {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains('@') {
+        return false;
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => match bracketed.split_once(']') {
+            Some((host, after)) if after.is_empty() || after.starts_with(':') => host,
+            _ => return false,
+        },
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// The opening message: `text` a single space, and the configured `voice_settings`.
@@ -161,7 +194,7 @@ pub fn text_message(text: &str) -> Option<String> {
 /// One message the server sent, as the binding reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerMessage {
-    /// The decoded bytes of `audio`, when it is a string.
+    /// The decoded bytes of `audio`, when it is a non-empty string.
     pub audio: Option<Vec<u8>>,
     /// Whether `isFinal` is true.
     pub is_final: bool,
@@ -170,11 +203,12 @@ pub struct ServerMessage {
 /// Reads one text message of the server.
 ///
 /// # Errors
-/// [`ElevenLabsError::Server`] for an object carrying `message`, `error` or `detail` and neither
-/// `audio` nor `isFinal`; [`ElevenLabsError::Protocol`] for text that is not a JSON object, an
-/// `audio` that is neither a string nor null or not base64, an `isFinal` that is neither a
-/// boolean nor null, and an object with neither field. The error never quotes the message
-/// itself, only the server's own error text.
+/// [`ElevenLabsError::Server`] for an object carrying `message`, `error` or `detail` and no audio,
+/// where audio is an `audio` that is a non-empty string, so an error whose `audio` is null or
+/// empty is the server's error too; [`ElevenLabsError::Protocol`] for text that is not a JSON
+/// object, an `audio` that is neither a string nor null or not base64, an `isFinal` that is
+/// neither a boolean nor null, and an object with neither field. The error never quotes the
+/// message itself, only the server's own error text.
 pub fn parse_server_message(text: &str) -> Result<ServerMessage, ElevenLabsError> {
     let Ok(Value::Object(object)) = serde_json::from_str::<Value>(text) else {
         return Err(ElevenLabsError::Protocol(format!(
@@ -182,19 +216,24 @@ pub fn parse_server_message(text: &str) -> Result<ServerMessage, ElevenLabsError
             text.len()
         )));
     };
-    let has_audio = object.contains_key("audio");
-    let has_final = object.contains_key("isFinal");
-    if !has_audio && !has_final {
-        let said = ["message", "error", "detail"]
+    let carries_audio =
+        matches!(object.get("audio"), Some(Value::String(encoded)) if !encoded.is_empty());
+    if !carries_audio {
+        if let Some(said) = ["message", "error", "detail"]
             .iter()
-            .find_map(|name| object.get(*name).map(server_text));
-        return Err(said.map_or_else(
-            || ElevenLabsError::Protocol("an object with neither `audio` nor `isFinal`".to_owned()),
-            ElevenLabsError::Server,
-        ));
+            .find_map(|name| object.get(*name).map(server_text))
+        {
+            return Err(ElevenLabsError::Server(said));
+        }
+        if !object.contains_key("audio") && !object.contains_key("isFinal") {
+            return Err(ElevenLabsError::Protocol(
+                "an object with neither `audio` nor `isFinal`".to_owned(),
+            ));
+        }
     }
     let audio = match object.get("audio") {
         None | Some(Value::Null) => None,
+        Some(Value::String(encoded)) if encoded.is_empty() => None,
         Some(Value::String(encoded)) => Some(STANDARD.decode(encoded).map_err(|_| {
             ElevenLabsError::Protocol(format!(
                 "`audio` of {} characters is not base64",
@@ -259,6 +298,71 @@ mod tests {
                 Err(ConfigError::InvalidUrl(_))
             ));
         }
+    }
+
+    #[test]
+    fn plaintext_is_taken_only_to_a_loopback_host() {
+        let config = VoiceConfig::new("voice1", OutputFormat::Ulaw8000);
+        for taken in [
+            "ws://127.0.0.1:9",
+            "ws://127.8.9.10",
+            "ws://localhost:8080/",
+            "ws://LOCALHOST",
+            "ws://[::1]:9",
+            "wss://api.elevenlabs.io",
+            "wss://10.0.0.1:443",
+        ] {
+            assert!(
+                request_url(&Endpoint::new().with_url(taken), &config).is_ok(),
+                "{taken}"
+            );
+        }
+        for refused in [
+            "ws://api.elevenlabs.io",
+            "ws://10.0.0.1:9",
+            "ws://128.0.0.1",
+            "ws://[::2]:9",
+            "ws://localhost.example.com",
+            "ws://127.0.0.1@evil.example",
+            "ws://[::1]evil",
+            "ws://",
+        ] {
+            match request_url(&Endpoint::new().with_url(refused), &config) {
+                Err(ConfigError::InvalidUrl(detail)) => assert!(detail.contains("ws://")),
+                other => panic!("{refused}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_error_without_audio_is_the_servers_whatever_audio_says() {
+        for message in [
+            r#"{"audio":null,"error":"quota_exceeded"}"#,
+            r#"{"audio":"","message":"quota_exceeded"}"#,
+            r#"{"audio":null,"isFinal":false,"detail":"quota_exceeded"}"#,
+            r#"{"error":"quota_exceeded"}"#,
+        ] {
+            assert_eq!(
+                parse_server_message(message),
+                Err(ElevenLabsError::Server("quota_exceeded".to_owned())),
+                "{message}"
+            );
+        }
+        assert_eq!(
+            parse_server_message(r#"{"audio":"AAEC","message":"chunk"}"#).unwrap(),
+            ServerMessage {
+                audio: Some(vec![0, 1, 2]),
+                is_final: false
+            },
+            "audio with a message is audio"
+        );
+        assert_eq!(
+            parse_server_message(r#"{"audio":""}"#).unwrap(),
+            ServerMessage {
+                audio: None,
+                is_final: false
+            }
+        );
     }
 
     #[test]
