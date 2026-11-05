@@ -30,8 +30,9 @@ const KAISER_BETA: f64 = 8.0;
 /// frames gives the same output samples as the whole stream at once. The filter is linear-phase
 /// and causal: the output lags the input by [`Resampler::delay`] output samples, and nothing is
 /// held back, so after `n` input samples it has produced `ceil(n * L / M)` output samples.
-/// Construction allocates the filter; processing allocates only to grow its buffers to the
-/// largest frame it has seen.
+/// Construction allocates the filter. [`Resampler::process`] allocates only to grow its buffers
+/// and `output` to the largest frame it has seen; [`Resampler::resample_frame`] also allocates the
+/// data of each frame it returns.
 #[derive(Debug, Clone)]
 pub struct Resampler {
     from: u32,
