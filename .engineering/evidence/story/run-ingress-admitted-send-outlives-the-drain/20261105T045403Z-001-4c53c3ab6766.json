@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T04:54:03Z",
+  "actor": "human:timo",
+  "artifact": "story:run-ingress-admitted-send-outlives-the-drain",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "admitted_send_at_bridge_drain red on 85bf603, green on 2bd3200; adversary1_close_to_senders_cycle 0/50 on e7b8de8, 50/50 on 2bd3200; close race 4,000 rounds under pause and drop_stale_epochs, 0 answered otherwise",
+    "reference": "git:2bd3200"
+  }
+}
