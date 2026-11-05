@@ -64,12 +64,11 @@ const NATIVE_END: Duration = Duration::from_millis(400);
 /// The cascade's endpoint: the silence after speech that ends the recogniser's input.
 const HOLD: Duration = Duration::from_millis(200);
 /// The cascade's scripted delays per step: the recogniser's final transcript after the end of
-/// its input, the LLM's first token after the transcript, the TTS's first audio after the token,
-/// and the playout's start after the audio is handed to it.
+/// its input, the LLM's first token after the transcript, and the TTS's first audio after the
+/// token.
 const STT_DELAY: Duration = Duration::from_millis(120);
 const LLM_DELAY: Duration = Duration::from_millis(200);
 const TTS_DELAY: Duration = Duration::from_millis(90);
-const PLAYOUT_DELAY: Duration = Duration::from_millis(30);
 /// The cascade's detector: voiced input this long opens a turn, and so stops the playout.
 const ATTACK: Duration = Duration::from_millis(30);
 /// The time the playout takes to stop.
@@ -389,21 +388,14 @@ impl SynthesisHandle for DelayedSynthesis {
     }
 }
 
-/// A speaker whose playout starts `PLAYOUT_DELAY` after its first frame and stops in
-/// `STOP_DELAY`, on the fake clock.
+/// A speaker whose playout stops in `STOP_DELAY`, on the fake clock.
 struct DelayedPlayout {
     clock: Fake,
-    started: bool,
     stops: usize,
 }
 
 impl Playout for DelayedPlayout {
-    fn play(&mut self, _frame: &AudioFrame) {
-        if !self.started {
-            self.started = true;
-            self.clock.advance(PLAYOUT_DELAY);
-        }
-    }
+    fn play(&mut self, _frame: &AudioFrame) {}
 
     fn stop(&mut self) {
         self.stops += 1;
@@ -419,6 +411,12 @@ const ANSWER: [&str; 4] = [
 ];
 
 fn cascade_run(plan: &Plan) -> (Measured, usize) {
+    cascade_answering(plan, &ANSWER)
+}
+
+/// A run of the cascade whose LLM answers with the deltas `answer`; the mock synthesiser speaks
+/// one 10 ms frame per word.
+fn cascade_answering(plan: &Plan, answer: &[&str]) -> (Measured, usize) {
     let clock = Fake::new();
     let script = vec![
         Cue {
@@ -434,8 +432,12 @@ fn cascade_run(plan: &Plan) -> (Measured, usize) {
         inner: MockRecogniser::new(SttConfiguration::Incremental, ModelId::generate(), script),
         clock: clock.clone(),
     };
-    let mock: Generator =
-        MockGenerator::new(LlmConfiguration::StreamingOnly, ModelId::generate(), ANSWER).into();
+    let mock: Generator = MockGenerator::new(
+        LlmConfiguration::StreamingOnly,
+        ModelId::generate(),
+        answer.iter().copied(),
+    )
+    .into();
     let generator = Generator::new(
         mock.adapter().clone(),
         Arc::new(DelayedModel {
@@ -457,7 +459,6 @@ fn cascade_run(plan: &Plan) -> (Measured, usize) {
     cascade.attack = ATTACK;
     let mut playout = DelayedPlayout {
         clock: clock.clone(),
-        started: false,
         stops: 0,
     };
     let now = {
@@ -532,7 +533,6 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
         Measure::FinalTranscript,
         Measure::FirstToken,
         Measure::TtsFirstAudio,
-        Measure::PlayoutStart,
     ] {
         assert_eq!(measure.of(&native), None, "{measure:?} of the native arm");
     }
@@ -553,10 +553,13 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
         cascade.tts_first_audio,
         transcript + LLM_DELAY + TTS_DELAY,
     );
-    let playout = transcript + LLM_DELAY + TTS_DELAY + PLAYOUT_DELAY;
-    near("cascade playout start", cascade.playout_start, playout);
-    near("cascade first audio", cascade.first_audio, playout);
-    near("cascade response end", cascade.response_end, playout);
+    let audio = transcript + LLM_DELAY + TTS_DELAY;
+    near("cascade first audio", cascade.first_audio, audio);
+    near("cascade response end", cascade.response_end, audio);
+    assert_eq!(
+        cascade.first_audio, cascade.tts_first_audio,
+        "the client plays the first frame at its receipt: no answer plays before it"
+    );
     step(
         "the LLM's first token after the final transcript",
         cascade.final_transcript,
@@ -568,12 +571,6 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
         cascade.first_token,
         cascade.tts_first_audio,
         TTS_DELAY,
-    );
-    step(
-        "the playout's start after the TTS's first audio",
-        cascade.tts_first_audio,
-        cascade.playout_start,
-        PLAYOUT_DELAY,
     );
     assert_eq!(cascade.first_transcript, None);
 
@@ -612,7 +609,6 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
         "final transcript",
         "first token",
         "tts first audio",
-        "playout start",
     ] {
         assert!(heading.contains(name), "{name} in {heading}");
     }
@@ -622,9 +618,10 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
     assert!(cascade_row.contains(" cascade "), "{cascade_row}");
     assert_eq!(
         native_row.matches("n/a").count(),
-        4,
-        "the four cascade steps: {native_row}"
+        3,
+        "the three cascade steps: {native_row}"
     );
+    assert!(!heading.contains("playout start"), "{heading}");
     assert_eq!(
         cascade_row.matches("n/a").count(),
         1,
@@ -643,7 +640,6 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
         runs[0].final_transcript,
         runs[0].first_token,
         runs[0].tts_first_audio,
-        runs[0].playout_start,
     ] {
         assert!(
             cascade_row.contains(&cell(value)),
@@ -669,7 +665,39 @@ fn the_cascade_stops_its_playout_at_a_barge_in_after_its_detector_hears_it() {
     near(
         "the latency turn's first audio, not the barge-in turn's",
         cascade.first_audio,
-        HOLD + STT_DELAY + LLM_DELAY + TTS_DELAY + PLAYOUT_DELAY,
+        HOLD + STT_DELAY + LLM_DELAY + TTS_DELAY,
+    );
+}
+
+/// Ten words, 100 ms of answer on the mock synthesiser.
+const SHORT_ANSWER: [&str; 4] = [
+    "Paris",
+    " is the capital",
+    " of France and has been",
+    " for.",
+];
+
+/// The barge-in's speech starts while the short answer still plays, and the answer ends before
+/// the detector's attack is met: barge-in to stop runs to the end of the answer's audio as the
+/// client plays it, not to a stop the detector's attack decides, and nothing is stopped.
+#[test]
+fn barge_in_to_stop_ends_where_the_answer_ends_before_the_detector_hears_it() {
+    let mut plan = Plan::new(utterance());
+    plan.barge_in = Some(utterance());
+    plan.barge_after = ms(80);
+    let (cascade, stops) = cascade_answering(&plan, &SHORT_ANSWER);
+    println!("{cascade:?}");
+    assert_eq!(cascade.notes, Vec::<String>::new(), "{cascade:?}");
+    assert_eq!(
+        stops, 0,
+        "nothing played when the detector heard the barge-in"
+    );
+    let stop = cascade
+        .barge_in_stop
+        .expect("barge-in to stop was measured");
+    assert!(
+        stop < ATTACK,
+        "barge-in to stop {stop:?}: the answer ended before the detector's attack of {ATTACK:?}"
     );
 }
 
@@ -757,7 +785,6 @@ fn a_cascade_measure_is_not_one_of_the_native_topology_and_the_shared_ones_are_b
         Measure::FinalTranscript,
         Measure::FirstToken,
         Measure::TtsFirstAudio,
-        Measure::PlayoutStart,
     ] {
         assert!(!measure.applies(Topology::Native), "{measure:?}");
         assert!(measure.applies(Topology::Cascade), "{measure:?}");

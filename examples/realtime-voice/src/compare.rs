@@ -38,21 +38,25 @@
 //! as user text; each committed segment of the answer is offered to the synthesiser as it
 //! arrives, and each frame of the synthesis is handed to the [`Playout`] as it arrives. The steps
 //! run one after the other on the caller's thread, each read on the caller's clock when it hands
-//! its event over. Four measures of the cascade's own steps run from the end of input speech:
+//! its event over. Three measures of the cascade's own steps run from the end of input speech:
 //!
 //! * final transcript: the recogniser's last committed span of the turn;
 //! * first token: the answer's first text delta;
-//! * TTS first audio: the synthesis's first frame;
-//! * playout start: the return of the playout's first [`Playout::play`].
+//! * TTS first audio: the synthesis's first frame.
 //!
-//! Its shared measures keep their names: first audio is the playout start, the instant the
-//! answer can be heard, as a native model's first audio is played at its receipt; response end is
-//! the synthesis's last event; barge-in to output stop runs from the barge-in's first voiced frame
-//! to the return of [`Playout::stop`], which the arm calls once [`Cascade::attack`] of voiced
-//! input opened a turn while the answer still played. The cascade has no first transcript of the
-//! answer apart from its first token, and a native model has none of the cascade's steps: the
-//! table shows such a cell as `n/a`, never as 0. [`hosted_tts`] makes the hosted synthesiser the
-//! `compare` example binds, or says why there is none.
+//! Its shared measures keep their names and are taken as a native model's are. The answer's audio
+//! is played on the client's model, not on a device: each frame from its receipt or from the end
+//! of the frame before it, whichever is later, cut where the client stops playout. First audio is
+//! the start of that playout, so it is the TTS first audio: an answer starts only once the one
+//! before it has played out, and no device adds its own delay. Response end is the synthesis's
+//! last event. Barge-in to output stop runs from the barge-in's first voiced frame to the end of
+//! the answer's audio as the client plays it; the client stops playout, calling
+//! [`Playout::stop`], once [`Cascade::attack`] of voiced input opened a turn while the answer
+//! still played, and the cut is the return of that call. Every frame of the synthesis counts as
+//! the answer's voiced audio: the arm has no detector on its output. The cascade has no first
+//! transcript of the answer apart from its first token, and a native model has none of the
+//! cascade's steps: the table shows such a cell as `n/a`, never as 0. [`hosted_tts`] makes the
+//! hosted synthesiser the `compare` example binds, or says why there is none.
 //!
 //! [`Comparison`] collects the runs of each provider, or why it was skipped, and prints the
 //! median and the spread (lowest and highest) of each measure over the runs that measured it, and
@@ -281,6 +285,14 @@ impl Topology {
             Self::Cascade => "cascade",
         }
     }
+
+    /// The topology named `name` in the table.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Native, Self::Cascade]
+            .into_iter()
+            .find(|topology| topology.name() == name)
+    }
 }
 
 /// What one run measured. A measure is `None` when the run did not reach it or its topology has
@@ -303,8 +315,6 @@ pub struct Measured {
     pub first_token: Option<Duration>,
     /// End of input speech to the TTS's first audio, for a cascade.
     pub tts_first_audio: Option<Duration>,
-    /// End of input speech to the start of the answer's playout, for a cascade.
-    pub playout_start: Option<Duration>,
     /// The usage the session reported over the run.
     pub usage: Totals,
     /// The seconds the provider billed, for one that bills by the second.
@@ -817,18 +827,18 @@ impl<R, S> Cascade<R, S> {
     }
 }
 
-/// Where a cascade arm plays the answer's audio.
+/// Where a cascade arm hands the answer's audio. The arm times the audio on the client's model of
+/// playout, whatever the playout does with it; only the return of [`Playout::stop`] is read.
 pub trait Playout {
-    /// Plays `frame` after the frames before it; the playout has started once the first call
-    /// returns.
+    /// Plays `frame` after the frames before it.
     fn play(&mut self, frame: &AudioFrame);
 
     /// Stops playout and drops what is queued; it has stopped once the call returns.
     fn stop(&mut self);
 }
 
-/// The playout of a client without a speaker: nothing is played, and each frame is timed as the
-/// client would play it.
+/// The playout of a client without a speaker: nothing is played, and the arm's model of the
+/// client's playout is the whole of it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClientPlayout;
 
@@ -888,11 +898,11 @@ struct Steps {
     speech_end: Option<Instant>,
     final_transcript: Option<Instant>,
     first_token: Option<Instant>,
+    /// The synthesis's first frame, and so the start of the client's playout.
     tts_first_audio: Option<Instant>,
-    playout_start: Option<Instant>,
     /// The synthesis's last event.
     ended: Option<Instant>,
-    /// Where the playout of the answer's audio received so far ends.
+    /// Where the client's playout of the answer's audio received so far ends.
     cursor: Option<Instant>,
     /// Whether the turn is over: answered, refused or failed.
     done: bool,
@@ -1008,12 +1018,11 @@ pub fn run_cascade<R: Recogniser, S: Synthesiser>(
     runner.cut();
     let latency = &runner.latency;
     let mut measured = std::mem::take(&mut runner.measured);
-    measured.first_audio = latency.since_speech_end(latency.playout_start);
+    measured.first_audio = latency.since_speech_end(latency.tts_first_audio);
     measured.response_end = latency.since_speech_end(latency.ended);
     measured.final_transcript = latency.since_speech_end(latency.final_transcript);
     measured.first_token = latency.since_speech_end(latency.first_token);
     measured.tts_first_audio = latency.since_speech_end(latency.tts_first_audio);
-    measured.playout_start = latency.since_speech_end(latency.playout_start);
     measured
 }
 
@@ -1082,14 +1091,14 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
             }
             Phase::BargeIn => {
                 if !self.barge_queued
-                    && let Some(first) = self.barge.playout_start
+                    && let Some(first) = self.barge.tts_first_audio
                     && now + self.barge_lead >= first + self.plan.barge_after
                     && let Some(frames) = &self.barge_in
                 {
                     self.queue.extend(frames.iter().cloned());
                     self.barge_queued = true;
                 }
-                if self.barge.done && self.barge.playout_start.is_none() {
+                if self.barge.done && self.barge.tts_first_audio.is_none() {
                     self.note("barge-in: the answer had no audio".to_owned());
                     self.phase = Phase::Done;
                 } else if late {
@@ -1208,30 +1217,42 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
         }
     }
 
-    /// The detector opened a turn at the barge-in, at `now`: stops the playout if the answer still
-    /// plays, measures the stop, and drops every step of the answer.
+    /// The detector opened a turn at the barge-in, at `now`: stops the playout if the answer
+    /// still plays or may play more, measures the barge-in to the end of the answer's audio as
+    /// the client plays it, cut at the stop, and drops every step of the answer.
     fn interrupt(&mut self, now: Instant) {
         let Some(barge) = self.barge_start else {
             return;
         };
-        match self.barge.cursor {
-            Some(cursor) if cursor > now => {
-                self.playout.stop();
-                let stopped = (self.clock)();
-                self.measured.barge_in_stop = Some(stopped.saturating_duration_since(barge));
+        let cursor = self.barge.cursor;
+        let playing = cursor.is_some_and(|cursor| cursor > now) || !self.barge.done;
+        let cut = playing.then(|| {
+            self.playout.stop();
+            (self.clock)()
+        });
+        let end = match (cursor, cut) {
+            (Some(cursor), Some(cut)) => Some(cursor.min(cut)),
+            (cursor, _) => cursor,
+        };
+        match end {
+            Some(end) if end >= barge => {
+                self.measured.barge_in_stop = Some(end.saturating_duration_since(barge));
             }
-            cursor => {
+            end => {
                 let after = |at: Instant| {
                     self.barge
-                        .playout_start
+                        .tts_first_audio
                         .map_or(0, |first| at.saturating_duration_since(first).as_millis())
                 };
-                let note = format!(
-                    "barge-in: the answer had finished playing before the barge-in: it ended {} \
-                     ms after its first audio, the barge-in's speech started {} ms after it",
-                    cursor.map_or(0, after),
-                    after(barge)
-                );
+                let note = match end {
+                    Some(end) => format!(
+                        "barge-in: the answer had finished playing before the barge-in: it ended \
+                         {} ms after its first audio, the barge-in's speech started {} ms after it",
+                        after(end),
+                        after(barge)
+                    ),
+                    None => "barge-in: the answer had no audio".to_owned(),
+                };
                 self.note(note);
             }
         }
@@ -1416,7 +1437,8 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
         }
     }
 
-    /// Takes an event of the synthesis: a frame is handed to the playout as it arrives.
+    /// Takes an event of the synthesis: a frame is played on the client's model from its receipt
+    /// or from the end of the frame before it, whichever is later, and handed to the playout.
     fn spoken(&mut self, event: SynthesisEvent) {
         let at = (self.clock)();
         if let Some(steps) = self.steps() {
@@ -1425,15 +1447,13 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
         let SynthesisEvent::Audio(audio) = event else {
             return;
         };
-        self.playout.play(audio.frame());
-        let played = (self.clock)();
         let length = audio.frame().duration();
         if let Some(steps) = self.steps() {
             steps.tts_first_audio.get_or_insert(at);
-            steps.playout_start.get_or_insert(played);
-            let start = steps.cursor.map_or(played, |cursor| cursor.max(played));
+            let start = steps.cursor.map_or(at, |cursor| cursor.max(at));
             steps.cursor = Some(start + length);
         }
+        self.playout.play(audio.frame());
     }
 }
 
@@ -1448,13 +1468,12 @@ pub enum Measure {
     FinalTranscript,
     FirstToken,
     TtsFirstAudio,
-    PlayoutStart,
 }
 
 impl Measure {
     /// Every measure, in the order the table shows them: those of a native model, then the
     /// cascade's steps.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::FirstAudio,
         Self::FirstTranscript,
         Self::ResponseEnd,
@@ -1462,7 +1481,6 @@ impl Measure {
         Self::FinalTranscript,
         Self::FirstToken,
         Self::TtsFirstAudio,
-        Self::PlayoutStart,
     ];
 
     /// The measure's column heading.
@@ -1476,19 +1494,18 @@ impl Measure {
             Self::FinalTranscript => "final transcript",
             Self::FirstToken => "first token",
             Self::TtsFirstAudio => "tts first audio",
-            Self::PlayoutStart => "playout start",
         }
     }
 
     /// Whether a provider of `topology` has the step the measure ends at: first audio, response
     /// end and barge-in to stop both have; the first transcript of the answer is a native
-    /// model's, and the four steps after it the cascade's.
+    /// model's, and the three steps after it the cascade's.
     #[must_use]
     pub const fn applies(self, topology: Topology) -> bool {
         match self {
             Self::FirstAudio | Self::ResponseEnd | Self::BargeInStop => true,
             Self::FirstTranscript => matches!(topology, Topology::Native),
-            Self::FinalTranscript | Self::FirstToken | Self::TtsFirstAudio | Self::PlayoutStart => {
+            Self::FinalTranscript | Self::FirstToken | Self::TtsFirstAudio => {
                 matches!(topology, Topology::Cascade)
             }
         }
@@ -1508,7 +1525,6 @@ impl Measure {
             Self::FinalTranscript => run.final_transcript,
             Self::FirstToken => run.first_token,
             Self::TtsFirstAudio => run.tts_first_audio,
-            Self::PlayoutStart => run.playout_start,
         }
     }
 }
@@ -1588,11 +1604,18 @@ impl Comparison {
         }
     }
 
-    /// Adds the runs of `provider`, of the topology its first run names.
+    /// Adds the runs of `provider`, of the topology its first run names; with no run, of the
+    /// topology `provider` is named after, else native. [`Comparison::ran_as`] names it.
     pub fn ran(&mut self, provider: &str, runs: Vec<Measured>) {
-        let topology = runs
-            .first()
-            .map_or_else(Topology::default, |run| run.topology);
+        let topology = runs.first().map_or_else(
+            || Topology::named(provider).unwrap_or_default(),
+            |run| run.topology,
+        );
+        self.ran_as(provider, topology, runs);
+    }
+
+    /// Adds the runs of `provider` of `topology`, whether or not there is a run.
+    pub fn ran_as(&mut self, provider: &str, topology: Topology, runs: Vec<Measured>) {
         self.providers
             .push((provider.to_owned(), topology, Outcome::Ran(runs)));
     }

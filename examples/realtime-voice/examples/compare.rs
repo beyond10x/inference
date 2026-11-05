@@ -147,8 +147,8 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                 match hosted()
                     .and_then(|synthesiser| cascade::measure(synthesiser, &plan, args.runs))
                 {
-                    Ok(runs) => comparison.ran(name, runs),
-                    Err(reason) => comparison.skipped_as(name, Topology::Cascade, &reason),
+                    Ok(runs) => comparison.ran_as(name, provider.topology(), runs),
+                    Err(reason) => comparison.skipped_as(name, provider.topology(), &reason),
                 }
                 continue;
             }
@@ -192,8 +192,8 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                 }),
         };
         match outcome {
-            Ok(runs) => comparison.ran(name, runs),
-            Err(error) => comparison.skipped(name, &error.to_string()),
+            Ok(runs) => comparison.ran_as(name, provider.topology(), runs),
+            Err(error) => comparison.skipped_as(name, provider.topology(), &error.to_string()),
         }
     }
     Ok(comparison)

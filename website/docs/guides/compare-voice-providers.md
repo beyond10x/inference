@@ -15,12 +15,20 @@ and spread of:
 - end of the question's speech to the answer's first audio, first transcript and response end,
   the turn latency;
 - barge-in to output stop, when a barge-in utterance is given;
-- for the cascade, end of speech to the recogniser's final transcript, the LLM's first token, the
-  TTS's first audio and the playout's start;
+- for the cascade, end of speech to the recogniser's final transcript, the LLM's first token and
+  the TTS's first audio;
 - the usage of each run.
 
 A step a topology does not have shows `n/a`. Every time is taken on the client, on one clock, at
 the receipt of each event. No microphone or speaker is used.
+
+Since no device plays the answer, both topologies play it on the client's model of playout: each
+frame from its receipt or from the end of the frame before it, whichever is later, cut where the
+client stops playout. Barge-in to output stop runs to the end of the answer's audio as the client
+plays it. For the cascade, playout therefore starts at the TTS's first audio, so the cascade's
+first audio is its TTS first audio and the table has no playout start column. The cascade's
+client stops playout once the local cascade's detector has heard the barge-in; an answer that ends
+before then stops where it ends.
 
 :::warning[Requirements]
 
@@ -104,9 +112,9 @@ cargo test -q -p realtime-voice --test compare two_scripted_providers_give_their
 running 1 test
 times in ms, taken on the client at the receipt of each event: median [lowest-highest] measured/runs; n/a: a step the topology does not have
 from the end of the question's speech; barge-in from the barge-in's first voiced frame; response end is the turn latency
-provider  topology  first audio           first transcript      response end          barge-in to stop      final transcript      first token           tts first audio       playout start
-fast      native    320 [300-340] 3/3     260 [250-270] 3/3     900 [900-900] 3/3     200 [200-200] 3/3     n/a                   n/a                   n/a                   n/a
-slow      native    640 [600-700] 3/3     520 [500-550] 3/3     1840 [1800-1900] 3/3  100 [100-100] 3/3     n/a                   n/a                   n/a                   n/a
+provider  topology  first audio           first transcript      response end          barge-in to stop      final transcript      first token           tts first audio
+fast      native    320 [300-340] 3/3     260 [250-270] 3/3     900 [900-900] 3/3     200 [200-200] 3/3     n/a                   n/a                   n/a
+slow      native    640 [600-700] 3/3     520 [500-550] 3/3     1840 [1800-1900] 3/3  100 [100-100] 3/3     n/a                   n/a                   n/a
 nova      native    skipped: blocked on AWS access
 usage per run, as each provider reports it
 fast      run 1: responses 2: in text 20 audio 40 cached 0, out text 10 audio 80; transcription in ? out ? (0 of 0 turns reported)
@@ -117,6 +125,6 @@ slow      run 2: responses 2: in text 20 audio ? cached 0, out text 10 audio ?; 
 slow      run 3: responses 2: in text 20 audio ? cached 0, out text 10 audio ?; transcription in ? out ? (0 of 0 turns reported); billed 12.5 s
 
 .
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.05s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.07s
 
 ```
