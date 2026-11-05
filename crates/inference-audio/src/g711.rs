@@ -144,9 +144,11 @@ pub(crate) fn data_len_mismatch(frame: &AudioFrame) -> Option<(u64, u64)> {
 impl AudioFrame {
     /// This frame in `encoding`: the same sample rate, channels, position and sample count, each
     /// sample converted on its own. `pcm_s16le` converts to and from `pcm_mulaw` and `pcm_alaw`
-    /// by G.711, and μ-law and A-law convert into one another through the 16-bit sample; the
-    /// same encoding returns a copy. `pcm_f32le` does not convert. A frame whose data is not the
-    /// length its format and sample count require is refused, and nothing panics.
+    /// by G.711, and μ-law and A-law convert into one another through the 16-bit sample, not by
+    /// G.711's direct μ-law/A-law conversion tables. A `pcm_s16le`, `pcm_mulaw` or `pcm_alaw`
+    /// frame converted to its own encoding is a copy. `pcm_f32le` does not convert, not even to
+    /// itself. A frame whose data is not the length its format and sample count require is
+    /// refused, and nothing panics.
     pub fn to_encoding(&self, encoding: AudioEncoding) -> Result<AudioFrame, ConversionError> {
         if let Some((expected, actual)) = data_len_mismatch(self) {
             return Err(ConversionError::DataLength { expected, actual });
