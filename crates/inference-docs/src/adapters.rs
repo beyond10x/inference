@@ -87,6 +87,15 @@ const BINDINGS: &[Binding] = &[
         licence: "hosted service: text leaves the machine",
     },
     Binding {
+        name: "Deepgram streaming STT",
+        package: "inference-deepgram",
+        runs: "STT, streaming; hosted, WebSocket (`v1/listen`), one connection per recognition",
+        features: &[],
+        record: Record::Claims("records/claims-stt.json"),
+        environment: "`DEEPGRAM_API_KEY`, or the keychain secret `deepgram-api-key` with feature `keychain`",
+        licence: "hosted service: audio leaves the machine",
+    },
+    Binding {
         name: "sherpa-onnx streaming STT",
         package: "inference-sherpa-onnx",
         runs: "STT, streaming; in process, native library",
