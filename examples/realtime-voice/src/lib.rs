@@ -25,7 +25,9 @@
 //! read. With `auto_interrupt` off the caller's rule is to cancel the response in progress itself;
 //! a model that takes truncation is then told to cut the played response at that position, and
 //! any response queued behind it at its first sample. A model that takes neither, such as one that
-//! cancels on its own side, only has its playout stopped.
+//! cancels on its own side, only has its playout stopped. Audio of a response the conversation
+//! truncated that still arrives, such as the deltas a provider had in flight when it cut the
+//! response on its own side, is the cut answer and is dropped.
 //!
 //! Every binding reports the speech start the conversation stops on, in its own way: OpenAI
 //! Realtime from the server's voice activity detection, Nova Sonic at the provider's
@@ -271,6 +273,7 @@ pub struct Conversation<S> {
     finished: bool,
     follow_up: HashSet<ResponseId>,
     current: Option<ResponseId>,
+    truncated: HashSet<ResponseId>,
     frames_sent: u64,
 }
 
@@ -331,6 +334,7 @@ impl<S: SpeechSessionHandle> Conversation<S> {
             finished: true,
             follow_up: HashSet::new(),
             current: None,
+            truncated: HashSet::new(),
             frames_sent: 0,
         })
     }
@@ -435,8 +439,10 @@ impl<S: SpeechSessionHandle> Conversation<S> {
                 text: delta.text,
             }),
             SessionEvent::OutputAudio(audio) => {
-                self.backlog.push_back((audio.response_id, audio.frame));
-                self.feed_speaker(notes);
+                if !self.truncated.contains(&audio.response_id) {
+                    self.backlog.push_back((audio.response_id, audio.frame));
+                    self.feed_speaker(notes);
+                }
             }
             SessionEvent::ResponseCreated(created) => self.current = Some(created.response_id),
             SessionEvent::ResponseCompleted(done) => {
@@ -547,8 +553,11 @@ impl<S: SpeechSessionHandle> Conversation<S> {
             .into_iter()
             .chain(unheard.into_iter().zip(start));
         for (response_id, heard) in cuts {
-            if let Err(error) = self.session.truncate_output(response_id, heard) {
-                notes.push(Note::Refused(format!("truncate: {error}")));
+            match self.session.truncate_output(response_id, heard) {
+                Ok(()) => {
+                    self.truncated.insert(response_id);
+                }
+                Err(error) => notes.push(Note::Refused(format!("truncate: {error}"))),
             }
         }
     }
