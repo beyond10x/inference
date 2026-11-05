@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.14.0] — 2026-11-05
+
+### Added
+
+- `InputEndpoint::known_contents`, a provided method, and `KnownContents` (`Empty`, `NotEmpty`,
+  `Unknown`) in `inference_core::endpoint`: an endpoint may say, without waiting, whether its edge
+  holds an envelope now. The default answers `Unknown`, which keeps the behaviour before it, so no
+  implementer has to change; `recv`'s contract is unchanged. An endpoint that overrides it and
+  answers a known value must lose nothing when a pending `recv` future of it is dropped, and is
+  given a new `recv` future on each poll by a caller that relies on the answer.
+  `QueueReceiver` and `SinkReceiver` implement it.
+
+### Changed
+
+- The ESS pin moves from 0.85.0 to 0.86.0: the CI download, the `inference-testkit`
+  `ess-conformance` and `ess-primitives` tags and `ess/ess-inputs.yaml`'s `requires: ess 0.86`.
+  `task check` needs `ess` 0.86.0 on `PATH`.
+
+### Fixed
+
+- A drained subgraph node no longer drops an envelope one of its edges holds behind a pending
+  receive. The ingress bridge took every `Pending` for an empty edge; it now trusts an endpoint's
+  `known_contents` answer, and polls an endpoint that answers `Unknown` and woke itself up to four
+  more times per drain read. An `Unknown` endpoint whose receive holds an envelope until another
+  thread wakes it still cannot be told apart from an empty one.
+- A subgraph node's ingress bridge takes its parent edges in strict turns; before, with three busy
+  edges, the middle one could wait behind the other two indefinitely.
+- `inference-testkit`'s model node, when an output send is refused as closed while its run is
+  being cancelled, ends cancelled with the cut turn's usage record as not final, instead of
+  failing without it. A drain the run still awaits fails it at once, as before.
+
 ## [0.13.0] — 2026-11-04
 
 ### Changed
