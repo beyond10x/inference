@@ -2159,6 +2159,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-deepgram"
+version = "0.15.0"
+dependencies = [
+ "futures-util",
+ "inference-stt",
+ "inference-testkit",
+ "keyring-core",
+ "rustls",
+ "secrets-core",
+ "secrets-keychain",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "webpki-roots 0.26.11",
+ "zeroize",
+]
+
+[[package]]
 name = "inference-docs"
 version = "0.15.0"
 dependencies = [
