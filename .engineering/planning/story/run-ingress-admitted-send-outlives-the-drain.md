@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:run-ingress-admitted-send-outlives-the-drain
 kind: story
-status: active
+status: implemented
 title: A send a run ingress admitted before its drain is delivered or reported
 summary: Measure whether a send admitted under the pause policy can still wait when the drain ends the bridge, and close the gap if it can.
 tags:
@@ -15,10 +15,11 @@ scope:
   path: crates/inference-runtime/src/drive.rs
 - confidence: cited
   path: crates/inference-runtime/src/queue.rs
-revision: 8
+revision: 14
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-05T04:55:22Z", actor: "human:operator", revision: 14, decided_on: {"recorded":{"test_result":1,"review_outcome":4,"verification":1}}}
 ---
 ## Context
 
@@ -47,59 +48,217 @@ says it was not delivered; a test holds whichever the runtime does.
 
 ## Design
 
-Taken out of the 0.14.0 wave under its acceptance terms. Each of its three corrections opened a
-new defect, and the third could not satisfy one recorded case without changing it.
+The 0.14.0 wave took this story out under its acceptance terms, after two adversary passes and three
+corrections. The work stays unmerged on branch `impl/run-ingress-admitted-send-outlives-the-drain`
+at `f54cb70`. The coordinator accepts what follows before any code changes.
 
-The work stays on branch `impl/run-ingress-admitted-send-outlives-the-drain`, at head `f54cb70`,
-unmerged:
+### The defect
 
-- `df0e382` measured the defect. Under `pause`, a send admitted before the drain into a subgraph
-  node's ingress could land while the ingress bridge sent `stop` into the child. It answered `Ok`
-  and was discarded when the bridge ended. The run's own ingress delivered that send.
-- `f54cb70` carries the last correction and both adversary passes. Its cases are in
-  `ingress_admitted_send_at_drain.rs`, `adversary1_parked_send_{queue,run}.rs` and
-  `adversary2_parked_send_{queue,run}.rs`.
-
-The next attempt writes the send's state machine down here, and the coordinator accepts it before
-any code changes.
-
-### States of one send on a run ingress
-
-| state | entered by | leaves by |
-|---|---|---|
-| unchecked | `send` called | first poll: refused `Closed` once the run admits no new input, else admitted |
-| admitted, room | queue has room | taken under the queue's lock: queued |
-| admitted, parked | queue full under `pause` or `drop_stale_epochs` | room reserved, receiver gone (`Closed` with envelope), stale (discarded), send dropped (withdrawn) |
-| reserved | a take or a raise gave it a place | its own poll lands it (queued), send dropped (place passed on), receiver gone, stale |
-| queued | landed | the receiver takes it (delivered), or the receiver goes (counted discarded) |
+Under `pause`, a send admitted before a drain into a subgraph node's run ingress waits for room.
+The node's ingress bridge drains: it finds its parent edge empty, sends `stop` into the child and
+ends. In the meantime the waiting send lands on the edge, answers `Ok`, and is discarded when the
+edge's receiver goes. The run's own ingress, read by a plain node, delivers the same send.
+Measured by `df0e382`: the subgraph case was red on the base, `Ok` with the child receiving one,
+two, three, stop.
 
 ### What every design must hold
 
-The adversary passes and the corrections found these requirements:
+1. A send given up before its envelope is in the queue delivers nothing.
+2. A send that answers `Ok` reaches the node that reads the edge.
+3. The drain never waits for a caller to poll a send it holds. A caller that polls a send under a
+   timeout, then awaits the run's drain, then awaits the send, gets its drain back.
+4. On a plain node's run ingress, a send parked before the drain is delivered
+   (`an_admitted_send_waiting_for_room_at_the_drain_reaches_the_node_that_reads_the_ingress`).
+5. Needing concurrent sends on one sender (pass 2, pre-existing): envelopes on one stream reach
+   the node in the order their sends parked, and a withdrawal gives back only its own sequence.
 
-1. A send given up before its envelope is queued delivers nothing. Passes 1 and 2 found two ways
-   to break this: an envelope handed in by the take, and a reserved envelope taken before its
-   send's next poll.
-2. A send that answers `Ok` reaches the node. The measured defect was a landing after the
-   bridge's empty check, discarded when its receiver went.
-3. The drain never waits for a caller to poll a send it holds. Correction 2 broke this: the
-   bridge waited at a reserved place, so the sequence of a send under a timeout, then
-   `drain().await`, then the send awaited, never ended.
-4. A send parked on a flat run's ingress before the drain is delivered. This is the recorded
-   case `an_admitted_send_waiting_for_room_at_the_drain_reaches_the_node_that_reads_the_ingress`.
-5. Pre-existing, needing concurrent sends on one sender (both notes from pass 2):
-   - envelopes on one stream reach the node in the order their sends parked;
-   - a withdrawal gives back only its own sequence.
+### The choice: the bridge closes its edge to senders in one step
 
-### The open choice
+The other choice, refusing every landing once the ingress is closed, breaks 4. This design keeps
+the queue of `f54cb70`:
 
-Requirements 2, 3 and 4 meet at the bridge. It must decide that its parent edge is empty and
-stop further landings in one step.
+- room is reserved as a place in queue order;
+- an envelope lands only by its own send's poll;
+- the ingress guard tracks the sequences taken and those under way.
 
-- Refusing every landing once the ingress is closed meets 2 and 3, but answers `Closed` where
-  4 records a delivery.
-- Making the bridge's empty check and its close one step under the queue's lock meets all three,
-  but the bridge reads its edges only through `InputEndpoint`. That needs a new trait method, a
-  public change.
+It adds one step that the bridge takes at its drain.
 
-Either way the decision comes before code.
+`inference_core::endpoint` gains an additive provided method and its answer:
+
+```rust
+/// Closes the edge to its senders and, in the same step, says what it still holds.
+/// After it, every send into the edge, and every send still waiting for room or holding
+/// a reserved place, is refused as `SendError::Closed` with its envelope.
+/// `recv` hands over what the edge held and then answers `None`.
+/// The default answers `Unsupported` and closes nothing, so an endpoint that keeps it
+/// behaves as before, and a caller given that answer decides as it would without
+/// this method.
+fn close_to_senders(&mut self) -> ClosedToSenders {
+    ClosedToSenders::Unsupported
+}
+
+pub enum ClosedToSenders {
+    /// Closed, holding nothing.
+    Empty,
+    /// Closed, holding at least one envelope.
+    Holding,
+    /// Not closed.
+    Unsupported,
+}
+```
+
+`QueueReceiver` overrides it. Under the queue's lock:
+
+- it marks the queue closed to senders;
+- it removes every reserved place whose send has not landed;
+- it answers from the envelopes that did land.
+
+A send that has not landed is refused with its envelope at its next poll, and a new send is
+refused at once. The receiver stays, so the landed envelopes are still taken. `recv` never waits
+on a closed queue: it takes the next landed envelope, or answers `None`.
+
+`SinkReceiver` and every other endpoint keep the default.
+
+### Who calls it, and when
+
+| caller | at | does |
+|---|---|---|
+| the subgraph ingress bridge (`ingress_bridge`) | its first read of the drain, once per parent edge | `Empty` ends that edge; `Holding` receives until `None`; `Unsupported` keeps the 0.14.0 path (`known_contents`, the bounded re-polls) |
+| a plain node | never | its ingress keeps 4 |
+
+A refusal by a queue closed to senders reaches the ingress guard as `Closed`. The guard reports
+it as a send that was not delivered, and it does not mark the consumer node gone: the node is
+draining, not gone. A withdrawn or refused send gives back its sequence, as in `f54cb70`.
+
+### The states of one send on a run ingress
+
+| state | entered by | leaves by |
+|---|---|---|
+| unchecked | `send` called | first poll: refused `Closed` once the run admits no new input; else admitted |
+| admitted, room | the queue has room | taken under the lock: queued |
+| parked | the queue is full under `pause` or `drop_stale_epochs` | a reserved place; or refused `Closed` with its envelope (closed to senders, or receiver gone); or discarded (stale); or withdrawn (send dropped) |
+| reserved | a take or a raise gave it a place | its own poll lands it: queued; or refused `Closed` with its envelope (closed to senders, or receiver gone); or withdrawn, passing the place on; or discarded (stale) |
+| queued | landed | taken by the receiver: delivered; or the receiver goes: counted discarded |
+
+"Closed to senders" acts on parked and reserved sends only. It never touches a queued envelope,
+so 2 holds. The bridge never waits on a send that has not landed, so 3 holds. A plain node never
+closes its edge, so 4 holds. 1 and 5 hold as in `f54cb70`.
+
+### Acceptance, on tests
+
+1. Every case at `f54cb70` stays green, unchanged:
+   - `ingress_admitted_send_at_drain.rs`;
+   - `adversary1_parked_send_queue.rs` and `adversary1_parked_send_run.rs`;
+   - `adversary2_parked_send_queue.rs` and `adversary2_parked_send_run.rs`.
+
+   The subgraph case that awaits the send once the run has ended comes back, and answers `Closed`
+   with its envelope.
+2. A held-send case in caller shape: the send polled under a timeout that fires while it waits,
+   then the run's drain awaited, then the send awaited, each await bounded. It is red on
+   `f54cb70` (the drain times out). Expected green on `main` (to be measured), where the send answers `Closed` after
+   the drain ends, and green on the unit.
+3. `QueueReceiver::close_to_senders` races a landing send from another thread. Every send is
+   either taken by the bridge or refused `Closed` with its envelope, never `Ok` and discarded.
+   The threaded give-ups under `pause` and `drop_stale_epochs` deliver no given-up send.
+4. One adversary pass, at most one correction. A red case, or an earlier case reopened, takes the
+   unit out again.
+
+## Measured on main
+
+`held_send_at_drain.rs` (commit `630b8d7` on branch `impl/close-to-senders-at-the-bridge-drain`)
+holds a send in caller shape:
+
+- the send is admitted and waits under `pause`;
+- it is polled under a timeout that fires while it waits;
+- the run's drain is awaited;
+- the send is awaited.
+
+Every await is bounded. The case runs twice: the plain node reads its ingress in its drain while
+`known_contents` is not `Empty`, and the subgraph node is read by its ingress bridge.
+
+| code | plain node | subgraph node |
+|---|---|---|
+| `main` (`85bf603`) | drain returned; held send `Closed` with its envelope; node received `first` | drain returned; held send `Closed` with its envelope; child received one, two, three, stop |
+| `f54cb70` merged | drain timed out after 10 s; held send `Ok`; node received `first` | drain timed out after 10 s; held send `Ok`; child received one, two, three |
+| the unit (`a75598d`) | drain timed out after 10 s; held send `Ok`; node received `first` | drain returned; held send `Closed` with its envelope; child received one, two, three, stop |
+
+## Second attempt (0.15.0): out again
+
+The unit implemented this Design section, `a75598d` on the branch above. Every acceptance case
+of the section is green:
+
+- `f54cb70`'s cases, the four adversary files unchanged;
+- the restored subgraph case, which answers `Closed`;
+- the threaded close race: 4,000 rounds under each of `pause` and `drop_stale_epochs`, every send
+  delivered or refused `Closed` with its envelope;
+- the threaded give-ups, none of them delivered.
+
+One case is red: the held send on a plain node's ingress. It is green on `main` and red since
+the reserved-place queue of `f54cb70`:
+
+- A reserved place whose send has not landed answers `known_contents` `NotEmpty`. That is not what
+  the method's documentation promises, "at least one envelope now, which a `recv` hands over":
+  `recv` hands nothing over until the caller polls the send.
+- So any reader that drains while its edge is known to hold an envelope waits for the caller,
+  which breaks requirement 3. The bridge escapes this by closing first; a plain node never
+  closes.
+- Making that reader close changes the case to fit the code. Making `known_contents` answer
+  otherwise changes an adversary case. Under the wave's terms a red case takes the unit out, so
+  neither was done.
+
+What this shows for the next design is a hypothesis, not yet built. `main`'s queue already holds
+requirement 3 on both readers. The defect this story measured needs only the bridge's atomic
+close (`close_to_senders` on `main`'s `QueueReceiver`): a waiting send then lands before the close
+and is received, or is refused `Closed` after it. The reserved-place queue serves requirement 5
+and the pre-existing order and sequence findings, which need concurrent sends on one sender and
+can be stories of their own.
+
+## Design D (0.15.0, third attempt)
+
+Third attempt, set by the coordinator on 2026-11-05 after the second went out on a red
+plain-node case. It replaces the choice above for the 0.15.0 wave.
+
+- **No reserved places.** The queue stays as on `main`: a waiting send pushes its envelope on its
+  own next poll. The reserved-place queue of `f54cb70`, the order of waiting sends and the
+  sequence give-back go to story:waiting-sends-land-in-the-order-they-started-waiting and
+  story:withdrawn-ingress-send-gives-back-its-sequence.
+- **Public surface:**
+  - `InputEndpoint::close_to_senders` and `ClosedToSenders` (`Empty`, `Holding`, `Unsupported`), as
+    above;
+  - the default answers `Unsupported` and closes nothing;
+  - a caller calls the method only while no `recv` future of the endpoint is alive.
+- **`QueueReceiver` overrides it on `main`'s queue.** In one step under the queue's lock, it marks
+  the queue closed to senders, wakes every waiting send and answers from what the queue holds.
+  After that:
+  - every send is refused `Closed` with its envelope, at its next poll for one that was waiting;
+  - `recv` hands over what the queue held, then answers `None`, and never waits;
+  - `known_contents` answers from what the queue holds.
+- **The bridge** calls it once per parent edge held as known, at its first read of the drain:
+  - `Empty` ends that edge;
+  - `Holding` receives until `None`;
+  - an edge in its receiving state, or one that answers `Unsupported`, keeps the 0.14.0 path.
+- **A plain node** never calls it. Its run ingress behaves as on `main`.
+- **The ingress guard** takes a `Closed` from a queue closed to senders as a send that was not
+  delivered. It gives the send's sequence back, as `main` does for a refusal, and does not mark
+  the consumer gone.
+
+Why this holds the requirements:
+
+- A waiting send lands either before the bridge's close, and the bridge receives it, or after,
+  and is refused with its envelope. Nothing answers `Ok` and is then discarded (2).
+- Nothing waits on a caller, because nothing is reserved (3).
+- A plain node is untouched (4).
+- A send dropped before its poll pushed nothing (1).
+
+### Acceptance (0.15.0, third attempt)
+
+1. `held_send_at_drain.rs` (`630b8d7`) is green for the plain node and the subgraph node.
+2. The close races a landing send from another thread for 4,000 rounds under each of `pause` and
+   `drop_stale_epochs`. Each send is received or refused `Closed` with its own envelope; none
+   answers otherwise.
+3. The defect's own case is green: a send admitted before the drain into a subgraph node, landing
+   while the bridge sends `stop`, is received or refused.
+4. `inference-core`, `inference-runtime` and `inference-facade` pass whole, with clippy and fmt.
+   The adversary files of `f54cb70` are out of scope.
+5. One adversary pass, then at most one correction. If this attempt is red too, the send and
+   drain work stops and stays the documented known issue.
