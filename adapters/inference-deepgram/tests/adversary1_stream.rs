@@ -122,5 +122,8 @@ async fn adversary1_a_recognition_iterated_inside_a_current_thread_runtime_compl
     let mut recogniser = server.recogniser();
     let (handle, events) = support::recognise(&mut recogniser, tone(6));
     assert!(handle.failure().is_none(), "{:?}", handle.failure());
-    assert_eq!(events.iter().map(describe).last().as_deref(), Some("usage"));
+    assert_eq!(
+        events.iter().map(describe).next_back().as_deref(),
+        Some("usage")
+    );
 }
