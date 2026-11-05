@@ -9,7 +9,7 @@ relations:
 - decides: story:long-talk-over-does-not-resume-the-cut-answer
 - decides: story:elevenlabs-streaming-tts-adapter
 - decides: story:voice-topology-latency-per-step
-revision: 3
+revision: 4
 ---
 ## Decision
 
@@ -106,3 +106,37 @@ U4, story:voice-topology-latency-per-step, left the wave:
 - Its work stays unmerged on its branch.
 
 Release 0.16.0 ships U1, U2 and U3. The staged gate runs on the integration branch without U4.
+
+## Delivered
+
+Three units merged into the integration branch, each after one adversary pass and at most one
+correction. The release commit is `06fcf36`.
+
+- **U1, story:g711-codec-and-anti-aliased-resampler.**
+  - Added the μ-law and A-law codec, `AudioFrame::to_encoding` and the band-limited `Resampler`.
+  - Content at 0.9 to 1.1 of the lower Nyquist frequency is 84 to 96 dB down. The tests assert
+    80 dB.
+  - The adversary pass found two documentation drifts, both fixed.
+- **U2, story:long-talk-over-does-not-resume-the-cut-answer.**
+  - Four acceptance cases, green on both paths: a short interruption, talk-overs of 6 s and 12 s,
+    and a backchannel.
+  - The adversary pass found two pre-existing defects, both fixed:
+    - the acknowledging sink lost the interruption record when a supersede arrived before the
+      turn's opening;
+    - `Conversation` played audio of a response it had truncated.
+  - Audio that GPT-Live streams after speech started is pinned as today's behaviour for
+    story:cut-response-audio-is-told-from-the-next-words, which is accepted for the next wave.
+- **U3, story:elevenlabs-streaming-tts-adapter.**
+  - Added the adapter `inference-elevenlabs`, tested against a local fixture server only. Its
+    live check is an example behind feature `live`.
+  - The adversary pass found three introduced defects, all fixed:
+    - a runtime guard that refused its own remedy;
+    - an error with null audio that stalled;
+    - `ws://` accepted for a remote host.
+  - story:elevenlabs-multi-context-tts-connection is filed as a draft.
+- **U4, story:voice-topology-latency-per-step,** left the wave, as the Outcome section says.
+- **Gate and versions.**
+  - The staged gate runs on the integration branch at the release commit.
+  - The ess pin stays at 0.86.0.
+  - Nothing from the adopter's discussion entered the repository; every committed text was
+    scanned.
