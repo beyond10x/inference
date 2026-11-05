@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T04:20:51Z",
+  "actor": "human:operator",
+  "artifact": "story:run-ingress-admitted-send-outlives-the-drain",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "held_send_at_drain at a75598d",
+    "reference": "git:a75598d"
+  }
+}

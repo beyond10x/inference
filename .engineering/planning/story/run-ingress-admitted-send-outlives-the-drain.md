@@ -15,7 +15,7 @@ scope:
   path: crates/inference-runtime/src/drive.rs
 - confidence: cited
   path: crates/inference-runtime/src/queue.rs
-revision: 9
+revision: 12
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 3}
@@ -161,3 +161,53 @@ closes its edge, so 4 holds. 1 and 5 hold as in `f54cb70`.
    The threaded give-ups under `pause` and `drop_stale_epochs` deliver no given-up send.
 4. One adversary pass, at most one correction. A red case, or an earlier case reopened, takes the
    unit out again.
+
+## Measured on main
+
+`held_send_at_drain.rs` (commit `630b8d7` on branch `impl/close-to-senders-at-the-bridge-drain`)
+holds a send in caller shape:
+
+- the send is admitted and waits under `pause`;
+- it is polled under a timeout that fires while it waits;
+- the run's drain is awaited;
+- the send is awaited.
+
+Every await is bounded. The case runs twice: the plain node reads its ingress in its drain while
+`known_contents` is not `Empty`, and the subgraph node is read by its ingress bridge.
+
+| code | plain node | subgraph node |
+|---|---|---|
+| `main` (`85bf603`) | drain returned; held send `Closed` with its envelope; node received `first` | drain returned; held send `Closed` with its envelope; child received one, two, three, stop |
+| `f54cb70` merged | drain timed out after 10 s; held send `Ok`; node received `first` | drain timed out after 10 s; held send `Ok`; child received one, two, three |
+| the unit (`a75598d`) | drain timed out after 10 s; held send `Ok`; node received `first` | drain returned; held send `Closed` with its envelope; child received one, two, three, stop |
+
+## Second attempt (0.15.0): out again
+
+The unit implemented this Design section, `a75598d` on the branch above. Every acceptance case
+of the section is green:
+
+- `f54cb70`'s cases, the four adversary files unchanged;
+- the restored subgraph case, which answers `Closed`;
+- the threaded close race: 4,000 rounds under each of `pause` and `drop_stale_epochs`, every send
+  delivered or refused `Closed` with its envelope;
+- the threaded give-ups, none of them delivered.
+
+One case is red: the held send on a plain node's ingress. It is green on `main` and red since
+the reserved-place queue of `f54cb70`:
+
+- A reserved place whose send has not landed answers `known_contents` `NotEmpty`. That is not what
+  the method's documentation promises, "at least one envelope now, which a `recv` hands over":
+  `recv` hands nothing over until the caller polls the send.
+- So any reader that drains while its edge is known to hold an envelope waits for the caller,
+  which breaks requirement 3. The bridge escapes this by closing first; a plain node never
+  closes.
+- Making that reader close changes the case to fit the code. Making `known_contents` answer
+  otherwise changes an adversary case. Under the wave's terms a red case takes the unit out, so
+  neither was done.
+
+What this shows for the next design is a hypothesis, not yet built. `main`'s queue already holds
+requirement 3 on both readers. The defect this story measured needs only the bridge's atomic
+close (`close_to_senders` on `main`'s `QueueReceiver`): a waiting send then lands before the close
+and is received, or is refused `Closed` after it. The reserved-place queue serves requirement 5
+and the pre-existing order and sequence findings, which need concurrent sends on one sender and
+can be stories of their own.
