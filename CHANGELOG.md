@@ -18,6 +18,13 @@
   - `resample_frame` refuses a frame of the wrong format, a data length mismatch or a gap in the
     sample clock with a `ResampleError`.
 
+### Fixed
+
+- The acknowledging audio sink of `inference-audio-device` records a talk-over's interruption
+  when the generation's supersede reaches it before the turn's opening. Before, it waited for a
+  supersede that had already come, so it never recorded the interruption or its
+  interruption-to-playback-stop measure. The speaker stopped either way.
+
 ## [0.15.0] — 2026-11-05
 
 ### Added
