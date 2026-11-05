@@ -12,8 +12,14 @@ relations:
 - serves: vision:inference
 scope:
 - confidence: cited
+  path: crates/inference-core/src/endpoint.rs
+- confidence: cited
+  path: crates/inference-runtime/src/queue.rs
+- confidence: cited
   path: crates/inference-runtime/src/subgraph.rs
-revision: 6
+- confidence: cited
+  path: crates/inference-runtime/src/usage_sink.rs
+revision: 9
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 3}
