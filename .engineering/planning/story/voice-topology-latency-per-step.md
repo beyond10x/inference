@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:voice-topology-latency-per-step
 kind: story
-status: draft
+status: active
 title: Cascade and native speech models in one latency report, per step
 summary: Time to first audio and turn latency for both topologies, with per-step latency for the cascade.
 tags:
@@ -10,7 +10,10 @@ tags:
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-05T13:07:48Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-05T13:07:48Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 

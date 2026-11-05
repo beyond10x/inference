@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:long-talk-over-does-not-resume-the-cut-answer
 kind: story
-status: draft
+status: active
 title: A long talk-over never resumes the cut answer
 summary: 'Barge-in scenarios: short interruption, long talk-over and backchannel, each held by a case.'
 tags:
@@ -10,7 +10,10 @@ tags:
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-05T13:07:48Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-05T13:07:48Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 
