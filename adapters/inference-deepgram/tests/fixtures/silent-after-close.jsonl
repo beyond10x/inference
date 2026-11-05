@@ -1,0 +1,1 @@
+{"on":"audio:1","send":{"type":"Results","channel_index":[0,1],"duration":0.5,"start":0.0,"is_final":false,"speech_final":false,"channel":{"alternatives":[{"transcript":"silence","confidence":0.9,"words":[]}]},"metadata":{"request_id":"fixture-request","model_uuid":"fixture-model"}}}
