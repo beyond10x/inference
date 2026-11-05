@@ -1,0 +1,11 @@
+{
+  "model": "eleven_flash_v2_5",
+  "binding": "inference_elevenlabs::ElevenLabsSynthesiser",
+  "features": [],
+  "claims": [
+    "output_streaming",
+    "incremental_input"
+  ],
+  "held_by": "claims_record::the_tts_record_holds_the_claims_of_the_binding",
+  "adapter_revision": "0.16.0"
+}

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T14:50:29Z",
+  "actor": "human:timo",
+  "artifact": "story:long-talk-over-does-not-resume-the-cut-answer",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "realtime-voice and local-voice-cascade --tests all green on 28103b7 plus the mutant change; cascade talk_over 10 of 10 sequential runs; inference-audio-device --lib --tests --all-features green; read-to-the-end case red against both resume mutants, green unmutated",
+    "reference": "git:33bc0ea"
+  }
+}

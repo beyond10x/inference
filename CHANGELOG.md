@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.16.0] — 2026-11-05
+
+### Added
+
+- G.711 in `inference-audio`:
+  - `encode_mulaw`, `decode_mulaw`, `encode_alaw` and `decode_alaw` convert between a 16-bit
+    sample and its one-byte code word, by the standard's segment tables;
+  - `AudioFrame::to_encoding` converts a frame between `pcm_s16le`, `pcm_mulaw` and `pcm_alaw`.
+    A data length that does not match the sample count, or a `pcm_f32le` frame, is refused with a
+    `ConversionError`.
+- `Resampler` in `inference-audio`:
+  - converts 16-bit mono PCM between 8, 16, 24 and 48 kHz (`RESAMPLER_RATES`);
+  - filters through a polyphase windowed-sinc low-pass, so content above the lower rate's Nyquist
+    frequency is attenuated, not folded back;
+  - keeps its state across frames, and its output lags its input by `Resampler::delay`;
+  - `resample_frame` refuses a frame of the wrong format, a data length mismatch or a gap in the
+    sample clock with a `ResampleError`.
+- `inference-elevenlabs`, the first hosted TTS adapter: ElevenLabs streaming text-to-speech over
+  its WebSocket text input, as an `inference-tts` `Synthesiser` at locality
+  `external_provider`.
+  - It claims `output_streaming` and `incremental_input`.
+  - Output formats: `ulaw_8000` and `alaw_8000` as G.711 at 8 kHz, and `pcm_16000`, `pcm_22050`,
+    `pcm_24000` and `pcm_44100` as 16-bit mono PCM. MP3 and Opus are refused.
+  - Each segment is spoken on its own connection. A cancel closes that connection, and no frame
+    of the segment follows.
+  - The key comes from an injected credential source, `ELEVENLABS_API_KEY` or the keychain, and
+    is sent only in the `xi-api-key` header. A `ws://` base URL is accepted only for a loopback
+    host.
+  - The live check is
+    `cargo run -p inference-elevenlabs --features live --example live`. It needs
+    `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`.
+
+### Fixed
+
+- The acknowledging audio sink of `inference-audio-device` records a talk-over's interruption
+  when the generation's supersede reaches it before the turn's opening. Before, it waited for a
+  supersede that had already come, so it never recorded the interruption or its
+  interruption-to-playback-stop measure. The speaker stopped either way.
+
 ## [0.15.0] — 2026-11-05
 
 ### Added
