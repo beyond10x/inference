@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T01:18:24Z",
+  "actor": "human:timo",
+  "artifact": "story:drain-treats-a-pending-receive-as-an-empty-edge",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --test adversary1_drain_window_edges --test adversary2_drain_window_receives --test drain_known_contents",
+    "reference": "base 0c885dc: the pending-then-ready case red (texts [], left_on_the_edge 2); 8416c38: 3 red; a1b8ea3: 3, 6 and 4 passed"
+  }
+}

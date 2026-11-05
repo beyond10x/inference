@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T12:03:27Z",
+  "actor": "human:timo",
+  "artifact": "story:refused-send-before-cancel-keeps-partial-usage",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference-testkit (stt,llm,tts,run): lib 55, usage_on_cancel 5, adversary1_llm_cut_node 1, adversary1_llm_node_turns 2, adversary4_llm_admission 2, adversary4_llm_supersede 2, adversary5_llm_stale 2, model_node_refused_send_on_cancel 2, adversary1_refused_send_on_cancel 6; inference-runtime: adversary1_subgraph_usage_rollup 12, adversary1_text_pipeline 2, adversary1_unconnected_usage_port 8, text_pipeline 4",
+    "reference": "impl/refused-send-before-cancel-keeps-partial-usage at 187bc58"
+  }
+}

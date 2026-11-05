@@ -18,7 +18,9 @@ use std::future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Poll, Waker};
 
-use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
+use inference_core::endpoint::{
+    EndpointFuture, InputEndpoint, KnownContents, OutputEndpoint, SendError,
+};
 use inference_core::envelope::EventEnvelope;
 use inference_core::id::NodeId;
 use inference_core::model::Modality;
@@ -191,6 +193,17 @@ impl<P: Send> InputEndpoint<P> for SinkReceiver<P> {
             }
         }))
     }
+
+    /// Empty while the sink holds nothing, its sending end gone or not, and not empty otherwise;
+    /// a `recv` future takes an envelope only when it completes, so dropping one before loses
+    /// nothing.
+    fn known_contents(&self) -> KnownContents {
+        if lock(&self.state).queue.is_empty() {
+            KnownContents::Empty
+        } else {
+            KnownContents::NotEmpty
+        }
+    }
 }
 
 impl<P> Drop for SinkReceiver<P> {
@@ -208,7 +221,7 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
 
-    use inference_core::endpoint::OutputEndpoint;
+    use inference_core::endpoint::{InputEndpoint, KnownContents, OutputEndpoint};
     use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
     use inference_core::id::{NodeId, RunId, StreamId};
 
@@ -265,5 +278,51 @@ mod tests {
             lock(&state).queue.is_empty(),
             "nothing sent after the reader is gone is kept"
         );
+    }
+
+    /// Polls one receive of `receiver` once and drops it.
+    fn polled_once(receiver: &mut dyn InputEndpoint<ControlKind>) -> Poll<bool> {
+        receiver
+            .recv()
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .map(|received| received.is_some())
+    }
+
+    #[test]
+    fn the_reader_knows_whether_the_sink_holds_anything_open_or_closed() {
+        let (sender, mut receiver) = sink();
+        assert_eq!(
+            receiver.known_contents(),
+            KnownContents::Empty,
+            "open, empty"
+        );
+        assert_eq!(polled_once(&mut receiver), Poll::Pending);
+        assert!(sent(&sender, 1));
+        assert!(sent(&sender, 2));
+        assert_eq!(
+            receiver.known_contents(),
+            KnownContents::NotEmpty,
+            "open, holding, after a dropped pending receive"
+        );
+        drop(sender);
+        assert_eq!(
+            receiver.known_contents(),
+            KnownContents::NotEmpty,
+            "closed, holding"
+        );
+        assert_eq!(polled_once(&mut receiver), Poll::Ready(true));
+        assert_eq!(
+            receiver.known_contents(),
+            KnownContents::NotEmpty,
+            "closed, one left"
+        );
+        assert_eq!(polled_once(&mut receiver), Poll::Ready(true));
+        assert_eq!(
+            receiver.known_contents(),
+            KnownContents::Empty,
+            "closed, empty"
+        );
+        assert_eq!(polled_once(&mut receiver), Poll::Ready(false));
     }
 }

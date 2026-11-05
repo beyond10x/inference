@@ -44,7 +44,9 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context, Poll, Waker};
 
-use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
+use inference_core::endpoint::{
+    EndpointFuture, InputEndpoint, KnownContents, OutputEndpoint, SendError,
+};
 use inference_core::envelope::EventEnvelope;
 use inference_core::id::{GenerationId, NodeId};
 use inference_pipeline::{Edge, EdgeId, Exposure, ExposureId, OverloadPolicy};
@@ -640,5 +642,15 @@ impl<P> Drop for QueueReceiver<P> {
 impl<P: Send> InputEndpoint<P> for QueueReceiver<P> {
     fn recv(&mut self) -> EndpointFuture<'_, Option<EventEnvelope<P>>> {
         Box::pin(future::poll_fn(move |cx| self.shared.poll_recv(cx)))
+    }
+
+    /// Empty while nothing is queued, closed or not, and not empty otherwise; a `recv` future
+    /// takes an envelope only when it completes, so dropping one before loses nothing.
+    fn known_contents(&self) -> KnownContents {
+        if self.is_empty() {
+            KnownContents::Empty
+        } else {
+            KnownContents::NotEmpty
+        }
     }
 }
