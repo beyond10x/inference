@@ -22,6 +22,8 @@ the live tests read the same ones and are ignored without them.
 | `AWS_REGION` | `inference-aws` | the Bedrock region for Nova Sonic; credentials come from the AWS default chain | none |
 | `INFERENCE_NOVA_SONIC_MODEL` | `inference-aws` | another Nova Sonic model | `amazon.nova-2-sonic-v1:0` |
 | `INFERENCE_COMPARE_BARGE_IN_WAV` | `realtime-voice`, example `compare` | a 16-bit PCM WAV file of speech sent over each answer as a barge-in | no barge-in |
+| `ELEVENLABS_API_KEY` | `inference-elevenlabs` (`EnvironmentSource::elevenlabs`); `realtime-voice`, example `compare` | the ElevenLabs key, read at every connection | none: the cascade arm of `compare` is skipped |
+| `ELEVENLABS_VOICE_ID` | `realtime-voice`, example `compare`; `inference-elevenlabs` live example | the ElevenLabs voice the cascade arm speaks with; with `ELEVENLABS_API_KEY` it configures the hosted TTS | the cascade arm is skipped |
 
 The OpenAI key is sent once in the handshake and never logged by the adapter. The WebSocket library
 below it logs the handshake at trace level: see
