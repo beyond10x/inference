@@ -10,7 +10,7 @@ tags:
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-05T13:07:47Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-05T13:07:47Z", actor: "human:operator", revision: 3}
@@ -38,3 +38,16 @@ bridged to a phone leg inside the library.
   stated figure, where the linear resampler folds it back.
 - A 24 kHz to 8 kHz μ-law chain on a speech fixture stays within a stated error of a reference
   computed in the test.
+
+## Specification
+
+No ESS declaration is added. The `ess/domains/audio.yaml` domain declares the values audio carries:
+`AudioEncoding` with `pcm_s16le`, `pcm_mulaw` and `pcm_alaw`, `AudioFormat`, `SampleClockPosition`
+and `AudioFrame`. The codec and `Resampler` are library functions over those declared values.
+
+- They have no identity, no lifecycle, no command, event or view, and no wire form.
+- `ConversionError` and `ResampleError` are the errors of a library call. They are not refusals of
+  a declared command, and the specification's `errors` hold only refusals of declared commands.
+- The design's resampling transform (design 464, 496) is a graph node a planner may add. This
+  story adds no node kind. A later story that makes resampling a planned `transform` node declares
+  that node in `ess/domains/graph.yaml` first.
