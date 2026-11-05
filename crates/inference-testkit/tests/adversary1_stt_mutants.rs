@@ -158,10 +158,10 @@ impl MutantRecognition {
             self.span(text);
         }
         let ended = self.output.input_ended();
-        if self.defect != Defect::TakesLate || ended {
-            if let Ok(frames) = self.output.take_input() {
-                self.taken += frames.len();
-            }
+        if (self.defect != Defect::TakesLate || ended)
+            && let Ok(frames) = self.output.take_input()
+        {
+            self.taken += frames.len();
         }
         while self.spans < self.taken / 40 {
             let text = format!("word {}", self.spans);
