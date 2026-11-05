@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- G.711 in `inference-audio`:
+  - `encode_mulaw`, `decode_mulaw`, `encode_alaw` and `decode_alaw` convert between a 16-bit
+    sample and its one-byte code word, by the standard's segment tables;
+  - `AudioFrame::to_encoding` converts a frame between `pcm_s16le`, `pcm_mulaw` and `pcm_alaw`.
+    A data length that does not match the sample count, or a `pcm_f32le` frame, is refused with a
+    `ConversionError`.
+- `Resampler` in `inference-audio`:
+  - converts 16-bit mono PCM between 8, 16, 24 and 48 kHz (`RESAMPLER_RATES`);
+  - filters through a polyphase windowed-sinc low-pass, so content above the lower rate's Nyquist
+    frequency is attenuated, not folded back;
+  - keeps its state across frames, and its output lags its input by `Resampler::delay`;
+  - `resample_frame` refuses a frame of the wrong format, a data length mismatch or a gap in the
+    sample clock with a `ResampleError`.
+
 ## [0.15.0] — 2026-11-05
 
 ### Added
