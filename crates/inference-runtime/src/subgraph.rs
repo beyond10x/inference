@@ -79,7 +79,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};
 
-use inference_core::endpoint::{InputEndpoint, KnownContents, OutputEndpoint, SendError};
+use inference_core::endpoint::{
+    ClosedToSenders, InputEndpoint, KnownContents, OutputEndpoint, SendError,
+};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{NodeId, RunId, StreamId};
 use inference_pipeline::{
@@ -839,7 +841,14 @@ fn receiving<P: Send + 'static>(mut input: Box<dyn InputEndpoint<P>>) -> Receivi
 
 /// What the parent edges of an ingress have next.
 enum Merged<P> {
-    Received(Box<dyn InputEndpoint<P>>, Option<Box<EventEnvelope<P>>>),
+    /// A receive of a parent edge completed: the endpoint, what it answered, and whether the
+    /// bridge closed that edge to its senders at the drain, whose `None` ends the edge for the
+    /// drain rather than closing it without `stop`.
+    Received(
+        Box<dyn InputEndpoint<P>>,
+        Option<Box<EventEnvelope<P>>>,
+        bool,
+    ),
     Drain,
     End,
 }
@@ -853,6 +862,30 @@ enum ParentEdge<P> {
     /// receive of it on each poll and drops it while pending, so that it can ask the endpoint
     /// between receives ([`InputEndpoint::known_contents`]).
     Known(Box<dyn InputEndpoint<P>>),
+    /// A known edge the bridge closed to its senders at the drain, which answered
+    /// [`ClosedToSenders::Holding`]: received until its receive answers `None`.
+    ClosedToSenders(Box<dyn InputEndpoint<P>>),
+}
+
+/// Closes every edge held as known to its senders ([`InputEndpoint::close_to_senders`]): no
+/// `recv` future of such an edge is alive between polls. An edge that answers
+/// [`ClosedToSenders::Empty`] ends for the drain and is dropped; one that answers
+/// [`ClosedToSenders::Holding`] is received until `None`; one that answers
+/// [`ClosedToSenders::Unsupported`], and an edge whose receive stays in flight, keeps the path it
+/// was on. Answers whether an edge ended for the drain.
+fn close_known_to_senders<P>(edges: &mut Vec<ParentEdge<P>>) -> bool {
+    let mut ended = false;
+    for edge in std::mem::take(edges) {
+        match edge {
+            ParentEdge::Known(mut input) => match input.close_to_senders() {
+                ClosedToSenders::Empty => ended = true,
+                ClosedToSenders::Holding => edges.push(ParentEdge::ClosedToSenders(input)),
+                ClosedToSenders::Unsupported => edges.push(ParentEdge::Known(input)),
+            },
+            edge @ (ParentEdge::Receiving(_) | ParentEdge::ClosedToSenders(_)) => edges.push(edge),
+        }
+    }
+    ended
 }
 
 /// `input` as the bridge holds it, by what it answers now.
@@ -865,17 +898,30 @@ fn parent_edge<P: Send + 'static>(input: Box<dyn InputEndpoint<P>>) -> ParentEdg
 
 /// One parent edge polled once.
 enum Polled<P> {
-    /// Its receive completed: the endpoint, and what the receive answered.
-    Ready(Box<dyn InputEndpoint<P>>, Option<EventEnvelope<P>>),
+    /// Its receive completed: the endpoint, what the receive answered, and whether the bridge
+    /// closed the edge to its senders.
+    Ready(Box<dyn InputEndpoint<P>>, Option<EventEnvelope<P>>, bool),
     /// Its receive is pending: the edge, and what its endpoint says the edge holds, unknown for
-    /// an edge whose receive stays in flight.
+    /// an edge whose receive stays in flight, and not empty for an edge closed to its senders
+    /// that still holds what it said.
     Pending(ParentEdge<P>, KnownContents),
+}
+
+impl<P> Polled<P> {
+    /// A completed receive as the bridge merges it.
+    fn merged(
+        input: Box<dyn InputEndpoint<P>>,
+        received: Option<EventEnvelope<P>>,
+        closed: bool,
+    ) -> Merged<P> {
+        Merged::Received(input, received.map(Box::new), closed)
+    }
 }
 
 fn poll_edge<P>(edge: ParentEdge<P>, cx: &mut Context<'_>) -> Polled<P> {
     match edge {
         ParentEdge::Receiving(mut receiving) => match receiving.as_mut().poll(cx) {
-            Poll::Ready((input, received)) => Polled::Ready(input, received),
+            Poll::Ready((input, received)) => Polled::Ready(input, received, false),
             Poll::Pending => {
                 Polled::Pending(ParentEdge::Receiving(receiving), KnownContents::Unknown)
             }
@@ -883,10 +929,19 @@ fn poll_edge<P>(edge: ParentEdge<P>, cx: &mut Context<'_>) -> Polled<P> {
         ParentEdge::Known(mut input) => {
             let polled = input.recv().as_mut().poll(cx);
             match polled {
-                Poll::Ready(received) => Polled::Ready(input, received),
+                Poll::Ready(received) => Polled::Ready(input, received, false),
                 Poll::Pending => {
                     let known = input.known_contents();
                     Polled::Pending(ParentEdge::Known(input), known)
+                }
+            }
+        }
+        ParentEdge::ClosedToSenders(mut input) => {
+            let polled = input.recv().as_mut().poll(cx);
+            match polled {
+                Poll::Ready(received) => Polled::Ready(input, received, true),
+                Poll::Pending => {
+                    Polled::Pending(ParentEdge::ClosedToSenders(input), KnownContents::NotEmpty)
                 }
             }
         }
@@ -902,8 +957,8 @@ fn next_received<P>(edges: &mut Vec<ParentEdge<P>>, cx: &mut Context<'_>) -> Opt
             continue;
         }
         match poll_edge(edge, cx) {
-            Polled::Ready(input, received) => {
-                merged = Some(Merged::Received(input, received.map(Box::new)));
+            Polled::Ready(input, received, closed) => {
+                merged = Some(Polled::merged(input, received, closed));
             }
             Polled::Pending(edge, _) => edges.push(edge),
         }
@@ -939,8 +994,8 @@ fn drain_round<P>(edges: &mut Vec<ParentEdge<P>>, cx: &Context<'_>) -> Round<P> 
         });
         let waker = Waker::from(Arc::clone(&woken));
         match poll_edge(edge, &mut Context::from_waker(&waker)) {
-            Polled::Ready(input, received) => {
-                round = Round::Received(Merged::Received(input, received.map(Box::new)));
+            Polled::Ready(input, received, closed) => {
+                round = Round::Received(Polled::merged(input, received, closed));
             }
             Polled::Pending(edge, known) => {
                 edges.push(edge);
@@ -1004,6 +1059,16 @@ impl Wake for Woken {
 /// of it and the read of the drain would stay on the edge and be dropped with it
 /// (`story:subgraph-nested-drain-residual-loss`).
 ///
+/// At its first read of the drain the bridge closes every parent edge it holds as known, with no
+/// `recv` future of it alive, to that edge's senders ([`InputEndpoint::close_to_senders`]), in
+/// one step that also says what the edge still holds. A send into the edge that has not landed,
+/// such as one the parent's ingress admitted before the drain and that still waits for room, is
+/// then refused as closed with its envelope instead of landing on an edge nobody reads, and the
+/// bridge never waits for its caller to poll it
+/// (`story:run-ingress-admitted-send-outlives-the-drain`). An edge closed holding nothing ends for
+/// the drain, and one closed holding something is received until its receive answers `None`. An
+/// edge whose receive stays in flight, and one whose endpoint does not close, are read as follows.
+///
 /// The senders of the parent's edges are not gone when it drains the node, so the bridge cannot
 /// wait for a receive to answer `None` (`story:drain-treats-a-pending-receive-as-an-empty-edge`).
 /// While the node drains, an edge whose receive answered `Pending` is read by what its endpoint
@@ -1025,9 +1090,11 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
     let bridges = &open.0;
     let mut pending: Vec<ParentEdge<P>> = parents.into_iter().map(parent_edge).collect();
     let mut closed = false;
+    let mut closed_to_senders = false;
+    let mut ended_for_the_drain = false;
     loop {
         if pending.is_empty() {
-            if !closed {
+            if !closed || ended_for_the_drain {
                 let _taken_or_child_gone = send(
                     ingress.as_ref(),
                     crossing.stop(),
@@ -1054,6 +1121,11 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
             if !draining {
                 return next_received(&mut pending, cx).map_or(Poll::Pending, Poll::Ready);
             }
+            if !std::mem::replace(&mut closed_to_senders, true)
+                && close_known_to_senders(&mut pending)
+            {
+                ended_for_the_drain = true;
+            }
             for _ in 0..=DRAIN_REPOLLS {
                 match drain_round(&mut pending, cx) {
                     Round::Received(merged) => return Poll::Ready(merged),
@@ -1066,7 +1138,7 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
         })
         .await;
         match next {
-            Merged::Received(input, Some(envelope)) => {
+            Merged::Received(input, Some(envelope), closed_edge) => {
                 if envelope.kind == ControlKind::Stop.as_str() {
                     continue;
                 }
@@ -1079,11 +1151,13 @@ async fn ingress_bridge<P: From<ControlKind> + Send + 'static>(
                 )
                 .await
                 {
+                    Sent::Taken if closed_edge => pending.push(ParentEdge::ClosedToSenders(input)),
                     Sent::Taken => pending.push(parent_edge(input)),
                     Sent::Refused | Sent::Cancelled => return,
                 }
             }
-            Merged::Received(_, None) => closed = true,
+            Merged::Received(_, None, true) => ended_for_the_drain = true,
+            Merged::Received(_, None, false) => closed = true,
             Merged::Drain => {
                 let _taken_or_child_gone = send(
                     ingress.as_ref(),
