@@ -9,7 +9,7 @@ relations:
 - decides: story:long-talk-over-does-not-resume-the-cut-answer
 - decides: story:elevenlabs-streaming-tts-adapter
 - decides: story:voice-topology-latency-per-step
-revision: 1
+revision: 2
 ---
 ## Decision
 
@@ -73,3 +73,21 @@ Units run one at a time, U1 to U4, then one staged full gate and release 0.16.0.
   product, host, channel, person or ticket name appears. Every committed text is scanned.
 - story:waiting-sends-land-in-the-order-they-started-waiting and
   story:withdrawn-ingress-send-gives-back-its-sequence stay drafts for a later runtime wave.
+
+## Talk-over finding
+
+The coordinator decided on 2026-11-05 how the talk-over unit's finding is handled:
+
+- story:long-talk-over-does-not-resume-the-cut-answer ships as it is. Its four acceptance cases
+  are green.
+- Audio of the cut answer, when a provider keeps streaming it after speech started, plays today
+  during the talk-over. That behaviour is pinned as today's behaviour.
+- story:cut-response-audio-is-told-from-the-next-words is filed. The coordinator accepts it for
+  the next inference wave, beside story:deepgram-voice-agent-adapter and
+  story:elevenlabs-realtime-agent-adapter.
+- Its change is additive: either the binding marks frames by response item or turn, or the
+  `inference-duplex` contract is extended additively. The pinned tests flip in that story.
+- The cascade's 6 s case must not enter the gate while it is still flaky. It failed once in eight
+  runs, waiting for the interruption. Before the gate, its cause is either explained and fixed in
+  the test or harness, or the case is made deterministic. No case is newly ignored without the
+  coordinator's word.
