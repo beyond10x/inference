@@ -33,7 +33,10 @@
 //! the design names them without saying what a full queue does under them.
 //!
 //! Once the receiver is gone every send returns [`SendError::Closed`]; once every sender is gone
-//! the receiver yields what is queued and then `None`. Waiting is a [`Future`](std::future::Future)
+//! the receiver yields what is queued and then `None`. The receiver can also close the queue to
+//! its senders while it stays ([`InputEndpoint::close_to_senders`]): every send is then refused
+//! as closed with its envelope, one waiting for room at its next poll, and the receiver yields
+//! what is queued and then `None` without waiting. Waiting is a [`Future`](std::future::Future)
 //! woken through its [`Waker`], so the queue runs under any executor.
 
 use std::collections::{HashMap, VecDeque};
@@ -45,7 +48,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context, Poll, Waker};
 
 use inference_core::endpoint::{
-    EndpointFuture, InputEndpoint, KnownContents, OutputEndpoint, SendError,
+    ClosedToSenders, EndpointFuture, InputEndpoint, KnownContents, OutputEndpoint, SendError,
 };
 use inference_core::envelope::EventEnvelope;
 use inference_core::id::{GenerationId, NodeId};
@@ -152,7 +155,7 @@ impl<P> Room<P> {
             return Poll::Ready(());
         };
         let mut state = shared.state();
-        if !state.receiver || state.items.len() < shared.capacity.get() {
+        if !state.receiver || state.closed_to_senders || state.items.len() < shared.capacity.get() {
             return Poll::Ready(());
         }
         register(&mut state.waiting_senders, cx.waker());
@@ -209,6 +212,8 @@ struct State<P> {
     newest_epochs: HashMap<NodeId, i64>,
     senders: usize,
     receiver: bool,
+    /// The receiver closed the queue to its senders ([`InputEndpoint::close_to_senders`]).
+    closed_to_senders: bool,
     waiting_senders: Vec<Waker>,
     waiting_receiver: Option<Waker>,
 }
@@ -263,7 +268,7 @@ impl<P> Shared<P> {
             _ => None,
         };
         let mut state = self.state();
-        if !state.receiver {
+        if !state.receiver || state.closed_to_senders {
             return Poll::Ready(Err(SendError::Closed(envelope)));
         }
         let mut raised = false;
@@ -338,7 +343,8 @@ impl<P> Shared<P> {
         outcome
     }
 
-    /// One attempt to take the oldest queued envelope.
+    /// One attempt to take the oldest queued envelope. A queue closed to its senders never waits:
+    /// nothing more can land on it.
     fn poll_recv(&self, cx: &Context<'_>) -> Poll<Option<EventEnvelope<P>>> {
         let mut state = self.state();
         if let Some(queued) = state.items.pop_front() {
@@ -347,7 +353,7 @@ impl<P> Shared<P> {
             wake(senders);
             return Poll::Ready(Some(queued.envelope));
         }
-        if state.senders == 0 {
+        if state.senders == 0 || state.closed_to_senders {
             return Poll::Ready(None);
         }
         state.waiting_receiver = Some(cx.waker().clone());
@@ -377,6 +383,7 @@ impl<P> Shared<P> {
             newest_epochs: HashMap::new(),
             senders: 1,
             receiver: true,
+            closed_to_senders: false,
             waiting_senders: Vec::new(),
             waiting_receiver: None,
         };
@@ -566,6 +573,13 @@ impl<P> QueueSender<P> {
     pub fn discarded(&self) -> u64 {
         self.shared.discarded()
     }
+
+    /// Whether the receiver closed the queue to its senders
+    /// ([`InputEndpoint::close_to_senders`]): a send it refuses as closed then was not delivered
+    /// while the receiver stays, which reads what the queue held.
+    pub(crate) fn is_closed_to_senders(&self) -> bool {
+        self.shared.state().closed_to_senders
+    }
 }
 
 impl<P> Clone for QueueSender<P> {
@@ -652,5 +666,24 @@ impl<P: Send> InputEndpoint<P> for QueueReceiver<P> {
         } else {
             KnownContents::NotEmpty
         }
+    }
+
+    /// In one step under the queue's lock: marks the queue closed to its senders, wakes every
+    /// send waiting for room, so that its next poll is refused as closed with its envelope, and
+    /// answers from what the queue holds. A send that pushed its envelope before the step was
+    /// taken, and what it pushed is still handed over; one that had not is refused, so none
+    /// answers `Ok` for an envelope the receiver never sees.
+    fn close_to_senders(&mut self) -> ClosedToSenders {
+        let mut state = self.shared.state();
+        state.closed_to_senders = true;
+        let answer = if state.items.is_empty() {
+            ClosedToSenders::Empty
+        } else {
+            ClosedToSenders::Holding
+        };
+        let senders = std::mem::take(&mut state.waiting_senders);
+        drop(state);
+        wake(senders);
+        answer
     }
 }
