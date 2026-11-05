@@ -40,6 +40,11 @@ below it logs the handshake at trace level: see
 | `INFERENCE_LLAMA_SERVER_URL` | `--server-url` | the base URL of a `llama-server` API on loopback; a host that is not loopback is refused | none |
 | `INFERENCE_LLAMA_SERVER_MODEL` | `--server-model` | the model the server answers to, its `--alias` | none |
 
+The `cascade` arm of the `realtime-voice` example `compare`, built with feature `local`, reads the
+same five variables as `talk`: `INFERENCE_CASCADE_STT`, `INFERENCE_SHERPA_ONNX_STT_DIR`,
+`INFERENCE_WHISPERCPP_STT_MODEL`, `INFERENCE_LLAMA_SERVER_URL` and `INFERENCE_LLAMA_SERVER_MODEL`.
+It has no options for them. A missing one skips the arm, naming the missing step.
+
 `talk` also takes `--max-output-tokens` (the most tokens of one answer, 64 by default), and `--input`
 and `--output` to pick devices by name.
 
