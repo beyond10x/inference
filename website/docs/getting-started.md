@@ -3,7 +3,7 @@ title: Getting started
 sidebar_position: 2
 description: Run the first example with no model and no network, build and check the workspace, and add inference to your own project.
 lede: One contract and a mock recogniser print two committed spans; the rest of the workspace builds after one pinned native archive is fetched.
-source: examples/stt-only, Taskfile.yml, .cargo/config.toml, Cargo.toml, CHANGELOG.md 0.13.0
+source: examples/stt-only, Taskfile.yml, .cargo/config.toml, Cargo.toml, CHANGELOG.md 0.14.0
 ---
 
 # Getting started
@@ -60,9 +60,9 @@ the adapter that implements it, and switch on the adapter features you use:
 
 ```toml
 [dependencies]
-inference-stt = { git = "https://github.com/beyond10x/inference", tag = "0.13.0" }
-inference-duplex = { git = "https://github.com/beyond10x/inference", tag = "0.13.0" }
-inference-openai = { git = "https://github.com/beyond10x/inference", tag = "0.13.0", features = ["duplex", "keychain"] }
+inference-stt = { git = "https://github.com/beyond10x/inference", tag = "0.14.0" }
+inference-duplex = { git = "https://github.com/beyond10x/inference", tag = "0.14.0" }
+inference-openai = { git = "https://github.com/beyond10x/inference", tag = "0.14.0", features = ["duplex", "keychain"] }
 ```
 
 Every crate, its features and what it holds is listed in [Crates](reference/crates.md); which

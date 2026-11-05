@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-04T12:03:27Z",
+  "actor": "human:operator",
+  "artifact": "story:refused-send-before-cancel-keeps-partial-usage",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-testkit --features stt,llm,tts,run --test model_node_refused_send_on_cancel --test adversary1_refused_send_on_cancel",
+    "reference": "base d7ff439: the refusal-then-cancel case red (failed, generation Active, records []); 38da92e: drain-then-cancel case red; 187bc58: 2 and 6 passed"
+  }
+}

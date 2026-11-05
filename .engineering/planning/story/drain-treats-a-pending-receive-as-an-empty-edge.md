@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:drain-treats-a-pending-receive-as-an-empty-edge
 kind: story
-status: draft
+status: implemented
 title: A subgraph drain keeps an envelope an edge holds behind a pending receive
 summary: The ingress bridge ends for the drain only on edges that are empty, not on a receive that answered Pending once.
 tags:
@@ -10,7 +10,20 @@ tags:
 relations:
 - decomposes: epic:session-facade
 - serves: vision:inference
-revision: 1
+scope:
+- confidence: cited
+  path: crates/inference-core/src/endpoint.rs
+- confidence: cited
+  path: crates/inference-runtime/src/queue.rs
+- confidence: cited
+  path: crates/inference-runtime/src/subgraph.rs
+- confidence: cited
+  path: crates/inference-runtime/src/usage_sink.rs
+revision: 10
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-04T07:29:54Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-05T02:46:33Z", actor: "human:operator", revision: 10, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 ## Context
 
