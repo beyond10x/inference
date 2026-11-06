@@ -53,7 +53,11 @@
 //!   new response.
 //! - **When a message ends.** `agent_response` arrives "once the message is finished, usually
 //!   after its audio started", and the documented order is audio, then `agent_response`. The
-//!   binding takes `agent_response` as the end of its message, audio included.
+//!   binding takes `agent_response` as the end of its message's text, not of its audio: audio of
+//!   the message that follows it stays on its response until the user's next turn, audio with a
+//!   greater `event_id`, or a quiet bound with no audio of it (`agent_duplex`). That audio may
+//!   follow `agent_response` is read from "usually after its audio started"; the end rule is
+//!   inferred, not stated.
 //! - **Close codes and idle timeout.** Only 4300 is named, after a queue timeout. Any close is
 //!   read as the end of the conversation, its code and reason kept. No idle timeout is stated:
 //!   a connection that sends nothing, not even a `ping`, for [`AgentEndpoint::read_timeout`]
