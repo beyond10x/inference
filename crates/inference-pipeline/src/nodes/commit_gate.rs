@@ -25,7 +25,13 @@
 //!   ([`CommitGateHandle::dropped_segments`]). What arrives of a generation after it ended, as of
 //!   a generation superseded by an interruption (632-641), is stale: a delta of it is dropped and
 //!   recorded the same way, and the commit of a dropped segment is dropped too, so that no
-//!   segment of an older generation reaches the TTS node once its end passed the gate.
+//!   segment of an older generation reaches the TTS node once its end passed the gate. A stale
+//!   segment is forgotten once its commit or its `inference.stream.SegmentDiscarded` arrives.
+//!   The gate keeps the last [`KEPT_GENERATIONS`] generations that ended, in the order they
+//!   ended, each with its stale segments, and forgets the oldest whole past that, so what it
+//!   keeps is bounded however long the run: what arrives of a generation after
+//!   [`KEPT_GENERATIONS`] later ones ended is no longer known stale and is gated as live content,
+//!   a delta held until its commit and then passed with it.
 //!
 //! The rules are the same in both places, since a transcript carries no delta and an LLM's output
 //! no hypothesis. What a lane passes keeps the order it arrived in: an envelope behind a held
@@ -83,6 +89,9 @@ pub enum Gated {
     },
     /// `inference.stream.TextSegmentCommitted` of the segment `segment_id`.
     SegmentCommitted { segment_id: SegmentId },
+    /// `inference.stream.SegmentDiscarded` of the segment `segment_id`: it will not be spoken.
+    /// The gate passes it on as it passes [`Gated::Other`] and forgets the segment if it is stale.
+    SegmentDiscarded { segment_id: SegmentId },
     /// The generation `generation_id` ended: `inference.stream.GenerationCompleted`,
     /// `GenerationCancelled` or `GenerationSuperseded`.
     GenerationEnded { generation_id: GenerationId },
@@ -123,9 +132,13 @@ pub struct PassedTurn {
 /// What the gate has held back, refused, dropped and passed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GateRecord {
-    /// The hypotheses and the revisions of spans not yet committed, none of which was passed.
+    /// The hypotheses, and the revisions of spans the gate does not know as Committed, none of
+    /// which was passed: spans not yet committed, and spans committed before the turn completed
+    /// last, which the gate has forgotten.
     pub held_back: usize,
-    /// The revisions of spans already passed as Committed, in arrival order.
+    /// The revisions of spans the gate passed as Committed in the turn still open or in the turn
+    /// completed last, in arrival order; a revision of a span committed earlier is counted in
+    /// [`GateRecord::held_back`] instead. Neither is passed.
     pub refused: Vec<RefusedRevision>,
     /// The segments whose deltas were held and dropped, never committed, in the order dropped.
     pub dropped: Vec<SegmentId>,
@@ -143,6 +156,67 @@ struct Queued<P> {
     waiting: Option<(SegmentId, GenerationId)>,
 }
 
+/// How many generations that ended a [`CommitGate`] keeps, each with its stale segments; past it
+/// the gate forgets the generation that ended first, whole.
+pub const KEPT_GENERATIONS: usize = 64;
+
+/// The generations that ended, at most [`KEPT_GENERATIONS`] of them in the order they ended, each
+/// with its stale segments: those whose deltas were dropped and whose commit or discard has not
+/// arrived. Each stale segment is recorded in [`GateRecord::dropped`] once, when it enters.
+#[derive(Default)]
+struct EndedGenerations(VecDeque<(GenerationId, HashSet<SegmentId>)>);
+
+impl EndedGenerations {
+    fn contains(&self, generation_id: GenerationId) -> bool {
+        self.0.iter().any(|(ended, _)| *ended == generation_id)
+    }
+
+    /// Keeps `generation_id` as ended, forgetting the generation that ended first, with its
+    /// stale segments, past [`KEPT_GENERATIONS`].
+    fn end(&mut self, generation_id: GenerationId) {
+        if !self.contains(generation_id) {
+            self.0.push_back((generation_id, HashSet::new()));
+            while self.0.len() > KEPT_GENERATIONS {
+                self.0.pop_front();
+            }
+        }
+    }
+
+    /// Records `segment_id`, of the ended `generation_id`, as dropped, once while it is stale.
+    fn drop_segment(
+        &mut self,
+        generation_id: GenerationId,
+        segment_id: SegmentId,
+        record: &mut GateRecord,
+    ) {
+        if let Some((_, stale)) = self.0.iter_mut().find(|(ended, _)| *ended == generation_id)
+            && stale.insert(segment_id)
+        {
+            record.dropped.push(segment_id);
+        }
+    }
+
+    fn is_stale(&self, segment_id: SegmentId) -> bool {
+        self.0.iter().any(|(_, stale)| stale.contains(&segment_id))
+    }
+
+    /// Forgets the stale segment `segment_id`, whose commit or discard arrived.
+    fn forget(&mut self, segment_id: SegmentId) {
+        for (_, stale) in &mut self.0 {
+            stale.remove(&segment_id);
+        }
+    }
+
+    /// How many generations and how many stale segments are kept.
+    #[cfg(test)]
+    fn kept(&self) -> (usize, usize) {
+        (
+            self.0.len(),
+            self.0.iter().map(|(_, stale)| stale.len()).sum(),
+        )
+    }
+}
+
 /// The rules of the gate over its lanes, apart from the edges: what one envelope arriving on a
 /// lane lets the lane pass.
 struct Gate<P> {
@@ -152,11 +226,7 @@ struct Gate<P> {
     /// The spans passed as Committed before it and after the one before; older spans are
     /// forgotten, so the spans kept are those of the turn still open and the turn completed last.
     previous: HashSet<SpanId>,
-    /// The generations that ended.
-    ended: HashSet<GenerationId>,
-    /// The segments whose deltas were dropped and whose commit has not arrived; each is recorded
-    /// in [`GateRecord::dropped`] once, when it enters, and leaves when its commit is dropped.
-    stale: HashSet<SegmentId>,
+    ended: EndedGenerations,
 }
 
 impl<P: GatePayload> Gate<P> {
@@ -165,15 +235,7 @@ impl<P: GatePayload> Gate<P> {
             lanes: (0..lanes).map(|_| VecDeque::new()).collect(),
             passed: HashSet::new(),
             previous: HashSet::new(),
-            ended: HashSet::new(),
-            stale: HashSet::new(),
-        }
-    }
-
-    /// Records `segment_id` as dropped, once while it is stale.
-    fn dropped(stale: &mut HashSet<SegmentId>, record: &mut GateRecord, segment_id: SegmentId) {
-        if stale.insert(segment_id) {
-            record.dropped.push(segment_id);
+            ended: EndedGenerations::default(),
         }
     }
 
@@ -192,7 +254,7 @@ impl<P: GatePayload> Gate<P> {
         let queue = &mut self.lanes[lane];
         match ControlKind::of(&envelope.kind) {
             Some(ControlKind::Stop) => {
-                Self::drop_waiting(queue, &mut self.stale, record, |_| true);
+                Self::drop_all_waiting(queue, record);
                 queue.push_back(ready(envelope));
             }
             Some(_) => queue.push_back(ready(envelope)),
@@ -215,8 +277,8 @@ impl<P: GatePayload> Gate<P> {
                 Gated::Delta {
                     segment_id,
                     generation_id,
-                } if self.ended.contains(&generation_id) => {
-                    Self::dropped(&mut self.stale, record, segment_id);
+                } if self.ended.contains(generation_id) => {
+                    self.ended.drop_segment(generation_id, segment_id, record);
                 }
                 Gated::Delta {
                     segment_id,
@@ -225,8 +287,8 @@ impl<P: GatePayload> Gate<P> {
                     envelope,
                     waiting: Some((segment_id, generation_id)),
                 }),
-                Gated::SegmentCommitted { segment_id } if self.stale.contains(&segment_id) => {
-                    self.stale.remove(&segment_id);
+                Gated::SegmentCommitted { segment_id } if self.ended.is_stale(segment_id) => {
+                    self.ended.forget(segment_id);
                 }
                 Gated::SegmentCommitted { segment_id } => {
                     for queued in queue.iter_mut() {
@@ -240,10 +302,19 @@ impl<P: GatePayload> Gate<P> {
                     record.committed.push(segment_id);
                     queue.push_back(ready(envelope));
                 }
+                Gated::SegmentDiscarded { segment_id } => {
+                    self.ended.forget(segment_id);
+                    queue.push_back(ready(envelope));
+                }
                 Gated::GenerationEnded { generation_id } => {
-                    self.ended.insert(generation_id);
-                    Self::drop_waiting(queue, &mut self.stale, record, |generation| {
-                        generation == generation_id
+                    self.ended.end(generation_id);
+                    let ended = &mut self.ended;
+                    queue.retain(|queued| match queued.waiting {
+                        Some((segment_id, generation)) if generation == generation_id => {
+                            ended.drop_segment(generation_id, segment_id, record);
+                            false
+                        }
+                        _ => true,
                     });
                     queue.push_back(ready(envelope));
                 }
@@ -260,24 +331,22 @@ impl<P: GatePayload> Gate<P> {
     /// The lane `lane` ended without a `stop`: drops its held deltas and answers the rest.
     fn close(&mut self, lane: usize, record: &mut GateRecord) -> Vec<EventEnvelope<P>> {
         let queue = &mut self.lanes[lane];
-        Self::drop_waiting(queue, &mut self.stale, record, |_| true);
+        Self::drop_all_waiting(queue, record);
         Self::release(queue)
     }
 
-    /// Drops every delta `queue` holds whose generation `ends`, recording its segment once and
-    /// among the `stale`, whose later commit is dropped too.
-    fn drop_waiting(
-        queue: &mut VecDeque<Queued<P>>,
-        stale: &mut HashSet<SegmentId>,
-        record: &mut GateRecord,
-        ends: impl Fn(GenerationId) -> bool,
-    ) {
+    /// Drops every delta `queue` holds as its lane ends, recording each segment once. Nothing
+    /// more arrives on the lane, so none of them is kept stale.
+    fn drop_all_waiting(queue: &mut VecDeque<Queued<P>>, record: &mut GateRecord) {
+        let mut dropped = HashSet::new();
         queue.retain(|queued| match queued.waiting {
-            Some((segment_id, generation_id)) if ends(generation_id) => {
-                Self::dropped(stale, record, segment_id);
+            Some((segment_id, _)) => {
+                if dropped.insert(segment_id) {
+                    record.dropped.push(segment_id);
+                }
                 false
             }
-            _ => true,
+            None => true,
         });
     }
 
@@ -643,8 +712,8 @@ mod tests {
     use inference_text::{SegmentId, SpanId, TurnCompleted, TurnId, TurnOpened};
 
     use super::{
-        CommitGateHandle, Gate, GatePayload, GateRecord, GateState, Gated, RefusedRevision,
-        TurnEvent, Watched,
+        CommitGateHandle, Gate, GatePayload, GateRecord, GateState, Gated, KEPT_GENERATIONS,
+        RefusedRevision, TurnEvent, Watched,
     };
 
     /// The payload of the cases: what the gate reads, or a control event.
@@ -1006,14 +1075,86 @@ mod tests {
             "every stale segment is recorded once"
         );
         assert_eq!(record.committed, [], "and none is passed");
-        assert!(
-            gate.stale.is_empty(),
-            "a stale segment is forgotten once its commit was dropped: {} held",
-            gate.stale.len()
+        assert_eq!(
+            gate.ended.kept().1,
+            0,
+            "a stale segment is forgotten once its commit was dropped"
         );
         assert!(
             gate.passed.len() + gate.previous.len() <= 2 * last_turn.len(),
             "the spans kept are those of the open turn and the turn completed last"
+        );
+    }
+
+    #[test]
+    fn generations_cancelled_while_a_segment_is_held_keep_the_gate_within_its_bound() {
+        let mut gate = Gate::new(1);
+        let mut record = GateRecord::default();
+        let mut text = Stream::new();
+        let generations = 4 * KEPT_GENERATIONS;
+        let mut last = None;
+        for index in 0..generations {
+            let (segment_id, generation_id) = (SegmentId::generate(), GenerationId::generate());
+            let delta = Gated::Delta {
+                segment_id,
+                generation_id,
+            };
+            gate.take(0, text.content(delta), &mut record);
+            let cancelled = Gated::GenerationEnded { generation_id };
+            assert_eq!(
+                payloads(gate.take(0, text.content(cancelled), &mut record)),
+                [Payload::Content(cancelled)],
+                "the held delta is dropped at the cancel"
+            );
+            if index % 2 == 0 {
+                let discarded = Gated::SegmentDiscarded { segment_id };
+                assert_eq!(
+                    payloads(gate.take(0, text.content(discarded), &mut record)),
+                    [Payload::Content(discarded)],
+                    "a discard passes on"
+                );
+            }
+            last = Some((segment_id, generation_id));
+        }
+        let (generations_kept, stale_kept) = gate.ended.kept();
+        assert!(
+            generations_kept <= KEPT_GENERATIONS,
+            "{generations_kept} ended generations kept"
+        );
+        assert!(
+            stale_kept <= KEPT_GENERATIONS,
+            "{stale_kept} stale segments kept"
+        );
+        assert_eq!(
+            stale_kept,
+            KEPT_GENERATIONS / 2,
+            "a discarded segment is forgotten; one never discarded is kept with its generation"
+        );
+        assert_eq!(record.dropped.len(), generations, "each dropped once");
+
+        let (segment_id, generation_id) = last.expect("a generation ran");
+        let late = Gated::Delta {
+            segment_id: SegmentId::generate(),
+            generation_id,
+        };
+        assert_eq!(
+            gate.take(0, text.content(late), &mut record),
+            [],
+            "late content of a generation still kept is stale"
+        );
+        assert_eq!(
+            gate.take(
+                0,
+                text.content(Gated::SegmentCommitted { segment_id }),
+                &mut record
+            ),
+            [],
+            "and so is a late commit of its stale segment"
+        );
+        assert_eq!(
+            record.committed,
+            [],
+            "nothing of a cancelled generation passed"
         );
     }
 
