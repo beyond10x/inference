@@ -121,7 +121,7 @@ use inference_duplex::{
 use inference_tools::Json;
 use tokio::runtime::Runtime;
 
-use crate::config::{Endpoint, FunctionTool};
+use crate::config::{Deadlines, Endpoint, FunctionTool};
 use crate::credential::CredentialSource;
 use crate::duplex::{failure, kept_push, milliseconds, without_waiting};
 use crate::error::RealtimeError;
@@ -283,6 +283,7 @@ fn alaw(byte: u8) -> u16 {
 pub struct OpenAiLive {
     adapter: Adapter,
     endpoint: Endpoint,
+    deadlines: Deadlines,
     source: Box<dyn CredentialSource>,
     credential: String,
     backend: ResponsesBackend,
@@ -323,6 +324,7 @@ impl OpenAiLive {
         Self {
             adapter,
             endpoint,
+            deadlines: Deadlines::default(),
             source,
             credential: credential.into(),
             backend: ResponsesBackend::new(DEFAULT_BACKEND_MODEL),
@@ -334,6 +336,33 @@ impl OpenAiLive {
     /// The hosted `gpt-live-1` endpoint.
     pub fn hosted(source: Box<dyn CredentialSource>, credential: impl Into<String>) -> Self {
         Self::new(Endpoint::live(LIVE_MODEL), source, credential)
+    }
+
+    /// This model with another deadline for the opening handshake of each session it opens
+    /// ([`Deadlines::connect_timeout`]); past it, `open` fails as a closed transport.
+    #[must_use]
+    pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.deadlines = self.deadlines.with_connect_timeout(connect_timeout);
+        self
+    }
+
+    /// This model with another deadline for each write of the sessions it opens
+    /// ([`Deadlines::write_timeout`]); past it, the write fails the session as a closed
+    /// transport.
+    #[must_use]
+    pub fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+        self.deadlines = self.deadlines.with_write_timeout(write_timeout);
+        self
+    }
+
+    /// The deadline of the opening handshake, [`crate::DEFAULT_CONNECT_TIMEOUT`] unless set.
+    pub fn connect_timeout(&self) -> Duration {
+        self.deadlines.connect_timeout()
+    }
+
+    /// The deadline of each write, [`crate::DEFAULT_WRITE_TIMEOUT`] unless set.
+    pub fn write_timeout(&self) -> Duration {
+        self.deadlines.write_timeout()
     }
 
     /// This model under an adapter record declared elsewhere, such as a model store's.
@@ -412,8 +441,9 @@ impl NativeSpeechModel for OpenAiLive {
                 })
             })?;
         let client = runtime
-            .block_on(LiveClient::connect(
+            .block_on(LiveClient::connect_with(
                 &self.endpoint,
+                self.deadlines,
                 self.source.as_ref(),
                 &self.credential,
                 &client_config,

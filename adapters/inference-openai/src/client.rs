@@ -18,7 +18,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use zeroize::Zeroizing;
 
 use crate::audio::encode_pcm16_24k;
-use crate::config::{Endpoint, FunctionTool, SessionConfig, ToolChoice, WireFormat};
+use crate::config::{Deadlines, Endpoint, FunctionTool, SessionConfig, ToolChoice, WireFormat};
 use crate::credential::{CredentialError, CredentialSource};
 use crate::error::{ConnectError, RealtimeError};
 use crate::event::ServerEvent;
@@ -39,7 +39,7 @@ pub(crate) type SocketStream = SplitStream<Socket>;
 /// handshake.
 ///
 /// Every method takes the whole client, so a write the peer does not drain holds up every read
-/// until it fails at the endpoint's write deadline ([`Endpoint::write_timeout`]).
+/// until it fails at the write deadline ([`Deadlines::write_timeout`]).
 /// [`RealtimeClient::into_split`] gives a [`RealtimeSender`] and a [`RealtimeReceiver`] that two
 /// tasks own instead.
 pub struct RealtimeClient {
@@ -55,7 +55,7 @@ pub struct RealtimeClient {
 pub struct RealtimeSender {
     sink: SocketSink,
     input_format: WireFormat,
-    /// The deadline of each write ([`Endpoint::write_timeout`]).
+    /// The deadline of each write ([`Deadlines::write_timeout`]).
     write_timeout: std::time::Duration,
 }
 
@@ -211,8 +211,9 @@ impl RealtimeClient {
     /// The credential is resolved before any connection is made, is sent only in the opening
     /// handshake and is never part of an error. The URL is checked before the credential is
     /// resolved: `wss://`, or `ws://` only to a loopback host, since `ws://` sends the key in the
-    /// clear. The opening handshake takes at most [`Endpoint::connect_timeout`], and each write
-    /// at most [`Endpoint::write_timeout`].
+    /// clear. The opening handshake takes at most [`DEFAULT_CONNECT_TIMEOUT`](crate::DEFAULT_CONNECT_TIMEOUT),
+    /// and each write at most [`DEFAULT_WRITE_TIMEOUT`](crate::DEFAULT_WRITE_TIMEOUT);
+    /// [`RealtimeClient::connect_with`] takes other [`Deadlines`].
     ///
     /// # Errors
     /// [`RealtimeError::Credential`] when the source refuses or the credential is not a valid
@@ -227,15 +228,31 @@ impl RealtimeClient {
         credential: &str,
         session: &SessionConfig,
     ) -> Result<Self, RealtimeError> {
+        Self::connect_with(endpoint, Deadlines::default(), source, credential, session).await
+    }
+
+    /// [`RealtimeClient::connect`] under `deadlines`: the opening handshake takes at most
+    /// [`Deadlines::connect_timeout`], and each write of the session at most
+    /// [`Deadlines::write_timeout`].
+    ///
+    /// # Errors
+    /// The errors of [`RealtimeClient::connect`].
+    pub async fn connect_with(
+        endpoint: &Endpoint,
+        deadlines: Deadlines,
+        source: &dyn CredentialSource,
+        credential: &str,
+        session: &SessionConfig,
+    ) -> Result<Self, RealtimeError> {
         let url = request_url(endpoint)?;
-        let (sink, stream) = open_socket(&url, source, credential, endpoint.connect_timeout)
+        let (sink, stream) = open_socket(&url, source, credential, deadlines.connect_timeout())
             .await?
             .split();
 
         let mut sender = RealtimeSender {
             sink,
             input_format: session.input_format,
-            write_timeout: endpoint.write_timeout,
+            write_timeout: deadlines.write_timeout(),
         };
         let mut receiver = RealtimeReceiver {
             stream,
@@ -495,6 +512,11 @@ impl RealtimeClient {
 }
 
 impl RealtimeSender {
+    /// The deadline of each write on this half ([`Deadlines::write_timeout`]).
+    pub fn write_timeout(&self) -> std::time::Duration {
+        self.write_timeout
+    }
+
     /// [`RealtimeClient::update_session`] on this half: sends `session.update`, and later
     /// appends follow its input format.
     ///
