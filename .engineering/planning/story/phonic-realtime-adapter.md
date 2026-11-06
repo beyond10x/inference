@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:phonic-realtime-adapter
 kind: story
-status: active
+status: implemented
 title: Phonic 1 as a duplex binding
 summary: The top-ranked speech-to-speech model on two independent boards, beside the native speech models in compare.
 tags:
@@ -10,10 +10,11 @@ tags:
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-06T17:26:37Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-06T17:26:37Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-06T18:22:07Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 ## Context
 
