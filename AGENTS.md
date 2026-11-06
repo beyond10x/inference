@@ -79,6 +79,9 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   adapter's capability record at adoption; any other licence needs the owner's word for that
   checkpoint. Tests download no weights and start no model server: a test that needs one reads
   its path or URL from an environment variable and is ignored without it.
+- A live test that talks to a hosted provider is ignored, behind feature `live`, and its ignore
+  reason contains the word `billed`; the release check admits an added `#[ignore]` only with that
+  word.
 - `inference-llm` is a thin wrapper over the `llm` repository's model contract
   (`llm-core`, `llm_core::Model`) at a release tag, 0.20.0 now, and the workspace's
   `rust-version` is what that tag requires, 1.98 (owner decision, 2026-10-20, reversing the

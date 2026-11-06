@@ -120,6 +120,7 @@ pub struct MockSpeechModel {
     script: Vec<ScriptedTurn>,
     faults: Faults,
     restarts: bool,
+    late_usage: bool,
     speech: SpeechReports,
 }
 
@@ -254,6 +255,16 @@ impl MockSpeechModel {
         self
     }
 
+    /// The same model reporting each response's usage once more just after the response
+    /// completes, as a provider whose usage frame trails its completion may: the ledger refuses
+    /// that report, its usage being recorded, and the session counts the refusal as a dropped
+    /// event and carries on, as a binding does.
+    #[must_use]
+    pub const fn with_late_usage(mut self) -> Self {
+        self.late_usage = true;
+        self
+    }
+
     fn adapter_claiming(claims: Vec<Capability>) -> Adapter {
         let (adapter, _) = Adapter::declare(DeclareAdapter {
             model_id: ModelId::generate(),
@@ -280,6 +291,7 @@ impl MockSpeechModel {
             script,
             faults: Faults::default(),
             restarts: false,
+            late_usage: false,
             speech: SpeechReports::Heard,
         }
     }
@@ -310,6 +322,7 @@ impl NativeSpeechModel for MockSpeechModel {
             script: self.script.iter().cloned().collect(),
             faults: self.faults,
             restarts: self.restarts,
+            late_usage: self.late_usage,
             now,
             speaking: false,
             spoken: Vec::new(),
@@ -343,6 +356,7 @@ pub struct MockSpeechSession {
     script: VecDeque<ScriptedTurn>,
     faults: Faults,
     restarts: bool,
+    late_usage: bool,
     now: Instant,
     speaking: bool,
     spoken: Vec<u8>,
@@ -468,6 +482,27 @@ impl MockSpeechSession {
         Ok(())
     }
 
+    /// Reports the usage of the response `response_id`. A report the ledger refuses, such as one
+    /// after the response's usage record was made, is counted as a dropped event, as a binding
+    /// drops it, and the session carries on.
+    fn report_usage(&mut self, response_id: ResponseId) {
+        let usage = ResponseUsage {
+            input: TokenCounts {
+                text_tokens: 20,
+                audio_tokens: 50,
+                cached_tokens: 0,
+            },
+            output: TokenCounts {
+                text_tokens: 8,
+                audio_tokens: 30,
+                cached_tokens: 0,
+            },
+        };
+        if let Err(refusal) = self.ledger.response_usage(response_id, usage, self.now) {
+            self.ledger.dropped(refusal);
+        }
+    }
+
     /// Performs the next step of the response in progress.
     fn step(&mut self) -> Result<(), SessionError> {
         let Some(response_id) = self.ledger.in_progress() else {
@@ -493,24 +528,12 @@ impl MockSpeechSession {
                 self.ledger
                     .tool_call(call_id, response_id, &tool, arguments, now)?;
             }
-            Step::Usage => self.ledger.response_usage(
-                response_id,
-                ResponseUsage {
-                    input: TokenCounts {
-                        text_tokens: 20,
-                        audio_tokens: 50,
-                        cached_tokens: 0,
-                    },
-                    output: TokenCounts {
-                        text_tokens: 8,
-                        audio_tokens: 30,
-                        cached_tokens: 0,
-                    },
-                },
-                now,
-            )?,
+            Step::Usage => self.report_usage(response_id),
             Step::Complete => {
                 self.ledger.response_completed(response_id, now)?;
+                if self.late_usage {
+                    self.report_usage(response_id);
+                }
                 if self.creates_responses() && self.pending.is_some() {
                     self.start_response()?;
                 }
@@ -657,9 +680,9 @@ mod tests {
     };
     use inference_duplex::inference_audio::SampleClockPosition;
     use inference_duplex::{
-        NativeSpeechModel, OpenError, ResponseId, SessionConfig, SessionEvent, SessionFailureKind,
-        SpeechSessionHandle, SpeechSessionState, TuningOption, TurnDetection, TurnSensitivity,
-        TurnTuning, Unsupported,
+        NativeSpeechModel, OpenError, ResponseId, ResponseState, ResponseStateConflict,
+        SessionConfig, SessionError, SessionEvent, SessionFailureKind, SpeechSessionHandle,
+        SpeechSessionState, TuningOption, TurnDetection, TurnSensitivity, TurnTuning, Unsupported,
     };
     use inference_tools::{DeclareTool, SideEffectClass, Tool};
     use serde_json::json;
@@ -790,6 +813,56 @@ mod tests {
             events.last(),
             Some(SessionEvent::ResponseCompleted(done)) if done.response_id == response
         ));
+    }
+
+    /// `story:contract-usage-and-naming-drift`: a usage report after the response's usage
+    /// record is refused by the ledger and counted as a dropped event; the session carries on.
+    #[test]
+    fn a_usage_report_after_the_record_is_counted_as_a_drop_and_the_session_carries_on() {
+        let mut model = MockSpeechModel::native(vec![
+            turn("what time is it", "It is noon"),
+            turn("and the date", "It is Friday"),
+        ])
+        .with_late_usage();
+        let mut session = model
+            .open(config(TurnDetection::Disabled, false))
+            .expect("the model takes the configuration");
+        speak(&mut session, 0, 3);
+        session.commit_input().expect("a manual commit");
+        session.create_response().expect("no response in progress");
+        let first = drain(&mut session);
+        let response = created(&first)[0];
+
+        assert_eq!(session.ledger().dropped_count(), 1, "{first:#?}");
+        assert_eq!(
+            session.ledger().dropped_events(),
+            [SessionError::ResponseNotInProgress(ResponseStateConflict {
+                current: ResponseState::Completed
+            })]
+        );
+        assert_eq!(
+            first
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    SessionEvent::ResponseUsageRecorded(usage) if usage.response_id == response
+                ))
+                .count(),
+            1,
+            "the late report records nothing"
+        );
+
+        speak(&mut session, 1_280, 3);
+        session.commit_input().expect("a manual commit");
+        session.create_response().expect("no response in progress");
+        let second = drain(&mut session);
+        assert_eq!(
+            created(&second).len(),
+            1,
+            "the session carries on: {second:#?}"
+        );
+        assert_eq!(session.ledger().dropped_count(), 2);
+        assert_eq!(session.ledger().session().state(), SpeechSessionState::Open);
     }
 
     #[test]

@@ -13,8 +13,16 @@
 //! merge order is the one total order of the recording, the order the recorder took its entries
 //! in, and is not a promise that the run happened in that order across streams.
 //!
-//! Every entry is kept in memory, for [`Recorder::recording`] and a replay, and written to each
-//! [`RecordSink`] the caller supplies ([`Recorder::with_sink`]), such as a file, in merge order. A
+//! Every entry is written to each [`RecordSink`] the caller supplies ([`Recorder::with_sink`]),
+//! such as a file, in merge order, and the first entries are kept in memory, for
+//! [`Recorder::recording`] and a replay: at most the recorder's bound, [`DEFAULT_RECORDER_BOUND`]
+//! (65 536 entries) unless the caller sets another ([`Recorder::with_bound`]). An entry taken once
+//! the bound is reached is written to the sinks and offered to telemetry, but neither kept nor
+//! counted as a decision, and [`Recorder::dropped`] counts it; so a long run's memory stays within
+//! the bound, and what is kept is a prefix of the run, which a replay can feed: the recording names
+//! where it was cut ([`Recording::cut_at`]), and a replay compares decisions up to the cut. A run
+//! that must be recorded whole past the bound is recorded through a sink. The bound counts entries,
+//! not bytes: an entry holds its envelope's payload, audio frames included. A
 //! [`TelemetrySink`] attached to the recorder ([`Recorder::with_telemetry`]) is offered one
 //! record per envelope; it is best-effort and never waits.
 //!
@@ -53,6 +61,10 @@ use inference_pipeline::{
 };
 
 use crate::telemetry::{Telemetry, TelemetrySink};
+
+/// How many entries a [`Recorder`] keeps in memory unless told otherwise
+/// ([`Recorder::with_bound`]); see the module documentation.
+pub const DEFAULT_RECORDER_BOUND: usize = 65_536;
 
 /// What the recorder took.
 #[derive(Debug, Clone, PartialEq)]
@@ -245,11 +257,43 @@ fn decision<P: fmt::Debug>(
 }
 
 /// A recording of one run: what the recorder took, in merge order, under the policy version the
-/// run was driven under.
+/// run was driven under, and, when the recorder's bound cut it, where ([`Recording::cut_at`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recording<P> {
     pub policy_version: String,
     pub entries: Vec<Recorded<P>>,
+    cut_at: Option<u64>,
+}
+
+impl<P> Recording<P> {
+    /// A whole recording of `entries`, under `policy_version`: one read back from a sink, for
+    /// instance.
+    #[must_use]
+    pub const fn new(policy_version: String, entries: Vec<Recorded<P>>) -> Self {
+        Self {
+            policy_version,
+            entries,
+            cut_at: None,
+        }
+    }
+
+    /// The recording, cut by a recorder's bound at the merge order `cut_at`: the first entry the
+    /// recorder took and did not keep. What the run did from there on is not in it.
+    #[must_use]
+    pub fn cut(self, cut_at: u64) -> Self {
+        Self {
+            cut_at: Some(cut_at),
+            ..self
+        }
+    }
+
+    /// The merge order at which the recorder's bound cut the recording, the first entry it did not
+    /// keep; none for a whole recording. A replay compares decisions only up to the cut
+    /// ([`crate::replay::Replay::report`]).
+    #[must_use]
+    pub const fn cut_at(&self) -> Option<u64> {
+        self.cut_at
+    }
 }
 
 impl<P: fmt::Debug> Recording<P> {
@@ -327,7 +371,13 @@ struct State<P> {
     next: u64,
     entries: Vec<Recorded<P>>,
     decisions: Vec<ControlDecision>,
+    /// The event identities of the kept entries, at most `bound` of them.
     seen: HashSet<EventId>,
+    /// How many entries are kept at most, and how many were taken past it.
+    bound: usize,
+    dropped: u64,
+    /// The merge order of the first entry not kept, once one was not.
+    cut_at: Option<u64>,
     sinks: Vec<Box<dyn RecordSink<P>>>,
     telemetry: Vec<Arc<dyn TelemetrySink>>,
 }
@@ -364,6 +414,9 @@ impl<P: Clone + Send + fmt::Debug + 'static> Recorder<P> {
                     entries: Vec::new(),
                     decisions: Vec::new(),
                     seen: HashSet::new(),
+                    bound: DEFAULT_RECORDER_BOUND,
+                    dropped: 0,
+                    cut_at: None,
                     sinks: Vec::new(),
                     telemetry: Vec::new(),
                 }),
@@ -392,6 +445,29 @@ impl<P: Clone + Send + fmt::Debug + 'static> Recorder<P> {
     pub fn with_telemetry(self, sink: Arc<dyn TelemetrySink>) -> Self {
         self.state().telemetry.push(sink);
         self
+    }
+
+    /// The recorder, keeping at most `bound` entries in memory from now on, the first it takes;
+    /// see the module documentation.
+    #[must_use]
+    pub fn with_bound(self, bound: usize) -> Self {
+        self.state().bound = bound;
+        self
+    }
+
+    /// How many entries the recorder keeps in memory at most: [`DEFAULT_RECORDER_BOUND`] unless
+    /// [`with_bound`](Self::with_bound) set another.
+    #[must_use]
+    pub fn bound(&self) -> usize {
+        self.state().bound
+    }
+
+    /// How many entries the recorder took once its bound was reached: written to its sinks, not
+    /// kept in memory, and missing from [`recording`](Self::recording) and
+    /// [`decisions`](Self::decisions).
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.state().dropped
     }
 
     /// The policy version the run is driven under.
@@ -437,12 +513,14 @@ impl<P: Clone + Send + fmt::Debug + 'static> Recorder<P> {
         });
     }
 
-    /// Everything recorded so far.
+    /// Everything recorded so far and kept, cut where the bound cut it ([`Recording::cut_at`]).
     #[must_use]
     pub fn recording(&self) -> Recording<P> {
+        let state = self.state();
         Recording {
             policy_version: self.shared.policy_version.clone(),
-            entries: self.state().entries.clone(),
+            entries: state.entries.clone(),
+            cut_at: state.cut_at,
         }
     }
 
@@ -478,8 +556,9 @@ impl<P: Clone + Send + fmt::Debug + 'static> Recorder<P> {
         }
     }
 
-    /// Takes `entry` at the next merge order: keeps it, counts its decision, writes it to every
-    /// sink, offers its telemetry and wakes every waiter.
+    /// Takes `entry` at the next merge order: keeps it and counts its decision while fewer than
+    /// the bound are kept, else counts it dropped; writes it to every sink, offers its telemetry
+    /// and wakes every waiter.
     fn take(&self, entry: Entry<P>) {
         let mut guard = self.state();
         let state = &mut *guard;
@@ -488,7 +567,8 @@ impl<P: Clone + Send + fmt::Debug + 'static> Recorder<P> {
             entry,
         };
         state.next += 1;
-        if let Some(decision) = decision(&recorded, &mut state.seen) {
+        let kept = state.entries.len() < state.bound;
+        if kept && let Some(decision) = decision(&recorded, &mut state.seen) {
             state.decisions.push(decision);
         }
         for sink in &state.sinks {
@@ -512,7 +592,12 @@ impl<P: Clone + Send + fmt::Debug + 'static> Recorder<P> {
                 sink.offer(telemetry.clone());
             }
         }
-        state.entries.push(recorded);
+        if kept {
+            state.entries.push(recorded);
+        } else {
+            state.dropped = state.dropped.saturating_add(1);
+            state.cut_at.get_or_insert(recorded.merge_order);
+        }
         drop(guard);
         self.shared.changed.notify_all();
     }
@@ -733,14 +818,14 @@ mod tests {
             emitted(tts, first.clone()),
             emitted(llm, envelope("stop", 2)),
         ];
-        let recording = Recording {
-            policy_version: String::new(),
-            entries: entries
+        let recording = Recording::new(
+            String::new(),
+            entries
                 .into_iter()
                 .zip(0..)
                 .map(|(entry, merge_order)| Recorded { merge_order, entry })
                 .collect(),
-        };
+        );
         assert_eq!(
             recording
                 .usage()
@@ -832,9 +917,9 @@ mod tests {
             causation_id: None,
             payload,
         };
-        Recording {
-            policy_version: String::new(),
-            entries: vec![Recorded {
+        Recording::new(
+            String::new(),
+            vec![Recorded {
                 merge_order: 0,
                 entry: Entry::Emitted {
                     node_id,
@@ -842,7 +927,7 @@ mod tests {
                     envelope,
                 },
             }],
-        }
+        )
     }
 
     #[test]

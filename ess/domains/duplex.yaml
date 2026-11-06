@@ -942,6 +942,12 @@ commands:
 
   # read from: docs/design/inference.md:367
   # read from: docs/design/inference.md:373
+  # UNMAPPED: once the response's usage record is made (inference.usage.UsageRecorded), a later
+  # report of its usage is refused with ResponseStateConflict and records nothing, so that no
+  # ResponseUsageRecorded gives counts its usage record does not carry; the binding counts the
+  # refusal as a dropped event. The response row carries no field saying its usage is recorded,
+  # since the record is another domain's, so no outcome here raises it; the contract crate does
+  # (SessionLedger::response_usage, SessionLedger::response_usage_reported).
   - name: inference.duplex.RecordResponseUsage
     input:
       - name: response_id

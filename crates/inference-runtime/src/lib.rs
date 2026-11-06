@@ -52,7 +52,7 @@ pub use controller::{
     CreateControllerError, Egress, ExposedEnds, FailNodeError, Ingress, InstanceConflict,
     RunController, RunError,
 };
-pub use drive::{RunRequests, SequenceNotIncreasing};
+pub use drive::{REFUSALS_KEPT, RunRequests, SequenceNotIncreasing};
 pub use inference_core::id::{NodeId, RunId};
 pub use queue::{
     Channel, EdgeQueue, EpochLookup, ExposureWatch, QueueReceiver, QueueSender, QueueWatch,

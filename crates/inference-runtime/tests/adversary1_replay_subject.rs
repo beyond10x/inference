@@ -30,9 +30,9 @@ fn authorized(node_id: NodeId, port_id: PortId, call: Value) -> Recording<Value>
         causation_id: None,
         payload: call,
     };
-    Recording {
-        policy_version: String::new(),
-        entries: vec![Recorded {
+    Recording::new(
+        String::new(),
+        vec![Recorded {
             merge_order: 0,
             entry: Entry::Emitted {
                 node_id,
@@ -40,7 +40,7 @@ fn authorized(node_id: NodeId, port_id: PortId, call: Value) -> Recording<Value>
                 envelope,
             },
         }],
-    }
+    )
 }
 
 #[test]

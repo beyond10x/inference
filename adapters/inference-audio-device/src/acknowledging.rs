@@ -16,13 +16,19 @@
 //! `inference.stream.AcknowledgePlayback` with it. A segment completed without frames takes the
 //! receipt of no frames at once. Receipts go out in the order the segments arrived. The frames of
 //! one synthesis are taken to lie on one sample clock, in order, as the speaker's played position
-//! is read on the clock of the frames pushed.
+//! is read on the clock of the frames pushed: a frame starting below the end of audio the sink
+//! holds and has not yet acknowledged, its clock gone back without a stop, is refused and ends the
+//! exchange with [`PlaybackFault::ClockRegression`], since that receipt, and every later one,
+//! would otherwise wait forever.
 //!
 //! Given a turns port ([`AcknowledgingSink::with_turns`]), it takes the turn events of the turn
 //! policy on a second input edge, ahead of its audio and while a frame waits for room, and acts on
 //! each `inference.stream.TurnOpened`, the barge-in of `docs/design/inference.md` 632-641: every
 //! generation that began before it is stale from then on, and every segment it holds is
-//! forgotten, never acknowledged. A generation began before the opening of a turn when the sink
+//! forgotten, never acknowledged, but one whose every frame the speaker had played by then: the
+//! user heard it, and its receipt goes once its `SynthesisCompleted` arrives, unless a later frame
+//! of it, stale and dropped, or the supersede of its generation arrives first; while it waits for
+//! that completion it holds back no later receipt. A generation began before the opening of a turn when the sink
 //! took a frame of it before that opening, or when its `inference.stream.GenerationStarted`
 //! ([`Playable::Started`]), which reaches the sink on the audio edge ahead of the generation's
 //! frames, names an epoch below the turn's ordinal: the sink numbers the turns it saw open from 1,
@@ -54,7 +60,15 @@
 //! On the end of input, a control event of kind `stop`, or once its input edge is closed, it
 //! finishes the audio and goes on until every completed segment it holds was played and
 //! acknowledged and, given a turns port, that edge ended too; it then sends the end of input on, a
-//! control event of kind `stop`, and ends.
+//! control event of kind `stop`, and ends. A segment never completed by then is forgotten, never
+//! acknowledged, as no completion can follow the end of input. While it waits for that playback,
+//! and whenever a frame waits for room in the speaker's queue, its input then unread, the device
+//! is watched: an error the output stream reported since the sink started ends the
+//! exchange at once with [`PlaybackFault::StreamError`], and audio queued while the played
+//! position stays where it is for the playback patience ([`PLAYBACK_PATIENCE`] unless
+//! [`AcknowledgingSink::with_playback_patience`] set another) ends it with
+//! [`PlaybackFault::Stalled`]; the node's drain then fails with the fault's text, and
+//! [`AcknowledgingHandle::fault`] answers the fault.
 //! Cancelled, or stopped, it sends nothing more and stops the speaker at once. The speaker is
 //! closed, its device stream released, when the exchange ends, or at the node's stop if it never
 //! started. Content other than a frame, a completion or a control event is taken and ignored.
@@ -88,6 +102,77 @@ pub const ACKNOWLEDGE_PLAYBACK: &str = "inference.stream.AcknowledgePlayback";
 /// How long the sink waits for room in the speaker's queue, or for input while a segment waits
 /// for its playback, before looking again.
 const POLL: Duration = Duration::from_millis(2);
+
+/// How long, by default, the sink waits while a frame waits for room, or at the end of its input,
+/// while audio is queued and the speaker's played position does not move, before it takes the
+/// device for stopped and fails;
+/// [`AcknowledgingSink::with_playback_patience`] sets another.
+pub const PLAYBACK_PATIENCE: Duration = Duration::from_secs(2);
+
+/// Why the sink's exchange failed on its speaker or its frames, as
+/// [`AcknowledgingHandle::fault`] answers it; the failure the node's drain answers is its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaybackFault {
+    /// The output stream reported an error while a frame waited for room, or while the sink
+    /// waited, at the end of its input, for the playback of what it holds: `errors` reported
+    /// since the sink started, the last with its message.
+    StreamError {
+        errors: u64,
+        last_error: Option<String>,
+    },
+    /// While a frame waited for room, or at the end of its input, with `queued` samples still
+    /// to play, the played position stayed
+    /// at `played` for `patience`: the device stopped taking audio.
+    Stalled {
+        patience: Duration,
+        played: Option<SampleClockPosition>,
+        queued: usize,
+    },
+    /// A frame of the segment `segment_id` starts at `position`, below `held_end`, where audio
+    /// the sink holds and has not yet acknowledged ends: its clock went back without a stop, so
+    /// the played position, read on the clock of the frames pushed, could never pass that end.
+    /// The frame is not pushed.
+    ClockRegression {
+        segment_id: SegmentId,
+        position: u64,
+        held_end: u64,
+    },
+}
+
+impl fmt::Display for PlaybackFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StreamError { errors, last_error } => write!(
+                f,
+                "the output stream reported {errors} error(s) while the sink waited for playback, \
+                 the last: {}",
+                last_error.as_deref().unwrap_or("without a message")
+            ),
+            Self::Stalled {
+                patience,
+                played,
+                queued,
+            } => write!(
+                f,
+                "the played position stayed at {:?} for {patience:?} with {queued} sample(s) \
+                 queued: the output device stopped playing",
+                played.map(SampleClockPosition::get)
+            ),
+            Self::ClockRegression {
+                segment_id,
+                position,
+                held_end,
+            } => write!(
+                f,
+                "a frame of segment {segment_id:?} starts at sample {position}, below sample \
+                 {held_end} where audio not yet acknowledged ends: its clock went back without a \
+                 stop"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PlaybackFault {}
 
 /// What a payload of the sink's input carries, as the sink reads it.
 #[derive(Debug)]
@@ -174,6 +259,7 @@ struct State {
     interruptions: Vec<Interruption>,
     stale: Vec<StaleFrame>,
     failure: Option<String>,
+    fault: Option<PlaybackFault>,
     finished: Option<Waker>,
 }
 
@@ -242,12 +328,14 @@ impl Drop for Done {
     }
 }
 
-/// The frames of one segment the sink holds, and where its audio ends on the frames' clock.
+/// The frames of one segment the sink holds, and where its audio ends on the frames' clock;
+/// `heard` once the opening of a turn found every frame of it played, kept to acknowledge.
 #[derive(Debug, Default)]
 struct Held {
     frames: Vec<SegmentAudio>,
     end: u64,
     completed: bool,
+    heard: bool,
     generation_id: Option<GenerationId>,
 }
 
@@ -298,6 +386,12 @@ struct Playing<P> {
     /// The segments whose frames the sink dropped, which it never acknowledges.
     dropped: HashSet<SegmentId>,
     input_ended: bool,
+    /// How long the end of input waits while audio is queued and the played position stays.
+    patience: Duration,
+    /// The stream errors the speaker had reported when the exchange started.
+    errors_at_start: u64,
+    /// The played position the end of input last saw move, and since when it stayed there.
+    watch: Option<(Option<SampleClockPosition>, Instant)>,
 }
 
 impl<P: PlaybackPayload> Playing<P> {
@@ -348,12 +442,75 @@ impl<P: PlaybackPayload> Playing<P> {
         }
     }
 
+    /// Records `fault` as what ended the exchange, and answers its text, the exchange's failure.
+    fn fail(&self, fault: PlaybackFault) -> String {
+        let failure = fault.to_string();
+        self.shared.update(|state| state.fault = Some(fault));
+        failure
+    }
+
+    /// While a frame waits for room, and at the end of input while the sink waits for the
+    /// playback of what it holds: fails with the output stream's error once one was reported
+    /// since the exchange started, and with a stall once audio is queued and the played position
+    /// stayed where it was for the patience.
+    fn watch_device(&mut self) -> Result<(), String> {
+        let waits_for_room = self.pending.is_some();
+        let waits_for_playback = self.input_ended && !self.order.is_empty();
+        if !waits_for_room && !waits_for_playback {
+            self.watch = None;
+            return Ok(());
+        }
+        let stats = self.speaker.stats();
+        if stats.stream_errors > self.errors_at_start {
+            return Err(self.fail(PlaybackFault::StreamError {
+                errors: stats.stream_errors - self.errors_at_start,
+                last_error: stats.last_error,
+            }));
+        }
+        let queued = self.speaker.queued();
+        if queued == 0 && self.pending.is_none() {
+            self.watch = None;
+            return Ok(());
+        }
+        let played = self.speaker.played();
+        match self.watch {
+            Some((seen, since)) if seen == played => {
+                if since.elapsed() >= self.patience {
+                    return Err(self.fail(PlaybackFault::Stalled {
+                        patience: self.patience,
+                        played,
+                        queued,
+                    }));
+                }
+            }
+            _ => self.watch = Some((played, Instant::now())),
+        }
+        Ok(())
+    }
+
     /// Pushes the frame waiting for room, if the queue has room for it now, and keeps it; true
-    /// while it still waits.
+    /// while it still waits. A frame starting below the end of audio held and not yet heard is
+    /// refused: its clock went back without a stop.
     fn push_pending(&mut self) -> Result<bool, String> {
         let Some((audio, _)) = &self.pending else {
             return Ok(false);
         };
+        let position = audio.frame().position.get();
+        if let Some(held_end) = self
+            .held
+            .values()
+            .filter(|held| !held.heard && !held.frames.is_empty())
+            .map(|held| held.end)
+            .max()
+            .filter(|end| position < *end)
+        {
+            let segment_id = audio.segment_id();
+            return Err(self.fail(PlaybackFault::ClockRegression {
+                segment_id,
+                position,
+                held_end,
+            }));
+        }
         match self.speaker.try_push(audio.frame()) {
             Ok(()) => {}
             Err(PushError::Full) => return Ok(true),
@@ -391,6 +548,9 @@ impl<P: PlaybackPayload> Playing<P> {
     fn drop_stale(&mut self, audio: &SegmentAudio, generation_id: Option<GenerationId>) {
         let segment_id = audio.segment_id();
         self.dropped.insert(segment_id);
+        if self.held.remove(&segment_id).is_some() {
+            self.order.retain(|held| *held != segment_id);
+        }
         let played = self.speaker.played();
         self.shared.update(|state| {
             state.stale.push(StaleFrame {
@@ -401,10 +561,57 @@ impl<P: PlaybackPayload> Playing<P> {
         });
     }
 
-    /// Forgets every segment the sink holds, none of which it acknowledges.
+    /// Marks heard every segment the sink holds whose frames the speaker played by `played`.
+    fn mark_heard(&mut self, played: Option<SampleClockPosition>) {
+        let Some(played) = played else {
+            return;
+        };
+        for held in self.held.values_mut() {
+            if !held.frames.is_empty() && played.get() >= held.end {
+                held.heard = true;
+            }
+        }
+    }
+
+    /// Forgets every segment kept as heard whose generation `forgets` picks; none of them is
+    /// acknowledged.
+    fn forget_heard(&mut self, forgets: impl Fn(Option<GenerationId>) -> bool) {
+        let Self {
+            order,
+            held,
+            dropped,
+            ..
+        } = self;
+        order.retain(|segment_id| {
+            let forgotten = held
+                .get(segment_id)
+                .is_some_and(|held| held.heard && forgets(held.generation_id));
+            if forgotten {
+                held.remove(segment_id);
+                dropped.insert(*segment_id);
+            }
+            !forgotten
+        });
+    }
+
+    /// Forgets every segment the sink holds, none of which it acknowledges, but those marked
+    /// heard.
     fn forget_held(&mut self) {
-        self.dropped.extend(self.order.drain(..));
-        self.held.clear();
+        let Self {
+            order,
+            held,
+            dropped,
+            ..
+        } = self;
+        order.retain(|segment_id| {
+            let heard = held.get(segment_id).is_some_and(|held| held.heard);
+            if !heard {
+                held.remove(segment_id);
+                dropped.insert(*segment_id);
+            }
+            heard
+        });
+        held.retain(|_, held| held.heard);
     }
 
     /// Whether the generation `generation_id` began before the opening of the turn opened last:
@@ -443,8 +650,11 @@ impl<P: PlaybackPayload> Playing<P> {
                 self.pending = Some((audio, generation_id));
             }
         }
-        self.forget_held();
         let cut_ahead = self.cut_ahead.take();
+        if !unplayed {
+            self.mark_heard(self.speaker.played());
+            self.forget_held();
+        }
         if !unplayed
             && let Some(cut) = cut_ahead
             && self.stale.contains(&cut.generation_id)
@@ -479,6 +689,8 @@ impl<P: PlaybackPayload> Playing<P> {
         let position = self.speaker.stop();
         let stop = at.elapsed();
         let played_after = self.speaker.played();
+        self.mark_heard(position);
+        self.forget_held();
         self.shared.update(|state| {
             state.interruptions.push(Interruption {
                 turn_id,
@@ -501,6 +713,7 @@ impl<P: PlaybackPayload> Playing<P> {
         let at = Instant::now();
         let by_turn = self.is_stale(Some(generation_id));
         self.stale.insert(generation_id);
+        self.forget_heard(|of| of == Some(generation_id));
         let holds = self
             .held
             .values()
@@ -539,14 +752,27 @@ impl<P: PlaybackPayload> Playing<P> {
     }
 
     /// Sends the receipt of every completed segment, in arrival order, whose audio the speaker
-    /// played past.
+    /// played past. A segment kept as heard and still waiting for its completion holds back no
+    /// later receipt: its audio is behind the speaker, and its completion may never come.
     fn acknowledge(&mut self) -> Result<(), String> {
-        while let Some(&segment_id) = self.order.front() {
+        let mut index = 0;
+        while let Some(&segment_id) = self.order.get(index) {
             let Some(held) = self.held.get(&segment_id) else {
-                self.order.pop_front();
+                self.order.remove(index);
                 continue;
             };
+            if !held.completed && self.input_ended && self.pending.is_none() {
+                self.order.remove(index);
+                self.held.remove(&segment_id);
+                self.dropped.insert(segment_id);
+                continue;
+            }
+            if held.heard && !held.completed {
+                index += 1;
+                continue;
+            }
             let played = held.frames.is_empty()
+                || held.heard
                 || self
                     .speaker
                     .played()
@@ -554,7 +780,7 @@ impl<P: PlaybackPayload> Playing<P> {
             if !held.completed || !played {
                 return Ok(());
             }
-            self.order.pop_front();
+            self.order.remove(index);
             let held = self.held.remove(&segment_id).unwrap_or_default();
             let frames = held.frames.len();
             let receipt = PlaybackReceipt::from_frames(held.frames)
@@ -597,7 +823,8 @@ impl<P: PlaybackPayload> Playing<P> {
                         self.pending = Some((audio, generation_id));
                     }
                     Playable::Completed(segment_id) => {
-                        if !stale && !self.dropped.contains(&segment_id) {
+                        let heard = self.held.get(&segment_id).is_some_and(|held| held.heard);
+                        if heard || (!stale && !self.dropped.contains(&segment_id)) {
                             self.completed(segment_id);
                         }
                     }
@@ -671,6 +898,7 @@ impl<P: PlaybackPayload> Playing<P> {
                 let end = self.envelope(stop.as_str(), None, P::control(stop));
                 return self.send(end);
             }
+            self.watch_device()?;
             if idle {
                 thread::park_timeout(POLL);
             }
@@ -682,6 +910,7 @@ impl<P: PlaybackPayload> Playing<P> {
 pub struct AcknowledgingSink {
     run_id: RunId,
     turns: Option<PortId>,
+    patience: Duration,
     node_id: Option<NodeId>,
     speaker: Option<Speaker>,
     shared: Arc<Shared>,
@@ -707,6 +936,7 @@ impl AcknowledgingSink {
         Self {
             run_id,
             turns: None,
+            patience: PLAYBACK_PATIENCE,
             node_id: None,
             speaker: Some(speaker),
             shared: Arc::default(),
@@ -719,6 +949,15 @@ impl AcknowledgingSink {
     #[must_use]
     pub const fn with_turns(mut self, turns: PortId) -> Self {
         self.turns = Some(turns);
+        self
+    }
+
+    /// The same sink waiting at most `patience`, while a frame waits for room or at the end of
+    /// its input, while audio is queued and the played position does not move;
+    /// [`PLAYBACK_PATIENCE`] by default.
+    #[must_use]
+    pub const fn with_playback_patience(mut self, patience: Duration) -> Self {
+        self.patience = patience;
         self
     }
 
@@ -792,6 +1031,13 @@ impl AcknowledgingHandle {
     pub fn failure(&self) -> Option<String> {
         self.shared.read(|state| state.failure.clone())
     }
+
+    /// The fault of the speaker or of the frames that ended the sink's exchange, if one did; its
+    /// text is then the [`failure`](AcknowledgingHandle::failure).
+    #[must_use]
+    pub fn fault(&self) -> Option<PlaybackFault> {
+        self.shared.read(|state| state.fault.clone())
+    }
 }
 
 impl<P: PlaybackPayload> NodeImplementation<P> for AcknowledgingSink {
@@ -841,6 +1087,7 @@ impl<P: PlaybackPayload> NodeImplementation<P> for AcknowledgingSink {
                 .speaker
                 .take()
                 .ok_or_else(|| NodeError::new("the sink's speaker was already used"))?;
+            let errors_at_start = speaker.stats().stream_errors;
             let output = endpoints.outputs.remove(0);
             let mut playing = Playing {
                 run_id: self.run_id,
@@ -864,6 +1111,9 @@ impl<P: PlaybackPayload> NodeImplementation<P> for AcknowledgingSink {
                 cut_ahead: None,
                 dropped: HashSet::new(),
                 input_ended: false,
+                patience: self.patience,
+                errors_at_start,
+                watch: None,
             };
             let done = Done(Arc::clone(&self.shared));
             self.thread = Some(thread::spawn(move || {
