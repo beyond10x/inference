@@ -10,9 +10,9 @@ summary: >-
   another planned pipeline from Ready, keeping its history and vocabulary, and is closed by
   draining. Transport persistence is not model persistence: the session is stable while the runs
   below it come and go. Its history is the ordered committed facts it accepted or delivered (user
-  turns, assistant segments, tool results), each naming the run it came from, and it outlives
-  those runs. Logical identity and interaction policy, which the design also gives the session,
-  are not declared yet.
+  turns, assistant segments, refusals, tool results), each naming the run it came from, and it
+  outlives those runs. Logical identity and interaction policy, which the design also gives the
+  session, are not declared yet.
 
 naming:
   wire: session
@@ -28,13 +28,14 @@ types:
     of: Uuid
 
   # What one committed fact of the conversation is: the committed input text of one user turn,
-  # the text of one committed output segment, or the outcome of one tool call. Never a hypothesis,
-  # a tentative segment, a delta or audio (media state).
+  # the text of one committed output segment, the text of one refusal the model gave instead of an
+  # answer (a committed message, as llm's conversation keeps its refusal item), or the outcome
+  # of one tool call. Never a hypothesis, a tentative segment, a delta or audio (media state).
   # read from: docs/design/inference.md:737
   # read from: docs/design/inference.md:739
   - name: inference.session.HistoryKind
     kind: enum
-    variants: [user_turn, assistant_segment, tool_result]
+    variants: [user_turn, assistant_segment, assistant_refusal, tool_result]
 
 entities:
   # read from: docs/design/inference.md:105

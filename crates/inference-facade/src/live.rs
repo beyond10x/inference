@@ -39,8 +39,10 @@
 //! recorded only once the ingress took the input. The bookkeeping of the generations an interrupt
 //! cuts is released once nothing of a generation can still arrive, its end read and the playback
 //! of each of its segments ended, and is kept for at most 256 generations: past them the oldest
-//! is let go, and a late event of it is delivered after an interrupt, the one exception to the
-//! cut ([`LiveSession::interrupt`]). What is not bounded: a session's history grows with its
+//! is let go. A cut generation let go of either way stays known as cut among the last 256 cut
+//! generations let go, so that what of it arrives after its end, a refusal among it, stays cut;
+//! a late event of a cut generation older than those is delivered, the one exception to the cut
+//! ([`LiveSession::interrupt`]). What is not bounded: a session's history grows with its
 //! turns, and its row and history stay for as long as the session's state machine lives, Closed
 //! included, as the history contract requires ([`crate::history`]).
 //!
@@ -183,9 +185,12 @@ impl Inbox {
 
 /// The most generations a live session keeps the bookkeeping of: a memory backstop for
 /// generations whose end the session never reads, such as those of a pipeline whose egress
-/// carries no generation end or no playback. Past it the oldest generation is released, and an
-/// interrupt no longer cuts an event of it that arrives late; that is the one case in which a
-/// late event of a delivered generation is delivered after an interrupt.
+/// carries no generation end or no playback. Past it the oldest generation is released. A cut
+/// generation's cut outlives its release: the session remembers the last [`GENERATIONS_KEPT`]
+/// cut generations it released, so that what of one arrives after its end, such as a refusal
+/// `inference-llm` delivers after a cancel or a supersede, stays cut. Only a cut generation
+/// older than those is no longer known as cut; that is the one case in which a late event of an
+/// interrupted generation is delivered.
 pub(crate) const GENERATIONS_KEPT: usize = 256;
 
 /// The generations a live session delivered an event of, those an interrupt cut, and the
@@ -196,11 +201,16 @@ pub(crate) const GENERATIONS_KEPT: usize = 256;
 /// `GenerationCompleted`, `GenerationSuperseded` or `GenerationCancelled`, and the playback of
 /// every segment a delta of it named ended, by `AudioPlayed`, whether the generation was cut or
 /// not. A generation's text ends before its audio is played, so one that ended with a segment not
-/// yet played is kept. Past [`GENERATIONS_KEPT`] generations kept, the oldest is released.
+/// yet played is kept. Past [`GENERATIONS_KEPT`] generations kept, the oldest is released. A cut
+/// generation, once released, is remembered as cut among the last [`GENERATIONS_KEPT`] released,
+/// and nothing of it is delivered or kept again.
 #[derive(Debug, Default)]
 pub(crate) struct Generations {
     delivered: HashSet<GenerationId>,
     cut: HashSet<GenerationId>,
+    /// The cut generations whose bookkeeping was released, the oldest first, at most
+    /// [`GENERATIONS_KEPT`].
+    released_cut: VecDeque<GenerationId>,
     segments: HashMap<SegmentId, GenerationId>,
     /// The generations whose end the session read.
     ended: HashSet<GenerationId>,
@@ -221,6 +231,9 @@ impl Generations {
         let Some(generation_id) = generation else {
             return true;
         };
+        if self.released_cut.contains(&generation_id) {
+            return false;
+        }
         self.keep(generation_id);
         if let SessionEvent::TextDelta(delta) = event {
             self.segments.insert(delta.segment_id, generation_id);
@@ -265,10 +278,16 @@ impl Generations {
         }
     }
 
-    /// Releases every record of `generation_id`.
+    /// Releases every record of `generation_id`; a cut one is remembered as cut, past
+    /// [`GENERATIONS_KEPT`] remembered the oldest forgotten.
     fn release(&mut self, generation_id: GenerationId) {
         self.delivered.remove(&generation_id);
-        self.cut.remove(&generation_id);
+        if self.cut.remove(&generation_id) {
+            self.released_cut.push_back(generation_id);
+            while self.released_cut.len() > GENERATIONS_KEPT {
+                self.released_cut.pop_front();
+            }
+        }
         self.ended.remove(&generation_id);
         self.segments.retain(|_, kept| *kept != generation_id);
         self.kept.retain(|kept| *kept != generation_id);
@@ -1052,8 +1071,11 @@ impl<P: SessionPayload> LiveSession<P> {
     ///
     /// The session keeps what it needs to cut a generation until nothing of it can still arrive:
     /// the generation ended and the playback of each of its segments ended. It keeps that for at
-    /// most 256 generations; past them it lets go of the oldest, and a late event of a generation
-    /// let go of that way is delivered after an interrupt. That is the one exception to the cut.
+    /// most 256 generations; past them it lets go of the oldest. A cut generation it let go of
+    /// stays known as cut among the last 256 cut generations let go, so that an event of it
+    /// arriving after its end, such as a refusal `inference-llm` delivers after a cancel or a
+    /// supersede, is not delivered. A late event of a cut generation older than those is
+    /// delivered; that is the one exception to the cut.
     ///
     /// # Errors
     ///
@@ -1166,7 +1188,8 @@ impl<P: SessionPayload> LiveSession<P> {
 
     /// The session event an envelope of an egress is delivered as, if any. A committed fact the
     /// session delivers joins its history: a voice turn's committed transcript as a user turn, a
-    /// committed segment as an assistant segment, a tool result with its call.
+    /// committed segment as an assistant segment, a refusal as an assistant refusal, a tool result
+    /// with its call.
     ///
     /// Nothing is delivered once the session was cancelled, nor an event of a generation an
     /// interrupt cut: its generation is the envelope's, or the one the event names, or, for an
@@ -1195,6 +1218,9 @@ impl<P: SessionPayload> LiveSession<P> {
             }
             SessionEvent::TextSegmentCommitted(segment) => {
                 self.remember(HistoryKind::AssistantSegment, segment.text.clone(), None);
+            }
+            SessionEvent::GenerationRefused(refused) => {
+                self.remember(HistoryKind::AssistantRefusal, refused.text.clone(), None);
             }
             SessionEvent::ToolCallResult(result) => {
                 self.remember(
@@ -1556,6 +1582,15 @@ mod tests {
         })
     }
 
+    /// The start of `generation_id`, which names no segment.
+    fn started(generation_id: GenerationId) -> SessionEvent {
+        SessionEvent::GenerationStarted(GenerationStarted {
+            generation_id,
+            run_id: RunId::generate(),
+            epoch: 1,
+        })
+    }
+
     /// One generation from its start to its completion, with one segment.
     fn generation(generations: &mut Generations) -> (GenerationId, SegmentId) {
         let (generation_id, segment_id) = (GenerationId::generate(), SegmentId::generate());
@@ -1706,6 +1741,56 @@ mod tests {
         assert!(
             !generations.admit(None, &SessionEvent::AudioPlayed(AudioPlayed { segment_id })),
             "the completed generation's playback is cut"
+        );
+    }
+
+    /// Every event of a cut generation that arrives after its end, its refusal or a late delta,
+    /// stays cut once its bookkeeping was released, and is not kept again; the cut generations
+    /// remembered so stay within the backstop.
+    #[test]
+    fn a_cut_generation_stays_cut_past_its_end_within_the_backstop() {
+        let mut generations = Generations::default();
+        let cut = GenerationId::generate();
+        assert!(generations.admit(None, &started(cut)));
+        generations.interrupt();
+        assert!(!generations.admit(
+            None,
+            &SessionEvent::GenerationCancelled(GenerationCancelled { generation_id: cut }),
+        ));
+        assert!(
+            !generations.admit(
+                None,
+                &SessionEvent::GenerationRefused(GenerationRefused {
+                    generation_id: cut,
+                    text: "no".to_owned(),
+                }),
+            ),
+            "a refusal after the end of a cut generation stays cut"
+        );
+        assert!(
+            !generations.admit(None, &delta(SegmentId::generate(), cut)),
+            "so does a late delta"
+        );
+        assert!(
+            !generations.kept.contains(&cut),
+            "and nothing of it is kept again"
+        );
+        for _ in 0..=GENERATIONS_KEPT {
+            let other = GenerationId::generate();
+            assert!(generations.admit(None, &started(other)));
+            generations.interrupt();
+            assert!(!generations.admit(
+                None,
+                &SessionEvent::GenerationCompleted(GenerationCompleted {
+                    generation_id: other,
+                    stop_reason: None,
+                }),
+            ));
+        }
+        assert!(generations.released_cut.len() <= GENERATIONS_KEPT);
+        assert!(
+            !generations.released_cut.contains(&cut),
+            "past the backstop the oldest cut generation is let go"
         );
     }
 
