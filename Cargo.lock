@@ -2149,6 +2149,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-cartesia"
+version = "0.21.0"
+dependencies = [
+ "base64 0.23.1",
+ "futures-util",
+ "inference-testkit",
+ "inference-tts",
+ "keyring-core",
+ "rustls",
+ "secrets-core",
+ "secrets-keychain",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "webpki-roots 0.26.11",
+ "zeroize",
+]
+
+[[package]]
 name = "inference-core"
 version = "0.21.0"
 dependencies = [
@@ -3479,6 +3499,7 @@ dependencies = [
  "clap",
  "inference-audio-device",
  "inference-aws",
+ "inference-cartesia",
  "inference-deepgram",
  "inference-duplex",
  "inference-elevenlabs",
