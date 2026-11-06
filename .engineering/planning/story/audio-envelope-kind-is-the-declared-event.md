@@ -2,53 +2,45 @@
 format: aep.planning-md/3
 id: story:audio-envelope-kind-is-the-declared-event
 kind: story
-status: draft
+status: active
 title: Audio envelopes carry the declared event name inference.audio.AudioChunk
-summary: SynthesisEvent::name() now returns inference.audio.AudioChunk for a frame (0.19.0, N14), while about 25 sites (the TTS testkit node, inference-audio-device AUDIO_FRAME, runtime, examples, tests) still stamp the envelope kind inference.audio.AudioFrame; move them together, keeping the old constant as a deprecated alias
+summary: Every envelope of a frame of audio is stamped inference.audio.AudioChunk, the declared event, as SynthesisEvent::name() already returns since 0.19.0; no alias for the old kind
 tags:
 - from-finding
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
 - serves: vision:inference
-revision: 1
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T19:11:12Z", actor: "human:timo", revision: 4}
+- {from: "proposed", to: "active", at: "2026-11-06T19:11:13Z", actor: "human:timo", revision: 5}
 ---
-<!-- Starting point for a `story` artifact, seeded by `aep artifact new story <name>`.
-     No frontmatter here on purpose: the `---` block is written by the CLI from the id, kind, status
-     and relations you gave it, and a second copy in this file would be the one that went stale.
-     Delete the italic guidance as you fill each section. -->
-
-# Story: <name>
+# Story: audio envelopes carry the declared event name
 
 ## Outcome
 
-*What is true for whom once this has shipped, in one sentence. If it names a component rather than a
-person, it is a task — say what changes for someone.*
+A consumer that routes pipeline envelopes by kind sees one name for a frame of synthesized or
+captured audio, `inference.audio.AudioChunk`, the event `ess/domains/audio.yaml` declares, and no
+envelope anywhere is stamped `inference.audio.AudioFrame`, which is the type that holds the frame.
 
 ## Context
 
-*Why this is worth doing now, and what it depends on. Link the epic or specification it comes from
-rather than restating it; the `derived_from` relation already carries the edge.*
+0.19.0 (finding N14 of review-result:full-codebase-2026-11-06) made `SynthesisEvent::name()` return
+`inference.audio.AudioChunk` for a frame. About 25 files still stamp envelopes with the kind
+`inference.audio.AudioFrame`: the TTS testkit node, `inference-audio-device`'s `AUDIO_FRAME`, the
+runtime's record, the testkit cascade, `local-voice-cascade` and their tests (43 occurrences by
+`rg -c 'inference\.audio\.AudioFrame' -g '!target'` on 0.22.0). Backwards compatibility is not
+kept (AGENTS.md, 2026-11-06): no deprecated alias.
 
 ## Acceptance
 
-*The conditions under which this is done, each one something a person or a check can observe. "Works
-correctly" is not one of them.*
+- `rg 'inference\.audio\.AudioFrame' -g '!target'` matches only the type's own declaration and
+  doc lines (the struct in `inference-audio` and `ess/domains/audio.yaml`, and fields typed
+  `inference.audio.AudioFrame`), never an envelope kind or a constant used as one.
+- A test asserts that the TTS node and the audio-device node each emit envelopes whose kind equals
+  `SynthesisEvent` frame's `name()`, `inference.audio.AudioChunk`.
+- `CHANGELOG.md` `## [Unreleased]` has a `Breaking` line naming every renamed or removed constant.
 
 ## Out of Scope
 
-*What a reasonable reader would expect to be included and is not — the boundary that stops this
-story quietly becoming an epic.*
-
-## Ambiguities
-
-*Each gap this story found and did not close, classified. `inferable` — the answer is already
-written down, so give the `path:line` or the artifact id that settles it.
-`requires-stakeholder-input` — nobody here can decide it, so name who does, and raise that entry as
-a `decision-blocker` with a `blocks` edge to this story, or it is a sentence somebody improvises
-later.*
-
-## Open Questions
-
-*Anything still undecided belongs in `## Ambiguities` above, classified and with its citation or its
-decider. Keep this section for a question that is neither — an unowned question is a story that
-stalls without anybody noticing.*
+- Renaming the type `AudioFrame`.
