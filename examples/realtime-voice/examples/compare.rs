@@ -22,12 +22,20 @@
 //! key from `DEEPGRAM_API_KEY`, runs with the default providers of
 //! `inference_deepgram::agent::AgentConfig` in G.711 μ-law at 8 kHz
 //! (`realtime_voice::deepgram_config`), and reports no usage: it bills per minute, which no
-//! message carries. A provider whose model cannot be made or whose first session does not open is
-//! skipped with the reason; `--skip <provider>=<reason>` skips one without trying it.
+//! message carries. Phonic reads its key from `PHONIC_API_KEY`, runs `phonic-1` in 16-bit PCM at
+//! 16 kHz both ways with the demo instructions and tool (`phonic_config`), and reports no usage.
+//! Deepslate Opal reads its key from `DEEPSLATE_API_KEY`, its vendor and
+//! organization from `DEEPSLATE_VENDOR_ID` and `DEEPSLATE_ORGANIZATION_ID`, and the hosted voice
+//! it speaks with from `DEEPSLATE_VOICE_ID`, without which it is skipped; it runs in 16-bit PCM
+//! at 16 kHz and reports no usage, which no message carries. A provider whose model cannot be
+//! made or whose first session does not open is skipped with the reason;
+//! `--skip <provider>=<reason>` skips one without trying it.
 //!
 //! The cascade arm, `cascade`, speaks with ElevenLabs when its key resolves from
 //! `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` names a voice, in `pcm_24000`; otherwise it is
-//! skipped as "no hosted TTS configured". Its recogniser and LLM are those the local voice
+//! skipped as "no hosted TTS configured". With `--cascade-voice cartesia` it speaks with Cartesia
+//! Sonic instead, its key from `CARTESIA_API_KEY` and its voice from `CARTESIA_VOICE_ID`, in
+//! 16-bit PCM at 24 kHz. Its recogniser and LLM are those the local voice
 //! cascade configures (`local_voice_cascade::local::LocalConfig::from_env`), bound with feature
 //! `local`, with that cascade's detector; a missing one skips the arm, naming it.
 
@@ -41,6 +49,8 @@ use clap::{Parser, ValueEnum};
 use inference_aws::duplex::NovaSonicSpeech;
 use inference_deepgram::agent::AgentConfig;
 use inference_deepgram::{AgentEndpoint as DeepgramEndpoint, DeepgramAgent};
+use inference_deepslate::{DeepslateOpal, OpalConfig};
+use inference_duplex::inference_tools::{DeclareTool, Tool};
 use inference_duplex::{NativeSpeechModel, SessionConfig};
 use inference_elevenlabs::agent::{AgentEndpoint, SignedUrl};
 use inference_elevenlabs::{ElevenLabsAgent, ElevenLabsSynthesiser};
@@ -49,11 +59,13 @@ use inference_openai::live_duplex::{OpenAiLive, OpenAiLiveSession};
 use inference_openai::{
     CredentialSource, Endpoint, EnvironmentSource, KeychainSource, OPENAI_KEY_NAME,
 };
+use inference_phonic::{PhonicConfig, PhonicEndpoint, PhonicSpeech};
 use realtime_voice::compare::{
     Billing, Clip, Comparison, Measured, Plan, Topology, VOICE_VARIABLE, hosted_tts,
 };
 use realtime_voice::{
     Reported, deepgram_config, elevenlabs_config, nova_config, openai_config, openai_live_config,
+    pcm16,
 };
 
 const QUESTION: &[u8] =
@@ -73,7 +85,7 @@ struct Args {
         long,
         value_enum,
         value_delimiter = ',',
-        default_value = "openai,openai-live,nova,elevenlabs,deepgram,cascade"
+        default_value = "openai,openai-live,nova,elevenlabs,deepgram,phonic,deepslate,cascade"
     )]
     providers: Vec<Provider>,
     /// The runs of each provider.
@@ -85,6 +97,18 @@ struct Args {
     /// The length of one input frame, in milliseconds.
     #[arg(long, default_value_t = 20)]
     frame_ms: u64,
+    /// The hosted voice the cascade arm speaks with.
+    #[arg(long, value_enum, default_value = "elevenlabs")]
+    cascade_voice: CascadeVoice,
+}
+
+/// A hosted TTS the cascade arm can speak with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CascadeVoice {
+    /// ElevenLabs streaming TTS.
+    Elevenlabs,
+    /// Cartesia Sonic streaming TTS.
+    Cartesia,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -99,6 +123,10 @@ enum Provider {
     Elevenlabs,
     /// A Deepgram Voice Agent session.
     Deepgram,
+    /// A Phonic speech-to-speech conversation.
+    Phonic,
+    /// A Deepslate Opal session.
+    Deepslate,
     /// The local voice cascade's recogniser and LLM, speaking with ElevenLabs.
     Cascade,
 }
@@ -111,15 +139,21 @@ impl Provider {
             Self::Nova => "nova",
             Self::Elevenlabs => "elevenlabs",
             Self::Deepgram => "deepgram",
+            Self::Phonic => "phonic",
+            Self::Deepslate => "deepslate",
             Self::Cascade => "cascade",
         }
     }
 
     const fn topology(self) -> Topology {
         match self {
-            Self::Openai | Self::OpenaiLive | Self::Nova | Self::Elevenlabs | Self::Deepgram => {
-                Topology::Native
-            }
+            Self::Openai
+            | Self::OpenaiLive
+            | Self::Nova
+            | Self::Elevenlabs
+            | Self::Deepgram
+            | Self::Phonic
+            | Self::Deepslate => Topology::Native,
             Self::Cascade => Topology::Cascade,
         }
     }
@@ -143,6 +177,48 @@ const DEEPGRAM_REPORTED: Reported = Reported {
     output_audio: false,
 };
 
+/// What no Phonic message reports: every count.
+const PHONIC_REPORTED: Reported = Reported {
+    input_text: false,
+    input_audio: false,
+    input_cached: false,
+    output_text: false,
+    output_audio: false,
+};
+
+/// The session compare opens with Phonic: 16-bit PCM at 16 kHz both ways, Phonic's own
+/// turn-taking, responses and barge-in, the demo instructions and tool, and Phonic's default
+/// voice. Phonic declares inline tools with `strict: true`, so the tool's schema takes the
+/// strict form: no additional properties, every property required.
+fn phonic_config() -> SessionConfig {
+    SessionConfig {
+        voice: String::new(),
+        instructions: realtime_voice::INSTRUCTIONS.to_owned(),
+        tools: vec![strict(&realtime_voice::time_tool())],
+        ..realtime_voice::elevenlabs_config()
+    }
+}
+
+/// `tool` with its schema in OpenAI's strict form.
+fn strict(tool: &Tool) -> Tool {
+    let mut schema = tool.schema().clone();
+    let required: Vec<serde_json::Value> = schema["properties"]
+        .as_object()
+        .map(|properties| properties.keys().cloned().map(Into::into).collect())
+        .unwrap_or_default();
+    schema["additionalProperties"] = false.into();
+    schema["required"] = required.into();
+    Tool::declare(DeclareTool {
+        name: tool.name().to_owned(),
+        description: tool.description().to_owned(),
+        schema,
+        schema_revision: tool.schema_revision().to_owned(),
+        side_effect: tool.side_effect(),
+        requires_confirmation: tool.requires_confirmation(),
+    })
+    .0
+}
+
 fn main() -> ExitCode {
     let args = Args::parse();
     match compare(&args) {
@@ -154,6 +230,24 @@ fn main() -> ExitCode {
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// What no Deepslate Opal message reports: every count.
+const DEEPSLATE_REPORTED: Reported = DEEPGRAM_REPORTED;
+
+/// The variable naming the hosted voice Deepslate Opal speaks with.
+const DEEPSLATE_VOICE_VARIABLE: &str = "DEEPSLATE_VOICE_ID";
+
+/// The session `compare` opens on Deepslate Opal: 16-bit PCM at 16 kHz both ways, its own
+/// turn-taking, responses and barge-in, the hosted voice `DEEPSLATE_VOICE_ID` names, the demo
+/// instructions and tool.
+fn deepslate_config() -> SessionConfig {
+    SessionConfig {
+        voice: std::env::var(DEEPSLATE_VOICE_VARIABLE).unwrap_or_default(),
+        input_format: pcm16(16_000),
+        output_format: pcm16(16_000),
+        ..deepgram_config()
     }
 }
 
@@ -180,9 +274,13 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
         }
         let outcome = match provider {
             Provider::Cascade => {
-                match hosted()
-                    .and_then(|synthesiser| cascade::measure(synthesiser, &plan, args.runs))
-                {
+                let measured = match args.cascade_voice {
+                    CascadeVoice::Elevenlabs => hosted()
+                        .and_then(|synthesiser| cascade::measure(synthesiser, &plan, args.runs)),
+                    CascadeVoice::Cartesia => cartesia()
+                        .and_then(|synthesiser| cascade::measure(synthesiser, &plan, args.runs)),
+                };
+                match measured {
                     Ok(runs) => comparison.ran_as(name, provider.topology(), runs),
                     Err(reason) => comparison.skipped_as(name, provider.topology(), &reason),
                 }
@@ -250,6 +348,33 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                         )
                     })
             }
+            Provider::Phonic => PhonicSpeech::from_env(PhonicEndpoint::new(), PhonicConfig::new())
+                .map_err(Box::<dyn Error>::from)
+                .and_then(|mut model| {
+                    measure(
+                        name,
+                        &mut model,
+                        phonic_config,
+                        &plan,
+                        args.runs,
+                        &Billing::tokens(PHONIC_REPORTED),
+                    )
+                }),
+            Provider::Deepslate => match std::env::var_os(DEEPSLATE_VOICE_VARIABLE) {
+                None => Err(format!("{DEEPSLATE_VOICE_VARIABLE} names no hosted voice").into()),
+                Some(_) => DeepslateOpal::from_env(OpalConfig::new())
+                    .map_err(Box::<dyn Error>::from)
+                    .and_then(|mut model| {
+                        measure(
+                            name,
+                            &mut model,
+                            deepslate_config,
+                            &plan,
+                            args.runs,
+                            &Billing::tokens(DEEPSLATE_REPORTED),
+                        )
+                    }),
+            },
         };
         match outcome {
             Ok(runs) => comparison.ran_as(name, provider.topology(), runs),
@@ -270,10 +395,31 @@ fn hosted() -> Result<ElevenLabsSynthesiser, String> {
     )
 }
 
+/// The cascade arm's synthesiser with `--cascade-voice cartesia`: Cartesia Sonic in 16-bit PCM
+/// at 24 kHz, its key from `CARTESIA_API_KEY` and its voice from `CARTESIA_VOICE_ID`.
+fn cartesia() -> Result<inference_cartesia::CartesiaSynthesiser, String> {
+    use realtime_voice::compare::NO_HOSTED_TTS;
+    if std::env::var_os(inference_cartesia::CARTESIA_KEY_VARIABLE).is_none() {
+        return Err(format!("{NO_HOSTED_TTS}: CARTESIA_API_KEY is not set"));
+    }
+    let voice = std::env::var("CARTESIA_VOICE_ID")
+        .ok()
+        .filter(|voice| !voice.trim().is_empty())
+        .ok_or_else(|| format!("{NO_HOSTED_TTS}: CARTESIA_VOICE_ID names no voice"))?;
+    inference_cartesia::CartesiaSynthesiser::from_env(
+        inference_cartesia::Endpoint::new(),
+        inference_cartesia::VoiceConfig::new(
+            voice.trim(),
+            inference_cartesia::OutputFormat::PCM_S16LE_24000,
+        ),
+    )
+    .map_err(|error| format!("{NO_HOSTED_TTS}: {error}"))
+}
+
 /// The cascade arm over the local voice cascade's recogniser and LLM.
 #[cfg(feature = "local")]
 mod cascade {
-    use inference_elevenlabs::ElevenLabsSynthesiser;
+    use inference_tts::Synthesiser;
     use local_voice_cascade::local::{
         LocalConfig, LocalModels, LocalRefused, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE,
         SPEECH_VAD,
@@ -297,11 +443,11 @@ mod cascade {
     }
 
     /// `runs` runs of the plan over the local recogniser and LLM and `synthesiser`.
-    pub fn measure(
-        synthesiser: ElevenLabsSynthesiser,
-        plan: &Plan,
-        runs: usize,
-    ) -> Result<Vec<Measured>, String> {
+    pub fn measure<S>(synthesiser: S, plan: &Plan, runs: usize) -> Result<Vec<Measured>, String>
+    where
+        S: Synthesiser,
+        S::Handle: Send,
+    {
         let config = LocalConfig::from_env().map_err(|refused| missing(&refused))?;
         let models = LocalModels::open(&config).map_err(|refused| missing(&refused))?;
         let mut cascade = Cascade::new(
@@ -324,12 +470,11 @@ mod cascade {
 /// Without feature `local`, the cascade arm has no local recogniser or LLM.
 #[cfg(not(feature = "local"))]
 mod cascade {
-    use inference_elevenlabs::ElevenLabsSynthesiser;
     use realtime_voice::compare::{Measured, Plan};
 
     /// Skips the arm, naming the missing steps.
-    pub fn measure(
-        _synthesiser: ElevenLabsSynthesiser,
+    pub fn measure<S>(
+        _synthesiser: S,
         _plan: &Plan,
         _runs: usize,
     ) -> Result<Vec<Measured>, String> {

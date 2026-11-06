@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.22.0] — 2026-11-06
+
+### Breaking
+
+- `inference-elevenlabs`: `ElevenLabsSynthesiser` speaks an utterance on one
+  `multi-stream-input` connection, one context per segment, replacing the per-segment
+  `stream-input` binding. `protocol::init_message` and `END_OF_INPUT` are removed;
+  `context_message`, `close_context_message`, `CLOSE_SOCKET` and `FINAL_SPELLINGS` replace them,
+  `text_message` takes the context id, and `BACKEND` is `elevenlabs-multi-stream-input`.
+
+### Added
+
+- `inference-deepslate`: a new adapter crate, `DeepslateOpal` and `DeepslateOpalSession`, a duplex
+  binding over Deepslate Opal's protobuf WebSocket protocol, with its claims record and a
+  `compare` provider. A tool call is answered as unavailable and the session goes on.
+- `inference-phonic`: a new adapter crate, `PhonicSpeech` and `PhonicSession`, a duplex binding
+  over Phonic's speech-to-speech WebSocket, with its claims record and a `compare` provider. A
+  named agent's own tools are answered with an error and noted in the session's dropped events.
+- `inference-cartesia`: a new adapter crate, a streaming TTS synthesiser over Cartesia Sonic's
+  WebSocket, one context per segment, with its claims record; `compare --cascade-voice cartesia`
+  speaks the cascade arm with it.
+- `inference-openai`: feature `speech`, `speech::OpenAiSpeech`, a streaming TTS synthesiser over
+  the speech endpoint: PCM resampled to the requested rate, G.711 where asked, the character
+  limit as a typed error, and a cancel that keeps the usage known so far.
+
+### Fixed
+
+- `inference-runtime` tests: a race where the stop was sent after the run had ended, which
+  failed `main`'s CI once.
+
 ## [0.21.0] — 2026-11-06
 
 ### Added

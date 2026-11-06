@@ -414,6 +414,13 @@ impl Running {
         block_on(self.ingresses[port].send(envelope)).expect("taken");
     }
 
+    /// Sends a stop that may arrive after the run already ended on its own, for instance when a
+    /// closed receiver failed it after the first input: a closed ingress is then the expected
+    /// answer, not a failure of the case.
+    fn send_stop(&self, port: &str, envelope: EventEnvelope<PipelinePayload>) {
+        let _ended_or_taken = block_on(self.ingresses[port].send(envelope));
+    }
+
     fn egress(&mut self, name: &str) -> &mut dyn InputEndpoint<PipelinePayload> {
         self.egresses.get_mut(name).expect("the egress").as_mut()
     }
@@ -945,7 +952,7 @@ fn usage_edge_to_a_closed_receiver(subgraph: bool) -> RunState {
     };
     let mut application = Application::new(running.run_id);
     running.send("user text", application.text("user text", "1"));
-    running.send("user text", application.stop("user text"));
+    running.send_stop("user text", application.stop("user text"));
     let _replies = drain(running.egress("reply"));
     running.drive.join().expect("the loop does not panic")
 }

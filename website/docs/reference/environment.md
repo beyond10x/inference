@@ -3,7 +3,7 @@ title: Environment
 sidebar_position: 4
 description: Every environment variable the adapters, examples and live tests read, what it does, and its default.
 lede: Adapters and examples take their keys, checkpoints and servers from the environment or from options; nothing is looked up or downloaded on their behalf.
-source: adapters/inference-openai (config.rs, credentials), adapters/inference-aws (nova_sonic), adapters/inference-elevenlabs (credential.rs, examples/live.rs, tests/agent_duplex_live.rs), adapters/inference-deepgram (credential.rs, tests/live.rs), examples/realtime-voice, examples/local-voice-cascade (src/local.rs), examples/stt-sherpa-onnx, adapter tests
+source: adapters/inference-openai (config.rs, credentials), adapters/inference-aws (nova_sonic), adapters/inference-elevenlabs (credential.rs, examples/live.rs, tests/agent_duplex_live.rs), adapters/inference-deepgram (credential.rs, tests/live.rs), adapters/inference-phonic, adapters/inference-deepslate and adapters/inference-cartesia (credential.rs, config.rs, tests/live.rs), examples/realtime-voice, examples/local-voice-cascade (src/local.rs), examples/stt-sherpa-onnx, adapter tests
 ---
 
 # Environment
@@ -21,6 +21,13 @@ the live tests read the same ones and are ignored without them.
 | `INFERENCE_OPENAI_REALTIME_MODEL` | `inference-openai` | another OpenAI Realtime model | `gpt-realtime-2.1` |
 | `AWS_REGION` | `inference-aws` | the Bedrock region for Nova Sonic; credentials come from the AWS default chain | none |
 | `INFERENCE_NOVA_SONIC_MODEL` | `inference-aws` | another Nova Sonic model | `amazon.nova-2-sonic-v1:0` |
+| `PHONIC_API_KEY` | `inference-phonic` (`EnvironmentSource::phonic`), its live test; `realtime-voice`, example `compare` | the Phonic key, sent only in the handshake's `Authorization` header | none: the `phonic` arm of `compare` fails; the live test also reads the OS keychain, secret `phonic-api-key` |
+| `DEEPSLATE_API_KEY` | `inference-deepslate` (`EnvironmentSource::deepslate`), its live test; `realtime-voice`, example `compare` | the Deepslate key, sent only in the handshake's `Authorization` header | none: the session fails to open; the live test also reads the OS keychain, secret `deepslate-api-key` |
+| `DEEPSLATE_VENDOR_ID`, `DEEPSLATE_ORGANIZATION_ID` | `inference-deepslate` (`Endpoint::from_env`) | the vendor and organization the Opal endpoint is opened for | none: `ConfigError::Missing` |
+| `DEEPSLATE_MODEL` | `inference-deepslate` (`Endpoint::from_env`) | another Opal model | the adapter's `MODEL` |
+| `DEEPSLATE_VOICE_ID` | `inference-deepslate` live test; `realtime-voice`, example `compare` | the hosted voice Opal speaks with | none: the `deepslate` arm of `compare` fails |
+| `CARTESIA_API_KEY` | `inference-cartesia` (`EnvironmentSource::cartesia`); `realtime-voice`, example `compare` with `--cascade-voice cartesia` | the Cartesia key, sent only in the `X-API-Key` header | none: the cascade arm of `compare` is skipped; the live test also reads the OS keychain, secret `cartesia-api-key` |
+| `CARTESIA_VOICE_ID` | `inference-cartesia` live test; `realtime-voice`, example `compare` with `--cascade-voice cartesia` | the Sonic voice the cascade arm speaks with | none: the cascade arm is skipped |
 | `INFERENCE_COMPARE_BARGE_IN_WAV` | `realtime-voice`, example `compare` | a 16-bit PCM WAV file of speech sent over each answer as a barge-in | no barge-in |
 | `ELEVENLABS_API_KEY` | `inference-elevenlabs` (`EnvironmentSource::elevenlabs`), its example `live`; `realtime-voice`, example `compare` | the ElevenLabs key, sent only in the `xi-api-key` header, read at every connection | the example `live` reads the OS keychain, secret `elevenlabs-api-key`; the cascade arm of `compare` is skipped |
 | `ELEVENLABS_VOICE_ID` | `inference-elevenlabs`, example `live`; `realtime-voice`, example `compare` | the voice the live check and the cascade arm of `compare` speak with; with `ELEVENLABS_API_KEY` it configures the cascade arm's hosted TTS | none: the example `live` exits with status 2 and the cascade arm is skipped |

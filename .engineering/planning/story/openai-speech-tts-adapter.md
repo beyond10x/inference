@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:openai-speech-tts-adapter
 kind: story
-status: draft
+status: implemented
 title: OpenAI streamed speech as a hosted TTS adapter
 summary: A second hosted TTS binding, for consumers already on OpenAI speech.
 tags:
@@ -10,7 +10,11 @@ tags:
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T17:26:37Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-06T17:26:38Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-06T18:22:07Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 ## Context
 

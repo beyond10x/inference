@@ -1,0 +1,11 @@
+{
+  "model": "sonic-3.6",
+  "binding": "inference_cartesia::CartesiaSynthesiser",
+  "features": [],
+  "claims": [
+    "output_streaming",
+    "incremental_input"
+  ],
+  "held_by": "claims_record::the_tts_record_holds_the_claims_of_the_binding",
+  "adapter_revision": "0.22.0"
+}
