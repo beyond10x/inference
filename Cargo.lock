@@ -2179,6 +2179,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-deepslate"
+version = "0.21.0"
+dependencies = [
+ "futures-util",
+ "inference-duplex",
+ "keyring-core",
+ "rustls",
+ "secrets-core",
+ "secrets-keychain",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "webpki-roots 0.26.11",
+ "zeroize",
+]
+
+[[package]]
 name = "inference-docs"
 version = "0.21.0"
 dependencies = [
@@ -3501,6 +3519,7 @@ dependencies = [
  "inference-audio-device",
  "inference-aws",
  "inference-deepgram",
+ "inference-deepslate",
  "inference-duplex",
  "inference-elevenlabs",
  "inference-llm",
