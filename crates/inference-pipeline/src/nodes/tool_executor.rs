@@ -42,9 +42,9 @@
 //! complete before the cancel or not made. A call delivered as the cancel is taken is either
 //! started, and its `ToolCallStarted` sent, before the cancel, or neither started nor executed:
 //! the move to Started is made under the same lock, and an executor is not invoked or polled once
-//! the cancel was taken. Only a `ToolCallStarted` still waiting for room on a full edge when the
-//! cancel comes leaves its call Started and unsent. An executor that panics ends the node's
-//! exchange, and the node's drain fails naming the panic.
+//! the cancel was taken. A cancel that comes while the `ToolCallStarted` still waits for room on
+//! a full edge drops that send and puts the call back Authorized, as it was before the move. An
+//! executor that panics ends the node's exchange, and the node's drain fails naming the panic.
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
@@ -474,8 +474,11 @@ impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
     /// instant it started. The cancel check, the move to Started in the record and each poll of the
     /// send are made under the lock the cancel is taken under, so a cancel taken first leaves the
     /// call as it was and sends nothing, and one taken later finds the call started and its event
-    /// sent, unless the send still waited for room on a full edge. Nothing, once cancelled, or when
-    /// the state machine refuses to start the call; the refusal is recorded.
+    /// sent. A cancel taken while the send still waits for room on a full edge drops the send and
+    /// puts the call back in the record as it was before the move, Authorized, under the same
+    /// lock: only this node moves a call out of Authorized into Started, so nothing else moved it
+    /// meanwhile. Nothing, once cancelled, or when the state machine refuses to start the call; the
+    /// refusal is recorded.
     fn start(
         &mut self,
         delivered: ToolCall,
@@ -490,14 +493,22 @@ impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
         } = self;
         let output: &dyn OutputEndpoint<P> = output.as_ref();
         let mut delivered = Some(delivered);
+        let mut before = None;
         let mut started = None;
         let mut sending = None;
         let sent = block_on(future::poll_fn(|cx| {
             let mut guard = state.lock();
             if guard.0.cancelled {
+                if let Some(before) = before.take() {
+                    sending = None;
+                    calls.put(before);
+                }
                 return Poll::Ready(Ok(false));
             }
             if let Some(delivered) = delivered.take() {
+                let held = calls
+                    .get(delivered.call_id())
+                    .unwrap_or_else(|| delivered.clone());
                 match calls.moved(delivered, ToolCall::start) {
                     Ok((call, event)) => {
                         let update = ToolCallUpdate {
@@ -506,6 +517,7 @@ impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
                         };
                         let envelope = emitter.update(update, cause);
                         started = Some((call, envelope.event_id, Instant::now()));
+                        before = Some(held);
                         sending = Some(output.send(envelope));
                     }
                     Err((call, refused)) => {
