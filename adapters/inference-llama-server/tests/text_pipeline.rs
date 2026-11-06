@@ -193,6 +193,10 @@ impl TurnNode {
                                     handle.failure()
                                 ));
                             }
+                            GenerationEvent::Refused(refused) => {
+                                StreamEvent::GenerationRefused(refused)
+                            }
+                            _ => continue,
                         };
                         let envelope = envelopes.envelope(
                             event.name().to_owned(),

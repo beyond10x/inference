@@ -60,6 +60,14 @@ types:
     kind: enum
     variants: [audio_frame_time, inference_execution_time, wall_time, playback_time]
 
+  # Why the model's last turn of a generation stopped, as the model reported it: it ended its
+  # turn, it ended with tool calls, it reached the maximum output tokens of the request, or it
+  # stopped incomplete for a reason of its own. A truncated answer is told from a whole one by it.
+  # read from: docs/design/inference.md:366
+  - name: inference.stream.StopReason
+    kind: enum
+    variants: [end_turn, tool_calls, max_output_tokens, incomplete]
+
   # The canonical envelope of every routable event. There is no single global order across
   # independently produced streams: sequence orders the events of one stream only, and a recorder
   # may assign a merge order of its own beside it. A control event (start, stop, commit, revise,
@@ -644,10 +652,15 @@ commands:
             epoch: input.epoch
         summary: A new output epoch is active for the node.
 
+  # The producer names why its model stopped, when a model stopped it; a completion the caller
+  # asks for while no turn ended names none.
+  # read from: docs/design/inference.md:366
   - name: inference.stream.CompleteGeneration
     input:
       - name: generation_id
         type: inference.stream.GenerationId
+      - name: stop_reason
+        type: Optional<inference.stream.StopReason>
     outcomes:
       - name: completed
         moves: inference.stream.Generation.complete
@@ -657,6 +670,7 @@ commands:
         payload:
           inference.stream.GenerationCompleted:
             generation_id: input.generation_id
+            stop_reason: input.stop_reason
         summary: The generation produced its last output.
       - name: wrong-state
         wrong_state: true
@@ -785,6 +799,37 @@ commands:
             sequence: input.sequence
             text: input.text
         summary: Tentative text exists; it is not yet safe to speak or publish.
+
+  # The producer delivers the model's refusal into its Active generation. A refusal makes no
+  # segment and moves nothing: the generation stays Active and completes as any other, so the
+  # refusal is told from an answer by its event alone.
+  # read from: docs/design/inference.md:366
+  - name: inference.stream.RefuseGeneration
+    input:
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: text
+        type: String
+    outcomes:
+      - name: unknown-generation
+        when_related: {via: input.generation_id, exists: false}
+        error: inference.stream.GenerationNotFound
+        payload:
+          inference.stream.GenerationNotFound:
+            generation_id: input.generation_id
+        summary: No generation carries this identity; no refusal was delivered.
+      - name: stale-generation
+        when_related: {via: input.generation_id, predicate: state != Active}
+        error: inference.stream.GenerationStateConflict
+        summary: The generation is not Active; the refusal is stale and was not delivered.
+      - name: refused
+        emits:
+          - inference.stream.GenerationRefused
+        payload:
+          inference.stream.GenerationRefused:
+            generation_id: input.generation_id
+            text: input.text
+        summary: The model refused to answer; the refusal is delivered, not spoken.
 
   # read from: docs/design/inference.md:615
   - name: inference.stream.CommitSegment
@@ -994,6 +1039,19 @@ events:
     fields:
       - name: generation_id
         type: inference.stream.GenerationId
+      - name: stop_reason
+        type: Optional<inference.stream.StopReason>
+
+  # The model refused to answer, and text is its refusal as it gave it. A refusal is not prose:
+  # it makes no segment, so no sink speaks it as an answer. The LLM node emits it from the
+  # model's refusal item when the turn carrying it ends, through RefuseGeneration.
+  # read from: docs/design/inference.md:366
+  - name: inference.stream.GenerationRefused
+    fields:
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: text
+        type: String
 
   - name: inference.stream.GenerationSuperseded
     fields:

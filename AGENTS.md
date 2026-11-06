@@ -114,3 +114,7 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
 - This repository is public. Committed text names no private repository, session or decision id,
   host detail or person.
 - No comments in `Taskfile.yml`, `Cargo.toml` or any other config or manifest file.
+- Backwards compatibility is not kept (owner decision, 2026-11-06). Change a public type, trait
+  or event where a fix needs it, update every caller in this repository in the same change, and
+  keep no deprecated alias, shim or compatibility field. The release that ships it is a minor
+  bump whose `CHANGELOG.md` entry has a `Breaking` section.
