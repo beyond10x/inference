@@ -11,7 +11,7 @@
 //! a frame boundary; a step taken between two instants of the arm is exact.
 
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use inference_duplex::inference_audio::{AudioFrame, SampleClockPosition};
@@ -73,6 +73,27 @@ const TTS_DELAY: Duration = Duration::from_millis(90);
 const ATTACK: Duration = Duration::from_millis(30);
 /// The time the playout takes to stop.
 const STOP_DELAY: Duration = Duration::from_millis(10);
+
+/// The wall-clock time a case may take: every case runs on a fake clock and takes milliseconds,
+/// so an arm that spins or hangs fails the case instead of holding the test binary.
+const DEADLINE: Duration = Duration::from_secs(20);
+
+/// Runs `case` on a thread of its own, failing once `DEADLINE` passed; a panic of the case
+/// fails it as well, its message printed by the case's thread.
+fn within_deadline(case: fn()) {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        case();
+        let _ = sender.send(());
+    });
+    match receiver.recv_timeout(DEADLINE) {
+        Ok(()) => {}
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the case did not end within {DEADLINE:?} of wall-clock time: it hangs")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the case failed; see its panic above"),
+    }
+}
 
 fn ms(millis: u64) -> Duration {
     Duration::from_millis(millis)
@@ -504,6 +525,12 @@ fn row(table: &str, name: &str) -> String {
 
 #[test]
 fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay() {
+    within_deadline(
+        a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay_case,
+    );
+}
+
+fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay_case() {
     let plan = Plan::new(utterance());
     let native = native_run(&plan);
     let (cascade, _) = cascade_run(&plan);
@@ -651,6 +678,10 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
 
 #[test]
 fn the_cascade_stops_its_playout_at_a_barge_in_after_its_detector_hears_it() {
+    within_deadline(the_cascade_stops_its_playout_at_a_barge_in_after_its_detector_hears_it_case);
+}
+
+fn the_cascade_stops_its_playout_at_a_barge_in_after_its_detector_hears_it_case() {
     let mut plan = Plan::new(utterance());
     plan.barge_in = Some(utterance());
     plan.barge_after = ms(20);
@@ -682,6 +713,10 @@ const SHORT_ANSWER: [&str; 4] = [
 /// client plays it, not to a stop the detector's attack decides, and nothing is stopped.
 #[test]
 fn barge_in_to_stop_ends_where_the_answer_ends_before_the_detector_hears_it() {
+    within_deadline(barge_in_to_stop_ends_where_the_answer_ends_before_the_detector_hears_it_case);
+}
+
+fn barge_in_to_stop_ends_where_the_answer_ends_before_the_detector_hears_it_case() {
     let mut plan = Plan::new(utterance());
     plan.barge_in = Some(utterance());
     plan.barge_after = ms(80);
@@ -723,6 +758,12 @@ impl CredentialSource for FakeKey {
 
 #[test]
 fn without_a_hosted_tts_the_cascade_arm_is_skipped_and_the_native_arm_still_reports() {
+    within_deadline(
+        without_a_hosted_tts_the_cascade_arm_is_skipped_and_the_native_arm_still_reports_case,
+    );
+}
+
+fn without_a_hosted_tts_the_cascade_arm_is_skipped_and_the_native_arm_still_reports_case() {
     let skipped = hosted_tts(
         Endpoint::new(),
         Arc::new(NoKey),
@@ -773,6 +814,12 @@ fn without_a_hosted_tts_the_cascade_arm_is_skipped_and_the_native_arm_still_repo
 
 #[test]
 fn a_cascade_measure_is_not_one_of_the_native_topology_and_the_shared_ones_are_both() {
+    within_deadline(
+        a_cascade_measure_is_not_one_of_the_native_topology_and_the_shared_ones_are_both_case,
+    );
+}
+
+fn a_cascade_measure_is_not_one_of_the_native_topology_and_the_shared_ones_are_both_case() {
     for measure in [
         Measure::FirstAudio,
         Measure::ResponseEnd,
