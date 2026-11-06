@@ -22,7 +22,9 @@
 //! key from `DEEPGRAM_API_KEY`, runs with the default providers of
 //! `inference_deepgram::agent::AgentConfig` in G.711 μ-law at 8 kHz
 //! (`realtime_voice::deepgram_config`), and reports no usage: it bills per minute, which no
-//! message carries. A provider whose model cannot be made or whose first session does not open is
+//! message carries. Phonic reads its key from `PHONIC_API_KEY`, runs `phonic-1` in 16-bit PCM at
+//! 16 kHz both ways with the demo instructions and tool (`phonic_config`), and reports no usage.
+//! A provider whose model cannot be made or whose first session does not open is
 //! skipped with the reason; `--skip <provider>=<reason>` skips one without trying it.
 //!
 //! The cascade arm, `cascade`, speaks with ElevenLabs when its key resolves from
@@ -49,6 +51,7 @@ use inference_openai::live_duplex::{OpenAiLive, OpenAiLiveSession};
 use inference_openai::{
     CredentialSource, Endpoint, EnvironmentSource, KeychainSource, OPENAI_KEY_NAME,
 };
+use inference_phonic::{PhonicConfig, PhonicEndpoint, PhonicSpeech};
 use realtime_voice::compare::{
     Billing, Clip, Comparison, Measured, Plan, Topology, VOICE_VARIABLE, hosted_tts,
 };
@@ -73,7 +76,7 @@ struct Args {
         long,
         value_enum,
         value_delimiter = ',',
-        default_value = "openai,openai-live,nova,elevenlabs,deepgram,cascade"
+        default_value = "openai,openai-live,nova,elevenlabs,deepgram,phonic,cascade"
     )]
     providers: Vec<Provider>,
     /// The runs of each provider.
@@ -99,6 +102,8 @@ enum Provider {
     Elevenlabs,
     /// A Deepgram Voice Agent session.
     Deepgram,
+    /// A Phonic speech-to-speech conversation.
+    Phonic,
     /// The local voice cascade's recogniser and LLM, speaking with ElevenLabs.
     Cascade,
 }
@@ -111,15 +116,19 @@ impl Provider {
             Self::Nova => "nova",
             Self::Elevenlabs => "elevenlabs",
             Self::Deepgram => "deepgram",
+            Self::Phonic => "phonic",
             Self::Cascade => "cascade",
         }
     }
 
     const fn topology(self) -> Topology {
         match self {
-            Self::Openai | Self::OpenaiLive | Self::Nova | Self::Elevenlabs | Self::Deepgram => {
-                Topology::Native
-            }
+            Self::Openai
+            | Self::OpenaiLive
+            | Self::Nova
+            | Self::Elevenlabs
+            | Self::Deepgram
+            | Self::Phonic => Topology::Native,
             Self::Cascade => Topology::Cascade,
         }
     }
@@ -142,6 +151,26 @@ const DEEPGRAM_REPORTED: Reported = Reported {
     output_text: false,
     output_audio: false,
 };
+
+/// What no Phonic message reports: every count.
+const PHONIC_REPORTED: Reported = Reported {
+    input_text: false,
+    input_audio: false,
+    input_cached: false,
+    output_text: false,
+    output_audio: false,
+};
+
+/// The session compare opens with Phonic: 16-bit PCM at 16 kHz both ways, Phonic's own
+/// turn-taking, responses and barge-in, the demo instructions and tool, and Phonic's default
+/// voice.
+fn phonic_config() -> SessionConfig {
+    SessionConfig {
+        voice: String::new(),
+        instructions: realtime_voice::INSTRUCTIONS.to_owned(),
+        ..realtime_voice::elevenlabs_config()
+    }
+}
 
 fn main() -> ExitCode {
     let args = Args::parse();
@@ -250,6 +279,18 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                         )
                     })
             }
+            Provider::Phonic => PhonicSpeech::from_env(PhonicEndpoint::new(), PhonicConfig::new())
+                .map_err(Box::<dyn Error>::from)
+                .and_then(|mut model| {
+                    measure(
+                        name,
+                        &mut model,
+                        phonic_config,
+                        &plan,
+                        args.runs,
+                        &Billing::tokens(PHONIC_REPORTED),
+                    )
+                }),
         };
         match outcome {
             Ok(runs) => comparison.ran_as(name, provider.topology(), runs),
