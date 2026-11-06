@@ -64,7 +64,8 @@ decision; each such decision is named in `src/protocol.rs` as inferred.
    the session on `error`.
 5. Whether `user_started_speaking` itself cuts the assistant, or only an interruption that
    `interrupted_response` then reports. The binding cuts the response at
-   `interrupted_response`, and drops audio after it until the next `assistant_started_speaking`.
+   `interrupted_response`, and drops audio after it until the next `assistant_started_speaking`
+   or `input_text`.
 6. Whether a response without `assistant_started_speaking` (a welcome message) exists. Audio
    while no response is in progress opens one.
 7. What follows `assistant_ended_conversation`: the binding completes the response in progress

@@ -46,12 +46,24 @@
 //! * Barge-in: `interrupted_response` cancels the response in progress (`ResponseCancelled`),
 //!   and its text, what was spoken before the cut, becomes that response's final transcript
 //!   ([`PhonicSession::final_transcript`]). Audio after it, up to the next
-//!   `assistant_started_speaking`, belongs to the cut response and is dropped
+//!   `assistant_started_speaking`, the end of the next user turn (`input_text`) or a tool call,
+//!   belongs to the cut response and is dropped
 //!   ([`PhonicSession::late_audio_dropped`]). That rule is inferred ([`crate::protocol`]).
 //! * A `tool_call` of a tool the session offers is proposed on the response in progress
-//!   (`SpeechToolCallProposed`); [`SpeechSessionHandle::submit_tool_result`] sends
-//!   `tool_call_output` with the result as it is. A call of a tool the session does not offer
-//!   fails the session as a provider error naming it ([`PhonicError::ToolNotOffered`]).
+//!   (`SpeechToolCallProposed`), which then completes: the call is executed `sync`, so Phonic
+//!   is silent until the answer, and the caller's time running the tool is not counted against
+//!   the provider's idle limit. [`SpeechSessionHandle::submit_tool_result`] sends
+//!   `tool_call_output` with the result as it is; what Phonic says next opens the next
+//!   response. Phonic waits at most the tool's output timeout for the answer, 5 s by default
+//!   (the binding sets none), and truncates an `output` whose JSON text exceeds 16,000
+//!   characters.
+//! * A call of a tool the session does not offer: when `config` names an agent, it may be one of
+//!   that agent's pre-defined WebSocket tools, which the session cannot run. It is answered at
+//!   once with a `tool_call_output` whose output is a short JSON error
+//!   ([`crate::protocol::tool_unavailable`]), the caller is told through the ledger's dropped
+//!   events (`SessionError::ToolNotOffered` in [`SessionLedger::dropped_events`]), and the
+//!   session goes on. Without a named agent no such tool can exist, and the call fails the
+//!   session as a provider error naming it ([`PhonicError::ToolNotOffered`]).
 //! * `error` fails the session as a provider error ([`PhonicError::Server`]); a close by the
 //!   server or a failed read fails it as a closed transport ([`PhonicError::Closed`],
 //!   [`PhonicError::Transport`]), the close code kept. [`PhonicSession::failure_cause`] keeps
@@ -357,6 +369,7 @@ impl NativeSpeechModel for PhonicSpeech {
             late_audio: 0,
             warnings: 0,
             assistant_ended: false,
+            agent_named: self.config.agent.is_some(),
             failure: None,
             closing: false,
         };
@@ -787,6 +800,8 @@ pub struct PhonicSession {
     late_audio: u64,
     warnings: u64,
     assistant_ended: bool,
+    /// The `config` named an agent, whose own WebSocket tools Phonic may call.
+    agent_named: bool,
     failure: Option<PhonicError>,
     /// The caller is closing: what would fail the session is not recorded.
     closing: bool,
@@ -1022,6 +1037,7 @@ impl PhonicSession {
                 }
             }
             ServerMessage::InputText { text, .. } => {
+                self.dropping = false;
                 let committed = self.ledger.input_committed(now);
                 self.or_drop(committed);
                 let heard = self.ledger.input_transcribed(text, now);
@@ -1038,7 +1054,17 @@ impl PhonicSession {
                     .iter()
                     .any(|tool| tool.name() == tool_name);
                 if !offered {
-                    self.fail_with(PhonicError::ToolNotOffered { name: tool_name });
+                    if !self.agent_named {
+                        self.fail_with(PhonicError::ToolNotOffered { name: tool_name });
+                        return;
+                    }
+                    let refusal = protocol::tool_output(
+                        &tool_call_id,
+                        &protocol::tool_unavailable(&tool_name),
+                    );
+                    self.ledger
+                        .dropped(SessionError::ToolNotOffered { name: tool_name });
+                    let _ = self.send(refusal);
                     return;
                 }
                 self.dropping = false;
@@ -1051,6 +1077,7 @@ impl PhonicSession {
                     now,
                 );
                 self.or_drop(proposed);
+                self.complete(now);
             }
             ServerMessage::Error { code, message } => {
                 self.fail_with(PhonicError::Server { code, message });

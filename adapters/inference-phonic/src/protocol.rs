@@ -40,8 +40,9 @@
 //! - **Whether `error` is fatal.** Only `warning` is called non-fatal; an `error` fails the
 //!   session (inferred).
 //! - **Barge-in.** Whether `user_started_speaking` itself cuts the assistant is not stated. The
-//!   response is cut at `interrupted_response`, the documented report of an interruption, and its
-//!   audio after it, up to the next `assistant_started_speaking`, is dropped (inferred).
+//!   response is cut at `interrupted_response`, the documented report of an interruption, and
+//!   its audio after it, up to the next `assistant_started_speaking` or `input_text`, is dropped
+//!   (inferred).
 //! - **A response without `assistant_started_speaking`.** Not stated; audio while no response is
 //!   in progress opens one.
 //! - **Keepalive and idle close.** No keepalive message is documented; the server closes after
@@ -426,6 +427,12 @@ pub fn tool_output(tool_call_id: &str, output: &Json) -> String {
         "output": output,
     })
     .to_string()
+}
+
+/// The `output` the binding answers a call of the tool `name` with when the session does not
+/// offer it: a short JSON error.
+pub fn tool_unavailable(name: &str) -> Json {
+    json!({"error": format!("the tool `{name}` is not available in this session")})
 }
 
 /// A message the server sent, as the binding reads it.
