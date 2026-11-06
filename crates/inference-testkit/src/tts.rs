@@ -30,10 +30,10 @@
 //! [`SynthesisHandle::acknowledge_playback`] with the [`PlaybackReceipt`] it makes by consuming
 //! them.
 //!
-//! Behind the `run` feature, `TtsNode` is the graph node of a voice pipeline over any
-//! synthesiser, the mock by default: it synthesises every committed segment an LLM node emits
-//! and, playing, acknowledges its playback through the sink double; given a `usage` port, it
-//! sends the synthesis's usage record there.
+//! Behind the `run` feature, `TtsNode` is `inference-pipeline`'s graph node of a voice pipeline
+//! over any synthesiser, the mock by default: it synthesises every committed segment an LLM node
+//! emits and, playing, acknowledges its playback through the sink double, which implements the
+//! pipeline's `PlaybackSink`; given a `usage` port, it sends the synthesis's usage record there.
 //!
 //! It declares a maximum concurrency of one and holds to it: while one synthesis of a
 //! synthesiser, or of a clone of it, runs, a second start is refused with
@@ -76,6 +76,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use inference_pipeline::nodes::tts::PlaybackSink;
 use inference_tts::inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
 use inference_tts::inference_core::model::{
     Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
@@ -502,5 +503,23 @@ impl MockSink {
             .expect("an acknowledged segment is held")
             .snapshot();
         Ok((played, event))
+    }
+}
+
+/// The sink a playing TTS node of the testkit plays through: it plays nothing, and acknowledges
+/// a segment once it was given every frame of it.
+impl PlaybackSink for MockSink {
+    type Refused = SinkRefused;
+
+    fn give(&mut self, audio: SegmentAudio) {
+        Self::give(self, audio);
+    }
+
+    fn acknowledge<H: SynthesisHandle>(
+        &mut self,
+        handle: &mut H,
+        segment_id: SegmentId,
+    ) -> Result<(SegmentSnapshot, AudioPlayed), SinkRefused> {
+        Self::acknowledge(self, handle, segment_id)
     }
 }

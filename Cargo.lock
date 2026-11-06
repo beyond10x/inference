@@ -2407,8 +2407,11 @@ version = "0.23.0"
 dependencies = [
  "inference-audio",
  "inference-core",
+ "inference-llm",
+ "inference-stt",
  "inference-text",
  "inference-tools",
+ "inference-tts",
  "proptest",
  "serde",
  "serde_json",

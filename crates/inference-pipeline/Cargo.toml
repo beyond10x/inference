@@ -10,8 +10,11 @@ repository.workspace = true
 [dependencies]
 inference-audio = { path = "../inference-audio" }
 inference-core = { path = "../inference-core" }
+inference-llm = { path = "../inference-llm", features = ["tools"] }
+inference-stt = { path = "../inference-stt" }
 inference-text = { path = "../inference-text" }
 inference-tools = { path = "../inference-tools" }
+inference-tts = { path = "../inference-tts" }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
