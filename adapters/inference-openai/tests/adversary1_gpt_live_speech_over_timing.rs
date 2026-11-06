@@ -214,9 +214,14 @@ fn created(events: &[SessionEvent]) -> usize {
         .count()
 }
 
-/// The user interrupts, the model yields for 300 ms (less than the 800 ms gap) and goes on, on
-/// the same response, and the user interrupts again. Each interruption is speech over what the
-/// response has spoken since the one before; the second stops nothing today.
+/// The user interrupts, the model yields for 300 ms (less than the 800 ms gap) and goes on, and
+/// the user interrupts again. Each interruption is speech over what the model has spoken since
+/// the one before, and neither is lost.
+///
+/// story:cut-response-audio-is-told-from-the-next-words: the model's words after the first
+/// interruption, starting after both its cut output and the user's speech ended, are a new
+/// response, so the replay reads two responses and the second interruption is speech over the
+/// one carrying the resumed words.
 #[test]
 fn a_second_interruption_of_the_same_response_is_reported() {
     let mut events = vec![
@@ -234,13 +239,35 @@ fn a_second_interruption_of_the_same_response_is_reported() {
         heard("stop", 2_100, 2_300),
     ];
     events.extend(gap());
-    let events = Server::replay(events).events(1);
+    let events = Server::replay(events).events(2);
 
-    assert_eq!(created(&events), 1, "one response: {events:#?}");
+    assert_eq!(
+        created(&events),
+        2,
+        "story:cut-response-audio-is-told-from-the-next-words: the cut answer, then the resumed \
+         words on a response of their own: {events:#?}"
+    );
     assert_eq!(
         speech_started(&events),
         vec![at(1_250), at(2_100)],
         "both interruptions of the answer are speech over it: {events:#?}"
+    );
+    let second = |which: fn(&SessionEvent) -> bool| {
+        events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| which(event))
+            .map(|(index, _)| index)
+            .nth(1)
+    };
+    let resumed = second(|event| matches!(event, SessionEvent::ResponseCreated(_)));
+    let second_speech = second(|event| matches!(event, SessionEvent::SpeechStarted(_)));
+    assert!(
+        resumed
+            .zip(second_speech)
+            .is_some_and(|(created, spoken)| created < spoken),
+        "story:cut-response-audio-is-told-from-the-next-words: the second interruption is \
+         speech over the response carrying the resumed words: {events:#?}"
     );
 }
 
