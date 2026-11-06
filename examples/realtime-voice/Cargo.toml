@@ -27,6 +27,7 @@ clap = { version = "4", default-features = false, features = ["derive", "error-c
 inference-audio-device = { path = "../../adapters/inference-audio-device" }
 inference-aws = { path = "../../adapters/inference-aws", features = ["duplex"] }
 inference-deepgram = { path = "../../adapters/inference-deepgram", features = ["duplex"] }
+inference-deepslate = { path = "../../adapters/inference-deepslate" }
 inference-elevenlabs = { path = "../../adapters/inference-elevenlabs", features = ["duplex"] }
 inference-openai = { path = "../../adapters/inference-openai", features = ["gpt-live", "live"] }
 inference-testkit = { path = "../../crates/inference-testkit", features = ["duplex", "llm", "stt", "tts"] }
