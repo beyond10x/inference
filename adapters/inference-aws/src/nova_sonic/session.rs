@@ -76,6 +76,7 @@ impl Session {
                 decoder: Decoder::default(),
                 read_timeout: config.read_timeout,
                 activity,
+                stalled: None,
             },
         })
     }
@@ -210,6 +211,8 @@ pub struct SessionReader {
     decoder: Decoder,
     read_timeout: Duration,
     activity: Arc<Activity>,
+    /// When the reader last reported a stall: the clock restarts there.
+    stalled: Option<Instant>,
 }
 
 /// When a frame last crossed the session, either way: the start of the stall clock.
@@ -243,13 +246,16 @@ impl SessionReader {
     /// [`NovaSonicError::Stall`] when the session was quiet for the read timeout: the clock runs
     /// from the later of the last frame the writer sent and the last frame the reader received.
     /// While the user speaks the writer sends audio, so a turn longer than the read timeout is not
-    /// a stall; the clock counts once both sides are quiet. A stall leaves the reader usable.
+    /// a stall; the clock counts once both sides are quiet. A stall leaves the reader usable and
+    /// restarts the clock: over a session that stays quiet, the next read reports the next stall
+    /// one read timeout later, not at once.
     pub async fn recv(&mut self) -> Result<Option<OutputEvent>, NovaSonicError> {
         let frame = loop {
-            let deadline = self.activity.last() + self.read_timeout;
+            let deadline = self.deadline();
             match tokio::time::timeout_at(deadline.into(), self.output.recv()).await {
                 Ok(frame) => break frame,
-                Err(_) if self.activity.last() + self.read_timeout <= Instant::now() => {
+                Err(_) if self.deadline() <= Instant::now() => {
+                    self.stalled = Some(Instant::now());
                     return Err(NovaSonicError::Stall {
                         after: self.read_timeout,
                     });
@@ -263,5 +269,13 @@ impl SessionReader {
             Some(Err(error)) => Ok(Some(OutputEvent::Error(error))),
             Some(Ok(bytes)) => self.decoder.decode(&bytes).map(Some),
         }
+    }
+
+    /// When the session counts as stalled: one read timeout after the later of the last frame
+    /// either way and the last stall reported.
+    fn deadline(&self) -> Instant {
+        let last = self.activity.last();
+        let from = self.stalled.map_or(last, |stalled| stalled.max(last));
+        from + self.read_timeout
     }
 }

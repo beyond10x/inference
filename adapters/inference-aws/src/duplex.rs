@@ -41,7 +41,9 @@
 //!   end. What waits for a next response that never begins is recorded at the session's end, by
 //!   close or failure, before its end event, as usage of the session naming no response, when
 //!   a count of it is above 0 or left out;
-//! - a service error fails the session, a closed stream fails it as `transport_closed`;
+//! - a service error fails the session, a closed stream fails it as `transport_closed`, and an
+//!   audio block at a rate other than the session's output format fails it as `provider_error`,
+//!   the rate never substituted;
 //! - an event is read field by field: one without a field the binding does not need keeps its
 //!   meaning, so a `completionEnd` without its reason still ends the response in progress, and a
 //!   `contentEnd` or interruption notice without its `contentId` applies to the response in
@@ -84,6 +86,7 @@ use inference_duplex::{
     TurnDetection, TurnSensitivity, UsageTotal,
 };
 use tokio::runtime::Runtime;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::nova_sonic::{
@@ -103,6 +106,15 @@ pub const CLAIMS: [Capability; 5] = [
     Capability::ToolCalling,
     Capability::Interruptible,
 ];
+
+/// The longest [`NativeSpeechModel::open`] waits for the provider's stream to open, from the
+/// connect to the service's response headers, unless [`NovaSonicSpeech::with_open_timeout`] sets
+/// another; past it, `open` fails as `transport_closed`.
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Arrivals the binding holds ahead of a caller that does not call `next_event`. The reader waits
+/// while that many are held, and the client's own output buffer then fills behind it.
+const ARRIVALS_CAPACITY: usize = 128;
 
 /// Whether `model_id` names Nova 2 Sonic, whose session start takes an endpointing sensitivity;
 /// a model id or an inference-profile ARN naming `nova-2-sonic`.
@@ -222,6 +234,7 @@ pub struct NovaSonicSpeech<C = NovaSonic> {
     adapter: Adapter,
     capabilities: SpeechCapabilities,
     pool: Arc<Pool>,
+    open_timeout: Duration,
 }
 
 impl NovaSonicSpeech<NovaSonic> {
@@ -277,7 +290,21 @@ impl<C: Connector> NovaSonicSpeech<C> {
             adapter,
             capabilities,
             pool,
+            open_timeout: OPEN_TIMEOUT,
         }
+    }
+
+    /// The model with `timeout` as the longest a session's opening may take, from the connect
+    /// to the open stream, in place of [`OPEN_TIMEOUT`].
+    #[must_use]
+    pub fn with_open_timeout(mut self, timeout: Duration) -> Self {
+        self.open_timeout = timeout;
+        self
+    }
+
+    /// The longest a session's opening may take.
+    pub fn open_timeout(&self) -> Duration {
+        self.open_timeout
     }
 
     /// The connector sessions are opened through.
@@ -332,7 +359,10 @@ impl<C: Connector> NativeSpeechModel for NovaSonicSpeech<C> {
     }
 
     /// Opens a session once the [`SessionLedger`] admits `config`, then connects. A connection
-    /// the service refused fails as `rejected`, one that never reached it as `transport_closed`.
+    /// the service refused fails as `rejected`, one that never reached it as `transport_closed`,
+    /// and so does one that did not open within the open timeout ([`OPEN_TIMEOUT`] unless
+    /// [`NovaSonicSpeech::with_open_timeout`] set another): a server that accepts the connection
+    /// and never answers does not hold `open`.
     fn open(&mut self, config: SessionConfig) -> Result<NovaSonicSpeechSession, OpenError> {
         let client = Self::client_config(&config);
         let (ledger, _) = SessionLedger::open(
@@ -342,18 +372,26 @@ impl<C: Connector> NativeSpeechModel for NovaSonicSpeech<C> {
             config,
             Instant::now(),
         )?;
+        let deadline = self.open_timeout;
+        let connect = self.connector.connect(client);
         let session = self
             .pool
-            .run(self.connector.connect(client))
+            .run(async move { tokio::time::timeout(deadline, connect).await })
             .ok_or_else(|| {
                 OpenError::Failed(failure(
                     SessionFailureKind::TransportClosed,
                     "the runtime stopped while connecting",
                 ))
             })?
+            .map_err(|_| {
+                OpenError::Failed(failure(
+                    SessionFailureKind::TransportClosed,
+                    &format!("the provider's stream did not open within {deadline:?}"),
+                ))
+            })?
             .map_err(|error| OpenError::Failed(open_failure(&error)))?;
         let Session { writer, reader } = session;
-        let (arrived, arrivals) = std_mpsc::channel();
+        let (arrived, arrivals) = arrival_channel(ARRIVALS_CAPACITY);
         let (commands, queued) = tokio_mpsc::unbounded_channel();
         self.pool.spawn(forward(reader, arrived.clone()));
         self.pool.spawn(write(writer, queued, arrived));
@@ -413,8 +451,82 @@ impl Received {
     }
 }
 
-/// Forwards the reader's events until the stream ends or the session is gone.
-async fn forward(mut reader: SessionReader, arrived: std_mpsc::Sender<Arrival>) {
+/// The sending side of the arrivals: the reader's take one place of room each; the writer's one
+/// failure report takes none, so that it never waits on a caller that stopped reading.
+#[derive(Debug, Clone)]
+struct Arrived {
+    sender: std_mpsc::Sender<(Arrival, bool)>,
+    room: Arc<Semaphore>,
+}
+
+impl Arrived {
+    /// Sends `arrival` once there is room for it; `false` once the session is gone.
+    async fn send(&self, arrival: Arrival) -> bool {
+        let Ok(place) = self.room.acquire().await else {
+            return false;
+        };
+        if self.sender.send((arrival, true)).is_err() {
+            return false;
+        }
+        place.forget();
+        true
+    }
+
+    /// Sends `arrival` at once, taking no room: for the writer's failure, sent once at most.
+    fn send_now(&self, arrival: Arrival) {
+        let _ = self.sender.send((arrival, false));
+    }
+}
+
+/// The receiving side of the arrivals: each arrival taken gives its place back. Dropped with the
+/// session, it closes the room, so a sender waiting for a place ends.
+#[derive(Debug)]
+struct Arrivals {
+    receiver: std_mpsc::Receiver<(Arrival, bool)>,
+    room: Arc<Semaphore>,
+}
+
+impl Arrivals {
+    fn try_recv(&self) -> Result<Arrival, std_mpsc::TryRecvError> {
+        let taken = self.receiver.try_recv()?;
+        Ok(self.give_back(taken))
+    }
+
+    fn recv_timeout(&self, wait: Duration) -> Result<Arrival, RecvTimeoutError> {
+        let taken = self.receiver.recv_timeout(wait)?;
+        Ok(self.give_back(taken))
+    }
+
+    fn give_back(&self, (arrival, placed): (Arrival, bool)) -> Arrival {
+        if placed {
+            self.room.add_permits(1);
+        }
+        arrival
+    }
+}
+
+impl Drop for Arrivals {
+    fn drop(&mut self) {
+        self.room.close();
+    }
+}
+
+/// Arrivals bounded at `capacity`: the sender waits while that many are held.
+fn arrival_channel(capacity: usize) -> (Arrived, Arrivals) {
+    let (sender, receiver) = std_mpsc::channel();
+    let room = Arc::new(Semaphore::new(capacity));
+    (
+        Arrived {
+            sender,
+            room: Arc::clone(&room),
+        },
+        Arrivals { receiver, room },
+    )
+}
+
+/// Forwards the reader's events until the stream ends or the session is gone, waiting while the
+/// arrivals are at their bound.
+async fn forward(mut reader: SessionReader, arrived: Arrived) {
     loop {
         let what = match reader.recv().await {
             Ok(Some(event)) => Received::Event(event),
@@ -428,7 +540,7 @@ async fn forward(mut reader: SessionReader, arrived: std_mpsc::Sender<Arrival>) 
             at: Instant::now(),
             what,
         };
-        if arrived.send(arrival).is_err() || ended {
+        if !arrived.send(arrival).await || ended {
             return;
         }
     }
@@ -438,7 +550,7 @@ async fn forward(mut reader: SessionReader, arrived: std_mpsc::Sender<Arrival>) 
 async fn write(
     mut writer: SessionWriter,
     mut queued: tokio_mpsc::UnboundedReceiver<Command>,
-    arrived: std_mpsc::Sender<Arrival>,
+    arrived: Arrived,
 ) {
     while let Some(command) = queued.recv().await {
         let sent = match command {
@@ -453,7 +565,7 @@ async fn write(
             }
         };
         if let Err(error) = sent {
-            let _ = arrived.send(Arrival {
+            arrived.send_now(Arrival {
                 at: Instant::now(),
                 what: Received::Failed(error),
             });
@@ -506,7 +618,6 @@ struct Block {
     role: Role,
     kind: ContentKind,
     stage: Option<GenerationStage>,
-    rate: Option<u32>,
     response: Option<ResponseId>,
 }
 
@@ -671,7 +782,7 @@ struct Turns {
 pub struct NovaSonicSpeechSession {
     ledger: SessionLedger,
     commands: tokio_mpsc::UnboundedSender<Command>,
-    arrivals: std_mpsc::Receiver<Arrival>,
+    arrivals: Arrivals,
     turns: Turns,
     _pool: Arc<Pool>,
 }
@@ -794,12 +905,28 @@ impl NovaSonicSpeechSession {
         }
     }
 
+    /// Starts a content block. An audio block at a rate other than the session's output format
+    /// fails the session as `provider_error`: every frame of it would be refused, and the caller
+    /// asked for that rate.
     fn content_start(&mut self, start: OutputContentStart, at: Instant) {
+        let asked = self.ledger.session().output_format().sample_rate.get();
+        if let Some(rate) = start.audio_rate_hertz
+            && rate != asked
+        {
+            let refused = self.ledger.fail(failure(
+                SessionFailureKind::ProviderError,
+                &format!(
+                    "the provider answered with audio at {rate} Hz where the session asked for \
+                     {asked} Hz"
+                ),
+            ));
+            self.or_drop(refused);
+            return;
+        }
         let mut block = Block {
             role: start.role,
             kind: start.kind,
             stage: start.stage,
-            rate: start.audio_rate_hertz,
             response: None,
         };
         match (&block.role, &block.kind) {
@@ -872,10 +999,7 @@ impl NovaSonicSpeechSession {
         let Some(response) = block.response else {
             return;
         };
-        let mut format = *self.ledger.session().output_format();
-        if let Some(rate) = block.rate.and_then(NonZeroU32::new) {
-            format.sample_rate = rate;
-        }
+        let format = *self.ledger.session().output_format();
         if !audio.pcm.len().is_multiple_of(2) {
             return;
         }
@@ -1165,6 +1289,44 @@ mod tests {
             speech: Some(speech),
             text: Some(text),
         }
+    }
+
+    /// story:nova-sonic-stall-and-bounds, W3: over a session quiet past its idle limit with
+    /// nothing awaited, the reader forwards one quiet arrival per idle limit, counted over a fixed
+    /// window, and does not spin.
+    #[test]
+    fn a_quiet_session_forwards_one_quiet_arrival_per_idle_limit() {
+        let pool = Pool::start().expect("the runtime starts");
+        let (arrived, arrivals) = arrival_channel(ARRIVALS_CAPACITY);
+        let (input, _sent) = tokio_mpsc::channel(64);
+        let (_frames, output) = tokio_mpsc::channel(4);
+        let mut client = nova_sonic::SessionConfig::new("quiet");
+        client.read_timeout = Duration::from_millis(50);
+        let session = pool
+            .run(async move { Session::open(&client, input, output).await })
+            .expect("the runtime runs")
+            .expect("the session opens over channels");
+        let Session { writer, reader } = session;
+        pool.spawn(forward(reader, arrived));
+        let window = Duration::from_millis(500);
+        let started = Instant::now();
+        let mut quiet = 0_u32;
+        while let Some(remaining) = window.checked_sub(started.elapsed()) {
+            match arrivals.recv_timeout(remaining) {
+                Ok(Arrival {
+                    what: Received::Quiet,
+                    ..
+                }) => quiet += 1,
+                Ok(other) => panic!("a quiet session forwards only quiet: {other:?}"),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => panic!("the reader stopped"),
+            }
+        }
+        drop(writer);
+        assert!(
+            (5..=11).contains(&quiet),
+            "story:nova-sonic-stall-and-bounds: {quiet} quiet arrivals in {window:?} at a 50 ms idle limit"
+        );
     }
 
     fn value(tally: &Tally, kind: QuantityKind) -> Option<i64> {
