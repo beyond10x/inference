@@ -1,0 +1,69 @@
+type: ess-scenario/1
+domain: inference.model
+scenario: adapter-publishes-its-descriptor-whole
+summary: An adapter declared with two voices, two codecs, every limit and two rate limits whose limit and window differ is published by the Adapters view with that descriptor, whole and in order.
+arrange:
+  - instance: model
+    entity: inference.model.Model
+  - instance: adapter
+    entity: inference.model.Adapter
+timeline:
+  - at: 2026-01-05T09:00:00Z
+    command: inference.model.DeclareModel
+    input:
+      family: speech
+      checkpoint: hosted
+      code_license: none
+      weight_license: none
+      checksum: none
+      input_modalities: [Text]
+      output_modalities: [Audio]
+      provenance: hosted endpoint
+      source_revision: r1
+    outcome: declared
+    capture: {instance: model, event: inference.model.ModelDeclared, field: model_id}
+  - at: 2026-01-05T09:00:01Z
+    command: inference.model.DeclareAdapter
+    input:
+      model_id: {$instance: model}
+      backend: speech
+      contract_revision: r1
+      execution_form: hosted_service
+      locality: external_provider
+      capabilities: [output_streaming, incremental_input]
+      max_concurrency: 3
+      descriptor:
+        voices: [calm, bright, low]
+        codecs: [pcm16, opus]
+        context_tokens: 32000
+        max_input_duration_ms: 600000
+        max_output_duration_ms: 120000
+        token_budget: 4096
+        state_scope: session
+        rate_limits:
+          - {unit: requests, limit: 60, window_ms: 60000}
+          - {unit: characters, limit: 5000, window_ms: 1000}
+    outcome: declared
+    capture: {instance: adapter, event: inference.model.AdapterDeclared, field: adapter_id}
+assert:
+  - view: inference.model.Adapters
+    contains:
+      adapter_id: {$instance: adapter}
+      model_id: {$instance: model}
+      backend: speech
+      contract_revision: r1
+      execution_form: hosted_service
+      locality: external_provider
+      capabilities: [output_streaming, incremental_input]
+      max_concurrency: 3
+      descriptor:
+        voices: [calm, bright, low]
+        codecs: [pcm16, opus]
+        context_tokens: 32000
+        max_input_duration_ms: 600000
+        max_output_duration_ms: 120000
+        token_budget: 4096
+        state_scope: session
+        rate_limits:
+          - {unit: requests, limit: 60, window_ms: 60000}
+          - {unit: characters, limit: 5000, window_ms: 1000}

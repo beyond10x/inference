@@ -285,7 +285,7 @@ impl Microphone {
                 let timestamp = i64::try_from(self.position).expect("within i64");
                 self.position += u64::from(sample_count);
                 self.envelope(
-                    "inference.audio.AudioFrame",
+                    "inference.audio.AudioChunk",
                     timestamp,
                     VoicePayload::Audio(frame),
                 )
@@ -302,7 +302,7 @@ impl Microphone {
                 let timestamp = i64::try_from(self.position).expect("within i64");
                 self.position += u64::from(frame.sample_count);
                 self.envelope(
-                    "inference.audio.AudioFrame",
+                    "inference.audio.AudioChunk",
                     timestamp,
                     VoicePayload::Audio(frame),
                 )

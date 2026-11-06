@@ -14,7 +14,7 @@ use std::task::{Context, Poll, Waker};
 use inference_core::generation::{GenerationRefused, StopReason as Stop};
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_core::usage::{Quantity, QuantityKind, UsageRecorded};
 use inference_llm::llm_core::{
@@ -159,6 +159,7 @@ fn start(answer: Answer, capabilities: Vec<Capability>) -> GenerationHandle {
         locality: Locality::SameProcess,
         capabilities,
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive")
     .0;

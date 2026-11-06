@@ -597,7 +597,7 @@ fn the_cascade_on_mocks_executes_the_read_only_tool_and_speaks_its_result() {
 
     let frames = utterance().into_iter().map(|frame| {
         (
-            "inference.audio.AudioFrame".to_owned(),
+            "inference.audio.AudioChunk".to_owned(),
             None,
             Payload::Audio(frame),
         )

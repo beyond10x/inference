@@ -1888,6 +1888,7 @@ mod tests {
                     ("locality", text("same_process")),
                     ("capabilities", list(&["output_streaming"])),
                     ("max_concurrency", number(1.0)),
+                    ("descriptor", empty_descriptor()),
                 ],
             ),
             "adapter_id",
@@ -2106,6 +2107,16 @@ mod tests {
         );
         assert_eq!(observed[0].payload["exposure_id"], exposure_id);
         assert_eq!(observed[0].payload.len(), 4);
+    }
+
+    /// A descriptor that declares nothing: its three lists, each empty, as the wire requires.
+    fn empty_descriptor() -> Node {
+        Node::Map(
+            ["voices", "codecs", "rate_limits"]
+                .into_iter()
+                .map(|list| (list.to_owned(), Node::Seq(Vec::new())))
+                .collect(),
+        )
     }
 
     fn port_descriptor(name: &str) -> Node {

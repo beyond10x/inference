@@ -511,7 +511,7 @@ fn the_usage_of_a_recognition_reaches_the_exposed_usage_egress_with_run_and_node
     for frame in frames(FRAMES) {
         let at = i64::try_from(frame.position.get()).expect("a short clip");
         let envelope = sending_audio.envelope(
-            "inference.audio.AudioFrame",
+            "inference.audio.AudioChunk",
             at,
             Timebase::AudioFrameTime,
             Payload::Audio(frame),

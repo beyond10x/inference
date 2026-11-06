@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use inference_duplex::inference_audio::{AudioEncoding, AudioFormat};
 use inference_duplex::inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_duplex::{
     ResponseId, SessionConfig, SessionEvent, SessionFailureKind, SessionLedger, SpeechCapabilities,
@@ -41,6 +42,7 @@ fn open(now: Instant) -> SessionLedger {
             locality: Locality::ExternalProvider,
             capabilities: vec![Capability::ConcurrentInputOutput],
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         },
     )
     .expect("a positive concurrency")

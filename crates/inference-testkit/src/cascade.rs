@@ -114,7 +114,7 @@ pub const VAD: VadConfig = VadConfig {
 /// What the edges and exposures of the cascade carry.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CascadePayload {
-    /// A frame of audio; its envelope's `kind` is `inference.audio.AudioFrame`.
+    /// A frame of audio; its envelope's `kind` is `inference.audio.AudioChunk`.
     Audio(AudioFrame),
     /// An `inference.stream` event; its envelope's `kind` is the event's declared name.
     Stream(StreamEvent),

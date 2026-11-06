@@ -106,6 +106,7 @@ fn declare_adapter(
         locality: input.named("locality")?,
         capabilities: input.named_list("capabilities")?,
         max_concurrency: input.integer("max_concurrency")?,
+        descriptor: typed(DECLARE_ADAPTER, "descriptor", &mut input)?,
     };
     input.finish()?;
     Ok(match domain.declare_adapter(declare) {
@@ -201,8 +202,8 @@ fn wire_json(node: &Node) -> Value {
     }
 }
 
-/// The node of a value through its JSON form: a list of strings, formats or evidence, or a
-/// resource profile.
+/// The node of a value through its JSON form: a list of strings, formats or evidence, a
+/// resource profile or an adapter descriptor.
 fn json_node<T: Serialize>(value: &T) -> Result<Node, TargetError> {
     let value = serde_json::to_value(value)
         .map_err(|error| TargetError::unavailable("writing a value", error.to_string()))?;
@@ -360,6 +361,7 @@ fn adapters_row(row: &AdaptersRow) -> Result<ViewRow, TargetError> {
             "max_concurrency".to_owned(),
             integer_node(row.max_concurrency),
         ),
+        ("descriptor".to_owned(), json_node(&row.descriptor)?),
     ]))
 }
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.23.0] — 2026-11-06
+
+### Breaking
+
+- Every envelope of a frame of audio, synthesized or captured, has kind
+  `inference.audio.AudioChunk`, the event the specification declares (was
+  `inference.audio.AudioFrame`, the type). `inference-audio-device`: `node::AUDIO_FRAME` is
+  renamed `node::AUDIO_CHUNK`.
+- `inference-facade`: `SessionEvent` has the new variant `GenerationRefused` and `HistoryKind`
+  the new variant `AssistantRefusal` (`HistoryKind::ALL` has four entries).
+- `inference-core`: `DeclareAdapter` has a required `descriptor: AdapterDescriptor` field, and
+  `Adapter::descriptor()` and the `inference.model.Adapters` view carry it; the descriptor's
+  `voices`, `codecs` and `rate_limits` are required on the wire, as the specification declares
+  them. The adapter, not the capability record, carries the descriptor.
+
+### Added
+
+- `inference-facade`: `SessionEvent::GenerationRefused` delivers a model's refusal (its
+  generation and text) to the application, and the session records it in its history as
+  `assistant_refusal`. An interrupt cuts it with its generation. `inference-testkit` forwards it
+  instead of dropping it, and `MockGenerator::refusing` scripts a refusing model.
+
+### Fixed
+
+- `inference-facade`: an event of an interrupted generation that arrives after the generation's
+  end, such as a refusal kept across a cancel or supersede, is no longer delivered; the session
+  remembers the last 256 cut generations past their end.
+- `inference-deepgram` tests: the agent release test gives a session 2 s to open instead of
+  400 ms, which a loaded machine exceeded.
+
 ## [0.22.0] — 2026-11-06
 
 ### Breaking

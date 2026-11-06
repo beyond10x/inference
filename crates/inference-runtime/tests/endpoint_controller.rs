@@ -280,7 +280,7 @@ fn start(commands: impl TurnCommands) -> Running {
     let run_id = RunId::generate();
     let frames = tone_silence_tone_silence().into_iter().map(|frame| {
         (
-            "inference.audio.AudioFrame".to_owned(),
+            "inference.audio.AudioChunk".to_owned(),
             None,
             Payload::Audio(frame),
         )

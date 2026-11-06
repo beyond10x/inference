@@ -84,7 +84,7 @@ use futures_util::{SinkExt, StreamExt};
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
 use inference_duplex::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
@@ -224,6 +224,7 @@ impl PhonicSpeech {
             locality: Locality::ExternalProvider,
             capabilities: claims(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .map(|(adapter, _)| adapter)
         .unwrap_or_else(|_| unreachable!("a concurrency of one is positive"));

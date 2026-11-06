@@ -2,8 +2,8 @@
 //! caller assigns.
 
 use inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, DeclareModel, ExecutionForm, Locality,
-    Modality, Model, ModelId, NonPositiveConcurrency,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, DeclareModel, ExecutionForm,
+    Locality, Modality, Model, ModelId, NonPositiveConcurrency,
 };
 use uuid::Uuid;
 
@@ -30,6 +30,7 @@ fn declare_adapter(model_id: ModelId, max_concurrency: i64) -> DeclareAdapter {
         locality: Locality::SameProcess,
         capabilities: vec![Capability::OutputStreaming],
         max_concurrency,
+        descriptor: AdapterDescriptor::default(),
     }
 }
 

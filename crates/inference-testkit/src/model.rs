@@ -25,10 +25,10 @@ use uuid::Uuid;
 
 use inference_core::inference_audio::AudioFormat;
 use inference_core::model::{
-    Adapter, AdapterDeclared, AdapterId, AdapterNotFound, Capability, CapabilityEvidence,
-    CapabilityRecord, CapabilityRecordDeclared, CapabilityRecordId, DeclareAdapter,
-    DeclareCapabilityRecord, DeclareModel, ExecutionForm, Locality, Modality, Model, ModelDeclared,
-    ModelId, ModelNotFound, NonPositiveConcurrency, ResourceProfile,
+    Adapter, AdapterDeclared, AdapterDescriptor, AdapterId, AdapterNotFound, Capability,
+    CapabilityEvidence, CapabilityRecord, CapabilityRecordDeclared, CapabilityRecordId,
+    DeclareAdapter, DeclareCapabilityRecord, DeclareModel, ExecutionForm, Locality, Modality,
+    Model, ModelDeclared, ModelId, ModelNotFound, NonPositiveConcurrency, ResourceProfile,
 };
 
 /// The capability record of an adapter, loaded from its JSON file and checked against the
@@ -220,6 +220,7 @@ pub struct AdaptersRow {
     pub locality: Locality,
     pub capabilities: Vec<Capability>,
     pub max_concurrency: i64,
+    pub descriptor: AdapterDescriptor,
 }
 
 /// A row of the view `inference.model.CapabilityRecords`.
@@ -401,6 +402,7 @@ impl ModelDomain {
                 locality: adapter.locality(),
                 capabilities: adapter.capabilities().to_vec(),
                 max_concurrency: adapter.max_concurrency(),
+                descriptor: adapter.descriptor().clone(),
             })
             .collect()
     }
@@ -429,9 +431,9 @@ impl ModelDomain {
 #[cfg(test)]
 mod tests {
     use inference_core::model::{
-        AdapterId, AdapterNotFound, Capability, CapabilityEvidence, DeclareAdapter,
-        DeclareCapabilityRecord, DeclareModel, ExecutionForm, Locality, Modality, ModelId,
-        ModelNotFound, NonPositiveConcurrency, ResourceProfile,
+        AdapterDescriptor, AdapterId, AdapterNotFound, Capability, CapabilityEvidence,
+        DeclareAdapter, DeclareCapabilityRecord, DeclareModel, ExecutionForm, Locality, Modality,
+        ModelId, ModelNotFound, NonPositiveConcurrency, ResourceProfile,
     };
 
     use super::{
@@ -462,6 +464,7 @@ mod tests {
             locality: Locality::SameProcess,
             capabilities: vec![Capability::OutputStreaming],
             max_concurrency,
+            descriptor: AdapterDescriptor::default(),
         }
     }
 
@@ -546,6 +549,7 @@ mod tests {
                 locality: Locality::SameProcess,
                 capabilities: vec![Capability::OutputStreaming],
                 max_concurrency: 2,
+                descriptor: AdapterDescriptor::default(),
             }]
         );
     }

@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 use inference_core::generation::{Generation, GenerationState, GenerationStateConflict};
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_llm::llm_core::{Item, TurnRequest};
 use inference_llm::{
@@ -33,6 +33,7 @@ fn started() -> GenerationOutput {
             Capability::ConcurrentInputOutput,
         ],
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive")
     .0;

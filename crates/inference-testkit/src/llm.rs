@@ -12,7 +12,9 @@
 //! scripted to ([`MockGenerator::reporting`]), so the wrapper's record of it counts every token
 //! unknown. Scripted to hold a turn ([`MockGenerator::holding`]), the model streams that turn's
 //! text and then waits for its cancel, failing with the turn's usage as counts not final, as a
-//! call cut short in the middle of its output does. The model declares to `llm` that it streams
+//! call cut short in the middle of its output does. Scripted to refuse
+//! ([`MockGenerator::refusing`]), it answers the first turn of a conversation with `llm`'s refusal
+//! item and no delta. The model declares to `llm` that it streams
 //! exactly when its configuration claims `output_streaming` ([`MockConfiguration::declared`]), so
 //! the wrapper accepts the claims. What a generation
 //! delivers follows from what its configuration claims, as the wrapper decides it:
@@ -50,7 +52,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_llm::llm_core::{
     self, BoxFuture, CallId, Cancel, Capabilities, Dispatch, Id, Item, Protocol, Provenance,
@@ -160,6 +162,8 @@ struct MockModel {
     usage: Vec<Option<Usage>>,
     /// The turn of a conversation, counted from 0, that holds until it is cancelled.
     holding: Option<usize>,
+    /// The refusal the first turn of a conversation answers with, streaming nothing.
+    refusing: Option<String>,
 }
 
 /// The tool sets offered to the model of one generator, shared by its clones.
@@ -199,6 +203,7 @@ impl MockGenerator {
             locality: Locality::SameProcess,
             capabilities: configuration.capabilities(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("a maximum concurrency of one is positive");
         let id = |value: &str| Id::new(value).expect("a printable identifier");
@@ -217,6 +222,7 @@ impl MockGenerator {
             offered: Offered::default(),
             usage: Vec::new(),
             holding: None,
+            refusing: None,
         };
         Self::over(adapter, model)
     }
@@ -251,6 +257,7 @@ impl MockGenerator {
             locality: adapter.locality(),
             capabilities,
             max_concurrency: adapter.max_concurrency(),
+            descriptor: adapter.descriptor().clone(),
         })
         .expect("the declaration it repeats was admitted");
         let model = MockModel {
@@ -268,6 +275,7 @@ impl MockGenerator {
             offered: self.model.offered.clone(),
             usage: self.model.usage.clone(),
             holding: self.model.holding,
+            refusing: self.model.refusing.clone(),
         };
         Self::over(adapter, model)
     }
@@ -285,6 +293,7 @@ impl MockGenerator {
             offered: self.model.offered.clone(),
             usage: usage.into_iter().collect(),
             holding: self.model.holding,
+            refusing: self.model.refusing.clone(),
         };
         Self::over(self.generator.adapter().clone(), model)
     }
@@ -306,6 +315,26 @@ impl MockGenerator {
             offered: self.model.offered.clone(),
             usage: self.model.usage.clone(),
             holding: Some(turn),
+            refusing: self.model.refusing.clone(),
+        };
+        Self::over(self.generator.adapter().clone(), model)
+    }
+
+    /// The same generator, whose model refuses the first turn of a conversation: it streams no
+    /// delta and ends the turn with `llm`'s refusal item carrying `text` and no answer, so the
+    /// wrapper delivers a refusal and no segment. Every later turn it answers as before. Its
+    /// adapter is the same.
+    #[must_use]
+    pub fn refusing(self, text: impl Into<String>) -> Self {
+        let model = MockModel {
+            provenance: self.model.provenance.clone(),
+            capabilities: self.model.capabilities.clone(),
+            script: self.model.script.clone(),
+            tools: self.model.tools.clone(),
+            offered: self.model.offered.clone(),
+            usage: self.model.usage.clone(),
+            holding: self.model.holding,
+            refusing: Some(text.into()),
         };
         Self::over(self.generator.adapter().clone(), model)
     }
@@ -445,6 +474,23 @@ impl llm_core::Model for MockModel {
         cancel: &'a Cancel,
     ) -> BoxFuture<'a, Result<TurnOutcome, llm_core::Error>> {
         Box::pin(async move {
+            let first = !request.items.iter().any(|item| {
+                matches!(
+                    item,
+                    Item::AssistantText { .. } | Item::AssistantRefusal { .. } | Item::ToolCall(_)
+                )
+            });
+            if let (Some(text), true) = (&self.refusing, first) {
+                return Ok(TurnOutcome {
+                    stop_reason: StopReason::EndTurn,
+                    items: vec![Item::AssistantRefusal { text: text.clone() }],
+                    observation: TurnObservation {
+                        usage: self.usage.first().cloned().flatten(),
+                        final_usage: true,
+                        ..TurnObservation::new(self.provenance.clone())
+                    },
+                });
+            }
             let (pieces, calls) = self.answer(request);
             if self.capabilities.output_streaming {
                 for piece in &pieces {

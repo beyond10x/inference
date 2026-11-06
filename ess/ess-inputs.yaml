@@ -22,3 +22,4 @@ scenarios:
   - scenarios/close-delivers-received-usage.yaml
   - scenarios/fail-delivers-received-usage.yaml
   - scenarios/unknown-quantity-stays-unknown.yaml
+  - scenarios/adapter-publishes-its-descriptor-whole.yaml

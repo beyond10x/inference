@@ -2,53 +2,53 @@
 format: aep.planning-md/3
 id: story:adapter-descriptor-carrier
 kind: story
-status: draft
-title: Decide which declaration carries the AdapterDescriptor
-summary: '0.19.0 (N15) added AdapterDescriptor and RateLimit as a standalone type in inference-core and model.yaml, marked UNMAPPED for its carrier: Adapter or CapabilityRecord. Adding a field to either declaration breaks struct literals, so the carrier waits for a release that may break them or an additive constructor'
+status: implemented
+title: The adapter carries its AdapterDescriptor
+summary: DeclareAdapter and Adapter carry the AdapterDescriptor added in 0.19.0 (N15); every DeclareAdapter literal is updated
 tags:
 - from-finding
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
 - serves: vision:inference
-revision: 1
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T19:11:13Z", actor: "human:timo", revision: 4}
+- {from: "proposed", to: "active", at: "2026-11-06T19:11:13Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-11-06T21:20:42Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
-<!-- Starting point for a `story` artifact, seeded by `aep artifact new story <name>`.
-     No frontmatter here on purpose: the `---` block is written by the CLI from the id, kind, status
-     and relations you gave it, and a second copy in this file would be the one that went stale.
-     Delete the italic guidance as you fill each section. -->
-
-# Story: <name>
+# Story: the adapter carries its AdapterDescriptor
 
 ## Outcome
 
-*What is true for whom once this has shipped, in one sentence. If it names a component rather than a
-person, it is a task — say what changes for someone.*
+An application reading a declared `inference.model.Adapter` sees the adapter's voices, codecs,
+context size, duration limits, token budget, state scope and rate limits on the adapter itself.
 
 ## Context
 
-*Why this is worth doing now, and what it depends on. Link the epic or specification it comes from
-rather than restating it; the `derived_from` relation already carries the edge.*
+0.19.0 (finding N15 of review-result:full-codebase-2026-11-06) added `AdapterDescriptor` and
+`RateLimit` to `inference-core` (`crates/inference-core/src/model.rs:467-507`) and
+`ess/domains/model.yaml:127-150`, marked UNMAPPED for its carrier: `Adapter` or `CapabilityRecord`.
+
+Decision, taken by the session that owns this repository (2026-11-06): **`Adapter` carries it.**
+The design lists these descriptors beside the adapter's capabilities, and capabilities are the
+adapter's (`Adapter.capabilities`); a capability record is per hardware target, and a voice list or
+a rate limit does not change with the hardware. The descriptor was held back only because adding a
+field breaks every `DeclareAdapter` literal; backwards compatibility is no longer kept (AGENTS.md,
+2026-11-06).
 
 ## Acceptance
 
-*The conditions under which this is done, each one something a person or a check can observe. "Works
-correctly" is not one of them.*
+- `ess/domains/model.yaml`: `DeclareAdapter`'s input and the entity `Adapter` carry
+  `descriptor: inference.model.AdapterDescriptor`; the UNMAPPED marker on the carrier is removed;
+  `ess specify validate --path ess` passes and the synthesized suite covers the field.
+- `inference-core`: `DeclareAdapter` has a `descriptor: AdapterDescriptor` field and `Adapter` a
+  `descriptor()` accessor; a test declares an adapter with a non-empty descriptor and reads it back,
+  and the `AdapterDeclared` event or the view the specification names carries it.
+- Every `DeclareAdapter` literal in the repository is updated (107 literals in 97 files on 0.22.0);
+  the hosted adapters whose claims records name voices or codecs fill them in where the code
+  already knows them, others use `AdapterDescriptor::default()`.
+- `CHANGELOG.md` `## [Unreleased]` has a `Breaking` line.
 
 ## Out of Scope
 
-*What a reasonable reader would expect to be included and is not — the boundary that stops this
-story quietly becoming an epic.*
-
-## Ambiguities
-
-*Each gap this story found and did not close, classified. `inferable` — the answer is already
-written down, so give the `path:line` or the artifact id that settles it.
-`requires-stakeholder-input` — nobody here can decide it, so name who does, and raise that entry as
-a `decision-blocker` with a `blocks` edge to this story, or it is a sentence somebody improvises
-later.*
-
-## Open Questions
-
-*Anything still undecided belongs in `## Ambiguities` above, classified and with its citation or its
-decider. Keep this section for a question that is neither — an unowned question is a story that
-stalls without anybody noticing.*
+- A vocabulary for `RateLimit.unit` or `state_scope`.

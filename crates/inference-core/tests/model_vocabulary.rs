@@ -6,8 +6,9 @@ use std::fmt::Debug;
 
 use inference_core::id::{GenerationId, NodeId, RunId, SessionId, StreamId};
 use inference_core::model::{
-    Adapter, AdapterDeclared, AdapterId, Capability, DeclareAdapter, DeclareModel, ExecutionForm,
-    Locality, Modality, Model, ModelDeclared, ModelId, NonPositiveConcurrency,
+    Adapter, AdapterDeclared, AdapterDescriptor, AdapterId, Capability, DeclareAdapter,
+    DeclareModel, ExecutionForm, Locality, Modality, Model, ModelDeclared, ModelId,
+    NonPositiveConcurrency,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -36,6 +37,7 @@ fn declare_adapter_input(model_id: ModelId, max_concurrency: i64) -> DeclareAdap
         locality: Locality::LocalWorker,
         capabilities: vec![Capability::OutputStreaming, Capability::IncrementalInput],
         max_concurrency,
+        descriptor: AdapterDescriptor::default(),
     }
 }
 

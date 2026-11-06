@@ -76,9 +76,9 @@ types:
         type: Bytes
 
 events:
-  # A frame of synthesized audio as a speech synthesiser yields it: the AudioChunk of the design's
-  # TTS event family, the event a synthesis handle names for a frame. A name has one owner, so
-  # the event that carries a frame is named apart from the type AudioFrame that holds it; the
+  # A frame of audio as a node carries it, synthesized by a speech synthesiser or captured from a
+  # device: the AudioChunk of the design's TTS event family, the event a synthesis handle names
+  # for a frame and every envelope of a frame is stamped with. A name has one owner, so the event that carries a frame is named apart from the type AudioFrame that holds it; the
   # segment the frame is of is the synthesis handle's, not the event's. No command here emits it:
   # the TTS contract is no domain of this specification yet (system.yaml).
   # read from: docs/design/inference.md:336
