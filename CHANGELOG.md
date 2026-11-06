@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking
+
+- Every envelope of a frame of audio, synthesized or captured, has kind
+  `inference.audio.AudioChunk`, the event the specification declares (was
+  `inference.audio.AudioFrame`, the type). `inference-audio-device`: `node::AUDIO_FRAME` is
+  renamed `node::AUDIO_CHUNK`.
+- `inference-facade`: `SessionEvent` has the new variant `GenerationRefused` and `HistoryKind`
+  the new variant `AssistantRefusal` (`HistoryKind::ALL` has four entries).
+
+### Added
+
+- `inference-facade`: `SessionEvent::GenerationRefused` delivers a model's refusal (its
+  generation and text) to the application, and the session records it in its history as
+  `assistant_refusal`. An interrupt cuts it with its generation. `inference-testkit` forwards it
+  instead of dropping it, and `MockGenerator::refusing` scripts a refusing model.
+
+### Fixed
+
+- `inference-facade`: an event of an interrupted generation that arrives after the generation's
+  end, such as a refusal kept across a cancel or supersede, is no longer delivered; the session
+  remembers the last 256 cut generations past their end.
+
 ## [0.22.0] — 2026-11-06
 
 ### Breaking
