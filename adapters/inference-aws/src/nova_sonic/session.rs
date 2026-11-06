@@ -251,10 +251,16 @@ impl SessionReader {
     /// one read timeout later, not at once.
     pub async fn recv(&mut self) -> Result<Option<OutputEvent>, NovaSonicError> {
         let frame = loop {
-            let deadline = self.deadline();
+            let Some(deadline) = self.deadline() else {
+                break self.output.recv().await;
+            };
             match tokio::time::timeout_at(deadline.into(), self.output.recv()).await {
                 Ok(frame) => break frame,
-                Err(_) if self.deadline() <= Instant::now() => {
+                Err(_)
+                    if self
+                        .deadline()
+                        .is_some_and(|deadline| deadline <= Instant::now()) =>
+                {
                     self.stalled = Some(Instant::now());
                     return Err(NovaSonicError::Stall {
                         after: self.read_timeout,
@@ -272,10 +278,11 @@ impl SessionReader {
     }
 
     /// When the session counts as stalled: one read timeout after the later of the last frame
-    /// either way and the last stall reported.
-    fn deadline(&self) -> Instant {
+    /// either way and the last stall reported; none when that lies past what an `Instant` can
+    /// hold, as for a read timeout of `Duration::MAX`, and the read then waits for the next frame.
+    fn deadline(&self) -> Option<Instant> {
         let last = self.activity.last();
         let from = self.stalled.map_or(last, |stalled| stalled.max(last));
-        from + self.read_timeout
+        from.checked_add(self.read_timeout)
     }
 }

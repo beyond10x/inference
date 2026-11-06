@@ -181,10 +181,8 @@ fn a_caller_that_stops_reading_holds_the_arrivals_at_their_bound() {
     assert_eq!(session.ledger().session().state(), SpeechSessionState::Open);
 }
 
-/// story:nova-sonic-stall-and-bounds, N10: a server that accepts the connection and never sends
-/// its response headers makes `open` fail within the binding's deadline, as a closed transport.
-#[test]
-fn a_server_that_never_answers_fails_open_within_the_deadline() {
+/// A client of a local server that accepts every connection and never answers.
+fn silent_nova() -> NovaSonic {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
     let port = listener.local_addr().expect("its address").port();
     std::thread::spawn(move || {
@@ -208,10 +206,42 @@ fn a_server_that_never_answers_fails_open_within_the_deadline() {
             "test",
         ))
         .build();
-    let nova = NovaSonic::new(
+    NovaSonic::new(
         aws_sdk_bedrockruntime::Client::from_conf(silent),
         nova_sonic::DEFAULT_MODEL_ID,
+    )
+}
+
+/// story:nova-sonic-stall-and-bounds, A2 of correction 1: the client's own `start`, called
+/// directly against a server that accepts the connection and never answers, fails within its
+/// deadline as a connect error naming it.
+#[tokio::test]
+async fn start_against_a_server_that_never_answers_fails_within_its_deadline() {
+    let nova = silent_nova().with_open_timeout(Duration::from_millis(300));
+    assert_eq!(nova.open_timeout(), Duration::from_millis(300));
+    let started = Instant::now();
+    let started_session = tokio::time::timeout(
+        Duration::from_secs(5),
+        nova.start(&ClientConfig::new("quiet")),
+    )
+    .await
+    .expect("story:nova-sonic-stall-and-bounds: start returns within its deadline");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
     );
+    let Err(NovaSonicError::Connect(message)) = started_session else {
+        panic!("start fails to connect: {started_session:?}");
+    };
+    assert!(message.contains("did not open within"), "{message}");
+}
+
+/// story:nova-sonic-stall-and-bounds, N10: a server that accepts the connection and never sends
+/// its response headers makes `open` fail within the binding's deadline, as a closed transport.
+#[test]
+fn a_server_that_never_answers_fails_open_within_the_deadline() {
+    let nova = silent_nova();
     let mut model = NovaSonicSpeech::new(nova)
         .expect("the runtime starts")
         .with_open_timeout(Duration::from_millis(300));
@@ -247,12 +277,12 @@ fn the_open_deadline_is_stated() {
         .expect("the runtime starts");
     assert_eq!(model.open_timeout(), OPEN_TIMEOUT);
     assert_eq!(OPEN_TIMEOUT, Duration::from_secs(10));
+    assert_eq!(silent_nova().open_timeout(), OPEN_TIMEOUT);
 }
 
-/// story:nova-sonic-stall-and-bounds, N11: assistant audio at a rate other than the session's
-/// output rate fails the session as a provider error naming both rates.
-#[test]
-fn an_answer_at_another_rate_fails_the_session() {
+/// Frames that commit the user's input, then start assistant audio at 24 kHz, for a session
+/// asking 16 kHz.
+fn other_rate_frames() -> Vec<Vec<u8>> {
     let fields = |body: Value| {
         let mut body = body;
         body["sessionId"] = json!("s");
@@ -260,7 +290,7 @@ fn an_answer_at_another_rate_fails_the_session() {
         body["completionId"] = json!("c");
         body
     };
-    let frames = vec![
+    vec![
         event("completionStart", fields(json!({}))),
         event(
             "contentStart",
@@ -298,8 +328,45 @@ fn an_answer_at_another_rate_fails_the_session() {
             "audioOutput",
             fields(json!({"contentId": "audio-1", "content": STANDARD.encode([0_u8; 960])})),
         ),
-    ];
-    let scripted = Scripted::new(frames, true);
+    ]
+}
+
+/// story:nova-sonic-stall-and-bounds, A1 of correction 1: a caller waiting `Duration::MAX` for
+/// the next event gets it when it comes; the wait's deadline does not overflow.
+#[test]
+fn a_wait_of_duration_max_returns_the_next_event() {
+    let scripted = Scripted::new(other_rate_frames(), true);
+    let mut model = NovaSonicSpeech::with_connector(scripted).expect("the runtime starts");
+    let mut session = model.open(config()).expect("opens");
+    session
+        .append_audio(speech())
+        .expect("input in the session's format");
+    let (done, waited) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut events = Vec::new();
+        while let Some(event) = session.next_event(Duration::MAX) {
+            let failed = matches!(event, SessionEvent::SpeechSessionFailed(_));
+            events.push(event);
+            if failed {
+                break;
+            }
+        }
+        let _ = done.send(events);
+    });
+    let events = waited
+        .recv_timeout(Duration::from_secs(5))
+        .expect("story:nova-sonic-stall-and-bounds: a wait of Duration::MAX returns");
+    assert!(
+        matches!(events.last(), Some(SessionEvent::SpeechSessionFailed(_))),
+        "{events:#?}"
+    );
+}
+
+/// story:nova-sonic-stall-and-bounds, N11: assistant audio at a rate other than the session's
+/// output rate fails the session as a provider error naming both rates.
+#[test]
+fn an_answer_at_another_rate_fails_the_session() {
+    let scripted = Scripted::new(other_rate_frames(), true);
     let mut model = NovaSonicSpeech::with_connector(scripted).expect("the runtime starts");
     let mut session = model.open(config()).expect("opens");
     session

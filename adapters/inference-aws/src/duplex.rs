@@ -96,6 +96,13 @@ use crate::nova_sonic::{
     ToolUse, Usage, redact,
 };
 
+/// The longest [`NativeSpeechModel::open`] waits for a session to open, unless
+/// [`NovaSonicSpeech::with_open_timeout`] sets another: the connector's whole connect, which for
+/// [`NovaSonic`] is the session's setup, credential resolution, request signing, the connection
+/// and the service's response headers. Past it, `open` fails as `transport_closed`. The same
+/// value bounds [`NovaSonic::start`] on its own ([`NovaSonic::with_open_timeout`]).
+pub use crate::nova_sonic::OPEN_TIMEOUT;
+
 /// The capabilities the adapter claims: output streaming, incremental input, input while output
 /// streams, tool calling and interruption. Not `native_duplex`, which needs the evidence of
 /// `inference_duplex::conformance::native_duplex_evidence` that Nova Sonic does not give.
@@ -106,11 +113,6 @@ pub const CLAIMS: [Capability; 5] = [
     Capability::ToolCalling,
     Capability::Interruptible,
 ];
-
-/// The longest [`NativeSpeechModel::open`] waits for the provider's stream to open, from the
-/// connect to the service's response headers, unless [`NovaSonicSpeech::with_open_timeout`] sets
-/// another; past it, `open` fails as `transport_closed`.
-pub const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Arrivals the binding holds ahead of a caller that does not call `next_event`. The reader waits
 /// while that many are held, and the client's own output buffer then fills behind it.
@@ -1251,9 +1253,11 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
         if self.ledger.session().require_open().is_err() {
             return None;
         }
-        let deadline = Instant::now() + wait;
+        let deadline = Instant::now().checked_add(wait);
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = deadline.map_or(Duration::MAX, |deadline| {
+                deadline.saturating_duration_since(Instant::now())
+            });
             match self.arrivals.recv_timeout(remaining) {
                 Ok(arrival) => {
                     let unreadable = matches!(arrival.what, Received::Undecodable(_));
@@ -1264,7 +1268,7 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
                     if let Some(event) = self.ledger.next_event() {
                         return Some(event);
                     }
-                    if Instant::now() >= deadline {
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                         break;
                     }
                 }
