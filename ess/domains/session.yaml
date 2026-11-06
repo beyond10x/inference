@@ -761,6 +761,13 @@ commands:
         summary: The fact is in the session's history, after every entry recorded before it.
 
 events:
+  # The session declares only its lifecycle events. The events it delivers from its run's
+  # egresses keep the names and fields of the domain that declares them, so a refused generation
+  # reaches the application as inference.stream.GenerationRefused, naming the generation and
+  # carrying the refusal text, with no segment, and an interrupt cuts it with its generation.
+  # read from: docs/design/inference.md:339
+  # read from: docs/design/inference.md:366
+
   # read from: docs/design/inference.md:990
   - name: inference.session.HistoryRecorded
     fields:

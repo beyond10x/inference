@@ -10,7 +10,7 @@
 //! |---|---|
 //! | session lifecycle | `SessionOpened`, `RunAttached`, `SessionReady`, `InputSent`, `InputCommitted`, `SessionInterrupted`, `PipelineSwitched`, `SessionDraining`, `SessionClosed`, `HistoryRecorded` |
 //! | transcript | `TranscriptHypothesis`, `TranscriptRevision`, `TranscriptCommitted` |
-//! | text generation | `GenerationStarted`, `TextDelta`, `TextSegmentCommitted`, `GenerationCompleted`, `GenerationSuperseded`, `GenerationCancelled` |
+//! | text generation | `GenerationStarted`, `TextDelta`, `TextSegmentCommitted`, `GenerationCompleted`, `GenerationSuperseded`, `GenerationCancelled`, `GenerationRefused` |
 //! | synthesis audio | `AudioChunk`, `SynthesisCompleted`, `AudioPlayed` |
 //! | tools | `ToolCallProposed`, `ToolCallAuthorized`, `ToolCallRejected`, `ToolCallStarted`, `ToolCallResult`, `ToolCallFailed` |
 //! | usage | `UsageRecorded` |
@@ -24,7 +24,8 @@
 use inference_audio::AudioFrame;
 use inference_core::envelope::ControlKind;
 use inference_core::generation::{
-    GenerationCancelled, GenerationCompleted, GenerationStarted, GenerationSuperseded,
+    GenerationCancelled, GenerationCompleted, GenerationRefused, GenerationStarted,
+    GenerationSuperseded,
 };
 use inference_core::usage::UsageRecorded;
 use inference_runtime::run::{RunCancelled, RunCompleted, RunFailed};
@@ -87,6 +88,11 @@ pub enum SessionEvent {
     GenerationSuperseded(GenerationSuperseded),
     /// `inference.stream.GenerationCancelled`.
     GenerationCancelled(GenerationCancelled),
+    /// `inference.stream.GenerationRefused`: the model refused to answer the generation it
+    /// names, and `text` is its refusal. A refusal makes no segment, so no `TextDelta` or
+    /// `TextSegmentCommitted` carries it; the generation completes as any other. An interrupt
+    /// cuts it with its generation.
+    GenerationRefused(GenerationRefused),
     /// §6.4 `AudioChunk`: a frame of synthesized audio.
     AudioChunk(AudioFrame),
     /// `inference.stream.SynthesisCompleted`.

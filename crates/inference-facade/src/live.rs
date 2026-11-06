@@ -1360,6 +1360,7 @@ const fn generation_of(event: &SessionEvent) -> Option<GenerationId> {
         SessionEvent::GenerationCompleted(event) => Some(event.generation_id),
         SessionEvent::GenerationSuperseded(event) => Some(event.generation_id),
         SessionEvent::GenerationCancelled(event) => Some(event.generation_id),
+        SessionEvent::GenerationRefused(event) => Some(event.generation_id),
         SessionEvent::TextDelta(event) => Some(event.generation_id),
         _ => None,
     }
@@ -1449,7 +1450,9 @@ impl<P: Send + 'static> fmt::Debug for SessionDriver<P> {
 
 #[cfg(test)]
 mod tests {
-    use inference_core::generation::{GenerationCancelled, GenerationCompleted, GenerationStarted};
+    use inference_core::generation::{
+        GenerationCancelled, GenerationCompleted, GenerationRefused, GenerationStarted,
+    };
     use inference_pipeline::PipelineState;
     use inference_text::{AudioPlayed, TextDelta};
 
@@ -1703,6 +1706,30 @@ mod tests {
         assert!(
             !generations.admit(None, &SessionEvent::AudioPlayed(AudioPlayed { segment_id })),
             "the completed generation's playback is cut"
+        );
+    }
+
+    /// A refusal names its generation and nothing else, so an envelope that names none is cut
+    /// with the generation the refusal names, and a refusal of a generation not cut is delivered.
+    #[test]
+    fn an_interrupt_cuts_the_refusal_of_the_cut_generation() {
+        let mut generations = Generations::default();
+        let (cut, segment) = (GenerationId::generate(), SegmentId::generate());
+        assert!(generations.admit(None, &delta(segment, cut)));
+        generations.interrupt();
+        let refused = |generation_id| {
+            SessionEvent::GenerationRefused(GenerationRefused {
+                generation_id,
+                text: "no".to_owned(),
+            })
+        };
+        assert!(
+            !generations.admit(None, &refused(cut)),
+            "the refusal of the cut generation is cut, story:facade-session-refusal-event"
+        );
+        assert!(
+            generations.admit(None, &refused(GenerationId::generate())),
+            "the refusal of another generation is delivered"
         );
     }
 }
