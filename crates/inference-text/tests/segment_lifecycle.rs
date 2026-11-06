@@ -120,7 +120,7 @@ fn a_delta_into_an_active_generation_is_a_tentative_segment_carrying_its_generat
 fn a_delta_into_a_generation_that_is_not_active_is_refused_with_its_state() {
     let active = generation();
     let stale = [
-        active.complete().expect("completes").0,
+        active.complete(None).expect("completes").0,
         active.supersede().expect("is superseded").0,
         active.cancel().expect("is cancelled").0,
     ];

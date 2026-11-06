@@ -392,6 +392,8 @@ impl<P: ModelPayload> Exchanging<P> {
             GenerationEvent::Cancelled(cancelled, _) => {
                 (StreamEvent::GenerationCancelled(cancelled), true)
             }
+            GenerationEvent::Refused(refused) => (StreamEvent::GenerationRefused(refused), false),
+            _ => return Ok(()),
         };
         self.emit(event).await?;
         self.record();

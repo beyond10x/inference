@@ -25,7 +25,7 @@ fn active() -> Generation {
 fn terminal() -> [Generation; 3] {
     let generation = active();
     [
-        generation.complete().expect("Active completes").0,
+        generation.complete(None).expect("Active completes").0,
         generation.supersede().expect("Active is superseded").0,
         generation.cancel().expect("Active is cancelled").0,
     ]
@@ -64,9 +64,15 @@ fn each_transition_moves_an_active_generation_and_keeps_its_fields() {
     let generation = active();
     let id = generation.generation_id();
 
-    let (completed, event) = generation.complete().expect("Active completes");
+    let (completed, event) = generation.complete(None).expect("Active completes");
     assert_eq!(completed.state(), GenerationState::Completed);
-    assert_eq!(event, GenerationCompleted { generation_id: id });
+    assert_eq!(
+        event,
+        GenerationCompleted {
+            generation_id: id,
+            stop_reason: None
+        }
+    );
 
     let (superseded, event) = generation.supersede().expect("Active is superseded");
     assert_eq!(superseded.state(), GenerationState::Superseded);
@@ -95,7 +101,7 @@ fn a_terminal_generation_refuses_every_transition_with_the_state_it_holds() {
         let current = generation.state();
         let conflict = GenerationStateConflict { current };
         assert_eq!(
-            generation.complete(),
+            generation.complete(None),
             Err(conflict),
             "{current:?} completes"
         );

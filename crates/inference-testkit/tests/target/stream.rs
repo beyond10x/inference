@@ -32,7 +32,10 @@ use ess_conformance::target::{
     DeclaredErrorValue, EventObservationRequest, ObservedEvent, SemanticCommandRequest,
     SemanticCommandResult, SemanticViewRequest, SemanticViewResult, TargetError, ViewRow,
 };
-use inference_core::generation::{GenerationStarted, GenerationStateConflict, StartGeneration};
+use ess_primitives::node::Node;
+use inference_core::generation::{
+    GenerationStarted, GenerationStateConflict, StartGeneration, StopReason,
+};
 use inference_core::id::GenerationId;
 use inference_runtime::run::{RunNotFound, RunStateConflict};
 use inference_testkit::graph::GraphDomain;
@@ -46,7 +49,7 @@ use inference_text::{
     SpanStateConflict, TurnId, TurnStateConflict,
 };
 
-use super::{Input, Stores, integer_node, named_node, text_node, unsupported};
+use super::{Input, Stores, integer_node, named_node, text_node, unreadable, unsupported};
 
 /// The prefix of every name this module answers.
 pub const DOMAIN: &str = "inference.stream";
@@ -60,6 +63,7 @@ const START_GENERATION: &str = "inference.stream.StartGeneration";
 const COMPLETE_GENERATION: &str = "inference.stream.CompleteGeneration";
 const SUPERSEDE_GENERATION: &str = "inference.stream.SupersedeGeneration";
 const CANCEL_GENERATION: &str = "inference.stream.CancelGeneration";
+const REFUSE_GENERATION: &str = "inference.stream.RefuseGeneration";
 const EMIT_TEXT_DELTA: &str = "inference.stream.EmitTextDelta";
 const COMMIT_SEGMENT: &str = "inference.stream.CommitSegment";
 const QUEUE_FOR_SYNTHESIS: &str = "inference.stream.QueueForSynthesis";
@@ -78,6 +82,7 @@ const GENERATION_STARTED: &str = "inference.stream.GenerationStarted";
 const GENERATION_COMPLETED: &str = "inference.stream.GenerationCompleted";
 const GENERATION_SUPERSEDED: &str = "inference.stream.GenerationSuperseded";
 const GENERATION_CANCELLED: &str = "inference.stream.GenerationCancelled";
+const GENERATION_REFUSED: &str = "inference.stream.GenerationRefused";
 const TEXT_DELTA: &str = "inference.stream.TextDelta";
 const TEXT_SEGMENT_COMMITTED: &str = "inference.stream.TextSegmentCommitted";
 const SEGMENT_QUEUED: &str = "inference.stream.SegmentQueued";
@@ -86,7 +91,7 @@ const AUDIO_PLAYED: &str = "inference.stream.AudioPlayed";
 const SEGMENT_DISCARDED: &str = "inference.stream.SegmentDiscarded";
 
 /// Every event this module observes.
-const EVENTS: [&str; 17] = [
+const EVENTS: [&str; 18] = [
     SPEECH_STARTED,
     SPEECH_ENDED,
     TURN_OPENED,
@@ -98,6 +103,7 @@ const EVENTS: [&str; 17] = [
     GENERATION_COMPLETED,
     GENERATION_SUPERSEDED,
     GENERATION_CANCELLED,
+    GENERATION_REFUSED,
     TEXT_DELTA,
     TEXT_SEGMENT_COMMITTED,
     SEGMENT_QUEUED,
@@ -148,7 +154,8 @@ pub fn execute_command(
         }
         START_GENERATION => start_generation(domain, graph, request)?,
         COMPLETE_GENERATION => {
-            let answer = domain.complete_generation(generation_id(request)?);
+            let (generation_id, stop_reason) = completion(request)?;
+            let answer = domain.complete_generation(generation_id, stop_reason);
             let answer = answer.map(StreamEvent::GenerationCompleted);
             generation_moved(COMPLETE_GENERATION, "completed", answer, request)?
         }
@@ -162,6 +169,7 @@ pub fn execute_command(
             let answer = answer.map(StreamEvent::GenerationCancelled);
             generation_moved(CANCEL_GENERATION, "cancelled", answer, request)?
         }
+        REFUSE_GENERATION => refuse_generation(domain, request)?,
         EMIT_TEXT_DELTA => emit_text_delta(domain, request)?,
         COMMIT_SEGMENT => {
             let answer = domain.commit_segment(segment_id(request)?);
@@ -413,6 +421,33 @@ fn generation_id(request: &SemanticCommandRequest) -> Result<GenerationId, Targe
     Ok(generation_id)
 }
 
+/// The fields of `CompleteGeneration`: the generation and, when the request names one, the
+/// stop reason.
+fn completion(
+    request: &SemanticCommandRequest,
+) -> Result<(GenerationId, Option<StopReason>), TargetError> {
+    let mut input = Input::of(request);
+    let generation_id = input.named("generation_id")?;
+    let stop_reason = input
+        .optional("stop_reason")
+        .map(|node| match node {
+            Node::Text(text) => serde_json::from_value(serde_json::Value::String(text.clone()))
+                .map_err(|error| {
+                    unreadable(
+                        format!("reading `{COMPLETE_GENERATION}`"),
+                        format!("`stop_reason`: {error}: {node:?}"),
+                    )
+                }),
+            other => Err(unreadable(
+                format!("reading `{COMPLETE_GENERATION}`"),
+                format!("`stop_reason` is not a stop reason: {other:?}"),
+            )),
+        })
+        .transpose()?;
+    input.finish()?;
+    Ok((generation_id, stop_reason))
+}
+
 /// The one field of a segment command.
 fn segment_id(request: &SemanticCommandRequest) -> Result<SegmentId, TargetError> {
     let mut input = Input::of(request);
@@ -488,6 +523,35 @@ fn emit_text_delta(
         }
         Err(EmitTextDeltaError::StaleGeneration(conflict)) => {
             SemanticCommandResult::took(outcome(EMIT_TEXT_DELTA, "stale-generation"))
+                .with_error(generation_conflict(conflict)?)
+        }
+    })
+}
+
+/// The answer of `RefuseGeneration`: `refused` and its event, `unknown-generation` or
+/// `stale-generation`.
+fn refuse_generation(
+    domain: &mut StreamDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let generation_id = input.named("generation_id")?;
+    let text = input.text("text")?;
+    input.finish()?;
+    Ok(match domain.refuse_generation(generation_id, text) {
+        Ok(event) => SemanticCommandResult::took(outcome(REFUSE_GENERATION, "refused")).emitting(
+            stream_event(&StreamEvent::GenerationRefused(event))?
+                .in_activity(request.correlation.clone()),
+        ),
+        Err(GenerationMoveError::Unknown(error)) => {
+            SemanticCommandResult::took(outcome(REFUSE_GENERATION, "unknown-generation"))
+                .with_error(
+                    DeclaredErrorValue::new(parse::<ErrorRef>(GENERATION_NOT_FOUND))
+                        .with("generation_id", named_node(&error.generation_id)?),
+                )
+        }
+        Err(GenerationMoveError::Conflict(conflict)) => {
+            SemanticCommandResult::took(outcome(REFUSE_GENERATION, "stale-generation"))
                 .with_error(generation_conflict(conflict)?)
         }
     })
@@ -606,13 +670,23 @@ fn stream_event(event: &StreamEvent) -> Result<ObservedEvent, TargetError> {
         }
         StreamEvent::GenerationStarted(event) => generation_started(event)?,
         StreamEvent::GenerationCompleted(event) => {
-            generation(GENERATION_COMPLETED, event.generation_id)?
+            generation(GENERATION_COMPLETED, event.generation_id)?.with(
+                "stop_reason",
+                event
+                    .stop_reason
+                    .as_ref()
+                    .map_or(Ok(Node::Null), named_node)?,
+            )
         }
         StreamEvent::GenerationSuperseded(event) => {
             generation(GENERATION_SUPERSEDED, event.generation_id)?
         }
         StreamEvent::GenerationCancelled(event) => {
             generation(GENERATION_CANCELLED, event.generation_id)?
+        }
+        StreamEvent::GenerationRefused(event) => {
+            generation(GENERATION_REFUSED, event.generation_id)?
+                .with("text", text_node(&event.text))
         }
         StreamEvent::TextDelta(event) => ObservedEvent::new(parse::<EventRef>(TEXT_DELTA))
             .with("segment_id", named_node(&event.segment_id)?)

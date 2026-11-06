@@ -338,7 +338,8 @@ impl<M: NativeSpeechModel> Show<M> {
     }
 
     /// Opens the next turn's session when none is generating, nothing waits behind the turn
-    /// playing, and the show is not closed.
+    /// playing, and the show is not closed. A session whose response is refused is closed at once,
+    /// its last usage and the time it ran handed on.
     fn start_turn(&mut self, events: &mut Vec<Event>) {
         if self.live.is_some() || self.closed || self.queue.len() > 1 {
             return;
@@ -379,8 +380,18 @@ impl<M: NativeSpeechModel> Show<M> {
             }
         };
         let listen = !capabilities.manual_response;
+        let opened = Instant::now();
         if !listen && let Err(error) = session.create_response() {
             self.fail(Some(host), format!("no response: {error}"), events);
+            let live = Live {
+                session,
+                host,
+                opened,
+                heard: opened,
+                sent: 0,
+                listen,
+            };
+            self.end_session(live, events);
             return;
         }
         if directive == Directive::Close {
@@ -406,7 +417,6 @@ impl<M: NativeSpeechModel> Show<M> {
             playing: false,
             finished: false,
         });
-        let opened = Instant::now();
         self.live = Some(Live {
             session,
             host,

@@ -61,7 +61,7 @@ impl SessionPayload for PipelinePayload {
 
 /// The session event an `inference.stream` event is delivered as: every event of the session
 /// vocabulary the stream domain declares; none for a speech, turn, queued or discarded segment
-/// event, which the vocabulary does not carry.
+/// event, or a refusal, which the vocabulary does not carry.
 pub(crate) fn stream_session_event(event: &StreamEvent) -> Option<SessionEvent> {
     Some(match event.clone() {
         StreamEvent::TranscriptHypothesis(event) => SessionEvent::TranscriptHypothesis(event),
@@ -80,7 +80,8 @@ pub(crate) fn stream_session_event(event: &StreamEvent) -> Option<SessionEvent> 
         | StreamEvent::TurnOpened(_)
         | StreamEvent::TurnCompleted(_)
         | StreamEvent::SegmentQueued(_)
-        | StreamEvent::SegmentDiscarded(_) => return None,
+        | StreamEvent::SegmentDiscarded(_)
+        | StreamEvent::GenerationRefused(_) => return None,
     })
 }
 

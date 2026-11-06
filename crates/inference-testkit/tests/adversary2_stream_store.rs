@@ -70,7 +70,7 @@ fn a_refused_supersede_or_cancel_discards_none_of_the_segments_the_generation_ho
         unplayed_and_played(&mut domain, generation);
         let before_terminal = states(&domain);
         match terminal {
-            GenerationState::Completed => domain.complete_generation(generation).map(|_| ()),
+            GenerationState::Completed => domain.complete_generation(generation, None).map(|_| ()),
             GenerationState::Superseded => domain.supersede_generation(generation).map(|_| ()),
             _ => domain.cancel_generation(generation).map(|_| ()),
         }
@@ -83,7 +83,7 @@ fn a_refused_supersede_or_cancel_discards_none_of_the_segments_the_generation_ho
 
         assert!(domain.supersede_generation(generation).is_err());
         assert!(domain.cancel_generation(generation).is_err());
-        assert!(domain.complete_generation(generation).is_err());
+        assert!(domain.complete_generation(generation, None).is_err());
 
         assert_eq!(
             states(&domain),
@@ -155,7 +155,7 @@ fn a_fixed_seed_walk_of_every_command_keeps_the_declared_lifecycle() {
                 }
                 1 => {
                     let generation = pick_generation(&mut walk, &generations);
-                    domain.complete_generation(generation).is_ok()
+                    domain.complete_generation(generation, None).is_ok()
                 }
                 2 => {
                     let generation = pick_generation(&mut walk, &generations);
