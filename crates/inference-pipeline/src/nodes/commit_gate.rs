@@ -10,9 +10,12 @@
 //!   `input`, passed on `output`, and the turn events on `turns`, passed on `turns_out`. It passes
 //!   each `inference.stream.TranscriptCommitted` and every turn event, and holds back every
 //!   hypothesis and every revision of a span not yet committed: none of them is passed, ever, as
-//!   the committed span carries its final text. A revision naming a span the gate already passed
-//!   as Committed is the `wrong-state` outcome of `inference.stream.ReviseSpan`: it is refused,
-//!   recorded on the handle ([`CommitGateHandle::refused_revisions`]) and never passed;
+//!   the committed span carries its final text. A revision naming a span the gate passed as
+//!   Committed in the turn still open or in the turn completed last is the `immutable` outcome
+//!   of `inference.stream.ReviseSpan`: it is refused, recorded on the handle
+//!   ([`CommitGateHandle::refused_revisions`]) and never passed. The gate forgets the spans of
+//!   older turns, so that what it keeps is bounded by the turns still going: a revision of one of
+//!   them is held back as a revision of a span not yet committed is, and is never passed either;
 //! * the output gate, between the LLM and the TTS node, has one lane: the LLM node's output. It
 //!   holds each `inference.stream.TextDelta`, the Tentative segment it emits, until the segment's
 //!   `TextSegmentCommitted` arrives, and then passes both, so that the TTS node is never handed a
@@ -39,7 +42,7 @@
 //! The end of input on a lane, a control event of kind `stop`, drops the deltas the lane holds,
 //! passes the rest and then the `stop`, and ends the lane; a lane whose input edge is closed ends
 //! the same way without a `stop`. The node ends once every lane ended. Cancelled, it sends nothing
-//! more.
+//! more, and a send waiting for room on a full edge ends at the cancel.
 //!
 //! The gate reads its payload through [`GatePayload`], which the payload of the run implements,
 //! so that this crate depends on no contract crate.
@@ -56,6 +59,7 @@ use inference_core::envelope::{ControlKind, EventEnvelope, EventId};
 use inference_core::id::{GenerationId, NodeId};
 use inference_text::{SegmentId, SpanId, TurnId};
 
+use super::tool_authority::sent_unless;
 use super::turn_policy::TurnEvent;
 use super::{Task, Watched, block_on};
 use crate::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
@@ -143,10 +147,15 @@ struct Queued<P> {
 /// lane lets the lane pass.
 struct Gate<P> {
     lanes: Vec<VecDeque<Queued<P>>>,
-    /// The spans passed as Committed.
+    /// The spans passed as Committed since the last `TurnCompleted` the gate took.
     passed: HashSet<SpanId>,
-    /// The generations that ended, and the segments whose deltas were dropped.
+    /// The spans passed as Committed before it and after the one before; older spans are
+    /// forgotten, so the spans kept are those of the turn still open and the turn completed last.
+    previous: HashSet<SpanId>,
+    /// The generations that ended.
     ended: HashSet<GenerationId>,
+    /// The segments whose deltas were dropped and whose commit has not arrived; each is recorded
+    /// in [`GateRecord::dropped`] once, when it enters, and leaves when its commit is dropped.
     stale: HashSet<SegmentId>,
 }
 
@@ -155,8 +164,16 @@ impl<P: GatePayload> Gate<P> {
         Self {
             lanes: (0..lanes).map(|_| VecDeque::new()).collect(),
             passed: HashSet::new(),
+            previous: HashSet::new(),
             ended: HashSet::new(),
             stale: HashSet::new(),
+        }
+    }
+
+    /// Records `segment_id` as dropped, once while it is stale.
+    fn dropped(stale: &mut HashSet<SegmentId>, record: &mut GateRecord, segment_id: SegmentId) {
+        if stale.insert(segment_id) {
+            record.dropped.push(segment_id);
         }
     }
 
@@ -182,7 +199,7 @@ impl<P: GatePayload> Gate<P> {
             None => match envelope.payload.gated() {
                 Gated::Hypothesis { .. } => record.held_back += 1,
                 Gated::Revision { span_id } => {
-                    if self.passed.contains(&span_id) {
+                    if self.passed.contains(&span_id) || self.previous.contains(&span_id) {
                         record.refused.push(RefusedRevision {
                             span_id,
                             event_id: envelope.event_id,
@@ -199,10 +216,7 @@ impl<P: GatePayload> Gate<P> {
                     segment_id,
                     generation_id,
                 } if self.ended.contains(&generation_id) => {
-                    self.stale.insert(segment_id);
-                    if !record.dropped.contains(&segment_id) {
-                        record.dropped.push(segment_id);
-                    }
+                    Self::dropped(&mut self.stale, record, segment_id);
                 }
                 Gated::Delta {
                     segment_id,
@@ -211,7 +225,9 @@ impl<P: GatePayload> Gate<P> {
                     envelope,
                     waiting: Some((segment_id, generation_id)),
                 }),
-                Gated::SegmentCommitted { segment_id } if self.stale.contains(&segment_id) => {}
+                Gated::SegmentCommitted { segment_id } if self.stale.contains(&segment_id) => {
+                    self.stale.remove(&segment_id);
+                }
                 Gated::SegmentCommitted { segment_id } => {
                     for queued in queue.iter_mut() {
                         if queued
@@ -229,6 +245,10 @@ impl<P: GatePayload> Gate<P> {
                     Self::drop_waiting(queue, &mut self.stale, record, |generation| {
                         generation == generation_id
                     });
+                    queue.push_back(ready(envelope));
+                }
+                Gated::Turn(TurnEvent::Completed(_)) => {
+                    self.previous = std::mem::take(&mut self.passed);
                     queue.push_back(ready(envelope));
                 }
                 Gated::Turn(_) | Gated::Other => queue.push_back(ready(envelope)),
@@ -254,10 +274,7 @@ impl<P: GatePayload> Gate<P> {
     ) {
         queue.retain(|queued| match queued.waiting {
             Some((segment_id, generation_id)) if ends(generation_id) => {
-                stale.insert(segment_id);
-                if !record.dropped.contains(&segment_id) {
-                    record.dropped.push(segment_id);
-                }
+                Self::dropped(stale, record, segment_id);
                 false
             }
             _ => true,
@@ -348,6 +365,14 @@ impl CommitGateHandle {
         self.state.read(|state| state.record.clone())
     }
 
+    /// Everything the gate recorded since the record was last taken, leaving it empty: a host
+    /// that reads the record of a long run this way keeps it bounded by what it has not read yet.
+    /// [`CommitGateHandle::record`] and the readers below answer from what is left.
+    #[must_use]
+    pub fn take_record(&self) -> GateRecord {
+        self.state.update(|state| std::mem::take(&mut state.record))
+    }
+
     /// The revisions the gate refused, each naming a span it had passed as Committed, in arrival
     /// order.
     #[must_use]
@@ -418,9 +443,6 @@ impl<P: GatePayload> Exchanging<P> {
     /// Sends what the lane `lane` passes, recording each `TurnCompleted` once it was passed.
     async fn pass(&mut self, lane: usize, passed: Vec<EventEnvelope<P>>) -> Result<(), String> {
         for envelope in passed {
-            if self.state.read(|state| state.cancelled) {
-                return Ok(());
-            }
             let completed = match envelope.payload.gated() {
                 Gated::Turn(TurnEvent::Completed(completed))
                     if ControlKind::of(&envelope.kind).is_none() =>
@@ -429,10 +451,16 @@ impl<P: GatePayload> Exchanging<P> {
                 }
                 _ => None,
             };
-            self.outputs[lane]
-                .send(envelope)
-                .await
-                .map_err(|refused| refused.to_string())?;
+            let sent = sent_unless(
+                &self.state,
+                |state| state.cancelled,
+                self.outputs[lane].as_ref(),
+                envelope,
+            )
+            .await?;
+            if !sent {
+                return Ok(());
+            }
             if let Some(turn_id) = completed {
                 let at = Instant::now();
                 self.state
@@ -608,11 +636,16 @@ impl<P: GatePayload> NodeImplementation<P> for CommitGate {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
     use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
     use inference_text::{SegmentId, SpanId, TurnCompleted, TurnId, TurnOpened};
 
-    use super::{Gate, GatePayload, GateRecord, Gated, RefusedRevision, TurnEvent};
+    use super::{
+        CommitGateHandle, Gate, GatePayload, GateRecord, GateState, Gated, RefusedRevision,
+        TurnEvent, Watched,
+    };
 
     /// The payload of the cases: what the gate reads, or a control event.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -909,6 +942,96 @@ mod tests {
             [2, 3, 4],
             "the rest in arrival order once the second is committed"
         );
+    }
+
+    #[test]
+    fn a_long_run_keeps_the_spans_of_the_open_turn_and_the_stale_segments_until_their_commit() {
+        let mut gate = Gate::new(2);
+        let mut record = GateRecord::default();
+        let (mut transcript, mut turns) = (Stream::new(), Stream::new());
+        let mut last_turn = Vec::new();
+        for _ in 0..50 {
+            let turn_id = TurnId::generate();
+            let opened = Gated::Turn(TurnEvent::Opened(TurnOpened {
+                turn_id,
+                run_id: RunId::generate(),
+            }));
+            gate.take(1, turns.content(opened), &mut record);
+            last_turn = (0..3).map(|_| SpanId::generate()).collect();
+            for span_id in &last_turn {
+                let committed = Gated::SpanCommitted { span_id: *span_id };
+                gate.take(0, transcript.content(committed), &mut record);
+            }
+            let completed = Gated::Turn(TurnEvent::Completed(TurnCompleted { turn_id }));
+            gate.take(1, turns.content(completed), &mut record);
+        }
+        assert!(
+            gate.passed.len() <= last_turn.len(),
+            "the spans of finished turns are not kept: {} held",
+            gate.passed.len()
+        );
+        let revision = transcript.content(Gated::Revision {
+            span_id: last_turn[0],
+        });
+        let event_id = revision.event_id;
+        assert_eq!(gate.take(0, revision, &mut record), []);
+        assert_eq!(
+            record.refused,
+            [RefusedRevision {
+                span_id: last_turn[0],
+                event_id
+            }],
+            "a revision of a span of the turn just completed is still refused"
+        );
+
+        let mut text = Stream::new();
+        for _ in 0..50 {
+            let (segment_id, generation_id) = (SegmentId::generate(), GenerationId::generate());
+            let delta = Gated::Delta {
+                segment_id,
+                generation_id,
+            };
+            gate.take(0, text.content(delta), &mut record);
+            let ended = Gated::GenerationEnded { generation_id };
+            gate.take(0, text.content(ended), &mut record);
+            gate.take(
+                0,
+                text.content(Gated::SegmentCommitted { segment_id }),
+                &mut record,
+            );
+        }
+        assert_eq!(
+            record.dropped.len(),
+            50,
+            "every stale segment is recorded once"
+        );
+        assert_eq!(record.committed, [], "and none is passed");
+        assert!(
+            gate.stale.is_empty(),
+            "a stale segment is forgotten once its commit was dropped: {} held",
+            gate.stale.len()
+        );
+        assert!(
+            gate.passed.len() + gate.previous.len() <= 2 * last_turn.len(),
+            "the spans kept are those of the open turn and the turn completed last"
+        );
+    }
+
+    #[test]
+    fn a_taken_record_leaves_the_handle_empty() {
+        let state = Arc::new(Watched::new(GateState::default()));
+        let handle = CommitGateHandle {
+            state: Arc::clone(&state),
+        };
+        let segment_id = SegmentId::generate();
+        state.update(|state| {
+            state.record.held_back = 2;
+            state.record.dropped.push(segment_id);
+        });
+        let taken = handle.take_record();
+        assert_eq!(taken.held_back, 2);
+        assert_eq!(taken.dropped, [segment_id]);
+        assert_eq!(handle.record(), GateRecord::default(), "nothing is left");
     }
 
     #[test]

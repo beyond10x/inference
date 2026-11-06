@@ -45,9 +45,10 @@
 //! its edge of authorized calls, so that an executor running a call of the generation signals its
 //! cancellation. Every later proposal of the generation is rejected `superseded`.
 //!
-//! On the end of input, a control event of kind `stop`, or once its input edge is closed, the
-//! node waits for the host to answer every call it holds, then passes the end of input on, on
-//! each of its output edges, and ends. Cancelled, it abandons the calls it holds and sends nothing
+//! On the end of input, a control event of kind `stop`, the node waits for the host to answer
+//! every call it holds, then passes the end of input on, on each of its output edges, and ends;
+//! once its input edge is closed, it waits the same way and ends without passing anything on, as
+//! no end of input arrived to pass. Cancelled, it abandons the calls it holds and sends nothing
 //! more: the check and each poll of a send are made under the lock the cancel is taken under, so
 //! a send is either complete before the cancel or not made.
 
@@ -122,17 +123,30 @@ pub(crate) async fn send_unless<S, P>(
     endpoint: &dyn OutputEndpoint<P>,
     envelope: EventEnvelope<P>,
 ) -> Result<(), String> {
+    sent_unless(watched, cancelled, endpoint, envelope)
+        .await
+        .map(|_| ())
+}
+
+/// As [`send_unless`], answering whether the envelope was sent: `true` once the edge took it,
+/// `false` when the cancel came first.
+pub(crate) async fn sent_unless<S, P>(
+    watched: &Watched<S>,
+    cancelled: fn(&S) -> bool,
+    endpoint: &dyn OutputEndpoint<P>,
+    envelope: EventEnvelope<P>,
+) -> Result<bool, String> {
     let mut sending = endpoint.send(envelope);
     future::poll_fn(|cx| {
         let mut guard = watched.lock();
         if cancelled(&guard.0) {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(Ok(false));
         }
         guard.1 = Some(cx.waker().clone());
         sending
             .as_mut()
             .poll(cx)
-            .map(|sent| sent.map_err(|refused| refused.to_string()))
+            .map(|sent| sent.map(|()| true).map_err(|refused| refused.to_string()))
     })
     .await
 }
@@ -257,17 +271,21 @@ enum Signal {
 
 impl AuthorityState {
     /// A cancel first, then an answered call, then, once the input ended, that nothing is held.
+    /// An answer naming a call no longer held, one an interruption withdrew after the hook
+    /// answered it, is dropped, and the answers queued behind it are examined at the same poll,
+    /// so that none waits for a wake that will not come.
     fn signal(&mut self, input_ended: bool) -> Option<Signal> {
         if self.cancelled {
             return Some(Signal::Cancel);
         }
-        if let Some((call_id, confirmed)) = self.answers.pop_front()
-            && let Some(index) = self
+        while let Some((call_id, confirmed)) = self.answers.pop_front() {
+            if let Some(index) = self
                 .held
                 .iter()
                 .position(|held| held.call.call_id() == call_id)
-        {
-            return Some(Signal::Answer(self.held.remove(index), confirmed));
+            {
+                return Some(Signal::Answer(self.held.remove(index), confirmed));
+            }
         }
         (input_ended && self.held.is_empty()).then_some(Signal::Settled)
     }
