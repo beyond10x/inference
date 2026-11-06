@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:openai-transport-deadlines-and-cleartext
 kind: story
-status: active
+status: implemented
 title: OpenAI WebSocket transport has a handshake and write deadline and refuses cleartext off loopback
 tags:
 - from-finding
@@ -18,10 +18,11 @@ scope:
   path: adapters/inference-openai/src/live_duplex.rs
 - confidence: inferred
   path: adapters/inference-openai/tests/gpt_live_duplex.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-06T00:41:02Z", actor: "human:timo", revision: 6}
 - {from: "proposed", to: "active", at: "2026-11-06T00:41:02Z", actor: "human:timo", revision: 7}
+- {from: "active", to: "implemented", at: "2026-11-06T11:38:56Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 ## Context
 
