@@ -80,7 +80,7 @@ const BINDINGS: &[Binding] = &[
     Binding {
         name: "ElevenLabs streaming TTS",
         package: "inference-elevenlabs",
-        runs: "TTS, streaming; hosted, WebSocket (`stream-input`), one connection per segment",
+        runs: "TTS, streaming; hosted, WebSocket (`multi-stream-input`), one connection per utterance, one context per segment",
         features: &[],
         record: Record::Claims("records/claims-tts.json"),
         environment: "`ELEVENLABS_API_KEY`, or the keychain secret `elevenlabs-api-key` with feature `keychain`",

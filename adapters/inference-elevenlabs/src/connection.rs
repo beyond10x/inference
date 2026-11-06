@@ -1,4 +1,4 @@
-//! One WebSocket connection of one segment: the handshake with the key, bounded writes and
+//! One WebSocket connection of one synthesis: the handshake with the key, bounded writes and
 //! reads, and the close.
 
 use std::sync::Arc;
@@ -20,11 +20,10 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// The most a cancel or an orderly close waits for the close frame to be written.
 pub const CLOSE_BOUND: Duration = Duration::from_secs(1);
 
-/// An open connection and when it last read a message.
+/// An open connection and the bound on its writes and on each wait for the server.
 pub(crate) struct Connection {
     socket: Socket,
     read_timeout: Duration,
-    last_message: Instant,
 }
 
 impl Connection {
@@ -73,8 +72,12 @@ impl Connection {
         Ok(Self {
             socket,
             read_timeout,
-            last_message: Instant::now(),
         })
+    }
+
+    /// The instant the read timeout ends when it starts now.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        Instant::now().checked_add(self.read_timeout)
     }
 
     /// Writes `text` as one text message, waiting at most the read timeout.
@@ -85,11 +88,13 @@ impl Connection {
             .map_err(|error| ElevenLabsError::Transport(error.to_string()))
     }
 
-    /// The next text message, waiting at most until the read timeout has passed since the last
-    /// message read. Pings and pongs are skipped and move nothing.
-    pub(crate) async fn read(&mut self) -> Result<String, ElevenLabsError> {
+    /// The next text message, waiting at most until `deadline`, which the caller moves on the
+    /// messages it counts. Pings and pongs are skipped and move nothing.
+    pub(crate) async fn read_until(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<String, ElevenLabsError> {
         loop {
-            let deadline = self.last_message.checked_add(self.read_timeout);
             let next = match deadline {
                 Some(deadline) => tokio::time::timeout_at(deadline, self.socket.next())
                     .await
@@ -107,10 +112,7 @@ impl Connection {
                 Some(Ok(message)) => message,
             };
             match message {
-                Message::Text(text) => {
-                    self.last_message = Instant::now();
-                    return Ok(text.as_str().to_owned());
-                }
+                Message::Text(text) => return Ok(text.as_str().to_owned()),
                 Message::Close(frame) => {
                     return Err(ElevenLabsError::Closed {
                         code: frame.as_ref().map(|frame| u16::from(frame.code)),
@@ -130,10 +132,17 @@ impl Connection {
         }
     }
 
-    /// Writes a close frame, waiting at most [`CLOSE_BOUND`], and drops the connection without
-    /// reading anything more from it.
-    pub(crate) async fn close(mut self) {
-        let _ = tokio::time::timeout(CLOSE_BOUND, self.socket.close(None)).await;
+    /// Writes `farewell`, when there is one, then a close frame, waiting at most [`CLOSE_BOUND`]
+    /// for both, and drops the connection without reading anything more from it.
+    pub(crate) async fn close(mut self, farewell: Option<&str>) {
+        let socket = &mut self.socket;
+        let _ = tokio::time::timeout(CLOSE_BOUND, async move {
+            if let Some(farewell) = farewell {
+                let _ = socket.send(Message::text(farewell)).await;
+            }
+            let _ = socket.close(None).await;
+        })
+        .await;
     }
 }
 
