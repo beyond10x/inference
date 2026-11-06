@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:elevenlabs-multi-context-tts-connection
 kind: story
-status: draft
+status: active
 title: ElevenLabs TTS speaks an utterance on one connection
 summary: Bind the multi-stream endpoint so segments after the first pay no handshake and a barge-in closes a context, not a connection
 tags:
@@ -11,7 +11,10 @@ relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
 - depends_on: story:elevenlabs-streaming-tts-adapter
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T17:26:37Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-06T17:26:37Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 
