@@ -5,7 +5,7 @@
 
 mod support;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use inference_deepgram::{CloseCause, DeepgramError, DeepgramRecognition, claims};
 use inference_stt::Recogniser;
@@ -71,15 +71,26 @@ fn a_dropped_recognition_frees_its_slot_and_revives_nothing() {
     let server = server();
     let observed = conformance::cancellation(&mut server.recogniser(), &input()).unwrap();
     assert_eq!(observed.max_concurrency, 1);
-    assert_eq!(
-        server.next_client_close(Duration::from_secs(5)),
-        Some(0),
-        "the dropped recognition closed its connection"
+    assert_eq!(observed.committed, 2);
+    let dropped = 1;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut closed = Vec::new();
+    while !closed.contains(&dropped) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match server.next_client_close(left) {
+            Some(index) => closed.push(index),
+            None => break,
+        }
+    }
+    assert!(
+        closed.contains(&dropped),
+        "the dropped recognition, connection {dropped} after the baseline, closed its connection; \
+         closes seen: {closed:?}"
     );
     assert_eq!(
         server.seen().len(),
-        2,
-        "the fresh one ran on a connection of its own"
+        3,
+        "the baseline, the dropped and the fresh recognition each ran on a connection of its own"
     );
     assert_clean(&server);
 }

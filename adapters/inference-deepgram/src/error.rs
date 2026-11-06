@@ -93,8 +93,8 @@ pub enum DeepgramError {
         reason: String,
         cause: CloseCause,
     },
-    /// No message arrived for the read timeout after the end of input, which this carries, or a
-    /// write did not finish within it.
+    /// The summary `Metadata` did not arrive within the total deadline after the end of input,
+    /// which this carries, or a write did not finish within the read timeout.
     Stalled(Duration),
     /// The server sent something that is not a message of the protocol: a binary frame, text
     /// that is not a JSON object, an object without a string `type`, or a known message missing
