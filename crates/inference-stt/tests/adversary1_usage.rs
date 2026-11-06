@@ -1,7 +1,8 @@
 //! Adversary pass 1 on `story:usage-stt`: the audio a recognition's usage record counts.
-//! `input_audio_ms` is the audio offered, samples over sample rate, so a clip of a whole number of
-//! milliseconds reports exactly that many, whatever frame size carried it; a frame refused after
-//! the end of input is not counted; frames shorter than a millisecond add up.
+//! `input_audio_ms` is the audio taken (`story:contract-usage-and-naming-drift`; it was the audio
+//! offered), samples over sample rate, so a clip of a whole number of milliseconds reports exactly
+//! that many, whatever frame size carried it; a frame refused after the end of input is not
+//! counted; frames shorter than a millisecond add up.
 
 use std::num::{NonZeroU16, NonZeroU32};
 
@@ -69,6 +70,9 @@ fn offer(output: &mut TranscriptOutput, count: u64, sample_count: u32, sample_ra
 
 fn input_audio(output: &mut TranscriptOutput) -> Quantity {
     output.end_input().expect("input ends once");
+    output
+        .take_input()
+        .expect("the audio counts once taken (story:contract-usage-and-naming-drift)");
     let envelope = output.usage().expect("input has ended");
     let TranscriptEvent::Usage(recorded) = envelope.payload else {
         panic!("a usage record")
@@ -95,6 +99,10 @@ fn ten_seconds_at_44_1_khz_in_frames_that_are_no_whole_nanosecond_count_as_10000
 fn one_second_at_48_khz_in_single_sample_frames_counts_as_1000_ms() {
     let mut output = output();
     offer(&mut output, 48_000, 1, 48_000);
+    output.end_input().expect("input ends once");
+    output
+        .take_input()
+        .expect("the audio counts once taken (story:contract-usage-and-naming-drift)");
     assert_eq!(
         output.input_audio_ms(),
         1_000,
@@ -119,6 +127,11 @@ fn a_frame_refused_after_the_end_of_input_is_not_counted() {
     offer(&mut output, 10, 160, 16_000);
     output.end_input().expect("input ends once");
     assert_eq!(output.offer(frame(1_600, 16_000, 16_000)), Err(InputEnded));
+    assert_eq!(
+        output.take_input().map(|frames| frames.len()),
+        Ok(10),
+        "the refused frame is not taken (story:contract-usage-and-naming-drift)"
+    );
     assert_eq!(
         output.input_audio_ms(),
         100,

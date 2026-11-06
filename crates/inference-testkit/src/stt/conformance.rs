@@ -157,7 +157,7 @@ pub enum Item {
     /// that is not final, and the handle names a typed error.
     BackendFailure,
     /// [`usage_recorded`]: a completed recognition yields exactly one final usage record, its last
-    /// event, whose audio milliseconds are the audio offered.
+    /// event, whose audio milliseconds are all the audio offered, taken or not.
     UsageRecorded,
     /// [`claims_observed`]: `incremental_input` and `output_streaming` are claimed exactly when
     /// they are observed.
@@ -311,8 +311,8 @@ pub struct FailureObserved {
 /// What [`usage_recorded`] observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsageObserved {
-    /// The `input_audio_ms` of the record, the audio offered. Beyond `i64::MAX` it reads
-    /// `i64::MAX`; the record then carried them as unknown.
+    /// The `input_audio_ms` of the record, all the audio offered, taken or not. Beyond
+    /// `i64::MAX` it reads `i64::MAX`; the record then carried them as unknown.
     pub audio_ms: i64,
     /// The `local_compute_ms` of the record, as the recogniser reported it.
     pub local_compute: Quantity,
@@ -575,8 +575,9 @@ where
 /// Checks [`Item::UsageRecorded`]: the whole input is offered and ended, and once the iteration
 /// has ended exactly one event was a usage record, the last. It names the adapter and the model
 /// of the recogniser's adapter record and is final; it carries exactly one quantity of each kind
-/// it reports: `input_audio_ms`, `measured`, the audio of the frames offered, never a zero that
-/// stands for audio the record did not count; `requests`, `measured` 1; and `local_compute_ms`,
+/// it reports: `input_audio_ms`, `measured`, the audio of every frame offered, taken or not,
+/// never a zero that stands for audio the record did not count; `requests`, `measured` 1; and
+/// `local_compute_ms`,
 /// measured or unknown as the recogniser reports it.
 ///
 /// # Errors

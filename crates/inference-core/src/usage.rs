@@ -530,6 +530,8 @@ impl KindTotal {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UsageTotal {
     records: u64,
+    /// How many partial records carried no quantity, so no kind counts them partial.
+    partial_without_kinds: u64,
     kinds: BTreeMap<QuantityKind, KindTotal>,
     uncounted: BTreeSet<NodeId>,
 }
@@ -544,9 +546,13 @@ impl UsageTotal {
     /// Adds the record whose quantities are `quantities` and whose ESS field `final` is
     /// `is_final`: each known value to its kind's sum, each unknown quantity to its kind's unknown
     /// count, and the record to the count of every kind it carries and, when it is not final, to
-    /// the partial count of each.
+    /// the partial count of each. A partial record that carries no quantity counts in no kind,
+    /// and still leaves the total incomplete ([`UsageTotal::complete`]).
     pub fn add(&mut self, quantities: &[Quantity], is_final: bool) {
         self.records += 1;
+        if quantities.is_empty() && !is_final {
+            self.partial_without_kinds += 1;
+        }
         let mut carried: Vec<QuantityKind> = Vec::with_capacity(quantities.len());
         for quantity in quantities {
             let total = self.kinds.entry(quantity.kind()).or_default();
@@ -595,10 +601,13 @@ impl UsageTotal {
     }
 
     /// Whether every kind is complete: no quantity the total took was unknown and no record it
-    /// took was partial; and whether the total names no node whose usage it may miss.
+    /// took was partial, one that carried no quantity among them; and whether the total names no
+    /// node whose usage it may miss.
     #[must_use]
     pub fn complete(&self) -> bool {
-        self.uncounted.is_empty() && self.kinds.values().all(KindTotal::complete)
+        self.partial_without_kinds == 0
+            && self.uncounted.is_empty()
+            && self.kinds.values().all(KindTotal::complete)
     }
 }
 

@@ -263,8 +263,8 @@ fn a_late_report_for_a_recorded_response_makes_no_second_record() {
             current: ResponseState::Cancelled
         }))
     );
-    ledger
-        .response_usage(
+    assert_eq!(
+        ledger.response_usage(
             first,
             ResponseUsage {
                 input: TokenCounts::default(),
@@ -275,8 +275,13 @@ fn a_late_report_for_a_recorded_response_makes_no_second_record() {
                 },
             },
             now,
-        )
-        .expect("the contract's usage is recorded all the same");
+        ),
+        Err(SessionError::ResponseNotInProgress(ResponseStateConflict {
+            current: ResponseState::Cancelled
+        })),
+        "the contract's usage is refused as well once the record is made \
+         (story:contract-usage-and-naming-drift)"
+    );
     running(&mut ledger, second, 4, now);
     ledger.response_completed(second, now).expect("in progress");
     ledger.close().expect("open");
