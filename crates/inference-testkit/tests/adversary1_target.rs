@@ -78,7 +78,7 @@ fn declare_adapter_input(model_id: Node, max_concurrency: Node) -> Vec<(&'static
         ("locality", text("same_process")),
         ("capabilities", list(&["tool_calling", "native_duplex"])),
         ("max_concurrency", max_concurrency),
-        ("descriptor", Node::Map(BTreeMap::new())),
+        ("descriptor", empty_descriptor()),
     ]
 }
 
@@ -490,4 +490,14 @@ fn through_the_runner_a_fractional_or_out_of_range_integer_or_an_extra_field_is_
         Status::Error,
         "an undeclared `colour`"
     );
+}
+
+/// A descriptor that declares nothing: its three lists, each empty, as the wire requires.
+fn empty_descriptor() -> Node {
+    Node::Map(
+        ["voices", "codecs", "rate_limits"]
+            .into_iter()
+            .map(|list| (list.to_owned(), Node::Seq(Vec::new())))
+            .collect(),
+    )
 }

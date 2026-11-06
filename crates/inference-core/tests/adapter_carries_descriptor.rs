@@ -122,3 +122,48 @@ fn model_yaml_declares_the_descriptor_on_the_input_the_entity_and_the_view() {
         );
     });
 }
+
+/// A `DeclareAdapter` input on the wire, carrying `descriptor` as given.
+fn declare_adapter_wire(descriptor: serde_json::Value) -> serde_json::Value {
+    json!({
+        "model_id": "00000000-0000-4000-8000-000000000001",
+        "backend": "realtime",
+        "contract_revision": "r1",
+        "execution_form": "hosted_service",
+        "locality": "external_provider",
+        "capabilities": ["output_streaming"],
+        "max_concurrency": 1,
+        "descriptor": descriptor,
+    })
+}
+
+#[test]
+fn a_descriptor_without_its_lists_is_refused_as_ess_refuses_it() {
+    within("descriptor lists required", || {
+        assert!(
+            serde_json::from_value::<AdapterDescriptor>(json!({})).is_err(),
+            "an empty object leaves out the three lists model.yaml requires"
+        );
+        for list in ["voices", "codecs", "rate_limits"] {
+            let mut descriptor = json!({"voices": [], "codecs": [], "rate_limits": []});
+            descriptor.as_object_mut().expect("an object").remove(list);
+            assert!(
+                serde_json::from_value::<AdapterDescriptor>(descriptor).is_err(),
+                "a descriptor without `{list}` is refused"
+            );
+        }
+        assert!(
+            serde_json::from_value::<DeclareAdapter>(declare_adapter_wire(json!({}))).is_err(),
+            "DeclareAdapter refuses `\"descriptor\": {{}}`"
+        );
+        assert!(
+            serde_json::from_value::<DeclareAdapter>(declare_adapter_wire(json!(null))).is_err(),
+            "DeclareAdapter refuses a missing descriptor"
+        );
+        let declared: DeclareAdapter = serde_json::from_value(declare_adapter_wire(
+            json!({"voices": [], "codecs": [], "rate_limits": []}),
+        ))
+        .expect("the three lists, each empty, with every optional part left out");
+        assert_eq!(declared.descriptor, AdapterDescriptor::default());
+    });
+}

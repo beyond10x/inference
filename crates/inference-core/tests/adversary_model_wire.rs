@@ -21,7 +21,7 @@ fn scenario_declare_adapter_input(max_concurrency: Value) -> Value {
         "execution_form": "in_process",
         "locality": "same_process",
         "max_concurrency": max_concurrency,
-        "descriptor": {},
+        "descriptor": {"voices": [], "codecs": [], "rate_limits": []},
         "model_id": SCENARIO_MODEL_ID,
     })
 }
