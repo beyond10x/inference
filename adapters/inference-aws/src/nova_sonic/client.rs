@@ -70,6 +70,10 @@ impl NovaSonic {
     /// A failure to open is a [`NovaSonicError::Connect`] whose message names the failure's kind
     /// and, for an error the service returned, its error code: never the SDK's error chain, which
     /// can name the caller's profile, single sign-on session or files.
+    ///
+    /// The start has no deadline of its own: only the SDK configuration's timeouts apply, and a
+    /// server that accepts the connection and never answers holds it. Bound it with
+    /// `tokio::time::timeout`, as the duplex binding's `open` does.
     pub async fn start(&self, config: &SessionConfig) -> Result<Session, NovaSonicError> {
         let (input, queued) = mpsc::channel::<Vec<u8>>(INPUT_CAPACITY);
         let (frames, output) = mpsc::channel::<OutputFrame>(OUTPUT_CAPACITY);
