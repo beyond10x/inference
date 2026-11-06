@@ -11,6 +11,12 @@
   `SubgraphHandle::dropped_usage`, `REFUSALS_KEPT` (256), `RunController::refusals_overflow`,
   `DEFAULT_RECORDER_BOUND` (65 536), `Recorder::with_bound`, `bound` and `dropped`,
   `Recording::new`, `cut` and `cut_at`, and `Replay::compared_until`.
+- `inference-core`: `AdapterDescriptor` and `RateLimit`, the design's adapter descriptor, also
+  declared in `ess/domains/model.yaml`; which declaration carries it is still open.
+- `inference-stt`: `TranscriptOutput::next_offered` and `take_next`, to take offered frames one
+  at a time.
+- `inference-testkit`: the duplex mock's `with_late_usage`.
+- `ess/domains/audio.yaml` declares the event `inference.audio.AudioChunk`.
 
 ### Changed
 
@@ -20,6 +26,11 @@
 - `inference-llama-server` accepts a base URL only on a loopback host (`127.0.0.0/8`, `::1`,
   `localhost`); any other host is refused before anything opens, and the refusal names scheme,
   host and port, never a user part.
+- `inference-tts`: `SynthesisEvent::name()` returns `inference.audio.AudioChunk` for a frame, the
+  event the specification declares (was `inference.audio.AudioFrame`, which is a type). Envelope
+  kinds elsewhere still say `inference.audio.AudioFrame`.
+- `inference-stt`: `input_audio_ms` counts all audio offered on a call not marked failed, and
+  only the audio taken on a failed call (was the audio offered in both cases).
 
 ### Fixed
 
@@ -31,6 +42,13 @@
 - `inference-runtime`: dropping a subgraph node ends its child run within `CHILD_DROP_BOUND`; a
   bridge send on a full parent edge waits instead of spinning; a usage send gives way
   `USAGE_STOP_GRACE` after a stop, or at once on a drop; refusals and recordings are bounded.
+- `inference-duplex`: `SessionLedger::response_usage` refuses a report once the response's usage
+  record is made, as `response_usage_reported` does; the testkit mock counts that refusal as a
+  drop.
+- `inference-core`: `UsageTotal::complete()` stays false while it holds a partial record with no
+  quantities.
+- `inference-deepgram`: a recognition counts as taken only the frames it forwarded, not the frames
+  after a refused one.
 - `local-voice-cascade` example: each turn's first-audio measure is the first frame of its own
   answer, and a discarded segment reaches the commit gate as `Gated::SegmentDiscarded`.
 
