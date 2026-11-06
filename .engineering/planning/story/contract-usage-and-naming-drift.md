@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:contract-usage-and-naming-drift
 kind: story
-status: draft
+status: active
 title: Contract crates agree on usage counting, event names and the design's model descriptors
 tags:
 - from-finding
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
+- serves: vision:inference
 scope:
 - confidence: inferred
   path: crates/inference-core/src/model.rs
@@ -25,7 +26,10 @@ scope:
   path: ess/domains/model.yaml
 - confidence: inferred
   path: ess/domains/usage.yaml
-revision: 9
+revision: 11
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T00:41:04Z", actor: "human:timo", revision: 10}
+- {from: "proposed", to: "active", at: "2026-11-06T00:41:05Z", actor: "human:timo", revision: 11}
 ---
 ## Context
 

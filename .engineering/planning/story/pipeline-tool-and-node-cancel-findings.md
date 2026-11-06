@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:pipeline-tool-and-node-cancel-findings
 kind: story
-status: draft
+status: active
 title: Pipeline tool authority, executor and stream nodes settle every answer, honour cancel and stay bounded
 tags:
 - from-finding
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
+- serves: vision:inference
 scope:
 - confidence: inferred
   path: crates/inference-pipeline/src/definition.rs
@@ -23,7 +24,10 @@ scope:
   path: crates/inference-pipeline/src/nodes/turn_policy.rs
 - confidence: inferred
   path: crates/inference-pipeline/src/nodes/vad.rs
-revision: 8
+revision: 10
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T00:41:03Z", actor: "human:timo", revision: 9}
+- {from: "proposed", to: "active", at: "2026-11-06T00:41:03Z", actor: "human:timo", revision: 10}
 ---
 ## Context
 

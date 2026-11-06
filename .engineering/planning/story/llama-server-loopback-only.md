@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:llama-server-loopback-only
 kind: story
-status: draft
+status: active
 title: The llama-server adapter accepts loopback hosts only, and local refusals carry no userinfo
 tags:
 - from-finding
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
+- serves: vision:inference
 scope:
 - confidence: inferred
   path: adapters/inference-llama-server/src/lib.rs
@@ -15,7 +16,10 @@ scope:
   path: examples/local-voice-cascade/src/lib.rs
 - confidence: inferred
   path: examples/local-voice-cascade/src/local.rs
-revision: 4
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T00:41:04Z", actor: "human:timo", revision: 5}
+- {from: "proposed", to: "active", at: "2026-11-06T00:41:04Z", actor: "human:timo", revision: 6}
 ---
 ## Context
 

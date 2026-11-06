@@ -2,16 +2,20 @@
 format: aep.planning-md/3
 id: story:llm-wrapper-outcomes-and-debug
 kind: story
-status: draft
+status: active
 title: The LLM wrapper keeps partial usage of a failed turn, redacts its Debug and tells truncation and refusal apart
 tags:
 - from-finding
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
+- serves: vision:inference
 scope:
 - confidence: inferred
   path: crates/inference-llm/src/lib.rs
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T00:41:05Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-11-06T00:41:05Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 
