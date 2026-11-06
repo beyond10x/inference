@@ -145,6 +145,10 @@ impl NodeImplementation<PipelinePayload> for Streamer {
                                 GenerationEvent::Cancelled(cancelled, _) => {
                                     StreamEvent::GenerationCancelled(cancelled)
                                 }
+                                GenerationEvent::Refused(refused) => {
+                                    StreamEvent::GenerationRefused(refused)
+                                }
+                                _ => continue,
                             };
                             if !send(event, generation_id) {
                                 return;

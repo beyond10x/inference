@@ -54,6 +54,7 @@ impl Talker {
             }),
             StreamEvent::GenerationCompleted(GenerationCompleted {
                 generation_id: first,
+                stop_reason: None,
             }),
         ];
         for epoch in 0..self.later {
@@ -65,6 +66,7 @@ impl Talker {
             }));
             events.push(StreamEvent::GenerationCompleted(GenerationCompleted {
                 generation_id,
+                stop_reason: None,
             }));
         }
         events.push(StreamEvent::AudioPlayed(AudioPlayed { segment_id }));

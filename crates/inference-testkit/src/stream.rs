@@ -70,8 +70,9 @@ use uuid::Uuid;
 
 use inference_core::envelope::{EventEnvelope, EventId};
 use inference_core::generation::{
-    Generation, GenerationCancelled, GenerationCompleted, GenerationNotFound, GenerationStarted,
-    GenerationState, GenerationStateConflict, GenerationSuperseded, StartGeneration,
+    Generation, GenerationCancelled, GenerationCompleted, GenerationNotFound, GenerationRefused,
+    GenerationStarted, GenerationState, GenerationStateConflict, GenerationSuperseded,
+    StartGeneration, StopReason,
 };
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_pipeline::nodes::vad::{SpeechEnded, SpeechStarted};
@@ -232,6 +233,8 @@ pub enum StreamEvent {
     GenerationSuperseded(GenerationSuperseded),
     /// `inference.stream.GenerationCancelled`.
     GenerationCancelled(GenerationCancelled),
+    /// `inference.stream.GenerationRefused`.
+    GenerationRefused(GenerationRefused),
     /// `inference.stream.TextDelta`.
     TextDelta(TextDelta),
     /// `inference.stream.TextSegmentCommitted`.
@@ -263,6 +266,7 @@ impl StreamEvent {
             Self::GenerationCompleted(_) => "inference.stream.GenerationCompleted",
             Self::GenerationSuperseded(_) => "inference.stream.GenerationSuperseded",
             Self::GenerationCancelled(_) => "inference.stream.GenerationCancelled",
+            Self::GenerationRefused(_) => "inference.stream.GenerationRefused",
             Self::TextDelta(_) => "inference.stream.TextDelta",
             Self::TextSegmentCommitted(_) => "inference.stream.TextSegmentCommitted",
             Self::SegmentQueued(_) => "inference.stream.SegmentQueued",
@@ -273,7 +277,7 @@ impl StreamEvent {
     }
 
     /// The `generation_id` the payload carries: the generation events' and `TextDelta`'s, the
-    /// five events whose declaration has the field, and none for every other event.
+    /// six events whose declaration has the field, and none for every other event.
     #[must_use]
     pub const fn generation_id(&self) -> Option<GenerationId> {
         match self {
@@ -281,6 +285,7 @@ impl StreamEvent {
             Self::GenerationCompleted(event) => Some(event.generation_id),
             Self::GenerationSuperseded(event) => Some(event.generation_id),
             Self::GenerationCancelled(event) => Some(event.generation_id),
+            Self::GenerationRefused(event) => Some(event.generation_id),
             Self::TextDelta(event) => Some(event.generation_id),
             Self::SpeechStarted(_)
             | Self::SpeechEnded(_)
@@ -842,7 +847,8 @@ impl StreamDomain {
         event
     }
 
-    /// Runs `inference.stream.CompleteGeneration`.
+    /// Runs `inference.stream.CompleteGeneration` with its `stop_reason` input, which the
+    /// [`GenerationCompleted`] carries.
     ///
     /// # Errors
     ///
@@ -852,10 +858,11 @@ impl StreamDomain {
     pub fn complete_generation(
         &mut self,
         generation_id: GenerationId,
+        stop_reason: Option<StopReason>,
     ) -> Result<GenerationCompleted, GenerationMoveError> {
         self.move_generation(
             generation_id,
-            Generation::complete,
+            |generation| generation.complete(stop_reason),
             StreamEvent::GenerationCompleted,
         )
     }
@@ -924,6 +931,32 @@ impl StreamDomain {
         self.issue();
         self.segments.segments.push(segment);
         self.events.push(StreamEvent::TextDelta(event.clone()));
+        Ok(event)
+    }
+
+    /// Runs `inference.stream.RefuseGeneration`: records the [`GenerationRefused`] that
+    /// [`Generation::refuse`] returns; the generation moves nowhere.
+    ///
+    /// # Errors
+    ///
+    /// [`GenerationMoveError::Unknown`] when no stored generation carries `generation_id`,
+    /// [`GenerationMoveError::Conflict`] when it is not Active. No event is recorded.
+    pub fn refuse_generation(
+        &mut self,
+        generation_id: GenerationId,
+        text: String,
+    ) -> Result<GenerationRefused, GenerationMoveError> {
+        let generation =
+            self.generations
+                .get(generation_id)
+                .ok_or(GenerationMoveError::Unknown(GenerationNotFound {
+                    generation_id,
+                }))?;
+        let event = generation
+            .refuse(text)
+            .map_err(GenerationMoveError::Conflict)?;
+        self.events
+            .push(StreamEvent::GenerationRefused(event.clone()));
         Ok(event)
     }
 
@@ -1025,7 +1058,7 @@ impl StreamDomain {
     fn move_generation<E: Clone>(
         &mut self,
         generation_id: GenerationId,
-        transition: fn(&Generation) -> Result<(Generation, E), GenerationStateConflict>,
+        transition: impl FnOnce(&Generation) -> Result<(Generation, E), GenerationStateConflict>,
         record: fn(E) -> StreamEvent,
     ) -> Result<E, GenerationMoveError> {
         let slot = self
@@ -1560,7 +1593,9 @@ mod tests {
         let (generation, segments) = one_of_each(&mut domain);
         let completed = start(&mut domain);
         let kept = emit(&mut domain, completed, 1);
-        domain.complete_generation(completed).expect("completes");
+        domain
+            .complete_generation(completed, None)
+            .expect("completes");
         let other_run = RunId::from(Uuid::from_u128(0xfeed));
         let elsewhere = domain
             .start_generation(StartGeneration {
@@ -1616,7 +1651,7 @@ mod tests {
         let (generation, segments) = one_of_each(&mut domain);
 
         domain
-            .complete_generation(generation)
+            .complete_generation(generation, None)
             .expect("Active completes");
 
         for (before, segment) in segments {
@@ -1629,7 +1664,7 @@ mod tests {
         let mut domain = StreamDomain::new();
         let generation = start(&mut domain);
         domain
-            .complete_generation(generation)
+            .complete_generation(generation, None)
             .expect("Active completes");
         let snapshot = domain.segments_view();
         let events = domain.events().len();
@@ -1639,7 +1674,7 @@ mod tests {
 
         assert_eq!(domain.supersede_generation(generation), Err(conflict));
         assert_eq!(domain.cancel_generation(generation), Err(conflict));
-        assert_eq!(domain.complete_generation(generation), Err(conflict));
+        assert_eq!(domain.complete_generation(generation, None), Err(conflict));
         assert_eq!(domain.segments_view(), snapshot);
         assert_eq!(domain.events().len(), events);
 
@@ -1647,7 +1682,7 @@ mod tests {
         let not_found = GenerationMoveError::Unknown(GenerationNotFound {
             generation_id: unknown,
         });
-        assert_eq!(domain.complete_generation(unknown), Err(not_found));
+        assert_eq!(domain.complete_generation(unknown, None), Err(not_found));
         assert_eq!(domain.supersede_generation(unknown), Err(not_found));
         assert_eq!(domain.cancel_generation(unknown), Err(not_found));
         assert_eq!(domain.events().len(), events);
