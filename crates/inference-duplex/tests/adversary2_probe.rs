@@ -15,7 +15,8 @@ use inference_duplex::inference_audio::{
     AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition,
 };
 use inference_duplex::inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
@@ -186,6 +187,7 @@ fn a_model_that_never_reads_the_input_during_output_gives_no_native_duplex_evide
                 locality: Locality::ExternalProvider,
                 capabilities: vec![Capability::ConcurrentInputOutput],
                 max_concurrency: 1,
+                descriptor: AdapterDescriptor::default(),
             },
         )
         .expect("a positive concurrency")

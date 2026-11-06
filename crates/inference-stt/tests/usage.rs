@@ -16,7 +16,7 @@ use inference_stt::inference_audio::{AudioEncoding, AudioFormat, AudioFrame, Sam
 use inference_stt::inference_core::envelope::Timebase;
 use inference_stt::inference_core::id::{NodeId, RunId, StreamId};
 use inference_stt::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_stt::inference_core::usage::{Quantity, QuantityKind, UsageRecorded};
 use inference_stt::inference_text::{ReviseSpan, SpanId, TurnId};
@@ -35,6 +35,7 @@ fn adapter(capabilities: Vec<Capability>) -> Adapter {
         locality: Locality::SameProcess,
         capabilities,
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive")
     .0

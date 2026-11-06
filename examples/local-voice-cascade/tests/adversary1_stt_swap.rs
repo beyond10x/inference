@@ -194,6 +194,7 @@ fn relocated(backend: SttBackend, locality: Locality) -> Adapter {
         locality,
         capabilities: record.capabilities().to_vec(),
         max_concurrency: record.max_concurrency(),
+        descriptor: record.descriptor().clone(),
     })
     .expect("a positive concurrency")
     .0

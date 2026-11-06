@@ -4,7 +4,9 @@
 //! `measured`, with `requests` 1 and `local_compute_ms` `unknown`, the mock computing nothing of
 //! its own; a segment discarded after synthesis still counts; and the TTS node given a `usage`
 //! port, exposed as an egress, delivers the record there with the run and the node set, as the
-//! model node of `story:usage-llm` does.
+//! model node of `story:usage-llm` does. The node stamps each frame's envelope with the name its
+//! synthesis gives a frame, `inference.audio.AudioChunk`
+//! (`story:audio-envelope-kind-is-the-declared-event`).
 
 #![cfg(all(feature = "tts", feature = "run"))]
 
@@ -12,9 +14,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
+use std::time::Duration;
 
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
@@ -420,14 +423,17 @@ fn drained(mut egress: Box<dyn InputEndpoint<Payload>>) -> Vec<EventEnvelope<Pay
     received
 }
 
-#[test]
-fn the_usage_of_a_synthesis_reaches_the_exposed_usage_egress_with_run_and_node_set() {
-    let rate = 16_000;
-    let synthesiser = MockSynthesiser::new(
-        MockConfiguration::IncrementalStreaming,
-        ModelId::generate(),
-        format(rate),
-    );
+/// What a run of the TTS node alone delivered: the envelopes of its audio and usage egresses.
+struct Delivered {
+    run_id: RunId,
+    tts: NodeId,
+    spoken: Vec<EventEnvelope<Payload>>,
+    received: Vec<EventEnvelope<Payload>>,
+}
+
+/// Runs `synthesiser` as the TTS node alone over the [`TWELVE`] and [`THIRTY`] segments of one
+/// generation, then the end of input, and answers what its egresses delivered.
+fn through_the_node(synthesiser: MockSynthesiser) -> Delivered {
     let adapter = synthesiser.adapter().clone();
     let (declaration, planned, tts, usage_port) = planned(&adapter);
     let run_id = RunId::generate();
@@ -495,6 +501,29 @@ fn the_usage_of_a_synthesis_reaches_the_exposed_usage_egress_with_run_and_node_s
     let (controller, result) = drive.join().expect("the drive loop does not panic");
     result.expect("the drive loop ends the run");
     assert_eq!(controller.run().state(), RunState::Completed);
+    Delivered {
+        run_id,
+        tts,
+        spoken,
+        received,
+    }
+}
+
+#[test]
+fn the_usage_of_a_synthesis_reaches_the_exposed_usage_egress_with_run_and_node_set() {
+    let rate = 16_000;
+    let synthesiser = MockSynthesiser::new(
+        MockConfiguration::IncrementalStreaming,
+        ModelId::generate(),
+        format(rate),
+    );
+    let adapter = synthesiser.adapter().clone();
+    let Delivered {
+        run_id,
+        tts,
+        spoken,
+        received,
+    } = through_the_node(synthesiser);
 
     let samples: u64 = spoken
         .iter()
@@ -537,4 +566,50 @@ fn the_usage_of_a_synthesis_reaches_the_exposed_usage_egress_with_run_and_node_s
         "the run's envelopes name no session"
     );
     assert_usage(record, &adapter, ms(samples, rate));
+}
+
+#[test]
+fn the_node_stamps_each_frame_with_the_name_its_synthesis_gives_a_frame() {
+    let mut synthesiser = MockSynthesiser::new(
+        MockConfiguration::IncrementalStreaming,
+        ModelId::generate(),
+        format(16_000),
+    );
+    let mut handle = synthesiser
+        .start()
+        .expect("a fresh synthesiser runs nothing else");
+    for segment in committed(&[TWELVE]) {
+        handle.offer_segment(segment).expect("a Committed segment");
+    }
+    let name = handle
+        .by_ref()
+        .find(|event| matches!(event, SynthesisEvent::Audio(_)))
+        .expect("the mock synthesises a frame")
+        .name();
+    drop(handle);
+    assert_eq!(name, "inference.audio.AudioChunk");
+
+    let node = MockSynthesiser::new(
+        MockConfiguration::IncrementalStreaming,
+        ModelId::generate(),
+        format(16_000),
+    );
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(through_the_node(node));
+    });
+    let delivered = finished
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the run ends within 20 s");
+    let frames: Vec<&str> = delivered
+        .spoken
+        .iter()
+        .filter(|envelope| matches!(envelope.payload, Payload::Audio(_)))
+        .map(|envelope| envelope.kind.as_str())
+        .collect();
+    assert_eq!(
+        frames, [name; 8],
+        "a frame per word: {:?}",
+        delivered.spoken
+    );
 }

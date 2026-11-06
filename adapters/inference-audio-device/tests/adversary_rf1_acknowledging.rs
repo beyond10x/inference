@@ -27,7 +27,8 @@ use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{Generation, StartGeneration};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
@@ -285,6 +286,7 @@ impl Synthesis {
             locality: Locality::SameProcess,
             capabilities: vec![Capability::IncrementalInput, Capability::OutputStreaming],
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("a positive concurrency");
         let (generation, _) = Generation::start(StartGeneration {
@@ -365,7 +367,7 @@ impl Feed {
             Payload::Control(kind) => kind.as_str().to_owned(),
             Payload::Completed(_) => "inference.stream.SynthesisCompleted".to_owned(),
             Payload::Started(..) => "inference.stream.GenerationStarted".to_owned(),
-            _ => "inference.audio.AudioFrame".to_owned(),
+            _ => "inference.audio.AudioChunk".to_owned(),
         };
         self.edge.put(EventEnvelope {
             schema_version: 1,

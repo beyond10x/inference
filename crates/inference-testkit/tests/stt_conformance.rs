@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use inference_core::envelope::EventEnvelope;
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_core::usage::{Quantity, QuantityKind};
 use inference_stt::inference_audio::AudioFrame;
@@ -267,6 +267,7 @@ impl Double {
             locality: Locality::SameProcess,
             capabilities: vec![Capability::IncrementalInput, Capability::OutputStreaming],
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("one is positive");
         Self {

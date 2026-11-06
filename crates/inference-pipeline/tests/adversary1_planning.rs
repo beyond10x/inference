@@ -5,7 +5,8 @@
 use std::num::NonZeroUsize;
 
 use inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
@@ -54,6 +55,7 @@ fn known(adapters: Vec<Vec<Capability>>) -> Known {
                     locality: Locality::SameProcess,
                     capabilities,
                     max_concurrency: 1,
+                    descriptor: AdapterDescriptor::default(),
                 })
                 .expect("a positive concurrency")
                 .0

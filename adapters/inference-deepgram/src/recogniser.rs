@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use inference_stt::inference_audio::{AudioFormat, AudioFrame};
 use inference_stt::inference_core::envelope::EventEnvelope;
 use inference_stt::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_stt::inference_text::{ReviseSpan, SpanId};
 use inference_stt::{
@@ -151,6 +151,7 @@ fn declare(max_concurrency: i64) -> Result<Adapter, ConfigError> {
         locality: Locality::ExternalProvider,
         capabilities: claims(),
         max_concurrency,
+        descriptor: AdapterDescriptor::default(),
     })
     .map(|(adapter, _)| adapter)
     .map_err(|_| ConfigError::MaxConcurrency(max_concurrency))

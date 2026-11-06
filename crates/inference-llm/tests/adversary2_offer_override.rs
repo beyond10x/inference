@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_llm::llm_core::{
     BoxFuture, Cancel, Capabilities, Error, Id, Item, Model, Protocol, Provenance, StopReason,
@@ -70,6 +70,7 @@ fn an_adapter_not_claiming_concurrent_input_output_takes_no_input_through_offer_
         locality: Locality::SameProcess,
         capabilities: vec![Capability::OutputStreaming],
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive")
     .0;

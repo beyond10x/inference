@@ -62,8 +62,8 @@ use sherpa_onnx::{
 use inference_stt::inference_audio::{AudioEncoding, AudioFrame};
 use inference_stt::inference_core::envelope::EventEnvelope;
 use inference_stt::inference_core::model::{
-    Adapter, AdapterDeclared, Capability, DeclareAdapter, DeclareModel, ExecutionForm, Locality,
-    Modality, Model, ModelDeclared, ModelId, NonPositiveConcurrency,
+    Adapter, AdapterDeclared, AdapterDescriptor, Capability, DeclareAdapter, DeclareModel,
+    ExecutionForm, Locality, Modality, Model, ModelDeclared, ModelId, NonPositiveConcurrency,
 };
 use inference_stt::inference_text::{ReviseSpan, SpanId};
 use inference_stt::{
@@ -285,6 +285,7 @@ pub fn declare_adapter(
         locality: Locality::SameProcess,
         capabilities: vec![Capability::IncrementalInput, Capability::OutputStreaming],
         max_concurrency,
+        descriptor: AdapterDescriptor::default(),
     })
 }
 

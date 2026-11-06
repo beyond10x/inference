@@ -10,7 +10,7 @@ use std::num::{NonZeroU16, NonZeroU32};
 use inference_core::generation::{Generation, StartGeneration};
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_testkit::tts::{MockSink, SinkRefused};
 use inference_text::{
@@ -96,6 +96,7 @@ fn bare(capabilities: Vec<Capability>, segments: Vec<OutputSegment>) -> Bare {
         locality: Locality::SameProcess,
         capabilities,
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("a maximum concurrency of one is positive");
     let mut handle = Bare {

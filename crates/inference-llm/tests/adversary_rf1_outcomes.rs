@@ -15,7 +15,7 @@ use std::time::Duration;
 use inference_core::generation::StopReason as Stop;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_core::usage::UsageRecorded;
 use inference_llm::llm_core::{
@@ -197,6 +197,7 @@ fn start(steps: Vec<Step>, capabilities: Vec<Capability>) -> GenerationHandle {
         locality: Locality::SameProcess,
         capabilities,
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive")
     .0;

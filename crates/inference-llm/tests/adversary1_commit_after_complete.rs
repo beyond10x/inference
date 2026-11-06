@@ -6,7 +6,7 @@
 
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_llm::llm_core::{Item, TurnRequest};
 use inference_llm::{CONTRACT_REVISION, GenerationOutput, GenerationRequest};
@@ -21,6 +21,7 @@ fn started() -> GenerationOutput {
         locality: Locality::SameProcess,
         capabilities: vec![Capability::OutputStreaming],
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive")
     .0;

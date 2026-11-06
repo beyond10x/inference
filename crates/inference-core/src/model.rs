@@ -9,8 +9,8 @@
 //! declaring command, [`Model::declare`], [`Adapter::declare`] and [`CapabilityRecord::declare`],
 //! which return the entity and the event the declaration emits. An [`AdapterDescriptor`]
 //! describes what the design lists beside an adapter's capabilities, every part optional: voices,
-//! codecs, context size, duration limits, token budget, state scope and [`RateLimit`]s; no
-//! declaring command takes one yet. Serialized names are the ESS names.
+//! codecs, context size, duration limits, token budget, state scope and [`RateLimit`]s; an
+//! [`Adapter`] carries the one its [`DeclareAdapter`] names. Serialized names are the ESS names.
 
 use std::error::Error;
 use std::fmt;
@@ -279,6 +279,7 @@ pub struct DeclareAdapter {
     pub locality: Locality,
     pub capabilities: Vec<Capability>,
     pub max_concurrency: i64,
+    pub descriptor: AdapterDescriptor,
 }
 
 /// `inference.model.AdapterDeclared`: an adapter was declared with the capabilities it claims.
@@ -338,6 +339,7 @@ pub struct Adapter {
     locality: Locality,
     capabilities: Vec<Capability>,
     max_concurrency: i64,
+    descriptor: AdapterDescriptor,
 }
 
 impl Adapter {
@@ -385,6 +387,7 @@ impl Adapter {
             locality: input.locality,
             capabilities: input.capabilities,
             max_concurrency: input.max_concurrency,
+            descriptor: input.descriptor,
         };
         Ok((adapter, event))
     }
@@ -428,6 +431,13 @@ impl Adapter {
     #[must_use]
     pub const fn max_concurrency(&self) -> i64 {
         self.max_concurrency
+    }
+
+    /// The voices, codecs, limits and rate limits the adapter declares; an empty part declares
+    /// nothing of it.
+    #[must_use]
+    pub const fn descriptor(&self) -> &AdapterDescriptor {
+        &self.descriptor
     }
 }
 
@@ -474,18 +484,17 @@ pub struct RateLimit {
 /// capabilities and a [`CapabilityRecord`] does not carry: the voices and codecs a speech model
 /// offers, its context size in tokens, its input and output duration limits in milliseconds, its
 /// token budget, its state scope and its rate limits. Every part is optional: an empty list or a
-/// `None` says the adapter declares nothing of it, never that it supports none, and the wire may
-/// leave it out. Languages and audio formats are the capability record's. A field the
+/// `None` says the adapter declares nothing of it, never that it supports none. On the wire the
+/// three lists are required, empty or not, as `ess/domains/model.yaml` declares them, and a
+/// `None` may be left out. Languages and audio formats are the capability record's. A field the
 /// specification does not declare is refused.
 ///
-/// No declaring command takes a descriptor yet; build one with the parts an adapter declares and
-/// `..AdapterDescriptor::default()`.
+/// [`DeclareAdapter`] takes one and [`Adapter::descriptor`] reads it back; build one with the
+/// parts an adapter declares and `..AdapterDescriptor::default()`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterDescriptor {
-    #[serde(default)]
     pub voices: Vec<String>,
-    #[serde(default)]
     pub codecs: Vec<String>,
     #[serde(default)]
     pub context_tokens: Option<i64>,
@@ -497,7 +506,6 @@ pub struct AdapterDescriptor {
     pub token_budget: Option<i64>,
     #[serde(default)]
     pub state_scope: Option<String>,
-    #[serde(default)]
     pub rate_limits: Vec<RateLimit>,
 }
 

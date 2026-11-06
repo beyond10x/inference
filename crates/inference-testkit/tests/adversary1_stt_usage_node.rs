@@ -282,7 +282,7 @@ impl Sending {
     fn frame(&mut self, frame: AudioFrame) -> EventEnvelope<Payload> {
         let at = i64::try_from(frame.position.get()).expect("a short clip");
         self.envelope(
-            "inference.audio.AudioFrame",
+            "inference.audio.AudioChunk",
             at,
             Timebase::AudioFrameTime,
             Payload::Audio(frame),
