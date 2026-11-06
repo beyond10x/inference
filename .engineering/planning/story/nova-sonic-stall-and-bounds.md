@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:nova-sonic-stall-and-bounds
 kind: story
-status: draft
+status: active
 title: Nova Sonic reports one stall per idle limit and bounds its arrivals and open
 tags:
 - from-finding
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
+- serves: vision:inference
 scope:
 - confidence: inferred
   path: adapters/inference-aws/src/client.rs
@@ -15,7 +16,10 @@ scope:
   path: adapters/inference-aws/src/duplex.rs
 - confidence: inferred
   path: adapters/inference-aws/src/nova_sonic/session.rs
-revision: 4
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T00:41:02Z", actor: "human:operator", revision: 5}
+- {from: "proposed", to: "active", at: "2026-11-06T00:41:02Z", actor: "human:operator", revision: 6}
 ---
 ## Context
 

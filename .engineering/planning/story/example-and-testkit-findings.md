@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:example-and-testkit-findings
 kind: story
-status: draft
+status: active
 title: Examples, the sherpa recogniser and the duplex mock close the review's remaining findings
 tags:
 - from-finding
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
+- serves: vision:inference
 scope:
 - confidence: inferred
   path: adapters/inference-sherpa-onnx/src/stt.rs
@@ -17,7 +18,10 @@ scope:
   path: examples/realtime-voice/src/lib.rs
 - confidence: inferred
   path: examples/repo-podcast/src/show.rs
-revision: 5
+revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T00:41:05Z", actor: "human:operator", revision: 6}
+- {from: "proposed", to: "active", at: "2026-11-06T00:41:05Z", actor: "human:operator", revision: 7}
 ---
 ## Context
 

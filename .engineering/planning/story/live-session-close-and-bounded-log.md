@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:live-session-close-and-bounded-log
 kind: story
-status: draft
+status: active
 title: A draining live session closes when its run fails or is cancelled, and its event log is bounded
 tags:
 - from-finding
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
+- serves: vision:inference
 scope:
 - confidence: inferred
   path: crates/inference-facade/src/live.rs
@@ -15,7 +16,10 @@ scope:
   path: crates/inference-facade/src/session.rs
 - confidence: inferred
   path: ess/domains/session.yaml
-revision: 4
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T00:41:02Z", actor: "human:operator", revision: 5}
+- {from: "proposed", to: "active", at: "2026-11-06T00:41:02Z", actor: "human:operator", revision: 6}
 ---
 ## Context
 

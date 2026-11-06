@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:acknowledging-sink-drain-ends
 kind: story
-status: draft
+status: active
 title: The acknowledging sink's drain ends when the device stops, and keeps receipts of audio already heard
 tags:
 - from-finding
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
+- serves: vision:inference
 scope:
 - confidence: inferred
   path: adapters/inference-audio-device/src/acknowledging.rs
@@ -15,7 +16,10 @@ scope:
   path: adapters/inference-audio-device/src/playout.rs
 - confidence: inferred
   path: adapters/inference-audio-device/tests/acknowledging.rs
-revision: 4
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T00:41:03Z", actor: "human:operator", revision: 5}
+- {from: "proposed", to: "active", at: "2026-11-06T00:41:03Z", actor: "human:operator", revision: 6}
 ---
 ## Context
 
