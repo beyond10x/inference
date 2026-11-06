@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.23.0] — 2026-11-06
 
 ### Breaking
 
@@ -27,6 +27,8 @@
 - `inference-facade`: an event of an interrupted generation that arrives after the generation's
   end, such as a refusal kept across a cancel or supersede, is no longer delivered; the session
   remembers the last 256 cut generations past their end.
+- `inference-deepgram` tests: the agent release test gives a session 2 s to open instead of
+  400 ms, which a loaded machine exceeded.
 
 ## [0.22.0] — 2026-11-06
 
