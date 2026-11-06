@@ -41,3 +41,24 @@ fn the_tts_record_holds_the_claims_of_the_binding() {
     );
     assert_eq!(record.adapter_revision, env!("CARGO_PKG_VERSION"));
 }
+
+/// `records/claims-agent.json` holds the agent conversation binding's claims, as
+/// `agent_claims` makes them.
+#[cfg(feature = "duplex")]
+#[test]
+fn the_agent_record_holds_the_claims_of_the_binding() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("records/claims-agent.json");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} cannot be read: {error}", path.display()));
+    let record: ClaimsRecord = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("{} is not a claims record: {error}", path.display()));
+    assert_eq!(record.claims, inference_elevenlabs::agent_claims());
+    assert_eq!(record.model, inference_elevenlabs::AGENT_MODEL);
+    assert_eq!(record.binding, "inference_elevenlabs::ElevenLabsAgent");
+    assert_eq!(record.features, vec!["duplex".to_owned()]);
+    assert_eq!(
+        record.held_by,
+        "claims_record::the_agent_record_holds_the_claims_of_the_binding"
+    );
+    assert_eq!(record.adapter_revision, env!("CARGO_PKG_VERSION"));
+}

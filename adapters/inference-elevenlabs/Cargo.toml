@@ -1,6 +1,6 @@
 [package]
 name = "inference-elevenlabs"
-description = "ElevenLabs streaming TTS for the inference framework: a synthesiser of the TTS contract over the single-stream text-to-speech WebSocket."
+description = "ElevenLabs for the inference framework: a streaming TTS synthesiser over the single-stream text-to-speech WebSocket and, with feature duplex, an agent conversation as a native speech model."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,11 +10,13 @@ repository.workspace = true
 [features]
 keychain = ["dep:keyring-core", "dep:secrets-core", "dep:secrets-keychain"]
 native-keychain = ["keychain", "secrets-keychain/native-keychain"]
+duplex = ["dep:inference-duplex", "tokio/macros", "tokio/rt-multi-thread", "tokio/sync"]
 live = ["native-keychain"]
 
 [dependencies]
 base64.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+inference-duplex = { path = "../../crates/inference-duplex", optional = true }
 inference-tts = { path = "../../crates/inference-tts" }
 keyring-core = { version = "1", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -29,7 +31,15 @@ zeroize = "1"
 [dev-dependencies]
 inference-testkit = { path = "../../crates/inference-testkit", features = ["tts"] }
 serde.workspace = true
-tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+
+[[test]]
+name = "agent_duplex"
+required-features = ["duplex"]
+
+[[test]]
+name = "agent_duplex_live"
+required-features = ["live", "duplex"]
 
 [[example]]
 name = "live"
