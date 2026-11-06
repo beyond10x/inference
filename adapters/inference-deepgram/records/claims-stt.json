@@ -1,0 +1,11 @@
+{
+  "model": "nova-3",
+  "binding": "inference_deepgram::DeepgramRecogniser",
+  "features": [],
+  "claims": [
+    "incremental_input",
+    "output_streaming"
+  ],
+  "held_by": "claims_record::the_stt_record_holds_the_claims_of_the_binding",
+  "adapter_revision": "0.17.0"
+}

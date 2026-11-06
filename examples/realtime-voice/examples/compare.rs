@@ -14,7 +14,13 @@
 //! figure is taken: on the client, at the receipt of each duplex event.
 //!
 //! Each provider runs with the session configuration `talk` uses and its key or credentials as
-//! `talk` reads them. A provider whose model cannot be made or whose first session does not open
+//! `talk` reads them. The ElevenLabs agent is `ELEVENLABS_AGENT_ID` for a public agent, or
+//! `ELEVENLABS_AGENT_SIGNED_URL` for a private one, and must take and give `pcm_16000`
+//! (`realtime_voice::elevenlabs_config`); it reports no usage. The Deepgram Voice Agent reads its key from
+//! `DEEPGRAM_API_KEY`, runs with the default providers of `inference_deepgram::agent::AgentConfig`
+//! in G.711 μ-law at 8 kHz (`realtime_voice::deepgram_config`), and reports no usage: it bills
+//! per minute, which no message carries. A provider whose model cannot be
+//! made or whose first session does not open
 //! is skipped with the reason; `--skip <provider>=<reason>` skips one without trying it. The
 //! local cascade is not a native speech model and is listed as skipped.
 
@@ -25,14 +31,20 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
 use inference_aws::duplex::NovaSonicSpeech;
+use inference_deepgram::agent::AgentConfig;
+use inference_deepgram::{AgentEndpoint as DeepgramEndpoint, DeepgramAgent};
 use inference_duplex::{NativeSpeechModel, SessionConfig};
+use inference_elevenlabs::ElevenLabsAgent;
+use inference_elevenlabs::agent::{AgentEndpoint, SignedUrl};
 use inference_openai::duplex::OpenAiRealtime;
 use inference_openai::live_duplex::{OpenAiLive, OpenAiLiveSession};
 use inference_openai::{
     CredentialSource, Endpoint, EnvironmentSource, KeychainSource, OPENAI_KEY_NAME,
 };
 use realtime_voice::compare::{Billing, Clip, Comparison, Measured, Plan};
-use realtime_voice::{Reported, nova_config, openai_config, openai_live_config};
+use realtime_voice::{
+    Reported, deepgram_config, elevenlabs_config, nova_config, openai_config, openai_live_config,
+};
 
 const QUESTION: &[u8] =
     include_bytes!("../../../adapters/inference-openai/tests/fixtures/speech.wav");
@@ -55,7 +67,7 @@ struct Args {
         long,
         value_enum,
         value_delimiter = ',',
-        default_value = "openai,openai-live,nova"
+        default_value = "openai,openai-live,nova,elevenlabs,deepgram"
     )]
     providers: Vec<Provider>,
     /// The runs of each provider.
@@ -77,6 +89,10 @@ enum Provider {
     OpenaiLive,
     /// Amazon Nova Sonic on Bedrock.
     Nova,
+    /// An ElevenLabs agent conversation.
+    Elevenlabs,
+    /// A Deepgram Voice Agent session.
+    Deepgram,
 }
 
 impl Provider {
@@ -85,9 +101,29 @@ impl Provider {
             Self::Openai => "openai",
             Self::OpenaiLive => "openai-live",
             Self::Nova => "nova",
+            Self::Elevenlabs => "elevenlabs",
+            Self::Deepgram => "deepgram",
         }
     }
 }
+
+/// What no ElevenLabs agent message reports: every count.
+const ELEVENLABS_REPORTED: Reported = Reported {
+    input_text: false,
+    input_audio: false,
+    input_cached: false,
+    output_text: false,
+    output_audio: false,
+};
+
+/// What no Deepgram Voice Agent message reports: every count.
+const DEEPGRAM_REPORTED: Reported = Reported {
+    input_text: false,
+    input_audio: false,
+    input_cached: false,
+    output_text: false,
+    output_audio: false,
+};
 
 fn main() -> ExitCode {
     let args = Args::parse();
@@ -163,6 +199,30 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                         &Billing::tokens(Reported::NOVA),
                     )
                 }),
+            Provider::Elevenlabs => elevenlabs_agent().and_then(|mut model| {
+                measure(
+                    name,
+                    &mut model,
+                    elevenlabs_config,
+                    &plan,
+                    args.runs,
+                    &Billing::tokens(ELEVENLABS_REPORTED),
+                )
+            }),
+            Provider::Deepgram => {
+                DeepgramAgent::from_env(DeepgramEndpoint::new(), AgentConfig::new())
+                    .map_err(Box::<dyn Error>::from)
+                    .and_then(|mut model| {
+                        measure(
+                            name,
+                            &mut model,
+                            deepgram_config,
+                            &plan,
+                            args.runs,
+                            &Billing::tokens(DEEPGRAM_REPORTED),
+                        )
+                    })
+            }
         };
         match outcome {
             Ok(runs) => comparison.ran(name, runs),
@@ -190,6 +250,19 @@ fn openai_key() -> Result<Box<dyn CredentialSource>, Box<dyn Error>> {
             Box::new(KeychainSource::native()?)
         },
     )
+}
+
+/// The ElevenLabs agent the environment names: a signed URL, else a public agent id.
+fn elevenlabs_agent() -> Result<ElevenLabsAgent, Box<dyn Error>> {
+    if let Ok(url) = std::env::var("ELEVENLABS_AGENT_SIGNED_URL") {
+        return Ok(ElevenLabsAgent::signed(
+            SignedUrl::new(url)?,
+            AgentEndpoint::new(),
+        ));
+    }
+    let id = std::env::var("ELEVENLABS_AGENT_ID")
+        .map_err(|_| "neither ELEVENLABS_AGENT_ID nor ELEVENLABS_AGENT_SIGNED_URL is set")?;
+    Ok(ElevenLabsAgent::public(id, AgentEndpoint::new())?)
 }
 
 /// `runs` runs of the plan over `model`; an error when the first session does not open.

@@ -3,7 +3,7 @@ title: Environment
 sidebar_position: 4
 description: Every environment variable the adapters, examples and live tests read, what it does, and its default.
 lede: Adapters and examples take their keys, checkpoints and servers from the environment or from options; nothing is looked up or downloaded on their behalf.
-source: adapters/inference-openai (config.rs, credentials), adapters/inference-aws (nova_sonic), adapters/inference-elevenlabs (credential.rs, examples/live.rs), examples/realtime-voice, examples/local-voice-cascade (src/local.rs), examples/stt-sherpa-onnx, adapter tests
+source: adapters/inference-openai (config.rs, credentials), adapters/inference-aws (nova_sonic), adapters/inference-elevenlabs (credential.rs, examples/live.rs, tests/agent_duplex_live.rs), adapters/inference-deepgram (credential.rs, tests/live.rs), examples/realtime-voice, examples/local-voice-cascade (src/local.rs), examples/stt-sherpa-onnx, adapter tests
 ---
 
 # Environment
@@ -24,6 +24,10 @@ the live tests read the same ones and are ignored without them.
 | `INFERENCE_COMPARE_BARGE_IN_WAV` | `realtime-voice`, example `compare` | a 16-bit PCM WAV file of speech sent over each answer as a barge-in | no barge-in |
 | `ELEVENLABS_API_KEY` | `inference-elevenlabs` (`EnvironmentSource::elevenlabs`), its example `live` | the ElevenLabs key, sent only in the `xi-api-key` header | the example `live` reads the OS keychain, secret `elevenlabs-api-key` |
 | `ELEVENLABS_VOICE_ID` | `inference-elevenlabs`, example `live` | the voice the live check speaks with | none: the example exits with status 2 |
+| `ELEVENLABS_AGENT_ID` | `inference-elevenlabs` test `agent_duplex_live`, `realtime-voice` example `compare` | the ElevenLabs agent the live check and `compare` talk to | none: one of it and `ELEVENLABS_AGENT_SIGNED_URL` is required |
+| `ELEVENLABS_AGENT_SIGNED_URL` | as above | a signed conversation URL, used instead of the agent id and the key | none |
+| `DEEPGRAM_API_KEY` | `inference-deepgram` (`EnvironmentSource::deepgram`), its live tests | the Deepgram key, sent only as `Authorization: Token` in the handshake | none; with feature `keychain`, `KeychainSource` reads the OS keychain |
+| `INFERENCE_DEEPGRAM_STT_CLIP` | `inference-deepgram` test `live` | a 16-bit mono WAV file the live check transcribes | none: the test panics |
 
 The OpenAI key is sent once in the handshake and never logged by the adapter. The WebSocket library
 below it logs the handshake at trace level: see

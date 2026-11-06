@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-06T00:16:44Z",
+  "actor": "human:operator",
+  "artifact": "story:cut-response-audio-is-told-from-the-next-words",
+  "kind": "story",
+  "revision": 15,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p realtime-voice --test talk_over; cargo test -p inference-openai --features gpt-live,duplex --test gpt_live_duplex",
+    "reference": "baseline 0d44521: talk_over FAILED 18 passed 4 failed, gpt_live_duplex FAILED 23/1 (U1/scratch/red-*.log); treatment 9fee977: talk_over 22/0, gpt_live_duplex 24/0, adversary1_gpt_live_transcript 6/0 (U1/scratch/green-*.log)"
+  }
+}
