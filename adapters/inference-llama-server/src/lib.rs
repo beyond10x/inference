@@ -11,6 +11,14 @@
 //! `inference-llm` refuses input for an adapter that does not claim
 //! [`Capability::ConcurrentInputOutput`].
 //!
+//! # Loopback only
+//!
+//! The adapter is declared a local service on a local worker, and it sends prompts in the clear
+//! with no credential, so it serves a server on this machine only: [`binding`], and with it
+//! [`LlamaServer::new`], refuse a base URL whose host is not loopback ([`loopback`]) before
+//! anything is made, with an `InvalidRequest` naming the URL's scheme, host and port and never its
+//! userinfo ([`NotLoopback`]). A server on another machine is out of this adapter's scope.
+//!
 //! # Tool proposals
 //!
 //! With [`Config::tools`] on, the binding declares tools and a tool choice and the adapter claims
@@ -75,6 +83,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::future;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::thread;
@@ -129,7 +138,8 @@ pub const WEIGHT_LICENSE: &str = "Apache-2.0";
 /// How to reach one running `llama-server` and what it serves.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The base URL of the server's OpenAI-compatible API, `http://127.0.0.1:8080/v1`.
+    /// The base URL of the server's OpenAI-compatible API, `http://127.0.0.1:8080/v1`; its host
+    /// must be loopback ([`loopback`]).
     pub base_url: String,
     /// The model name the server answers to, its `--alias`; every request names it.
     pub served_model: String,
@@ -176,12 +186,16 @@ impl Config {
 
 /// The anonymous, self-hosted Chat Completions binding of `config`: no credential is resolved and
 /// no authorization header is sent. Its model is `config.served_model`, under that name both in
-/// the binding and on the wire.
+/// the binding and on the wire. The base URL's host must be loopback ([`loopback`]).
 ///
 /// # Errors
 ///
-/// The `llm` error refusing the base URL or the served model name, or the binding.
+/// An [`ErrorCode::InvalidRequest`](llm_core::ErrorCode::InvalidRequest) whose message is the
+/// [`NotLoopback`] refusal when the base URL's host is not loopback, before anything else is
+/// read; otherwise the `llm` error refusing the base URL or the served model name, or the
+/// binding.
 pub fn binding(config: &Config) -> Result<Binding, Error> {
+    loopback(&config.base_url).map_err(|refused| Error::invalid(refused.to_string()))?;
     let served = id(&config.served_model)?;
     BindingDocument::new(
         Provider {
@@ -214,6 +228,101 @@ pub fn binding(config: &Config) -> Result<Binding, Error> {
         },
     )
     .bind()
+}
+
+/// What ends the authority of an `http` or `https` URL under the WHATWG parser `llm` reads the
+/// base URL with: `\` as well as `/`, `?` and `#`.
+const AUTHORITY_END: [char; 4] = ['/', '\\', '?', '#'];
+
+/// A base URL refused because it is not an `http` or `https` URL whose host is loopback.
+///
+/// It keeps only the URL's scheme, host and port ([`NotLoopback::origin`]); its userinfo, path,
+/// query and fragment are never kept, so neither its text nor its `Debug` form echoes them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotLoopback {
+    origin: String,
+}
+
+impl NotLoopback {
+    /// The refused URL's scheme, host and port, as `http://10.0.0.5:8080`: the authority after
+    /// its last `@`. Where an `@` follows the authority, as in userinfo holding a `/`, the host
+    /// and port are withheld, since what precedes them could be userinfo: `http://(withheld)`.
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    fn of(url: &str) -> Self {
+        let (scheme, rest) = match url.split_once("://") {
+            Some((scheme, rest)) => (Some(scheme), rest),
+            None => (None, url),
+        };
+        let authority = rest.split(AUTHORITY_END).next().unwrap_or_default();
+        let host_port = if rest
+            .get(authority.len()..)
+            .unwrap_or_default()
+            .contains('@')
+        {
+            "(withheld)"
+        } else {
+            authority.rsplit('@').next().unwrap_or_default()
+        };
+        let origin = match scheme {
+            Some(scheme) => format!("{scheme}://{host_port}"),
+            None => host_port.to_owned(),
+        };
+        Self { origin }
+    }
+}
+
+impl fmt::Display for NotLoopback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} is not an http URL whose host is loopback: this adapter serves a llama-server on \
+             this machine only",
+            self.origin
+        )
+    }
+}
+
+impl std::error::Error for NotLoopback {}
+
+/// Whether `url` is an `http` or `https` URL whose host is `localhost` or a loopback address,
+/// IPv4 or IPv6, an IPv4 address mapped into IPv6 read as the IPv4 address. The host is read
+/// from the authority after any userinfo, the authority ending at the first `/`, `\`, `?` or `#`
+/// as the WHATWG parser `llm` reads the base URL with ends it; the scheme and `localhost` are
+/// read without regard to case.
+///
+/// [`binding`], and with it [`LlamaServer::new`], refuse any other base URL: the adapter is
+/// declared a local service on a local worker ([`declare_adapter`]) and sends prompts in the
+/// clear, so a server on another machine is out of its scope.
+///
+/// # Errors
+///
+/// [`NotLoopback`], naming the URL's scheme, host and port only.
+pub fn loopback(url: &str) -> Result<(), NotLoopback> {
+    let refused = || NotLoopback::of(url);
+    let (scheme, rest) = url.split_once("://").ok_or_else(refused)?;
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) {
+        return Err(refused());
+    }
+    let authority = rest.split(AUTHORITY_END).next().unwrap_or_default();
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    let admitted = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let (address, after) = bracketed.split_once(']').ok_or_else(refused)?;
+        (after.is_empty() || after.starts_with(':'))
+            && address
+                .parse::<Ipv6Addr>()
+                .is_ok_and(|address| IpAddr::V6(address).to_canonical().is_loopback())
+    } else {
+        let host = host_port.split(':').next().unwrap_or_default();
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.to_canonical().is_loopback())
+    };
+    if admitted { Ok(()) } else { Err(refused()) }
 }
 
 fn id(value: &str) -> Result<Id, Error> {

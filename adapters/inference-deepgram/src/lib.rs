@@ -38,7 +38,8 @@
 //!
 //! # Usage
 //!
-//! The usage record is the contract's: `input_audio_ms`, the audio offered, `requests` 1, and
+//! The usage record is the contract's: `input_audio_ms`, all the audio offered (on a call marked
+//! failed, the audio forwarded: a frame is taken only once it can be sent), `requests` 1, and
 //! `local_compute_ms` unknown, since nothing is computed here. The seconds of audio the endpoint
 //! reports in its summary `Metadata` are not a quantity the contract's record carries, so they are
 //! not put in it; [`DeepgramRecognition::provider_duration`] gives them as reported.

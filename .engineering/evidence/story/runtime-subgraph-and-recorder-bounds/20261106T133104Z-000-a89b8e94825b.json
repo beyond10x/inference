@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-06T13:31:04Z",
+  "actor": "human:operator",
+  "artifact": "story:runtime-subgraph-and-recorder-bounds",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "0.19.0 staged full gate on wave/2026-11-06-inference-review-fixes-2: s1 (sherpa archive, ess validate, aep validate, docs generate --check, fmt), s2 clippy --workspace --all-targets --all-features, s3a/s3b/s3c workspace tests all-features: 3244 passed, 0 failed, 55 ignored over 471 suites"
+  }
+}

@@ -1068,11 +1068,20 @@ impl<P: Send + 'static> RunController<P> {
         }
     }
 
-    /// Every envelope of user content the run refused because its sequence did not increase on
-    /// its stream, in the order the run refused them; none of them reached an edge.
+    /// The first [`REFUSALS_KEPT`](crate::REFUSALS_KEPT) envelopes of user content the run refused
+    /// because their sequence did not increase on their stream, in the order the run refused them;
+    /// none of them reached an edge. Later refusals are counted by
+    /// [`refusals_overflow`](Self::refusals_overflow).
     #[must_use]
     pub fn refusals(&self) -> Vec<SequenceNotIncreasing> {
         self.signals.refusals()
+    }
+
+    /// How many refusals the run made past the first [`REFUSALS_KEPT`](crate::REFUSALS_KEPT),
+    /// which [`refusals`](Self::refusals) does not list.
+    #[must_use]
+    pub fn refusals_overflow(&self) -> u64 {
+        self.signals.refusals_overflow()
     }
 
     /// The run.

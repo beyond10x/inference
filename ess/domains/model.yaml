@@ -99,6 +99,54 @@ types:
       - name: gpu_memory_mib
         type: Optional<Integer>
 
+  # One limit a provider or a deployment puts on an adapter: at most `limit` of `unit` per window
+  # of `window_ms` milliseconds, such as 60 requests per 60000 ms. The unit is a free name, such
+  # as requests or input_text_tokens, until the design settles a vocabulary for it; the parts are
+  # this specification's choice, not the design's.
+  # read from: docs/design/inference.md:439
+  - name: inference.model.RateLimit
+    kind: struct
+    fields:
+      - name: unit
+        type: String
+      - name: limit
+        type: Integer
+      - name: window_ms
+        type: Integer
+
+  # The descriptors of an adapter the design lists beside its capabilities and that the
+  # capability record does not carry: the voices and codecs a speech model offers, its context
+  # size in tokens, its input and output duration limits in milliseconds, its token budget, its
+  # state scope and its rate limits. Every part is optional: an empty list or none says the
+  # adapter declares nothing of it, never that it supports none. Languages and audio formats are
+  # the capability record's. State scope is free text until the design names its values.
+  # read from: docs/design/inference.md:386
+  # read from: docs/design/inference.md:435
+  # read from: docs/design/inference.md:436
+  # read from: docs/design/inference.md:439
+  # UNMAPPED: no command takes a descriptor and no entity carries one yet: adding it to the input
+  # of DeclareAdapter or DeclareCapabilityRecord changes a declared input every existing
+  # declaration writes. Which of the two carries it is open for the owner.
+  - name: inference.model.AdapterDescriptor
+    kind: struct
+    fields:
+      - name: voices
+        type: List<String>
+      - name: codecs
+        type: List<String>
+      - name: context_tokens
+        type: Optional<Integer>
+      - name: max_input_duration_ms
+        type: Optional<Integer>
+      - name: max_output_duration_ms
+        type: Optional<Integer>
+      - name: token_budget
+        type: Optional<Integer>
+      - name: state_scope
+        type: Optional<String>
+      - name: rate_limits
+        type: List<inference.model.RateLimit>
+
 entities:
   # A trained inference artifact or hosted model endpoint, described by capabilities and
   # resources; it owns model identity, modality support and constraints. Family and checkpoint,
