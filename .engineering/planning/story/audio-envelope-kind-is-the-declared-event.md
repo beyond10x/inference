@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:audio-envelope-kind-is-the-declared-event
 kind: story
-status: active
+status: implemented
 title: Audio envelopes carry the declared event name inference.audio.AudioChunk
 summary: Every envelope of a frame of audio is stamped inference.audio.AudioChunk, the declared event, as SynthesisEvent::name() already returns since 0.19.0; no alias for the old kind
 tags:
@@ -10,10 +10,11 @@ tags:
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
 - serves: vision:inference
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-06T19:11:12Z", actor: "human:operator", revision: 4}
 - {from: "proposed", to: "active", at: "2026-11-06T19:11:13Z", actor: "human:operator", revision: 5}
+- {from: "active", to: "implemented", at: "2026-11-06T21:20:41Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 # Story: audio envelopes carry the declared event name
 
