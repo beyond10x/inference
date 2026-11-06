@@ -39,8 +39,9 @@
 //! `inference.usage.UsageRecorded` of [`usage_of_turn`] over the usage `llm` observed for it, its
 //! start and end measured around the turn on the wall clock, placed on no run, node or session,
 //! which the node that places it fills. A turn that fails yields a record too, before the
-//! [`GenerationEvent::Cancelled`] of its generation: one request, every token count unknown and
-//! its counts not final, so a failed call is still counted. A supersede or a cancel the caller
+//! [`GenerationEvent::Cancelled`] of its generation: one request, the token counts `llm` observed
+//! before it failed, as the partial usage of an interrupted stream, every other token count
+//! unknown, and its counts not final, so a failed call is still counted. A supersede or a cancel the caller
 //! asks for delivers no more text, and no usage record is lost to it: the record of each turn
 //! that ended and was not yet taken is still delivered, and the turn running then is cancelled
 //! through [`llm_core::Cancel`] and polled until its model returns from the cancel, which may
@@ -886,17 +887,23 @@ pub struct GenerationHandle {
     _slot: Slot,
 }
 
+/// Shows the generation, the calls by their identifiers and the rest by count: no text of the
+/// conversation, as the `Debug` form of an [`AdmittedInput`] shows none. The instructions, the
+/// items, the inputs waiting, the segments' and the delivered events' text and the arguments of
+/// staged calls are left out, so a handle in a log or a panic carries no prompt or user text.
 impl fmt::Debug for GenerationHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let staged: Vec<&CallId> = self.staged.iter().map(|call| &call.call_id).collect();
         f.debug_struct("GenerationHandle")
-            .field("output", &self.output)
-            .field("conversation", &self.conversation)
-            .field("inputs", &self.inputs)
+            .field("generation", self.output.generation())
+            .field("segments", &self.output.segments().len())
+            .field("conversation_items", &self.conversation.items.len())
+            .field("inputs", &self.inputs.len())
             .field("awaited", &self.awaited)
-            .field("staged", &self.staged)
+            .field("staged", &staged)
             .field("running", &self.turn.is_some())
-            .field("delivered", &self.delivered)
-            .field("failure", &self.failure)
+            .field("delivered", &self.delivered.len())
+            .field("failure", &self.failure.as_ref().map(|error| error.code))
             .finish_non_exhaustive()
     }
 }
@@ -1275,7 +1282,8 @@ impl GenerationHandle {
 
     /// Cancels the generation of a turn that failed, keeping `error`: what was delivered stays
     /// queued, the usage records held among it, then the usage record of the failed turn, one
-    /// request with every token count unknown and its counts not final, and
+    /// request with the counts its error's observation carries, every other token count
+    /// unknown, and its counts not final, and
     /// [`GenerationEvent::Cancelled`] follows them with the segments discarded.
     fn turn_failed(&mut self, error: llm_core::Error) {
         self.turn = None;
@@ -1283,14 +1291,13 @@ impl GenerationHandle {
         if let Ok((cancelled, discarded)) = self.output.cancel() {
             self.stop();
             self.keep_held_usage();
-            let upstream_model = error
-                .observation
-                .as_ref()
-                .and_then(|observation| observation.upstream_model.as_ref());
+            let observation = error.observation.as_deref();
             let recorded = usage_of_turn(
                 &self.adapter,
-                None,
-                upstream_model.map(llm_core::Id::as_str),
+                observation.and_then(|observation| observation.usage.as_ref()),
+                observation
+                    .and_then(|observation| observation.upstream_model.as_ref())
+                    .map(llm_core::Id::as_str),
                 false,
                 (self.turn_started_ms, ended_at_ms),
             );
