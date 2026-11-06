@@ -19,8 +19,8 @@
 //! On the end of input, a control event of kind `stop`, or once its input edge is closed, as on a
 //! drain, it completes the turn it holds Open, sending its `TurnCompleted` on the wall clock with
 //! no cause, as no speech activity answers it; on a `stop` it then passes the end of input on.
-//! Then it ends. Cancelled, it sends nothing more. Content other than speech activity fails the
-//! node.
+//! Then it ends. Cancelled, it sends nothing more, and a send waiting for room on a full edge
+//! ends at the cancel. Content other than speech activity fails the node.
 
 use std::fmt;
 use std::future;
@@ -33,6 +33,7 @@ use inference_text::{
     OpenTurn, TurnCompleted, TurnId, TurnNotFound, TurnOpened, TurnStateConflict,
 };
 
+use super::tool_authority::send_unless;
 use super::vad::SpeechActivity;
 use super::{Emitter, Next, Task, Watched, block_on, next, one_in_one_out};
 use crate::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
@@ -217,15 +218,16 @@ struct Exchanging<P> {
 }
 
 impl<P: TurnPayload> Exchanging<P> {
-    /// Sends `envelope` on, unless the policy was cancelled: it then sends nothing more.
+    /// Sends `envelope` on, unless the policy was cancelled: it then sends nothing more, and a
+    /// cancel taken while the send waits for room ends the wait ([`send_unless`]).
     async fn send(&self, envelope: EventEnvelope<P>) -> Result<(), String> {
-        if self.state.read(|state| state.cancelled) {
-            return Ok(());
-        }
-        self.output
-            .send(envelope)
-            .await
-            .map_err(|refused| refused.to_string())
+        send_unless(
+            &self.state,
+            |state| state.cancelled,
+            self.output.as_ref(),
+            envelope,
+        )
+        .await
     }
 
     /// The command `activity` calls for, if any, run against the store and its event sent on,

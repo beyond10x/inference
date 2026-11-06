@@ -1,6 +1,7 @@
 //! The binding of a session to Bedrock's `InvokeModelWithBidirectionalStream`.
 
 use std::future::Future;
+use std::time::Duration;
 
 use aws_sdk_bedrockruntime::Client;
 use aws_sdk_bedrockruntime::error::{ProvideErrorMetadata, SdkError};
@@ -32,20 +33,43 @@ const OUTPUT_CAPACITY: usize = 256;
 /// [`NovaSonicError::Connect`] message begins.
 pub(crate) const SERVICE_ERROR: &str = "the service returned an error";
 
-/// A Nova Sonic client: a Bedrock runtime client and the model id it invokes.
+/// The longest [`NovaSonic::start`] waits for the service to open the stream, from the request's
+/// credential resolution and signing through the connection to the service's response headers,
+/// unless [`NovaSonic::with_open_timeout`] sets another. Past it, the start fails as a
+/// [`NovaSonicError::Connect`] naming the timeout.
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A Nova Sonic client: a Bedrock runtime client, the model id it invokes, and how long a start
+/// may take.
 #[derive(Debug, Clone)]
 pub struct NovaSonic {
     client: Client,
     model_id: String,
+    open_timeout: Duration,
 }
 
 impl NovaSonic {
-    /// A client over `client`, whose credentials and region the caller chose.
+    /// A client over `client`, whose credentials and region the caller chose, starting sessions
+    /// within [`OPEN_TIMEOUT`].
     pub fn new(client: Client, model_id: impl Into<String>) -> Self {
         NovaSonic {
             client,
             model_id: model_id.into(),
+            open_timeout: OPEN_TIMEOUT,
         }
+    }
+
+    /// The client with `timeout` as the longest a start waits for the stream to open, in place
+    /// of [`OPEN_TIMEOUT`].
+    #[must_use]
+    pub fn with_open_timeout(mut self, timeout: Duration) -> Self {
+        self.open_timeout = timeout;
+        self
+    }
+
+    /// The longest a start waits for the stream to open.
+    pub fn open_timeout(&self) -> Duration {
+        self.open_timeout
     }
 
     /// A client from the AWS SDK's default chain: credentials from the environment, profile or
@@ -70,6 +94,10 @@ impl NovaSonic {
     /// A failure to open is a [`NovaSonicError::Connect`] whose message names the failure's kind
     /// and, for an error the service returned, its error code: never the SDK's error chain, which
     /// can name the caller's profile, single sign-on session or files.
+    ///
+    /// A stream the service did not open within the open timeout ([`OPEN_TIMEOUT`] unless
+    /// [`NovaSonic::with_open_timeout`] set another) is a [`NovaSonicError::Connect`] too, so a
+    /// server that accepts the connection and never answers does not hold the start.
     pub async fn start(&self, config: &SessionConfig) -> Result<Session, NovaSonicError> {
         let (input, queued) = mpsc::channel::<Vec<u8>>(INPUT_CAPACITY);
         let (frames, output) = mpsc::channel::<OutputFrame>(OUTPUT_CAPACITY);
@@ -83,13 +111,20 @@ impl NovaSonic {
                 ),
             )
         });
-        let response = self
+        let send = self
             .client
             .invoke_model_with_bidirectional_stream()
             .model_id(&self.model_id)
             .body(body.into())
-            .send()
+            .send();
+        let response = tokio::time::timeout(self.open_timeout, send)
             .await
+            .map_err(|_| {
+                NovaSonicError::Connect(format!(
+                    "the stream did not open within {:?}",
+                    self.open_timeout
+                ))
+            })?
             .map_err(|error| NovaSonicError::Connect(connect_message(&error)))?;
         tokio::spawn(bridge(
             SdkSource {
