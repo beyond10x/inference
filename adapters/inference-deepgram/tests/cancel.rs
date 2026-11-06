@@ -45,7 +45,14 @@ fn a_dropped_handle_closes_its_socket_and_frees_its_slot() {
     let mut recogniser = server.recogniser();
     let mut handle = recogniser.start(request()).unwrap();
     handle.offer_frame(tone(1).remove(0)).unwrap();
-    let _ = handle.next();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while handle.next().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "no hypothesis arrived, so the socket never opened"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(recogniser.start(request()).is_err(), "one at a time");
     drop(handle);
     assert_eq!(server.next_client_close(Duration::from_secs(5)), Some(0));
