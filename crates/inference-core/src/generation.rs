@@ -210,6 +210,25 @@ impl Generation {
         })
     }
 
+    /// Runs the `refused` outcome of `inference.stream.RefuseGeneration`: the model's refusal
+    /// `text` is delivered into the Active generation, which moves nowhere.
+    ///
+    /// # Errors
+    ///
+    /// [`GenerationStateConflict`] carrying the held state when the generation is not Active, the
+    /// `stale-generation` outcome; nothing is delivered.
+    pub fn refuse(&self, text: String) -> Result<GenerationRefused, GenerationStateConflict> {
+        if self.state != GenerationState::Active {
+            return Err(GenerationStateConflict {
+                current: self.state,
+            });
+        }
+        Ok(GenerationRefused {
+            generation_id: self.generation_id,
+            text,
+        })
+    }
+
     /// Runs the `completed` outcome of `inference.stream.CompleteGeneration` with its
     /// `stop_reason` input: the generation moves from Active to Completed, and the event carries
     /// `stop_reason`.

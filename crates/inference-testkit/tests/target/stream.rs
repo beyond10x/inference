@@ -63,6 +63,7 @@ const START_GENERATION: &str = "inference.stream.StartGeneration";
 const COMPLETE_GENERATION: &str = "inference.stream.CompleteGeneration";
 const SUPERSEDE_GENERATION: &str = "inference.stream.SupersedeGeneration";
 const CANCEL_GENERATION: &str = "inference.stream.CancelGeneration";
+const REFUSE_GENERATION: &str = "inference.stream.RefuseGeneration";
 const EMIT_TEXT_DELTA: &str = "inference.stream.EmitTextDelta";
 const COMMIT_SEGMENT: &str = "inference.stream.CommitSegment";
 const QUEUE_FOR_SYNTHESIS: &str = "inference.stream.QueueForSynthesis";
@@ -168,6 +169,7 @@ pub fn execute_command(
             let answer = answer.map(StreamEvent::GenerationCancelled);
             generation_moved(CANCEL_GENERATION, "cancelled", answer, request)?
         }
+        REFUSE_GENERATION => refuse_generation(domain, request)?,
         EMIT_TEXT_DELTA => emit_text_delta(domain, request)?,
         COMMIT_SEGMENT => {
             let answer = domain.commit_segment(segment_id(request)?);
@@ -521,6 +523,35 @@ fn emit_text_delta(
         }
         Err(EmitTextDeltaError::StaleGeneration(conflict)) => {
             SemanticCommandResult::took(outcome(EMIT_TEXT_DELTA, "stale-generation"))
+                .with_error(generation_conflict(conflict)?)
+        }
+    })
+}
+
+/// The answer of `RefuseGeneration`: `refused` and its event, `unknown-generation` or
+/// `stale-generation`.
+fn refuse_generation(
+    domain: &mut StreamDomain,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let generation_id = input.named("generation_id")?;
+    let text = input.text("text")?;
+    input.finish()?;
+    Ok(match domain.refuse_generation(generation_id, text) {
+        Ok(event) => SemanticCommandResult::took(outcome(REFUSE_GENERATION, "refused")).emitting(
+            stream_event(&StreamEvent::GenerationRefused(event))?
+                .in_activity(request.correlation.clone()),
+        ),
+        Err(GenerationMoveError::Unknown(error)) => {
+            SemanticCommandResult::took(outcome(REFUSE_GENERATION, "unknown-generation"))
+                .with_error(
+                    DeclaredErrorValue::new(parse::<ErrorRef>(GENERATION_NOT_FOUND))
+                        .with("generation_id", named_node(&error.generation_id)?),
+                )
+        }
+        Err(GenerationMoveError::Conflict(conflict)) => {
+            SemanticCommandResult::took(outcome(REFUSE_GENERATION, "stale-generation"))
                 .with_error(generation_conflict(conflict)?)
         }
     })

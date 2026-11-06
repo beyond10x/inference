@@ -1,11 +1,39 @@
 //! `inference.stream.CompleteGeneration` takes an optional `stop_reason`, and the
 //! `GenerationCompleted` it emits carries it, serialized as written in ESS: a stop reason by its
-//! ESS name, none as null.
+//! ESS name, none as null. `inference.stream.RefuseGeneration` delivers a refusal into an Active
+//! generation only, and moves it nowhere.
 
 use inference_core::generation::{
-    Generation, GenerationCompleted, GenerationRefused, GenerationState, StartGeneration,
-    StopReason,
+    Generation, GenerationCompleted, GenerationRefused, GenerationState, GenerationStateConflict,
+    StartGeneration, StopReason,
 };
+
+#[test]
+fn a_refusal_is_delivered_into_an_active_generation_only() {
+    let generation = active();
+    assert_eq!(
+        generation.refuse("No.".to_owned()),
+        Ok(GenerationRefused {
+            generation_id: generation.generation_id(),
+            text: "No.".to_owned(),
+        })
+    );
+    assert_eq!(generation.state(), GenerationState::Active);
+    let ended = [
+        generation.complete(None).expect("Active completes").0,
+        generation.supersede().expect("Active is superseded").0,
+        generation.cancel().expect("Active is cancelled").0,
+    ];
+    for ended in ended {
+        assert_eq!(
+            ended.refuse("No.".to_owned()),
+            Err(GenerationStateConflict {
+                current: ended.state()
+            }),
+            "a refusal into a generation that is not Active is stale"
+        );
+    }
+}
 use inference_core::id::{GenerationId, NodeId, RunId};
 use serde_json::json;
 
