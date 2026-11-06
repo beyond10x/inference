@@ -14,11 +14,11 @@
 //! the segment's generation, and each segment's `SynthesisCompleted` is emitted once its last
 //! frame was sent.
 //!
-//! Playing ([`TtsNode::playing`]), the node is also its pipeline's playback: it gives every frame
-//! to a [`PlaybackSink`] as it sends it, and once a segment is Synthesized it acknowledges its
-//! playback through the sink, `inference.stream.AcknowledgePlayback`, which moves the segment to
-//! Played, and emits its `AudioPlayed`. The Played segments are read from the node's handle
-//! ([`TtsHandle::played`]).
+//! Playing ([`TtsNode::playing_through`]), the node is also its pipeline's playback: it gives every
+//! frame to the host's [`PlaybackSink`] as it sends it, and once a segment is Synthesized it
+//! acknowledges its playback through the sink, `inference.stream.AcknowledgePlayback`, which
+//! moves the segment to Played, and emits its `AudioPlayed`. The Played segments are read from the
+//! node's handle ([`TtsHandle::played`]).
 //!
 //! Given a usage port ([`TtsNode::with_usage`]), the output port its pipeline declares under the
 //! name `usage`, the node sends on the edge or exposure leaving it the usage record of its
@@ -43,6 +43,7 @@
 //! fails the node.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt;
 use std::future;
 use std::sync::{Arc, Weak};
@@ -54,14 +55,9 @@ use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{Generation, StartGeneration};
 use inference_core::id::{GenerationId, NodeId, RunId, SessionId, StreamId};
 use inference_core::usage::UsageRecorded;
-use inference_text::{
-    AudioPlayed, OutputSegment, SegmentId, SegmentSnapshot, SegmentState, SegmentStateConflict,
-};
+use inference_text::{AudioPlayed, OutputSegment, SegmentId, SegmentSnapshot};
 use inference_tts::inference_audio::AudioFrame;
-use inference_tts::{
-    FrameOfAnotherSegment, PlaybackReceipt, PlaybackRefused, SegmentAudio, SegmentNotHeld,
-    SynthesisEvent, SynthesisHandle, Synthesiser,
-};
+use inference_tts::{SegmentAudio, SynthesisEvent, SynthesisHandle, Synthesiser};
 
 use super::log::{self, RunLog, StreamEmitter, StreamEvent};
 use super::tool_authority::send_unless;
@@ -98,6 +94,53 @@ pub trait TtsPayload: From<ControlKind> + Send + 'static {
     fn spoken(self) -> Spoken;
 }
 
+/// The host's media sink a playing [`TtsNode`] plays through: it is given every frame the node
+/// sends, and acknowledges the playback of each Synthesized segment once it played every frame of
+/// it. The node holds no sink of its own; a host that plays audio, such as an audio device
+/// adapter, supplies one ([`TtsNode::playing_through`]).
+pub trait PlaybackSink: Send + 'static {
+    /// Why the sink refused to acknowledge a segment's playback.
+    type Refused: fmt::Debug;
+
+    /// Gives the sink a frame of a segment to play.
+    fn give(&mut self, audio: SegmentAudio);
+
+    /// Runs `inference.stream.AcknowledgePlayback` on the segment `segment_id` of the synthesis
+    /// `handle` runs, through [`SynthesisHandle::acknowledge_playback`] with the receipt of the
+    /// frames the sink played: the snapshot of the Played segment and its `AudioPlayed`.
+    ///
+    /// # Errors
+    ///
+    /// The sink's refusal, when it did not play exactly the frames the synthesis emitted of the
+    /// segment, or the handle's, described; the node then fails.
+    fn acknowledge<H: SynthesisHandle>(
+        &mut self,
+        handle: &mut H,
+        segment_id: SegmentId,
+    ) -> Result<(SegmentSnapshot, AudioPlayed), Self::Refused>;
+}
+
+/// The sink of a [`TtsNode`] that does not play, its default: it has no value, so a node over it
+/// is never playing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoPlayback {}
+
+impl PlaybackSink for NoPlayback {
+    type Refused = Infallible;
+
+    fn give(&mut self, _audio: SegmentAudio) {
+        match *self {}
+    }
+
+    fn acknowledge<H: SynthesisHandle>(
+        &mut self,
+        _handle: &mut H,
+        _segment_id: SegmentId,
+    ) -> Result<(SegmentSnapshot, AudioPlayed), Infallible> {
+        match *self {}
+    }
+}
+
 /// What the node was asked, and what its synthesis came to.
 #[derive(Debug, Default)]
 struct State {
@@ -112,11 +155,12 @@ impl fmt::Debug for Watched<State> {
     }
 }
 
-/// The TTS node over the synthesiser `S`; see the module documentation.
-pub struct TtsNode<S> {
+/// The TTS node over the synthesiser `S`, playing, when it plays, through the host's sink `K`; see
+/// the module documentation.
+pub struct TtsNode<S, K = NoPlayback> {
     run_id: RunId,
     synthesiser: S,
-    playing: bool,
+    playback: Option<K>,
     usage: Option<PortId>,
     log: RunLog,
     node_id: Option<NodeId>,
@@ -124,12 +168,12 @@ pub struct TtsNode<S> {
     exchange: Exchange,
 }
 
-impl<S: fmt::Debug> fmt::Debug for TtsNode<S> {
+impl<S: fmt::Debug, K> fmt::Debug for TtsNode<S, K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TtsNode")
             .field("run_id", &self.run_id)
             .field("synthesiser", &self.synthesiser)
-            .field("playing", &self.playing)
+            .field("playing", &self.playback.is_some())
             .field("usage", &self.usage)
             .field("node_id", &self.node_id)
             .field("state", &self.state)
@@ -138,7 +182,7 @@ impl<S: fmt::Debug> fmt::Debug for TtsNode<S> {
     }
 }
 
-impl<S: Synthesiser> TtsNode<S> {
+impl<S: Synthesiser, K: PlaybackSink> TtsNode<S, K> {
     /// A TTS node of the run `run_id` synthesising on `synthesiser`, recording what it emits in
     /// `log`.
     #[must_use]
@@ -146,7 +190,7 @@ impl<S: Synthesiser> TtsNode<S> {
         Self {
             run_id,
             synthesiser,
-            playing: false,
+            playback: None,
             usage: None,
             log,
             node_id: None,
@@ -155,12 +199,21 @@ impl<S: Synthesiser> TtsNode<S> {
         }
     }
 
-    /// The same node, which plays what it synthesises through a [`PlaybackSink`] and acknowledges
-    /// the playback of each segment; see the module documentation.
+    /// The same node, which plays what it synthesises through `sink`, the host's, and acknowledges
+    /// the playback of each segment through it; see the module documentation.
     #[must_use]
-    pub const fn playing(mut self) -> Self {
-        self.playing = true;
+    pub fn playing_through(mut self, sink: K) -> Self {
+        self.playback = Some(sink);
         self
+    }
+
+    /// As [`TtsNode::playing_through`], through a new sink of the type `K`.
+    #[must_use]
+    pub fn playing(self) -> Self
+    where
+        K: Default,
+    {
+        self.playing_through(K::default())
     }
 
     /// The same node given a usage port, `usage`, the output port its pipeline declares under the
@@ -279,12 +332,12 @@ impl<P: TtsPayload> UsageOut<P> {
 }
 
 /// One started exchange of a [`TtsNode`].
-struct Exchanging<P, H> {
+struct Exchanging<P, H, K> {
     run_id: RunId,
     producer: NodeId,
     port: String,
     synthesis: H,
-    sink: Option<PlaybackSink>,
+    sink: Option<K>,
     input: Box<dyn InputEndpoint<P>>,
     output: Box<dyn OutputEndpoint<P>>,
     /// The node's `usage` port, given one with an edge or exposure leaving it.
@@ -300,7 +353,7 @@ struct Exchanging<P, H> {
     state: Arc<Watched<State>>,
 }
 
-impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
+impl<P: TtsPayload, H: SynthesisHandle, K: PlaybackSink> Exchanging<P, H, K> {
     /// Sends `envelope`, unless the node is cancelled first or while the send waits for room.
     async fn send(&self, envelope: EventEnvelope<P>) -> Result<(), String> {
         send_unless(
@@ -495,10 +548,11 @@ impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
 }
 
 /// The synthesis runs on the exchange's thread.
-impl<P, S> NodeImplementation<P> for TtsNode<S>
+impl<P, S, K> NodeImplementation<P> for TtsNode<S, K>
 where
     P: TtsPayload,
     S: Synthesiser + Send,
+    K: PlaybackSink,
     S::Handle: Send + 'static,
 {
     fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
@@ -534,7 +588,7 @@ where
                 emitter: StreamEmitter::new(self.run_id, producer, port.clone(), self.log.clone()),
                 port,
                 synthesis,
-                sink: self.playing.then(PlaybackSink::new),
+                sink: self.playback.take(),
                 input,
                 output: output.endpoint,
                 usage: usage.map(|usage| UsageOut {
@@ -574,144 +628,5 @@ where
 
     fn stop(&mut self) -> NodeFuture<'_, ()> {
         Box::pin(self.exchange.finished())
-    }
-}
-
-/// Why the sink refused to acknowledge playback; nothing changed either way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SinkRefused {
-    /// The synthesis holds no such segment.
-    SegmentNotHeld(SegmentNotHeld),
-    /// The `wrong-state` outcome of `inference.stream.AcknowledgePlayback`: the segment is not
-    /// Synthesized, in the state carried.
-    SegmentStateConflict(SegmentStateConflict),
-    /// The sink has been given no audio of a segment the synthesis emitted frames of, so it
-    /// played none.
-    NothingGiven { segment_id: SegmentId },
-    /// The receipt's frames are of another segment.
-    FrameOfAnotherSegment(FrameOfAnotherSegment),
-    /// The sink has been given `given` frames of the segment, those the synthesis already counts
-    /// as played among them, where the synthesis emitted `emitted`, so it has not played exactly
-    /// its audio.
-    FramesOutstanding {
-        segment_id: SegmentId,
-        given: usize,
-        emitted: usize,
-    },
-}
-
-impl From<PlaybackRefused> for SinkRefused {
-    fn from(error: PlaybackRefused) -> Self {
-        match error {
-            PlaybackRefused::SegmentNotHeld(error) => Self::SegmentNotHeld(error),
-            PlaybackRefused::SegmentStateConflict(error) => Self::SegmentStateConflict(error),
-            PlaybackRefused::FrameOfAnotherSegment(error) => Self::FrameOfAnotherSegment(error),
-            PlaybackRefused::PlayedFramesMismatch(error) => Self::FramesOutstanding {
-                segment_id: error.segment_id,
-                given: error.played,
-                emitted: error.emitted,
-            },
-        }
-    }
-}
-
-/// The sink that acknowledges playback: it is given the frames of a synthesis and acknowledges playback of a
-/// Synthesized segment once it has been given every frame the synthesis emitted of it.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct PlaybackSink {
-    given: Vec<SegmentAudio>,
-}
-
-impl PlaybackSink {
-    /// A sink that has been given nothing.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Gives the sink a frame to play.
-    pub fn give(&mut self, audio: SegmentAudio) {
-        self.given.push(audio);
-    }
-
-    /// How many frames of the segment `segment_id` the sink has been given and not yet
-    /// acknowledged.
-    #[must_use]
-    pub fn frames_given(&self, segment_id: SegmentId) -> usize {
-        self.given
-            .iter()
-            .filter(|audio| audio.segment_id() == segment_id)
-            .count()
-    }
-
-    /// Runs `inference.stream.AcknowledgePlayback` on the segment `segment_id` of the synthesis
-    /// `handle` runs, through [`SynthesisHandle::acknowledge_playback`] with the
-    /// [`PlaybackReceipt`] it makes by consuming the frames of the segment it was given, none for
-    /// a segment synthesized without frames: the synthesis's record moves from Synthesized to
-    /// Played. Frames of the segment the synthesis already counts as played, from a receipt it
-    /// refused earlier, count as given. Returns a snapshot of the Played record and its
-    /// `AudioPlayed`.
-    ///
-    /// # Errors
-    ///
-    /// [`SinkRefused::SegmentNotHeld`] when the synthesis holds no such segment;
-    /// [`SinkRefused::SegmentStateConflict`] carrying its state when it is not Synthesized, a
-    /// Queued or Played one among them; [`SinkRefused::NothingGiven`] when neither the sink nor
-    /// the synthesis's count has a frame of a segment the synthesis emitted frames of; and
-    /// [`SinkRefused::FramesOutstanding`] when the two together are not exactly the frames the
-    /// synthesis emitted of it. On each of these the sink refuses before it makes a receipt:
-    /// nothing moves and the sink keeps its frames. When the handle refuses the receipt the sink
-    /// made, the sink no longer holds those frames, since a receipt consumes them and is not
-    /// handed back; the synthesis counts them as played, so they are not lost, and the next
-    /// acknowledgement confirms them.
-    pub fn acknowledge<H: SynthesisHandle>(
-        &mut self,
-        handle: &mut H,
-        segment_id: SegmentId,
-    ) -> Result<(SegmentSnapshot, AudioPlayed), SinkRefused> {
-        let current = handle
-            .output()
-            .segment(segment_id)
-            .ok_or(SegmentNotHeld { segment_id })
-            .map_err(SinkRefused::SegmentNotHeld)?
-            .state();
-        if current != SegmentState::Synthesized {
-            return Err(SinkRefused::SegmentStateConflict(SegmentStateConflict {
-                current,
-            }));
-        }
-        let counted = handle
-            .output()
-            .frames_played(segment_id)
-            .unwrap_or_default();
-        let given = self.frames_given(segment_id) + counted;
-        let emitted = handle
-            .output()
-            .frames_emitted(segment_id)
-            .unwrap_or_default();
-        if given == 0 && emitted > 0 {
-            return Err(SinkRefused::NothingGiven { segment_id });
-        }
-        if given != emitted {
-            return Err(SinkRefused::FramesOutstanding {
-                segment_id,
-                given,
-                emitted,
-            });
-        }
-        let (played, kept): (Vec<SegmentAudio>, Vec<SegmentAudio>) = self
-            .given
-            .drain(..)
-            .partition(|audio| audio.segment_id() == segment_id);
-        self.given = kept;
-        let receipt = PlaybackReceipt::from_frames(played)
-            .expect("the sink was given frames of the segment, and only of it");
-        let event = handle.acknowledge_playback(segment_id, receipt)?;
-        let played = handle
-            .output()
-            .segment(segment_id)
-            .expect("an acknowledged segment is held")
-            .snapshot();
-        Ok((played, event))
     }
 }

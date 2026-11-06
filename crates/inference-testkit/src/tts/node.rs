@@ -1,12 +1,14 @@
 //! The TTS node of a voice pipeline, `inference-pipeline`'s
-//! [`inference_pipeline::nodes::tts::TtsNode`], here over the [`MockSynthesiser`] by default.
+//! [`inference_pipeline::nodes::tts::TtsNode`], here over the [`MockSynthesiser`] by default and,
+//! playing, through the [`MockSink`].
 
-use super::MockSynthesiser;
+use super::{MockSink, MockSynthesiser};
 
 pub use inference_pipeline::nodes::tts::{Spoken, TtsHandle, TtsPayload};
 
-/// The TTS node over the synthesiser `S`, the [`MockSynthesiser`] by default.
-pub type TtsNode<S = MockSynthesiser> = inference_pipeline::nodes::tts::TtsNode<S>;
+/// The TTS node over the synthesiser `S`, the [`MockSynthesiser`] by default, playing, when it
+/// plays, through the [`MockSink`].
+pub type TtsNode<S = MockSynthesiser> = inference_pipeline::nodes::tts::TtsNode<S, MockSink>;
 
 #[cfg(test)]
 mod tests {

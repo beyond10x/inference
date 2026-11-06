@@ -148,6 +148,7 @@ pub(crate) async fn recv_unless<P, S>(
 /// Sends `envelope` along `output`, unless `stop` holds of `watched` first or while the send
 /// waits for room: the send is then abandoned, the envelope not sent, and the answer is `Ok`, as
 /// a node cancelled sends nothing more. Otherwise what the edge answered, a refusal described.
+#[cfg(feature = "stt")]
 pub(crate) async fn send_unless<P, S>(
     output: &dyn OutputEndpoint<P>,
     watched: &Watched<S>,
