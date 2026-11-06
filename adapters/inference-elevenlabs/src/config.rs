@@ -14,12 +14,12 @@ use crate::error::ConfigError;
 /// names a model.
 pub const DEFAULT_MODEL: &str = "eleven_flash_v2_5";
 
-/// The hosted API's base URL; the binding adds `/v1/text-to-speech/{voice_id}/stream-input`.
+/// The hosted API's base URL; the binding adds `/v1/text-to-speech/{voice_id}/multi-stream-input`.
 pub const DEFAULT_URL: &str = "wss://api.elevenlabs.io";
 
-/// How long a connection may go without a server message before the synthesis fails as
-/// stalled. Every read waits at most this long from the last message read on the connection
-/// (the end of the handshake before the first), and every write at most this long.
+/// How long the segment being spoken may go without a message of its context before the
+/// synthesis fails as stalled. Every read waits at most this long from the last message of that
+/// context (from sending its text before the first), and every write at most this long.
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the TCP connection, TLS and the WebSocket handshake may take together.
