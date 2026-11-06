@@ -187,6 +187,40 @@ fn an_input_the_ingress_refused_records_no_input_sent() {
         1,
         "the session counts the one input its run took"
     );
+    assert_eq!(
+        sessions.events_released(),
+        0,
+        "a log within its bound released nothing"
+    );
+}
+
+/// The log keeps every event up to exactly its bound; the event one past it releases the oldest
+/// half, which the count of released events says.
+#[test]
+fn the_log_holds_exactly_its_bound_and_releases_its_oldest_half_one_past_it() {
+    let mut sessions = Sessions::counted_in(9);
+    let session_id = ready(&mut sessions);
+    while sessions.events().len() < BOUND {
+        let before = sessions.events().len();
+        sessions.commit_input(session_id).expect("committed");
+        assert_eq!(
+            sessions.events().len(),
+            before + 1,
+            "below its bound the log keeps every event"
+        );
+    }
+    assert_eq!(sessions.events().len(), BOUND, "a full log holds its bound");
+    assert_eq!(sessions.events_released(), 0, "a full log released nothing");
+    sessions.commit_input(session_id).expect("committed");
+    assert_eq!(
+        sessions.events().len(),
+        BOUND / 2 + 1,
+        "one past its bound the log released its oldest half, then took the event"
+    );
+    assert_eq!(
+        sessions.events_released(),
+        u64::try_from(BOUND / 2).expect("small")
+    );
 }
 
 /// The bound the event log of a [`Sessions`] states.
