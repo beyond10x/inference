@@ -1,0 +1,11 @@
+{
+  "model": "gpt-4o-mini-tts",
+  "binding": "inference_openai::speech::OpenAiSpeech",
+  "features": ["speech"],
+  "claims": [
+    "output_streaming",
+    "incremental_input"
+  ],
+  "held_by": "speech_claims_record::the_speech_record_holds_the_claims_of_the_binding",
+  "adapter_revision": "0.21.0"
+}
