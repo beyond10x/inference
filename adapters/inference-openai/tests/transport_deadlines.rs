@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_WRITE_TIMEOUT, Endpoint, OPENAI_KEY_NAME, RealtimeClient, RealtimeError, SessionConfig,
+    DEFAULT_WRITE_TIMEOUT, Deadlines, Endpoint, OPENAI_KEY_NAME, RealtimeClient, RealtimeError,
+    SessionConfig,
 };
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
@@ -139,17 +140,17 @@ async fn stop_reading(socket: Socket) {
 }
 
 #[test]
-fn the_deadlines_are_stated_and_on_the_endpoint() {
-    let endpoint = Endpoint::new(MODEL);
-    assert_eq!(endpoint.connect_timeout, DEFAULT_CONNECT_TIMEOUT);
-    assert_eq!(endpoint.write_timeout, DEFAULT_WRITE_TIMEOUT);
+fn the_deadlines_are_stated_and_settable() {
+    let deadlines = Deadlines::default();
+    assert_eq!(deadlines.connect_timeout(), DEFAULT_CONNECT_TIMEOUT);
+    assert_eq!(deadlines.write_timeout(), DEFAULT_WRITE_TIMEOUT);
     assert!(DEFAULT_CONNECT_TIMEOUT > Duration::ZERO && DEFAULT_CONNECT_TIMEOUT < HANG * 10);
     assert!(DEFAULT_WRITE_TIMEOUT > Duration::ZERO && DEFAULT_WRITE_TIMEOUT < HANG * 10);
-    let set = endpoint
+    let set = deadlines
         .with_connect_timeout(DEADLINE)
         .with_write_timeout(DEADLINE * 2);
-    assert_eq!(set.connect_timeout, DEADLINE);
-    assert_eq!(set.write_timeout, DEADLINE * 2);
+    assert_eq!(set.connect_timeout(), DEADLINE);
+    assert_eq!(set.write_timeout(), DEADLINE * 2);
 }
 
 /// W1: a server that accepts TCP and never answers the upgrade fails `connect` at the endpoint's
@@ -157,14 +158,13 @@ fn the_deadlines_are_stated_and_on_the_endpoint() {
 #[tokio::test]
 async fn a_server_that_never_answers_the_upgrade_fails_connect_within_the_deadline() {
     let (address, _held) = silent_listener().await;
-    let endpoint = Endpoint::new(MODEL)
-        .with_url(format!("ws://{address}/v1/realtime"))
-        .with_connect_timeout(DEADLINE);
+    let endpoint = Endpoint::new(MODEL).with_url(format!("ws://{address}/v1/realtime"));
     let started = Instant::now();
     let outcome = tokio::time::timeout(
         HANG,
-        RealtimeClient::connect(
+        RealtimeClient::connect_with(
             &endpoint,
+            Deadlines::default().with_connect_timeout(DEADLINE),
             &CountingSource::default(),
             OPENAI_KEY_NAME,
             &SessionConfig::default(),
@@ -265,10 +265,10 @@ async fn a_peer_that_stops_reading_fails_a_write_within_the_deadline() {
     .await;
     let endpoint = Endpoint::new(MODEL)
         .with_url(format!("ws://{address}/v1/realtime"))
-        .with_read_timeout(Duration::from_secs(5))
-        .with_write_timeout(DEADLINE);
-    let mut client = RealtimeClient::connect(
+        .with_read_timeout(Duration::from_secs(5));
+    let mut client = RealtimeClient::connect_with(
         &endpoint,
+        Deadlines::default().with_write_timeout(DEADLINE),
         &CountingSource::default(),
         OPENAI_KEY_NAME,
         &SessionConfig::default(),
@@ -321,14 +321,14 @@ mod live {
     #[tokio::test]
     async fn a_server_that_never_answers_the_upgrade_fails_live_connect_within_the_deadline() {
         let (address, _held) = silent_listener().await;
-        let endpoint = Endpoint::live(LIVE_MODEL)
-            .with_url(format!("ws://{address}/v1/live/sessions"))
-            .with_connect_timeout(DEADLINE);
+        let endpoint =
+            Endpoint::live(LIVE_MODEL).with_url(format!("ws://{address}/v1/live/sessions"));
         let started = Instant::now();
         let outcome = tokio::time::timeout(
             HANG,
-            LiveClient::connect(
+            LiveClient::connect_with(
                 &endpoint,
+                Deadlines::default().with_connect_timeout(DEADLINE),
                 &CountingSource::default(),
                 OPENAI_KEY_NAME,
                 &LiveSessionConfig::default(),
@@ -383,10 +383,10 @@ mod live {
         .await;
         let endpoint = Endpoint::live(LIVE_MODEL)
             .with_url(format!("ws://{address}/v1/live/sessions"))
-            .with_read_timeout(Duration::from_secs(5))
-            .with_write_timeout(DEADLINE);
-        let mut client = LiveClient::connect(
+            .with_read_timeout(Duration::from_secs(5));
+        let mut client = LiveClient::connect_with(
             &endpoint,
+            Deadlines::default().with_write_timeout(DEADLINE),
             &CountingSource::default(),
             OPENAI_KEY_NAME,
             &LiveSessionConfig::default(),
@@ -436,9 +436,7 @@ mod binding {
     fn the_binding_open_fails_within_the_connect_deadline() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (address, _held) = runtime.block_on(silent_listener());
-        let endpoint = Endpoint::new(MODEL)
-            .with_url(format!("ws://{address}/v1/realtime"))
-            .with_connect_timeout(DEADLINE);
+        let endpoint = Endpoint::new(MODEL).with_url(format!("ws://{address}/v1/realtime"));
         let (done, outcome) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let started = Instant::now();
@@ -446,7 +444,10 @@ mod binding {
                 endpoint,
                 Box::new(CountingSource::default()),
                 OPENAI_KEY_NAME,
-            );
+            )
+            .with_connect_timeout(DEADLINE);
+            assert_eq!(model.connect_timeout(), DEADLINE);
+            assert_eq!(model.write_timeout(), DEFAULT_WRITE_TIMEOUT);
             let pcm24 = AudioFormat {
                 encoding: AudioEncoding::PcmS16le,
                 sample_rate: NonZeroU32::new(24_000).unwrap(),

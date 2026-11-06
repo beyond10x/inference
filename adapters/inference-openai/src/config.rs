@@ -34,28 +34,67 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// to add to the current instant, such as `Duration::MAX`, is no bound.
 pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Where a session connects: the WebSocket URL, the model id, the read timeout, the deadline of
-/// the opening handshake and the deadline of each write.
+/// The transport's deadlines beside the [`Endpoint`]'s read timeout: the whole opening handshake
+/// ([`Deadlines::connect_timeout`], [`DEFAULT_CONNECT_TIMEOUT`] by default) and each write
+/// ([`Deadlines::write_timeout`], [`DEFAULT_WRITE_TIMEOUT`] by default). A connecting type takes
+/// them through its own `with_connect_timeout` and `with_write_timeout`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deadlines {
+    connect_timeout: Duration,
+    write_timeout: Duration,
+}
+
+impl Default for Deadlines {
+    /// [`DEFAULT_CONNECT_TIMEOUT`] and [`DEFAULT_WRITE_TIMEOUT`].
+    fn default() -> Self {
+        Self {
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
+        }
+    }
+}
+
+impl Deadlines {
+    /// These deadlines with another for the opening handshake.
+    #[must_use]
+    pub const fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
+    }
+
+    /// These deadlines with another for each write.
+    #[must_use]
+    pub const fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+        self.write_timeout = write_timeout;
+        self
+    }
+
+    /// The deadline of the whole opening handshake.
+    pub const fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+
+    /// The deadline of each write.
+    pub const fn write_timeout(&self) -> Duration {
+        self.write_timeout
+    }
+}
+
+/// Where a session connects: the WebSocket URL, the model id and the read timeout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     pub url: String,
     pub model: String,
     pub read_timeout: Duration,
-    /// The deadline of the whole opening handshake ([`DEFAULT_CONNECT_TIMEOUT`]).
-    pub connect_timeout: Duration,
-    /// The deadline of each write ([`DEFAULT_WRITE_TIMEOUT`]).
-    pub write_timeout: Duration,
 }
 
 impl Endpoint {
-    /// The hosted endpoint for `model`, with the default read, connect and write timeouts.
+    /// The hosted endpoint for `model`, with the default read timeout.
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             url: DEFAULT_URL.to_owned(),
             model: model.into(),
             read_timeout: DEFAULT_READ_TIMEOUT,
-            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-            write_timeout: DEFAULT_WRITE_TIMEOUT,
         }
     }
 
@@ -67,18 +106,6 @@ impl Endpoint {
             .filter(|model| !model.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
         Self::new(model)
-    }
-
-    /// This endpoint with another deadline for the opening handshake.
-    pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
-        self.connect_timeout = connect_timeout;
-        self
-    }
-
-    /// This endpoint with another deadline for each write.
-    pub fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
-        self.write_timeout = write_timeout;
-        self
     }
 
     /// This endpoint at another URL, such as a local test server. The URL is checked when a

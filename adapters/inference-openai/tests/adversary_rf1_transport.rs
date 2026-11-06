@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use inference_openai::{
-    Credential, CredentialError, CredentialFuture, CredentialSource, Endpoint, OPENAI_KEY_NAME,
-    RealtimeClient, RealtimeError, SessionConfig,
+    Credential, CredentialError, CredentialFuture, CredentialSource, Deadlines, Endpoint,
+    OPENAI_KEY_NAME, RealtimeClient, RealtimeError, SessionConfig,
 };
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
@@ -161,12 +161,16 @@ async fn accept_session(socket: &mut Socket) {
     .await;
 }
 
-async fn connect(endpoint: &Endpoint) -> (Duration, Result<RealtimeClient, RealtimeError>) {
+async fn connect(
+    endpoint: &Endpoint,
+    deadlines: Deadlines,
+) -> (Duration, Result<RealtimeClient, RealtimeError>) {
     let started = Instant::now();
     let outcome = tokio::time::timeout(
         HANG,
-        RealtimeClient::connect(
+        RealtimeClient::connect_with(
             endpoint,
+            deadlines,
             &CountingSource::default(),
             OPENAI_KEY_NAME,
             &SessionConfig::default(),
@@ -183,10 +187,12 @@ async fn connect(endpoint: &Endpoint) -> (Duration, Result<RealtimeClient, Realt
 async fn a_tls_peer_that_never_answers_fails_connect_within_the_deadline() {
     let deadline = Duration::from_millis(300);
     let (address, _held) = silent_listener().await;
-    let endpoint = Endpoint::new(MODEL)
-        .with_url(format!("wss://{address}/v1/realtime"))
-        .with_connect_timeout(deadline);
-    let (elapsed, outcome) = connect(&endpoint).await;
+    let endpoint = Endpoint::new(MODEL).with_url(format!("wss://{address}/v1/realtime"));
+    let (elapsed, outcome) = connect(
+        &endpoint,
+        Deadlines::default().with_connect_timeout(deadline),
+    )
+    .await;
     assert!(
         matches!(&outcome, Err(RealtimeError::Connect(error)) if error.status.is_none()),
         "{:?}",
@@ -205,9 +211,12 @@ async fn a_slow_handshake_that_completes_under_the_deadline_connects() {
     let address = dripping_server(Duration::from_millis(1_000)).await;
     let endpoint = Endpoint::new(MODEL)
         .with_url(format!("ws://{address}/v1/realtime"))
-        .with_read_timeout(Duration::from_secs(5))
-        .with_connect_timeout(Duration::from_millis(2_500));
-    let (elapsed, outcome) = connect(&endpoint).await;
+        .with_read_timeout(Duration::from_secs(5));
+    let (elapsed, outcome) = connect(
+        &endpoint,
+        Deadlines::default().with_connect_timeout(Duration::from_millis(2_500)),
+    )
+    .await;
     assert!(outcome.is_ok(), "{:?}", outcome.err());
     assert!(
         elapsed >= Duration::from_millis(900),
@@ -221,10 +230,12 @@ async fn a_slow_handshake_that_completes_under_the_deadline_connects() {
 async fn a_progressing_handshake_past_the_deadline_fails_at_the_deadline() {
     let deadline = Duration::from_millis(400);
     let address = dripping_server(Duration::from_millis(3_000)).await;
-    let endpoint = Endpoint::new(MODEL)
-        .with_url(format!("ws://{address}/v1/realtime"))
-        .with_connect_timeout(deadline);
-    let (elapsed, outcome) = connect(&endpoint).await;
+    let endpoint = Endpoint::new(MODEL).with_url(format!("ws://{address}/v1/realtime"));
+    let (elapsed, outcome) = connect(
+        &endpoint,
+        Deadlines::default().with_connect_timeout(deadline),
+    )
+    .await;
     assert!(
         matches!(&outcome, Err(RealtimeError::Connect(error)) if error.status.is_none()),
         "{:?}",
@@ -258,10 +269,12 @@ async fn a_redirect_off_loopback_is_not_followed() {
             .await;
         }
     });
-    let endpoint = Endpoint::new(MODEL)
-        .with_url(format!("ws://{address}/v1/realtime"))
-        .with_connect_timeout(Duration::from_secs(2));
-    let (_, outcome) = connect(&endpoint).await;
+    let endpoint = Endpoint::new(MODEL).with_url(format!("ws://{address}/v1/realtime"));
+    let (_, outcome) = connect(
+        &endpoint,
+        Deadlines::default().with_connect_timeout(Duration::from_secs(2)),
+    )
+    .await;
     assert!(
         matches!(&outcome, Err(RealtimeError::Connect(error)) if error.status == Some(302)),
         "{:?}",
@@ -330,7 +343,7 @@ async fn cleartext_to_ipv6_loopback_connects() {
     let endpoint = Endpoint::new(MODEL)
         .with_url(format!("ws://[::1]:{}/v1/realtime", address.port()))
         .with_read_timeout(Duration::from_secs(5));
-    let (_, outcome) = connect(&endpoint).await;
+    let (_, outcome) = connect(&endpoint, Deadlines::default()).await;
     assert!(outcome.is_ok(), "{:?}", outcome.err());
 }
 
@@ -445,8 +458,9 @@ mod binding {
             tokio::time::sleep(Duration::from_secs(30)).await;
             drop(socket);
         });
-        let endpoint = server.endpoint.clone().with_write_timeout(deadline);
-        let mut model = server.model(endpoint);
+        let mut model = server
+            .model(server.endpoint.clone())
+            .with_write_timeout(deadline);
         let (done, outcome) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut session = model.open(config()).expect("the session opens");
