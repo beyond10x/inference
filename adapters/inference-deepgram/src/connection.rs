@@ -8,10 +8,12 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use crate::credential::{CredentialError, CredentialSource};
 use crate::error::{ConnectError, DeepgramError};
+use crate::listen::MAX_MESSAGE_SIZE;
 
 /// An open connection.
 pub(crate) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -20,8 +22,10 @@ pub(crate) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub const CLOSE_BOUND: Duration = Duration::from_secs(1);
 
 /// Resolves the secret `credential` names through `source` and opens a WebSocket to `url` with
-/// `Authorization: Token <key>`, marked sensitive. The credential is resolved before any
-/// connection is made, is sent only in the handshake and is never part of an error.
+/// `Authorization: Token <key>`, marked sensitive, reading messages and frames of at most
+/// [`MAX_MESSAGE_SIZE`]. The credential is resolved before any connection is made, an empty or
+/// blank one is refused as invalid, and it is sent only in the handshake and is never part of an
+/// error.
 pub(crate) async fn open(
     url: &str,
     source: &dyn CredentialSource,
@@ -32,6 +36,9 @@ pub(crate) async fn open(
         .resolve(credential)
         .await
         .map_err(DeepgramError::Credential)?;
+    if resolved.expose().iter().all(u8::is_ascii_whitespace) {
+        return Err(DeepgramError::Credential(CredentialError::Invalid));
+    }
     let mut value = b"Token ".to_vec();
     value.extend_from_slice(resolved.expose());
     drop(resolved);
@@ -52,8 +59,11 @@ pub(crate) async fn open(
     } else {
         None
     };
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE_SIZE))
+        .max_frame_size(Some(MAX_MESSAGE_SIZE));
     let handshake =
-        tokio_tungstenite::connect_async_tls_with_config(request, None, true, connector);
+        tokio_tungstenite::connect_async_tls_with_config(request, Some(config), true, connector);
     let (socket, _) = tokio::time::timeout(connect_timeout, handshake)
         .await
         .map_err(|_| {

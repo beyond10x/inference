@@ -60,14 +60,22 @@
 //!   does not end a call. A known message missing what the binding reads is a protocol error.
 //! - **The close code after `Metadata`.** Not stated. The binding closes the connection itself
 //!   once it has read the summary `Metadata` after `CloseStream`, and reads nothing more; a close
-//!   before that `Metadata`, whatever its code, fails the recognition. A `Metadata` before
-//!   `CloseStream` is not the summary and is ignored.
+//!   before that `Metadata`, whatever its code, fails the recognition. A `Metadata` the binding
+//!   reads before it has sent `CloseStream` is not the summary and is ignored, however long it
+//!   waits for the caller.
 //! - **Encodings and rates.** A default encoding is not stated, so the binding always names one.
 //!   μ-law and A-law are taken only at 8 kHz, the telephony rate; 32-bit PCM is refused, since
 //!   whether `linear32` is integer or float is not stated; more than one channel is refused.
 //! - **How long the endpoint may stay silent.** Not stated for an open stream, whose silence is
 //!   the speaker's; the endpoint closes a stream without audio itself (`NET-0001`, `NET-0002`).
-//!   Once `CloseStream` is sent, every read waits at most the read timeout.
+//!   Once `CloseStream` is sent, the summary `Metadata` must arrive within the read timeout,
+//!   counted once from `CloseStream`: messages in between do not extend it.
+//! - **Whether a final result can repeat audio already committed.** Not stated. A `Results`
+//!   whose span (`start` plus `duration`) ends no later than the audio already committed, while
+//!   no span is open, is dropped: after an `UtteranceEnd` committed an interim span, the final
+//!   result of the same audio does not commit the words again.
+//! - **The largest message.** Not stated. The binding reads messages and frames of at most
+//!   [`MAX_MESSAGE_SIZE`] and holds at most [`INBOUND_DEPTH`] messages its caller has not taken.
 //! - **The `NET-0002` timeout, the `UtteranceEnd` timer's reference, the billing unit, the
 //!   longest connection and the largest chunk.** Not stated; the binding depends on none.
 
@@ -85,6 +93,14 @@ pub const KEEP_ALIVE: &str = r#"{"type":"KeepAlive"}"#;
 
 /// The message that ends the input of a stream.
 pub const CLOSE_STREAM: &str = r#"{"type":"CloseStream"}"#;
+
+/// The largest message, and the largest frame, the binding reads: 4 MiB. A larger one fails the
+/// recognition as a transport error instead of being buffered.
+pub const MAX_MESSAGE_SIZE: usize = 4 << 20;
+
+/// The most server messages a recognition holds that its caller has not taken yet. Once that
+/// many are waiting, the binding stops reading the connection until the caller takes one.
+pub const INBOUND_DEPTH: usize = 32;
 
 /// The most characters of a server's error text an error keeps.
 pub const SERVER_MESSAGE_LIMIT: usize = 256;
@@ -150,6 +166,9 @@ pub enum ServerMessage {
         is_final: bool,
         /// Endpointing ended an utterance here.
         speech_final: bool,
+        /// Where the audio span ends, in seconds: `start` plus `duration`, when both are numbers
+        /// and the sum is finite.
+        end: Option<f64>,
     },
     /// No word followed the last one for `utterance_end_ms`. `last_word_end` is the end of the
     /// last word in seconds, below 0 when the utterance was already finalized.
@@ -229,7 +248,15 @@ fn results(object: &Map<String, Value>) -> Result<ServerMessage, DeepgramError> 
         transcript: transcript.to_owned(),
         is_final: flag("is_final")?,
         speech_final: flag("speech_final")?,
+        end: span_end(object),
     })
+}
+
+/// `start` plus `duration` of a `Results`, when both are numbers and the sum is finite.
+fn span_end(object: &Map<String, Value>) -> Option<f64> {
+    let start = object.get("start").and_then(Value::as_f64)?;
+    let duration = object.get("duration").and_then(Value::as_f64)?;
+    Some(start + duration).filter(|end| end.is_finite())
 }
 
 /// The server's text: a string as it is, else the whole value, cut to [`SERVER_MESSAGE_LIMIT`]
@@ -303,6 +330,33 @@ mod tests {
     }
 
     #[test]
+    fn the_end_of_a_results_span_is_its_start_plus_its_duration() {
+        let end = |text: &str| match parse_server_message(text).unwrap() {
+            ServerMessage::Results { end, .. } => end,
+            other => panic!("{other:?}"),
+        };
+        let alternatives = r#""channel":{"alternatives":[{"transcript":"x"}]}"#;
+        assert_eq!(
+            end(&format!(
+                r#"{{"type":"Results",{alternatives},"start":1.5,"duration":0.5}}"#
+            )),
+            Some(2.0)
+        );
+        assert_eq!(
+            end(&format!(
+                r#"{{"type":"Results",{alternatives},"start":1.5}}"#
+            )),
+            None
+        );
+        assert_eq!(
+            end(&format!(
+                r#"{{"type":"Results",{alternatives},"start":1e308,"duration":1e308}}"#
+            )),
+            None
+        );
+    }
+
+    #[test]
     fn results_utterance_end_and_metadata_are_read() {
         assert_eq!(
             parse_server_message(
@@ -312,7 +366,8 @@ mod tests {
             ServerMessage::Results {
                 transcript: "hi".to_owned(),
                 is_final: true,
-                speech_final: false
+                speech_final: false,
+                end: None,
             }
         );
         assert_eq!(
@@ -323,7 +378,8 @@ mod tests {
             ServerMessage::Results {
                 transcript: String::new(),
                 is_final: false,
-                speech_final: false
+                speech_final: false,
+                end: None,
             }
         );
         assert_eq!(
