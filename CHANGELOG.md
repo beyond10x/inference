@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `realtime-voice` example: the `compare` example measures a cascade (STT, LLM, TTS) beside
+  native speech models in one report, with the measures they share named the same (first audio,
+  response end, barge-in to stop) and the cascade's own steps (final transcript, first token, TTS
+  first audio). The cascade arm runs each step on a worker thread and paces input on the caller's
+  clock; `run_cascade` (simulated clock, which moves on after `SIMULATED_STALL`, 250 ms of wall
+  time without a report) and `run_cascade_live` (wall clock). With no hosted TTS configured, the
+  cascade arm says so and is skipped.
+
 ## [0.20.0] — 2026-11-06
 
 ### Breaking
