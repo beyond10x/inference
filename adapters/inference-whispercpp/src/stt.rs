@@ -25,8 +25,9 @@
 //!
 //! The recognition's usage record, the contract's [`TranscriptOutput::usage`], is its last event,
 //! delivered once input has ended, after the commit if there is text and whether or not
-//! whisper.cpp transcribed it: the audio offered and one request, as the contract measures them,
-//! and `local_compute_ms` `measured`, the wall time of the `full` call and the reading of its
+//! whisper.cpp transcribed it: the audio offered (on a failed call, the audio taken) and one
+//! request, as the contract measures them, and `local_compute_ms` `measured`, the wall time of
+//! the `full` call and the reading of its
 //! segments, or `unknown` when there was no audio to transcribe and whisper.cpp was not called.
 //! A transcription that failed is recorded with what was measured and its counts not final
 //! (`final` false), as `inference-llm` records a failed turn. whisper.cpp reports no quantity of
