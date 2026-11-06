@@ -303,7 +303,7 @@ impl Feed {
         self.sequence += 1;
         let kind = match &payload {
             Payload::Superseded(_) => "inference.stream.GenerationSuperseded".to_owned(),
-            _ => "inference.audio.AudioFrame".to_owned(),
+            _ => "inference.audio.AudioChunk".to_owned(),
         };
         self.edge.put(EventEnvelope {
             schema_version: 1,

@@ -209,7 +209,7 @@ fn unit(sequence: i64) -> EventEnvelope<()> {
         sequence,
         producer: NodeId::generate(),
         port: "audio".to_owned(),
-        kind: "inference.audio.AudioFrame".to_owned(),
+        kind: "inference.audio.AudioChunk".to_owned(),
         generation_id: None,
         timestamp: 0,
         timebase: Timebase::WallTime,

@@ -204,7 +204,7 @@ impl Application {
         let timestamp = i64::try_from(frame.position.get()).expect("within i64");
         self.envelope(
             AUDIO_INGRESS,
-            "inference.audio.AudioFrame",
+            "inference.audio.AudioChunk",
             Timebase::AudioFrameTime,
             timestamp,
             CascadePayload::Audio(frame),

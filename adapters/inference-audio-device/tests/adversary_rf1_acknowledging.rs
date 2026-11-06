@@ -365,7 +365,7 @@ impl Feed {
             Payload::Control(kind) => kind.as_str().to_owned(),
             Payload::Completed(_) => "inference.stream.SynthesisCompleted".to_owned(),
             Payload::Started(..) => "inference.stream.GenerationStarted".to_owned(),
-            _ => "inference.audio.AudioFrame".to_owned(),
+            _ => "inference.audio.AudioChunk".to_owned(),
         };
         self.edge.put(EventEnvelope {
             schema_version: 1,

@@ -350,8 +350,14 @@ impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
         self.send(carry(envelope)).await
     }
 
-    /// Sends `frame` of the segment `segment_id` on the node's audio stream.
-    async fn frame(&mut self, segment_id: SegmentId, frame: AudioFrame) -> Result<(), String> {
+    /// Sends `frame` of the segment `segment_id` on the node's audio stream, in an envelope of
+    /// `kind`, the name of the synthesis event that carried it.
+    async fn frame(
+        &mut self,
+        kind: &str,
+        segment_id: SegmentId,
+        frame: AudioFrame,
+    ) -> Result<(), String> {
         self.audio_sequence += 1;
         let timestamp = i64::try_from(frame.position.get()).unwrap_or(i64::MAX);
         let envelope = EventEnvelope {
@@ -363,7 +369,7 @@ impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
             sequence: self.audio_sequence,
             producer: self.producer,
             port: self.port.clone(),
-            kind: "inference.audio.AudioFrame".to_owned(),
+            kind: kind.to_owned(),
             generation_id: self.offered.get(&segment_id).copied(),
             timestamp,
             timebase: Timebase::AudioFrameTime,
@@ -377,13 +383,14 @@ impl<P: TtsPayload, H: SynthesisHandle> Exchanging<P, H> {
     /// completion emitted and, playing, the segment's playback acknowledged.
     async fn pump(&mut self) -> Result<(), String> {
         while let Some(event) = self.synthesis.next() {
+            let kind = event.name();
             match event {
                 SynthesisEvent::Audio(audio) => {
                     let (segment_id, frame) = (audio.segment_id(), audio.frame().clone());
                     if let Some(sink) = self.sink.as_mut() {
                         sink.give(audio);
                     }
-                    self.frame(segment_id, frame).await?;
+                    self.frame(kind, segment_id, frame).await?;
                 }
                 SynthesisEvent::Completed(completed) => {
                     self.emit(StreamEvent::SynthesisCompleted(completed))
