@@ -21,7 +21,9 @@ use inference_duplex::{
     SpeechSessionState, TokenCounts, TuningOption, TurnDetection, TurnSensitivity, TurnTuning,
     Unsupported, UsageRecorded,
 };
-use inference_openai::duplex::{OpenAiRealtime, capabilities, claims, wire_format};
+use inference_openai::duplex::{
+    OpenAiRealtime, OpenAiRealtimeSession, capabilities, claims, wire_format,
+};
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Eagerness, Endpoint,
     OPENAI_KEY_NAME, WireFormat,
@@ -2050,4 +2052,54 @@ fn a_wait_of_duration_max_ends_with_the_next_event() {
         ),
         "{events:#?}"
     );
+}
+
+/// N8: `error` events do not end the session and are kept, but only the most recent
+/// `SERVER_ERRORS_KEPT`; the count covers every one, so a server that sends errors without end
+/// grows nothing.
+#[test]
+fn server_errors_past_the_cap_are_counted_and_the_oldest_forgotten() {
+    const SENT: usize = OpenAiRealtimeSession::SERVER_ERRORS_KEPT + 6;
+    let server = Server::start(|mut socket| async move {
+        accept_session(&mut socket).await;
+        for at in 0..SENT {
+            send(
+                &mut socket,
+                json!({"type": "error", "event_id": format!("event_err_{at}"), "error": {
+                    "type": "invalid_request_error", "code": "invalid_value",
+                    "message": format!("error {at}"), "param": null, "event_id": null
+                }}),
+            )
+            .await;
+        }
+        send(
+            &mut socket,
+            json!({"type": "input_audio_buffer.speech_started", "event_id": "event_ss", "audio_start_ms": 100, "item_id": "item_1"}),
+        )
+        .await;
+        let _ = socket.next().await;
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, false))
+        .expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::SpeechStarted(_))
+    });
+    assert!(
+        matches!(events.last(), Some(SessionEvent::SpeechStarted(_))),
+        "{events:#?}"
+    );
+    let kept: Vec<_> = session
+        .server_errors()
+        .iter()
+        .map(|error| error.message.clone())
+        .collect();
+    let expected: Vec<_> = (SENT - OpenAiRealtimeSession::SERVER_ERRORS_KEPT..SENT)
+        .map(|at| format!("error {at}"))
+        .collect();
+    assert_eq!(kept, expected);
+    assert_eq!(session.server_error_count(), SENT as u64);
+    let _ = session.close();
+    server.finish();
 }
