@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.18.0] — 2026-11-06
 
 ### Added
 
@@ -32,6 +32,11 @@
   one; the tool executor bounds its read-ahead and, once cancelled, starts no call and restores a
   call whose start it was sending; the voice activity detector, turn policy and commit gate end a
   send waiting on a full edge when cancelled; the commit gate keeps at most 64 ended generations.
+
+### Changed
+
+- The `ess` pin moves to 0.88.0: CI's `ESS_VERSION`, the testkit's `ess-conformance` and
+  `ess-primitives` tags, and `requires` in `ess/ess-inputs.yaml`.
 
 ## [0.17.0] — 2026-11-06
 
