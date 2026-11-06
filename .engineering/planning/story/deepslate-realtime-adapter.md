@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:deepslate-realtime-adapter
 kind: story
-status: draft
+status: active
 title: Deepslate Opal as a duplex binding
 summary: An EU-hosted speech-to-speech provider in compare.
 tags:
@@ -10,7 +10,10 @@ tags:
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T17:26:36Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-06T17:26:37Z", actor: "human:timo", revision: 3}
 ---
 ## Context
 

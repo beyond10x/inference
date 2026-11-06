@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:cartesia-streaming-tts-adapter
 kind: story
-status: draft
+status: active
 title: Cartesia Sonic streaming TTS as a hosted TTS adapter
 summary: The lowest-latency hosted voice for a cascade, with phone-rate output.
 tags:
@@ -10,7 +10,10 @@ tags:
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T17:26:37Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-06T17:26:37Z", actor: "human:timo", revision: 3}
 ---
 ## Context
 
