@@ -180,6 +180,8 @@ impl Recogniser for DeepgramRecogniser {
             worker: None,
             format: None,
             open: None,
+            open_through: None,
+            committed_through: None,
             delivered: VecDeque::new(),
             failure: None,
             finished: false,
@@ -209,6 +211,8 @@ enum Command {
 /// What that thread tells the handle.
 enum Inbound {
     Message(ServerMessage),
+    /// The summary `Metadata`, read after the thread sent `CloseStream`, with its duration.
+    Summary(Option<f64>),
     Failed(DeepgramError),
 }
 
@@ -216,16 +220,24 @@ enum Inbound {
 struct Worker {
     commands: async_mpsc::UnboundedSender<Command>,
     inbound: mpsc::Receiver<Inbound>,
-    end_sent: bool,
+    /// When the summary is due at the latest, once the end of input was sent.
+    due: Option<std::time::Instant>,
 }
+
+/// How long the thread waits before it offers a message again to a full queue.
+const DELIVERY_RETRY: Duration = Duration::from_millis(10);
+
+/// How far two span ends may differ and still be the same audio, in seconds.
+const SAME_END: f64 = 1e-6;
 
 /// One recognition of a [`DeepgramRecogniser`]; it runs until it is dropped or cancelled.
 ///
 /// The connection is driven on a thread of its own, so audio, `KeepAlive` and transcripts move
 /// while the caller is elsewhere. Before the end of input, iterating takes the frames offered and
 /// yields what has arrived, without waiting: `None` then means nothing has arrived yet. Once input
-/// has ended, iterating blocks until the summary `Metadata` or a failure, each wait bounded by the
-/// endpoint's read timeout, and `None` means the recognition has ended. A failure ends the
+/// has ended, iterating blocks until the summary `Metadata` or a failure, all waits together
+/// bounded by the endpoint's read timeout plus [`CLOSE_BOUND`], and `None` means the recognition
+/// has ended. A failure ends the
 /// iteration; [`DeepgramRecognition::failure`] says why, and the usage record, delivered once
 /// input has ended, is then not final.
 pub struct DeepgramRecognition {
@@ -234,6 +246,10 @@ pub struct DeepgramRecognition {
     worker: Option<Worker>,
     format: Option<AudioFormat>,
     open: Option<(SpanId, String)>,
+    /// Where the audio of the open span ends, as far as its results said.
+    open_through: Option<f64>,
+    /// Where the audio of the committed spans ends, as far as their results said.
+    committed_through: Option<f64>,
     delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
     failure: Option<DeepgramError>,
     finished: bool,
@@ -334,20 +350,20 @@ impl DeepgramRecognition {
     }
 
     /// The next thing the connection's thread said: without waiting before the end of input,
-    /// bounded by the read timeout after it. `None` when nothing has arrived before the end of
-    /// input.
+    /// and after it by the summary's one deadline, the read timeout from the end of input plus
+    /// [`CLOSE_BOUND`]. `None` when nothing has arrived before the end of input.
     fn receive(&mut self) -> Option<Inbound> {
         let ended = self.output.input_ended();
         let bound = self.shared.endpoint.read_timeout + CLOSE_BOUND;
         let worker = self.worker.as_mut()?;
-        if ended && !worker.end_sent {
-            worker.end_sent = true;
+        if ended && worker.due.is_none() {
+            worker.due = Some(std::time::Instant::now() + bound);
             let _ = worker.commands.send(Command::End);
         }
-        let received = if ended {
+        let received = if let Some(due) = worker.due {
             worker
                 .inbound
-                .recv_timeout(bound)
+                .recv_timeout(due.saturating_duration_since(std::time::Instant::now()))
                 .map_err(|error| match error {
                     mpsc::RecvTimeoutError::Timeout => DeepgramError::Stalled(bound),
                     mpsc::RecvTimeoutError::Disconnected => stopped(),
@@ -369,9 +385,16 @@ impl DeepgramRecognition {
                 transcript,
                 is_final,
                 speech_final,
+                end,
             } => {
+                if self.open.is_none() && covered(end, self.committed_through) {
+                    return Ok(());
+                }
                 if !transcript.trim().is_empty() {
                     self.hear(transcript)?;
+                }
+                if self.open.is_some() {
+                    self.open_through = later(self.open_through, end);
                 }
                 if is_final || speech_final {
                     self.commit_open()?;
@@ -382,16 +405,17 @@ impl DeepgramRecognition {
                     self.commit_open()?;
                 }
             }
-            ServerMessage::Metadata { duration } => {
-                if self.worker.as_ref().is_some_and(|worker| worker.end_sent) {
-                    self.duration = duration;
-                    self.commit_open()?;
-                    self.finished = true;
-                    self.worker = None;
-                }
-            }
-            ServerMessage::Ignored => {}
+            ServerMessage::Metadata { .. } | ServerMessage::Ignored => {}
         }
+        Ok(())
+    }
+
+    /// Ends the recognition at its summary `Metadata`, committing a span still open.
+    fn summarise(&mut self, duration: Option<f64>) -> Result<(), DeepgramError> {
+        self.duration = duration;
+        self.commit_open()?;
+        self.finished = true;
+        self.worker = None;
         Ok(())
     }
 
@@ -428,9 +452,23 @@ impl DeepgramRecognition {
         if let Some((span_id, _)) = self.open.take() {
             let envelope = self.output.commit(span_id).map_err(refused)?;
             self.delivered.push_back(envelope);
+            self.committed_through = later(self.committed_through, self.open_through.take());
         }
         Ok(())
     }
+}
+
+/// The later of two span ends, either unknown.
+fn later(known: Option<f64>, other: Option<f64>) -> Option<f64> {
+    match (known, other) {
+        (Some(known), Some(other)) => Some(known.max(other)),
+        (known, other) => known.or(other),
+    }
+}
+
+/// Whether a result whose audio ends at `end` is audio already committed up to `through`.
+fn covered(end: Option<f64>, through: Option<f64>) -> bool {
+    matches!((end, through), (Some(end), Some(through)) if end <= through + SAME_END)
 }
 
 fn stopped() -> DeepgramError {
@@ -470,6 +508,7 @@ impl Iterator for DeepgramRecognition {
             let inbound = self.receive()?;
             let outcome = match inbound {
                 Inbound::Message(message) => self.apply(message),
+                Inbound::Summary(duration) => self.summarise(duration),
                 Inbound::Failed(error) => Err(error),
             };
             if let Err(error) = outcome {
@@ -515,7 +554,7 @@ impl RecognitionHandle for DeepgramRecognition {
 /// Starts the thread that drives one connection to `url`.
 fn spawn(shared: Arc<Shared>, url: String) -> Result<Worker, DeepgramError> {
     let (commands, receiver) = async_mpsc::unbounded_channel();
-    let (sender, inbound) = mpsc::channel();
+    let (sender, inbound) = mpsc::sync_channel(listen::INBOUND_DEPTH);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -527,93 +566,189 @@ fn spawn(shared: Arc<Shared>, url: String) -> Result<Worker, DeepgramError> {
     Ok(Worker {
         commands,
         inbound,
-        end_sent: false,
+        due: None,
     })
+}
+
+/// What the thread does after one event of its loop.
+enum Step {
+    Go,
+    /// The handle is gone or cancelled: close the connection, say nothing.
+    Stop,
+    /// Close the connection and tell the handle this, its last word.
+    Finish(Inbound),
+    /// The connection is lost: tell the handle this, its last word.
+    Lost(DeepgramError),
+}
+
+/// Whether a message offered to the handle's queue was taken.
+enum Offered {
+    Taken,
+    Full(Inbound),
+    Gone,
+}
+
+fn offer(inbound: &mpsc::SyncSender<Inbound>, item: Inbound) -> Offered {
+    match inbound.try_send(item) {
+        Ok(()) => Offered::Taken,
+        Err(mpsc::TrySendError::Full(item)) => Offered::Full(item),
+        Err(mpsc::TrySendError::Disconnected(_)) => Offered::Gone,
+    }
+}
+
+/// The open connection and what the thread keeps about it.
+struct Link {
+    socket: Socket,
+    read_timeout: Duration,
+    last_sent: Instant,
+    /// The one deadline of the summary, set when `CloseStream` is sent and never moved.
+    closing: Option<Instant>,
+}
+
+impl Link {
+    async fn command(&mut self, command: Option<Command>) -> Step {
+        let written = match command {
+            Some(Command::Audio(data)) => {
+                self.last_sent = Instant::now();
+                write(&mut self.socket, Message::binary(data), self.read_timeout).await
+            }
+            Some(Command::End) if self.closing.is_none() => {
+                self.closing = Some(Instant::now() + self.read_timeout);
+                write(
+                    &mut self.socket,
+                    Message::text(CLOSE_STREAM),
+                    self.read_timeout,
+                )
+                .await
+            }
+            Some(Command::End) => Ok(()),
+            Some(Command::Cancel) | None => return Step::Stop,
+        };
+        match written {
+            Ok(()) => Step::Go,
+            Err(error) => Step::Finish(Inbound::Failed(error)),
+        }
+    }
+
+    /// Reads one message: the summary when `CloseStream` was sent and it is a `Metadata`.
+    fn read(
+        &self,
+        message: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+    ) -> Result<Option<Inbound>, Step> {
+        let text = match read(message) {
+            Ok(Some(text)) => text,
+            Ok(None) => return Ok(None),
+            Err(error) => return Err(Step::Lost(error)),
+        };
+        match listen::parse_server_message(&text) {
+            Ok(ServerMessage::Metadata { duration }) if self.closing.is_some() => {
+                Err(Step::Finish(Inbound::Summary(duration)))
+            }
+            Ok(message) => Ok(Some(Inbound::Message(message))),
+            Err(error) => Err(Step::Finish(Inbound::Failed(error))),
+        }
+    }
 }
 
 /// Drives one connection: opens it, sends audio, `KeepAlive` and `CloseStream` as the handle
 /// asks, and hands every server message to the handle, until the summary `Metadata`, a failure,
-/// a cancel or the handle's drop.
+/// a cancel or the handle's drop. A cancel or drop during the opening handshake drops the attempt
+/// at once. While the handle's queue is full the connection is not read.
 async fn drive(
     shared: Arc<Shared>,
     url: String,
     mut commands: async_mpsc::UnboundedReceiver<Command>,
-    inbound: mpsc::Sender<Inbound>,
+    inbound: mpsc::SyncSender<Inbound>,
 ) {
     let endpoint = &shared.endpoint;
-    let opened = connection::open(
+    let opening = connection::open(
         &url,
         shared.source.as_ref(),
         &shared.credential,
         endpoint.connect_timeout,
-    )
-    .await;
-    let mut socket = match opened {
-        Ok(socket) => socket,
-        Err(error) => {
-            let _ = inbound.send(Inbound::Failed(error));
-            return;
-        }
-    };
-    let keepalive = shared.config.keepalive_interval;
-    let read_timeout = endpoint.read_timeout;
-    let mut last_sent = Instant::now();
-    let mut closing: Option<Instant> = None;
-    loop {
-        let keepalive_at = last_sent + keepalive;
-        let deadline = closing.unwrap_or(keepalive_at);
-        let failure = tokio::select! {
-            command = commands.recv() => match command {
-                Some(Command::Audio(data)) => {
-                    last_sent = Instant::now();
-                    write(&mut socket, Message::binary(data), read_timeout).await.err()
-                }
-                Some(Command::End) => {
-                    closing = Some(Instant::now() + read_timeout);
-                    write(&mut socket, Message::text(CLOSE_STREAM), read_timeout).await.err()
-                }
-                Some(Command::Cancel) | None => {
-                    connection::close(socket).await;
-                    return;
-                }
-            },
-            message = socket.next() => match read(message) {
-                Ok(None) => None,
-                Ok(Some(text)) => {
-                    if closing.is_some() {
-                        closing = Some(Instant::now() + read_timeout);
-                    }
-                    match listen::parse_server_message(&text) {
-                        Ok(message) => {
-                            let summary =
-                                closing.is_some() && matches!(message, ServerMessage::Metadata { .. });
-                            if inbound.send(Inbound::Message(message)).is_err() || summary {
-                                connection::close(socket).await;
-                                return;
-                            }
-                            None
-                        }
-                        Err(error) => Some(error),
-                    }
-                }
+    );
+    tokio::pin!(opening);
+    let mut early = VecDeque::new();
+    let socket = loop {
+        tokio::select! {
+            opened = &mut opening => match opened {
+                Ok(socket) => break socket,
                 Err(error) => {
                     let _ = inbound.send(Inbound::Failed(error));
                     return;
                 }
             },
-            () = tokio::time::sleep_until(keepalive_at), if closing.is_none() => {
-                last_sent = Instant::now();
-                write(&mut socket, Message::text(KEEP_ALIVE), read_timeout).await.err()
-            }
-            () = tokio::time::sleep_until(deadline), if closing.is_some() => {
-                Some(DeepgramError::Stalled(read_timeout))
+            command = commands.recv() => match command {
+                Some(Command::Cancel) | None => return,
+                Some(command) => early.push_back(command),
+            },
+        }
+    };
+    let mut link = Link {
+        socket,
+        read_timeout: endpoint.read_timeout,
+        last_sent: Instant::now(),
+        closing: None,
+    };
+    let keepalive = shared.config.keepalive_interval;
+    let mut held: Option<Inbound> = None;
+    loop {
+        let keepalive_at = link.last_sent + keepalive;
+        let step = if let Some(command) = early.pop_front() {
+            link.command(Some(command)).await
+        } else {
+            tokio::select! {
+                command = commands.recv() => link.command(command).await,
+                message = link.socket.next(), if held.is_none() => match link.read(message) {
+                    Ok(None) => Step::Go,
+                    Ok(Some(item)) => match offer(&inbound, item) {
+                        Offered::Taken => Step::Go,
+                        Offered::Full(item) => {
+                            held = Some(item);
+                            Step::Go
+                        }
+                        Offered::Gone => Step::Stop,
+                    },
+                    Err(step) => step,
+                },
+                () = tokio::time::sleep(DELIVERY_RETRY), if held.is_some() => {
+                    match held.take().map(|item| offer(&inbound, item)) {
+                        Some(Offered::Full(item)) => {
+                            held = Some(item);
+                            Step::Go
+                        }
+                        Some(Offered::Gone) => Step::Stop,
+                        Some(Offered::Taken) | None => Step::Go,
+                    }
+                }
+                () = tokio::time::sleep_until(keepalive_at), if link.closing.is_none() => {
+                    link.last_sent = Instant::now();
+                    match write(&mut link.socket, Message::text(KEEP_ALIVE), link.read_timeout).await {
+                        Ok(()) => Step::Go,
+                        Err(error) => Step::Finish(Inbound::Failed(error)),
+                    }
+                }
+                () = tokio::time::sleep_until(link.closing.unwrap_or(keepalive_at)), if link.closing.is_some() => {
+                    Step::Finish(Inbound::Failed(DeepgramError::Stalled(link.read_timeout)))
+                }
             }
         };
-        if let Some(error) = failure {
-            let _ = inbound.send(Inbound::Failed(error));
-            connection::close(socket).await;
-            return;
+        let last = match step {
+            Step::Go => continue,
+            Step::Stop => {
+                connection::close(link.socket).await;
+                return;
+            }
+            Step::Finish(last) => {
+                connection::close(link.socket).await;
+                last
+            }
+            Step::Lost(error) => Inbound::Failed(error),
+        };
+        if held.is_none_or(|item| inbound.send(item).is_ok()) {
+            let _ = inbound.send(last);
         }
+        return;
     }
 }
 
@@ -704,7 +839,88 @@ mod tests {
             transcript: transcript.to_owned(),
             is_final,
             speech_final,
+            end: None,
         }
+    }
+
+    fn ending(transcript: &str, is_final: bool, end: f64) -> ServerMessage {
+        ServerMessage::Results {
+            transcript: transcript.to_owned(),
+            is_final,
+            speech_final: false,
+            end: Some(end),
+        }
+    }
+
+    #[test]
+    fn a_final_result_of_audio_an_utterance_end_already_committed_is_dropped() {
+        let mut recognition = recognition();
+        recognition
+            .apply(ending("good morning", false, 0.5))
+            .unwrap();
+        recognition
+            .apply(ServerMessage::UtteranceEnd { last_word_end: 1.2 })
+            .unwrap();
+        recognition
+            .apply(ending("good morning", true, 0.5))
+            .unwrap();
+        recognition.apply(ending("bye", false, 1.7)).unwrap();
+        recognition.apply(ending("bye", true, 1.7)).unwrap();
+        assert_eq!(
+            kinds(&mut recognition),
+            [
+                "hypothesis good morning",
+                "commit",
+                "hypothesis bye",
+                "commit"
+            ]
+        );
+    }
+
+    #[test]
+    fn results_without_a_span_end_are_never_dropped() {
+        let mut recognition = recognition();
+        recognition.apply(ending("one", true, 0.5)).unwrap();
+        recognition.apply(results("two", true, false)).unwrap();
+        assert_eq!(
+            kinds(&mut recognition),
+            ["hypothesis one", "commit", "hypothesis two", "commit"]
+        );
+    }
+
+    #[test]
+    fn a_metadata_message_never_ends_the_recognition_only_the_summary_does() {
+        let mut recognition = recognition();
+        recognition.apply(results("open", false, false)).unwrap();
+        recognition
+            .apply(ServerMessage::Metadata {
+                duration: Some(0.1),
+            })
+            .unwrap();
+        assert!(!recognition.finished);
+        assert_eq!(recognition.provider_duration(), None);
+        recognition.summarise(Some(0.2)).unwrap();
+        assert!(recognition.finished);
+        assert_eq!(recognition.provider_duration(), Some(0.2));
+        assert_eq!(kinds(&mut recognition), ["hypothesis open", "commit"]);
+    }
+
+    #[test]
+    fn a_full_queue_holds_the_message_and_a_dropped_one_says_gone() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        assert!(matches!(
+            offer(&sender, Inbound::Summary(None)),
+            Offered::Taken
+        ));
+        assert!(matches!(
+            offer(&sender, Inbound::Summary(Some(1.0))),
+            Offered::Full(Inbound::Summary(Some(_)))
+        ));
+        drop(receiver);
+        assert!(matches!(
+            offer(&sender, Inbound::Summary(None)),
+            Offered::Gone
+        ));
     }
 
     fn kinds(recognition: &mut DeepgramRecognition) -> Vec<String> {

@@ -58,6 +58,8 @@ pub enum Action {
     Send(String),
     /// Sends a close frame with this code and reason.
     Close(u16, String),
+    /// Waits this long before the next step.
+    Wait(Duration),
 }
 
 /// One step of a script.
@@ -311,6 +313,11 @@ async fn serve(
         Ok(response)
     };
     let accepted = tokio_tungstenite::accept_hdr_async(stream, callback).await;
+    if accepted.is_err() && refusal.is_none() {
+        record(&|seen| seen.client_closed = true);
+        let _ = closes.send(index);
+        return;
+    }
     let (path, query, authorization) = head.lock().unwrap().clone();
     let mut violations = Vec::new();
     if authorization.as_deref() != Some(&format!("Token {KEY}")) {
@@ -366,6 +373,7 @@ async fn serve(
                         .await;
                     server_closed = true;
                 }
+                Action::Wait(pause) => tokio::time::sleep(pause).await,
             }
         }
         let violation = match socket.next().await {

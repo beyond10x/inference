@@ -40,6 +40,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use inference_stt::inference_audio::AudioFrame;
@@ -148,8 +149,9 @@ pub enum Item {
     /// [`end_of_input`]: the end of input ends the iteration within the drain bound, with every
     /// span committed, and it stays ended.
     EndOfInput,
-    /// [`cancellation`]: a dropped handle releases its slot and revives nothing, and the declared
-    /// maximum concurrency is held.
+    /// [`cancellation`]: a dropped handle releases its slot and revives nothing: the next
+    /// recognition commits what a clean one of the same input does, and the declared maximum
+    /// concurrency is held.
     Cancellation,
     /// [`backend_failure`]: a backend that closes or fails ends the iteration with a usage record
     /// that is not final, and the handle names a typed error.
@@ -206,6 +208,12 @@ pub enum Fault {
     SlotNotReleased(ConcurrencyLimitReached),
     /// A fresh recognition delivered an event of a span of the recognition dropped before it.
     StaleOutput { span_id: SpanId },
+    /// The fresh recognition after a drop committed other texts than a clean baseline
+    /// recognition of the same input.
+    TranscriptDiffers {
+        baseline: Vec<String>,
+        fresh: Vec<String>,
+    },
     /// Once the iteration ended, no usage record had been delivered.
     UsageMissing,
     /// A second usage record was delivered.
@@ -287,6 +295,8 @@ pub struct CancellationObserved {
     pub max_concurrency: i64,
     /// The frames the dropped recognition was offered before it was dropped.
     pub frames_before_drop: usize,
+    /// The spans the fresh recognition committed, as many as the baseline did.
+    pub committed: usize,
 }
 
 /// What [`backend_failure`] observed.
@@ -407,21 +417,22 @@ pub fn spans_in_order<R: Recogniser>(
 
 /// Checks [`Item::EndOfInput`]: the whole input is offered and ended; the iteration ends within
 /// [`Input::drain_bound`], every span the recognition emitted is committed, and a further
-/// iteration yields nothing.
+/// iteration yields nothing. The bound holds while the iteration waits: the drain runs on a
+/// thread of its own, and a handle that blocks past the bound fails the check when the bound
+/// passes, its thread left to end on its own.
 ///
 /// # Errors
 ///
 /// A [`Failure`] naming [`Item::EndOfInput`].
-pub fn end_of_input<R: Recogniser>(
-    recogniser: &mut R,
-    input: &Input,
-) -> Result<EndObserved, Failure> {
+pub fn end_of_input<R>(recogniser: &mut R, input: &Input) -> Result<EndObserved, Failure>
+where
+    R: Recogniser,
+    R::Handle: Send + 'static,
+{
     let mut driver = Driver::start(recogniser, Item::EndOfInput)?;
     driver.feed(input, &mut ignore)?;
     driver.end()?;
-    let started = Instant::now();
-    driver.drain(input.drain_bound, &mut ignore)?;
-    let drained_in = started.elapsed();
+    let (mut driver, drained_in) = driver.drain_within(input.drain_bound)?;
     if let Some(&span_id) = driver.ledger.open.first() {
         return Err(driver.fail(Fault::SpanLeftOpen { span_id }));
     }
@@ -434,12 +445,16 @@ pub fn end_of_input<R: Recogniser>(
     })
 }
 
-/// Checks [`Item::Cancellation`]: as many recognitions as the adapter declares run at once, up to
-/// [`CONCURRENCY_BOUND`], and, within that bound, one more start is refused; one of them, offered
-/// the first half of the input and stepped once, is dropped mid-recognition; the next start
-/// succeeds, and that fresh recognition, offered the whole input and ended, delivers no event of
-/// a span of the dropped one, passes the ledger from its own first sequence and ends with its
-/// usage record. A cancel is the drop: the contract has no other.
+/// Checks [`Item::Cancellation`]: first a clean baseline recognition is offered the whole input,
+/// ended and drained, and its committed texts kept. Then as many recognitions as the adapter
+/// declares run at once, up to [`CONCURRENCY_BOUND`], and, within that bound, one more start is
+/// refused; one of them, offered the first half of the input and stepped once, is dropped
+/// mid-recognition; the next start succeeds, and that fresh recognition, offered the whole input
+/// and ended, delivers no event of a span of the dropped one, passes the ledger from its own first
+/// sequence, ends with its usage record and commits exactly the baseline's texts in the same
+/// order: words of the dropped recognition carried into it under fresh span ids fail it. The
+/// recogniser must transcribe the same input the same way twice, as an in-process model or a
+/// scripted fixture server does. A cancel is the drop: the contract has no other.
 ///
 /// # Errors
 ///
@@ -450,6 +465,16 @@ pub fn cancellation<R: Recogniser>(
 ) -> Result<CancellationObserved, Failure> {
     let item = Item::Cancellation;
     let fail = |fault| Failure { item, fault };
+    let baseline = {
+        let mut driver = Driver::start(recogniser, item)?;
+        driver.feed(input, &mut ignore)?;
+        driver.end()?;
+        driver.drain(input.drain_bound, &mut ignore)?;
+        if driver.ledger.usage.is_none() {
+            return Err(driver.fail(Fault::UsageMissing));
+        }
+        driver.committed_texts()
+    };
     let max_concurrency = recogniser.adapter().max_concurrency();
     let declared = usize::try_from(max_concurrency).unwrap_or(1).max(1);
     let mut running = Vec::with_capacity(declared.min(CONCURRENCY_BOUND));
@@ -497,10 +522,15 @@ pub fn cancellation<R: Recogniser>(
     if driver.ledger.usage.is_none() {
         return Err(driver.fail(Fault::UsageMissing));
     }
+    let fresh = driver.committed_texts();
+    if fresh != baseline {
+        return Err(driver.fail(Fault::TranscriptDiffers { baseline, fresh }));
+    }
     drop(running);
     Ok(CancellationObserved {
         max_concurrency,
         frames_before_drop: half,
+        committed: fresh.len(),
     })
 }
 
@@ -849,7 +879,8 @@ impl<H: RecognitionHandle> Driver<H> {
     }
 
     /// Takes every event after the end of input until the iteration ends, failing it when that
-    /// takes longer than `bound`.
+    /// took longer than `bound`. The bound is read once the iteration has ended; only
+    /// [`Driver::drain_within`] holds it while the iteration waits.
     fn drain(&mut self, bound: Duration, on_event: &mut OnEvent<'_, H>) -> Result<(), Failure> {
         let started = Instant::now();
         self.poll(on_event)?;
@@ -857,6 +888,55 @@ impl<H: RecognitionHandle> Driver<H> {
             return Err(self.fail(Fault::DrainUnbounded { bound }));
         }
         Ok(())
+    }
+
+    /// The texts of the committed spans, in commit order.
+    fn committed_texts(&self) -> Vec<String> {
+        self.ledger
+            .committed_spans
+            .iter()
+            .map(|&span_id| {
+                self.handle
+                    .output()
+                    .span(span_id)
+                    .map(|span| span.text().to_owned())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+}
+
+impl<H: RecognitionHandle + Send + 'static> Driver<H> {
+    /// Takes every event after the end of input until the iteration ends, on a thread of its
+    /// own, and fails when it has not ended within `bound`, while it still waits: the thread is
+    /// then left to end on its own. Answers the driver back and how long the drain took.
+    fn drain_within(self, bound: Duration) -> Result<(Self, Duration), Failure> {
+        let item = self.item;
+        let started = Instant::now();
+        let (sender, receiver) = mpsc::channel();
+        let drain = std::thread::spawn(move || {
+            let mut driver = self;
+            let outcome = driver.poll(&mut ignore);
+            let _ = sender.send((driver, outcome));
+        });
+        match receiver.recv_timeout(bound) {
+            Ok((driver, outcome)) => {
+                outcome?;
+                let drained_in = started.elapsed();
+                if drained_in > bound {
+                    return Err(driver.fail(Fault::DrainUnbounded { bound }));
+                }
+                Ok((driver, drained_in))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(Failure {
+                item,
+                fault: Fault::DrainUnbounded { bound },
+            }),
+            Err(mpsc::RecvTimeoutError::Disconnected) => match drain.join() {
+                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(()) => unreachable!("the drain thread answers before it ends"),
+            },
+        }
     }
 }
 

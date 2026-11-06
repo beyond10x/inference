@@ -77,6 +77,7 @@ fn the_cancellation_check_accepts_the_mock_in_both_configurations() {
             .unwrap_or_else(|failure| panic!("{configuration:?}: {failure}"));
         assert_eq!(observed.max_concurrency, 1, "{configuration:?}");
         assert_eq!(observed.frames_before_drop, 80, "{configuration:?}");
+        assert!(observed.committed > 0, "{configuration:?}");
     }
 }
 
