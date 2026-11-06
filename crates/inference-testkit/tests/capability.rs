@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 
 use inference_core::model::{
-    Capability, CapabilityEvidence, DeclareAdapter, DeclareModel, ExecutionForm, Locality,
-    Modality, ModelId,
+    AdapterDescriptor, Capability, CapabilityEvidence, DeclareAdapter, DeclareModel, ExecutionForm,
+    Locality, Modality, ModelId,
 };
 use inference_stt::Recogniser;
 use inference_testkit::model::ModelDomain;
@@ -84,6 +84,7 @@ fn a_loaded_record_declares_in_the_model_domain_against_its_adapter() {
             locality: Locality::SameProcess,
             capabilities: MockConfiguration::Incremental.capabilities(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("declared");
     let adapter = domain

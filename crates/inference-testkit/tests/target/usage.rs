@@ -539,7 +539,9 @@ mod tests {
     use ess_primitives::facts::Number;
     use ess_primitives::ids::CorrelationId;
     use ess_primitives::node::Node;
-    use inference_core::model::{DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality};
+    use inference_core::model::{
+        AdapterDescriptor, DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality,
+    };
     use inference_core::usage::UnknownReason;
 
     use super::{PRICE_USAGE, RECORD_USAGE, Stores, execute_command};
@@ -602,6 +604,7 @@ mod tests {
                 locality: Locality::SameProcess,
                 capabilities: Vec::new(),
                 max_concurrency: 1,
+                descriptor: AdapterDescriptor::default(),
             })
             .expect("the model is declared");
         stores

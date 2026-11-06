@@ -76,7 +76,7 @@ use inference_duplex::inference_audio::{
     AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition,
 };
 use inference_duplex::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
@@ -284,6 +284,7 @@ impl<C: Connector> NovaSonicSpeech<C> {
             locality: Locality::ExternalProvider,
             capabilities: CLAIMS.to_vec(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .unwrap_or_else(|_| unreachable!("a concurrency of one is positive"));
         let capabilities = capabilities(connector.model_id());

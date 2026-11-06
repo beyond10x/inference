@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 
 use inference_core::id::{GenerationId, NodeId, RunId, SessionId, StreamId};
 use inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, DeclareModel, ExecutionForm, Locality,
-    Modality, Model, ModelId, NonPositiveConcurrency,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, DeclareModel, ExecutionForm,
+    Locality, Modality, Model, ModelId, NonPositiveConcurrency,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -21,6 +21,7 @@ fn scenario_declare_adapter_input(max_concurrency: Value) -> Value {
         "execution_form": "in_process",
         "locality": "same_process",
         "max_concurrency": max_concurrency,
+        "descriptor": {},
         "model_id": SCENARIO_MODEL_ID,
     })
 }
@@ -132,6 +133,7 @@ fn integer_adapter_input(model_id: ModelId, max_concurrency: i64) -> DeclareAdap
         locality: Locality::SameProcess,
         capabilities: vec![Capability::OutputStreaming, Capability::NativeDuplex],
         max_concurrency,
+        descriptor: AdapterDescriptor::default(),
     }
 }
 
@@ -165,7 +167,9 @@ fn adversary_adapter_entity_and_event_carry_exactly_the_ess_fields() {
             "locality",
             "capabilities",
             "max_concurrency",
-        ])
+            "descriptor",
+        ]),
+        "story:adapter-descriptor-carrier: the entity carries its descriptor"
     );
     assert_eq!(entity["execution_form"], json!("in_process"));
     assert_eq!(entity["locality"], json!("same_process"));

@@ -8,7 +8,7 @@ use inference_tts::inference_audio::{AudioEncoding, AudioFormat, AudioFrame, Sam
 use inference_tts::inference_core::generation::{Generation, StartGeneration};
 use inference_tts::inference_core::id::{NodeId, RunId};
 use inference_tts::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_tts::inference_text::OutputSegment;
 use inference_tts::{CONTRACT_REVISION, SynthesisEvent, SynthesisOutput};
@@ -59,6 +59,7 @@ fn every_kind_of_event() -> Vec<SynthesisEvent> {
         locality: Locality::SameProcess,
         capabilities: vec![Capability::OutputStreaming],
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive")
     .0;

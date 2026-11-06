@@ -7,7 +7,7 @@ use std::num::{NonZeroU16, NonZeroU32};
 use inference_stt::inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 use inference_stt::inference_core::id::{NodeId, RunId, StreamId};
 use inference_stt::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_stt::inference_core::usage::{Quantity, QuantityKind};
 use inference_stt::inference_text::TurnId;
@@ -22,6 +22,7 @@ fn output(capabilities: Vec<Capability>) -> TranscriptOutput {
         locality: Locality::SameProcess,
         capabilities,
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive")
     .0;

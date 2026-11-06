@@ -103,6 +103,7 @@ fn declare_adapter(model_id: &str) -> SemanticCommandRequest {
             ("locality", text("same_process")),
             ("capabilities", Node::Seq(vec![text("tool_calling")])),
             ("max_concurrency", Node::Number(Number::from(1_i64))),
+            ("descriptor", Node::Map(BTreeMap::new())),
         ],
     )
 }

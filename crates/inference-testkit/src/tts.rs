@@ -78,7 +78,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use inference_tts::inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
 use inference_tts::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_tts::inference_text::{
     AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentSnapshot,
@@ -213,6 +213,7 @@ impl MockSynthesiser {
             locality: Locality::SameProcess,
             capabilities: configuration.capabilities(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("a maximum concurrency of one is positive");
         Self {

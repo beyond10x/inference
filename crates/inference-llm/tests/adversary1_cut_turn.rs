@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use inference_core::generation::GenerationState;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_core::usage::{Quantity, QuantityKind, UsageRecorded};
 use inference_llm::llm_core::{
@@ -179,6 +179,7 @@ fn generator(streams: bool, model: &Scripted) -> Generator {
         locality: Locality::SameProcess,
         capabilities,
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive");
     Generator::new(adapter, Arc::new(model.clone()))

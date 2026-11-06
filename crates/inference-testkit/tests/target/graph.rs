@@ -1888,6 +1888,7 @@ mod tests {
                     ("locality", text("same_process")),
                     ("capabilities", list(&["output_streaming"])),
                     ("max_concurrency", number(1.0)),
+                    ("descriptor", Node::Map(BTreeMap::new())),
                 ],
             ),
             "adapter_id",
