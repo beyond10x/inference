@@ -24,7 +24,8 @@ use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{Generation, StartGeneration};
 use inference_core::id::{NodeId, RunId, StreamId};
 use inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
@@ -539,6 +540,7 @@ fn frame_event_name() -> &'static str {
         locality: Locality::SameProcess,
         capabilities: vec![Capability::IncrementalInput, Capability::OutputStreaming],
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("a positive concurrency");
     let (generation, _) = Generation::start(StartGeneration {

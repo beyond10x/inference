@@ -10,6 +10,10 @@
   renamed `node::AUDIO_CHUNK`.
 - `inference-facade`: `SessionEvent` has the new variant `GenerationRefused` and `HistoryKind`
   the new variant `AssistantRefusal` (`HistoryKind::ALL` has four entries).
+- `inference-core`: `DeclareAdapter` has a required `descriptor: AdapterDescriptor` field, and
+  `Adapter::descriptor()` and the `inference.model.Adapters` view carry it; the descriptor's
+  `voices`, `codecs` and `rate_limits` are required on the wire, as the specification declares
+  them. The adapter, not the capability record, carries the descriptor.
 
 ### Added
 
