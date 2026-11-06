@@ -53,12 +53,16 @@
 //! through [`RecognitionHandle::revise`] among them, is refused with [`RecognitionEnded`], and a
 //! second record with [`UsageAlreadyRecorded`]. It is enveloped like any other event, at the next
 //! sequence of the request's stream. Its quantities are measured by the contract, so every
-//! recogniser reports them without code of its own: `input_audio_ms`, the audio the
-//! implementation took ([`TranscriptOutput::take_input`]), not the audio offered, as a synthesis
-//! counts the characters it took, so a recogniser that failed before taking its tail counts none
-//! of the tail; the samples per channel at each sample rate counted exactly, over that rate,
-//! summed and rounded down to the millisecond once; and `requests`, 1. The implementation adds the time its backend
-//! computed through [`TranscriptOutput::add_local_compute`], reported as `local_compute_ms`,
+//! recogniser reports them without code of its own: `input_audio_ms`, on a call marked failed
+//! the audio the implementation took ([`TranscriptOutput::take_input`]), as a synthesis counts
+//! the characters it took, so a recogniser that failed before taking its tail counts none of the
+//! tail; on any other call, whose record is final and so leaves no input out, the audio taken
+//! and the audio still offered and never taken, which is all the audio offered; the samples per
+//! channel at each sample rate counted exactly, over that rate, summed and rounded down to the
+//! millisecond once; and `requests`, 1. An implementation that may still refuse a frame looks at
+//! it with [`TranscriptOutput::next_offered`] and takes it with [`TranscriptOutput::take_next`]
+//! once it passes it on. The implementation adds the time its backend computed through
+//! [`TranscriptOutput::add_local_compute`], reported as `local_compute_ms`,
 //! `measured`, and `unknown` when it adds none. A backend call that failed is still recorded,
 //! with what was measured, its counts not final (`final` false) once the implementation marks it
 //! with [`TranscriptOutput::mark_failed`], as `inference-llm` records a failed turn; a failed
@@ -589,21 +593,53 @@ impl TranscriptOutput {
         self.require_before_end(Capability::IncrementalInput)?;
         let frames: Vec<AudioFrame> = self.offered.drain(..).collect();
         for frame in &frames {
-            let samples = self
-                .taken_samples
-                .entry(frame.format.sample_rate.get())
-                .or_insert(0);
-            *samples = samples.saturating_add(u128::from(frame.sample_count));
-            let end = frame
-                .position
-                .get()
-                .saturating_add(u64::from(frame.sample_count));
-            self.taken_through = self
-                .taken_through
-                .max(i64::try_from(end).unwrap_or(i64::MAX));
+            self.count_taken(frame);
         }
-        self.taken += frames.len();
         Ok(frames)
+    }
+
+    /// The frame [`Self::take_next`] would take, left offered: none when no frame is offered, or
+    /// when input has not ended and the adapter does not claim [`Capability::IncrementalInput`].
+    /// An implementation that can still refuse a frame, such as one in a format its backend
+    /// does not take, looks at it here first, so that a frame it never passes on is not counted.
+    #[must_use]
+    pub fn next_offered(&self) -> Option<&AudioFrame> {
+        self.require_before_end(Capability::IncrementalInput)
+            .ok()
+            .and(self.offered.front())
+    }
+
+    /// Takes the next frame offered and not yet taken, as [`Self::take_input`] takes them all;
+    /// none when no frame is offered.
+    ///
+    /// # Errors
+    ///
+    /// [`CapabilityNotClaimed`] naming [`Capability::IncrementalInput`] when input has not ended
+    /// and the adapter does not claim it; no frame is taken.
+    pub fn take_next(&mut self) -> Result<Option<AudioFrame>, CapabilityNotClaimed> {
+        self.require_before_end(Capability::IncrementalInput)?;
+        let frame = self.offered.pop_front();
+        if let Some(frame) = &frame {
+            self.count_taken(frame);
+        }
+        Ok(frame)
+    }
+
+    /// Counts `frame` as taken: its samples and the sample clock past it.
+    fn count_taken(&mut self, frame: &AudioFrame) {
+        let samples = self
+            .taken_samples
+            .entry(frame.format.sample_rate.get())
+            .or_insert(0);
+        *samples = samples.saturating_add(u128::from(frame.sample_count));
+        let end = frame
+            .position
+            .get()
+            .saturating_add(u64::from(frame.sample_count));
+        self.taken_through = self
+            .taken_through
+            .max(i64::try_from(end).unwrap_or(i64::MAX));
+        self.taken += 1;
     }
 
     /// Runs the `emitted` outcome of `inference.stream.EmitHypothesis` in the request's turn: adds
@@ -707,7 +743,8 @@ impl TranscriptOutput {
     }
 
     /// Milliseconds of audio the implementation has taken so far ([`Self::take_input`]); audio
-    /// offered and not yet taken does not count. The samples per channel taken at each sample
+    /// offered and not yet taken does not count here, though a usage record not marked failed
+    /// counts it (see the crate documentation). The samples per channel taken at each sample
     /// rate, counted exactly, over that rate, summed as an exact fraction and
     /// rounded down to the millisecond once, at the end. Should that fraction not fit `u128`,
     /// which takes several sample rates with no common divisor in one recognition, each rate's
@@ -720,25 +757,22 @@ impl TranscriptOutput {
 
     /// The milliseconds of [`Self::input_audio_ms`]; `None` beyond `i64::MAX`.
     fn taken_ms(&self) -> Option<i64> {
-        let exact = self.taken_samples.iter().try_fold(
-            (0_u128, 1_u128),
-            |(numerator, denominator), (&rate, &samples)| {
-                add_fraction(
-                    (numerator, denominator),
-                    (samples.checked_mul(1_000)?, u128::from(rate)),
-                )
-            },
-        );
-        let ms = exact.map_or_else(
-            || {
-                self.taken_samples
-                    .iter()
-                    .map(|(&rate, &samples)| samples.saturating_mul(1_000) / u128::from(rate))
-                    .fold(0_u128, u128::saturating_add)
-            },
-            |(numerator, denominator)| numerator / denominator,
-        );
-        i64::try_from(ms).ok()
+        milliseconds(&self.taken_samples)
+    }
+
+    /// The milliseconds the usage record counts; `None` beyond `i64::MAX`. A call marked failed
+    /// counts the audio taken. A call not marked failed makes a final record, which leaves out no
+    /// input: it counts the audio taken and the audio still offered and never taken.
+    fn recorded_ms(&self) -> Option<i64> {
+        if self.failed || self.offered.is_empty() {
+            return self.taken_ms();
+        }
+        let mut samples = self.taken_samples.clone();
+        for frame in &self.offered {
+            let count = samples.entry(frame.format.sample_rate.get()).or_insert(0);
+            *count = count.saturating_add(u128::from(frame.sample_count));
+        }
+        milliseconds(&samples)
     }
 
     /// Runs `inference.usage.RecordUsage` for the recognition and returns its enveloped
@@ -784,7 +818,7 @@ impl TranscriptOutput {
             self.started_at_ms,
             wall_clock_ms().max(self.started_at_ms),
             vec![
-                measured(QuantityKind::InputAudioMs, self.taken_ms()),
+                measured(QuantityKind::InputAudioMs, self.recorded_ms()),
                 Quantity::measured(QuantityKind::Requests, 1),
                 local_compute,
             ],
@@ -904,6 +938,31 @@ impl TranscriptOutput {
             payload,
         }
     }
+}
+
+/// The milliseconds of `samples`, the samples per channel at each sample rate: over that rate,
+/// summed as an exact fraction and rounded down once; each rate rounded down on its own and
+/// summed when the fraction does not fit `u128`. `None` beyond `i64::MAX`.
+fn milliseconds(samples: &BTreeMap<u32, u128>) -> Option<i64> {
+    let exact = samples.iter().try_fold(
+        (0_u128, 1_u128),
+        |(numerator, denominator), (&rate, &count)| {
+            add_fraction(
+                (numerator, denominator),
+                (count.checked_mul(1_000)?, u128::from(rate)),
+            )
+        },
+    );
+    let ms = exact.map_or_else(
+        || {
+            samples
+                .iter()
+                .map(|(&rate, &count)| count.saturating_mul(1_000) / u128::from(rate))
+                .fold(0_u128, u128::saturating_add)
+        },
+        |(numerator, denominator)| numerator / denominator,
+    );
+    i64::try_from(ms).ok()
 }
 
 /// The greatest common divisor of `a` and `b`; `a` when `b` is 0.

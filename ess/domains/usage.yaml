@@ -51,8 +51,10 @@ types:
   # kind: no provider caches output; ResponseUsage has no cached audio count, so a binding whose
   # provider reports one records it from its own fields); inference.duplex.TranscriptionUsage
   # input_tokens to input_audio_tokens and output_tokens to output_text_tokens. A recogniser's
-  # input_audio_ms and a synthesiser's input_characters count the input its backend took, not
-  # the input offered to it: a call that failed before taking the rest counts none of the rest.
+  # input_audio_ms and a synthesiser's input_characters of a failed call count the input its
+  # backend took, not the input offered to it, so the rest it never took counts nothing; a final
+  # record leaves no input out (a synthesiser's is refused while a segment is not taken, a
+  # recogniser's counts the audio offered and never taken as well).
   # read from: docs/design/inference.md:367
   # read from: docs/design/inference.md:373
   # read from: docs/design/inference.md:439

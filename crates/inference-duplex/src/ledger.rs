@@ -1307,7 +1307,8 @@ impl SessionLedger {
     }
 
     /// The provider reported the usage of a response, in any state of the response or the
-    /// session: the running total of the response so far, which replaces the one recorded
+    /// session until the response's usage record is made, and refused after it (see Errors):
+    /// the running total of the response so far, which replaces the one recorded
     /// before. It is for a provider that reports every count and whose report is the final
     /// total: its record takes every count as reported ([`ResponseUsage::quantities`]),
     /// [`UsageTotal::Final`].
