@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:elevenlabs-realtime-agent-adapter
 kind: story
-status: active
+status: implemented
 title: ElevenLabs realtime conversation as a duplex binding
 summary: Eleven Realtime as a native speech provider in compare.
 tags:
@@ -57,10 +57,11 @@ scope:
   path: website/docs/reference/environment.md
 - confidence: inferred
   path: website/docs/status.mdx
-revision: 27
+revision: 28
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-05T13:07:49Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-05T16:11:00Z", actor: "human:timo", revision: 27}
+- {from: "active", to: "implemented", at: "2026-11-06T10:49:22Z", actor: "human:timo", revision: 28, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 ## Context
 
