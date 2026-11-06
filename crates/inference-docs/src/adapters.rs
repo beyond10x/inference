@@ -105,6 +105,15 @@ const BINDINGS: &[Binding] = &[
         licence: "hosted service: audio leaves the machine",
     },
     Binding {
+        name: "Deepgram Voice Agent",
+        package: "inference-deepgram",
+        runs: "native speech (duplex); hosted, WebSocket (`v1/agent/converse`), the listen, think and speak providers its `Settings` name",
+        features: &[],
+        record: Record::Claims("records/claims-voice-agent.json"),
+        environment: "`DEEPGRAM_API_KEY` with Voice Agent access, or the keychain secret `deepgram-api-key` with feature `keychain`",
+        licence: "hosted service: audio leaves the machine",
+    },
+    Binding {
         name: "sherpa-onnx streaming STT",
         package: "inference-sherpa-onnx",
         runs: "STT, streaming; in process, native library",
