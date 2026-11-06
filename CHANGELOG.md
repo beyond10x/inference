@@ -1,6 +1,135 @@
 # Changelog
 
-## [Unreleased]
+## [0.19.0] — 2026-11-06
+
+### Added
+
+- `inference-audio-device`: `PlaybackFault`, `PLAYBACK_PATIENCE` (2 s),
+  `AcknowledgingSink::with_playback_patience` and `AcknowledgingHandle::fault`.
+- `inference-llama-server`: `loopback` and `NotLoopback`.
+- `inference-runtime`: `CHILD_DROP_BOUND` (5 s), `USAGE_STOP_GRACE` (1 s),
+  `SubgraphHandle::dropped_usage`, `REFUSALS_KEPT` (256), `RunController::refusals_overflow`,
+  `DEFAULT_RECORDER_BOUND` (65 536), `Recorder::with_bound`, `bound` and `dropped`,
+  `Recording::new`, `cut` and `cut_at`, and `Replay::compared_until`.
+- `inference-core`: `AdapterDescriptor` and `RateLimit`, the design's adapter descriptor, also
+  declared in `ess/domains/model.yaml`; which declaration carries it is still open.
+- `inference-stt`: `TranscriptOutput::next_offered` and `take_next`, to take offered frames one
+  at a time.
+- `inference-testkit`: the duplex mock's `with_late_usage`.
+- `ess/domains/audio.yaml` declares the event `inference.audio.AudioChunk`.
+
+### Changed
+
+- **Breaking:** `inference-runtime`'s `Recording` keeps where its recorder's bound cut it, in a
+  private field, so it is built with `Recording::new` instead of a struct literal. A replay compares
+  a cut recording only as far as it holds, instead of reporting a divergence at the cut.
+- `inference-llama-server` accepts a base URL only on a loopback host (`127.0.0.0/8`, `::1`,
+  `localhost`); any other host is refused before anything opens, and the refusal names scheme,
+  host and port, never a user part.
+- `inference-tts`: `SynthesisEvent::name()` returns `inference.audio.AudioChunk` for a frame, the
+  event the specification declares (was `inference.audio.AudioFrame`, which is a type). Envelope
+  kinds elsewhere still say `inference.audio.AudioFrame`.
+- `inference-stt`: `input_audio_ms` counts all audio offered on a call not marked failed, and
+  only the audio taken on a failed call (was the audio offered in both cases).
+
+### Fixed
+
+- `inference-audio-device`: the acknowledging sink's drain fails on a stream error at once, and on
+  queued audio whose played position does not move for the patience, also while a frame waits
+  for room, instead of hanging on a dead speaker. A segment heard in full before a turn opened is
+  acknowledged at its completion, possibly after later segments' receipts. A frame whose sample
+  clock goes back below held, unplayed audio is refused.
+- `inference-runtime`: dropping a subgraph node ends its child run within `CHILD_DROP_BOUND`; a
+  bridge send on a full parent edge waits instead of spinning; a usage send gives way
+  `USAGE_STOP_GRACE` after a stop, or at once on a drop; refusals and recordings are bounded.
+- `inference-duplex`: `SessionLedger::response_usage` refuses a report once the response's usage
+  record is made, as `response_usage_reported` does; the testkit mock counts that refusal as a
+  drop.
+- `inference-core`: `UsageTotal::complete()` stays false while it holds a partial record with no
+  quantities.
+- `inference-deepgram`: a recognition counts as taken only the frames it forwarded, not the frames
+  after a refused one.
+- `local-voice-cascade` example: each turn's first-audio measure is the first frame of its own
+  answer, and a discarded segment reaches the commit gate as `Gated::SegmentDiscarded`.
+
+## [0.18.0] — 2026-11-06
+
+### Added
+
+- `inference-openai`: `Deadlines` holds the WebSocket handshake and write deadlines (10 s each by
+  default). `RealtimeClient::connect_with` and `LiveClient::connect_with` take one;
+  `OpenAiRealtime` and `OpenAiLive` gain `with_connect_timeout` and `with_write_timeout`, and the
+  senders `write_timeout()`. `Endpoint` and `connect` are unchanged.
+- `inference-aws`: `NovaSonic::with_open_timeout` and `open_timeout`, default `OPEN_TIMEOUT`
+  (10 s, now also exported from `nova_sonic`), bound `NovaSonic::start` as the duplex binding's
+  `with_open_timeout` bounds its open.
+- `inference-pipeline`: `Gated::SegmentDiscarded`; the tool executor's `with_read_ahead` (default
+  64); the commit gate handle's `take_record`.
+- `inference-facade`: `Sessions::inputs_sent`, `LiveSessions::inputs_sent` and
+  `events_released`.
+
+### Fixed
+
+- `inference-openai`: a server that accepts the TCP connection and never answers the handshake,
+  or stops reading, fails the session at the deadline instead of hanging it. `ws://` is refused off
+  loopback, and a redirect is not followed.
+- `inference-aws`: Nova Sonic reports one stall per idle limit, bounds the arrivals waiting for
+  the caller, and fails the session with a provider error when a later audio block comes at
+  another rate. An idle limit or wait of `Duration::MAX` no longer panics.
+- `inference-facade`: a draining live session whose run fails or is cancelled closes, delivering
+  the run's end and then `SessionClosed`. The event log is bounded at 4096 events, and a
+  generation's bookkeeping is released once its playback ended (at most 256 kept). A refused send
+  records no `InputSent`.
+- `inference-pipeline`: the tool authority authorizes a confirmed call queued behind a withdrawn
+  one; the tool executor bounds its read-ahead and, once cancelled, starts no call and restores a
+  call whose start it was sending; the voice activity detector, turn policy and commit gate end a
+  send waiting on a full edge when cancelled; the commit gate keeps at most 64 ended generations.
+
+### Changed
+
+- The `ess` pin moves to 0.88.0: CI's `ESS_VERSION`, the testkit's `ess-conformance` and
+  `ess-primitives` tags, and `requires` in `ess/ess-inputs.yaml`.
+
+## [0.17.0] — 2026-11-06
+
+### Added
+
+- `inference-deepgram`, a hosted adapter at locality `external_provider`:
+  - `DeepgramRecogniser`, Deepgram streaming speech-to-text over the `/v1/listen` WebSocket, as an
+    `inference-stt` `Recogniser`. It claims `incremental_input` and `output_streaming`
+    (`records/claims-stt.json`).
+  - Input is G.711 μ-law or A-law at 8 kHz, or 16-bit PCM at any rate. Interim results revise an
+    open span; `is_final` commits it; `speech_final` or `UtteranceEnd` ends the turn.
+  - Messages and frames over 4 MiB fail the recognition; at most 32 server messages wait for the
+    caller. The end of a recognition is bounded by one deadline from `CloseStream`.
+  - With feature `duplex`, `DeepgramAgent` is a Deepgram Voice Agent session
+    (`/v1/agent/converse`) as an `inference-duplex` native speech model
+    (`records/claims-voice-agent.json`). A response cut after `AgentAudioDone` completes at the
+    next turn event or after a 1 s quiet bound. A think or speak failure warning ends the wait
+    for that reply.
+  - The key comes from an injected credential source, `DEEPGRAM_API_KEY` or the keychain, and is
+    sent only in the handshake. `ws://` is accepted only for a loopback host, and a base URL with
+    a user part is refused for every scheme.
+- `ElevenLabsAgent` in `inference-elevenlabs`, behind feature `duplex`: a conversation with an
+  ElevenLabs agent over `/v1/convai/conversation`, as an `inference-duplex` native speech model
+  (`records/claims-agent.json`). Messages and frames are bounded at 1 MiB; server pings are
+  answered without queueing; a cancel affects only the open in progress.
+- `inference_testkit::stt::conformance`: the backend-neutral checks of a streaming STT adapter,
+  generic over any `Recogniser`, for an adapter crate to run against its own recogniser.
+
+### Fixed
+
+- The GPT-Live duplex binding of `inference-openai` ends a response cut by the user's speech at
+  the model's next words: the first output fragment after a pause in the model's output and after
+  the user's speech ends begins a new response. Before, the next words stayed on the cut response,
+  so a caller that dropped the cut response's audio dropped them too.
+
+### Changed
+
+- The `ess` pin moves to 0.87.0: CI's `ESS_VERSION`, the testkit's `ess-conformance` and
+  `ess-primitives` tags, and `requires` in `ess/ess-inputs.yaml`.
+
+## [0.16.0] — 2026-11-05
 
 ### Added
 

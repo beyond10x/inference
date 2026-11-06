@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-06T10:49:22Z",
+  "actor": "human:operator",
+  "artifact": "story:cut-response-audio-is-told-from-the-next-words",
+  "kind": "story",
+  "revision": 15,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "0.17.0 staged full gate on wave/2026-11-05-inference-next: s1 (sherpa archive, ess validate, aep validate, docs generate --check, fmt) green; s2 clippy --workspace --all-targets --all-features green; s3a, s3b green; s3c 3136 passed, 1 failed (deepgram cancel.rs drop test, a test race, fixed by 030f8bf, merged a0c7a92; inference-deepgram --all-features --tests then 120 passed, 0 failed)"
+  }
+}

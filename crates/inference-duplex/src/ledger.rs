@@ -1307,14 +1307,18 @@ impl SessionLedger {
     }
 
     /// The provider reported the usage of a response, in any state of the response or the
-    /// session: the running total of the response so far, which replaces the one recorded
+    /// session until the response's usage record is made, and refused after it (see Errors):
+    /// the running total of the response so far, which replaces the one recorded
     /// before. It is for a provider that reports every count and whose report is the final
-    /// total: until the response's usage is recorded, its record takes every count as
-    /// reported ([`ResponseUsage::quantities`]), [`UsageTotal::Final`].
+    /// total: its record takes every count as reported ([`ResponseUsage::quantities`]),
+    /// [`UsageTotal::Final`].
     ///
     /// # Errors
     ///
-    /// [`SessionError::UnknownResponse`].
+    /// [`SessionError::UnknownResponse`], then [`SessionError::ResponseNotInProgress`] when the
+    /// response's usage was already recorded, as [`Self::response_usage_reported`] refuses it:
+    /// nothing is recorded, so no `ResponseUsageRecorded` gives counts its usage record does
+    /// not carry. The binding counts the refusal as a dropped event ([`Self::dropped`]).
     pub fn response_usage(
         &mut self,
         response_id: ResponseId,
@@ -1322,10 +1326,9 @@ impl SessionLedger {
         now: Instant,
     ) -> Result<(), SessionError> {
         let index = self.index_of(response_id)?;
+        self.require_unrecorded(index)?;
         self.record_response_usage(index, usage, now);
-        if !self.meters[index].recorded {
-            self.count(index, usage.quantities(), UsageTotal::Final);
-        }
+        self.count(index, usage.quantities(), UsageTotal::Final);
         Ok(())
     }
 

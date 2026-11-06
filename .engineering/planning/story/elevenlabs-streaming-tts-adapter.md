@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:elevenlabs-streaming-tts-adapter
 kind: story
-status: active
+status: implemented
 title: ElevenLabs streaming TTS as a hosted TTS adapter
 summary: A hosted TTS binding so a cascade can speak with a leading voice.
 tags:
@@ -10,10 +10,11 @@ tags:
 relations:
 - decomposes: epic:native-voice
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-05T13:07:48Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-05T13:07:48Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-05T18:06:35Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 ## Context
 

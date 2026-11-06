@@ -47,12 +47,34 @@
 //! in `ulaw_8000` and one in `pcm_24000`, checks the encoding, rate and frame lengths of what
 //! comes back and prints the time to first audio. It is billed.
 
+//!
+//! With feature `duplex`, [`ElevenLabsAgent`] is a conversation with an ElevenLabs agent as a
+//! native speech model of the `inference-duplex` contract, over the agent WebSocket
+//! `/v1/convai/conversation`: [`agent`] is its wire protocol, with the documentation it was taken
+//! from and what that leaves open, and `agent_duplex` says how the conversation maps onto the
+//! contract. It reads messages and frames of at most [`agent::MAX_MESSAGE_BYTES`] (1 MiB). Its
+//! claims are [`agent_claims`], and `records/claims-agent.json` holds the same; `native_duplex`
+//! is not among them, since the agent answers speech over a response by interrupting it.
+
+#[cfg(feature = "duplex")]
+pub mod agent;
+#[cfg(feature = "duplex")]
+mod agent_duplex;
 mod config;
 mod connection;
 mod credential;
 mod error;
 pub mod protocol;
 mod synthesiser;
+
+#[cfg(feature = "duplex")]
+pub use agent_duplex::{
+    AGENT_BACKEND, AGENT_MODEL, ElevenLabsAgent, ElevenLabsAgentSession, INBOUND_QUEUE,
+    MESSAGE_QUIET, OUTBOUND_QUEUE, OpenCanceller, agent_capabilities, agent_claims,
+    agent_native_duplex_verdict,
+};
+#[cfg(feature = "duplex")]
+pub use inference_duplex;
 
 pub use config::{
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL, Endpoint,

@@ -1186,8 +1186,11 @@ impl NodeDescriptor {
 
 /// `inference.graph.FeedbackLoop`: a feedback edge of a pipeline with the iteration rule that
 /// bounds the loop it closes: how many times one generation may go round the loop along the edge
-/// before the loop terminates. The edge's capacity is the loop's queue bound. Its maximum is at
-/// least one by type, the invariant `max_iterations > 0` of graph.yaml.
+/// before the loop terminates. Each proposal of the generation that arrives along the edge goes
+/// round once, so a generation proposing several calls at once uses one iteration per call, not
+/// one per round of calls: the tool authority counts it so
+/// ([`nodes::ToolAuthority::bounded_by`]). The edge's capacity is the loop's queue bound. Its
+/// maximum is at least one by type, the invariant `max_iterations > 0` of graph.yaml.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FeedbackLoop {
     feedback_id: FeedbackLoopId,

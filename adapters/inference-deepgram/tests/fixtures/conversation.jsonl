@@ -1,0 +1,8 @@
+{"on":"audio:1","send":{"type":"Results","channel_index":[0,1],"duration":0.5,"start":0.0,"is_final":false,"speech_final":false,"channel":{"alternatives":[{"transcript":"hello","confidence":0.9,"words":[]}]},"metadata":{"request_id":"fixture-request","model_uuid":"fixture-model"}}}
+{"on":"audio:2","send":{"type":"Results","channel_index":[0,1],"duration":0.5,"start":0.0,"is_final":false,"speech_final":false,"channel":{"alternatives":[{"transcript":"hello there","confidence":0.9,"words":[]}]},"metadata":{"request_id":"fixture-request","model_uuid":"fixture-model"}}}
+{"on":"audio:3","send":{"type":"Results","channel_index":[0,1],"duration":0.5,"start":0.0,"is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"hello there","confidence":0.9,"words":[]}]},"metadata":{"request_id":"fixture-request","model_uuid":"fixture-model"}}}
+{"on":"audio:4","send":{"type":"Results","channel_index":[0,1],"duration":0.5,"start":0.5,"is_final":false,"speech_final":false,"channel":{"alternatives":[{"transcript":"how are","confidence":0.9,"words":[]}]},"metadata":{"request_id":"fixture-request","model_uuid":"fixture-model"}}}
+{"on":"close_stream","send":{"type":"Results","channel_index":[0,1],"duration":0.5,"start":0.5,"is_final":true,"speech_final":false,"channel":{"alternatives":[{"transcript":"how are you","confidence":0.9,"words":[]}]},"metadata":{"request_id":"fixture-request","model_uuid":"fixture-model"}}}
+{"on":"close_stream","send":{"type":"UtteranceEnd","channel":[0,1],"last_word_end":1.5}}
+{"on":"close_stream","send":{"type":"Metadata","request_id":"fixture-request","sha256":"fixture","created":"2026-11-05T00:00:00.000Z","duration":1.6,"channels":1}}
+{"on":"close_stream","close":{"code":1000,"reason":""}}

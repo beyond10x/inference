@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-06T03:29:09Z",
+  "actor": "human:operator",
+  "artifact": "story:cut-response-audio-is-told-from-the-next-words",
+  "kind": "story",
+  "revision": 15,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference-openai 17 GPT-Live targets 99 passed; realtime-voice talk_over 22, adversary1_gpt_live_transcript 6, adversary1_talk_over_cut_answer 5, acceptance 3; clippy clean (correction head acf6b79)"
+  }
+}
