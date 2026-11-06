@@ -934,6 +934,32 @@ impl StreamDomain {
         Ok(event)
     }
 
+    /// Runs `inference.stream.RefuseGeneration`: records the [`GenerationRefused`] that
+    /// [`Generation::refuse`] returns; the generation moves nowhere.
+    ///
+    /// # Errors
+    ///
+    /// [`GenerationMoveError::Unknown`] when no stored generation carries `generation_id`,
+    /// [`GenerationMoveError::Conflict`] when it is not Active. No event is recorded.
+    pub fn refuse_generation(
+        &mut self,
+        generation_id: GenerationId,
+        text: String,
+    ) -> Result<GenerationRefused, GenerationMoveError> {
+        let generation =
+            self.generations
+                .get(generation_id)
+                .ok_or(GenerationMoveError::Unknown(GenerationNotFound {
+                    generation_id,
+                }))?;
+        let event = generation
+            .refuse(text)
+            .map_err(GenerationMoveError::Conflict)?;
+        self.events
+            .push(StreamEvent::GenerationRefused(event.clone()));
+        Ok(event)
+    }
+
     /// Runs `inference.stream.CommitSegment`.
     ///
     /// # Errors

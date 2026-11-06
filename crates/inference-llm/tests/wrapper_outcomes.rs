@@ -1,7 +1,7 @@
 //! What the wrapper keeps of a turn and what it shows of a generation.
 //!
 //! A turn that fails after the provider counted some of it records those counts, the rest
-//! unknown and none final, as a turn its generation's end cut does: tokens billed before a stream
+//! unknown and final as the provider marked them, as a turn its generation's end cut does: tokens billed before a stream
 //! failed are not counted unknown. The `Debug` form of a handle carries no text of the
 //! conversation: no instructions, no item, no input offered while it runs, no output and no tool
 //! call arguments, as the `Debug` form of an admitted input carries none. A generation completes
@@ -214,7 +214,7 @@ fn failed_turn_record(final_usage: bool) -> UsageRecorded {
 }
 
 #[test]
-fn a_turn_failing_with_partial_usage_records_those_counts_not_final() {
+fn a_turn_failing_with_partial_usage_records_those_counts_final_as_the_provider_marked_them() {
     for final_usage in [false, true] {
         let record = failed_turn_record(final_usage);
         assert_eq!(
@@ -242,9 +242,10 @@ fn a_turn_failing_with_partial_usage_records_those_counts_not_final() {
             Quantity::measured(QuantityKind::Requests, 1)
         );
         assert_eq!(record.upstream_model.as_deref(), Some(UPSTREAM));
-        assert!(
-            !record.r#final,
-            "the counts of a failed turn are never final, whatever the observation marked"
+        assert_eq!(
+            record.r#final, final_usage,
+            "a failed turn's counts are final as the provider marked them, as \
+             ess/domains/usage.yaml declares (story:llm-wrapper-outcomes-and-debug)"
         );
     }
 }
@@ -398,5 +399,40 @@ fn a_refusal_is_delivered_as_a_refusal_with_its_text_and_makes_no_segment() {
             matches!(seen.last(), Some(GenerationEvent::Completed(_))),
             "a refused turn still completes its generation: {seen:?}"
         );
+    }
+}
+
+#[test]
+fn the_refusal_of_an_ended_turn_survives_a_supersede_or_a_cancel() {
+    const REFUSAL: &str = "No.";
+    for capabilities in [vec![Capability::OutputStreaming], Vec::new()] {
+        for supersede in [true, false] {
+            let mut handle = start(Answer::Refusal(REFUSAL), capabilities.clone());
+            let mut cx = Context::from_waker(Waker::noop());
+            let Poll::Ready(Some(GenerationEvent::Started(_))) = handle.poll_turn_event(&mut cx)
+            else {
+                panic!("the first event is GenerationStarted")
+            };
+            if supersede {
+                handle.supersede().expect("the generation is Active");
+            } else {
+                handle.cancel().expect("the generation is Active");
+            }
+            let after: Vec<GenerationEvent> = handle.by_ref().collect();
+            assert!(
+                after.iter().any(|event| matches!(
+                    event,
+                    GenerationEvent::Refused(refused) if refused.text == REFUSAL
+                )),
+                "the refusal of a turn that ended is an outcome, kept as its usage record is \
+                 ({capabilities:?}, supersede {supersede}): {after:?}"
+            );
+            assert!(
+                after
+                    .iter()
+                    .any(|event| matches!(event, GenerationEvent::Usage(_))),
+                "its usage record is kept too: {after:?}"
+            );
+        }
     }
 }

@@ -800,6 +800,37 @@ commands:
             text: input.text
         summary: Tentative text exists; it is not yet safe to speak or publish.
 
+  # The producer delivers the model's refusal into its Active generation. A refusal makes no
+  # segment and moves nothing: the generation stays Active and completes as any other, so the
+  # refusal is told from an answer by its event alone.
+  # read from: docs/design/inference.md:366
+  - name: inference.stream.RefuseGeneration
+    input:
+      - name: generation_id
+        type: inference.stream.GenerationId
+      - name: text
+        type: String
+    outcomes:
+      - name: unknown-generation
+        when_related: {via: input.generation_id, exists: false}
+        error: inference.stream.GenerationNotFound
+        payload:
+          inference.stream.GenerationNotFound:
+            generation_id: input.generation_id
+        summary: No generation carries this identity; no refusal was delivered.
+      - name: stale-generation
+        when_related: {via: input.generation_id, predicate: state != Active}
+        error: inference.stream.GenerationStateConflict
+        summary: The generation is not Active; the refusal is stale and was not delivered.
+      - name: refused
+        emits:
+          - inference.stream.GenerationRefused
+        payload:
+          inference.stream.GenerationRefused:
+            generation_id: input.generation_id
+            text: input.text
+        summary: The model refused to answer; the refusal is delivered, not spoken.
+
   # read from: docs/design/inference.md:615
   - name: inference.stream.CommitSegment
     input:
@@ -1013,7 +1044,7 @@ events:
 
   # The model refused to answer, and text is its refusal as it gave it. A refusal is not prose:
   # it makes no segment, so no sink speaks it as an answer. The LLM node emits it from the
-  # model's refusal item when the turn carrying it ends; no command of this domain causes it.
+  # model's refusal item when the turn carrying it ends, through RefuseGeneration.
   # read from: docs/design/inference.md:366
   - name: inference.stream.GenerationRefused
     fields:
