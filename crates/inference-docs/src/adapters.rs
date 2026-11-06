@@ -123,6 +123,15 @@ const BINDINGS: &[Binding] = &[
         licence: "hosted service: audio leaves the machine",
     },
     Binding {
+        name: "Phonic speech-to-speech",
+        package: "inference-phonic",
+        runs: "native speech (duplex); hosted, WebSocket (`v1/sts/ws`), `phonic-1` unless configured otherwise",
+        features: &[],
+        record: Record::Claims("records/claims-duplex.json"),
+        environment: "`PHONIC_API_KEY`, or the keychain secret `phonic-api-key` with feature `keychain`",
+        licence: "hosted service: audio leaves the machine",
+    },
+    Binding {
         name: "sherpa-onnx streaming STT",
         package: "inference-sherpa-onnx",
         runs: "STT, streaming; in process, native library",
