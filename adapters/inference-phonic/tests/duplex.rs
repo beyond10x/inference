@@ -660,17 +660,32 @@ fn a_tool_the_session_offers_is_declared_inline_proposed_and_answered() {
             panic!("{events:#?}");
         };
         let call_id = proposed.call_id.clone();
+        let calling = proposed.response_id;
         assert_eq!(call_id.as_str(), "call_1");
+        let events = events_until(&mut session, |event| {
+            matches!(event, SessionEvent::ResponseCompleted(_))
+        });
+        assert!(
+            matches!(
+                events.last(),
+                Some(SessionEvent::ResponseCompleted(done)) if done.response_id == calling
+            ),
+            "story:phonic-realtime-adapter: the tool-call response completes once the call is \
+             proposed, before the answer: {events:#?}"
+        );
         session
             .submit_tool_result(&call_id, serde_json::json!({"time": "12:00"}))
             .unwrap();
         let events = events_until(&mut session, |event| {
             matches!(event, SessionEvent::ResponseCompleted(_))
         });
-        assert!(matches!(
-            events.last(),
-            Some(SessionEvent::ResponseCompleted(_))
-        ));
+        assert!(
+            matches!(
+                events.last(),
+                Some(SessionEvent::ResponseCompleted(done)) if done.response_id != calling
+            ),
+            "story:phonic-realtime-adapter: the answer opens the next response: {events:#?}"
+        );
         let seen = server.seen(0);
         let tools = &seen.messages[0].1["tools"];
         assert_eq!(tools[0]["type"], "custom_websocket");
@@ -705,6 +720,55 @@ fn a_tool_the_session_does_not_offer_fails_the_session_naming_it() {
                 name: "open_door".to_owned()
             })
         );
+    });
+}
+
+#[test]
+fn a_tool_of_the_named_agent_is_answered_with_an_error_and_noted_and_the_session_goes_on() {
+    bounded(|| {
+        let server = PhonicServer::start(Script::new(vec![
+            Step::Send(support::tool_call("open_door", "call_3")),
+            Step::AwaitType("tool_call_output"),
+            Step::Send(support::bare("assistant_started_speaking")),
+            Step::Send(support::audio(640, "I cannot open it.")),
+            Step::Send(support::bare("assistant_finished_speaking")),
+        ]));
+        let mut model = PhonicSpeech::new(
+            endpoint(&server),
+            PhonicConfig::new().with_agent("front-desk"),
+            Arc::new(FixedKey(KEY)),
+            KEY_NAME,
+        )
+        .unwrap();
+        let mut session = model.open(config()).unwrap();
+        let events = events_until(&mut session, |event| {
+            ended(event) || matches!(event, SessionEvent::ResponseCompleted(_))
+        });
+        assert!(
+            matches!(events.last(), Some(SessionEvent::ResponseCompleted(_))),
+            "{events:#?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::SpeechToolCallProposed(_))),
+            "{events:#?}"
+        );
+        assert!(
+            session
+                .ledger()
+                .dropped_events()
+                .contains(&SessionError::ToolNotOffered {
+                    name: "open_door".to_owned()
+                }),
+            "{:?}",
+            session.ledger().dropped_events()
+        );
+        let outputs = server.seen(0).of_type("tool_call_output");
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["tool_call_id"], "call_3");
+        let error = outputs[0]["output"]["error"].as_str().unwrap_or_default();
+        assert!(error.contains("open_door"), "{outputs:?}");
     });
 }
 

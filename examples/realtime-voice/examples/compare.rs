@@ -43,6 +43,7 @@ use clap::{Parser, ValueEnum};
 use inference_aws::duplex::NovaSonicSpeech;
 use inference_deepgram::agent::AgentConfig;
 use inference_deepgram::{AgentEndpoint as DeepgramEndpoint, DeepgramAgent};
+use inference_duplex::inference_tools::{DeclareTool, Tool};
 use inference_duplex::{NativeSpeechModel, SessionConfig};
 use inference_elevenlabs::agent::{AgentEndpoint, SignedUrl};
 use inference_elevenlabs::{ElevenLabsAgent, ElevenLabsSynthesiser};
@@ -163,13 +164,35 @@ const PHONIC_REPORTED: Reported = Reported {
 
 /// The session compare opens with Phonic: 16-bit PCM at 16 kHz both ways, Phonic's own
 /// turn-taking, responses and barge-in, the demo instructions and tool, and Phonic's default
-/// voice.
+/// voice. Phonic declares inline tools with `strict: true`, so the tool's schema takes the
+/// strict form: no additional properties, every property required.
 fn phonic_config() -> SessionConfig {
     SessionConfig {
         voice: String::new(),
         instructions: realtime_voice::INSTRUCTIONS.to_owned(),
+        tools: vec![strict(&realtime_voice::time_tool())],
         ..realtime_voice::elevenlabs_config()
     }
+}
+
+/// `tool` with its schema in OpenAI's strict form.
+fn strict(tool: &Tool) -> Tool {
+    let mut schema = tool.schema().clone();
+    let required: Vec<serde_json::Value> = schema["properties"]
+        .as_object()
+        .map(|properties| properties.keys().cloned().map(Into::into).collect())
+        .unwrap_or_default();
+    schema["additionalProperties"] = false.into();
+    schema["required"] = required.into();
+    Tool::declare(DeclareTool {
+        name: tool.name().to_owned(),
+        description: tool.description().to_owned(),
+        schema,
+        schema_revision: tool.schema_revision().to_owned(),
+        side_effect: tool.side_effect(),
+        requires_confirmation: tool.requires_confirmation(),
+    })
+    .0
 }
 
 fn main() -> ExitCode {
