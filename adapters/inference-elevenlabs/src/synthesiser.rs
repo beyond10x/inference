@@ -1,6 +1,6 @@
 //! The binding of the TTS contract: [`ElevenLabsSynthesiser`] and its synthesis handle.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,14 +17,14 @@ use inference_tts::{
     PlaybackRefused, SynthesisEvent, SynthesisHandle, SynthesisOutput, Synthesiser, UtteranceEnded,
 };
 
-use crate::config::{Endpoint, VoiceConfig};
+use crate::config::{Endpoint, VoiceConfig, VoiceSettings};
 use crate::connection::Connection;
 use crate::credential::{CredentialSource, ELEVENLABS_KEY_NAME, EnvironmentSource};
 use crate::error::{ConfigError, ElevenLabsError};
-use crate::protocol::{self, END_OF_INPUT};
+use crate::protocol::{self, CLOSE_SOCKET};
 
 /// The backend name of the adapter record.
-pub const BACKEND: &str = "elevenlabs-stream-input";
+pub const BACKEND: &str = "elevenlabs-multi-stream-input";
 
 /// The capabilities an adapter record of the binding claims. `incremental_input`: a segment is
 /// sent as soon as the handle is iterated after it was offered, before the utterance ends.
@@ -40,12 +40,12 @@ struct Shared {
     url: String,
     endpoint: Endpoint,
     format: AudioFormat,
-    init: String,
+    settings: Option<VoiceSettings>,
     source: Arc<dyn CredentialSource>,
     credential: String,
 }
 
-/// ElevenLabs' single-stream text-to-speech endpoint as a synthesiser of the TTS contract, at
+/// ElevenLabs' multi-stream text-to-speech endpoint as a synthesiser of the TTS contract, at
 /// locality `external_provider`. See the crate documentation.
 pub struct ElevenLabsSynthesiser {
     adapter: Adapter,
@@ -87,7 +87,7 @@ impl ElevenLabsSynthesiser {
                 url,
                 endpoint,
                 format: config.output_format.audio_format(),
-                init: protocol::init_message(config.voice_settings.as_ref()),
+                settings: config.voice_settings,
                 source,
                 credential: credential.into(),
             }),
@@ -164,7 +164,10 @@ impl Synthesiser for ElevenLabsSynthesiser {
             output: SynthesisOutput::start(&self.adapter),
             shared: Arc::clone(&self.shared),
             runtime: None,
+            connection: None,
             live: None,
+            cancelled: HashSet::new(),
+            contexts: 0,
             pending: VecDeque::new(),
             delivered: VecDeque::new(),
             next_sample: 0,
@@ -183,11 +186,28 @@ impl Drop for Slot {
     }
 }
 
-/// The connection of the segment being spoken, and the byte of a sample split across chunks.
+/// The segment being spoken: its context on the connection and the text message sent to it, the
+/// instant its read timeout ends, moved on each message of the context, whether a message of the
+/// context has arrived, whether its connection was already reopened once for it, and the byte of
+/// a sample split across chunks.
 struct Live {
     segment_id: SegmentId,
-    connection: Connection,
+    context_id: String,
+    message: String,
+    deadline: Option<tokio::time::Instant>,
+    heard: bool,
+    reopened: bool,
     carry: Vec<u8>,
+}
+
+/// Whether `error` says the connection ended, by a close or a transport failure, as an idle
+/// timeout of the endpoint would end it; the one kind of failure a segment reopens the
+/// connection for.
+fn ended(error: &ElevenLabsError) -> bool {
+    matches!(
+        error,
+        ElevenLabsError::Closed { .. } | ElevenLabsError::Transport(_)
+    )
 }
 
 /// One synthesis of an [`ElevenLabsSynthesiser`]; it runs until it is dropped.
@@ -200,7 +220,10 @@ pub struct ElevenLabsSynthesis {
     output: SynthesisOutput,
     shared: Arc<Shared>,
     runtime: Option<tokio::runtime::Runtime>,
+    connection: Option<Connection>,
     live: Option<Live>,
+    cancelled: HashSet<String>,
+    contexts: u64,
     pending: VecDeque<(SegmentId, String)>,
     delivered: VecDeque<SynthesisEvent>,
     next_sample: u64,
@@ -213,6 +236,7 @@ impl fmt::Debug for ElevenLabsSynthesis {
         f.debug_struct("ElevenLabsSynthesis")
             .field("format", &self.shared.format)
             .field("segments", &self.output.segments().len())
+            .field("connected", &self.connection.is_some())
             .field("speaking", &self.live.as_ref().map(|live| live.segment_id))
             .field("failure", &self.failure)
             .finish_non_exhaustive()
@@ -247,34 +271,122 @@ impl ElevenLabsSynthesis {
         self.output.segment(segment_id).map(OutputSegment::state)
     }
 
-    /// Opens the connection of one segment and sends its whole input: the opening message, the
-    /// text message and the end of input.
-    fn open(&mut self, message: String) -> Result<Connection, ElevenLabsError> {
-        let shared = Arc::clone(&self.shared);
-        run(&mut self.runtime, async move {
-            let endpoint = &shared.endpoint;
-            let mut connection = Connection::open(
-                &shared.url,
-                shared.source.as_ref(),
-                &shared.credential,
-                endpoint.connect_timeout,
-                endpoint.read_timeout,
-            )
-            .await?;
-            connection.send(shared.init.clone()).await?;
-            connection.send(message).await?;
-            connection.send(END_OF_INPUT.to_owned()).await?;
-            Ok(connection)
-        })?
+    /// Speaks `message`, the text message of the context `context_id`, as [`Self::send_context`]
+    /// does. When the connection turns out to have ended, as the endpoint's idle timeout ends it
+    /// between segments, it reopens the connection once and sends the context again. Returns the
+    /// instant the read timeout of the context's first message ends, and whether it reopened.
+    fn speak(
+        &mut self,
+        context_id: &str,
+        message: &str,
+    ) -> Result<(Option<tokio::time::Instant>, bool), ElevenLabsError> {
+        match self.send_context(context_id, message) {
+            Ok(deadline) => Ok((deadline, false)),
+            Err(error) if ended(&error) => {
+                self.cancelled.clear();
+                Ok((self.send_context(context_id, message)?, true))
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    /// Reads one message of the segment being spoken and acts on it.
-    fn step(&mut self) -> Result<(), ElevenLabsError> {
-        let Some(live) = self.live.as_mut() else {
+    /// Reopens the connection for the segment being spoken, whose connection ended before any
+    /// message of its context arrived, and sends its context again on the new one.
+    fn reopen(&mut self) -> Result<(), ElevenLabsError> {
+        let Some((context_id, message)) = self
+            .live
+            .as_ref()
+            .map(|live| (live.context_id.clone(), live.message.clone()))
+        else {
             return Ok(());
         };
-        let text = run(&mut self.runtime, live.connection.read())??;
+        self.connection = None;
+        self.cancelled.clear();
+        let deadline = self.send_context(&context_id, &message)?;
+        if let Some(live) = self.live.as_mut() {
+            live.deadline = deadline;
+            live.reopened = true;
+        }
+        Ok(())
+    }
+
+    /// Sends the context `context_id` with its text message `message` on the synthesis's
+    /// connection, opening it first when there is none: the context's opening message, the text
+    /// and the close of the context. Returns the instant the read timeout of its first message
+    /// ends. On a failure the connection is dropped.
+    fn send_context(
+        &mut self,
+        context_id: &str,
+        message: &str,
+    ) -> Result<Option<tokio::time::Instant>, ElevenLabsError> {
+        let shared = Arc::clone(&self.shared);
+        let connection = self.connection.take();
+        let opening = protocol::context_message(context_id, shared.settings.as_ref());
+        let message = message.to_owned();
+        let close = protocol::close_context_message(context_id);
+        let connection = run(&mut self.runtime, async move {
+            let mut connection = match connection {
+                Some(connection) => connection,
+                None => {
+                    let endpoint = &shared.endpoint;
+                    Connection::open(
+                        &shared.url,
+                        shared.source.as_ref(),
+                        &shared.credential,
+                        endpoint.connect_timeout,
+                        endpoint.read_timeout,
+                    )
+                    .await?
+                }
+            };
+            connection.send(opening).await?;
+            connection.send(message).await?;
+            connection.send(close).await?;
+            Ok::<_, ElevenLabsError>(connection)
+        })??;
+        let deadline = connection.deadline();
+        self.connection = Some(connection);
+        Ok(deadline)
+    }
+
+    /// Reads one message of the connection and acts on it: audio and the final message of the
+    /// segment being spoken, or a message of a cancelled context, which is dropped. A connection
+    /// that ends before any message of the context being spoken arrived is reopened once for it.
+    fn step(&mut self) -> Result<(), ElevenLabsError> {
+        let (Some(live), Some(connection)) = (self.live.as_ref(), self.connection.as_mut()) else {
+            return Ok(());
+        };
+        let may_reopen = !live.heard && !live.reopened;
+        let text = match run(&mut self.runtime, connection.read_until(live.deadline))? {
+            Ok(text) => text,
+            Err(error) if may_reopen && ended(&error) => return self.reopen(),
+            Err(error) => return Err(error),
+        };
+        let (Some(live), Some(connection)) = (self.live.as_ref(), self.connection.as_mut()) else {
+            return Ok(());
+        };
         let message = protocol::parse_server_message(&text)?;
+        let Some(context_id) = message.context_id else {
+            return Err(ElevenLabsError::Protocol(
+                "a message without `contextId`".to_owned(),
+            ));
+        };
+        if context_id != live.context_id {
+            if !self.cancelled.contains(&context_id) {
+                return Err(ElevenLabsError::Protocol(
+                    "a message of a context the binding is not speaking".to_owned(),
+                ));
+            }
+            if message.is_final {
+                self.cancelled.remove(&context_id);
+            }
+            return Ok(());
+        }
+        let deadline = connection.deadline();
+        if let Some(live) = self.live.as_mut() {
+            live.deadline = deadline;
+            live.heard = true;
+        }
         if let Some(audio) = message.audio {
             self.emit(audio)?;
         }
@@ -317,9 +429,10 @@ impl ElevenLabsSynthesis {
         Ok(())
     }
 
-    /// Completes the segment being spoken on its final message and closes its connection.
+    /// Completes the segment being spoken on the final message of its context. The connection
+    /// stays open for the next segment.
     fn finish_segment(&mut self) -> Result<(), ElevenLabsError> {
-        let Some(live) = self.live.as_ref() else {
+        let Some(live) = self.live.take() else {
             return Ok(());
         };
         if !live.carry.is_empty() {
@@ -333,21 +446,22 @@ impl ElevenLabsSynthesis {
             .complete(live.segment_id, Vec::new())
             .map_err(refused)?;
         self.delivered.extend(events);
-        self.close_live();
         Ok(())
     }
 
-    /// Closes the connection of the segment being spoken, if there is one, reading nothing more.
-    fn close_live(&mut self) {
-        if let Some(live) = self.live.take() {
-            let _ = run(&mut self.runtime, live.connection.close());
+    /// Closes the connection, if there is one: `close_socket`, then a close frame, waiting at
+    /// most [`CLOSE_BOUND`](crate::CLOSE_BOUND), reading nothing more.
+    fn close_connection(&mut self) {
+        self.live = None;
+        if let Some(connection) = self.connection.take() {
+            let _ = run(&mut self.runtime, connection.close(Some(CLOSE_SOCKET)));
         }
     }
 
     /// Ends the synthesis as failed by `error`: its connection closed, its call marked failed,
     /// and nothing more spoken.
     fn fail(&mut self, error: ElevenLabsError) {
-        self.close_live();
+        self.close_connection();
         self.pending.clear();
         self.output.mark_failed();
         self.failure = Some(error);
@@ -405,7 +519,8 @@ impl Iterator for ElevenLabsSynthesis {
 
     /// The next event. It blocks while a segment is being spoken, each read bounded by the read
     /// timeout; `None` once nothing more is delivered until more is offered or the utterance
-    /// ends.
+    /// ends. Once the utterance has ended and every segment is spoken, the connection is closed
+    /// with `close_socket` before the usage record is returned.
     fn next(&mut self) -> Option<SynthesisEvent> {
         loop {
             if let Some(event) = self.delivered.pop_front() {
@@ -423,23 +538,32 @@ impl Iterator for ElevenLabsSynthesis {
             }
             self.take_input();
             let Some((segment_id, text)) = self.pending.pop_front() else {
+                if self.output.utterance_ended() {
+                    self.close_connection();
+                }
                 return self.output.usage().ok();
             };
             if self.state(segment_id) != Some(SegmentState::Queued) {
                 continue;
             }
-            let Some(message) = protocol::text_message(&text) else {
+            let context_id = format!("s{}", self.contexts);
+            let Some(message) = protocol::text_message(&context_id, &text) else {
                 match self.output.complete(segment_id, Vec::new()) {
                     Ok(events) => self.delivered.extend(events),
                     Err(error) => self.fail(refused(error)),
                 }
                 continue;
             };
-            match self.open(message) {
-                Ok(connection) => {
+            self.contexts += 1;
+            match self.speak(&context_id, &message) {
+                Ok((deadline, reopened)) => {
                     self.live = Some(Live {
                         segment_id,
-                        connection,
+                        context_id,
+                        message,
+                        deadline,
+                        heard: false,
+                        reopened,
                         carry: Vec::new(),
                     });
                 }
@@ -451,7 +575,7 @@ impl Iterator for ElevenLabsSynthesis {
 
 impl Drop for ElevenLabsSynthesis {
     fn drop(&mut self) {
-        self.close_live();
+        self.close_connection();
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
@@ -480,9 +604,11 @@ impl SynthesisHandle for ElevenLabsSynthesis {
     }
 
     /// Discards the segment through [`SynthesisOutput::discard`] and drops every event of it not
-    /// yet delivered. When it is the segment being spoken, a barge-in, its connection is closed:
-    /// the protocol has no cancel message, so the binding sends a close frame, waiting at most
-    /// [`CLOSE_BOUND`](crate::CLOSE_BOUND), and reads nothing more of it.
+    /// yet delivered. When it is the segment being spoken, a barge-in, its context ends for the
+    /// binding: nothing is sent, since its `close_context` went with its text, every later
+    /// message of the context is dropped unread, and the connection stays open for the next
+    /// segment. The discard does no I/O and does not wait for the server; it stops nothing at
+    /// the server, which still generates and sends the whole segment.
     fn discard(&mut self, segment_id: SegmentId) -> Result<SegmentDiscarded, DiscardRefused> {
         let event = self.output.discard(segment_id)?;
         self.delivered
@@ -491,8 +617,9 @@ impl SynthesisHandle for ElevenLabsSynthesis {
             .live
             .as_ref()
             .is_some_and(|live| live.segment_id == segment_id)
+            && let Some(live) = self.live.take()
         {
-            self.close_live();
+            self.cancelled.insert(live.context_id);
         }
         Ok(event)
     }

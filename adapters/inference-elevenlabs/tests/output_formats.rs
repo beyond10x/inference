@@ -214,7 +214,8 @@ fn the_options_reach_the_query_and_the_voice_settings_the_first_message() {
     let first: Value = serde_json::from_str(&seen.messages[0]).unwrap();
     assert_eq!(
         first,
-        json!({"text": " ", "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}})
+        json!({"text": " ", "context_id": "s0", "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}}),
+        "story:elevenlabs-multi-context-tts-connection: the settings open the segment's context"
     );
     assert_eq!(server.violations(), Vec::<String>::new());
 }

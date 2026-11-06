@@ -52,6 +52,10 @@
 //! backend; it shares the credential sources and the transport. With `gpt-live` and `duplex`,
 //! `live_duplex::OpenAiLive` binds it to the same duplex contract, so the two can be swapped and
 //! compared.
+//!
+//! With feature `speech`, `speech::OpenAiSpeech` is a synthesiser of the `inference-tts` contract
+//! over the streamed speech endpoint (`POST /v1/audio/speech`), its frames resampled and, where
+//! asked, G.711-encoded by `inference-audio`; it shares the credential sources.
 
 mod audio;
 mod client;
@@ -65,6 +69,8 @@ mod event;
 pub mod live;
 #[cfg(all(feature = "gpt-live", feature = "duplex"))]
 pub mod live_duplex;
+#[cfg(feature = "speech")]
+pub mod speech;
 
 pub use audio::encode_pcm16_24k;
 pub use client::{

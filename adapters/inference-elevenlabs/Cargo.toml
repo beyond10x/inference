@@ -1,6 +1,6 @@
 [package]
 name = "inference-elevenlabs"
-description = "ElevenLabs for the inference framework: a streaming TTS synthesiser over the single-stream text-to-speech WebSocket and, with feature duplex, an agent conversation as a native speech model."
+description = "ElevenLabs for the inference framework: a streaming TTS synthesiser over the multi-stream text-to-speech WebSocket, one connection per utterance, and, with feature duplex, an agent conversation as a native speech model."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

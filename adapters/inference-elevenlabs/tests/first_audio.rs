@@ -62,22 +62,33 @@ fn the_binding_sends_one_space_then_the_text_with_one_trailing_space_and_flush_t
     assert!(handle.failure().is_none(), "{:?}", handle.failure());
     assert!(matches!(events.last(), Some(SynthesisEvent::Usage(_))));
 
+    assert_eq!(
+        server.next_client_close(std::time::Duration::from_secs(5)),
+        Some(0)
+    );
     let seen = server.seen();
-    assert_eq!(seen.len(), 2, "one connection per segment");
+    assert_eq!(
+        seen.len(),
+        1,
+        "story:elevenlabs-multi-context-tts-connection: one connection per synthesis"
+    );
     let parsed = |text: &str| serde_json::from_str::<Value>(text).unwrap();
-    for (connection, text) in seen.iter().zip(["First sentence. ", "Second one. "]) {
-        let messages: Vec<Value> = connection.messages.iter().map(|m| parsed(m)).collect();
-        assert_eq!(
-            messages,
-            [
-                json!({"text": " "}),
-                json!({"text": text, "flush": true}),
-                json!({"text": ""}),
-            ]
-        );
-        assert!(connection.query.contains("model_id=eleven_flash_v2_5"));
-        assert!(connection.query.contains("output_format=pcm_24000"));
-    }
+    let messages: Vec<Value> = seen[0].messages.iter().map(|m| parsed(m)).collect();
+    assert_eq!(
+        messages,
+        [
+            json!({"text": " ", "context_id": "s0"}),
+            json!({"text": "First sentence. ", "context_id": "s0", "flush": true}),
+            json!({"context_id": "s0", "close_context": true}),
+            json!({"text": " ", "context_id": "s1"}),
+            json!({"text": "Second one. ", "context_id": "s1", "flush": true}),
+            json!({"context_id": "s1", "close_context": true}),
+            json!({"close_socket": true}),
+        ],
+        "story:elevenlabs-multi-context-tts-connection: each segment is a context of one connection"
+    );
+    assert!(seen[0].query.contains("model_id=eleven_flash_v2_5"));
+    assert!(seen[0].query.contains("output_format=pcm_24000"));
     assert_eq!(server.violations(), Vec::<String>::new());
 }
 

@@ -1,6 +1,7 @@
-//! Cancel on barge-in: the single-stream protocol has no cancel message, so a discard of the
-//! segment being spoken closes its connection. The fixture server sees the close, and no frame of
-//! the cancelled segment arrives after it, though the server had sent more.
+//! Cancel on barge-in: a discard of the segment being spoken ends its context for the binding,
+//! which drops every later message of it. No frame of the cancelled segment arrives after the
+//! discard, though the server had sent more, and the connection stays open for the next segment.
+//! Dropping the handle closes the connection.
 
 mod support;
 
@@ -14,7 +15,7 @@ use support::{FixtureServer, Script, committed};
 const FORMAT: OutputFormat = OutputFormat::Ulaw8000;
 
 #[test]
-fn a_discard_mid_segment_closes_the_socket_and_no_frame_of_it_follows() {
+fn a_discard_mid_segment_keeps_the_socket_and_no_frame_of_it_follows() {
     let server = FixtureServer::scripted(FORMAT, vec![Script::NoFinal, Script::Serve]);
     let mut synthesiser = server.synthesiser(FORMAT);
     let mut handle = synthesiser.start().unwrap();
@@ -29,11 +30,11 @@ fn a_discard_mid_segment_closes_the_socket_and_no_frame_of_it_follows() {
     assert_eq!(first.segment_id(), cancelled_id);
     handle.discard(cancelled_id).unwrap();
     assert_eq!(
-        server.next_client_close(Duration::from_secs(5)),
-        Some(0),
-        "the server sees the cancelled connection close"
+        server.next_client_close(Duration::from_millis(300)),
+        None,
+        "story:elevenlabs-multi-context-tts-connection: a cancel ends the context, not the connection"
     );
-    assert!(server.seen()[0].client_closed);
+    assert!(!server.seen()[0].client_closed);
 
     let next = segments.next().unwrap();
     let next_id = next.segment_id();
@@ -55,7 +56,22 @@ fn a_discard_mid_segment_closes_the_socket_and_no_frame_of_it_follows() {
     assert_eq!(
         handle.output().segment(next_id).map(|s| s.state()),
         Some(SegmentState::Synthesized),
-        "the next segment is spoken on a connection of its own"
+        "the next segment is spoken"
+    );
+    assert_eq!(
+        server.seen().len(),
+        1,
+        "story:elevenlabs-multi-context-tts-connection: the next segment speaks on the same connection"
+    );
+    assert_eq!(server.seen()[0].contexts, ["s0", "s1"]);
+    assert_eq!(
+        server.next_client_close(Duration::from_secs(5)),
+        Some(0),
+        "the end of the utterance closes the connection"
+    );
+    assert!(
+        server.seen()[0].close_socket,
+        "the utterance ends with close_socket"
     );
     let positions: Vec<u64> = after
         .iter()

@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "inference-audio"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -2124,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "inference-audio-device"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "cpal",
  "inference-audio",
@@ -2135,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "inference-aws"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "aws-config",
  "aws-sdk-bedrockruntime",
@@ -2149,8 +2149,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-cartesia"
+version = "0.22.0"
+dependencies = [
+ "base64 0.23.1",
+ "futures-util",
+ "inference-testkit",
+ "inference-tts",
+ "keyring-core",
+ "rustls",
+ "secrets-core",
+ "secrets-keychain",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "webpki-roots 0.26.11",
+ "zeroize",
+]
+
+[[package]]
 name = "inference-core"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-audio",
  "serde",
@@ -2160,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "inference-deepgram"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "futures-util",
  "inference-duplex",
@@ -2179,8 +2199,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-deepslate"
+version = "0.22.0"
+dependencies = [
+ "futures-util",
+ "inference-duplex",
+ "keyring-core",
+ "rustls",
+ "secrets-core",
+ "secrets-keychain",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "webpki-roots 0.26.11",
+ "zeroize",
+]
+
+[[package]]
 name = "inference-docs"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "clap",
  "inference-core",
@@ -2191,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "inference-duplex"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2202,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "inference-elevenlabs"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -2223,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "inference-facade"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2241,7 +2279,7 @@ dependencies = [
 
 [[package]]
 name = "inference-llama-server"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-core",
  "inference-llm",
@@ -2260,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "inference-llm"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-core",
  "inference-text",
@@ -2271,15 +2309,18 @@ dependencies = [
 
 [[package]]
 name = "inference-openai"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
  "inference-audio",
  "inference-core",
  "inference-duplex",
+ "inference-testkit",
  "inference-tools",
+ "inference-tts",
  "keyring-core",
+ "reqwest",
  "rustls",
  "secrets-core",
  "secrets-keychain",
@@ -2292,8 +2333,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-phonic"
+version = "0.22.0"
+dependencies = [
+ "base64 0.23.1",
+ "futures-util",
+ "inference-duplex",
+ "keyring-core",
+ "rustls",
+ "secrets-core",
+ "secrets-keychain",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "webpki-roots 0.26.11",
+ "zeroize",
+]
+
+[[package]]
 name = "inference-pipeline"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2307,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "inference-runtime"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-core",
  "inference-llm",
@@ -2321,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "inference-sherpa-onnx"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -2331,7 +2390,7 @@ dependencies = [
 
 [[package]]
 name = "inference-stt"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2340,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "inference-testkit"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "ess-conformance",
  "ess-primitives",
@@ -2361,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "inference-text"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-core",
  "serde",
@@ -2370,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tools"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-core",
  "inference-text",
@@ -2380,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tts"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2389,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "inference-whispercpp"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -2701,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "local-voice-cascade"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "clap",
  "inference-audio",
@@ -3473,17 +3532,20 @@ dependencies = [
 
 [[package]]
 name = "realtime-voice"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "chrono",
  "clap",
  "inference-audio-device",
  "inference-aws",
+ "inference-cartesia",
  "inference-deepgram",
+ "inference-deepslate",
  "inference-duplex",
  "inference-elevenlabs",
  "inference-llm",
  "inference-openai",
+ "inference-phonic",
  "inference-stt",
  "inference-testkit",
  "inference-tts",
@@ -3537,7 +3599,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "repo-podcast"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "clap",
  "inference-audio-device",
@@ -4102,7 +4164,7 @@ dependencies = [
 
 [[package]]
 name = "stt-only"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -4110,7 +4172,7 @@ dependencies = [
 
 [[package]]
 name = "stt-sherpa-onnx"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "clap",
  "inference-sherpa-onnx",
