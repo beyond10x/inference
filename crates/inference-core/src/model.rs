@@ -484,8 +484,9 @@ pub struct RateLimit {
 /// capabilities and a [`CapabilityRecord`] does not carry: the voices and codecs a speech model
 /// offers, its context size in tokens, its input and output duration limits in milliseconds, its
 /// token budget, its state scope and its rate limits. Every part is optional: an empty list or a
-/// `None` says the adapter declares nothing of it, never that it supports none, and the wire may
-/// leave it out. Languages and audio formats are the capability record's. A field the
+/// `None` says the adapter declares nothing of it, never that it supports none. On the wire the
+/// three lists are required, empty or not, as `ess/domains/model.yaml` declares them, and a
+/// `None` may be left out. Languages and audio formats are the capability record's. A field the
 /// specification does not declare is refused.
 ///
 /// [`DeclareAdapter`] takes one and [`Adapter::descriptor`] reads it back; build one with the
@@ -493,9 +494,7 @@ pub struct RateLimit {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterDescriptor {
-    #[serde(default)]
     pub voices: Vec<String>,
-    #[serde(default)]
     pub codecs: Vec<String>,
     #[serde(default)]
     pub context_tokens: Option<i64>,
@@ -507,7 +506,6 @@ pub struct AdapterDescriptor {
     pub token_budget: Option<i64>,
     #[serde(default)]
     pub state_scope: Option<String>,
-    #[serde(default)]
     pub rate_limits: Vec<RateLimit>,
 }
 

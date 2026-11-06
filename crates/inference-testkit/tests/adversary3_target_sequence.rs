@@ -103,7 +103,7 @@ fn declare_adapter(model_id: &str) -> SemanticCommandRequest {
             ("locality", text("same_process")),
             ("capabilities", Node::Seq(vec![text("tool_calling")])),
             ("max_concurrency", Node::Number(Number::from(1_i64))),
-            ("descriptor", Node::Map(BTreeMap::new())),
+            ("descriptor", empty_descriptor()),
         ],
     )
 }
@@ -448,4 +448,14 @@ fn observed_event_positions_are_the_targets_one_publication_order_1_2_and_3() {
         "observed-event positions are numbered in the target's one publication order, as the \
          tokens are: the model event first, then the generation, then the delta"
     );
+}
+
+/// A descriptor that declares nothing: its three lists, each empty, as the wire requires.
+fn empty_descriptor() -> Node {
+    Node::Map(
+        ["voices", "codecs", "rate_limits"]
+            .into_iter()
+            .map(|list| (list.to_owned(), Node::Seq(Vec::new())))
+            .collect(),
+    )
 }

@@ -212,7 +212,7 @@ fn adapter(target: &Target) -> Node {
                 ("locality", text("same_process")),
                 ("capabilities", list(&["interruptible"])),
                 ("max_concurrency", float(1.0)),
-                ("descriptor", Node::Map(BTreeMap::new())),
+                ("descriptor", empty_descriptor()),
             ],
         ),
         "adapter_id",
@@ -412,4 +412,14 @@ fn a_binding_row_and_node_bound_name_the_node_and_the_adapter_apart() {
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0]["node_id"], bound);
     assert_eq!(observed[0]["adapter_id"], adapter_id);
+}
+
+/// A descriptor that declares nothing: its three lists, each empty, as the wire requires.
+fn empty_descriptor() -> Node {
+    Node::Map(
+        ["voices", "codecs", "rate_limits"]
+            .into_iter()
+            .map(|list| (list.to_owned(), Node::Seq(Vec::new())))
+            .collect(),
+    )
 }

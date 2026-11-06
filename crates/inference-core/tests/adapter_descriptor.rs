@@ -39,10 +39,18 @@ fn a_descriptor_with_voices_a_context_size_and_a_rate_limit_round_trips_through_
 
 #[test]
 fn a_part_left_out_is_undeclared_and_a_field_ess_does_not_declare_is_refused() {
-    let empty: AdapterDescriptor = serde_json::from_value(json!({})).expect("every part optional");
+    let empty: AdapterDescriptor = serde_json::from_value(
+        json!({"voices": [], "codecs": [], "rate_limits": []}),
+    )
+    .expect(
+        "story:adapter-descriptor-carrier: an optional part may be left out, a list is required",
+    );
     assert_eq!(empty, AdapterDescriptor::default());
     assert!(
-        serde_json::from_value::<AdapterDescriptor>(json!({"voice": ["alloy"]})).is_err(),
+        serde_json::from_value::<AdapterDescriptor>(
+            json!({"voices": [], "codecs": [], "rate_limits": [], "voice": ["alloy"]})
+        )
+        .is_err(),
         "a misspelt field is not read as a descriptor without it"
     );
     assert!(
