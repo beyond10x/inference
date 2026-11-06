@@ -55,6 +55,7 @@ Every server message is a JSON object with a `type` and a `context_id`:
 - `done`: the context's generation is complete.
 - `error`: `status_code`, `title` and `message` required, `error_code` and `context_id` optional.
 - `flush_done`, `timestamps`, `phoneme_timestamps`: answers to options this adapter never sets.
+- Any other `type` that names a context: passed over, as below.
 
 ## Output formats
 
@@ -71,12 +72,20 @@ for the two G.711 laws, 16 for `pcm_s16le`, 32 (float) for `pcm_f32le`.
   `done` message, and does not say whether a `done` message follows a final chunk. The adapter
   ends the context at whichever comes first and drops anything more of that context.
 - **Cancel.** The contexts guide says a cancel stops only a request that has not started
-  generating; one already generating goes on sending its responses to the end. So after a cancel the server may go on sending the cancelled context's chunks and its `done`. The adapter
+  generating; one already generating goes on sending its responses to the end. So after a
+  cancel the server may go on sending the cancelled context's chunks and its `done`. The adapter
   sends the cancel, emits nothing more of that segment and drops every later message of its
   context, on the same connection; the next segment is sent at once on a new context.
+- **Message types added later.** The conventions page lets Cartesia add variants to enum-like
+  output values within a pinned version, and `type` is one. A message of a `type` the adapter
+  does not know is passed over when it names a context the adapter opened, like `flush_done`; it
+  is still a protocol violation when it names no context or one the adapter never opened.
 - **An error's scope.** An `error` carries `context_id` only when one is known, and the documented
-  example has `done` true. The adapter fails the synthesis on any error, except one of a context it
-  has already cancelled or finished, which it drops.
+  example has `done` true. No page says whether the connection stays usable for other contexts
+  after an error of one context, or whether the server closes it. So the adapter does not assume
+  it does: it fails the synthesis on any error, closes the connection and speaks no later
+  segment of that synthesis, except for an error of a context it has already cancelled or
+  finished, which it drops. A caller that wants to go on starts a new synthesis.
 - **Idle connections.** No idle timeout of the connection is documented. Contexts expire one
   second after their last audio is sent; the adapter never reuses one. A connection the server has
   closed between segments fails the next segment's write or read.
