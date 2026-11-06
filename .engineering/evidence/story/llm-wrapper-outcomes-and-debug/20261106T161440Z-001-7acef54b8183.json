@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-06T16:14:40Z",
+  "actor": "human:timo",
+  "artifact": "story:llm-wrapper-outcomes-and-debug",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-llm-wrapper-pass-1",
+    "review": "review-result:adversary-llm-wrapper-pass-1",
+    "outcome": "fixed"
+  }
+}

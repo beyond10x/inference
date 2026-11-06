@@ -101,7 +101,7 @@ fn input_while_active_is_admitted_only_with_concurrent_input_output() {
 fn input_to_a_generation_that_is_not_active_is_refused_with_its_state() {
     for capabilities in [Vec::new(), vec![Capability::ConcurrentInputOutput]] {
         let mut completed = started(capabilities.clone());
-        completed.complete().expect("Active completes");
+        completed.complete(None).expect("Active completes");
         let mut cancelled = started(capabilities.clone());
         cancelled.cancel().expect("Active is cancelled");
         let mut superseded = started(capabilities.clone());
@@ -146,7 +146,7 @@ fn admitted_input_is_not_released_once_the_generation_is_not_active() {
     let input = completed
         .admit_input("more".to_owned())
         .expect("a claiming adapter admits input while Active");
-    completed.complete().expect("Active completes");
+    completed.complete(None).expect("Active completes");
     assert_eq!(
         completed.release(input),
         Err(InputRefused::GenerationStateConflict(
@@ -179,7 +179,7 @@ fn segments_are_numbered_from_one_emitted_while_active_only_and_committed_after_
         "a committed segment is not committed twice"
     );
     let third = output.emit("c".to_owned()).expect("Active takes a delta");
-    output.complete().expect("Active completes");
+    output.complete(None).expect("Active completes");
     let before = snapshot(&output);
     assert_eq!(
         output.emit("d".to_owned()),
