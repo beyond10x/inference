@@ -88,7 +88,7 @@ use crate::client::{
     ReuniteError, SocketSink, SocketStream, check_model, close_socket, open_socket, read_text,
     send_json, within,
 };
-use crate::config::{DEFAULT_READ_TIMEOUT, Endpoint, FunctionTool};
+use crate::config::{DEFAULT_READ_TIMEOUT, Deadlines, Endpoint, FunctionTool};
 use crate::credential::CredentialSource;
 use crate::error::RealtimeError;
 use crate::event::{ServerError, text_start};
@@ -718,7 +718,8 @@ pub struct LiveClosed {
 /// server events through [`LiveClient::next_event`]. The client holds no credential after the
 /// handshake.
 ///
-/// Every method takes the whole client, so a write the peer does not drain holds up every read.
+/// Every method takes the whole client, so a write the peer does not drain holds up every read
+/// until it fails at the write deadline ([`Deadlines::write_timeout`]).
 /// [`LiveClient::into_split`] gives a [`LiveSender`] and a [`LiveReceiver`] that two tasks own
 /// instead.
 pub struct LiveClient {
@@ -730,6 +731,8 @@ pub struct LiveClient {
 /// [`LiveClient`]. A write it has pending does not hold up its [`LiveReceiver`].
 pub struct LiveSender {
     sink: SocketSink,
+    /// The deadline of each write ([`Deadlines::write_timeout`]).
+    write_timeout: Duration,
 }
 
 /// The receiving half of a Live session, from [`LiveClient::into_split`]:
@@ -778,12 +781,30 @@ impl LiveClient {
     /// first is kept and returned first by [`LiveClient::next_event`].
     ///
     /// # Errors
-    /// [`RealtimeError::InvalidEndpoint`] for a model id outside the characters model ids use or
-    /// a URL with a query, before anything is resolved or connected;
-    /// [`RealtimeError::Credential`], [`RealtimeError::Connect`]; [`RealtimeError::Server`] when
+    /// [`RealtimeError::InvalidEndpoint`] for a model id outside the characters model ids use, a
+    /// URL with a query, or a URL that is neither `wss://` nor `ws://` to a loopback host (`ws://`
+    /// sends the key in the clear), before anything is resolved or connected;
+    /// [`RealtimeError::Credential`]; [`RealtimeError::Connect`], without a status when the
+    /// opening handshake passed [`DEFAULT_CONNECT_TIMEOUT`](crate::DEFAULT_CONNECT_TIMEOUT); [`RealtimeError::Server`] when
     /// the server answers the start with `error`; and the errors of [`LiveClient::next_event`].
     pub async fn connect(
         endpoint: &Endpoint,
+        source: &dyn CredentialSource,
+        credential: &str,
+        session: &LiveSessionConfig,
+    ) -> Result<Self, RealtimeError> {
+        Self::connect_with(endpoint, Deadlines::default(), source, credential, session).await
+    }
+
+    /// [`LiveClient::connect`] under `deadlines`: the opening handshake takes at most
+    /// [`Deadlines::connect_timeout`], and each write of the session at most
+    /// [`Deadlines::write_timeout`].
+    ///
+    /// # Errors
+    /// The errors of [`LiveClient::connect`].
+    pub async fn connect_with(
+        endpoint: &Endpoint,
+        deadlines: Deadlines,
         source: &dyn CredentialSource,
         credential: &str,
         session: &LiveSessionConfig,
@@ -794,10 +815,18 @@ impl LiveClient {
                 "the Live URL takes no query; the model goes in session.start".to_owned(),
             ));
         }
-        let (sink, stream) = open_socket(&endpoint.url, source, credential)
-            .await?
-            .split();
-        let mut sender = LiveSender { sink };
+        let (sink, stream) = open_socket(
+            &endpoint.url,
+            source,
+            credential,
+            deadlines.connect_timeout(),
+        )
+        .await?
+        .split();
+        let mut sender = LiveSender {
+            sink,
+            write_timeout: deadlines.write_timeout(),
+        };
         let mut receiver = LiveReceiver {
             stream,
             read_timeout: endpoint.read_timeout,
@@ -993,7 +1022,8 @@ impl LiveClient {
     ///
     /// The whole close, the write of `session.close`, every read and the closing of the
     /// connection, takes at most the longer of the endpoint's read timeout and [`CLOSE_TIMEOUT`],
-    /// however often the server sends and whether or not it drains the socket.
+    /// however often the server sends and whether or not it drains the socket. That bound, not
+    /// the endpoint's write deadline, governs the write of `session.close`.
     ///
     /// # Errors
     /// The errors of [`LiveClient::next_event`] when the connection ends before
@@ -1013,6 +1043,7 @@ impl LiveClient {
         let started = tokio::time::Instant::now();
         self.receiver.read_timeout = bound;
         self.receiver.last_message = started;
+        self.sender.write_timeout = Duration::MAX;
         within(started, bound, self.sender.request_close())
             .await
             .ok_or(RealtimeError::Stalled(bound))??;
@@ -1036,6 +1067,11 @@ impl LiveClient {
 }
 
 impl LiveSender {
+    /// The deadline of each write on this half ([`Deadlines::write_timeout`]).
+    pub fn write_timeout(&self) -> Duration {
+        self.write_timeout
+    }
+
     /// [`LiveClient::append_audio`] on this half.
     ///
     /// # Errors
@@ -1131,7 +1167,7 @@ impl LiveSender {
     /// [`RealtimeError::Transport`] when `payload` is longer than 125 bytes, refused before
     /// anything is written, or when the write fails.
     pub async fn ping(&mut self, payload: &[u8]) -> Result<(), RealtimeError> {
-        crate::client::send_ping(&mut self.sink, payload).await
+        crate::client::send_ping(&mut self.sink, payload, self.write_timeout).await
     }
 
     /// [`LiveClient::request_close`] on this half: sends `session.close` without waiting;
@@ -1155,7 +1191,7 @@ impl LiveSender {
     }
 
     async fn send(&mut self, event: Value) -> Result<(), RealtimeError> {
-        send_json(&mut self.sink, &event).await
+        send_json(&mut self.sink, &event, self.write_timeout).await
     }
 }
 

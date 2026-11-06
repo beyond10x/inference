@@ -260,7 +260,7 @@ impl SessionDomain {
         self.sessions.sessions()
     }
 
-    /// Every event emitted, in the order it was emitted.
+    /// The events emitted, in the order they were emitted, as [`Sessions::events`] keeps them.
     #[must_use]
     pub fn events(&self) -> &[SessionEvent] {
         self.sessions.events()

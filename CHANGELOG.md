@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.18.0] — 2026-11-06
+
+### Added
+
+- `inference-openai`: `Deadlines` holds the WebSocket handshake and write deadlines (10 s each by
+  default). `RealtimeClient::connect_with` and `LiveClient::connect_with` take one;
+  `OpenAiRealtime` and `OpenAiLive` gain `with_connect_timeout` and `with_write_timeout`, and the
+  senders `write_timeout()`. `Endpoint` and `connect` are unchanged.
+- `inference-aws`: `NovaSonic::with_open_timeout` and `open_timeout`, default `OPEN_TIMEOUT`
+  (10 s, now also exported from `nova_sonic`), bound `NovaSonic::start` as the duplex binding's
+  `with_open_timeout` bounds its open.
+- `inference-pipeline`: `Gated::SegmentDiscarded`; the tool executor's `with_read_ahead` (default
+  64); the commit gate handle's `take_record`.
+- `inference-facade`: `Sessions::inputs_sent`, `LiveSessions::inputs_sent` and
+  `events_released`.
+
+### Fixed
+
+- `inference-openai`: a server that accepts the TCP connection and never answers the handshake,
+  or stops reading, fails the session at the deadline instead of hanging it. `ws://` is refused off
+  loopback, and a redirect is not followed.
+- `inference-aws`: Nova Sonic reports one stall per idle limit, bounds the arrivals waiting for
+  the caller, and fails the session with a provider error when a later audio block comes at
+  another rate. An idle limit or wait of `Duration::MAX` no longer panics.
+- `inference-facade`: a draining live session whose run fails or is cancelled closes, delivering
+  the run's end and then `SessionClosed`. The event log is bounded at 4096 events, and a
+  generation's bookkeeping is released once its playback ended (at most 256 kept). A refused send
+  records no `InputSent`.
+- `inference-pipeline`: the tool authority authorizes a confirmed call queued behind a withdrawn
+  one; the tool executor bounds its read-ahead and, once cancelled, starts no call and restores a
+  call whose start it was sending; the voice activity detector, turn policy and commit gate end a
+  send waiting on a full edge when cancelled; the commit gate keeps at most 64 ended generations.
+
+### Changed
+
+- The `ess` pin moves to 0.88.0: CI's `ESS_VERSION`, the testkit's `ess-conformance` and
+  `ess-primitives` tags, and `requires` in `ess/ess-inputs.yaml`.
+
 ## [0.17.0] — 2026-11-06
 
 ### Added

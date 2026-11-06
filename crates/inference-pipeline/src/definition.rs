@@ -17,9 +17,9 @@
 //! feedback loop leaves an output and enters an input, so a descriptor may give an input and an
 //! output one name; an exposure, which says no direction, naming such a name is refused
 //! (`ambiguous_port`). It then refuses an unknown profile or adapter, as `DeclarePipeline` and
-//! `BindNode` do. Only then does it declare, as the builder does, holding a capacity beyond
-//! `i64::MAX` as `i64::MAX`, so a refused definition leaves the declaration holding nothing it did
-//! not hold before. What the check leaves to the graph,
+//! `BindNode` do. Only then does it declare, as the builder does, holding a capacity or a feedback
+//! loop's `max_iterations` beyond `i64::MAX` as `i64::MAX`, so a refused definition leaves the
+//! declaration holding nothing it did not hold before. What the check leaves to the graph,
 //! such as commitment semantics, cycles and reachability, is §10.2 validation's, one code path
 //! for definitions, the builder and the commands (open question 4, 1229).
 //!
@@ -427,7 +427,7 @@ impl Declaration {
                 .iter()
                 .find(|(edge, _)| edge.from == feedback.from && edge.to == feedback.to)
             {
-                self.insert_feedback_loop(pipeline_id, *edge_id, feedback.max_iterations);
+                self.insert_feedback_loop(pipeline_id, *edge_id, carried(feedback.max_iterations));
             }
         }
         for binding in &definition.bindings {
