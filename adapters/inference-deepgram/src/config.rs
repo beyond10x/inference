@@ -112,28 +112,152 @@ impl Endpoint {
     ///
     /// # Errors
     /// [`ConfigError::InvalidUrl`] when it is not `wss://`, or `ws://` to a loopback host
-    /// (`127.0.0.0/8`, `::1`, `localhost`), or carries a query or fragment. The message never
+    /// (`127.0.0.0/8`, `::1`, `localhost`), or carries a query, a fragment or a user part
+    /// (`user@host`, whatever the scheme). The message never
     /// carries the URL itself.
     pub fn base(&self) -> Result<&str, ConfigError> {
-        let base = self.url.trim_end_matches('/');
-        if let Some(rest) = base.strip_prefix("ws://") {
-            if !is_loopback(rest) {
-                return Err(ConfigError::InvalidUrl(
-                    "ws:// would send the key in the clear; it is taken only to a loopback host, use wss://"
-                        .to_owned(),
-                ));
-            }
-        } else if !base.starts_with("wss://") {
+        checked_base(&self.url)
+    }
+}
+
+/// `url`, its trailing slashes dropped, once it is a base URL the binding takes: `wss://`, or
+/// `ws://` to a loopback host, with no query, fragment or user part. The error never carries the URL.
+fn checked_base(url: &str) -> Result<&str, ConfigError> {
+    let base = url.trim_end_matches('/');
+    if let Some(rest) = base.strip_prefix("ws://") {
+        if !is_loopback(rest) {
             return Err(ConfigError::InvalidUrl(
-                "the scheme must be wss://, or ws:// to a loopback host".to_owned(),
+                "ws:// would send the key in the clear; it is taken only to a loopback host, use wss://"
+                    .to_owned(),
             ));
         }
-        if base.contains('?') || base.contains('#') {
-            return Err(ConfigError::InvalidUrl(
-                "the base URL carries a query or fragment; the binding adds its own".to_owned(),
-            ));
+    } else if !base.starts_with("wss://") {
+        return Err(ConfigError::InvalidUrl(
+            "the scheme must be wss://, or ws:// to a loopback host".to_owned(),
+        ));
+    }
+    if base.contains('?') || base.contains('#') {
+        return Err(ConfigError::InvalidUrl(
+            "the base URL carries a query or fragment; the binding adds its own".to_owned(),
+        ));
+    }
+    let authority = base
+        .split_once("://")
+        .map_or("", |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    if authority.contains('@') {
+        return Err(ConfigError::InvalidUrl(
+            "the base URL carries a user part, which makes its host read as another".to_owned(),
+        ));
+    }
+    Ok(base)
+}
+
+/// The Voice Agent's base URL. The documentation names no EU host for the Voice Agent, so none
+/// is offered; [`AgentEndpoint::with_url`] points a session at any other host.
+pub const AGENT_URL: &str = "wss://agent.deepgram.com";
+
+/// The `Authorization` scheme the Voice Agent handshake carries unless told otherwise: the
+/// documentation does not state one, and the live transcription endpoint takes `Token`.
+pub const DEFAULT_AUTH_SCHEME: &str = "Token";
+
+/// How long a Voice Agent session's opening may take in all: the TCP connection, TLS, the
+/// WebSocket handshake, `Welcome`, `Settings` and `SettingsApplied`.
+pub const DEFAULT_AGENT_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long an open Voice Agent connection may send nothing at all, not even the answer to a
+/// WebSocket ping, before it is taken as stalled; and how long a write may take.
+pub const DEFAULT_AGENT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a Voice Agent session goes without sending audio before it sends a `KeepAlive`, as
+/// the documentation asks: every 8 seconds while no audio is sent.
+pub const DEFAULT_AGENT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(8);
+
+/// Where a Voice Agent session connects, how it authenticates, and the bounds on opening it,
+/// reading it and keeping it alive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentEndpoint {
+    /// Scheme and host (and port), no query or fragment: `wss://` to any host, `ws://` only to
+    /// a loopback host, since the key would travel in the clear.
+    pub url: String,
+    /// The word before the key in the `Authorization` header: 1 to 32 ASCII letters.
+    pub auth_scheme: String,
+    /// The bound on the whole opening, up to `SettingsApplied`.
+    pub open_timeout: Duration,
+    /// How long the connection may send nothing, and how long a write may take.
+    pub read_timeout: Duration,
+    /// How long the session goes without sending audio before it sends a `KeepAlive`.
+    pub keepalive_interval: Duration,
+}
+
+impl Default for AgentEndpoint {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AgentEndpoint {
+    /// [`AGENT_URL`] with [`DEFAULT_AUTH_SCHEME`] and the default bounds.
+    pub fn new() -> Self {
+        Self {
+            url: AGENT_URL.to_owned(),
+            auth_scheme: DEFAULT_AUTH_SCHEME.to_owned(),
+            open_timeout: DEFAULT_AGENT_OPEN_TIMEOUT,
+            read_timeout: DEFAULT_AGENT_READ_TIMEOUT,
+            keepalive_interval: DEFAULT_AGENT_KEEPALIVE_INTERVAL,
         }
-        Ok(base)
+    }
+
+    /// This endpoint at another base URL, such as a local test server.
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.url = url.into();
+        self
+    }
+
+    /// This endpoint with another `Authorization` scheme.
+    pub fn with_auth_scheme(mut self, scheme: impl Into<String>) -> Self {
+        self.auth_scheme = scheme.into();
+        self
+    }
+
+    /// This endpoint with another bound on the opening.
+    pub fn with_open_timeout(mut self, timeout: Duration) -> Self {
+        self.open_timeout = timeout;
+        self
+    }
+
+    /// This endpoint with another read timeout.
+    pub fn with_read_timeout(mut self, timeout: Duration) -> Self {
+        self.read_timeout = timeout;
+        self
+    }
+
+    /// This endpoint with another keep-alive interval.
+    pub fn with_keepalive_interval(mut self, interval: Duration) -> Self {
+        self.keepalive_interval = interval;
+        self
+    }
+
+    /// The base URL, its trailing slashes dropped, once the endpoint is one the binding takes.
+    ///
+    /// # Errors
+    /// [`ConfigError::InvalidUrl`] as [`Endpoint::base`] refuses a URL;
+    /// [`ConfigError::AuthScheme`] for a scheme that is not 1 to 32 ASCII letters;
+    /// [`ConfigError::KeepAliveInterval`] for a zero keep-alive interval.
+    pub fn base(&self) -> Result<&str, ConfigError> {
+        let scheme = &self.auth_scheme;
+        if scheme.is_empty()
+            || scheme.len() > 32
+            || !scheme.chars().all(|c| c.is_ascii_alphabetic())
+        {
+            return Err(ConfigError::AuthScheme);
+        }
+        if self.keepalive_interval.is_zero() {
+            return Err(ConfigError::KeepAliveInterval);
+        }
+        checked_base(&self.url)
     }
 }
 
@@ -323,5 +447,46 @@ mod tests {
             ..ListenConfig::new()
         };
         assert_eq!(config.validate(), Err(ConfigError::KeepAliveInterval));
+    }
+
+    #[test]
+    fn the_agent_endpoint_takes_a_plain_scheme_and_a_checked_url() {
+        let endpoint = AgentEndpoint::new();
+        assert_eq!(endpoint.base(), Ok("wss://agent.deepgram.com"));
+        assert_eq!(endpoint.auth_scheme, "Token");
+        assert_eq!(endpoint.keepalive_interval, Duration::from_secs(8));
+        for scheme in ["", "Token x", "Tok\r\nen", &"a".repeat(33)] {
+            assert_eq!(
+                AgentEndpoint::new().with_auth_scheme(scheme).base(),
+                Err(ConfigError::AuthScheme),
+                "{scheme:?}"
+            );
+        }
+        assert_eq!(
+            AgentEndpoint::new()
+                .with_keepalive_interval(Duration::ZERO)
+                .base(),
+            Err(ConfigError::KeepAliveInterval)
+        );
+        for refused in [
+            "ws://agent.deepgram.com",
+            "wss://agent.deepgram.com@127.0.0.1:9",
+            "wss://user:pass@agent.deepgram.com",
+        ] {
+            assert!(
+                matches!(
+                    AgentEndpoint::new().with_url(refused).base(),
+                    Err(ConfigError::InvalidUrl(_))
+                ),
+                "{refused}"
+            );
+            assert!(
+                matches!(
+                    Endpoint::new().with_url(refused).base(),
+                    Err(ConfigError::InvalidUrl(_))
+                ),
+                "{refused}"
+            );
+        }
     }
 }

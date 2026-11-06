@@ -32,6 +32,17 @@ pub(crate) async fn open(
     credential: &str,
     connect_timeout: Duration,
 ) -> Result<Socket, DeepgramError> {
+    open_with_scheme(url, source, credential, "Token", connect_timeout).await
+}
+
+/// [`open`] with `scheme` before the key in the `Authorization` header instead of `Token`.
+pub(crate) async fn open_with_scheme(
+    url: &str,
+    source: &dyn CredentialSource,
+    credential: &str,
+    scheme: &str,
+    connect_timeout: Duration,
+) -> Result<Socket, DeepgramError> {
     let resolved = source
         .resolve(credential)
         .await
@@ -39,7 +50,7 @@ pub(crate) async fn open(
     if resolved.expose().iter().all(u8::is_ascii_whitespace) {
         return Err(DeepgramError::Credential(CredentialError::Invalid));
     }
-    let mut value = b"Token ".to_vec();
+    let mut value = format!("{scheme} ").into_bytes();
     value.extend_from_slice(resolved.expose());
     drop(resolved);
     let value = zeroize::Zeroizing::new(value);
