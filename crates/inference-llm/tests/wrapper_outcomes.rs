@@ -4,11 +4,14 @@
 //! unknown and none final, as a turn its generation's end cut does: tokens billed before a stream
 //! failed are not counted unknown. The `Debug` form of a handle carries no text of the
 //! conversation: no instructions, no item, no input offered while it runs, no output and no tool
-//! call arguments, as the `Debug` form of an admitted input carries none.
+//! call arguments, as the `Debug` form of an admitted input carries none. A generation completes
+//! with the stop reason of its last turn, so a truncated answer is told from a whole one, and a
+//! refusal is delivered as a refusal with its text, never as a segment of prose.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 
+use inference_core::generation::{GenerationRefused, StopReason as Stop};
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{
     Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
@@ -37,6 +40,10 @@ enum Answer {
     FailCounted(Usage, bool),
     /// A delta carrying [`MARK`], then an outcome ending with one call whose arguments carry it.
     MarkedCall,
+    /// This text as one delta, then an outcome stopped for this reason.
+    Stopped(&'static str, StopReason),
+    /// No delta, then an outcome carrying this refusal and no answer, ending its turn.
+    Refusal(&'static str),
 }
 
 struct OneTurn {
@@ -114,6 +121,30 @@ impl Model for OneTurn {
                         },
                     })
                 }
+                Answer::Stopped(text, stop_reason) => {
+                    sink.emit(StreamEvent::TextDelta {
+                        text: text.to_owned(),
+                    })
+                    .await?;
+                    Ok(TurnOutcome {
+                        stop_reason,
+                        items: vec![Item::assistant(text)],
+                        observation: TurnObservation {
+                            final_usage: true,
+                            ..TurnObservation::new(self.provenance.clone())
+                        },
+                    })
+                }
+                Answer::Refusal(text) => Ok(TurnOutcome {
+                    stop_reason: StopReason::EndTurn,
+                    items: vec![Item::AssistantRefusal {
+                        text: text.to_owned(),
+                    }],
+                    observation: TurnObservation {
+                        final_usage: true,
+                        ..TurnObservation::new(self.provenance.clone())
+                    },
+                }),
             }
         })
     }
@@ -254,6 +285,118 @@ fn the_debug_form_of_a_handle_carries_no_text_of_the_conversation() {
             debug.contains(&started.generation_id.to_string())
                 || debug.contains(&format!("{:?}", started.generation_id)),
             "the Debug form still names its generation: {debug}"
+        );
+    }
+}
+
+#[test]
+fn a_generation_completes_with_the_stop_reason_of_its_last_turn() {
+    for (reason, expected) in [
+        (StopReason::MaxOutputTokens, Stop::MaxOutputTokens),
+        (StopReason::EndTurn, Stop::EndTurn),
+        (
+            StopReason::Incomplete {
+                reason: "content filter".to_owned(),
+            },
+            Stop::Incomplete,
+        ),
+    ] {
+        let mut handle = start(
+            Answer::Stopped("A truncated ans", reason.clone()),
+            vec![Capability::OutputStreaming],
+        );
+        let seen: Vec<GenerationEvent> = handle.by_ref().collect();
+        let Some(GenerationEvent::Completed(completed)) = seen.last() else {
+            panic!("the generation completes: {seen:?}")
+        };
+        assert_eq!(
+            completed.stop_reason,
+            Some(expected),
+            "a turn stopped by {reason:?} completes its generation with that stop reason"
+        );
+        assert!(
+            seen.iter().any(|event| matches!(
+                event,
+                GenerationEvent::TextDelta(delta) if delta.text == "A truncated ans"
+            )),
+            "the text of the stopped turn is still delivered: {seen:?}"
+        );
+    }
+}
+
+#[test]
+fn a_generation_ending_on_tool_calls_completes_with_that_stop_reason() {
+    let mut handle = start(
+        Answer::MarkedCall,
+        vec![Capability::OutputStreaming, Capability::ToolCalling],
+    );
+    let mut cx = Context::from_waker(Waker::noop());
+    while let Poll::Ready(Some(_)) = handle.poll_turn_event(&mut cx) {}
+    handle.complete().expect("the generation is Active");
+    let seen: Vec<GenerationEvent> = handle.by_ref().collect();
+    let Some(GenerationEvent::Completed(completed)) = seen.last() else {
+        panic!("the generation completes: {seen:?}")
+    };
+    assert_eq!(completed.stop_reason, Some(Stop::ToolCalls));
+}
+
+#[test]
+fn a_generation_completed_before_any_turn_ended_names_no_stop_reason() {
+    let mut handle = start(Answer::Refusal("unused"), vec![Capability::OutputStreaming]);
+    handle
+        .complete()
+        .expect("the generation is Active, its first turn not yet run");
+    let seen: Vec<GenerationEvent> = handle.by_ref().collect();
+    let Some(GenerationEvent::Completed(completed)) = seen.last() else {
+        panic!("the generation completes: {seen:?}")
+    };
+    assert_eq!(completed.stop_reason, None, "no turn ended: {seen:?}");
+}
+
+#[test]
+fn a_refusal_is_delivered_as_a_refusal_with_its_text_and_makes_no_segment() {
+    const REFUSAL: &str = "I cannot help with that.";
+    for capabilities in [vec![Capability::OutputStreaming], Vec::new()] {
+        let mut handle = start(Answer::Refusal(REFUSAL), capabilities.clone());
+        let seen: Vec<GenerationEvent> = handle.by_ref().collect();
+        let Some(GenerationEvent::Started(started)) = seen.first() else {
+            panic!("the first event is GenerationStarted: {seen:?}")
+        };
+        let refusals: Vec<&GenerationRefused> = seen
+            .iter()
+            .filter_map(|event| match event {
+                GenerationEvent::Refused(refused) => Some(refused),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            refusals,
+            [&GenerationRefused {
+                generation_id: started.generation_id,
+                text: REFUSAL.to_owned(),
+            }],
+            "the refusal is delivered once, with its text, for {capabilities:?}: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|event| matches!(
+                event,
+                GenerationEvent::TextDelta(_) | GenerationEvent::SegmentCommitted(_)
+            )),
+            "a refusal makes no segment: {seen:?}"
+        );
+        let refused_at = seen
+            .iter()
+            .position(|event| matches!(event, GenerationEvent::Refused(_)));
+        let usage_at = seen
+            .iter()
+            .position(|event| matches!(event, GenerationEvent::Usage(_)));
+        assert!(
+            refused_at < usage_at,
+            "the refusal comes before its turn's usage record: {seen:?}"
+        );
+        assert!(
+            matches!(seen.last(), Some(GenerationEvent::Completed(_))),
+            "a refused turn still completes its generation: {seen:?}"
         );
     }
 }

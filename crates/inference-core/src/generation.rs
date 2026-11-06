@@ -57,10 +57,46 @@ pub struct GenerationStarted {
     pub epoch: i64,
 }
 
+/// `inference.stream.StopReason`: why the model's last turn of a generation stopped, as the model
+/// reported it. Serialized as written in ESS (`end_turn`, `max_output_tokens`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// The model ended its turn.
+    EndTurn,
+    /// The model ended its turn with tool calls.
+    ToolCalls,
+    /// The model reached the maximum output tokens of the request: the answer is truncated.
+    MaxOutputTokens,
+    /// The model stopped incomplete for a reason of its own.
+    Incomplete,
+}
+
+impl StopReason {
+    /// Every stop reason, in the order `ess/domains/stream.yaml` lists them.
+    pub const ALL: [Self; 4] = [
+        Self::EndTurn,
+        Self::ToolCalls,
+        Self::MaxOutputTokens,
+        Self::Incomplete,
+    ];
+}
+
 /// `inference.stream.GenerationCompleted`: the generation produced its last output.
+/// `stop_reason` is why the model's last turn stopped, when a model stopped it; none when the
+/// caller completed the generation while no turn had ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerationCompleted {
     pub generation_id: GenerationId,
+    pub stop_reason: Option<StopReason>,
+}
+
+/// `inference.stream.GenerationRefused`: the model refused to answer, and `text` is its refusal
+/// as it gave it. A refusal is not prose: it makes no segment, so no sink speaks it as an answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerationRefused {
+    pub generation_id: GenerationId,
+    pub text: String,
 }
 
 /// `inference.stream.GenerationSuperseded`: the epoch is stale; its results are rejected at
@@ -174,16 +210,21 @@ impl Generation {
         })
     }
 
-    /// Runs the `completed` outcome of `inference.stream.CompleteGeneration`: the generation
-    /// moves from Active to Completed.
+    /// Runs the `completed` outcome of `inference.stream.CompleteGeneration` with its
+    /// `stop_reason` input: the generation moves from Active to Completed, and the event carries
+    /// `stop_reason`.
     ///
     /// # Errors
     ///
     /// [`GenerationStateConflict`] carrying the held state when the generation is not Active.
-    pub fn complete(&self) -> Result<(Self, GenerationCompleted), GenerationStateConflict> {
+    pub fn complete(
+        &self,
+        stop_reason: Option<StopReason>,
+    ) -> Result<(Self, GenerationCompleted), GenerationStateConflict> {
         let generation = self.moved(GenerationState::Completed)?;
         let event = GenerationCompleted {
             generation_id: self.generation_id,
+            stop_reason,
         };
         Ok((generation, event))
     }

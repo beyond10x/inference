@@ -90,7 +90,7 @@ fn input_admitted_before_supersede_or_cancel_is_not_released_after() {
 fn another_generations_input_is_refused_as_such_even_when_this_one_is_not_active() {
     let admitting = started();
     let mut other = started();
-    other.complete().expect("Active completes");
+    other.complete(None).expect("Active completes");
     let input = admit(&admitting, SECRET);
     assert_eq!(
         other.release(input),
