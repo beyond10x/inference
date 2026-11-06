@@ -50,6 +50,8 @@ pub enum Script {
     NoFinal,
     /// Sends the first audio message, then closes the connection with code 1011.
     CloseAfterFirst,
+    /// Sends nothing and closes the connection with code 1011.
+    CloseAtOnce,
     /// Sends the first audio message, then this text, with the context's `contextId` added when
     /// it is a JSON object that names none.
     SendAfterFirst(&'static str),
@@ -394,6 +396,7 @@ fn answer(plan: &Plan, context_id: &str) -> Vec<Out> {
             out
         }
         Script::NoFinal => audio,
+        Script::CloseAtOnce => vec![Out::Close(1011, "fixture closes before any audio")],
         Script::CloseAfterFirst => {
             let mut out = first(audio);
             out.push(Out::Close(1011, "fixture closes mid-segment"));

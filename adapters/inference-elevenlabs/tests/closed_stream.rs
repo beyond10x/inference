@@ -105,6 +105,49 @@ fn malformed_json_is_a_protocol_failure() {
 }
 
 #[test]
+fn a_connection_that_ends_before_any_audio_twice_is_reopened_once_then_fails() {
+    let server = FixtureServer::start(FORMAT, Script::CloseAtOnce);
+    let mut synthesiser = server.synthesiser(FORMAT);
+    let (mut handle, events) = drain(&mut synthesiser);
+    assert!(
+        matches!(
+            handle.failure(),
+            Some(ElevenLabsError::Closed {
+                code: Some(1011),
+                ..
+            })
+        ),
+        "{:?}",
+        handle.failure()
+    );
+    assert_failed_and_ended(&mut handle, &events);
+    assert_eq!(server.seen().len(), 2, "one reopen, no more");
+    assert_eq!(
+        server.seen()[1].contexts,
+        ["s0"],
+        "the same context, sent again"
+    );
+}
+
+#[test]
+fn a_connection_that_ends_before_any_audio_once_is_reopened_and_the_segment_spoken() {
+    let server = FixtureServer::scripted(FORMAT, vec![Script::CloseAtOnce, Script::Serve]);
+    let mut synthesiser = server.synthesiser(FORMAT);
+    let (handle, events) = drain(&mut synthesiser);
+    assert_eq!(handle.failure(), None);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SynthesisEvent::Audio(_)))
+            .count(),
+        4
+    );
+    assert!(matches!(events.last(), Some(SynthesisEvent::Usage(record)) if record.r#final));
+    assert_eq!(server.seen().len(), 2);
+    assert_eq!(server.violations(), Vec::<String>::new());
+}
+
+#[test]
 fn a_message_without_context_id_is_a_protocol_failure() {
     let (mut handle, events) = run(Script::SendBareAfterFirst(r#"{"audio":"AAEC"}"#));
     match handle.failure() {
