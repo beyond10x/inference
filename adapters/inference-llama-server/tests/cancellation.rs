@@ -87,6 +87,8 @@ fn names(events: &[GenerationEvent]) -> Vec<&'static str> {
             GenerationEvent::Usage(_) => "RecordUsage",
             GenerationEvent::Completed(_) => "CompleteGeneration",
             GenerationEvent::Cancelled(..) => "CancelGeneration",
+            GenerationEvent::Refused(_) => "GenerationRefused",
+            _ => "unknown",
         })
         .collect()
 }

@@ -251,6 +251,8 @@ fn kinds(seen: &[(GenerationEvent, GenerationState)]) -> Vec<&'static str> {
             GenerationEvent::Usage(_) => "usage",
             GenerationEvent::Completed(_) => "completed",
             GenerationEvent::Cancelled(..) => "cancelled",
+            GenerationEvent::Refused(_) => "refused",
+            _ => "other",
         })
         .collect()
 }

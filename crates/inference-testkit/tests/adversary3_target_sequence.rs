@@ -40,7 +40,9 @@ use inference_core::generation::StartGeneration;
 use inference_core::id::{NodeId, RunId};
 use uuid::Uuid;
 
-use target::{Input, Stores, integer_node, named_list_node, named_node, text_node, unsupported};
+use target::{
+    Input, Stores, integer_node, named_list_node, named_node, text_node, unreadable, unsupported,
+};
 
 const VIEWS: [&str; 4] = [
     "inference.model.Models",
