@@ -22,19 +22,23 @@ use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
 use support::{FixedKey, FixtureServer, KEY, Script, VOICE, committed};
 use tokio_tungstenite::tungstenite::Message;
 
-/// One step a scripted server takes once a connection's input has ended.
+/// One step a scripted server takes once the client has closed a context
+/// (story:elevenlabs-multi-context-tts-connection: the scripts follow contexts, not
+/// connections). Every text sent names the context in `contextId` when it is a JSON object that
+/// names none.
 #[derive(Clone)]
 enum Act {
     /// Sends this text message.
     Send(String),
-    /// Sends this text message every 5 ms until the send fails, reading nothing.
+    /// Sends this text message every 5 ms until the send fails.
     Stream(String),
-    /// Sends a ping every 50 ms, forever, reading nothing.
+    /// Sends a ping every 50 ms, until the send fails.
     PingForever,
 }
 
-/// A loopback server answering its n-th connection with `scripts[n]`, the last for every one
-/// past them. It reports each connection's end, by the client's close or a failed send.
+/// A loopback server answering the n-th context it is asked for, across its connections, with
+/// `scripts[n]`, the last for every one past them. It reports each connection's end, by the
+/// client's close or a failed send.
 struct Scripted {
     url: String,
     ends: Mutex<mpsc::Receiver<usize>>,
@@ -53,10 +57,10 @@ impl Scripted {
                 .expect("a runtime");
             runtime.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener).expect("a listener");
+                let scripts = Arc::new((scripts, Mutex::new(0_usize)));
                 let mut index = 0;
                 while let Ok((stream, _)) = listener.accept().await {
-                    let acts = scripts[index.min(scripts.len() - 1)].clone();
-                    tokio::spawn(serve(stream, index, acts, end_tx.clone()));
+                    tokio::spawn(serve(stream, index, Arc::clone(&scripts), end_tx.clone()));
                     index += 1;
                 }
             });
@@ -85,55 +89,119 @@ impl Scripted {
     }
 }
 
+type Scripts = Arc<(Vec<Vec<Act>>, Mutex<usize>)>;
+
 async fn serve(
     stream: tokio::net::TcpStream,
     index: usize,
-    acts: Vec<Act>,
+    scripts: Scripts,
     ends: mpsc::Sender<usize>,
 ) {
-    let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+    let Ok(socket) = tokio_tungstenite::accept_async(stream).await else {
         return;
     };
-    loop {
-        match socket.next().await {
-            Some(Ok(Message::Text(text))) if text.as_str() == r#"{"text":""}"# => break,
-            Some(Ok(Message::Text(_) | Message::Ping(_) | Message::Pong(_))) => {}
-            _ => {
-                let _ = ends.send(index);
-                return;
+    let (sink, mut stream) = socket.split();
+    let sink = Arc::new(tokio::sync::Mutex::new(sink));
+    let mut acting = Vec::new();
+    while let Some(Ok(message)) = stream.next().await {
+        let Message::Text(text) = message else {
+            if matches!(message, Message::Close(_)) {
+                break;
             }
+            continue;
+        };
+        let Ok(serde_json::Value::Object(object)) =
+            serde_json::from_str::<serde_json::Value>(text.as_str())
+        else {
+            continue;
+        };
+        if object.contains_key("close_socket") {
+            break;
         }
+        if object.get("close_context") != Some(&serde_json::Value::Bool(true)) {
+            continue;
+        }
+        let Some(serde_json::Value::String(context_id)) = object.get("context_id") else {
+            continue;
+        };
+        let acts = {
+            let mut answered = scripts.1.lock().unwrap();
+            let acts = scripts.0[(*answered).min(scripts.0.len() - 1)].clone();
+            *answered += 1;
+            acts
+        };
+        acting.push(tokio::spawn(act(
+            acts,
+            context_id.clone(),
+            Arc::clone(&sink),
+        )));
     }
+    for task in acting {
+        task.abort();
+    }
+    let _ = sink.lock().await.close().await;
+    let _ = ends.send(index);
+}
+
+type Sink = Arc<
+    tokio::sync::Mutex<
+        futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+            Message,
+        >,
+    >,
+>;
+
+/// Takes `acts` for the context `context_id`, each text naming the context, until a send fails.
+async fn act(acts: Vec<Act>, context_id: String, sink: Sink) {
+    let named = |text: &str| match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Object(mut object)) => {
+            object
+                .entry("contextId")
+                .or_insert_with(|| serde_json::Value::String(context_id.clone()));
+            serde_json::Value::Object(object).to_string()
+        }
+        _ => text.to_owned(),
+    };
     for act in acts {
         match act {
             Act::Send(text) => {
-                if socket.send(Message::text(text)).await.is_err() {
-                    let _ = ends.send(index);
+                if sink
+                    .lock()
+                    .await
+                    .send(Message::text(named(&text)))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
             Act::Stream(text) => loop {
-                if socket.send(Message::text(text.clone())).await.is_err() {
-                    let _ = ends.send(index);
+                if sink
+                    .lock()
+                    .await
+                    .send(Message::text(named(&text)))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             },
             Act::PingForever => loop {
-                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
-                    let _ = ends.send(index);
+                if sink
+                    .lock()
+                    .await
+                    .send(Message::Ping(Vec::new().into()))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             },
         }
     }
-    while let Some(Ok(message)) = socket.next().await {
-        if matches!(message, Message::Close(_)) {
-            break;
-        }
-    }
-    let _ = ends.send(index);
 }
 
 fn audio(bytes: &[u8]) -> Act {
@@ -306,7 +374,7 @@ fn adversary1_pcm_one_byte_odd_empty_and_null_chunks_keep_every_sample() {
     assert!(matches!(events.last(), Some(SynthesisEvent::Usage(record)) if record.r#final));
 }
 
-/// G.711: one byte is one sample, and positions run on across segments and connections.
+/// G.711: one byte is one sample, and positions run on across segments.
 #[test]
 fn adversary1_alaw_positions_count_one_sample_per_byte_across_segments() {
     let segment = vec![
@@ -340,9 +408,10 @@ fn adversary1_alaw_positions_count_one_sample_per_byte_across_segments() {
     );
 }
 
-/// A cancel against a server that never reads the close and keeps streaming audio: the discard
+/// A cancel against a server that keeps streaming the cancelled context's audio: the discard
 /// returns within the close bound, nothing of the cancelled segment follows, the next segment is
-/// spoken on a new connection, and a second discard is refused.
+/// spoken on the same connection (story:elevenlabs-multi-context-tts-connection), and a second
+/// discard is refused.
 #[test]
 fn adversary1_a_cancel_against_a_server_that_keeps_streaming_is_bounded_and_clean() {
     let server = Scripted::start(vec![

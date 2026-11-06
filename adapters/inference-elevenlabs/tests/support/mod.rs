@@ -1,14 +1,18 @@
-//! A local WebSocket fixture server speaking the single-stream protocol of `src/protocol.rs`, the
+//! A local WebSocket fixture server speaking the multi-stream protocol of `src/protocol.rs`, the
 //! fixtures it serves, and helpers the test targets share.
 //!
 //! The server listens on 127.0.0.1 at a port the system picks. Each connection is checked
 //! against the protocol: the `xi-api-key` header carries the fixture key, the path and query name
-//! the voice, model and format, the first message is a single space, no message carries a key,
-//! every text message ends in exactly one space and flushes, and the last is the end of input.
-//! Every departure is recorded as a violation. It then answers with the scripted messages of a
-//! recorded fixture under `tests/fixtures/`, as its [`Script`] says.
+//! the voice, model and format, and no message carries a key. Every context opens with a single
+//! space and its `context_id`, gets one text ending in exactly one space with `flush` set, and is
+//! closed with `close_context` after it; a context name is used once; `close_socket` is the last
+//! message. Every departure is recorded as a violation. Each context, once closed, is answered
+//! with the scripted messages of a recorded fixture under `tests/fixtures/`, each naming the
+//! context in `contextId`, as its [`Script`] says; the n-th context the server answers, across its
+//! connections, gets the n-th script.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::mpsc;
@@ -29,6 +33,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 
 /// The key the fixture server expects; no real key appears in any test.
 pub const KEY: &str = "fixture-key-d41d8cd98f00b204";
@@ -36,20 +41,23 @@ pub const KEY: &str = "fixture-key-d41d8cd98f00b204";
 /// The voice the fixture server expects.
 pub const VOICE: &str = "fixturevoice01";
 
-/// What the server does once a connection's input has ended.
+/// What the server does once a context has been closed by the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Script {
-    /// Sends every message of the fixture, the final one last, then waits for the close.
+    /// Sends every message of the fixture, the context's final message last.
     Serve,
-    /// Sends every audio message of the fixture and no final one, then waits for the close.
+    /// Sends every audio message of the fixture and no final message.
     NoFinal,
     /// Sends the first audio message, then closes the connection with code 1011.
     CloseAfterFirst,
-    /// Sends the first audio message, then this text, then waits for the close.
+    /// Sends the first audio message, then this text, with the context's `contextId` added when
+    /// it is a JSON object that names none.
     SendAfterFirst(&'static str),
-    /// Sends nothing, and waits for the close.
+    /// Sends the first audio message, then this text exactly as it is.
+    SendBareAfterFirst(&'static str),
+    /// Sends nothing.
     Silent,
-    /// Refuses the handshake with HTTP 401.
+    /// Refuses the handshake with HTTP 401, when this is the script of the next context.
     Refuse,
 }
 
@@ -61,6 +69,10 @@ pub struct Seen {
     pub key: Option<String>,
     pub messages: Vec<String>,
     pub violations: Vec<String>,
+    /// The contexts the client closed, in order, each answered by its script.
+    pub contexts: Vec<String>,
+    /// The client sent `close_socket`.
+    pub close_socket: bool,
     /// The client closed the connection, by a close frame or by dropping it.
     pub client_closed: bool,
 }
@@ -74,16 +86,44 @@ pub struct FixtureServer {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// What one connection's task shares with the server: the fixture lines, the scripts and how
+/// many contexts have been answered so far.
+struct Plan {
+    lines: Vec<String>,
+    scripts: Vec<Script>,
+    answered: Mutex<usize>,
+}
+
+impl Plan {
+    /// The script of the next context to be answered.
+    fn next_script(&self) -> Script {
+        let answered = *self.answered.lock().unwrap();
+        self.scripts[answered.min(self.scripts.len() - 1)]
+    }
+
+    /// The script of a context being answered now.
+    fn take_script(&self) -> Script {
+        let mut answered = self.answered.lock().unwrap();
+        let script = self.scripts[(*answered).min(self.scripts.len() - 1)];
+        *answered += 1;
+        script
+    }
+}
+
 impl FixtureServer {
-    /// A server answering every connection with `script`, from the fixture of `format`.
+    /// A server answering every context with `script`, from the fixture of `format`.
     pub fn start(format: OutputFormat, script: Script) -> Self {
         Self::scripted(format, vec![script])
     }
 
-    /// A server answering its n-th connection with `scripts[n]`, the last script for every
-    /// connection past them.
+    /// A server answering its n-th context with `scripts[n]`, the last script for every context
+    /// past them.
     pub fn scripted(format: OutputFormat, scripts: Vec<Script>) -> Self {
-        let lines: Vec<String> = fixture(format).lines().map(str::to_owned).collect();
+        let plan = Arc::new(Plan {
+            lines: fixture(format).lines().map(str::to_owned).collect(),
+            scripts,
+            answered: Mutex::new(0),
+        });
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         std_listener.set_nonblocking(true).expect("non-blocking");
         let url = format!("ws://{}", std_listener.local_addr().expect("an address"));
@@ -99,7 +139,6 @@ impl FixtureServer {
                 .expect("a runtime");
             runtime.block_on(async move {
                 let listener = TcpListener::from_std(std_listener).expect("a listener");
-                let lines = Arc::new(lines);
                 let mut stop_rx = stop_rx;
                 let mut index = 0;
                 loop {
@@ -108,13 +147,11 @@ impl FixtureServer {
                         accepted = listener.accept() => accepted,
                     };
                     let Ok((stream, _)) = accepted else { break };
-                    let script = scripts[index.min(scripts.len() - 1)];
                     thread_seen.lock().unwrap().push(Seen::default());
                     tokio::spawn(serve(
                         stream,
                         index,
-                        script,
-                        Arc::clone(&lines),
+                        Arc::clone(&plan),
                         Arc::clone(&thread_seen),
                         close_tx.clone(),
                         expected_query.clone(),
@@ -181,14 +218,34 @@ impl Drop for FixtureServer {
     }
 }
 
+/// One thing the server's writer sends.
+enum Out {
+    Text(String),
+    /// A close frame with this code and reason; the writer stops after it.
+    Close(u16, &'static str),
+}
+
+/// What the client has done with one context.
+#[derive(Debug, Default)]
+struct Context {
+    flushed: bool,
+    closed: bool,
+}
+
+/// What a client message asks of the server, once checked.
+enum Asked {
+    Nothing,
+    Answer(String),
+    CloseSocket,
+}
+
 /// The handshake callback's error type is tungstenite's `ErrorResponse`, which its `Callback`
 /// trait fixes, so the size of that error is not this function's to change.
 #[allow(clippy::result_large_err)]
 async fn serve(
     stream: tokio::net::TcpStream,
     index: usize,
-    script: Script,
-    lines: Arc<Vec<String>>,
+    plan: Arc<Plan>,
     seen: Arc<Mutex<Vec<Seen>>>,
     closes: mpsc::Sender<usize>,
     expected_query: String,
@@ -196,6 +253,7 @@ async fn serve(
     let record = |update: &dyn Fn(&mut Seen)| update(&mut seen.lock().unwrap()[index]);
     let head = Arc::new(Mutex::new((String::new(), String::new(), None)));
     let callback_head = Arc::clone(&head);
+    let refuse = plan.next_script() == Script::Refuse;
     let callback = move |request: &Request, response: Response| {
         let key = request
             .headers()
@@ -207,7 +265,7 @@ async fn serve(
             request.uri().query().unwrap_or_default().to_owned(),
             key,
         );
-        if script == Script::Refuse {
+        if refuse {
             let mut refusal = ErrorResponse::new(Some("invalid_api_key".to_owned()));
             *refusal.status_mut() = StatusCode::UNAUTHORIZED;
             return Err(refusal);
@@ -221,113 +279,151 @@ async fn serve(
         seen.query.clone_from(&query);
         seen.key.clone_from(&key);
     });
-    let Ok(mut socket) = accepted else { return };
+    let Ok(socket) = accepted else { return };
     let mut violations = Vec::new();
     if key.as_deref() != Some(KEY) {
         violations.push("the xi-api-key header is not the fixture key".to_owned());
     }
-    if path != format!("/v1/text-to-speech/{VOICE}/stream-input") {
+    if path != format!("/v1/text-to-speech/{VOICE}/multi-stream-input") {
         violations.push(format!("path {path}"));
     }
     if !query.split('&').any(|pair| pair == expected_query) || !query.contains("model_id=") {
         violations.push(format!("query {query}"));
     }
+    record(&|seen| seen.violations.clone_from(&violations));
 
-    let mut messages = Vec::new();
-    let mut ended = false;
-    let mut client_closed = false;
-    while !ended {
-        match socket.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let text = text.as_str().to_owned();
-                check(&text, messages.len(), &mut violations, &mut ended);
-                messages.push(text);
-            }
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-            _ => {
-                client_closed = true;
-                break;
+    let (mut sink, mut stream) = socket.split();
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Out>();
+    let writer = tokio::spawn(async move {
+        while let Some(out) = out_rx.recv().await {
+            match out {
+                Out::Text(text) => {
+                    if sink.send(Message::text(text)).await.is_err() {
+                        return;
+                    }
+                }
+                Out::Close(code, reason) => {
+                    let _ = sink
+                        .send(Message::Close(Some(CloseFrame {
+                            code: code.into(),
+                            reason: reason.into(),
+                        })))
+                        .await;
+                    return;
+                }
             }
         }
-    }
-    record(&|seen| {
-        seen.messages.clone_from(&messages);
-        seen.violations.clone_from(&violations);
     });
-    if client_closed {
-        record(&|seen| seen.client_closed = true);
-        let _ = closes.send(index);
-        return;
-    }
 
-    let audio: Vec<&String> = lines
-        .iter()
-        .filter(|line| !line.contains("isFinal"))
-        .collect();
-    let send_all = |count: usize, with_final: bool| {
-        let mut out: Vec<String> = audio
-            .iter()
-            .take(count)
-            .map(|line| (*line).clone())
-            .collect();
-        if with_final {
-            out.extend(
-                lines
-                    .iter()
-                    .filter(|line| line.contains("isFinal"))
-                    .cloned(),
-            );
-        }
-        out
-    };
-    let (outgoing, then_close) = match script {
-        Script::Serve => (send_all(audio.len(), true), false),
-        Script::NoFinal => (send_all(audio.len(), false), false),
-        Script::CloseAfterFirst => (send_all(1, false), true),
-        Script::SendAfterFirst(raw) => {
-            let mut out = send_all(1, false);
-            out.push(raw.to_owned());
-            (out, false)
-        }
-        Script::Silent | Script::Refuse => (Vec::new(), false),
-    };
-    for line in outgoing {
-        if socket.send(Message::text(line)).await.is_err() {
-            break;
-        }
-    }
-    if then_close {
-        let _ = socket
-            .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                code: 1011.into(),
-                reason: "fixture closes mid-segment".into(),
-            }))
-            .await;
-        return;
-    }
+    let mut contexts: HashMap<String, Context> = HashMap::new();
+    let mut socket_closed = false;
+    let mut position = 0;
     loop {
-        match socket.next().await {
-            Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+        match stream.next().await {
             Some(Ok(Message::Text(text))) => {
                 let text = text.as_str().to_owned();
+                let mut found = Vec::new();
+                let asked = if socket_closed {
+                    found.push(format!("message {position} after close_socket"));
+                    Asked::Nothing
+                } else {
+                    check(&text, position, &mut contexts, &mut found)
+                };
+                position += 1;
                 record(&|seen| {
                     seen.messages.push(text.clone());
-                    seen.violations
-                        .push("a message after the end of input".to_owned());
+                    seen.violations.extend(found.iter().cloned());
                 });
+                match asked {
+                    Asked::Nothing => {}
+                    Asked::Answer(context_id) => {
+                        record(&|seen| seen.contexts.push(context_id.clone()));
+                        for out in answer(&plan, &context_id) {
+                            let _ = out_tx.send(out);
+                        }
+                    }
+                    Asked::CloseSocket => {
+                        socket_closed = true;
+                        record(&|seen| seen.close_socket = true);
+                        let _ = out_tx.send(Out::Close(1000, ""));
+                    }
+                }
             }
-            Some(Ok(_)) => {}
+            Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
+            Some(Ok(Message::Binary(_))) => {
+                record(&|seen| seen.violations.push("a binary message".to_owned()));
+            }
+            Some(Ok(Message::Close(_)) | Err(_)) | None => break,
         }
     }
+    drop(out_tx);
+    writer.abort();
     record(&|seen| seen.client_closed = true);
     let _ = closes.send(index);
 }
 
-/// Checks the `position`-th message of a connection against the protocol.
-fn check(text: &str, position: usize, violations: &mut Vec<String>, ended: &mut bool) {
+/// The messages the server sends for the context `context_id`, by the next script.
+fn answer(plan: &Plan, context_id: &str) -> Vec<Out> {
+    let with_context = |line: &str| -> String {
+        match serde_json::from_str::<Value>(line) {
+            Ok(Value::Object(mut object)) => {
+                object
+                    .entry("contextId")
+                    .or_insert_with(|| Value::String(context_id.to_owned()));
+                Value::Object(object).to_string()
+            }
+            _ => line.to_owned(),
+        }
+    };
+    let audio: Vec<Out> = plan
+        .lines
+        .iter()
+        .filter(|line| !line.contains("isFinal"))
+        .map(|line| Out::Text(with_context(line)))
+        .collect();
+    let first = |mut audio: Vec<Out>| {
+        audio.truncate(1);
+        audio
+    };
+    let final_message =
+        Out::Text(serde_json::json!({"isFinal": true, "contextId": context_id}).to_string());
+    match plan.take_script() {
+        Script::Serve => {
+            let mut out = audio;
+            out.push(final_message);
+            out
+        }
+        Script::NoFinal => audio,
+        Script::CloseAfterFirst => {
+            let mut out = first(audio);
+            out.push(Out::Close(1011, "fixture closes mid-segment"));
+            out
+        }
+        Script::SendAfterFirst(raw) => {
+            let mut out = first(audio);
+            out.push(Out::Text(with_context(raw)));
+            out
+        }
+        Script::SendBareAfterFirst(raw) => {
+            let mut out = first(audio);
+            out.push(Out::Text(raw.to_owned()));
+            out
+        }
+        Script::Silent | Script::Refuse => Vec::new(),
+    }
+}
+
+/// Checks the `position`-th message of a connection against the protocol, given the contexts
+/// the connection has seen, and says what it asks of the server.
+fn check(
+    text: &str,
+    position: usize,
+    contexts: &mut HashMap<String, Context>,
+    violations: &mut Vec<String>,
+) -> Asked {
     let Ok(Value::Object(message)) = serde_json::from_str::<Value>(text) else {
         violations.push(format!("message {position} is not a JSON object"));
-        return;
+        return Asked::Nothing;
     };
     for key_field in ["xi-api-key", "xi_api_key", "authorization"] {
         if message.contains_key(key_field) {
@@ -337,22 +433,68 @@ fn check(text: &str, position: usize, violations: &mut Vec<String>, ended: &mut 
     if text.contains(KEY) {
         violations.push(format!("message {position} carries the key"));
     }
+    let only = |allowed: &[&str], violations: &mut Vec<String>| {
+        for name in message.keys() {
+            if !allowed.contains(&name.as_str()) {
+                violations.push(format!("message {position} carries {name}"));
+            }
+        }
+    };
+    if message.contains_key("close_socket") {
+        only(&["close_socket"], violations);
+        if message.get("close_socket") != Some(&Value::Bool(true)) {
+            violations.push(format!("message {position}: close_socket is not true"));
+        }
+        return Asked::CloseSocket;
+    }
+    let Some(Value::String(context_id)) = message.get("context_id") else {
+        violations.push(format!("message {position} names no context_id"));
+        return Asked::Nothing;
+    };
+    if message.contains_key("close_context") {
+        only(&["context_id", "close_context"], violations);
+        if message.get("close_context") != Some(&Value::Bool(true)) {
+            violations.push(format!("message {position}: close_context is not true"));
+        }
+        let Some(context) = contexts.get_mut(context_id) else {
+            violations.push(format!("message {position} closes a context never opened"));
+            return Asked::Nothing;
+        };
+        if context.closed {
+            violations.push(format!("message {position} closes a context twice"));
+            return Asked::Nothing;
+        }
+        if !context.flushed {
+            violations.push(format!("message {position} closes a context with no text"));
+        }
+        context.closed = true;
+        return Asked::Answer(context_id.clone());
+    }
     let Some(Value::String(said)) = message.get("text") else {
         violations.push(format!("message {position} has no text"));
-        return;
+        return Asked::Nothing;
     };
-    if position == 0 {
+    let Some(context) = contexts.get_mut(context_id) else {
+        only(&["text", "context_id", "voice_settings"], violations);
         if said != " " {
-            violations.push("the first message's text is not a single space".to_owned());
+            violations.push(format!(
+                "message {position} opens a context with text other than a single space"
+            ));
         }
-        return;
+        contexts.insert(context_id.clone(), Context::default());
+        return Asked::Nothing;
+    };
+    only(&["text", "context_id", "flush"], violations);
+    if context.closed {
+        violations.push(format!("message {position} is sent to a closed context"));
     }
-    if said.is_empty() {
-        *ended = true;
-        if message.len() != 1 {
-            violations.push("the end of input carries more than its text".to_owned());
-        }
-        return;
+    if context.flushed {
+        violations.push(format!(
+            "message {position} is a second text of its context"
+        ));
+    }
+    if said.trim().is_empty() {
+        violations.push(format!("message {position} is a blank text"));
     }
     if !said.ends_with(' ') || said.ends_with("  ") {
         violations.push(format!(
@@ -362,6 +504,18 @@ fn check(text: &str, position: usize, violations: &mut Vec<String>, ended: &mut 
     if message.get("flush") != Some(&Value::Bool(true)) {
         violations.push(format!("message {position} does not flush"));
     }
+    context.flushed = true;
+    Asked::Nothing
+}
+
+/// Runs `work` on a thread of its own and fails the case when it does not return within `bound`.
+pub fn within<T: Send + 'static>(bound: Duration, work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    rx.recv_timeout(bound)
+        .unwrap_or_else(|_| panic!("the case did not finish within {bound:?}"))
 }
 
 /// A credential source that always returns one fixed key.
