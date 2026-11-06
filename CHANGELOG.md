@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `inference-audio-device`: `PlaybackFault`, `PLAYBACK_PATIENCE` (2 s),
+  `AcknowledgingSink::with_playback_patience` and `AcknowledgingHandle::fault`.
+- `inference-llama-server`: `loopback` and `NotLoopback`.
+- `inference-runtime`: `CHILD_DROP_BOUND` (5 s), `USAGE_STOP_GRACE` (1 s),
+  `SubgraphHandle::dropped_usage`, `REFUSALS_KEPT` (256), `RunController::refusals_overflow`,
+  `DEFAULT_RECORDER_BOUND` (65 536), `Recorder::with_bound`, `bound` and `dropped`,
+  `Recording::new`, `cut` and `cut_at`, and `Replay::compared_until`.
+
+### Changed
+
+- **Breaking:** `inference-runtime`'s `Recording` keeps where its recorder's bound cut it, in a
+  private field, so it is built with `Recording::new` instead of a struct literal. A replay compares
+  a cut recording only as far as it holds, instead of reporting a divergence at the cut.
+- `inference-llama-server` accepts a base URL only on a loopback host (`127.0.0.0/8`, `::1`,
+  `localhost`); any other host is refused before anything opens, and the refusal names scheme,
+  host and port, never a user part.
+
+### Fixed
+
+- `inference-audio-device`: the acknowledging sink's drain fails on a stream error at once, and on
+  queued audio whose played position does not move for the patience, also while a frame waits
+  for room, instead of hanging on a dead speaker. A segment heard in full before a turn opened is
+  acknowledged at its completion, possibly after later segments' receipts. A frame whose sample
+  clock goes back below held, unplayed audio is refused.
+- `inference-runtime`: dropping a subgraph node ends its child run within `CHILD_DROP_BOUND`; a
+  bridge send on a full parent edge waits instead of spinning; a usage send gives way
+  `USAGE_STOP_GRACE` after a stop, or at once on a drop; refusals and recordings are bounded.
+- `local-voice-cascade` example: each turn's first-audio measure is the first frame of its own
+  answer, and a discarded segment reaches the commit gate as `Gated::SegmentDiscarded`.
+
 ## [0.18.0] — 2026-11-06
 
 ### Added
