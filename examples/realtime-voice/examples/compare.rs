@@ -33,7 +33,9 @@
 //!
 //! The cascade arm, `cascade`, speaks with ElevenLabs when its key resolves from
 //! `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` names a voice, in `pcm_24000`; otherwise it is
-//! skipped as "no hosted TTS configured". Its recogniser and LLM are those the local voice
+//! skipped as "no hosted TTS configured". With `--cascade-voice cartesia` it speaks with Cartesia
+//! Sonic instead, its key from `CARTESIA_API_KEY` and its voice from `CARTESIA_VOICE_ID`, in
+//! 16-bit PCM at 24 kHz. Its recogniser and LLM are those the local voice
 //! cascade configures (`local_voice_cascade::local::LocalConfig::from_env`), bound with feature
 //! `local`, with that cascade's detector; a missing one skips the arm, naming it.
 
@@ -95,6 +97,18 @@ struct Args {
     /// The length of one input frame, in milliseconds.
     #[arg(long, default_value_t = 20)]
     frame_ms: u64,
+    /// The hosted voice the cascade arm speaks with.
+    #[arg(long, value_enum, default_value = "elevenlabs")]
+    cascade_voice: CascadeVoice,
+}
+
+/// A hosted TTS the cascade arm can speak with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CascadeVoice {
+    /// ElevenLabs streaming TTS.
+    Elevenlabs,
+    /// Cartesia Sonic streaming TTS.
+    Cartesia,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -260,9 +274,13 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
         }
         let outcome = match provider {
             Provider::Cascade => {
-                match hosted()
-                    .and_then(|synthesiser| cascade::measure(synthesiser, &plan, args.runs))
-                {
+                let measured = match args.cascade_voice {
+                    CascadeVoice::Elevenlabs => hosted()
+                        .and_then(|synthesiser| cascade::measure(synthesiser, &plan, args.runs)),
+                    CascadeVoice::Cartesia => cartesia()
+                        .and_then(|synthesiser| cascade::measure(synthesiser, &plan, args.runs)),
+                };
+                match measured {
                     Ok(runs) => comparison.ran_as(name, provider.topology(), runs),
                     Err(reason) => comparison.skipped_as(name, provider.topology(), &reason),
                 }
@@ -377,10 +395,31 @@ fn hosted() -> Result<ElevenLabsSynthesiser, String> {
     )
 }
 
+/// The cascade arm's synthesiser with `--cascade-voice cartesia`: Cartesia Sonic in 16-bit PCM
+/// at 24 kHz, its key from `CARTESIA_API_KEY` and its voice from `CARTESIA_VOICE_ID`.
+fn cartesia() -> Result<inference_cartesia::CartesiaSynthesiser, String> {
+    use realtime_voice::compare::NO_HOSTED_TTS;
+    if std::env::var_os(inference_cartesia::CARTESIA_KEY_VARIABLE).is_none() {
+        return Err(format!("{NO_HOSTED_TTS}: CARTESIA_API_KEY is not set"));
+    }
+    let voice = std::env::var("CARTESIA_VOICE_ID")
+        .ok()
+        .filter(|voice| !voice.trim().is_empty())
+        .ok_or_else(|| format!("{NO_HOSTED_TTS}: CARTESIA_VOICE_ID names no voice"))?;
+    inference_cartesia::CartesiaSynthesiser::from_env(
+        inference_cartesia::Endpoint::new(),
+        inference_cartesia::VoiceConfig::new(
+            voice.trim(),
+            inference_cartesia::OutputFormat::PCM_S16LE_24000,
+        ),
+    )
+    .map_err(|error| format!("{NO_HOSTED_TTS}: {error}"))
+}
+
 /// The cascade arm over the local voice cascade's recogniser and LLM.
 #[cfg(feature = "local")]
 mod cascade {
-    use inference_elevenlabs::ElevenLabsSynthesiser;
+    use inference_tts::Synthesiser;
     use local_voice_cascade::local::{
         LocalConfig, LocalModels, LocalRefused, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE,
         SPEECH_VAD,
@@ -404,11 +443,11 @@ mod cascade {
     }
 
     /// `runs` runs of the plan over the local recogniser and LLM and `synthesiser`.
-    pub fn measure(
-        synthesiser: ElevenLabsSynthesiser,
-        plan: &Plan,
-        runs: usize,
-    ) -> Result<Vec<Measured>, String> {
+    pub fn measure<S>(synthesiser: S, plan: &Plan, runs: usize) -> Result<Vec<Measured>, String>
+    where
+        S: Synthesiser,
+        S::Handle: Send,
+    {
         let config = LocalConfig::from_env().map_err(|refused| missing(&refused))?;
         let models = LocalModels::open(&config).map_err(|refused| missing(&refused))?;
         let mut cascade = Cascade::new(
@@ -431,12 +470,11 @@ mod cascade {
 /// Without feature `local`, the cascade arm has no local recogniser or LLM.
 #[cfg(not(feature = "local"))]
 mod cascade {
-    use inference_elevenlabs::ElevenLabsSynthesiser;
     use realtime_voice::compare::{Measured, Plan};
 
     /// Skips the arm, naming the missing steps.
-    pub fn measure(
-        _synthesiser: ElevenLabsSynthesiser,
+    pub fn measure<S>(
+        _synthesiser: S,
         _plan: &Plan,
         _runs: usize,
     ) -> Result<Vec<Measured>, String> {
