@@ -1,5 +1,38 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking
+
+- `inference-core`: `GenerationCompleted` carries `stop_reason: Option<StopReason>`, and
+  `Generation::complete` takes it. `inference-llm`: `GenerationOutput::complete` takes it,
+  `GenerationEvent` is `#[non_exhaustive]` and gains `Refused`. `inference-testkit`:
+  `StreamDomain::complete_generation` takes it.
+- `inference-sherpa-onnx`: `MODEL_RATE` is removed; stream and frame rates outside
+  `MIN_STREAM_RATE` (8 kHz) to `MAX_STREAM_RATE` (384 kHz) are refused with `UnsupportedRate`.
+
+### Added
+
+- `inference-core`: `StopReason` and the event `GenerationRefused`, also declared in
+  `ess/domains/stream.yaml`.
+
+### Changed
+
+- `inference-llm`: a generation completes with the stop reason of its last turn; a model's
+  refusal is delivered as `GenerationEvent::Refused` with its text, not as a text segment.
+- `inference-llm`: a failed turn's usage record keeps the counts the provider reported, never
+  final; `GenerationHandle`'s `Debug` shows ids, counts and the failure's error code only, no
+  conversation text.
+- `inference-testkit`: the duplex mock fails the session when its ledger refuses a scripted step,
+  also for a call scripted on a turn that ends during output, where an offered tool is now proposed
+  on the response in progress.
+
+### Fixed
+
+- `repo-podcast` example: a refused response closes the session the turn opened and reports its
+  time as billed.
+- `inference-deepgram` tests: the fixture server records a refused handshake before answering it.
+
 ## [0.19.0] — 2026-11-06
 
 ### Added
