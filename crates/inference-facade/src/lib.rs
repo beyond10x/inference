@@ -18,9 +18,10 @@
 //! vocabulary, and [`describe`] reports the pipeline it runs now: nodes, bindings, effective
 //! capabilities, downgrades and exposures. What the session's model calls consumed it delivers
 //! as `UsageRecorded` and adds up per run and over the session ([`usage`]). The session's event
-//! log and the bookkeeping an interrupt cuts by are bounded; past 256 generations kept, an
-//! interrupt no longer cuts a late event of the oldest, the one exception to the cut
-//! ([`live::LiveSession::interrupt`]). A session's history grows with its turns. The crate
+//! log and the bookkeeping an interrupt cuts by are bounded: at most 256 generations kept and
+//! 256 cut generations remembered past their end, so that a refusal or any other event of a cut
+//! generation arriving after its end stays cut; a late event of a cut generation older than
+//! those is delivered, the one exception to the cut ([`live::LiveSession::interrupt`]). A session's history grows with its turns. The crate
 //! carries no concrete model, backend or provider. Behind the feature `cost`, `cost` prices those records
 //! with a price document the caller supplies, record by record and over the session, through
 //! `llm-cost`; without it the crate depends on no pricing crate.
