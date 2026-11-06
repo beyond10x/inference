@@ -70,7 +70,8 @@ mod synthesiser;
 #[cfg(feature = "duplex")]
 pub use agent_duplex::{
     AGENT_BACKEND, AGENT_MODEL, ElevenLabsAgent, ElevenLabsAgentSession, INBOUND_QUEUE,
-    OUTBOUND_QUEUE, OpenCanceller, agent_capabilities, agent_claims, agent_native_duplex_verdict,
+    MESSAGE_QUIET, OUTBOUND_QUEUE, OpenCanceller, agent_capabilities, agent_claims,
+    agent_native_duplex_verdict,
 };
 #[cfg(feature = "duplex")]
 pub use inference_duplex;

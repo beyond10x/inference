@@ -382,6 +382,24 @@ fn a_cancel_while_awaiting_the_metadata_closes_the_connection_within_the_close_b
     assert!(closed.saturating_duration_since(cancelled_at) < CLOSE_BOUND);
 }
 
+/// A cancel issued while no open is in progress does nothing: the opens after it, on the same
+/// model, go through.
+#[test]
+fn a_cancel_with_no_open_in_progress_does_not_reach_a_later_open() {
+    let server = AgentServer::start(Script::new(Vec::new()));
+    let mut model = agent(&server);
+    let canceller = model.canceller();
+    canceller.cancel();
+    let first = model.open(config());
+    assert!(first.is_ok(), "{:?}", model.open_error());
+    drop(first);
+    canceller.cancel();
+    canceller.cancel();
+    let second = model.open(config());
+    assert!(second.is_ok(), "{:?}", model.open_error());
+    assert_eq!(model.open_error(), None);
+}
+
 #[test]
 fn no_metadata_within_the_deadline_fails_the_open_and_closes() {
     let mut script = Script::new(Vec::new());
