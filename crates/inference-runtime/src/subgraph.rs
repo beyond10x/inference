@@ -32,10 +32,18 @@
 //! A bridge's every wait gives way to a cancel, except where it reads a usage egress of the child
 //! ([`Declaration::is_usage_egress`]): a model node sends the record of the turn a cancel cut
 //! after its own cancel, so the bridge goes on reading such an egress until the child run is
-//! terminal and the egress closes, and sends what it reads there without giving way, so that a
-//! cancel of the parent loses no usage of the child. A full `fail` queue at a bridge is
-//! back-pressure, not loss: the bridge holds the envelope until the queue has room (see its
-//! private `send`).
+//! terminal and the egress closes, and sends what it reads there without giving way to the
+//! cancel, so that a cancel of the parent loses no usage of the child. Such a send gives way only
+//! once the node is stopped and [`USAGE_STOP_GRACE`] has passed with the parent edge still full,
+//! as when its consumer holds its receiver unread, so that the node's stop, and the parent's
+//! wind-down with it, cannot hang on it; each record given up so is counted
+//! ([`SubgraphHandle::dropped_usage`]). A full `fail` queue at a bridge is back-pressure, not
+//! loss: the bridge holds the envelope until the queue has room, waiting on a timer of the child's
+//! thread between its tries where it cannot be woken by the room (see its private `send`).
+//!
+//! A subgraph node dropped while its child runs, as when its parent's controller is dropped
+//! without a cancel, cancels the child and waits up to [`CHILD_DROP_BOUND`] for the child's
+//! thread to return, so the child's nodes do not outlive their parent.
 //!
 //! An output port of the node other than `usage` that no parent edge leaves, which validation
 //! admits when the port is optional, is the node's as a model node's port with no edge is the
@@ -75,9 +83,10 @@ use std::fmt;
 use std::future::{self, Future};
 use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};
+use std::time::{Duration, Instant};
 
 use inference_core::endpoint::{
     ClosedToSenders, InputEndpoint, KnownContents, OutputEndpoint, SendError,
@@ -93,6 +102,13 @@ use crate::controller::{Ingress, RunController, RunError};
 use crate::drive::RunRequests;
 use crate::queue::{EpochLookup, Room};
 use crate::run::{NodeInstanceState, RunState};
+
+/// How long dropping a [`SubgraphNode`] whose child runs waits for the child's thread to end.
+pub const CHILD_DROP_BOUND: Duration = Duration::from_secs(5);
+
+/// How long, once the subgraph node is stopped, a usage send of a bridge waits for room on a
+/// parent edge before it gives the record up.
+pub const USAGE_STOP_GRACE: Duration = Duration::from_secs(1);
 
 /// The node implementations of a child run: called once per node of the child, with the child
 /// run's identity, which the node stamps on what it emits, and the node's declaration.
@@ -115,6 +131,7 @@ pub struct ChildAtStop {
 struct Seen {
     child_run_id: Option<RunId>,
     at_stop: Option<ChildAtStop>,
+    dropped_usage: u64,
 }
 
 /// The caller's side of a [`SubgraphNode`]: what it reads of the child run.
@@ -140,12 +157,32 @@ impl SubgraphHandle {
     pub fn at_stop(&self) -> Option<ChildAtStop> {
         self.seen().at_stop.clone()
     }
+
+    /// How many usage records of the child the node gave up unsent because the parent edge they
+    /// waited on had no room [`USAGE_STOP_GRACE`] after the node's stop, or at its drop, and the
+    /// records the bridge read after that and did not forward. Each is counted by the child's
+    /// thread as it is given up, so a thread a drop left running past [`CHILD_DROP_BOUND`] still
+    /// counts what it gives up later. The count is per record, not per parent edge: where the
+    /// node's `usage` port feeds several parent edges, a record one edge took before another gave
+    /// it up counts once, though that edge delivered it. The caller marks the parent's usage total
+    /// partial for them, as for [`crate::usage_sink::uncounted_usage`].
+    #[must_use]
+    pub fn dropped_usage(&self) -> u64 {
+        self.seen().dropped_usage
+    }
 }
 
-/// What the bridges of a running child are told, shared with them.
+/// What the bridges of a running child are told, shared with them, and the timers of the child's
+/// thread.
 #[derive(Default)]
 struct Bridges {
+    /// The node's handle, which the usage records given up are counted in.
+    handle: SubgraphHandle,
     state: Mutex<(BridgeState, Vec<Waker>)>,
+    /// Notified on every change of the state, for a drop waiting for the thread to return.
+    changed: Condvar,
+    /// The tasks of the child's thread waiting for an instant, each woken once it passed.
+    due: Mutex<Vec<(Instant, Waker)>>,
 }
 
 #[derive(Default)]
@@ -165,6 +202,9 @@ struct BridgeState {
     refused: Option<String>,
     /// The ingress bridges that have not ended.
     ingresses: usize,
+    /// The subgraph node is stopped or dropped: a send waiting for room gives way, a usage send
+    /// once this instant has passed and any other at once.
+    stop_deadline: Option<Instant>,
 }
 
 impl Bridges {
@@ -174,7 +214,86 @@ impl Bridges {
             change(&mut state.0);
             std::mem::take(&mut state.1)
         };
+        self.changed.notify_all();
         wakers.into_iter().for_each(Waker::wake);
+    }
+
+    /// Waits up to `bound` for the thread of the child to return: true when it did.
+    fn wait_done(&self, bound: Duration) -> bool {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, bound, |state| !state.0.done)
+            .unwrap_or_else(PoisonError::into_inner);
+        state.0.done
+    }
+
+    /// Counts one usage record given up in the node's handle.
+    fn usage_given_up(&self) {
+        self.handle.seen().dropped_usage += 1;
+    }
+
+    /// Wakes the task of `cx` once `at` has passed; the child's thread parks no longer than that.
+    fn wake_at(&self, cx: &Context<'_>, at: Instant) {
+        let mut due = self.due.lock().unwrap_or_else(PoisonError::into_inner);
+        if !due
+            .iter()
+            .any(|(known, waker)| *known == at && waker.will_wake(cx.waker()))
+        {
+            due.push((at, cx.waker().clone()));
+        }
+    }
+
+    /// Wakes every task whose instant has passed and answers the earliest instant still ahead.
+    fn fire_due(&self) -> Option<Instant> {
+        let now = Instant::now();
+        let fired: Vec<Waker> = {
+            let mut due = self.due.lock().unwrap_or_else(PoisonError::into_inner);
+            let (fired, ahead) = std::mem::take(&mut *due)
+                .into_iter()
+                .partition::<Vec<_>, _>(|(at, _)| *at <= now);
+            *due = ahead;
+            fired.into_iter().map(|(_, waker)| waker).collect()
+        };
+        fired.into_iter().for_each(Waker::wake);
+        self.due
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(at, _)| *at)
+            .min()
+    }
+
+    /// Whether a send waiting for room gives way now: a send that `yields` at the node's cancel
+    /// or stop, a usage send once the stop deadline has passed. A send that does not give way has
+    /// the task of `cx` woken at the next change, so a drop moving the deadline to now wakes it at
+    /// once, and a usage send before its deadline also at the deadline.
+    fn gives_way(&self, cx: &Context<'_>, yields: bool) -> bool {
+        let deadline = self.read(cx, |state| {
+            if yields && (state.cancel || state.stop_deadline.is_some()) {
+                Some(None)
+            } else {
+                state.stop_deadline.map(Some)
+            }
+        });
+        match deadline {
+            None => false,
+            Some(None) => true,
+            Some(Some(at)) if Instant::now() >= at => true,
+            Some(Some(at)) => {
+                self.woken_by_the_next_change(cx);
+                self.wake_at(cx, at);
+                false
+            }
+        }
+    }
+
+    /// Registers the task of `cx` to be woken by the next change of the state.
+    fn woken_by_the_next_change(&self, cx: &Context<'_>) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.1.iter().any(|known| known.will_wake(cx.waker())) {
+            state.1.push(cx.waker().clone());
+        }
     }
 
     /// Reads the state, or registers the task of `cx` to be woken by its next change.
@@ -397,7 +516,10 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
                 let requests = child.requests();
                 let bridges = Arc::clone(&tasks.bridges);
                 let thread = thread::spawn(move || {
-                    let result = block_on(run_child(&mut child, tasks.tasks, &tasks.bridges));
+                    let result = block_on(
+                        run_child(&mut child, tasks.tasks, &tasks.bridges),
+                        &tasks.bridges,
+                    );
                     tasks.bridges.update(|state| state.done = true);
                     (child, result)
                 });
@@ -451,7 +573,10 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
         }
         let mut ends = child.exposed();
         let child_run = child.run().run_id();
-        let bridges = Arc::new(Bridges::default());
+        let bridges = Arc::new(Bridges {
+            handle: self.handle.clone(),
+            ..Bridges::default()
+        });
         let mut tasks: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = Vec::new();
         for (exposure, parents) in inputs {
             let Some(Ingress {
@@ -646,13 +771,49 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
         }
     }
 
+    /// Stops the child: a bridge send still waiting for room gives way, a usage send once
+    /// [`USAGE_STOP_GRACE`] has passed, so that a parent edge whose consumer holds its receiver
+    /// unread cannot hold the stop; then waits for the child's thread to return.
     async fn stop_child(&mut self) {
+        if let Child::Running { bridges, .. } = &self.state {
+            let deadline = Instant::now() + USAGE_STOP_GRACE;
+            bridges.update(|state| {
+                state.stop_deadline.get_or_insert(deadline);
+            });
+        }
         self.ended().await;
         if let Child::Prepared(child) = &mut self.state {
             let _cancelled_or_already_terminal = child.cancel().await;
         }
         if let Child::Prepared(child) | Child::Ended(child) = &self.state {
             self.record(child);
+        }
+    }
+}
+
+/// A subgraph node dropped while its child runs, as when its parent's controller is dropped
+/// without a cancel, cancels the child run, has every bridge send give way at once, usage sends
+/// included, and waits up to [`CHILD_DROP_BOUND`] for the child's thread to return, joining it;
+/// a thread still running then, held by a node of the child that does not end on its cancel, is
+/// left to end on its own. Usage records given up are counted in the [`SubgraphHandle`].
+impl<P> Drop for SubgraphNode<P> {
+    fn drop(&mut self) {
+        let Child::Running {
+            requests,
+            bridges,
+            thread,
+        } = std::mem::replace(&mut self.state, Child::None)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        bridges.update(|state| {
+            state.cancel = true;
+            state.stop_deadline = Some(now);
+        });
+        requests.cancel();
+        if bridges.wait_done(CHILD_DROP_BOUND) {
+            let _child_and_its_answer = thread.join();
         }
     }
 }
@@ -700,6 +861,10 @@ impl<P: From<ControlKind> + Clone + Send + 'static> NodeImplementation<P> for Su
         Box::pin(self.cancel_child())
     }
 
+    /// Stops the node; see [`SubgraphNode`]'s module documentation. A run cancels or drains a node
+    /// before it stops it, so the child has ended or been cancelled by then; a caller that calls
+    /// `stop` directly on a node it neither cancelled nor drained waits until the child run ends
+    /// on its own.
     fn stop(&mut self) -> NodeFuture<'_, ()> {
         Box::pin(self.stop_child())
     }
@@ -754,25 +919,35 @@ enum Sent {
     Taken,
     /// The queue refused it otherwise: closed, or the sequence did not increase.
     Refused,
-    /// The subgraph node was cancelled before the queue took it; it is dropped.
+    /// The subgraph node was cancelled, or stopped, before the queue took it; it is dropped.
     Cancelled,
 }
 
-/// Sends `envelope` on `output` as a bridge does, racing every wait against the node's cancel when
-/// it `yields`, so that a cancel ends a bridge whose queue holds a send waiting for room (`pause`).
-/// A usage record's send does not yield: it waits for the queue to take it or refuse it, closed,
-/// so that a cancel loses no usage (see [`egress_bridge`]).
+/// The first wait before a bridge sends again into a full `fail` queue whose `room` it does not
+/// hold, and the longest: each wait doubles the last, up to the longest.
+const FULL_RETRY_FIRST: Duration = Duration::from_millis(1);
+const FULL_RETRY_LONGEST: Duration = Duration::from_millis(16);
+
+/// Sends `envelope` on `output` as a bridge does, racing every wait against the node's cancel and
+/// stop when it `yields`, so that a cancel ends a bridge whose queue holds a send waiting for room
+/// (`pause`). A usage record's send does not yield to a cancel: it waits for the queue to take it
+/// or refuse it, closed, so that a cancel loses no usage (see [`egress_bridge`]). It gives way
+/// only once the node is stopped and [`USAGE_STOP_GRACE`] has passed, or at once when the node is
+/// dropped, so that a parent consumer holding its receiver unread cannot hold the node's stop, and
+/// with it the parent's wind-down, forever.
 ///
 /// A `fail` queue that is full answers [`SendError::Full`]. At a bridge that answer is
 /// back-pressure, not loss: the envelope was already taken from the other side's queue, whose
 /// producer saw its send succeed, so failing here would lose it with nobody told, and failing the
 /// subgraph node would fail the parent for the size of a queue the parent does not see. The bridge
 /// therefore holds the envelope and sends it again once the queue has room: woken by the
-/// receiver's next take where the bridge holds the queue's `room` (a child ingress), otherwise by
-/// yielding once to the other tasks of its thread (a parent edge, which hands the node only its
-/// sending end). Either way it gives way to the child's run loop and the other bridges instead of
-/// blocking their thread, and the other side's queue stays full meanwhile, which holds its
-/// producer under that queue's own policy.
+/// receiver's next take where the bridge holds the queue's `room` (a child ingress), otherwise
+/// after a wait on a timer of the child's thread, [`FULL_RETRY_FIRST`] doubling up to
+/// [`FULL_RETRY_LONGEST`] (a parent edge, which hands the node only its sending end), during which
+/// the thread parks, so that a consumer slower than the child does not spin it. Either way it
+/// gives way to the child's run loop and the other bridges instead of blocking their thread, and
+/// the other side's queue stays full meanwhile, which holds its producer under that queue's own
+/// policy.
 async fn send<P>(
     output: &dyn OutputEndpoint<P>,
     envelope: EventEnvelope<P>,
@@ -780,13 +955,9 @@ async fn send<P>(
     bridges: &Bridges,
     yields: bool,
 ) -> Sent {
-    let cancelled = |cx: &Context<'_>| {
-        yields
-            && bridges
-                .read(cx, |state| state.cancel.then_some(()))
-                .is_some()
-    };
+    let cancelled = |cx: &Context<'_>| bridges.gives_way(cx, yields);
     let mut envelope = envelope;
+    let mut wait = FULL_RETRY_FIRST;
     loop {
         let answer = {
             let mut sending = output.send(envelope);
@@ -803,17 +974,17 @@ async fn send<P>(
             Some(Ok(())) => return Sent::Taken,
             Some(Err(SendError::Full(refused))) => {
                 envelope = refused;
-                let mut yielded = false;
+                let again = Instant::now() + wait;
+                wait = (wait * 2).min(FULL_RETRY_LONGEST);
                 let gave_way = future::poll_fn(|cx| {
                     if cancelled(cx) {
                         return Poll::Ready(false);
                     }
                     match room {
                         Some(room) => room.poll_room(cx).map(|()| true),
-                        None if yielded => Poll::Ready(true),
+                        None if Instant::now() >= again => Poll::Ready(true),
                         None => {
-                            yielded = true;
-                            cx.waker().wake_by_ref();
+                            bridges.wake_at(cx, again);
                             Poll::Pending
                         }
                     }
@@ -1228,7 +1399,10 @@ enum Next<P> {
 /// cut after its own cancel (`story:llm-usage-on-cancel`), so at the cancel the bridge stops
 /// reading every other egress and goes on reading its usage egresses until the child run is
 /// terminal and they close, and its sends of their envelopes do not give way to the cancel: each
-/// waits until the parent edge takes it or refuses it, closed.
+/// waits until the parent edge takes it or refuses it, closed, or until [`USAGE_STOP_GRACE`]
+/// after the node's stop (at once after its drop). A send given up so ends the forwarding: the
+/// bridge goes on reading its egresses, so the child's nodes are not refused, and counts each
+/// usage record it reads then, and the one given up, as dropped.
 ///
 /// `egresses` is the child's egress of the port's name, or, for the node's usage port, that and
 /// every usage egress the port forwards ([`Declaration::forwarded_usage`]), merged as they arrive,
@@ -1249,6 +1423,7 @@ async fn egress_bridge<P: Clone + Send + 'static>(
     let mut stopped = sinks.clone();
     let usage: Vec<bool> = egresses.iter().map(|egress| egress.usage).collect();
     let mut cancelled = false;
+    let mut abandoned = false;
     let mut pending: Vec<(usize, Indexed<P>)> = egresses
         .into_iter()
         .enumerate()
@@ -1296,6 +1471,13 @@ async fn egress_bridge<P: Clone + Send + 'static>(
                 continue;
             }
         }
+        let record = usage[index] && envelope.kind != ControlKind::Stop.as_str();
+        if abandoned {
+            if record {
+                bridges.usage_given_up();
+            }
+            continue;
+        }
         let mut kept = Vec::with_capacity(parents.len());
         for parent in parents {
             match send(
@@ -1309,8 +1491,19 @@ async fn egress_bridge<P: Clone + Send + 'static>(
             {
                 Sent::Taken => kept.push(parent),
                 Sent::Refused => {}
+                Sent::Cancelled if usage[index] => {
+                    abandoned = true;
+                    break;
+                }
                 Sent::Cancelled => return,
             }
+        }
+        if abandoned {
+            if record {
+                bridges.usage_given_up();
+            }
+            parents = Vec::new();
+            continue;
         }
         if kept.is_empty() && !discards {
             bridges.update(|state| {
@@ -1359,14 +1552,19 @@ impl Wake for Unpark {
     }
 }
 
-/// Polls `future` on this thread until it completes.
-fn block_on<F: Future>(future: F) -> F::Output {
+/// Polls `future` on this thread until it completes, parking between polls until a wake or the
+/// earliest instant a task waits for on the timers of `bridges`, whose tasks it wakes once their
+/// instant has passed.
+fn block_on<F: Future>(future: F, bridges: &Bridges) -> F::Output {
     let waker = Waker::from(Arc::new(Unpark(thread::current())));
     let mut future = pin!(future);
     loop {
         if let Poll::Ready(output) = future.as_mut().poll(&mut Context::from_waker(&waker)) {
             return output;
         }
-        thread::park();
+        match bridges.fire_due() {
+            Some(at) => thread::park_timeout(at.saturating_duration_since(Instant::now())),
+            None => thread::park(),
+        }
     }
 }
