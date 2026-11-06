@@ -41,8 +41,9 @@
 //! the loop paces the input and reads each event on the caller's clock as it arrives, so a step
 //! that blocks, an LLM working on its next segment or a hosted synthesiser speaking one, holds no
 //! frame back. [`run_cascade_live`] runs on the wall clock and waits on the reports until the
-//! next frame is due; [`run_cascade`] runs on a simulated clock, which it moves on only once every
-//! worker is idle or parked on a pending future. Three measures of the cascade's own steps run
+//! next frame is due; [`run_cascade`] runs on a simulated clock, which it moves on once every
+//! worker is idle or parked on a pending future, or once the workers owed a report for
+//! [`SIMULATED_STALL`] of wall-clock time and so wait on that clock. Three measures of the cascade's own steps run
 //! from the end of input speech:
 //!
 //! * final transcript: the recogniser's last committed span of the turn;
@@ -1196,10 +1197,19 @@ struct CascadeRunner<'a, 's, 'e, R: Recogniser, S: Synthesiser> {
     measured: Measured,
 }
 
+/// The wall-clock time a simulated run waits for a report its workers owe before it takes them
+/// as waiting on its clock and moves the clock on to the next frame.
+pub const SIMULATED_STALL: Duration = Duration::from_millis(250);
+
 /// Runs the plan once over `cascade` on a simulated clock: `clock` is read, and `wait` moves it
-/// on until the next frame is due, called only once every worker is idle or parked on a pending
-/// future. The answer's audio is played on `playout`. Returns what it measured; see the module
-/// documentation. Every failure is a note of the run.
+/// on until the next frame is due. It is called once every worker is idle or parked on a pending
+/// future, or when the workers owe a report and none came for [`SIMULATED_STALL`] of wall-clock
+/// time: a step that blocks until the caller's clock reaches a time, or a future that wakes
+/// itself until then, waits on the clock, and the clock then moves one frame per stall. A step
+/// that computes for longer than that on the wall clock sees the simulated clock move meanwhile.
+/// The answer's audio is played on `playout`. Returns what it measured; see the module
+/// documentation. Every failure is a note of the run; a panic of a step or of the caller's
+/// playout, clock or wait reaches the caller once every worker stopped.
 pub fn run_cascade<R, S>(
     cascade: &mut Cascade<R, S>,
     plan: &Plan,
@@ -1311,6 +1321,18 @@ where
     })
 }
 
+/// A runner dropped without its last `cut`, as when the caller's playout, clock or wait panics
+/// on the arm's loop, tells the generator's worker to stop; the other workers end as their task
+/// senders drop. The arm's thread scope then joins every worker, and the panic reaches the
+/// caller instead of leaving the scope waiting on a worker its own waker keeps alive.
+impl<R: Recogniser, S: Synthesiser> Drop for CascadeRunner<'_, '_, '_, R, S> {
+    fn drop(&mut self) {
+        if let Some(tasks) = self.generate.take() {
+            hand(Some(&tasks), &self.owing, Generate::Stop);
+        }
+    }
+}
+
 impl<'s, R, S> CascadeRunner<'_, 's, '_, R, S>
 where
     R: Recogniser,
@@ -1347,7 +1369,13 @@ where
                     }
                     report
                 }
-                Some(_) => self.reports.recv().ok(),
+                Some(advance) => match self.reports.recv_timeout(SIMULATED_STALL) {
+                    Ok(report) => Some(report),
+                    Err(_) => {
+                        advance(until);
+                        None
+                    }
+                },
             };
             if let Some(report) = report {
                 self.take(report);
