@@ -1,8 +1,8 @@
 //! The wire protocol of a Phonic speech-to-speech conversation: where it connects, the `config`
 //! it sends, the messages it reads, and what the documentation leaves open.
 //!
-//! Taken on 2026-11-06 from Phonic's public documentation, saved with its URLs in this crate's
-//! `protocol/` directory:
+//! Taken on 2026-11-06 from Phonic's public documentation, summarised with its URLs in this crate's
+//! `protocol/README.md`:
 //!
 //! - <https://docs.phonic.co/api-reference/conversations/conversations>, the AsyncAPI reference;
 //! - <https://docs.phonic.co/docs/build/with-web-sockets/via-web-sockets>;

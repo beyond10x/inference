@@ -4,7 +4,7 @@
 //! `external_provider`: the audio of every session leaves the machine. [`PhonicSpeech`] opens a
 //! conversation over Phonic's realtime WebSocket `/v1/sts/ws` with the `phonic-1` model unless
 //! configured otherwise; [`protocol`] says what it sends and reads, the documentation it was taken
-//! from with its date (the pages themselves are in `protocol/`), and what that documentation
+//! from with its date (summarised in `protocol/README.md`), and what that documentation
 //! leaves open. `duplex` says how a conversation maps onto the contract.
 //!
 //! The session configuration chooses the formats both ways, each one Phonic takes: 16-bit PCM

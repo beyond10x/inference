@@ -1,14 +1,15 @@
 # Phonic speech-to-speech WebSocket: the documentation the binding was taken from
 
-Fetched on 2026-11-06 with `curl`, no key and no login, from Phonic's public documentation. Each
-file here is the page as it was served (the `.md` form the site offers for every page):
+Fetched on 2026-11-06 with `curl`, no key and no login, from Phonic's public documentation (the
+`.md` form the site offers for every page). The pages are Phonic's text and are not copied here;
+this file is a summary in our words.
 
-| file | URL |
+| page | URL |
 |---|---|
-| `conversations.md` | <https://docs.phonic.co/api-reference/conversations/conversations.md>, the AsyncAPI 2.6.0 reference of `GET /v1/sts/ws` |
-| `via-web-sockets.md` | <https://docs.phonic.co/docs/build/with-web-sockets/via-web-sockets.md> |
-| `websocket-tools.md` | <https://docs.phonic.co/docs/build/tools/websocket_tools.md> |
-| `authentication.md` | <https://docs.phonic.co/docs/platform/authentication/overview.md> |
+| Conversations | <https://docs.phonic.co/api-reference/conversations/conversations.md>, the AsyncAPI 2.6.0 reference of `GET /v1/sts/ws` |
+| Via WebSockets | <https://docs.phonic.co/docs/build/with-web-sockets/via-web-sockets.md> |
+| WebSocket tools | <https://docs.phonic.co/docs/build/tools/websocket_tools.md> |
+| Authentication | <https://docs.phonic.co/docs/platform/authentication/overview.md> |
 
 `src/protocol.rs` says which of it the binding speaks, and `src/duplex.rs` how a conversation
 maps onto the `inference-duplex` contract. What the documentation does not say is listed below
