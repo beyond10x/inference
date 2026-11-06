@@ -16,7 +16,7 @@ scope:
   path: crates/inference-facade/src/session.rs
 - confidence: inferred
   path: ess/domains/session.yaml
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-06T00:41:02Z", actor: "human:timo", revision: 5}
 - {from: "proposed", to: "active", at: "2026-11-06T00:41:02Z", actor: "human:timo", revision: 6}
@@ -33,8 +33,8 @@ From review-result:full-codebase-2026-11-06 (findings W4, W8, N24, N28), at rele
 ## Planned scope
 
 - A Draining session whose run ends Failed or Cancelled closes, delivering `RunFailed`/`RunCancelled` then `SessionClosed` last; `session.yaml` states it first.
-- Bound the event log: per-frame inputs are counted, not each logged, and a Closed session's history is released after its last receive; `events()` returns a bounded view. State the bound in the crate doc and `session.yaml`.
-- Prune generation bookkeeping when a generation ends.
+- Bound the event log: per-frame inputs are counted, not each logged, and the log holds at most a stated number of events; a Closed session's rows and history stay, as the documented history contract requires. State the bound in the crate doc and `session.yaml`.
+- Release generation bookkeeping once a generation has ended and a stated number of later generations (8) have ended after it; releasing at the end itself would let a barge-in miss audio still playing from that generation.
 - Record `InputSent` only after the ingress accepts.
 
 ## Acceptance
@@ -42,5 +42,5 @@ From review-result:full-codebase-2026-11-06 (findings W4, W8, N24, N28), at rele
 - `close()` then a node failure delivers `SessionClosed` and leaves the session Closed.
 - `close()` then a cancel by a second holder delivers `SessionClosed`.
 - Ten thousand audio sends leave the event log within its stated bound.
-- Generation bookkeeping is empty after a generation ends.
+- Generation bookkeeping holds at most the stated number of ended generations; an interrupt still cuts playback of a generation whose text has ended.
 - A refused ingress send yields no `InputSent`.
