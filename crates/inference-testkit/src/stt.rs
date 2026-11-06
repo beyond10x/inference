@@ -74,7 +74,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use inference_stt::inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 use inference_stt::inference_core::envelope::EventEnvelope;
 use inference_stt::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_stt::inference_core::usage::UsageRecorded;
 use inference_stt::inference_text::{ReviseSpan, SpanId};
@@ -328,6 +328,7 @@ impl MockRecogniser {
             locality: Locality::SameProcess,
             capabilities: configuration.capabilities(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("a maximum concurrency of one is positive");
         Self {

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use inference_duplex::inference_audio::{AudioFrame, SampleClockPosition};
 use inference_duplex::inference_core::model::{
-    Adapter, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
@@ -143,6 +143,7 @@ impl Scripted {
             locality: Locality::SameProcess,
             capabilities: Vec::new(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("a concurrency of one");
         let capabilities = SpeechCapabilities {

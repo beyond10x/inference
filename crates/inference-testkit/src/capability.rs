@@ -13,7 +13,7 @@
 //!
 //! ```
 //! # use inference_testkit::model::capability::{self, RecordRefused};
-//! # use inference_core::model::{Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId};
+//! # use inference_core::model::{Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId};
 //! let (adapter, _) = Adapter::declare(DeclareAdapter {
 //!     model_id: ModelId::generate(),
 //!     backend: "backend".to_owned(),
@@ -22,6 +22,7 @@
 //!     locality: Locality::SameProcess,
 //!     capabilities: vec![Capability::OutputStreaming],
 //!     max_concurrency: 1,
+//!     descriptor: AdapterDescriptor::default(),
 //! })
 //! .unwrap();
 //! let mut record = capability::parse(

@@ -32,7 +32,8 @@ use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
@@ -136,6 +137,7 @@ fn planning_refuses_an_external_provider_under_offline_strict_and_the_pipeline_s
         locality: Locality::ExternalProvider,
         capabilities: vec![Capability::OutputStreaming],
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("a positive concurrency");
     let known = Known {

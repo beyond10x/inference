@@ -2,7 +2,8 @@
 //! names of the record against `ess/domains/model.yaml`.
 
 use inference_core::model::{
-    Adapter, Capability, CapabilityRecord, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, CapabilityRecord, DeclareAdapter, ExecutionForm,
+    Locality, ModelId,
 };
 use inference_testkit::model::capability::{self, RecordRefused};
 use serde_json::Value;
@@ -16,6 +17,7 @@ fn streaming_adapter() -> Adapter {
         locality: Locality::SameProcess,
         capabilities: vec![Capability::OutputStreaming],
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one slot")
     .0

@@ -60,8 +60,8 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 use inference_stt::inference_audio::{AudioEncoding, AudioFrame};
 use inference_stt::inference_core::envelope::EventEnvelope;
 use inference_stt::inference_core::model::{
-    Adapter, AdapterDeclared, DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality,
-    Model, ModelDeclared, ModelId, NonPositiveConcurrency,
+    Adapter, AdapterDeclared, AdapterDescriptor, DeclareAdapter, DeclareModel, ExecutionForm,
+    Locality, Modality, Model, ModelDeclared, ModelId, NonPositiveConcurrency,
 };
 use inference_stt::inference_text::ReviseSpan;
 use inference_stt::{
@@ -178,6 +178,7 @@ pub fn declare_adapter(
         locality: Locality::SameProcess,
         capabilities: Vec::new(),
         max_concurrency,
+        descriptor: AdapterDescriptor::default(),
     })
 }
 

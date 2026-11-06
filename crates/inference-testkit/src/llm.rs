@@ -52,7 +52,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_llm::llm_core::{
     self, BoxFuture, CallId, Cancel, Capabilities, Dispatch, Id, Item, Protocol, Provenance,
@@ -203,6 +203,7 @@ impl MockGenerator {
             locality: Locality::SameProcess,
             capabilities: configuration.capabilities(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("a maximum concurrency of one is positive");
         let id = |value: &str| Id::new(value).expect("a printable identifier");
@@ -256,6 +257,7 @@ impl MockGenerator {
             locality: adapter.locality(),
             capabilities,
             max_concurrency: adapter.max_concurrency(),
+            descriptor: adapter.descriptor().clone(),
         })
         .expect("the declaration it repeats was admitted");
         let model = MockModel {

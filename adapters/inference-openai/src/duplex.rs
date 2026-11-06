@@ -98,7 +98,7 @@ use std::time::{Duration, Instant};
 
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
@@ -250,6 +250,7 @@ impl OpenAiRealtime {
             locality: Locality::ExternalProvider,
             capabilities: claims(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .map(|(adapter, _)| adapter)
         .unwrap_or_else(|_| unreachable!("a concurrency of one is positive"));

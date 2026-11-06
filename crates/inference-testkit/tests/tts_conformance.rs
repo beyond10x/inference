@@ -12,7 +12,7 @@ use std::num::{NonZeroU16, NonZeroU32};
 use std::rc::Rc;
 
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_core::usage::{Quantity, QuantityKind};
 use inference_testkit::tts::conformance::{
@@ -469,6 +469,7 @@ impl Double {
             locality: Locality::SameProcess,
             capabilities: claimed.capabilities(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("a maximum concurrency of one is positive");
         Self {

@@ -97,7 +97,7 @@ use inference_duplex::inference_audio::{
     AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition,
 };
 use inference_duplex::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
@@ -338,6 +338,7 @@ impl ElevenLabsAgent {
             locality: Locality::ExternalProvider,
             capabilities: agent_claims(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .map(|(adapter, _)| adapter)
         .unwrap_or_else(|_| unreachable!("a concurrency of one is positive"));

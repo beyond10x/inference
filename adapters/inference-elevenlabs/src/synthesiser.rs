@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use inference_tts::inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
 use inference_tts::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_tts::inference_text::{
     AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentState,
@@ -140,6 +140,7 @@ fn declare(max_concurrency: i64) -> Result<Adapter, ConfigError> {
         locality: Locality::ExternalProvider,
         capabilities: claims(),
         max_concurrency,
+        descriptor: AdapterDescriptor::default(),
     })
     .map(|(adapter, _)| adapter)
     .map_err(|_| ConfigError::MaxConcurrency(max_concurrency))

@@ -1059,7 +1059,7 @@ pub trait RecognitionHandle: Iterator<Item = EventEnvelope<TranscriptEvent>> {
 
 #[cfg(test)]
 mod tests {
-    use inference_core::model::{DeclareAdapter, ExecutionForm, Locality};
+    use inference_core::model::{AdapterDescriptor, DeclareAdapter, ExecutionForm, Locality};
 
     use super::*;
 
@@ -1072,6 +1072,7 @@ mod tests {
             locality: Locality::SameProcess,
             capabilities: Vec::new(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("one is positive")
         .0

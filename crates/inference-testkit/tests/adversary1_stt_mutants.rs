@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use inference_core::envelope::EventEnvelope;
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_stt::inference_audio::AudioFrame;
 use inference_stt::{
@@ -62,6 +62,7 @@ impl Mutant {
             locality: Locality::SameProcess,
             capabilities: vec![Capability::IncrementalInput, Capability::OutputStreaming],
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("one is positive");
         Self {
