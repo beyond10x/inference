@@ -127,6 +127,12 @@ impl fmt::Display for SequenceNotIncreasing {
 
 impl Error for SequenceNotIncreasing {}
 
+/// How many refusals a run keeps ([`RunController::refusals`](crate::RunController::refusals)): the
+/// first ones, in the order the run refused them. Each later one is counted
+/// ([`RunController::refusals_overflow`](crate::RunController::refusals_overflow)) and not kept, so
+/// a node that keeps sending non-increasing sequences does not grow the run without bound.
+pub const REFUSALS_KEPT: usize = 256;
+
 struct State {
     run: RunState,
     /// The output edges of each source node, and each ingress, that have not yet taken its end of
@@ -144,7 +150,9 @@ struct State {
     /// The nodes an edge into which refused an envelope as closed while the run was Active, in
     /// the order the refusals happened.
     gone: VecDeque<NodeId>,
+    /// The first [`REFUSALS_KEPT`] refusals, and how many came after them.
     refusals: Vec<SequenceNotIncreasing>,
+    refusals_overflow: u64,
     waker: Option<Waker>,
 }
 
@@ -188,6 +196,7 @@ impl Default for Signals {
                 input_closed: false,
                 gone: VecDeque::new(),
                 refusals: Vec::new(),
+                refusals_overflow: 0,
                 waker: None,
             }),
         }
@@ -263,13 +272,24 @@ impl Signals {
         !self.state().input_closed
     }
 
+    /// Keeps `refusal` while fewer than [`REFUSALS_KEPT`] are kept, else counts it.
     fn refused(&self, refusal: SequenceNotIncreasing) {
-        self.state().refusals.push(refusal);
+        let mut state = self.state();
+        if state.refusals.len() < REFUSALS_KEPT {
+            state.refusals.push(refusal);
+        } else {
+            state.refusals_overflow = state.refusals_overflow.saturating_add(1);
+        }
     }
 
-    /// Every envelope the run refused, in the order it refused them.
+    /// The first [`REFUSALS_KEPT`] envelopes the run refused, in the order it refused them.
     pub(crate) fn refusals(&self) -> Vec<SequenceNotIncreasing> {
         self.state().refusals.clone()
+    }
+
+    /// How many refusals came after the first [`REFUSALS_KEPT`] and were not kept.
+    pub(crate) fn refusals_overflow(&self) -> u64 {
+        self.state().refusals_overflow
     }
 
     /// What to do next from Active, once there is something: a failure the caller reported or a

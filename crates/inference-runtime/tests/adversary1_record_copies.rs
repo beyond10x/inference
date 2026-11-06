@@ -38,10 +38,7 @@ fn a_copy_passed_on_unchanged_is_not_a_second_decision() {
             },
         })
         .collect();
-    let recording = Recording {
-        policy_version: "1".to_owned(),
-        entries,
-    };
+    let recording = Recording::new("1".to_owned(), entries);
     let decisions = recording.decisions();
     assert_eq!(
         decisions

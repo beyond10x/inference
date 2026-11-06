@@ -1,6 +1,7 @@
 # The audio vocabulary of docs/design/inference.md: the frames, formats and sample clock that audio
 # media carries (§6.1, §6.3, §11.5). Every declaration cites the design line it was read from;
-# these are value types only, and no entity, command, event or view is declared here.
+# these are value types and the one event that carries a frame of synthesized audio, and no
+# entity, command or view is declared here.
 domain: inference.audio
 
 summary: >-
@@ -73,3 +74,16 @@ types:
         type: Integer
       - name: data
         type: Bytes
+
+events:
+  # A frame of synthesized audio as a speech synthesiser yields it: the AudioChunk of the design's
+  # TTS event family, the event a synthesis handle names for a frame. A name has one owner, so
+  # the event that carries a frame is named apart from the type AudioFrame that holds it; the
+  # segment the frame is of is the synthesis handle's, not the event's. No command here emits it:
+  # the TTS contract is no domain of this specification yet (system.yaml).
+  # read from: docs/design/inference.md:336
+  # read from: docs/design/inference.md:380
+  - name: inference.audio.AudioChunk
+    fields:
+      - name: frame
+        type: inference.audio.AudioFrame

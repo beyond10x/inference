@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-06T05:58:15Z",
+  "actor": "human:timo",
+  "artifact": "story:elevenlabs-realtime-agent-adapter",
+  "kind": "story",
+  "revision": 27,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference-elevenlabs --features duplex: lib 10, agent_duplex 22, claims_record 2, adversary2_agent_attack 3, TTS targets 45; clippy clean (correction head b0cc4a1)"
+  }
+}

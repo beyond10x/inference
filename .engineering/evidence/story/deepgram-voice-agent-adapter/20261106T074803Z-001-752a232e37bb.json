@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-06T07:48:03Z",
+  "actor": "human:timo",
+  "artifact": "story:deepgram-voice-agent-adapter",
+  "kind": "story",
+  "revision": 30,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "inference-deepgram --features duplex,keychain --tests: 16 targets, 118 passed, 0 failed (agent_duplex 24, adversary2_agent_attack 11, security2 5, STT targets unchanged); clippy clean (correction head 64b29b1)"
+  }
+}

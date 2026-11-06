@@ -43,7 +43,6 @@
 
 use std::error::Error;
 use std::fmt;
-use std::net::{IpAddr, Ipv6Addr};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -288,7 +287,8 @@ pub enum LocalRefused {
     Missing(&'static str),
     /// [`STT_VARIABLE`] is set to `value`, which names no [`SttBackend`].
     UnknownBackend { value: String },
-    /// The server URL is not an `http` or `https` URL whose host is loopback.
+    /// The server URL is not an `http` or `https` URL whose host is loopback. `url` holds the
+    /// URL's scheme, host and port only, never its userinfo, path or query.
     NotLoopback { url: String },
     /// The checkpoint directory does not hold the sherpa-onnx recogniser's pinned checkpoint.
     SherpaOnnx(inference_sherpa_onnx::stt::OpenRefused),
@@ -334,37 +334,17 @@ impl Error for LocalRefused {
 }
 
 /// Whether `url` is an `http` or `https` URL whose host is `localhost` or a loopback address,
-/// IPv4 or IPv6, an IPv4 address mapped into IPv6 read as the IPv4 address.
+/// IPv4 or IPv6, an IPv4 address mapped into IPv6 read as the IPv4 address: the server
+/// adapter's own rule ([`inference_llama_server::loopback`]), checked here before anything opens.
 ///
 /// # Errors
 ///
-/// [`LocalRefused::NotLoopback`] naming `url` otherwise.
+/// [`LocalRefused::NotLoopback`] naming the URL's scheme, host and port, never its userinfo,
+/// otherwise.
 pub fn loopback(url: &str) -> Result<(), LocalRefused> {
-    let refused = || LocalRefused::NotLoopback {
-        url: url.to_owned(),
-    };
-    let (scheme, rest) = url.split_once("://").ok_or_else(refused)?;
-    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) {
-        return Err(refused());
-    }
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host_port = authority.rsplit('@').next().unwrap_or_default();
-    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
-        let (address, _) = bracketed.split_once(']').ok_or_else(refused)?;
-        let address: Ipv6Addr = address.parse().map_err(|_| refused())?;
-        return if IpAddr::V6(address).to_canonical().is_loopback() {
-            Ok(())
-        } else {
-            Err(refused())
-        };
-    } else {
-        host_port.split(':').next().unwrap_or_default()
-    };
-    let admitted = host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.to_canonical().is_loopback());
-    if admitted { Ok(()) } else { Err(refused()) }
+    inference_llama_server::loopback(url).map_err(|refused| LocalRefused::NotLoopback {
+        url: refused.origin().to_owned(),
+    })
 }
 
 /// The mock synthesiser bound at `tts`: streaming each segment as it takes it, in 16 kHz mono

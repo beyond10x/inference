@@ -139,7 +139,7 @@ impl Connection {
 
 /// TLS with the ring provider and the webpki roots, independent of any process-wide default
 /// provider.
-fn tls_config() -> Result<Arc<rustls::ClientConfig>, ElevenLabsError> {
+pub(crate) fn tls_config() -> Result<Arc<rustls::ClientConfig>, ElevenLabsError> {
     let roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };

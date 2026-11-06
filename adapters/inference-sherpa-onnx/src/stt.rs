@@ -24,8 +24,9 @@
 //! the stream is flushed and the last span committed.
 //!
 //! The recognition's usage record, the contract's [`TranscriptOutput::usage`], is its last event,
-//! delivered right after the last commit: the audio offered and one request, as the contract
-//! measures them, and `local_compute_ms` `measured`, the wall time each step spent passing frames
+//! delivered right after the last commit: the audio offered (on a failed call, the audio taken)
+//! and one request, as the contract measures them, and `local_compute_ms` `measured`, the wall
+//! time each step spent passing frames
 //! to sherpa-onnx and decoding them, summed. sherpa-onnx reports no quantity of its own.
 //!
 //! The crate's `stt_conformance` tests hold the recogniser to adapter conformance against the

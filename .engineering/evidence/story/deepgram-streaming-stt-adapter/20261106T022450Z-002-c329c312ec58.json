@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-06T02:24:50Z",
+  "actor": "human:timo",
+  "artifact": "story:deepgram-streaming-stt-adapter",
+  "kind": "story",
+  "revision": 29,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p inference-deepgram --tests --all-features: 76 passed, 1 ignored; inference-testkit stt_conformance 13 and adversary1_stt_mutants 10 passed; A5 10/10; clippy clean (correction head d429b19)"
+  }
+}

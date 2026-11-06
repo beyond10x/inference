@@ -16,8 +16,9 @@
 //!   them all and runs the whole script.
 //!
 //! At the end of input every cue left runs, whatever its frame count, and then the recognition's
-//! usage record, [`TranscriptEvent::Usage`], is its last event: the audio offered and one request,
-//! as the contract measures them, and its local compute `unknown`, since the mock computes
+//! usage record, [`TranscriptEvent::Usage`], is its last event: the audio offered (on a failed
+//! call, the audio taken) and one request, as the contract measures them, and its local compute
+//! `unknown`, since the mock computes
 //! nothing of its own. The contract records it only once every span is committed, so a script
 //! that leaves a span uncommitted records none, and after it the contract refuses every move, a
 //! revision through the handle among them. A recognition dropped before its input ended records
@@ -90,6 +91,10 @@ pub use inference_stt;
 
 /// Synthetic audio: tone and silence, generated, never recorded.
 pub mod synthetic_audio;
+
+/// The backend-neutral checks of a streaming STT adapter, generic over any [`Recogniser`], for an
+/// adapter crate to run against its own recogniser.
+pub mod conformance;
 
 /// The STT node of a voice pipeline, behind the `run` feature: an [`SttNode`] recognises each
 /// turn the turn policy opens on one recognition of its recogniser, a [`MockRecogniser`] by

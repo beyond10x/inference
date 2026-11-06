@@ -25,8 +25,8 @@ use inference_duplex::{
 };
 use inference_openai::live::{CLOSE_TIMEOUT, LIVE_MODEL, LiveClosed, LiveFormat};
 use inference_openai::live_duplex::{
-    DEFAULT_BACKEND_MODEL, OpenAiLive, Segmentation, capabilities, claims, live_format,
-    native_duplex_verdict,
+    DEFAULT_BACKEND_MODEL, OpenAiLive, OpenAiLiveSession, Segmentation, capabilities, claims,
+    live_format, native_duplex_verdict,
 };
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Endpoint, OPENAI_KEY_NAME,
@@ -1116,9 +1116,11 @@ fn the_evidence_procedure_runs_through_the_segmentation_against_a_replay() {
     continuing.finish();
     let evidence = evidence.expect("output that takes up the input on the same response");
     assert_eq!(evidence.after, " And Portugal's is Lisbon.");
+    assert!(claims().contains(&Capability::NativeDuplex));
     assert_eq!(
         native_duplex_verdict(&Ok(evidence)),
-        Ok(claims().contains(&Capability::NativeDuplex))
+        Ok(true),
+        "evidence of native duplex agrees with the claim"
     );
 
     let yielding = evidence_replay(true);
@@ -1127,6 +1129,11 @@ fn the_evidence_procedure_runs_through_the_segmentation_against_a_replay() {
     assert!(
         matches!(refused, Err(NoNativeDuplex::NotDependent { .. })),
         "{refused:?}"
+    );
+    assert_eq!(
+        native_duplex_verdict(&refused),
+        Ok(false),
+        "a model that yields to the input disagrees with the claim"
     );
     assert!(native_duplex_verdict(&Err(NoNativeDuplex::Silent)).is_err());
 }
@@ -1575,5 +1582,223 @@ fn a_wait_of_duration_max_ends_with_the_next_event() {
                 if failed.failure.kind == SessionFailureKind::TransportClosed
         ),
         "{events:#?}"
+    );
+}
+
+/// A server that speaks an answer, is spoken over, streams the rest of the cut sentence, then
+/// speaks its next words after the caller's speech ended, each answer with one backend response
+/// of its own; it answers the close with `session.closed`.
+fn spoken_over() -> Server {
+    Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        send(&mut socket, said(" Once upon a time", 0)).await;
+        send(&mut socket, voiced()).await;
+        send(&mut socket, said(" there was", 200)).await;
+        send(&mut socket, voiced()).await;
+        send(
+            &mut socket,
+            backend("del_1", backend_completed("resp_1", 12, 4, 3)),
+        )
+        .await;
+        send(&mut socket, heard("wait", 300)).await;
+        send(&mut socket, voiced()).await;
+        send(&mut socket, said(" a ship", 400)).await;
+        send(&mut socket, voiced()).await;
+        send(&mut socket, heard(" stop", 600)).await;
+        send(&mut socket, voiced()).await;
+        send(&mut socket, said(" Sure.", 900)).await;
+        send(&mut socket, voiced()).await;
+        send(&mut socket, voiced()).await;
+        send(
+            &mut socket,
+            backend("del_1", backend_completed("resp_2", 20, 0, 7)),
+        )
+        .await;
+        for _ in 0..8 {
+            send(&mut socket, silent()).await;
+        }
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    })
+}
+
+/// The index of the first event among `events` that `which` accepts.
+fn at(events: &[SessionEvent], which: impl Fn(&SessionEvent) -> bool) -> usize {
+    events
+        .iter()
+        .position(which)
+        .unwrap_or_else(|| panic!("no such event: {events:#?}"))
+}
+
+/// Speech over an answer cuts it: what the model streams from the speech start until it speaks
+/// again after the speech ended (here the rest of the cut sentence, " a ship", and its audio)
+/// stays on the cut response, which completes before anything else. The model's next words, the
+/// first output fragment starting at or after the end of the caller's speech, open a new
+/// response, and the audio after them is on it. Each keeps the backend usage summed onto it.
+#[test]
+fn the_next_words_after_speech_over_an_answer_are_a_new_response() {
+    let server = spoken_over();
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let mut events = completed(&mut session, 2);
+    session.close().expect("open");
+    server.finish();
+    events.extend(std::iter::from_fn(|| session.next_event(Duration::ZERO)));
+
+    let ids = created(&events);
+    assert_eq!(
+        ids.len(),
+        2,
+        "the cut answer and the next words: {events:#?}"
+    );
+    let (cut, next) = (ids[0], ids[1]);
+    assert_eq!(
+        transcript(&events, cut),
+        " Once upon a time there was a ship"
+    );
+    assert_eq!(transcript(&events, next), " Sure.");
+
+    let started = at(&events, |event| {
+        matches!(event, SessionEvent::SpeechStarted(_))
+    });
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::SpeechStarted(_)))
+            .count(),
+        1,
+        "one interruption: {events:#?}"
+    );
+    let cut_done = at(
+        &events,
+        |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id == cut),
+    );
+    let next_created = at(
+        &events,
+        |event| matches!(event, SessionEvent::ResponseCreated(created) if created.response_id == next),
+    );
+    assert!(
+        started < cut_done && cut_done < next_created,
+        "the cut answer completes at the next words, before they begin: {events:#?}"
+    );
+    let of_cut = |event: &SessionEvent| matches!(event, SessionEvent::OutputAudio(output) if output.response_id == cut);
+    assert_eq!(
+        events[started..]
+            .iter()
+            .filter(|event| of_cut(event))
+            .count(),
+        3,
+        "the frames between the speech start and the next words are the cut answer's: {events:#?}"
+    );
+    assert!(
+        !events[next_created..].iter().any(of_cut),
+        "no frame of the cut answer after the next words began: {events:#?}"
+    );
+    let following = frames(&events, next);
+    assert_eq!(following.len(), 2 + 8, "{events:#?}");
+    assert_eq!(following[0], (0, FRAME, true), "the new response's clock");
+
+    assert_eq!(
+        quantity(&events, cut, QuantityKind::OutputTextTokens),
+        Some(3),
+        "the cut answer keeps its backend usage"
+    );
+    assert_eq!(
+        quantity(&events, next, QuantityKind::OutputTextTokens),
+        Some(7),
+        "the next words have theirs"
+    );
+}
+
+/// N8: `error` events and backend usages are kept, but only the most recent of each; the counts
+/// cover every one, and every backend usage is summed whether it is kept or not.
+#[test]
+fn server_errors_and_backend_usage_past_the_cap_are_counted_and_the_oldest_forgotten() {
+    const ERRORS: usize = OpenAiLiveSession::SERVER_ERRORS_KEPT + 6;
+    const USAGES: u64 = OpenAiLiveSession::BACKEND_USAGE_KEPT as u64 + 6;
+    let server = Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        for at in 0..ERRORS {
+            send(
+                &mut socket,
+                json!({"type": "error", "event_id": format!("evt_err_{at}"), "error": {"type": "invalid_request_error", "code": "invalid_value", "message": format!("error {at}")}}),
+            )
+            .await;
+        }
+        for at in 0..USAGES {
+            send(
+                &mut socket,
+                backend("del_1", backend_completed(&format!("resp_{at}"), at, 0, 1)),
+            )
+            .await;
+        }
+        send(&mut socket, heard(" Bye.", 0)).await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    });
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::InputTranscribed(_))
+    });
+    assert!(
+        matches!(events.last(), Some(SessionEvent::InputTranscribed(_))),
+        "{events:#?}"
+    );
+
+    let errors: Vec<_> = session
+        .server_errors()
+        .iter()
+        .map(|error| error.message.clone())
+        .collect();
+    let expected: Vec<_> = (ERRORS - OpenAiLiveSession::SERVER_ERRORS_KEPT..ERRORS)
+        .map(|at| format!("error {at}"))
+        .collect();
+    assert_eq!(errors, expected);
+    assert_eq!(session.server_error_count(), ERRORS as u64);
+
+    let usages: Vec<_> = session
+        .backend_usage()
+        .iter()
+        .map(|usage| usage.input_tokens)
+        .collect();
+    let expected: Vec<_> = (USAGES - OpenAiLiveSession::BACKEND_USAGE_KEPT as u64..USAGES)
+        .map(Some)
+        .collect();
+    assert_eq!(usages, expected);
+    assert_eq!(session.backend_usage_count(), USAGES);
+
+    session.close().expect("open");
+    server.finish();
+    let closing: Vec<_> = std::iter::from_fn(|| session.next_event(Duration::ZERO)).collect();
+    let held = records(&closing)
+        .into_iter()
+        .find(|record| {
+            record
+                .quantities
+                .iter()
+                .any(|quantity| quantity.kind() == QuantityKind::InputTextTokens)
+        })
+        .unwrap_or_else(|| panic!("the session's backend usage at its end: {closing:#?}"));
+    assert_eq!(
+        held.quantities,
+        vec![
+            Quantity::provider_reported(QuantityKind::InputTextTokens, (0..USAGES as i64).sum()),
+            Quantity::provider_reported(QuantityKind::CachedInputTokens, 0),
+            Quantity::provider_reported(QuantityKind::OutputTextTokens, USAGES as i64),
+        ],
+        "every backend usage is summed, kept or not"
     );
 }

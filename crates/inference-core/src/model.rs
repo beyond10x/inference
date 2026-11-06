@@ -7,8 +7,10 @@
 //! machine-readable profile of one adapter on one hardware target: the evidence for each claimed
 //! capability and the resource profile measured there. Each is created only through its
 //! declaring command, [`Model::declare`], [`Adapter::declare`] and [`CapabilityRecord::declare`],
-//! which return the entity and the event the declaration emits. Serialized names are the ESS
-//! names.
+//! which return the entity and the event the declaration emits. An [`AdapterDescriptor`]
+//! describes what the design lists beside an adapter's capabilities, every part optional: voices,
+//! codecs, context size, duration limits, token budget, state scope and [`RateLimit`]s; no
+//! declaring command takes one yet. Serialized names are the ESS names.
 
 use std::error::Error;
 use std::fmt;
@@ -454,6 +456,49 @@ pub struct ResourceProfile {
     pub cpu_real_time_factor_milli: Option<i64>,
     #[serde(default)]
     pub gpu_memory_mib: Option<i64>,
+}
+
+/// `inference.model.RateLimit`: at most `limit` of `unit` per window of `window_ms`
+/// milliseconds, such as 60 `requests` per 60000 ms. `unit` is a free name until the design
+/// settles a vocabulary for it. A field the specification does not declare is refused, and so is
+/// one left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimit {
+    pub unit: String,
+    pub limit: i64,
+    pub window_ms: i64,
+}
+
+/// `inference.model.AdapterDescriptor`: the descriptors of an adapter the design lists beside its
+/// capabilities and a [`CapabilityRecord`] does not carry: the voices and codecs a speech model
+/// offers, its context size in tokens, its input and output duration limits in milliseconds, its
+/// token budget, its state scope and its rate limits. Every part is optional: an empty list or a
+/// `None` says the adapter declares nothing of it, never that it supports none, and the wire may
+/// leave it out. Languages and audio formats are the capability record's. A field the
+/// specification does not declare is refused.
+///
+/// No declaring command takes a descriptor yet; build one with the parts an adapter declares and
+/// `..AdapterDescriptor::default()`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterDescriptor {
+    #[serde(default)]
+    pub voices: Vec<String>,
+    #[serde(default)]
+    pub codecs: Vec<String>,
+    #[serde(default)]
+    pub context_tokens: Option<i64>,
+    #[serde(default)]
+    pub max_input_duration_ms: Option<i64>,
+    #[serde(default)]
+    pub max_output_duration_ms: Option<i64>,
+    #[serde(default)]
+    pub token_budget: Option<i64>,
+    #[serde(default)]
+    pub state_scope: Option<String>,
+    #[serde(default)]
+    pub rate_limits: Vec<RateLimit>,
 }
 
 /// `inference.model.DeclareCapabilityRecord`: the input that declares a [`CapabilityRecord`] of

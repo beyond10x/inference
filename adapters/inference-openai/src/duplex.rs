@@ -89,7 +89,9 @@
 //!   leaves the session as an unreadable frame does.
 //! * A closed connection or a transport failure fails the session at once; the liveness bound
 //!   fails it when the server sends nothing readable while a response is awaited. `error` events
-//!   do not end the session; they are kept in [`OpenAiRealtimeSession::server_errors`].
+//!   do not end the session; the most recent 64 are kept in
+//!   [`OpenAiRealtimeSession::server_errors`] and every one is counted in
+//!   [`OpenAiRealtimeSession::server_error_count`].
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -111,7 +113,8 @@ use tokio::runtime::Runtime;
 
 use crate::client::RealtimeClient;
 use crate::config::{
-    Eagerness, Endpoint, FunctionTool, OutputModality, SessionConfig, TurnDetection, WireFormat,
+    Deadlines, Eagerness, Endpoint, FunctionTool, OutputModality, SessionConfig, TurnDetection,
+    WireFormat,
 };
 use crate::credential::CredentialSource;
 use crate::error::RealtimeError;
@@ -212,6 +215,7 @@ pub fn wire_format(format: &AudioFormat) -> Option<WireFormat> {
 pub struct OpenAiRealtime {
     adapter: Adapter,
     endpoint: Endpoint,
+    deadlines: Deadlines,
     source: Box<dyn CredentialSource>,
     credential: String,
     transcription: Option<String>,
@@ -252,12 +256,40 @@ impl OpenAiRealtime {
         Self {
             adapter,
             endpoint,
+            deadlines: Deadlines::default(),
             source,
             credential: credential.into(),
             transcription: Some(DEFAULT_TRANSCRIPTION_MODEL.to_owned()),
             speed: None,
             capabilities: capabilities(),
         }
+    }
+
+    /// This model with another deadline for the opening handshake of each session it opens
+    /// ([`Deadlines::connect_timeout`]); past it, `open` fails as a closed transport.
+    #[must_use]
+    pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.deadlines = self.deadlines.with_connect_timeout(connect_timeout);
+        self
+    }
+
+    /// This model with another deadline for each write of the sessions it opens
+    /// ([`Deadlines::write_timeout`]); past it, the write fails the session as a closed
+    /// transport.
+    #[must_use]
+    pub fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+        self.deadlines = self.deadlines.with_write_timeout(write_timeout);
+        self
+    }
+
+    /// The deadline of the opening handshake, [`crate::DEFAULT_CONNECT_TIMEOUT`] unless set.
+    pub fn connect_timeout(&self) -> Duration {
+        self.deadlines.connect_timeout()
+    }
+
+    /// The deadline of each write, [`crate::DEFAULT_WRITE_TIMEOUT`] unless set.
+    pub fn write_timeout(&self) -> Duration {
+        self.deadlines.write_timeout()
     }
 
     /// This model under an adapter record declared elsewhere, such as a model store's.
@@ -383,8 +415,9 @@ impl NativeSpeechModel for OpenAiRealtime {
                 })
             })?;
         let client = runtime
-            .block_on(RealtimeClient::connect(
+            .block_on(RealtimeClient::connect_with(
                 &self.endpoint,
+                self.deadlines,
                 self.source.as_ref(),
                 &self.credential,
                 &client_config,
@@ -408,8 +441,17 @@ impl NativeSpeechModel for OpenAiRealtime {
             awaiting_done: VecDeque::new(),
             undecodable: 0,
             server_errors: Vec::new(),
+            server_error_count: 0,
         })
     }
+}
+
+/// Appends `entry` to `list`, first forgetting its oldest entry when it holds `kept`.
+pub(crate) fn kept_push<T>(list: &mut Vec<T>, kept: usize, entry: T) {
+    if list.len() >= kept {
+        list.drain(..=list.len() - kept);
+    }
+    list.push(entry);
 }
 
 /// What `read` gives when it completes without waiting: it is polled once, and once more after
@@ -479,7 +521,10 @@ pub struct OpenAiRealtimeSession {
     /// `type` other than `response.done` is no lost `response.done`, and an unreadable
     /// `response.done` ends a response itself.
     undecodable: u64,
+    /// The most recent `error` events, at most [`Self::SERVER_ERRORS_KEPT`], and how many there
+    /// were in all.
     server_errors: Vec<ServerError>,
+    server_error_count: u64,
 }
 
 /// A response awaiting its `response.done`.
@@ -518,9 +563,20 @@ impl std::fmt::Debug for OpenAiRealtimeSession {
 }
 
 impl OpenAiRealtimeSession {
-    /// The `error` events the server sent during the session, which do not end it.
+    /// How many of the most recent `error` events [`Self::server_errors`] keeps.
+    pub const SERVER_ERRORS_KEPT: usize = 64;
+
+    /// The most recent `error` events the server sent during the session, which do not end it,
+    /// oldest first: at most [`Self::SERVER_ERRORS_KEPT`], so a server sending errors without end
+    /// holds no more. [`Self::server_error_count`] counts every one.
     pub fn server_errors(&self) -> &[ServerError] {
         &self.server_errors
+    }
+
+    /// How many `error` events the server sent during the session, those
+    /// [`Self::server_errors`] no longer keeps included.
+    pub fn server_error_count(&self) -> u64 {
+        self.server_error_count
     }
 
     /// The provider's id of a response.
@@ -1009,7 +1065,8 @@ impl OpenAiRealtimeSession {
                 if refused_commit && self.caller_commits > 0 {
                     self.caller_commits -= 1;
                 }
-                self.server_errors.push(error);
+                self.server_error_count = self.server_error_count.saturating_add(1);
+                kept_push(&mut self.server_errors, Self::SERVER_ERRORS_KEPT, error);
             }
             ServerEvent::SessionCreated { .. }
             | ServerEvent::SessionUpdated { .. }

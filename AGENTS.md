@@ -50,8 +50,8 @@ task check                      # the sherpa-onnx archive, specification and pla
 task docs-generate              # rewrite the generated files of the site
 npm --prefix website ci --allow-git=root && npm --prefix website run build   # build the site into website/build
 ess specify validate --path ess
-ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json   # the obliged scenarios plus the authored ones; as of ess 0.86.0 the only refusal allowed is ESS-SYNTH-001 for the `affects` cascade `inference.graph.CancelRun/outcome/cancelled`, executed by the authored scenario `cancel-run-discards-unplayed.yaml` past ESS story:a-cascade-onto-rows-of-a-guarded-creator-is-witnessed, which ESS 0.70.0 shipped and which does not cover it; the other four cascades are synthesized since ess 0.69.0, and their authored scenarios stay until that refusal clears
-ess verify conform run --path ess --scenarios ess/scenarios --target interpreted --report-format 2 --report-out .engineering/drafts/report.json   # every scenario against the specification itself; as of ess 0.86.0 one is unsupported, `inference.graph.AddSubgraphNode/outcome/added` (ESS-CF-TARGET: the model does not determine a complete typed view observation), so the run exits 1 and stays outside `task check`, whose testkit target runs the scenario and passes, until ESS story:an-unfillable-required-field-is-named-by-validate-and-the-view, an ESS draft
+ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json   # the obliged scenarios plus the authored ones; as of ess 0.88.0 the only refusal allowed is ESS-SYNTH-001 for the `affects` cascade `inference.graph.CancelRun/outcome/cancelled`, executed by the authored scenario `cancel-run-discards-unplayed.yaml` past ESS story:a-cascade-onto-rows-of-a-guarded-creator-is-witnessed, which ESS 0.70.0 shipped and which does not cover it; the other four cascades are synthesized since ess 0.69.0, and their authored scenarios stay until that refusal clears
+ess verify conform run --path ess --scenarios ess/scenarios --target interpreted --report-format 2 --report-out .engineering/drafts/report.json   # every scenario against the specification itself; as of ess 0.88.0 one is unsupported, `inference.graph.AddSubgraphNode/outcome/added` (ESS-CF-TARGET: the model does not determine a complete typed view observation), so the run exits 1 and stays outside `task check`, whose testkit target runs the scenario and passes, until ESS story:an-unfillable-required-field-is-named-by-validate-and-the-view, an ESS draft
 aep plan artifact validate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -79,6 +79,9 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   adapter's capability record at adoption; any other licence needs the owner's word for that
   checkpoint. Tests download no weights and start no model server: a test that needs one reads
   its path or URL from an environment variable and is ignored without it.
+- A live test that talks to a hosted provider is ignored, behind feature `live`, and its ignore
+  reason contains the word `billed`; the release check admits an added `#[ignore]` only with that
+  word.
 - `inference-llm` is a thin wrapper over the `llm` repository's model contract
   (`llm-core`, `llm_core::Model`) at a release tag, 0.20.0 now, and the workspace's
   `rust-version` is what that tag requires, 1.98 (owner decision, 2026-10-20, reversing the
