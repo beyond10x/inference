@@ -447,6 +447,11 @@ commands:
             session_id: input.session_id
         summary: No session carries this identity; nothing moved.
 
+  # The drain finishes when the session's run ends, however it ends. A draining session whose run
+  # completes closes once what the run produced was delivered; one whose run fails, or is
+  # cancelled by another holder of the run, closes the same way once the run's end was delivered,
+  # since nothing is in flight any more. Either way the facade delivers the run's end, RunCompleted,
+  # RunFailed or RunCancelled, and then SessionClosed last, and the session does not stay Draining.
   # read from: docs/design/inference.md:719
   # read from: docs/design/inference.md:339
   - name: inference.session.CompleteSessionClose
@@ -480,7 +485,10 @@ commands:
   # send submits typed input to the session's current run; a session admits input only while it
   # is Ready, so one that is Opened, Draining or Closed refuses it ("admits no new interaction").
   # Sending moves nothing: below the session the facade forwards the input to the run's ingress,
-  # stamped with the session and the run.
+  # stamped with the session and the run, and emits InputSent only once the ingress took it, so an
+  # input the ingress refused emits nothing. The state machine's event log counts a run of
+  # consecutive InputSent of one session as one entry, so that a voice session sending one input
+  # per audio frame does not grow it, and keeps at most its newest 4096 events.
   # read from: docs/design/inference.md:714
   # read from: docs/design/inference.md:310
   # read from: docs/design/inference.md:339

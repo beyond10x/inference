@@ -1,8 +1,9 @@
 //! The `inference.session` domain of `ess/domains/session.yaml`: the session state machine.
 //!
 //! [`Sessions`] holds the sessions, each with the identity of its current run, zero or one, and
-//! records every event it emits in order. The nouns are the domain's, in its terms: [`Session`],
-//! [`SessionState`], the inputs, the events and the refusals. A [`Sessions`] from
+//! records the events it emits in order, in a log bounded by [`Sessions::EVENT_LOG_BOUND`]. The
+//! nouns are the domain's, in its terms: [`Session`], [`SessionState`], the inputs, the events and
+//! the refusals. A [`Sessions`] from
 //! [`Sessions::new`] gives each session a random identity; one from [`Sessions::counted_in`] gives
 //! the next value of a counter, so that two runs of the same commands report the same identities,
 //! as a store or a test needs. A refused command takes no identity.
@@ -34,6 +35,7 @@
 //! sessions. The view `inference.session.Sessions` is [`Sessions::sessions_view`], read at the
 //! call.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
@@ -489,17 +491,26 @@ enum Identities {
 }
 
 /// The sessions, in the order they were opened, their history, in the order it was recorded,
-/// and the events the domain emitted. A session stays in every state, Closed included, and its
-/// history with it.
+/// and the newest events the domain emitted. A session stays in every state, Closed included, and
+/// its history with it. The event log is bounded: it keeps one [`InputSent`] for consecutive
+/// inputs of one session, counting them, and at most [`Sessions::EVENT_LOG_BOUND`] events,
+/// releasing its oldest half when it is full.
 #[derive(Debug, Clone, Default)]
 pub struct Sessions {
     sessions: Vec<Session>,
     history: Vec<HistoryEntry>,
     events: Vec<SessionEvent>,
+    /// How many events the log released to stay within its bound.
+    released: u64,
+    /// How many inputs each session sent.
+    inputs: HashMap<SessionId, u64>,
     identities: Identities,
 }
 
 impl Sessions {
+    /// The most events the log keeps.
+    pub const EVENT_LOG_BOUND: usize = 4096;
+
     /// No session, giving random identities.
     #[must_use]
     pub fn new() -> Self {
@@ -560,7 +571,7 @@ impl Sessions {
             session_id,
             pipeline_id,
         };
-        self.events.push(SessionEvent::SessionOpened(event));
+        self.log(SessionEvent::SessionOpened(event));
         Ok(event)
     }
 
@@ -603,7 +614,7 @@ impl Sessions {
         session.run_id = Some(run_id);
         session.state = SessionState::Opened;
         let event = RunAttached { session_id, run_id };
-        self.events.push(SessionEvent::RunAttached(event));
+        self.log(SessionEvent::RunAttached(event));
         Ok(event)
     }
 
@@ -637,7 +648,7 @@ impl Sessions {
         }
         session.state = SessionState::Ready;
         let event = SessionReady { session_id };
-        self.events.push(SessionEvent::SessionReady(event));
+        self.log(SessionEvent::SessionReady(event));
         Ok(event)
     }
 
@@ -657,12 +668,16 @@ impl Sessions {
             SessionState::Draining,
         )?;
         let event = SessionDraining { session_id };
-        self.events.push(SessionEvent::SessionDraining(event));
+        self.log(SessionEvent::SessionDraining(event));
         Ok(event)
     }
 
     /// Runs `inference.session.SendInput`: the `send` move from Ready to Ready, which admits
     /// input to the session's current run and moves nothing else.
+    ///
+    /// Every input accepted is counted ([`Sessions::inputs_sent`]); the event log keeps one
+    /// [`InputSent`] for consecutive inputs of one session, so that a session sending one input
+    /// per audio frame does not grow it.
     ///
     /// # Errors
     ///
@@ -671,8 +686,49 @@ impl Sessions {
     pub fn send_input(&mut self, session_id: SessionId) -> Result<InputSent, SessionMoveError> {
         self.move_session(session_id, &[SessionState::Ready], SessionState::Ready)?;
         let event = InputSent { session_id };
-        self.events.push(SessionEvent::InputSent(event));
+        *self.inputs.entry(session_id).or_default() += 1;
+        let repeated = matches!(
+            self.events.last(),
+            Some(SessionEvent::InputSent(last)) if last.session_id == session_id
+        );
+        if !repeated {
+            self.log(SessionEvent::InputSent(event));
+        }
         Ok(event)
+    }
+
+    /// Whether the session `session_id` admits input, as [`Sessions::send_input`] decides it,
+    /// moving nothing and recording nothing.
+    pub(crate) fn admits_input(&self, session_id: SessionId) -> Result<(), SessionMoveError> {
+        let state =
+            self.get(session_id)
+                .map(Session::state)
+                .ok_or(SessionMoveError::NoSuchSession(SessionNotFound {
+                    session_id,
+                }))?;
+        if state == SessionState::Ready {
+            Ok(())
+        } else {
+            Err(SessionMoveError::WrongState(SessionStateConflict {
+                current: state,
+            }))
+        }
+    }
+
+    /// How many inputs `SendInput` accepted for the session `session_id`.
+    #[must_use]
+    pub fn inputs_sent(&self, session_id: SessionId) -> u64 {
+        self.inputs.get(&session_id).copied().unwrap_or(0)
+    }
+
+    /// Records `event` in the log; a full log first releases its oldest half.
+    fn log(&mut self, event: SessionEvent) {
+        if self.events.len() >= Self::EVENT_LOG_BOUND {
+            let oldest = Self::EVENT_LOG_BOUND / 2;
+            self.events.drain(..oldest);
+            self.released += u64::try_from(oldest).unwrap_or(u64::MAX);
+        }
+        self.events.push(event);
     }
 
     /// Runs `inference.session.CommitInput`: the `commit` move from Ready to Ready, which admits a
@@ -688,7 +744,7 @@ impl Sessions {
     ) -> Result<InputCommitted, SessionMoveError> {
         self.move_session(session_id, &[SessionState::Ready], SessionState::Ready)?;
         let event = InputCommitted { session_id };
-        self.events.push(SessionEvent::InputCommitted(event));
+        self.log(SessionEvent::InputCommitted(event));
         Ok(event)
     }
 
@@ -755,7 +811,7 @@ impl Sessions {
             session_id,
             pipeline_id,
         };
-        self.events.push(SessionEvent::PipelineSwitched(event));
+        self.log(SessionEvent::PipelineSwitched(event));
         Ok(event)
     }
 
@@ -772,7 +828,7 @@ impl Sessions {
     ) -> Result<SessionInterrupted, SessionMoveError> {
         self.move_session(session_id, &[SessionState::Ready], SessionState::Ready)?;
         let event = SessionInterrupted { session_id };
-        self.events.push(SessionEvent::SessionInterrupted(event));
+        self.log(SessionEvent::SessionInterrupted(event));
         Ok(event)
     }
 
@@ -797,7 +853,7 @@ impl Sessions {
             SessionState::Closed,
         )?;
         let event = SessionClosed { session_id };
-        self.events.push(SessionEvent::SessionClosed(event));
+        self.log(SessionEvent::SessionClosed(event));
         Ok(event)
     }
 
@@ -813,7 +869,7 @@ impl Sessions {
     ) -> Result<SessionClosed, SessionMoveError> {
         self.move_session(session_id, &[SessionState::Draining], SessionState::Closed)?;
         let event = SessionClosed { session_id };
-        self.events.push(SessionEvent::SessionClosed(event));
+        self.log(SessionEvent::SessionClosed(event));
         Ok(event)
     }
 
@@ -872,10 +928,17 @@ impl Sessions {
         self.sessions.iter()
     }
 
-    /// Every event emitted, in the order it was emitted.
+    /// The events emitted, in the order they were emitted: at most [`Sessions::EVENT_LOG_BOUND`],
+    /// the newest, consecutive inputs of one session as one [`InputSent`].
     #[must_use]
     pub fn events(&self) -> &[SessionEvent] {
         &self.events
+    }
+
+    /// How many events the log released, the oldest first, to stay within its bound.
+    #[must_use]
+    pub const fn events_released(&self) -> u64 {
+        self.released
     }
 
     /// The view `inference.session.Sessions`: one row per session, in the order they were opened.
@@ -933,7 +996,7 @@ impl Sessions {
             text: input.text,
             call_id: input.call_id,
         });
-        self.events.push(SessionEvent::HistoryRecorded(event));
+        self.log(SessionEvent::HistoryRecorded(event));
         Ok(event)
     }
 
