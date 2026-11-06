@@ -16,7 +16,9 @@
 //! `SettingsApplied`. The whole opening is bounded by [`AgentEndpoint::open_timeout`] and races
 //! [`OpenCanceller::cancel`]: a cancel drops a handshake in progress, which closes the TCP
 //! connection at once, or sends a close frame, bounded by [`CLOSE_BOUND`], once the WebSocket is
-//! open. A close before `SettingsApplied` fails the open as
+//! open. A cancel reaches only an open in progress when it is issued; one issued while none is
+//! does nothing. A session voice longer than a provider field may be is refused before
+//! connecting ([`DeepgramError::Config`]). A close before `SettingsApplied` fails the open as
 //! [`DeepgramError::ClosedBeforeSettings`], an `Error` as [`DeepgramError::Server`] with its
 //! code. Every way an open fails leaves the reason in [`DeepgramAgent::open_error`]. No audio is
 //! sent before `SettingsApplied`.
@@ -27,7 +29,12 @@
 //! every message, writes what the session sends, sends `KeepAlive` after
 //! [`AgentEndpoint::keepalive_interval`] without audio and a WebSocket ping after as long
 //! without reading anything, and hands what it read to the session through a queue of
-//! [`INBOUND_DEPTH`] messages; while that queue is full it reads nothing more. The session's
+//! [`INBOUND_DEPTH`] messages. It reads each message before it waits for a slot, and answers a
+//! WebSocket ping as it reads it; a message the caller need not see (`AgentThinking`,
+//! `History`, the other passed-over types) takes a slot only when one is free at once, so a
+//! flood of them never stops the task reading. While it waits for a slot for a message the
+//! caller must see, it reads nothing more, but still writes what the session sends, sends
+//! `KeepAlive` and pings, and obeys a stop. The session's
 //! writes go through a queue of [`OUTBOUND_QUEUE`] messages, each send waiting at most
 //! [`AgentEndpoint::read_timeout`]. A message or frame larger than [`agent::MAX_MESSAGE_SIZE`] fails the
 //! session as a transport error, and a connection that sends nothing, pongs included, for
@@ -51,7 +58,20 @@
 //!   sent audio. `ConversationText` of the assistant is its `OutputTranscriptDelta`: given to the
 //!   response in progress, or, since it arrives before `AgentStartedSpeaking`, held and given to
 //!   the next one when none is. The latencies of `AgentStartedSpeaking` are kept on the session
-//!   ([`DeepgramAgentSession::latency`]).
+//!   ([`DeepgramAgentSession::latency`]). Held words, and the words of each response, are kept
+//!   and delivered up to [`agent::TEXT_LIMIT`] bytes; the bytes past it are counted
+//!   ([`DeepgramAgentSession::text_dropped`]).
+//! * Frames after `AgentAudioDone` with no `AgentStartedSpeaking` before them open a response
+//!   of their own, which completes at the next `AgentStartedSpeaking`, `UserStartedSpeaking`,
+//!   user `ConversationText`, a close by the caller, or [`TRAILING_QUIET`] (1 s, or half the idle
+//!   limit when that is shorter) without a frame. No frame is dropped, and a silent agent
+//!   leaves no response in progress, so the idle limit fails no healthy session. This rule is
+//!   inferred, not stated ([`crate::agent`]).
+//! * A `THINK_REQUEST_FAILED` or `SPEAK_REQUEST_FAILED` warning ends the reply it concerns: the
+//!   response in progress fails (`ResponseFailed`) and its later frames are dropped as a cut
+//!   reply's are; with none in progress, while a reply to the user's words is awaited, a
+//!   response is created and fails at once, so the caller stops awaiting it. The session stays
+//!   open and the warning is kept. That no reply follows these warnings is inferred.
 //! * `UserStartedSpeaking` is the user talking over the agent: `SpeechStarted` at the input sent
 //!   so far, then the response in progress ends as cancelled (`ResponseCancelled`). Its frames
 //!   that still arrive, up to the next `AgentStartedSpeaking` or `AgentAudioDone`, are dropped
@@ -76,7 +96,7 @@
 //!   record carries every count unknown.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -118,6 +138,13 @@ pub const OUTBOUND_QUEUE: usize = 64;
 
 /// The most warnings a session keeps; later ones are counted only.
 pub const WARNINGS_KEPT: usize = 64;
+
+/// How long a response of frames that came after `AgentAudioDone` waits for another frame
+/// before it completes, unless half the session's idle limit is shorter.
+pub const TRAILING_QUIET: Duration = Duration::from_secs(1);
+
+/// The warning codes after which the binding takes the reply they concern as never coming.
+const REPLY_FAILED: [&str; 2] = ["THINK_REQUEST_FAILED", "SPEAK_REQUEST_FAILED"];
 
 /// What the Voice Agent takes, as the duplex contract states it: the formats of
 /// [`agent::audio_formats`] each way; its own turn-taking as `server_vad` without tuning;
@@ -176,15 +203,61 @@ pub fn agent_native_duplex_verdict(
     Ok(agent_claims().contains(&Capability::NativeDuplex) == outcome.is_ok())
 }
 
-/// Cancels the open in progress on the model it came from. A cancel that finds no open in
-/// progress cancels the next one.
+/// Cancels the open in progress on the model it came from. A cancel issued while no open is in
+/// progress does nothing: it never reaches a later open.
 #[derive(Debug, Clone)]
-pub struct OpenCanceller(Arc<Notify>);
+pub struct OpenCanceller(Arc<CancelState>);
 
 impl OpenCanceller {
-    /// Cancels the open in progress, or the next one.
+    /// Cancels the open in progress, if one is.
     pub fn cancel(&self) {
-        self.0.notify_one();
+        self.0.cancel();
+    }
+}
+
+/// Which open is in progress and which one a cancel named, by generation; 0 is none.
+#[derive(Debug, Default)]
+struct CancelState {
+    opens: Mutex<(u64, u64)>,
+    notify: Notify,
+}
+
+impl CancelState {
+    fn opens(&self) -> MutexGuard<'_, (u64, u64)> {
+        self.opens.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The open of `generation` is in progress.
+    fn begin(&self, generation: u64) {
+        self.opens().0 = generation;
+    }
+
+    /// No open is in progress.
+    fn end(&self) {
+        self.opens().0 = 0;
+    }
+
+    /// Cancels the open in progress, if one is.
+    fn cancel(&self) {
+        let mut opens = self.opens();
+        if opens.0 != 0 {
+            opens.1 = opens.0;
+            drop(opens);
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// Resolves once the open of `generation` is cancelled.
+    async fn cancelled(&self, generation: u64) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.opens().1 == generation {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -197,7 +270,8 @@ pub struct DeepgramAgent {
     source: Arc<dyn CredentialSource>,
     credential: String,
     capabilities: SpeechCapabilities,
-    cancel: Arc<Notify>,
+    cancel: Arc<CancelState>,
+    generation: u64,
     open_error: Option<DeepgramError>,
 }
 
@@ -246,7 +320,8 @@ impl DeepgramAgent {
             source,
             credential: credential.into(),
             capabilities: agent_capabilities(),
-            cancel: Arc::new(Notify::new()),
+            cancel: Arc::new(CancelState::default()),
+            generation: 0,
             open_error: None,
         })
     }
@@ -284,7 +359,7 @@ impl DeepgramAgent {
     fn failed(&mut self, error: DeepgramError) -> OpenError {
         let kind = match &error {
             DeepgramError::Connect(connect) if connect.is_refusal() => SessionFailureKind::Rejected,
-            DeepgramError::Credential(_) => SessionFailureKind::Rejected,
+            DeepgramError::Credential(_) | DeepgramError::Config(_) => SessionFailureKind::Rejected,
             DeepgramError::Stalled(_) => SessionFailureKind::Stalled,
             DeepgramError::Server { .. } | DeepgramError::Protocol(_) => {
                 SessionFailureKind::ProviderError
@@ -325,6 +400,9 @@ impl NativeSpeechModel for DeepgramAgent {
                 config.input_format,
             )));
         };
+        if let Err(refused) = agent::validate_voice(&config.voice) {
+            return Err(self.failed(DeepgramError::Config(refused)));
+        }
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("deepgram-agent")
@@ -334,13 +412,16 @@ impl NativeSpeechModel for DeepgramAgent {
             Ok(runtime) => runtime,
             Err(error) => return Err(self.failed(DeepgramError::Runtime(error.to_string()))),
         };
+        self.generation += 1;
+        self.cancel.begin(self.generation);
         let link = Link {
             url: &self.url,
             endpoint: &self.endpoint,
             source: self.source.as_ref(),
             credential: &self.credential,
         };
-        let opened = runtime.block_on(connect(&link, settings, &self.cancel));
+        let opened = runtime.block_on(connect(&link, settings, &self.cancel, self.generation));
+        self.cancel.end();
         let (socket, opening) = match opened {
             Ok(opened) => opened,
             Err(error) => {
@@ -380,6 +461,11 @@ impl NativeSpeechModel for DeepgramAgent {
             latencies: HashMap::new(),
             warnings: Vec::new(),
             warnings_seen: 0,
+            text_dropped: 0,
+            after_done: false,
+            trailing: None,
+            quiet: TRAILING_QUIET.min(config.idle_limit / 2),
+            awaiting_reply: false,
             calls: HashMap::new(),
             failure: None,
             closing: false,
@@ -412,7 +498,8 @@ struct Opening {
 async fn connect(
     link: &Link<'_>,
     settings: String,
-    cancel: &Notify,
+    cancel: &CancelState,
+    generation: u64,
 ) -> Result<(Socket, Opening), DeepgramError> {
     let bound = link.endpoint.open_timeout;
     let deadline = tokio::time::Instant::now() + bound;
@@ -425,14 +512,14 @@ async fn connect(
     );
     let mut socket = tokio::select! {
         biased;
-        () = cancel.notified() => return Err(DeepgramError::Cancelled),
+        () = cancel.cancelled(generation) => return Err(DeepgramError::Cancelled),
         connected = tokio::time::timeout_at(deadline, handshake) => {
             connected.unwrap_or(Err(DeepgramError::Stalled(bound)))?
         }
     };
     let waited = tokio::select! {
         biased;
-        () = cancel.notified() => Err(DeepgramError::Cancelled),
+        () = cancel.cancelled(generation) => Err(DeepgramError::Cancelled),
         waited = tokio::time::timeout_at(deadline, await_applied(&mut socket, settings)) => {
             waited.unwrap_or(Err(DeepgramError::Stalled(bound)))
         }
@@ -617,7 +704,7 @@ impl Timers {
     }
 }
 
-/// What woke the connection task while it held room for one message.
+/// What woke the connection task while it read.
 enum Woken {
     Stop,
     Command(Option<Outbound>),
@@ -625,8 +712,67 @@ enum Woken {
     Frame(Frame),
 }
 
+/// Whether the connection task goes on after handing something over.
+enum Handed {
+    On,
+    /// The session stopped the task or dropped its queues.
+    Stopped,
+    /// A write failed; the task ends.
+    Failed,
+}
+
+/// Whether the caller must see `message`: everything but the types the session passes over.
+fn must_see(message: &ServerMessage) -> bool {
+    !matches!(
+        message,
+        ServerMessage::Ignored { .. }
+            | ServerMessage::Welcome { .. }
+            | ServerMessage::SettingsApplied
+    )
+}
+
+/// Hands `item` to the session, waiting for a slot of the inbound queue; meanwhile it still
+/// writes what the session sends, sends what the timers make due, and obeys a stop.
+async fn hand_over(
+    socket: &mut Socket,
+    commands: &mut mpsc::Receiver<Outbound>,
+    stop: &mut oneshot::Receiver<()>,
+    inbound: &mpsc::Sender<Inbound>,
+    timers: &mut Timers,
+    item: Inbound,
+) -> Handed {
+    loop {
+        let written = tokio::select! {
+            biased;
+            _ = &mut *stop => return Handed::Stopped,
+            permit = inbound.reserve() => {
+                return match permit {
+                    Ok(permit) => {
+                        permit.send(item);
+                        Handed::On
+                    }
+                    Err(_) => Handed::Stopped,
+                };
+            }
+            command = commands.recv() => match command {
+                Some(outbound) => timers.send(socket, outbound).await,
+                None => return Handed::Stopped,
+            },
+            () = tokio::time::sleep_until(timers.next(false)) => timers.fire(socket, false).await,
+        };
+        if let Err(error) = written {
+            let _ = inbound.try_send(Inbound::Ended(error));
+            return Handed::Failed;
+        }
+    }
+}
+
 /// The connection task: reads, writes what the session sends, keeps the connection alive,
-/// until the session stops it or drops its queue, or the connection ends.
+/// until the session stops it or drops its queue, or the connection ends. Each message is read
+/// before a slot of the inbound queue is reserved for it; a WebSocket ping is answered as it is
+/// read and takes no slot, and a message the caller need not see takes one only when one is
+/// free at once. While no slot is free for a message the caller must see, the task reads
+/// nothing more, and its timers no longer count a stall.
 async fn pump(
     mut socket: Socket,
     mut commands: mpsc::Receiver<Outbound>,
@@ -635,41 +781,6 @@ async fn pump(
     mut timers: Timers,
 ) {
     loop {
-        let permit = match inbound.try_reserve() {
-            Ok(permit) => permit,
-            Err(mpsc::error::TrySendError::Closed(())) => break,
-            Err(mpsc::error::TrySendError::Full(())) => {
-                let waited = tokio::select! {
-                    biased;
-                    _ = &mut stop => break,
-                    command = commands.recv() => match command {
-                        Some(outbound) => {
-                            if let Err(error) = timers.send(&mut socket, outbound).await {
-                                let _ = inbound.send(Inbound::Ended(error)).await;
-                                return;
-                            }
-                            continue;
-                        }
-                        None => break,
-                    },
-                    () = tokio::time::sleep_until(timers.next(false)) => {
-                        if let Err(error) = timers.fire(&mut socket, false).await {
-                            let _ = inbound.send(Inbound::Ended(error)).await;
-                            return;
-                        }
-                        continue;
-                    }
-                    permit = inbound.reserve() => permit,
-                };
-                match waited {
-                    Ok(permit) => {
-                        timers.read = tokio::time::Instant::now();
-                        permit
-                    }
-                    Err(_) => break,
-                }
-            }
-        };
         let woken = tokio::select! {
             biased;
             _ = &mut stop => Woken::Stop,
@@ -677,44 +788,58 @@ async fn pump(
             () = tokio::time::sleep_until(timers.next(true)) => Woken::Due,
             frame = next_frame(&mut socket) => Woken::Frame(frame),
         };
-        match woken {
+        let (item, ends) = match woken {
             Woken::Stop | Woken::Command(None) => break,
             Woken::Command(Some(outbound)) => {
                 if let Err(error) = timers.send(&mut socket, outbound).await {
-                    permit.send(Inbound::Ended(error));
+                    let _ = inbound.try_send(Inbound::Ended(error));
                     return;
                 }
+                continue;
             }
-            Woken::Due => {
-                if let Err(error) = timers.fire(&mut socket, true).await {
-                    permit.send(Inbound::Ended(error));
-                    break;
-                }
-            }
+            Woken::Due => match timers.fire(&mut socket, true).await {
+                Ok(()) => continue,
+                Err(error) => (Inbound::Ended(error), true),
+            },
             Woken::Frame(frame) => {
                 timers.read = tokio::time::Instant::now();
                 match frame {
                     Frame::Text(text) => match agent::parse(&text) {
-                        Ok(message) => permit.send(Inbound::Message(message)),
-                        Err(what) => permit.send(Inbound::Unreadable(what)),
+                        Ok(message) if !must_see(&message) => {
+                            let _ = inbound.try_send(Inbound::Message(message));
+                            continue;
+                        }
+                        Ok(message) => (Inbound::Message(message), false),
+                        Err(what) => (Inbound::Unreadable(what), false),
                     },
-                    Frame::Binary(audio) => permit.send(Inbound::Audio(audio)),
-                    Frame::Control => {}
+                    Frame::Binary(audio) => (Inbound::Audio(audio), false),
+                    Frame::Control => continue,
                     Frame::Closed { code, reason } => {
                         let cause = crate::error::CloseCause::of(code, &reason);
-                        permit.send(Inbound::Ended(DeepgramError::Closed {
+                        let closed = DeepgramError::Closed {
                             code,
                             reason,
                             cause,
-                        }));
-                        return;
+                        };
+                        (Inbound::Ended(closed), true)
                     }
-                    Frame::Failed(error) => {
-                        permit.send(Inbound::Ended(error));
-                        return;
-                    }
+                    Frame::Failed(error) => (Inbound::Ended(error), true),
                 }
             }
+        };
+        let handed = hand_over(
+            &mut socket,
+            &mut commands,
+            &mut stop,
+            &inbound,
+            &mut timers,
+            item,
+        )
+        .await;
+        match handed {
+            Handed::On if !ends => timers.read = tokio::time::Instant::now(),
+            Handed::On | Handed::Stopped => break,
+            Handed::Failed => return,
         }
     }
     connection::close(socket).await;
@@ -762,6 +887,18 @@ pub struct DeepgramAgentSession {
     latencies: HashMap<ResponseId, Latency>,
     warnings: Vec<AgentWarning>,
     warnings_seen: u64,
+    /// Bytes of assistant words past [`agent::TEXT_LIMIT`], neither kept nor delivered.
+    text_dropped: u64,
+    /// The last reply ended at `AgentAudioDone` and no `AgentStartedSpeaking` came since.
+    after_done: bool,
+    /// The response in progress was opened by frames after `AgentAudioDone`: when its last
+    /// frame arrived.
+    trailing: Option<Instant>,
+    /// How long a trailing response waits for another frame ([`TRAILING_QUIET`], or half the
+    /// idle limit when that is shorter).
+    quiet: Duration,
+    /// The user's words arrived and no response began since.
+    awaiting_reply: bool,
     /// The function name of each call proposed, by its id.
     calls: HashMap<String, String>,
     failure: Option<DeepgramError>,
@@ -818,6 +955,12 @@ impl DeepgramAgentSession {
     /// How many warnings the server sent in all.
     pub fn warnings_seen(&self) -> u64 {
         self.warnings_seen
+    }
+
+    /// How many bytes of assistant words went past [`agent::TEXT_LIMIT`], held before a reply or
+    /// said in one, and were neither kept nor delivered.
+    pub fn text_dropped(&self) -> u64 {
+        self.text_dropped
     }
 
     /// Why the session failed, once it did.
@@ -882,6 +1025,7 @@ impl DeepgramAgentSession {
     fn end_current(&mut self) {
         self.current = None;
         self.carry.clear();
+        self.trailing = None;
     }
 
     /// The response in progress, created when none is; held assistant words go to a new one.
@@ -897,21 +1041,94 @@ impl DeepgramAgentSession {
         self.current = Some(id);
         self.emitted = 0;
         self.carry.clear();
+        self.awaiting_reply = false;
         if let Some(text) = self.pending_text.take() {
             self.said(id, text, now);
         }
         Some(id)
     }
 
-    /// The assistant's words `text` on the response `id`.
-    fn said(&mut self, id: ResponseId, text: String, now: Instant) {
-        let delivered = self.ledger.output_transcript(id, text.clone(), now);
-        self.or_drop(delivered);
-        let transcript = self.transcripts.entry(id).or_default();
-        if !transcript.is_empty() {
-            transcript.push(' ');
+    /// `text` joined to `kept` with a space, as far as [`agent::TEXT_LIMIT`] allows; the bytes
+    /// past it are counted in [`Self::text_dropped`]. What was added is returned.
+    fn append_bounded(kept: &mut String, text: &str, dropped: &mut u64) -> String {
+        let separator = if kept.is_empty() { "" } else { " " };
+        let room = agent::TEXT_LIMIT.saturating_sub(kept.len() + separator.len());
+        let mut end = text.len().min(room);
+        while !text.is_char_boundary(end) {
+            end -= 1;
         }
-        transcript.push_str(&text);
+        *dropped = dropped.saturating_add((text.len() - end) as u64);
+        if end == 0 {
+            return String::new();
+        }
+        kept.push_str(separator);
+        kept.push_str(&text[..end]);
+        text[..end].to_owned()
+    }
+
+    /// Holds the assistant's words `text` for the next response, within [`agent::TEXT_LIMIT`].
+    fn hold(&mut self, text: &str) {
+        let held = self.pending_text.get_or_insert_with(String::new);
+        Self::append_bounded(held, text, &mut self.text_dropped);
+    }
+
+    /// The assistant's words `text` on the response `id`, within [`agent::TEXT_LIMIT`] for the
+    /// response.
+    fn said(&mut self, id: ResponseId, text: String, now: Instant) {
+        let transcript = self.transcripts.entry(id).or_default();
+        let added = Self::append_bounded(transcript, &text, &mut self.text_dropped);
+        if added.is_empty() {
+            return;
+        }
+        let delivered = self.ledger.output_transcript(id, added, now);
+        self.or_drop(delivered);
+    }
+
+    /// Completes the response in progress if frames after `AgentAudioDone` opened it.
+    fn finish_trailing(&mut self, now: Instant) {
+        if self.trailing.is_some() {
+            self.complete(now);
+        }
+    }
+
+    /// When the trailing response completes for want of another frame, if one is in progress.
+    fn quiet_due(&self) -> Option<Instant> {
+        self.trailing.and_then(|last| last.checked_add(self.quiet))
+    }
+
+    /// Completes the trailing response once [`Self::quiet_due`] has passed at `now`.
+    fn finish_if_quiet(&mut self, now: Instant) {
+        if self.quiet_due().is_some_and(|due| now >= due) {
+            self.complete(now);
+        }
+    }
+
+    /// The reply a think or speak failure warning concerns will not come: the response in
+    /// progress fails, its later frames are dropped; with none in progress while a reply to the
+    /// user's words is awaited, one is created and fails at once.
+    fn reply_failed(&mut self, warning: &AgentWarning, now: Instant) {
+        let failure = SessionFailure {
+            kind: SessionFailureKind::ProviderError,
+            detail: format!(
+                "the agent warned {}: {}",
+                warning.code.as_deref().unwrap_or_default(),
+                warning.description
+            ),
+        };
+        let id = match self.current {
+            Some(id) => {
+                self.dropping = true;
+                Some(id)
+            }
+            None if self.awaiting_reply => self.begin(now),
+            None => None,
+        };
+        if let Some(id) = id {
+            let failed = self.ledger.response_failed(id, failure, now);
+            self.or_drop(failed);
+            self.end_current();
+        }
+        self.awaiting_reply = false;
     }
 
     /// The response in progress completes.
@@ -967,7 +1184,11 @@ impl DeepgramAgentSession {
                     self.late_audio += 1;
                     return;
                 }
+                let trails = self.current.is_none() && self.after_done;
                 if let Some(id) = self.begin(now) {
+                    if trails || self.trailing.is_some() {
+                        self.trailing = Some(now);
+                    }
                     self.output(id, &audio, now);
                 }
             }
@@ -984,25 +1205,22 @@ impl DeepgramAgentSession {
                 role: Role::User,
                 content,
             } => {
+                self.finish_trailing(now);
                 let committed = self.ledger.input_committed(now);
                 self.or_drop(committed);
                 let heard = self.ledger.input_transcribed(content, now);
                 self.or_drop(heard);
+                self.awaiting_reply = self.current.is_none();
             }
             ServerMessage::ConversationText {
                 role: Role::Assistant,
                 content,
             } => match self.current {
                 Some(id) => self.said(id, content, now),
-                None => match &mut self.pending_text {
-                    Some(held) => {
-                        held.push(' ');
-                        held.push_str(&content);
-                    }
-                    None => self.pending_text = Some(content),
-                },
+                None => self.hold(&content),
             },
             ServerMessage::UserStartedSpeaking => {
+                self.finish_trailing(now);
                 let position = SampleClockPosition::new(self.input_samples)
                     .unwrap_or(SampleClockPosition::MAX);
                 let started = self.ledger.speech_started(position, now);
@@ -1017,7 +1235,10 @@ impl DeepgramAgentSession {
             }
             ServerMessage::AgentStartedSpeaking { latency } => {
                 self.dropping = false;
-                if self.current.is_some() && (self.emitted > 0 || !self.carry.is_empty()) {
+                self.after_done = false;
+                if self.current.is_some()
+                    && (self.emitted > 0 || !self.carry.is_empty() || self.trailing.is_some())
+                {
                     self.complete(now);
                 }
                 if let Some(id) = self.begin(now) {
@@ -1026,6 +1247,7 @@ impl DeepgramAgentSession {
             }
             ServerMessage::AgentAudioDone => {
                 self.dropping = false;
+                self.after_done = true;
                 self.complete(now);
             }
             ServerMessage::FunctionCallRequest { functions } => {
@@ -1058,6 +1280,13 @@ impl DeepgramAgentSession {
             }
             ServerMessage::Warning(warning) => {
                 self.warnings_seen = self.warnings_seen.saturating_add(1);
+                if warning
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| REPLY_FAILED.contains(&code))
+                {
+                    self.reply_failed(&warning, now);
+                }
                 if self.warnings.len() < WARNINGS_KEPT {
                     self.warnings.push(warning);
                 }
@@ -1168,6 +1397,7 @@ impl SpeechSessionHandle for DeepgramAgentSession {
         if self.require_open().is_ok() {
             self.closing = true;
             self.record_arrived();
+            self.finish_trailing(Instant::now());
             self.shutdown(true);
         }
         self.ledger.close()?;
@@ -1181,9 +1411,16 @@ impl SpeechSessionHandle for DeepgramAgentSession {
             if let Some(event) = self.ledger.next_event() {
                 return Some(event);
             }
-            let left = deadline.map_or(wait, |deadline| {
+            self.finish_if_quiet(Instant::now());
+            if let Some(event) = self.ledger.next_event() {
+                return Some(event);
+            }
+            let mut left = deadline.map_or(wait, |deadline| {
                 deadline.saturating_duration_since(Instant::now())
             });
+            if let Some(due) = self.quiet_due() {
+                left = left.min(due.saturating_duration_since(Instant::now()));
+            }
             if left.is_zero() || self.require_open().is_err() {
                 self.ledger.check_liveness(Instant::now());
                 return self.ledger.next_event();
@@ -1199,6 +1436,7 @@ impl SpeechSessionHandle for DeepgramAgentSession {
                     cause: crate::error::CloseCause::Other,
                 }),
                 Err(_) => {
+                    self.finish_if_quiet(Instant::now());
                     self.ledger.check_liveness(Instant::now());
                 }
             }

@@ -129,6 +129,9 @@ pub enum DeepgramError {
     ClosedBeforeSettings { code: Option<u16>, reason: String },
     /// The Voice Agent asked for a client-side function the session does not offer.
     FunctionNotOffered { name: String },
+    /// The session configuration asks the Voice Agent for something the binding refuses, such as
+    /// a voice longer than a provider field may be.
+    Config(ConfigError),
 }
 
 impl fmt::Display for DeepgramError {
@@ -157,6 +160,7 @@ impl fmt::Display for DeepgramError {
                 ),
                 None => f.write_str("the server closed the connection before SettingsApplied"),
             },
+            Self::Config(error) => write!(f, "configuration refused: {error}"),
             Self::FunctionNotOffered { name } => write!(
                 f,
                 "the agent asked for the client-side function `{name}`, which the session does not offer"

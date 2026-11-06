@@ -73,6 +73,15 @@
 //! - **Message size.** Not stated. The binding reads messages and frames of at most
 //!   [`MAX_MESSAGE_SIZE`] (4 MiB), the bound of the live transcription binding.
 //! - **Output pacing.** Not stated; frames are delivered as they arrive.
+//! - **A reply after a think or speak failure.** Not stated. After a `THINK_REQUEST_FAILED` or
+//!   `SPEAK_REQUEST_FAILED` warning the binding infers that the reply it was waiting for, or the
+//!   one in progress, will not come: that reply ends as failed and the session stays open.
+//! - **Audio after `AgentAudioDone`.** Not stated. Frames that arrive after a reply ended form a
+//!   reply of their own, which ends at the next `AgentStartedSpeaking`, `UserStartedSpeaking`,
+//!   user `ConversationText`, a close, or after a quiet bound without a frame; none is dropped.
+//! - **Text held and kept.** Not stated. Assistant words held before a reply opens, and the words
+//!   of each reply, are kept up to [`TEXT_LIMIT`] bytes each; what comes past it is counted, not
+//!   kept or delivered.
 
 use std::num::{NonZeroU16, NonZeroU32};
 
@@ -86,6 +95,10 @@ pub use crate::listen::{INBOUND_DEPTH, KEEP_ALIVE, MAX_MESSAGE_SIZE, SERVER_MESS
 
 /// The path of the Voice Agent endpoint under the base URL.
 pub const PATH: &str = "/v1/agent/converse";
+
+/// The most bytes of assistant words the binding holds before a reply opens, and keeps and
+/// delivers for one reply: one message's bound, [`MAX_MESSAGE_SIZE`].
+pub const TEXT_LIMIT: usize = MAX_MESSAGE_SIZE;
 
 /// The sample rates the binding offers for `linear16`, each way.
 pub const LINEAR16_RATES: [u32; 7] = [8_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000];
@@ -119,8 +132,25 @@ impl AgentProvider {
     }
 
     fn valid(&self) -> bool {
-        let field = |value: &str| !value.trim().is_empty() && value.chars().count() <= 128;
         field(&self.kind) && field(&self.model) && self.version.as_deref().is_none_or(field)
+    }
+}
+
+/// Whether `value` is a provider field the binding sends: not blank, at most 128 characters.
+fn field(value: &str) -> bool {
+    !value.trim().is_empty() && value.chars().count() <= 128
+}
+
+/// Checks the voice of a session, which becomes the speak model when it is not blank.
+///
+/// # Errors
+/// [`ConfigError::AgentProvider`] for a voice that is not blank and is longer than 128
+/// characters, the bound [`AgentConfig::validate`] holds every provider field to.
+pub fn validate_voice(voice: &str) -> Result<(), ConfigError> {
+    if voice.trim().is_empty() || field(voice) {
+        Ok(())
+    } else {
+        Err(ConfigError::AgentProvider)
     }
 }
 
@@ -751,5 +781,17 @@ mod tests {
         let mut config = AgentConfig::new();
         config.think.model = " ".to_owned();
         assert_eq!(config.validate(), Err(ConfigError::AgentProvider));
+    }
+
+    #[test]
+    fn a_session_voice_is_held_to_the_provider_field_bound() {
+        assert_eq!(validate_voice(""), Ok(()));
+        assert_eq!(validate_voice("  "), Ok(()));
+        assert_eq!(validate_voice("aura-2-thalia-en"), Ok(()));
+        assert_eq!(validate_voice(&"v".repeat(128)), Ok(()));
+        assert_eq!(
+            validate_voice(&"v".repeat(129)),
+            Err(ConfigError::AgentProvider)
+        );
     }
 }

@@ -112,7 +112,8 @@ impl Endpoint {
     ///
     /// # Errors
     /// [`ConfigError::InvalidUrl`] when it is not `wss://`, or `ws://` to a loopback host
-    /// (`127.0.0.0/8`, `::1`, `localhost`), or carries a query or fragment. The message never
+    /// (`127.0.0.0/8`, `::1`, `localhost`), or carries a query, a fragment or a user part
+    /// (`user@host`, whatever the scheme). The message never
     /// carries the URL itself.
     pub fn base(&self) -> Result<&str, ConfigError> {
         checked_base(&self.url)
@@ -120,7 +121,7 @@ impl Endpoint {
 }
 
 /// `url`, its trailing slashes dropped, once it is a base URL the binding takes: `wss://`, or
-/// `ws://` to a loopback host, with no query or fragment. The error never carries the URL.
+/// `ws://` to a loopback host, with no query, fragment or user part. The error never carries the URL.
 fn checked_base(url: &str) -> Result<&str, ConfigError> {
     let base = url.trim_end_matches('/');
     if let Some(rest) = base.strip_prefix("ws://") {
@@ -138,6 +139,17 @@ fn checked_base(url: &str) -> Result<&str, ConfigError> {
     if base.contains('?') || base.contains('#') {
         return Err(ConfigError::InvalidUrl(
             "the base URL carries a query or fragment; the binding adds its own".to_owned(),
+        ));
+    }
+    let authority = base
+        .split_once("://")
+        .map_or("", |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    if authority.contains('@') {
+        return Err(ConfigError::InvalidUrl(
+            "the base URL carries a user part, which makes its host read as another".to_owned(),
         ));
     }
     Ok(base)
@@ -456,11 +468,25 @@ mod tests {
                 .base(),
             Err(ConfigError::KeepAliveInterval)
         );
-        assert!(matches!(
-            AgentEndpoint::new()
-                .with_url("ws://agent.deepgram.com")
-                .base(),
-            Err(ConfigError::InvalidUrl(_))
-        ));
+        for refused in [
+            "ws://agent.deepgram.com",
+            "wss://agent.deepgram.com@127.0.0.1:9",
+            "wss://user:pass@agent.deepgram.com",
+        ] {
+            assert!(
+                matches!(
+                    AgentEndpoint::new().with_url(refused).base(),
+                    Err(ConfigError::InvalidUrl(_))
+                ),
+                "{refused}"
+            );
+            assert!(
+                matches!(
+                    Endpoint::new().with_url(refused).base(),
+                    Err(ConfigError::InvalidUrl(_))
+                ),
+                "{refused}"
+            );
+        }
     }
 }
