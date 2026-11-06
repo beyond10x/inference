@@ -18,6 +18,9 @@
 - `inference-phonic`: a new adapter crate, `PhonicSpeech` and `PhonicSession`, a duplex binding
   over Phonic's speech-to-speech WebSocket, with its claims record and a `compare` provider. A
   named agent's own tools are answered with an error and noted in the session's dropped events.
+- `inference-cartesia`: a new adapter crate, a streaming TTS synthesiser over Cartesia Sonic's
+  WebSocket, one context per segment, with its claims record; `compare --cascade-voice cartesia`
+  speaks the cascade arm with it.
 - `inference-openai`: feature `speech`, `speech::OpenAiSpeech`, a streaming TTS synthesiser over
   the speech endpoint: PCM resampled to the requested rate, G.711 where asked, the character
   limit as a typed error, and a cancel that keeps the usage known so far.
