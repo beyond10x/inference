@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-05T18:12:54Z",
+  "actor": "human:timo",
+  "artifact": "story:deepgram-streaming-stt-adapter",
+  "kind": "story",
+  "revision": 29,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-deepgram --tests --all-features; cargo test -p inference-testkit --features stt --test stt_conformance",
+    "reference": "base c0335ff has no inference-deepgram crate or stt::conformance; treatment 90d0780: 63 cases green, stt_conformance 13 passed (implementor report)"
+  }
+}
