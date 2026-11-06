@@ -273,14 +273,12 @@ fn hosted() -> Result<ElevenLabsSynthesiser, String> {
 /// The cascade arm over the local voice cascade's recogniser and LLM.
 #[cfg(feature = "local")]
 mod cascade {
-    use std::time::Instant;
-
     use inference_elevenlabs::ElevenLabsSynthesiser;
     use local_voice_cascade::local::{
         LocalConfig, LocalModels, LocalRefused, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE,
         SPEECH_VAD,
     };
-    use realtime_voice::compare::{Cascade, ClientPlayout, Measured, Plan, run_cascade};
+    use realtime_voice::compare::{Cascade, ClientPlayout, Measured, Plan, run_cascade_live};
     use realtime_voice::pcm16;
 
     /// The reason a local step is missing for, naming it.
@@ -317,13 +315,7 @@ mod cascade {
         Ok((1..=runs)
             .map(|run| {
                 eprintln!("cascade: run {run} of {runs}");
-                run_cascade(
-                    &mut cascade,
-                    plan,
-                    &Instant::now,
-                    &std::thread::sleep,
-                    &mut ClientPlayout,
-                )
+                run_cascade_live(&mut cascade, plan, &mut ClientPlayout)
             })
             .collect())
     }

@@ -7,14 +7,19 @@
 //! the LLM returns, and the detector's attack, which needs two frames of voiced input sent at
 //! pace, is met within one instant: barge-in to stop reads as the playout's own stop time.
 //!
-//! Every time is on a fake clock moved only by the wrappers here and the arm's waits; nothing
+//! The LLM's `GAP` is a future pending until the caller's clock reached it, woken by the clock's
+//! timer when the arm moves the clock on, as a model awaiting its next token is. The LLM never
+//! moves the clock itself: an arm that reads the clock while a step jumps it would see every
+//! frame of the jump as late, whether or not it paces input during the step.
+//!
+//! Every time is on a fake clock moved only by the playout's stop and the arm's waits; nothing
 //! sleeps, so nothing can hang on the wall clock.
 
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use inference_duplex::inference_audio::AudioFrame;
@@ -48,10 +53,12 @@ const FIRST: &str = "one two three four five six seven eight nine ten \
                      one two three four five six seven eight nine ten";
 const SECOND: &str = " and that is all.";
 
+/// A clock that moves only when it is moved, with timers it wakes as it passes them.
 #[derive(Debug, Clone)]
 struct Fake {
     base: Instant,
     offset: Arc<Mutex<Duration>>,
+    timers: Arc<Mutex<Vec<(Instant, Waker)>>>,
 }
 
 impl Fake {
@@ -59,6 +66,7 @@ impl Fake {
         Self {
             base: Instant::now(),
             offset: Arc::new(Mutex::new(Duration::ZERO)),
+            timers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -67,7 +75,54 @@ impl Fake {
     }
 
     fn advance(&self, by: Duration) {
-        *self.offset.lock().unwrap_or_else(PoisonError::into_inner) += by;
+        let now = {
+            let mut offset = self.offset.lock().unwrap_or_else(PoisonError::into_inner);
+            *offset += by;
+            self.base + *offset
+        };
+        let due: Vec<Waker> = {
+            let mut timers = self.timers.lock().unwrap_or_else(PoisonError::into_inner);
+            let (due, pending): (Vec<_>, Vec<_>) = timers.drain(..).partition(|(at, _)| *at <= now);
+            *timers = pending;
+            due.into_iter().map(|(_, waker)| waker).collect()
+        };
+        due.into_iter().for_each(Waker::wake);
+    }
+
+    /// Wakes `waker` once the clock reaches `at`.
+    fn wake_at(&self, at: Instant, waker: &Waker) {
+        self.timers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((at, waker.clone()));
+    }
+}
+
+/// Pending until the fake clock reaches `at`, woken by its timer.
+struct UntilClock {
+    clock: Fake,
+    at: Instant,
+}
+
+impl UntilClock {
+    fn after(clock: &Fake, delay: Duration) -> Self {
+        Self {
+            clock: clock.clone(),
+            at: clock.now() + delay,
+        }
+    }
+}
+
+impl std::future::Future for UntilClock {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.clock.now() >= self.at {
+            Poll::Ready(())
+        } else {
+            self.clock.wake_at(self.at, cx.waker());
+            Poll::Pending
+        }
     }
 }
 
@@ -122,7 +177,7 @@ impl StreamSink for SlowSink<'_> {
                     polls: 0,
                 }
                 .await;
-                self.clock.advance(GAP);
+                UntilClock::after(&self.clock, GAP).await;
             }
             self.inner.emit(event).await
         })
@@ -245,16 +300,38 @@ fn cascade_run(plan: &Plan) -> (Measured, usize) {
     (measured, playout.stops)
 }
 
+/// The wall-clock time a run of the case may take: the run is on a fake clock and takes
+/// milliseconds, so an arm that spins or hangs fails the case instead of holding it.
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Runs `work` on a thread of its own and returns its result, failing once `DEADLINE` passed.
+fn within_deadline<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    match receiver.recv_timeout(DEADLINE) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+            "the cascade run did not end within {DEADLINE:?} of wall-clock time: the arm spins or \
+             hangs while the LLM is pending on the fake clock"
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the cascade run panicked"),
+    }
+}
+
 /// The same plan as the unit's own barge-in case, which measures `FRAME + STOP_DELAY` with an
 /// LLM that gives every segment at once. Whether the LLM is still busy on a later segment when
 /// the barge-in comes must not change the figure: the barge-in's frames are sent at the plan's
 /// pace, and the detector needs `ATTACK` of them, two frames, before the playout is stopped.
 #[test]
 fn barge_in_to_stop_does_not_shrink_while_the_llm_is_busy_on_its_next_segment() {
-    let mut plan = Plan::new(utterance());
-    plan.barge_in = Some(utterance());
-    plan.barge_after = Duration::from_millis(20);
-    let (cascade, stops) = cascade_run(&plan);
+    let (cascade, stops) = within_deadline(|| {
+        let mut plan = Plan::new(utterance());
+        plan.barge_in = Some(utterance());
+        plan.barge_after = Duration::from_millis(20);
+        cascade_run(&plan)
+    });
     println!("{cascade:?}");
     assert_eq!(cascade.notes, Vec::<String>::new(), "{cascade:?}");
     assert_eq!(stops, 1, "the playout stopped once");
