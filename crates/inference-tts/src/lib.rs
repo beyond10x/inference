@@ -168,9 +168,10 @@
 //! completed no call and yields no record.
 //!
 //! The crate carries no concrete model, backend or provider; the scripted mock synthesiser and a
-//! sink double are `inference-testkit`'s, behind its `tts` feature. Voices, languages, codecs,
-//! audio formats and speaker conditions as capabilities, and text-to-audio alignment, are not part
-//! of the contract yet.
+//! sink double are `inference-testkit`'s, behind its `tts` feature. An adapter's voices and codecs
+//! can be described with `inference_core::model::AdapterDescriptor`, which no declaration
+//! carries yet; speaker conditions as capabilities, and text-to-audio alignment, are not part of
+//! the contract yet.
 //!
 //! The vocabulary crates the contract is written in are re-exported, so that a consumer of speech
 //! synthesis alone depends on this crate and one adapter.
@@ -300,7 +301,7 @@ impl PlaybackReceipt {
 /// produced it.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SynthesisEvent {
-    /// A frame of a segment's audio.
+    /// `inference.audio.AudioChunk`: a frame of a segment's audio.
     Audio(SegmentAudio),
     /// `inference.stream.SynthesisCompleted`: the segment's audio is generated and not yet played.
     Completed(SynthesisCompleted),
@@ -310,13 +311,14 @@ pub enum SynthesisEvent {
 }
 
 impl SynthesisEvent {
-    /// The name the event is declared under, in `ess/domains/audio.yaml` for a frame,
-    /// `ess/domains/stream.yaml` for a completion and `ess/domains/usage.yaml` for a usage
-    /// record: the `kind` of its envelope.
+    /// The name the event is declared under, in `ess/domains/audio.yaml` for a frame
+    /// (`inference.audio.AudioChunk`, the event that carries an `inference.audio.AudioFrame`,
+    /// not the type's own name), `ess/domains/stream.yaml` for a completion and
+    /// `ess/domains/usage.yaml` for a usage record: the `kind` of its envelope.
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
-            Self::Audio(_) => "inference.audio.AudioFrame",
+            Self::Audio(_) => "inference.audio.AudioChunk",
             Self::Completed(_) => "inference.stream.SynthesisCompleted",
             Self::Usage(_) => UsageRecorded::KIND,
         }

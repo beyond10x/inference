@@ -53,9 +53,11 @@
 //! through [`RecognitionHandle::revise`] among them, is refused with [`RecognitionEnded`], and a
 //! second record with [`UsageAlreadyRecorded`]. It is enveloped like any other event, at the next
 //! sequence of the request's stream. Its quantities are measured by the contract, so every
-//! recogniser reports them without code of its own: `input_audio_ms`, the audio offered, the
-//! samples per channel at each sample rate counted exactly, over that rate, summed and rounded
-//! down to the millisecond once, and `requests`, 1. The implementation adds the time its backend
+//! recogniser reports them without code of its own: `input_audio_ms`, the audio the
+//! implementation took ([`TranscriptOutput::take_input`]), not the audio offered, as a synthesis
+//! counts the characters it took, so a recogniser that failed before taking its tail counts none
+//! of the tail; the samples per channel at each sample rate counted exactly, over that rate,
+//! summed and rounded down to the millisecond once; and `requests`, 1. The implementation adds the time its backend
 //! computed through [`TranscriptOutput::add_local_compute`], reported as `local_compute_ms`,
 //! `measured`, and `unknown` when it adds none. A backend call that failed is still recorded,
 //! with what was measured, its counts not final (`final` false) once the implementation marks it
@@ -506,8 +508,8 @@ pub struct TranscriptOutput {
     request: RecognitionRequest,
     turn: Turn,
     offered: VecDeque<AudioFrame>,
-    /// The samples per channel offered so far, by sample rate.
-    offered_samples: BTreeMap<u32, u128>,
+    /// The samples per channel taken so far, by sample rate.
+    taken_samples: BTreeMap<u32, u128>,
     taken: usize,
     taken_through: i64,
     input_ended: bool,
@@ -538,7 +540,7 @@ impl TranscriptOutput {
             request,
             turn,
             offered: VecDeque::new(),
-            offered_samples: BTreeMap::new(),
+            taken_samples: BTreeMap::new(),
             taken: 0,
             taken_through: 0,
             input_ended: false,
@@ -559,11 +561,6 @@ impl TranscriptOutput {
         if self.input_ended {
             return Err(InputEnded);
         }
-        let samples = self
-            .offered_samples
-            .entry(frame.format.sample_rate.get())
-            .or_insert(0);
-        *samples = samples.saturating_add(u128::from(frame.sample_count));
         self.offered.push_back(frame);
         Ok(())
     }
@@ -582,7 +579,7 @@ impl TranscriptOutput {
     }
 
     /// Gives the frames offered and not yet taken to the implementation, in the order they were
-    /// offered.
+    /// offered; their audio counts towards the recognition's `input_audio_ms` from now on.
     ///
     /// # Errors
     ///
@@ -592,6 +589,11 @@ impl TranscriptOutput {
         self.require_before_end(Capability::IncrementalInput)?;
         let frames: Vec<AudioFrame> = self.offered.drain(..).collect();
         for frame in &frames {
+            let samples = self
+                .taken_samples
+                .entry(frame.format.sample_rate.get())
+                .or_insert(0);
+            *samples = samples.saturating_add(u128::from(frame.sample_count));
             let end = frame
                 .position
                 .get()
@@ -704,20 +706,21 @@ impl TranscriptOutput {
         self.failed
     }
 
-    /// Milliseconds of audio offered to the recognition so far: the samples per channel offered
-    /// at each sample rate, counted exactly, over that rate, summed as an exact fraction and
+    /// Milliseconds of audio the implementation has taken so far ([`Self::take_input`]); audio
+    /// offered and not yet taken does not count. The samples per channel taken at each sample
+    /// rate, counted exactly, over that rate, summed as an exact fraction and
     /// rounded down to the millisecond once, at the end. Should that fraction not fit `u128`,
     /// which takes several sample rates with no common divisor in one recognition, each rate's
     /// milliseconds are rounded down on their own and summed. Beyond `i64::MAX` it reads
     /// `i64::MAX`; the usage record then carries the milliseconds as unknown.
     #[must_use]
     pub fn input_audio_ms(&self) -> i64 {
-        self.offered_ms().unwrap_or(i64::MAX)
+        self.taken_ms().unwrap_or(i64::MAX)
     }
 
     /// The milliseconds of [`Self::input_audio_ms`]; `None` beyond `i64::MAX`.
-    fn offered_ms(&self) -> Option<i64> {
-        let exact = self.offered_samples.iter().try_fold(
+    fn taken_ms(&self) -> Option<i64> {
+        let exact = self.taken_samples.iter().try_fold(
             (0_u128, 1_u128),
             |(numerator, denominator), (&rate, &samples)| {
                 add_fraction(
@@ -728,7 +731,7 @@ impl TranscriptOutput {
         );
         let ms = exact.map_or_else(
             || {
-                self.offered_samples
+                self.taken_samples
                     .iter()
                     .map(|(&rate, &samples)| samples.saturating_mul(1_000) / u128::from(rate))
                     .fold(0_u128, u128::saturating_add)
@@ -781,7 +784,7 @@ impl TranscriptOutput {
             self.started_at_ms,
             wall_clock_ms().max(self.started_at_ms),
             vec![
-                measured(QuantityKind::InputAudioMs, self.offered_ms()),
+                measured(QuantityKind::InputAudioMs, self.taken_ms()),
                 Quantity::measured(QuantityKind::Requests, 1),
                 local_compute,
             ],
@@ -1024,7 +1027,7 @@ mod tests {
             "text_out",
         );
         let mut output = TranscriptOutput::start(&adapter(), request);
-        output.offered_samples.insert(1_000, samples);
+        output.taken_samples.insert(1_000, samples);
         output.end_input().expect("input ends once");
         let envelope = output.usage().expect("input has ended");
         let recorded = match envelope.payload {
@@ -1035,7 +1038,7 @@ mod tests {
             .quantities
             .iter()
             .find(|quantity| quantity.kind() == QuantityKind::InputAudioMs)
-            .expect("the audio offered")
+            .expect("the audio taken")
             .value()
     }
 
