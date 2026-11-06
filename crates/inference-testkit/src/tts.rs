@@ -81,18 +81,22 @@ use inference_tts::inference_core::model::{
     Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_tts::inference_text::{
-    AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentSnapshot,
-    SegmentState, SegmentStateConflict,
+    AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued, SegmentState,
 };
 use inference_tts::{
-    AudioRefused, CONTRACT_REVISION, ConcurrencyLimitReached, DiscardRefused,
-    FrameOfAnotherSegment, OfferRefused, PlaybackReceipt, PlaybackRefused, SegmentAudio,
-    SegmentNotHeld, SynthesisEvent, SynthesisHandle, SynthesisOutput, Synthesiser, UtteranceEnded,
+    AudioRefused, CONTRACT_REVISION, ConcurrencyLimitReached, DiscardRefused, OfferRefused,
+    PlaybackReceipt, PlaybackRefused, SynthesisEvent, SynthesisHandle, SynthesisOutput,
+    Synthesiser, UtteranceEnded,
 };
 
 /// The TTS contract the mock implements, re-exported with the vocabulary crates it re-exports, so
 /// that a test reaches `inference-tts`' types through the testkit alone.
 pub use inference_tts;
+
+/// The sink double: `inference-pipeline`'s acknowledging sink, which the playing TTS node plays
+/// through, given frames and acknowledging the playback of a Synthesized segment once it was given
+/// every frame the synthesis emitted of it.
+pub use inference_pipeline::nodes::tts::{PlaybackSink as MockSink, SinkRefused};
 
 /// The backend-neutral checks of the TTS adapter exit criteria, generic over any
 /// [`Synthesiser`], with [`MockSink`] as the sink, for an adapter crate to run against its own
@@ -363,144 +367,5 @@ impl SynthesisHandle for MockSynthesis {
         self.delivered
             .retain(|event| event.segment_id() != Some(segment_id));
         Ok(event)
-    }
-}
-
-/// Why the sink refused to acknowledge playback; nothing changed either way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SinkRefused {
-    /// The synthesis holds no such segment.
-    SegmentNotHeld(SegmentNotHeld),
-    /// The `wrong-state` outcome of `inference.stream.AcknowledgePlayback`: the segment is not
-    /// Synthesized, in the state carried.
-    SegmentStateConflict(SegmentStateConflict),
-    /// The sink has been given no audio of a segment the synthesis emitted frames of, so it
-    /// played none.
-    NothingGiven { segment_id: SegmentId },
-    /// The receipt's frames are of another segment.
-    FrameOfAnotherSegment(FrameOfAnotherSegment),
-    /// The sink has been given `given` frames of the segment, those the synthesis already counts
-    /// as played among them, where the synthesis emitted `emitted`, so it has not played exactly
-    /// its audio.
-    FramesOutstanding {
-        segment_id: SegmentId,
-        given: usize,
-        emitted: usize,
-    },
-}
-
-impl From<PlaybackRefused> for SinkRefused {
-    fn from(error: PlaybackRefused) -> Self {
-        match error {
-            PlaybackRefused::SegmentNotHeld(error) => Self::SegmentNotHeld(error),
-            PlaybackRefused::SegmentStateConflict(error) => Self::SegmentStateConflict(error),
-            PlaybackRefused::FrameOfAnotherSegment(error) => Self::FrameOfAnotherSegment(error),
-            PlaybackRefused::PlayedFramesMismatch(error) => Self::FramesOutstanding {
-                segment_id: error.segment_id,
-                given: error.played,
-                emitted: error.emitted,
-            },
-        }
-    }
-}
-
-/// The sink double: it is given the frames of a synthesis and acknowledges playback of a
-/// Synthesized segment once it has been given every frame the synthesis emitted of it.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct MockSink {
-    given: Vec<SegmentAudio>,
-}
-
-impl MockSink {
-    /// A sink that has been given nothing.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Gives the sink a frame to play.
-    pub fn give(&mut self, audio: SegmentAudio) {
-        self.given.push(audio);
-    }
-
-    /// How many frames of the segment `segment_id` the sink has been given and not yet
-    /// acknowledged.
-    #[must_use]
-    pub fn frames_given(&self, segment_id: SegmentId) -> usize {
-        self.given
-            .iter()
-            .filter(|audio| audio.segment_id() == segment_id)
-            .count()
-    }
-
-    /// Runs `inference.stream.AcknowledgePlayback` on the segment `segment_id` of the synthesis
-    /// `handle` runs, through [`SynthesisHandle::acknowledge_playback`] with the
-    /// [`PlaybackReceipt`] it makes by consuming the frames of the segment it was given, none for
-    /// a segment synthesized without frames: the synthesis's record moves from Synthesized to
-    /// Played. Frames of the segment the synthesis already counts as played, from a receipt it
-    /// refused earlier, count as given. Returns a snapshot of the Played record and its
-    /// `AudioPlayed`.
-    ///
-    /// # Errors
-    ///
-    /// [`SinkRefused::SegmentNotHeld`] when the synthesis holds no such segment;
-    /// [`SinkRefused::SegmentStateConflict`] carrying its state when it is not Synthesized, a
-    /// Queued or Played one among them; [`SinkRefused::NothingGiven`] when neither the sink nor
-    /// the synthesis's count has a frame of a segment the synthesis emitted frames of; and
-    /// [`SinkRefused::FramesOutstanding`] when the two together are not exactly the frames the
-    /// synthesis emitted of it. On each of these the sink refuses before it makes a receipt:
-    /// nothing moves and the sink keeps its frames. When the handle refuses the receipt the sink
-    /// made, the sink no longer holds those frames, since a receipt consumes them and is not
-    /// handed back; the synthesis counts them as played, so they are not lost, and the next
-    /// acknowledgement confirms them.
-    pub fn acknowledge<H: SynthesisHandle>(
-        &mut self,
-        handle: &mut H,
-        segment_id: SegmentId,
-    ) -> Result<(SegmentSnapshot, AudioPlayed), SinkRefused> {
-        let current = handle
-            .output()
-            .segment(segment_id)
-            .ok_or(SegmentNotHeld { segment_id })
-            .map_err(SinkRefused::SegmentNotHeld)?
-            .state();
-        if current != SegmentState::Synthesized {
-            return Err(SinkRefused::SegmentStateConflict(SegmentStateConflict {
-                current,
-            }));
-        }
-        let counted = handle
-            .output()
-            .frames_played(segment_id)
-            .unwrap_or_default();
-        let given = self.frames_given(segment_id) + counted;
-        let emitted = handle
-            .output()
-            .frames_emitted(segment_id)
-            .unwrap_or_default();
-        if given == 0 && emitted > 0 {
-            return Err(SinkRefused::NothingGiven { segment_id });
-        }
-        if given != emitted {
-            return Err(SinkRefused::FramesOutstanding {
-                segment_id,
-                given,
-                emitted,
-            });
-        }
-        let (played, kept): (Vec<SegmentAudio>, Vec<SegmentAudio>) = self
-            .given
-            .drain(..)
-            .partition(|audio| audio.segment_id() == segment_id);
-        self.given = kept;
-        let receipt = PlaybackReceipt::from_frames(played)
-            .expect("the sink was given frames of the segment, and only of it");
-        let event = handle.acknowledge_playback(segment_id, receipt)?;
-        let played = handle
-            .output()
-            .segment(segment_id)
-            .expect("an acknowledged segment is held")
-            .snapshot();
-        Ok((played, event))
     }
 }
