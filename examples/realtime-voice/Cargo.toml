@@ -29,6 +29,7 @@ inference-aws = { path = "../../adapters/inference-aws", features = ["duplex"] }
 inference-deepgram = { path = "../../adapters/inference-deepgram", features = ["duplex"] }
 inference-elevenlabs = { path = "../../adapters/inference-elevenlabs", features = ["duplex"] }
 inference-openai = { path = "../../adapters/inference-openai", features = ["gpt-live", "live"] }
+inference-phonic = { path = "../../adapters/inference-phonic" }
 inference-testkit = { path = "../../crates/inference-testkit", features = ["duplex", "llm", "stt", "tts"] }
 
 [lints]
