@@ -17,7 +17,8 @@ use std::thread::{self, Thread};
 use inference_core::generation::GenerationState;
 use inference_core::id::{GenerationId, RunId};
 use inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_llm::llm_core::{
@@ -233,6 +234,7 @@ fn a_model_node_answers_each_input_on_one_generation_of_an_llm_model() {
             Capability::ConcurrentInputOutput,
         ],
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive");
     let (declaration, planned, [source_id, model_id, sink_id]) = planned(&adapter);

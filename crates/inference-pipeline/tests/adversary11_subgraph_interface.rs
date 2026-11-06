@@ -5,7 +5,8 @@
 use std::num::NonZeroUsize;
 
 use inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
@@ -66,6 +67,7 @@ fn two_ports_of_one_name_cannot_both_take_the_childs_one_exposure_of_that_name()
         locality: Locality::SameProcess,
         capabilities: vec![Capability::OutputStreaming],
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("a positive concurrency");
     let known = Known { profile, adapter };

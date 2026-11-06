@@ -10,7 +10,7 @@
 use inference_tts::inference_core::generation::{Generation, StartGeneration};
 use inference_tts::inference_core::id::{NodeId, RunId};
 use inference_tts::inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_tts::inference_text::{OutputSegment, SegmentState, SegmentStateConflict};
 use inference_tts::{CONTRACT_REVISION, CompletionRefused, SegmentNotTaken, SynthesisOutput};
@@ -24,6 +24,7 @@ fn adapter(capabilities: Vec<Capability>) -> Adapter {
         locality: Locality::SameProcess,
         capabilities,
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("a maximum concurrency of one is positive")
     .0

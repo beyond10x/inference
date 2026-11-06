@@ -90,7 +90,7 @@
 //! # use inference_tts::inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 //! # use inference_tts::inference_core::generation::{Generation, StartGeneration};
 //! # use inference_tts::inference_core::id::{NodeId, RunId};
-//! # use inference_tts::inference_core::model::{Adapter, DeclareAdapter, ExecutionForm, Locality, ModelId};
+//! # use inference_tts::inference_core::model::{Adapter, AdapterDescriptor, DeclareAdapter, ExecutionForm, Locality, ModelId};
 //! # use inference_tts::inference_text::{OutputSegment, SegmentState};
 //! # use inference_tts::{AudioRefused, CONTRACT_REVISION, SynthesisEvent, SynthesisOutput};
 //! # let (adapter, _) = Adapter::declare(DeclareAdapter {
@@ -101,6 +101,7 @@
 //! #     locality: Locality::SameProcess,
 //! #     capabilities: Vec::new(),
 //! #     max_concurrency: 1,
+//! #     descriptor: AdapterDescriptor::default(),
 //! # }).unwrap();
 //! # let (generation, _) = Generation::start(StartGeneration {
 //! #     run_id: RunId::generate(),
@@ -168,10 +169,9 @@
 //! completed no call and yields no record.
 //!
 //! The crate carries no concrete model, backend or provider; the scripted mock synthesiser and a
-//! sink double are `inference-testkit`'s, behind its `tts` feature. An adapter's voices and codecs
-//! can be described with `inference_core::model::AdapterDescriptor`, which no declaration
-//! carries yet; speaker conditions as capabilities, and text-to-audio alignment, are not part of
-//! the contract yet.
+//! sink double are `inference-testkit`'s, behind its `tts` feature. An adapter declares its
+//! voices and codecs in its `inference_core::model::AdapterDescriptor`; speaker conditions as
+//! capabilities, and text-to-audio alignment, are not part of the contract yet.
 //!
 //! The vocabulary crates the contract is written in are re-exported, so that a consumer of speech
 //! synthesis alone depends on this crate and one adapter.
@@ -1309,7 +1309,7 @@ pub trait SynthesisHandle: Iterator<Item = SynthesisEvent> {
 
 #[cfg(test)]
 mod tests {
-    use inference_core::model::{DeclareAdapter, ExecutionForm, Locality};
+    use inference_core::model::{AdapterDescriptor, DeclareAdapter, ExecutionForm, Locality};
 
     use super::*;
 
@@ -1322,6 +1322,7 @@ mod tests {
             locality: Locality::SameProcess,
             capabilities: Vec::new(),
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .expect("one is positive")
         .0

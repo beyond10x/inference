@@ -21,7 +21,8 @@ use std::thread::{self, Thread};
 
 use inference_core::id::{GenerationId, RunId};
 use inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_llm::llm_core::{
@@ -253,6 +254,7 @@ fn run(scripted: &Scripted, inputs: &[&str]) -> Ran {
             Capability::ConcurrentInputOutput,
         ],
         max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
     })
     .expect("one is positive");
     let (declaration, planned, [source_id, model_id, sink_id]) = planned(&adapter);

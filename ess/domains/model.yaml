@@ -119,14 +119,13 @@ types:
   # size in tokens, its input and output duration limits in milliseconds, its token budget, its
   # state scope and its rate limits. Every part is optional: an empty list or none says the
   # adapter declares nothing of it, never that it supports none. Languages and audio formats are
-  # the capability record's. State scope is free text until the design names its values.
+  # the capability record's. State scope is free text until the design names its values. The
+  # Adapter carries it, not the CapabilityRecord: a record is per hardware target, and none of
+  # these changes with the hardware.
   # read from: docs/design/inference.md:386
   # read from: docs/design/inference.md:435
   # read from: docs/design/inference.md:436
   # read from: docs/design/inference.md:439
-  # UNMAPPED: no command takes a descriptor and no entity carries one yet: adding it to the input
-  # of DeclareAdapter or DeclareCapabilityRecord changes a declared input every existing
-  # declaration writes. Which of the two carries it is open for the owner.
   - name: inference.model.AdapterDescriptor
     kind: struct
     fields:
@@ -221,6 +220,11 @@ entities:
         type: List<inference.model.Capability>
       - name: max_concurrency
         type: Integer
+      # read from: docs/design/inference.md:435
+      # read from: docs/design/inference.md:436
+      # read from: docs/design/inference.md:439
+      - name: descriptor
+        type: inference.model.AdapterDescriptor
     relations:
       # An adapter connects one model; the model artifact stands on its own.
       # read from: docs/design/inference.md:99
@@ -378,6 +382,8 @@ commands:
         type: List<inference.model.Capability>
       - name: max_concurrency
         type: Integer
+      - name: descriptor
+        type: inference.model.AdapterDescriptor
     outcomes:
       # read from: docs/design/inference.md:99
       - name: unknown-model
@@ -400,6 +406,7 @@ commands:
           locality: input.locality
           capabilities: input.capabilities
           max_concurrency: input.max_concurrency
+          descriptor: input.descriptor
         emits:
           - inference.model.AdapterDeclared
         payload:
@@ -560,6 +567,8 @@ views:
         type: List<inference.model.Capability>
       - name: max_concurrency
         type: Integer
+      - name: descriptor
+        type: inference.model.AdapterDescriptor
 
   # read from: docs/design/inference.md:941-951
   - name: inference.model.CapabilityRecords
