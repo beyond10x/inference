@@ -18,7 +18,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use zeroize::Zeroizing;
 
 use crate::audio::encode_pcm16_24k;
-use crate::config::{Endpoint, FunctionTool, SessionConfig, ToolChoice, WireFormat};
+use crate::config::{Deadlines, Endpoint, FunctionTool, SessionConfig, ToolChoice, WireFormat};
 use crate::credential::{CredentialError, CredentialSource};
 use crate::error::{ConnectError, RealtimeError};
 use crate::event::ServerEvent;
@@ -38,7 +38,8 @@ pub(crate) type SocketStream = SplitStream<Socket>;
 /// server events through [`RealtimeClient::next_event`]. The client holds no credential after the
 /// handshake.
 ///
-/// Every method takes the whole client, so a write the peer does not drain holds up every read.
+/// Every method takes the whole client, so a write the peer does not drain holds up every read
+/// until it fails at the write deadline ([`Deadlines::write_timeout`]).
 /// [`RealtimeClient::into_split`] gives a [`RealtimeSender`] and a [`RealtimeReceiver`] that two
 /// tasks own instead.
 pub struct RealtimeClient {
@@ -54,6 +55,8 @@ pub struct RealtimeClient {
 pub struct RealtimeSender {
     sink: SocketSink,
     input_format: WireFormat,
+    /// The deadline of each write ([`Deadlines::write_timeout`]).
+    write_timeout: std::time::Duration,
 }
 
 /// The receiving half of a Realtime session, from [`RealtimeClient::into_split`]:
@@ -206,11 +209,17 @@ impl RealtimeClient {
     /// [`RealtimeClient::next_event`].
     ///
     /// The credential is resolved before any connection is made, is sent only in the opening
-    /// handshake and is never part of an error.
+    /// handshake and is never part of an error. The URL is checked before the credential is
+    /// resolved: `wss://`, or `ws://` only to a loopback host, since `ws://` sends the key in the
+    /// clear. The opening handshake takes at most [`DEFAULT_CONNECT_TIMEOUT`](crate::DEFAULT_CONNECT_TIMEOUT),
+    /// and each write at most [`DEFAULT_WRITE_TIMEOUT`](crate::DEFAULT_WRITE_TIMEOUT);
+    /// [`RealtimeClient::connect_with`] takes other [`Deadlines`].
     ///
     /// # Errors
     /// [`RealtimeError::Credential`] when the source refuses or the credential is not a valid
-    /// header value; [`RealtimeError::InvalidEndpoint`], [`RealtimeError::Connect`];
+    /// header value; [`RealtimeError::InvalidEndpoint`] for a URL that is neither `wss://` nor
+    /// `ws://` to a loopback host, before anything is resolved or connected;
+    /// [`RealtimeError::Connect`], without a status when the handshake passed its deadline;
     /// [`RealtimeError::Server`] when the server answers setup with `error`; and the errors of
     /// [`RealtimeClient::next_event`].
     pub async fn connect(
@@ -219,12 +228,31 @@ impl RealtimeClient {
         credential: &str,
         session: &SessionConfig,
     ) -> Result<Self, RealtimeError> {
+        Self::connect_with(endpoint, Deadlines::default(), source, credential, session).await
+    }
+
+    /// [`RealtimeClient::connect`] under `deadlines`: the opening handshake takes at most
+    /// [`Deadlines::connect_timeout`], and each write of the session at most
+    /// [`Deadlines::write_timeout`].
+    ///
+    /// # Errors
+    /// The errors of [`RealtimeClient::connect`].
+    pub async fn connect_with(
+        endpoint: &Endpoint,
+        deadlines: Deadlines,
+        source: &dyn CredentialSource,
+        credential: &str,
+        session: &SessionConfig,
+    ) -> Result<Self, RealtimeError> {
         let url = request_url(endpoint)?;
-        let (sink, stream) = open_socket(&url, source, credential).await?.split();
+        let (sink, stream) = open_socket(&url, source, credential, deadlines.connect_timeout())
+            .await?
+            .split();
 
         let mut sender = RealtimeSender {
             sink,
             input_format: session.input_format,
+            write_timeout: deadlines.write_timeout(),
         };
         let mut receiver = RealtimeReceiver {
             stream,
@@ -484,6 +512,11 @@ impl RealtimeClient {
 }
 
 impl RealtimeSender {
+    /// The deadline of each write on this half ([`Deadlines::write_timeout`]).
+    pub fn write_timeout(&self) -> std::time::Duration {
+        self.write_timeout
+    }
+
     /// [`RealtimeClient::update_session`] on this half: sends `session.update`, and later
     /// appends follow its input format.
     ///
@@ -544,7 +577,7 @@ impl RealtimeSender {
     /// [`RealtimeError::Transport`] when `payload` is longer than 125 bytes, refused before
     /// anything is written, or when the write fails.
     pub async fn ping(&mut self, payload: &[u8]) -> Result<(), RealtimeError> {
-        send_ping(&mut self.sink, payload).await
+        send_ping(&mut self.sink, payload, self.write_timeout).await
     }
 
     /// [`RealtimeClient::create_item`] on this half.
@@ -659,7 +692,7 @@ impl RealtimeSender {
     }
 
     async fn send(&mut self, event: Value) -> Result<(), RealtimeError> {
-        send_json(&mut self.sink, &event).await
+        send_json(&mut self.sink, &event, self.write_timeout).await
     }
 }
 
@@ -722,14 +755,18 @@ impl RealtimeReceiver {
     }
 }
 
-/// Resolves the secret `credential` names through `source` and opens a WebSocket to `url` with
-/// it as the bearer token. The credential is resolved before any connection is made, is sent only
-/// in the opening handshake, marked sensitive, and is never part of an error.
+/// Checks `url` ([`check_url`]), resolves the secret `credential` names through `source` and
+/// opens a WebSocket to `url` with it as the bearer token, the whole opening handshake (TCP, TLS
+/// for `wss://`, the HTTP upgrade) taking at most `connect_timeout`. The credential is resolved
+/// after the URL is checked and before any connection is made, is sent only in the opening
+/// handshake, marked sensitive, and is never part of an error.
 pub(crate) async fn open_socket(
     url: &str,
     source: &dyn CredentialSource,
     credential: &str,
+    connect_timeout: std::time::Duration,
 ) -> Result<Socket, RealtimeError> {
+    let tls = check_url(url)?;
     let resolved = source
         .resolve(credential)
         .await
@@ -747,16 +784,72 @@ pub(crate) async fn open_socket(
         .into_client_request()
         .map_err(|error| RealtimeError::InvalidEndpoint(error.to_string()))?;
     request.headers_mut().insert("authorization", header);
-    let connector = if url.starts_with("wss://") {
+    let connector = if tls {
         Some(Connector::Rustls(tls_config()?))
     } else {
         None
     };
-    let (socket, _) =
-        tokio_tungstenite::connect_async_tls_with_config(request, None, true, connector)
-            .await
-            .map_err(|error| RealtimeError::Connect(handshake_error(&error)))?;
+    let handshake =
+        tokio_tungstenite::connect_async_tls_with_config(request, None, true, connector);
+    let (socket, _) = within(tokio::time::Instant::now(), connect_timeout, handshake)
+        .await
+        .ok_or_else(|| {
+            RealtimeError::Connect(ConnectError {
+                status: None,
+                detail: format!(
+                    "the opening handshake did not complete within {connect_timeout:?}"
+                ),
+            })
+        })?
+        .map_err(|error| RealtimeError::Connect(handshake_error(&error)))?;
     Ok(socket)
+}
+
+/// Whether `url` takes TLS: `true` for `wss://`, `false` for `ws://` to a loopback host
+/// ([`is_loopback`]). `ws://` sends the bearer key in the clear, so any other host is refused, and
+/// so is any other scheme; the scheme is read without regard to case.
+///
+/// # Errors
+/// [`RealtimeError::InvalidEndpoint`], naming the rule and never the credential.
+pub(crate) fn check_url(url: &str) -> Result<bool, RealtimeError> {
+    let refused = |detail: &str| Err(RealtimeError::InvalidEndpoint(detail.to_owned()));
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return refused("the URL has no scheme; it must be wss://, or ws:// to a loopback host");
+    };
+    if scheme.eq_ignore_ascii_case("wss") {
+        Ok(true)
+    } else if scheme.eq_ignore_ascii_case("ws") {
+        if is_loopback(rest) {
+            Ok(false)
+        } else {
+            refused(
+                "ws:// would send the key in the clear; it is taken only to a loopback host, use wss://",
+            )
+        }
+    } else {
+        refused("the scheme must be wss://, or ws:// to a loopback host")
+    }
+}
+
+/// Whether the authority at the start of `rest`, what follows `ws://`, names a loopback host:
+/// `localhost`, an IPv4 address in `127.0.0.0/8` or `[::1]`, with or without a port. A user
+/// part (`user@host`) is refused, since it could make a host read as another.
+fn is_loopback(rest: &str) -> bool {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.contains('@') {
+        return false;
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => match bracketed.split_once(']') {
+            Some((host, after)) if after.is_empty() || after.starts_with(':') => host,
+            _ => return false,
+        },
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// `future`'s output, or `None` when `start + bound` passes first. A sum too large for an
@@ -826,12 +919,36 @@ pub(crate) async fn read_text(
     }
 }
 
-/// Writes `event` as one text message.
-pub(crate) async fn send_json(socket: &mut SocketSink, event: &Value) -> Result<(), RealtimeError> {
-    socket
-        .send(Message::text(event.to_string()))
-        .await
-        .map_err(|error| RealtimeError::Transport(error.to_string()))
+/// Writes `event` as one text message, taking at most `write_timeout` ([`write_within`]).
+pub(crate) async fn send_json(
+    socket: &mut SocketSink,
+    event: &Value,
+    write_timeout: std::time::Duration,
+) -> Result<(), RealtimeError> {
+    write_within(socket, Message::text(event.to_string()), write_timeout).await
+}
+
+/// Writes `message` on `socket`, failing as [`RealtimeError::Transport`] when the write has not
+/// completed within `write_timeout` of the call: a peer that stops draining the connection fails
+/// the write instead of holding it. A write that passes its deadline may leave part of the
+/// message on the connection. A bound too large to add to the current instant is no bound.
+async fn write_within(
+    socket: &mut SocketSink,
+    message: Message,
+    write_timeout: std::time::Duration,
+) -> Result<(), RealtimeError> {
+    within(
+        tokio::time::Instant::now(),
+        write_timeout,
+        socket.send(message),
+    )
+    .await
+    .ok_or_else(|| {
+        RealtimeError::Transport(format!(
+            "the write did not complete within {write_timeout:?}; the peer is not reading"
+        ))
+    })?
+    .map_err(|error| RealtimeError::Transport(error.to_string()))
 }
 
 /// The most payload a ping frame carries: RFC 6455, section 5.5, caps every control frame's
@@ -843,6 +960,7 @@ pub(crate) const MAX_PING_PAYLOAD: usize = 125;
 pub(crate) async fn send_ping(
     socket: &mut SocketSink,
     payload: &[u8],
+    write_timeout: std::time::Duration,
 ) -> Result<(), RealtimeError> {
     if payload.len() > MAX_PING_PAYLOAD {
         return Err(RealtimeError::Transport(format!(
@@ -850,10 +968,12 @@ pub(crate) async fn send_ping(
             payload.len()
         )));
     }
-    socket
-        .send(Message::Ping(payload.to_vec().into()))
-        .await
-        .map_err(|error| RealtimeError::Transport(error.to_string()))
+    write_within(
+        socket,
+        Message::Ping(payload.to_vec().into()),
+        write_timeout,
+    )
+    .await
 }
 
 /// One item of `conversation.item.create`'s `item`, as the client events reference gives it.

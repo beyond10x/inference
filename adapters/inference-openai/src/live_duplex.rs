@@ -81,7 +81,8 @@
 //!   cached or output tokens unknown once one backend response left them out; backend usage may
 //!   arrive after a response's silence gap ended it, so the record waits for the next response
 //!   or the session's end. In the contract's `ResponseUsage` a count the server left out is 0,
-//!   its absence kept in [`OpenAiLiveSession::backend_usage`]. A backend usage is read field by
+//!   its absence kept in [`OpenAiLiveSession::backend_usage`] (the most recent 64; every one is
+//!   summed and counted in [`OpenAiLiveSession::backend_usage_count`]). A backend usage is read field by
 //!   field: each count it carries is summed, and one missing or in another shape is unknown. A
 //!   backend usage missing its input or output tokens, a `usage` that is not an object and a
 //!   backend response end whose `response` is missing or not an object each count their frame
@@ -90,7 +91,8 @@
 //!   connect as a closed transport. A `session.closed` the caller did not ask for (expired, a
 //!   safety filter, a remote hangup) fails the session as a provider error, `connection_lost` as
 //!   a closed transport; a closed or failed connection fails it at once. `error` events do not
-//!   end the session and are kept in [`OpenAiLiveSession::server_errors`]. A `session.closed`
+//!   end the session; the most recent 64 are kept in [`OpenAiLiveSession::server_errors`] and
+//!   every one is counted in [`OpenAiLiveSession::server_error_count`]. A `session.closed`
 //!   without its reason or seconds still ends the session, and a backend response end without
 //!   its id still counts its usage.
 //! * A message the client cannot read (not JSON, no `type`, a typed event without a field it
@@ -122,9 +124,9 @@ use inference_duplex::{
 use inference_tools::Json;
 use tokio::runtime::Runtime;
 
-use crate::config::{Endpoint, FunctionTool};
+use crate::config::{Deadlines, Endpoint, FunctionTool};
 use crate::credential::CredentialSource;
-use crate::duplex::{failure, milliseconds, without_waiting};
+use crate::duplex::{failure, kept_push, milliseconds, without_waiting};
 use crate::error::RealtimeError;
 use crate::event::ServerError;
 use crate::live::{
@@ -284,6 +286,7 @@ fn alaw(byte: u8) -> u16 {
 pub struct OpenAiLive {
     adapter: Adapter,
     endpoint: Endpoint,
+    deadlines: Deadlines,
     source: Box<dyn CredentialSource>,
     credential: String,
     backend: ResponsesBackend,
@@ -324,6 +327,7 @@ impl OpenAiLive {
         Self {
             adapter,
             endpoint,
+            deadlines: Deadlines::default(),
             source,
             credential: credential.into(),
             backend: ResponsesBackend::new(DEFAULT_BACKEND_MODEL),
@@ -335,6 +339,33 @@ impl OpenAiLive {
     /// The hosted `gpt-live-1` endpoint.
     pub fn hosted(source: Box<dyn CredentialSource>, credential: impl Into<String>) -> Self {
         Self::new(Endpoint::live(LIVE_MODEL), source, credential)
+    }
+
+    /// This model with another deadline for the opening handshake of each session it opens
+    /// ([`Deadlines::connect_timeout`]); past it, `open` fails as a closed transport.
+    #[must_use]
+    pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.deadlines = self.deadlines.with_connect_timeout(connect_timeout);
+        self
+    }
+
+    /// This model with another deadline for each write of the sessions it opens
+    /// ([`Deadlines::write_timeout`]); past it, the write fails the session as a closed
+    /// transport.
+    #[must_use]
+    pub fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+        self.deadlines = self.deadlines.with_write_timeout(write_timeout);
+        self
+    }
+
+    /// The deadline of the opening handshake, [`crate::DEFAULT_CONNECT_TIMEOUT`] unless set.
+    pub fn connect_timeout(&self) -> Duration {
+        self.deadlines.connect_timeout()
+    }
+
+    /// The deadline of each write, [`crate::DEFAULT_WRITE_TIMEOUT`] unless set.
+    pub fn write_timeout(&self) -> Duration {
+        self.deadlines.write_timeout()
     }
 
     /// This model under an adapter record declared elsewhere, such as a model store's.
@@ -413,8 +444,9 @@ impl NativeSpeechModel for OpenAiLive {
                 })
             })?;
         let client = runtime
-            .block_on(LiveClient::connect(
+            .block_on(LiveClient::connect_with(
                 &self.endpoint,
+                self.deadlines,
                 self.source.as_ref(),
                 &self.credential,
                 &client_config,
@@ -449,9 +481,11 @@ impl NativeSpeechModel for OpenAiLive {
             input: HashMap::new(),
             output: HashMap::new(),
             backend_usage: Vec::new(),
+            backend_usage_count: 0,
             voice_seconds: None,
             final_usage: None,
             server_errors: Vec::new(),
+            server_error_count: 0,
         })
     }
 }
@@ -560,10 +594,16 @@ pub struct OpenAiLiveSession {
     input: HashMap<Option<ResponseId>, Option<u64>>,
     /// The output tokens summed as `usage` is; `None` once a backend response left them out.
     output: HashMap<Option<ResponseId>, Option<u64>>,
+    /// The most recent backend usages, at most [`Self::BACKEND_USAGE_KEPT`], and how many there
+    /// were in all.
     backend_usage: Vec<BackendUsage>,
+    backend_usage_count: u64,
     voice_seconds: Option<f64>,
     final_usage: Option<LiveClosed>,
+    /// The most recent `error` events, at most [`Self::SERVER_ERRORS_KEPT`], and how many there
+    /// were in all.
     server_errors: Vec<ServerError>,
+    server_error_count: u64,
 }
 
 impl Drop for OpenAiLiveSession {
@@ -594,14 +634,36 @@ impl OpenAiLiveSession {
         }
     }
 
-    /// The `error` events the server sent during the session, which do not end it.
+    /// How many of the most recent `error` events [`Self::server_errors`] keeps.
+    pub const SERVER_ERRORS_KEPT: usize = 64;
+
+    /// How many of the most recent backend usages [`Self::backend_usage`] keeps.
+    pub const BACKEND_USAGE_KEPT: usize = 64;
+
+    /// The most recent `error` events the server sent during the session, which do not end it,
+    /// oldest first: at most [`Self::SERVER_ERRORS_KEPT`], so a server sending errors without end
+    /// holds no more. [`Self::server_error_count`] counts every one.
     pub fn server_errors(&self) -> &[ServerError] {
         &self.server_errors
     }
 
-    /// The token usage of every backend response, in the order it was reported.
+    /// How many `error` events the server sent during the session, those
+    /// [`Self::server_errors`] no longer keeps included.
+    pub fn server_error_count(&self) -> u64 {
+        self.server_error_count
+    }
+
+    /// The token usage of the most recent backend responses, in the order it was reported: at
+    /// most [`Self::BACKEND_USAGE_KEPT`]. Every one is summed into the usage records whether it
+    /// is kept here or not; [`Self::backend_usage_count`] counts every one.
     pub fn backend_usage(&self) -> &[BackendUsage] {
         &self.backend_usage
+    }
+
+    /// How many backend usages the server reported during the session, those
+    /// [`Self::backend_usage`] no longer keeps included.
+    pub fn backend_usage_count(&self) -> u64 {
+        self.backend_usage_count
     }
 
     /// The voice seconds billed so far: the final count once `session.closed` confirmed it,
@@ -839,7 +901,8 @@ impl OpenAiLiveSession {
     /// ([`known_sum`]); the contract's `ResponseUsage`, which has no unknown, stops at
     /// `u64::MAX`.
     fn backend_usage_summed(&mut self, usage: BackendUsage) -> BackendSum {
-        self.backend_usage.push(usage);
+        self.backend_usage_count = self.backend_usage_count.saturating_add(1);
+        kept_push(&mut self.backend_usage, Self::BACKEND_USAGE_KEPT, usage);
         let id = self.current.or_else(|| {
             self.ledger
                 .responses()
@@ -1050,7 +1113,10 @@ impl OpenAiLiveSession {
                 self.current = None;
                 self.client = None;
             }
-            LiveEvent::Error(error) => self.server_errors.push(error),
+            LiveEvent::Error(error) => {
+                self.server_error_count = self.server_error_count.saturating_add(1);
+                kept_push(&mut self.server_errors, Self::SERVER_ERRORS_KEPT, error);
+            }
             LiveEvent::SessionStarted { .. }
             | LiveEvent::SessionUpdated { .. }
             | LiveEvent::DelegationCreated { .. }

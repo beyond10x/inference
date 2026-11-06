@@ -8,6 +8,17 @@
 //! the endpoint's read timeout, measured from the last message read across every read, is
 //! [`RealtimeError::Stalled`].
 //!
+//! Two more deadlines bound the transport, held in [`Deadlines`]: the whole opening handshake
+//! (TCP, TLS and the HTTP upgrade) takes at most [`Deadlines::connect_timeout`]
+//! ([`DEFAULT_CONNECT_TIMEOUT`], 10 seconds), past which connecting fails as
+//! [`RealtimeError::Connect`] without a status; and each write of a client event or a ping takes
+//! at most [`Deadlines::write_timeout`] ([`DEFAULT_WRITE_TIMEOUT`], 10 seconds), past which it
+//! fails as [`RealtimeError::Transport`], so a peer that stops reading cannot hold a session
+//! operation. [`RealtimeClient::connect_with`] and, with their features, `LiveClient::connect_with`
+//! and the duplex bindings' `with_connect_timeout` and `with_write_timeout` set them. The URL is `wss://`, or `ws://` only to a loopback host (`localhost`,
+//! `127.0.0.0/8`, `[::1]`): `ws://` would send the key in the clear, so any other URL is refused
+//! as [`RealtimeError::InvalidEndpoint`] before the credential is resolved or anything connects.
+//!
 //! Event shapes follow the published Realtime API reference, client events
 //! (`https://developers.openai.com/api/reference/resources/realtime/client-events`) and server
 //! events (`https://developers.openai.com/api/reference/resources/realtime/server-events`), in
@@ -61,9 +72,9 @@ pub use client::{
     ResponseConversation, ResponseOptions, ReuniteError,
 };
 pub use config::{
-    DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL, Eagerness, Endpoint, FunctionTool,
-    MODEL_VARIABLE, NoiseReduction, OutputModality, SessionConfig, ToolChoice, TurnDetection,
-    WireFormat,
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL,
+    DEFAULT_WRITE_TIMEOUT, Deadlines, Eagerness, Endpoint, FunctionTool, MODEL_VARIABLE,
+    NoiseReduction, OutputModality, SessionConfig, ToolChoice, TurnDetection, WireFormat,
 };
 #[cfg(feature = "keychain")]
 pub use credential::KeychainSource;
