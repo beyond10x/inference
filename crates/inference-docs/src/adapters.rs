@@ -105,6 +105,15 @@ const BINDINGS: &[Binding] = &[
         licence: "hosted service: audio leaves the machine",
     },
     Binding {
+        name: "Cartesia Sonic streaming TTS",
+        package: "inference-cartesia",
+        runs: "TTS, streaming; hosted, WebSocket (`tts/websocket`), one connection per synthesis, one context per segment",
+        features: &[],
+        record: Record::Claims("records/claims-tts.json"),
+        environment: "`CARTESIA_API_KEY`, or the keychain secret `cartesia-api-key` with feature `keychain`",
+        licence: "hosted service: text leaves the machine",
+    },
+    Binding {
         name: "Deepgram streaming STT",
         package: "inference-deepgram",
         runs: "STT, streaming; hosted, WebSocket (`v1/listen`), one connection per recognition",
