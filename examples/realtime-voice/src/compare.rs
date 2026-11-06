@@ -1764,7 +1764,10 @@ where
                 self.note(format!("the generation was cancelled: {failure}"));
                 self.end_utterance();
             }
-            GenerationEvent::Usage(_) => {}
+            GenerationEvent::Refused(refused) => {
+                self.note(format!("the model refused: {}", refused.text));
+            }
+            _ => {}
         }
     }
 
