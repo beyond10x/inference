@@ -87,6 +87,15 @@ const BINDINGS: &[Binding] = &[
         licence: "hosted service: text leaves the machine",
     },
     Binding {
+        name: "OpenAI streamed speech TTS",
+        package: "inference-openai",
+        runs: "TTS, streaming; hosted, HTTP (`POST /v1/audio/speech`, chunked PCM), one request per segment",
+        features: &[],
+        record: Record::Claims("records/claims-speech.json"),
+        environment: "`OPENAI_API_KEY`, or the keychain secret `openai-api-key` with feature `keychain`",
+        licence: "hosted service: text leaves the machine",
+    },
+    Binding {
         name: "ElevenLabs agent conversation",
         package: "inference-elevenlabs",
         runs: "native speech (duplex); hosted, WebSocket (`v1/convai/conversation`), the agent's own model, voice and formats",
