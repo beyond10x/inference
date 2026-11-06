@@ -2163,6 +2163,7 @@ name = "inference-deepgram"
 version = "0.16.0"
 dependencies = [
  "futures-util",
+ "inference-duplex",
  "inference-stt",
  "inference-testkit",
  "keyring-core",
@@ -3478,6 +3479,7 @@ dependencies = [
  "clap",
  "inference-audio-device",
  "inference-aws",
+ "inference-deepgram",
  "inference-duplex",
  "inference-elevenlabs",
  "inference-openai",

@@ -81,7 +81,25 @@
 //! speech-to-text access in `DEEPGRAM_API_KEY` (or the keychain) and a 16-bit mono WAV file in
 //! `INFERENCE_DEEPGRAM_STT_CLIP`, `cargo test -p inference-deepgram --features live --test live
 //! -- --ignored` transcribes it. It is billed.
+//!
+//! # The Voice Agent
+//!
+//! With feature `duplex`, [`DeepgramAgent`] is a Voice Agent session, Deepgram's bundle of
+//! speech recognition, a language model and speech synthesis behind one WebSocket
+//! (`/v1/agent/converse` on [`AGENT_URL`]), as a native speech model of the `inference-duplex`
+//! contract: [`agent`] is its wire protocol, with the documentation it was taken from and what
+//! that leaves open, and `agent_duplex` says how a session maps onto the contract. It reuses
+//! this crate's credential sources, handshake, `ws://` rule and bounds: messages and frames of
+//! at most [`listen::MAX_MESSAGE_SIZE`], at most [`listen::INBOUND_DEPTH`] waiting for the
+//! caller. Its claims are [`agent_claims`], and `records/claims-voice-agent.json` holds the
+//! same; `native_duplex` is not among them, since the agent answers speech over a reply by
+//! cutting it. Its live checks are `tests/agent_live.rs`, behind features `live` and `duplex`
+//! and ignored; they need a key with Voice Agent access and are billed.
 
+#[cfg(feature = "duplex")]
+pub mod agent;
+#[cfg(feature = "duplex")]
+mod agent_duplex;
 mod config;
 mod connection;
 mod credential;
@@ -89,10 +107,16 @@ mod error;
 pub mod listen;
 mod recogniser;
 
+#[cfg(feature = "duplex")]
+pub use agent_duplex::{
+    AGENT_BACKEND, AGENT_MODEL, DeepgramAgent, DeepgramAgentSession, OUTBOUND_QUEUE, OpenCanceller,
+    WARNINGS_KEPT, agent_capabilities, agent_claims, agent_native_duplex_verdict,
+};
 pub use config::{
-    DEFAULT_CONNECT_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LANGUAGE, DEFAULT_MODEL,
-    DEFAULT_READ_TIMEOUT, DEFAULT_URL, EU_URL, Endpoint, Endpointing, ListenConfig, Region,
-    UTTERANCE_END_RANGE,
+    AGENT_URL, AgentEndpoint, DEFAULT_AGENT_KEEPALIVE_INTERVAL, DEFAULT_AGENT_OPEN_TIMEOUT,
+    DEFAULT_AGENT_READ_TIMEOUT, DEFAULT_AUTH_SCHEME, DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LANGUAGE, DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL,
+    EU_URL, Endpoint, Endpointing, ListenConfig, Region, UTTERANCE_END_RANGE,
 };
 pub use connection::CLOSE_BOUND;
 #[cfg(feature = "keychain")]
@@ -102,4 +126,6 @@ pub use credential::{
     DEEPGRAM_KEY_VARIABLE, EnvironmentSource,
 };
 pub use error::{CloseCause, ConfigError, ConnectError, DeepgramError};
+#[cfg(feature = "duplex")]
+pub use inference_duplex;
 pub use recogniser::{BACKEND, DeepgramRecogniser, DeepgramRecognition, claims};
