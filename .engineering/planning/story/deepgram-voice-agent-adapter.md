@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:deepgram-voice-agent-adapter
 kind: story
-status: active
+status: implemented
 title: Deepgram Voice Agent as a duplex binding
 summary: A bundled hosted agent beside the native speech models in compare.
 tags:
@@ -60,10 +60,11 @@ scope:
   path: website/docs/reference/crates.md
 - confidence: inferred
   path: website/docs/reference/environment.md
-revision: 30
+revision: 31
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-05T13:07:48Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-05T16:11:01Z", actor: "human:operator", revision: 30}
+- {from: "active", to: "implemented", at: "2026-11-06T10:49:22Z", actor: "human:operator", revision: 31, decided_on: {"recorded":{"test_result":2,"review_outcome":2}}}
 ---
 ## Context
 
