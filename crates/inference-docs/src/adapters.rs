@@ -132,6 +132,15 @@ const BINDINGS: &[Binding] = &[
         licence: "hosted service: audio leaves the machine",
     },
     Binding {
+        name: "Deepslate Opal",
+        package: "inference-deepslate",
+        runs: "native speech (duplex); hosted, WebSocket (`api/v1/vendors/<vendor>/organizations/<organization>/realtime`), protocol buffers messages",
+        features: &[],
+        record: Record::Claims("records/claims-opal.json"),
+        environment: "`DEEPSLATE_API_KEY`, or the keychain secret `deepslate-api-key` with feature `keychain`; `DEEPSLATE_VENDOR_ID`, `DEEPSLATE_ORGANIZATION_ID`, and `DEEPSLATE_VOICE_ID` for spoken output",
+        licence: "hosted service: audio leaves the machine",
+    },
+    Binding {
         name: "sherpa-onnx streaming STT",
         package: "inference-sherpa-onnx",
         runs: "STT, streaming; in process, native library",
