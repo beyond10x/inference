@@ -159,9 +159,13 @@ impl SubgraphHandle {
     }
 
     /// How many usage records of the child the node gave up unsent because the parent edge they
-    /// waited on had no room [`USAGE_STOP_GRACE`] after the node's stop, or at its drop; counted
-    /// once the child's thread has returned. The caller marks the parent's usage total partial for
-    /// them, as for [`crate::usage_sink::uncounted_usage`].
+    /// waited on had no room [`USAGE_STOP_GRACE`] after the node's stop, or at its drop, and the
+    /// records the bridge read after that and did not forward. Each is counted by the child's
+    /// thread as it is given up, so a thread a drop left running past [`CHILD_DROP_BOUND`] still
+    /// counts what it gives up later. The count is per record, not per parent edge: where the
+    /// node's `usage` port feeds several parent edges, a record one edge took before another gave
+    /// it up counts once, though that edge delivered it. The caller marks the parent's usage total
+    /// partial for them, as for [`crate::usage_sink::uncounted_usage`].
     #[must_use]
     pub fn dropped_usage(&self) -> u64 {
         self.seen().dropped_usage
@@ -172,6 +176,8 @@ impl SubgraphHandle {
 /// thread.
 #[derive(Default)]
 struct Bridges {
+    /// The node's handle, which the usage records given up are counted in.
+    handle: SubgraphHandle,
     state: Mutex<(BridgeState, Vec<Waker>)>,
     /// Notified on every change of the state, for a drop waiting for the thread to return.
     changed: Condvar,
@@ -199,8 +205,6 @@ struct BridgeState {
     /// The subgraph node is stopped or dropped: a send waiting for room gives way, a usage send
     /// once this instant has passed and any other at once.
     stop_deadline: Option<Instant>,
-    /// The usage records an egress bridge gave up after the stop deadline, unsent.
-    dropped_usage: u64,
 }
 
 impl Bridges {
@@ -224,12 +228,9 @@ impl Bridges {
         state.0.done
     }
 
-    fn dropped_usage(&self) -> u64 {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .0
-            .dropped_usage
+    /// Counts one usage record given up in the node's handle.
+    fn usage_given_up(&self) {
+        self.handle.seen().dropped_usage += 1;
     }
 
     /// Wakes the task of `cx` once `at` has passed; the child's thread parks no longer than that.
@@ -264,8 +265,9 @@ impl Bridges {
     }
 
     /// Whether a send waiting for room gives way now: a send that `yields` at the node's cancel
-    /// or stop, a usage send once the stop deadline has passed. A usage send before its deadline
-    /// has the task of `cx` woken at the deadline; any other answer, at the next change.
+    /// or stop, a usage send once the stop deadline has passed. A send that does not give way has
+    /// the task of `cx` woken at the next change, so a drop moving the deadline to now wakes it at
+    /// once, and a usage send before its deadline also at the deadline.
     fn gives_way(&self, cx: &Context<'_>, yields: bool) -> bool {
         let deadline = self.read(cx, |state| {
             if yields && (state.cancel || state.stop_deadline.is_some()) {
@@ -279,9 +281,18 @@ impl Bridges {
             Some(None) => true,
             Some(Some(at)) if Instant::now() >= at => true,
             Some(Some(at)) => {
+                self.woken_by_the_next_change(cx);
                 self.wake_at(cx, at);
                 false
             }
+        }
+    }
+
+    /// Registers the task of `cx` to be woken by the next change of the state.
+    fn woken_by_the_next_change(&self, cx: &Context<'_>) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.1.iter().any(|known| known.will_wake(cx.waker())) {
+            state.1.push(cx.waker().clone());
         }
     }
 
@@ -562,7 +573,10 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
         }
         let mut ends = child.exposed();
         let child_run = child.run().run_id();
-        let bridges = Arc::new(Bridges::default());
+        let bridges = Arc::new(Bridges {
+            handle: self.handle.clone(),
+            ..Bridges::default()
+        });
         let mut tasks: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = Vec::new();
         for (exposure, parents) in inputs {
             let Some(Ingress {
@@ -705,7 +719,6 @@ impl<P: From<ControlKind> + Clone + Send + 'static> SubgraphNode<P> {
         };
         let bridges = Arc::clone(bridges);
         bridges.done().await;
-        self.handle.seen().dropped_usage += bridges.dropped_usage();
         if let Child::Running { thread, .. } = std::mem::replace(&mut self.state, Child::None) {
             self.state = match thread.join() {
                 Ok((child, _answered)) => Child::Ended(child),
@@ -802,7 +815,6 @@ impl<P> Drop for SubgraphNode<P> {
         if bridges.wait_done(CHILD_DROP_BOUND) {
             let _child_and_its_answer = thread.join();
         }
-        self.handle.seen().dropped_usage += bridges.dropped_usage();
     }
 }
 
@@ -849,6 +861,10 @@ impl<P: From<ControlKind> + Clone + Send + 'static> NodeImplementation<P> for Su
         Box::pin(self.cancel_child())
     }
 
+    /// Stops the node; see [`SubgraphNode`]'s module documentation. A run cancels or drains a node
+    /// before it stops it, so the child has ended or been cancelled by then; a caller that calls
+    /// `stop` directly on a node it neither cancelled nor drained waits until the child run ends
+    /// on its own.
     fn stop(&mut self) -> NodeFuture<'_, ()> {
         Box::pin(self.stop_child())
     }
@@ -1458,7 +1474,7 @@ async fn egress_bridge<P: Clone + Send + 'static>(
         let record = usage[index] && envelope.kind != ControlKind::Stop.as_str();
         if abandoned {
             if record {
-                bridges.update(|state| state.dropped_usage += 1);
+                bridges.usage_given_up();
             }
             continue;
         }
@@ -1484,7 +1500,7 @@ async fn egress_bridge<P: Clone + Send + 'static>(
         }
         if abandoned {
             if record {
-                bridges.update(|state| state.dropped_usage += 1);
+                bridges.usage_given_up();
             }
             parents = Vec::new();
             continue;

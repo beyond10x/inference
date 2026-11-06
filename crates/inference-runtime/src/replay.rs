@@ -106,6 +106,17 @@ pub fn first_divergence(
     recorded: &[ControlDecision],
     replayed: &[ControlDecision],
 ) -> Option<Divergence> {
+    divergence_within(recorded, replayed, false)
+}
+
+/// [`first_divergence`], or, of a recording a recorder's bound `cut`, the first divergence up to
+/// the cut: a node that departs only by deciding more than it was recorded to does not depart,
+/// since what it decided past the cut was not recorded.
+fn divergence_within(
+    recorded: &[ControlDecision],
+    replayed: &[ControlDecision],
+    cut: bool,
+) -> Option<Divergence> {
     let recorded = by_node(recorded);
     let replayed = by_node(replayed);
     let mut nodes: Vec<NodeId> = recorded.iter().map(|(node_id, _)| *node_id).collect();
@@ -120,6 +131,7 @@ pub fn first_divergence(
         let Some(index) =
             (0..was.len().max(is.len())).find(|&index| match (was.get(index), is.get(index)) {
                 (Some(was), Some(is)) => !was.same_as(is),
+                (None, Some(_)) => !cut,
                 _ => true,
             })
         else {
@@ -152,10 +164,14 @@ pub fn first_divergence(
 
 /// Whether `replayed` already departs from `recorded`: a node made a decision other than the one
 /// recorded at its place, or more than were recorded.
-fn departs(recorded: &[(NodeId, Vec<&ControlDecision>)], replayed: &[ControlDecision]) -> bool {
+fn departs(
+    recorded: &[(NodeId, Vec<&ControlDecision>)],
+    replayed: &[ControlDecision],
+    cut: bool,
+) -> bool {
     by_node(replayed).iter().any(|(node_id, made)| {
         let was = made_by(recorded, *node_id);
-        made.len() > was.len() || made.iter().zip(was).any(|(is, was)| !is.same_as(was))
+        (!cut && made.len() > was.len()) || made.iter().zip(was).any(|(is, was)| !is.same_as(was))
     })
 }
 
@@ -202,6 +218,7 @@ impl<'a, P: Clone + Send + std::fmt::Debug + 'static> Replay<'a, P> {
     ) -> Fed {
         let recorded = self.recording.decisions();
         let recorded_by_node = by_node(&recorded);
+        let cut = self.recording.cut_at().is_some();
         let mut fed = Fed::default();
         let mut ingresses: HashMap<String, Box<dyn OutputEndpoint<P>>> = HashMap::new();
         let mut waiting = true;
@@ -216,7 +233,7 @@ impl<'a, P: Clone + Send + std::fmt::Debug + 'static> Replay<'a, P> {
             if waiting {
                 let mut departed = false;
                 let ready = self.recorder.wait_until(patience, |replayed| {
-                    departed = departs(&recorded_by_node, replayed);
+                    departed = departs(&recorded_by_node, replayed, cut);
                     departed || reached(&required, replayed)
                 });
                 if !ready {
@@ -255,13 +272,23 @@ impl<'a, P: Clone + Send + std::fmt::Debug + 'static> Replay<'a, P> {
         fed
     }
 
+    /// Where the comparison ends: the merge order at which the recorder's bound cut the
+    /// recording ([`Recording::cut_at`]), none when the recording is whole.
+    #[must_use]
+    pub const fn compared_until(&self) -> Option<u64> {
+        self.recording.cut_at()
+    }
+
     /// The decisions of the recording and of the replay so far, compared; call it once the
-    /// replayed run has ended.
+    /// replayed run has ended. Of a recording its recorder's bound cut, the comparison ends at the
+    /// cut ([`compared_until`](Self::compared_until)): each node's decisions are compared as far
+    /// as the recording holds them, and a node that decided more in the replay than the recording
+    /// holds does not diverge for it; one that decided less, or otherwise, still does.
     #[must_use]
     pub fn report(&self) -> ReplayReport {
         let recorded = self.recording.decisions();
         let replayed = self.recorder.decisions();
-        let divergence = first_divergence(&recorded, &replayed);
+        let divergence = divergence_within(&recorded, &replayed, self.recording.cut_at().is_some());
         ReplayReport {
             recorded_policy: self.recording.policy_version.clone(),
             replayed_policy: self.recorder.policy_version().to_owned(),
