@@ -377,8 +377,9 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
         self.send(carry(envelope)).await
     }
 
-    /// Sends `audio` on the node's audio stream.
-    async fn frame(&mut self, audio: SegmentAudio) -> Result<(), String> {
+    /// Sends `audio` on the node's audio stream, in an envelope of `kind`, the name of the
+    /// synthesis event that carried it.
+    async fn frame(&mut self, kind: &str, audio: SegmentAudio) -> Result<(), String> {
         let segment_id = audio.segment_id();
         self.audio_sequence += 1;
         let timestamp = i64::try_from(audio.frame().position.get()).unwrap_or(i64::MAX);
@@ -391,7 +392,7 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
             sequence: self.audio_sequence,
             producer: self.producer,
             port: self.port.clone(),
-            kind: "inference.audio.AudioFrame".to_owned(),
+            kind: kind.to_owned(),
             generation_id: self.offered.get(&segment_id).copied(),
             timestamp,
             timebase: Timebase::AudioFrameTime,
@@ -425,8 +426,9 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
     /// Sends every event the synthesis has ready.
     async fn pump(&mut self) -> Result<(), String> {
         while let Some(event) = self.synthesis.next() {
+            let kind = event.name();
             match event {
-                SynthesisEvent::Audio(audio) => self.frame(audio).await?,
+                SynthesisEvent::Audio(audio) => self.frame(kind, audio).await?,
                 SynthesisEvent::Completed(completed) => {
                     let discarded = self
                         .synthesis

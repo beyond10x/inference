@@ -180,7 +180,7 @@ impl<T> fmt::Debug for Handoff<T> {
 /// What the edges and exposures of the cascade carry.
 #[derive(Debug, Clone)]
 pub enum VoicePayload {
-    /// A frame of audio; its envelope's `kind` is `inference.audio.AudioFrame`.
+    /// A frame of audio; its envelope's `kind` is `inference.audio.AudioChunk`.
     Audio(AudioFrame),
     /// An `inference.stream` event; its envelope's `kind` is the event's declared name.
     Stream(StreamEvent),

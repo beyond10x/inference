@@ -2,13 +2,14 @@
 //! source sends its frames in envelopes and the end of input on a drain, drops frames a full edge
 //! refuses, and the speaker sink plays what it receives, stops on a `cancel` control event and
 //! fails on content that is no audio (`story:audio-device-adapter`, Planned scope: pipeline
-//! nodes).
+//! nodes). The source stamps each frame with the name a synthesis gives a frame,
+//! `inference.audio.AudioChunk` (`story:audio-envelope-kind-is-the-declared-event`).
 
 use std::collections::VecDeque;
 use std::future::{self, Future};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 use std::pin::pin;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 use std::time::{Duration, Instant};
@@ -16,17 +17,22 @@ use std::time::{Duration, Instant};
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 use inference_audio_device::convert::encode;
 use inference_audio_device::fake::FakeHost;
-use inference_audio_device::node::{AUDIO_FRAME, DevicePayload, MicrophoneSource, SpeakerSink};
+use inference_audio_device::node::{AUDIO_CHUNK, DevicePayload, MicrophoneSource, SpeakerSink};
 use inference_audio_device::{CaptureConfig, DeviceSelector, Microphone, PlayoutConfig, Speaker};
 use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
+use inference_core::generation::{Generation, StartGeneration};
 use inference_core::id::{NodeId, RunId, StreamId};
-use inference_core::model::{Adapter, AdapterId};
+use inference_core::model::{
+    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_pipeline::{
     Catalog, Declaration, InteractionMode, Node, NodeEndpoints, NodeImplementation, NodeInput,
     NodeOutput, NodeRole, OverloadPolicy, PipelineSpec, PortId, PortTraits, modality,
 };
+use inference_tts::inference_text::OutputSegment;
+use inference_tts::{CONTRACT_REVISION, SynthesisEvent, SynthesisOutput};
 
 const PATIENCE: Duration = Duration::from_secs(5);
 
@@ -331,7 +337,7 @@ fn the_source_sends_each_frame_in_an_envelope_on_its_sample_clock_and_stop_on_a_
         assert_eq!(envelope.timebase, Timebase::AudioFrameTime);
     }
     for (index, envelope) in envelopes[..5].iter().enumerate() {
-        assert_eq!(envelope.kind, AUDIO_FRAME);
+        assert_eq!(envelope.kind, AUDIO_CHUNK);
         assert_eq!(envelope.timestamp, index as i64 * 320);
         let Payload::Audio(frame) = &envelope.payload else {
             panic!("an audio frame, not {:?}", envelope.payload);
@@ -370,7 +376,7 @@ fn the_source_drops_and_counts_frames_a_full_edge_refuses_and_sends_nothing_once
     assert!(
         envelopes
             .iter()
-            .all(|envelope| envelope.kind == AUDIO_FRAME)
+            .all(|envelope| envelope.kind == AUDIO_CHUNK)
     );
 }
 
@@ -401,7 +407,7 @@ fn the_sink_plays_the_frames_it_receives_and_a_cancel_event_stops_the_speaker_at
         edge.put(envelope(
             producer,
             index + 1,
-            AUDIO_FRAME,
+            AUDIO_CHUNK,
             Payload::Audio(audio_frame(index as u64 * 320, 0.5)),
         ));
     }
@@ -447,7 +453,7 @@ fn the_end_of_input_finishes_the_audio_so_running_dry_after_it_is_no_underrun() 
     edge.put(envelope(
         producer,
         1,
-        AUDIO_FRAME,
+        AUDIO_CHUNK,
         Payload::Audio(audio_frame(0, 0.5)),
     ));
     edge.put(envelope(
@@ -509,7 +515,7 @@ fn cancelling_the_sink_stops_the_speaker_and_ends_its_exchange() {
     edge.put(envelope(
         nodes.microphone.node_id(),
         1,
-        AUDIO_FRAME,
+        AUDIO_CHUNK,
         Payload::Audio(audio_frame(0, 0.5)),
     ));
     assert!(eventually(|| handle.pushed() == 1));
@@ -521,4 +527,63 @@ fn cancelling_the_sink_stops_the_speaker_and_ends_its_exchange() {
         0,
         "a cancelled sink leaves nothing to play"
     );
+}
+
+/// The name a synthesis gives the event of a frame, `SynthesisEvent::Audio(..).name()`.
+fn frame_event_name() -> &'static str {
+    let (adapter, _) = Adapter::declare(DeclareAdapter {
+        model_id: ModelId::generate(),
+        backend: "audio chunk kind test".to_owned(),
+        contract_revision: CONTRACT_REVISION.to_owned(),
+        execution_form: ExecutionForm::InProcess,
+        locality: Locality::SameProcess,
+        capabilities: vec![Capability::IncrementalInput, Capability::OutputStreaming],
+        max_concurrency: 1,
+    })
+    .expect("a positive concurrency");
+    let (generation, _) = Generation::start(StartGeneration {
+        run_id: RunId::generate(),
+        node_id: NodeId::generate(),
+        epoch: 1,
+    });
+    let (tentative, _) =
+        OutputSegment::emit(&generation, 1, "chunk".to_owned()).expect("an Active generation");
+    let (committed, _) = tentative.commit().expect("a Tentative segment commits");
+    let segment_id = committed.segment_id();
+    let mut output = SynthesisOutput::start(&adapter);
+    output.offer(committed).expect("a Committed segment queues");
+    output.take_input().expect("incremental input is claimed");
+    let event = output
+        .audio(segment_id, audio_frame(0, 0.5))
+        .expect("the synthesis emits a frame");
+    assert!(matches!(event, SynthesisEvent::Audio(_)), "{event:?}");
+    event.name()
+}
+
+#[test]
+fn the_source_stamps_each_frame_with_the_name_a_synthesis_gives_a_frame() {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let host = FakeHost::laptop();
+        let edge = Edge::new(usize::MAX);
+        let (mut source, _, _) = started_source(&host, &edge);
+        assert!(host.feed(&stereo(1920, 0.5)));
+        assert!(eventually(|| edge.len() == 2), "two 20 ms frames arrive");
+        let node: &mut dyn NodeImplementation<Payload> = &mut source;
+        block_on(node.drain()).expect("the source drains");
+        block_on(node.stop());
+        let _ = done.send(edge.taken());
+    });
+    let envelopes = finished
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the source drains within 20 s");
+    let name = frame_event_name();
+    assert_eq!(name, "inference.audio.AudioChunk");
+    assert_eq!(AUDIO_CHUNK, name);
+    let frames: Vec<&str> = envelopes
+        .iter()
+        .filter(|envelope| matches!(envelope.payload, Payload::Audio(_)))
+        .map(|envelope| envelope.kind.as_str())
+        .collect();
+    assert_eq!(frames, [name, name], "{envelopes:?}");
 }

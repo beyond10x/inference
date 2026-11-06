@@ -625,7 +625,7 @@ impl Started {
             let timestamp = i64::try_from(frame.position.get()).expect("within i64");
             last = timestamp + i64::from(frame.sample_count);
             let sent = envelope(
-                "inference.audio.AudioFrame",
+                "inference.audio.AudioChunk",
                 timestamp,
                 CascadePayload::Audio(frame),
             );

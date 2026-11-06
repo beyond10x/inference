@@ -530,7 +530,7 @@ fn the_cascade_speaks_committed_answers_through_both_gates_and_plays_them_throug
         let timestamp = i64::try_from(frame.position.get()).expect("within i64");
         last = timestamp + i64::from(frame.sample_count);
         let envelope = microphone.envelope(
-            "inference.audio.AudioFrame",
+            "inference.audio.AudioChunk",
             timestamp,
             VoicePayload::Audio(frame),
         );
