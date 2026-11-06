@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `inference-deepgram`, a hosted adapter at locality `external_provider`:
+  - `DeepgramRecogniser`, Deepgram streaming speech-to-text over the `/v1/listen` WebSocket, as an
+    `inference-stt` `Recogniser`. It claims `incremental_input` and `output_streaming`
+    (`records/claims-stt.json`).
+  - Input is G.711 μ-law or A-law at 8 kHz, or 16-bit PCM at any rate. Interim results revise an
+    open span; `is_final` commits it; `speech_final` or `UtteranceEnd` ends the turn.
+  - Messages and frames over 4 MiB fail the recognition; at most 32 server messages wait for the
+    caller. The end of a recognition is bounded by one deadline from `CloseStream`.
+  - With feature `duplex`, `DeepgramAgent` is a Deepgram Voice Agent session
+    (`/v1/agent/converse`) as an `inference-duplex` native speech model
+    (`records/claims-voice-agent.json`). A response cut after `AgentAudioDone` completes at the
+    next turn event or after a 1 s quiet bound. A think or speak failure warning ends the wait
+    for that reply.
+  - The key comes from an injected credential source, `DEEPGRAM_API_KEY` or the keychain, and is
+    sent only in the handshake. `ws://` is accepted only for a loopback host, and a base URL with
+    a user part is refused for every scheme.
+- `ElevenLabsAgent` in `inference-elevenlabs`, behind feature `duplex`: a conversation with an
+  ElevenLabs agent over `/v1/convai/conversation`, as an `inference-duplex` native speech model
+  (`records/claims-agent.json`). Messages and frames are bounded at 1 MiB; server pings are
+  answered without queueing; a cancel affects only the open in progress.
+- `inference_testkit::stt::conformance`: the backend-neutral checks of a streaming STT adapter,
+  generic over any `Recogniser`, for an adapter crate to run against its own recogniser.
+
+### Fixed
+
+- The GPT-Live duplex binding of `inference-openai` ends a response cut by the user's speech at
+  the model's next words: the first output fragment after a pause in the model's output and after
+  the user's speech ends begins a new response. Before, the next words stayed on the cut response,
+  so a caller that dropped the cut response's audio dropped them too.
+
 ## [0.16.0] — 2026-11-05
 
 ### Added
