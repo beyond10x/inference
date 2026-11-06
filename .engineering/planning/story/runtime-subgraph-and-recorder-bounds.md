@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:runtime-subgraph-and-recorder-bounds
 kind: story
-status: active
+status: implemented
 title: Runtime subgraphs end with their parent and never spin, and refusals and recordings are bounded
 tags:
 - from-finding
@@ -16,10 +16,11 @@ scope:
   path: crates/inference-runtime/src/record.rs
 - confidence: inferred
   path: crates/inference-runtime/src/subgraph.rs
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-06T00:41:04Z", actor: "human:operator", revision: 5}
 - {from: "proposed", to: "active", at: "2026-11-06T00:41:04Z", actor: "human:operator", revision: 6}
+- {from: "active", to: "implemented", at: "2026-11-06T13:31:04Z", actor: "human:operator", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 ## Context
 
