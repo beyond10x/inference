@@ -23,7 +23,9 @@
 //! [`AUDIO_FRAMES`] frames of 20 ms silence in the output format, then its usage and its
 //! completion. A [`Reply::Call`] proposes its tool call instead and completes; once the call is
 //! answered, the next response says the reply's `then` with `{result}` replaced by the result;
-//! a model that creates every response starts it by itself.
+//! a model that creates every response starts it by itself. A step the session's ledger refuses,
+//! such as a [`Reply::Call`] of a tool the session does not offer, fails the session as a
+//! provider error naming the refusal, so a mis-scripted scenario cannot pass.
 //!
 //! Time is the mock's own: it starts when the session opens, and a `next_event` with nothing to
 //! deliver advances it by `wait`, so the liveness bound is reached by waiting, deterministically.
@@ -662,7 +664,13 @@ impl SpeechSessionHandle for MockSpeechSession {
             .stall_after
             .is_some_and(|after| self.sent >= after);
         if !stalled && !self.plan.is_empty() {
-            let _ = self.step();
+            if let Err(refusal) = self.step() {
+                self.plan.clear();
+                let _ = self.ledger.fail(SessionFailure {
+                    kind: SessionFailureKind::ProviderError,
+                    detail: format!("the ledger refused a scripted step: {refusal}"),
+                });
+            }
             return self.ledger.next_event();
         }
         self.now += wait;
@@ -1004,6 +1012,44 @@ mod tests {
             event,
             SessionEvent::SpeechToolCallAnswered(answered) if answered.call_id == call_id
         )));
+    }
+
+    #[test]
+    fn a_scripted_call_of_a_tool_the_session_does_not_offer_fails_the_session_with_the_refusal() {
+        let mut model = MockSpeechModel::native(vec![ScriptedTurn {
+            heard: "how warm is it in Berlin".to_owned(),
+            reply: Reply::Call {
+                tool: "thermometer".to_owned(),
+                arguments: json!({"city": "Berlin"}),
+                then: "It is {result} degrees".to_owned(),
+            },
+        }]);
+        let mut session = model
+            .open(config(TurnDetection::Disabled, false))
+            .expect("the model takes the configuration");
+        speak(&mut session, 0, 2);
+        session.commit_input().expect("a manual commit");
+        session.create_response().expect("no response in progress");
+        let events = drain(&mut session);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::SpeechToolCallProposed(_))),
+            "{events:#?}"
+        );
+        let failure = events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::SpeechSessionFailed(failed) => Some(failed.failure.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the mis-scripted step fails the session: {events:#?}"));
+        assert_eq!(failure.kind, SessionFailureKind::ProviderError);
+        assert!(failure.detail.contains("thermometer"), "{failure:?}");
+        assert!(
+            session.ledger().session().require_open().is_err(),
+            "the session is no longer open"
+        );
     }
 
     #[test]

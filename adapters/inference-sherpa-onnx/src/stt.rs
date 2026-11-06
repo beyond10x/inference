@@ -15,7 +15,8 @@
 //! recogniser. Iterating its handle takes the frames offered so far through
 //! [`TranscriptOutput::take_input`], decodes each to mono f32 ([`mono_samples`]), passes it to the
 //! stream, which resamples what is not at 16 kHz, and decodes while the stream is ready. A stream
-//! is given one sample rate only, that of its first frame, because sherpa-onnx ends the process
+//! is given one sample rate only, that of its first frame ([`MODEL_RATE`] when that is above
+//! [`MAX_STREAM_RATE`], refused by [`stream_rate`]), because sherpa-onnx ends the process
 //! when one stream is given a second: a later frame at another rate is resampled to the first
 //! by linear interpolation, each run of consecutive frames at one rate as one signal, with no
 //! low-pass filter. The first non-empty partial result emits a Hypothesis span, a changed result
@@ -113,6 +114,51 @@ pub const DEFAULT_MAX_CONCURRENCY: i64 = 1;
 /// The silence appended before the end of input, in hundredths of a second, so that the stream's
 /// last chunk is decoded rather than held back as context.
 const TAIL_PADDING_HUNDREDTHS: usize = 66;
+
+/// The sample rate the checkpoint's features are computed at, given to a stream whose first
+/// frame's rate is refused by [`stream_rate`].
+pub const MODEL_RATE: u32 = 16_000;
+
+/// The highest sample rate a stream is given, the highest an audio interface commonly delivers.
+pub const MAX_STREAM_RATE: u32 = 384_000;
+
+/// A sample rate above [`MAX_STREAM_RATE`], refused as a stream's rate before anything is
+/// allocated from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsupportedRate {
+    pub rate: u32,
+}
+
+impl fmt::Display for UnsupportedRate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a sample rate of {} Hz is above the {MAX_STREAM_RATE} Hz a stream takes",
+            self.rate
+        )
+    }
+}
+
+impl Error for UnsupportedRate {}
+
+/// The rate a stream whose first frame is at `frame_rate` is given: that rate itself.
+///
+/// # Errors
+///
+/// [`UnsupportedRate`] when `frame_rate` is above [`MAX_STREAM_RATE`]; the recognition then gives
+/// its stream [`MODEL_RATE`] and resamples every frame to it.
+pub const fn stream_rate(frame_rate: u32) -> Result<u32, UnsupportedRate> {
+    if frame_rate > MAX_STREAM_RATE {
+        return Err(UnsupportedRate { rate: frame_rate });
+    }
+    Ok(frame_rate)
+}
+
+/// The samples of silence appended at the end of input to a stream at `stream_rate`.
+fn tail_padding(stream_rate: u32) -> Result<usize, UnsupportedRate> {
+    let rate = self::stream_rate(stream_rate)?;
+    Ok(usize::try_from(rate).unwrap_or(0) * TAIL_PADDING_HUNDREDTHS / 100)
+}
 
 /// What a pinned file is to the recogniser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -654,8 +700,9 @@ pub struct SherpaOnnxRecognition {
     output: TranscriptOutput,
     utterance: Utterance,
     delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
-    /// The sample rate of the first frame the stream took, the only rate it is ever given:
-    /// sherpa-onnx ends the process when one stream is given a second rate.
+    /// The sample rate of the first frame the stream took, or [`MODEL_RATE`] when [`stream_rate`]
+    /// refused it, the only rate it is ever given: sherpa-onnx ends the process when one stream
+    /// is given a second rate.
     stream_rate: Option<u32>,
     /// The resampler of the current run of frames at another rate than `stream_rate`.
     resampler: Option<Resampler>,
@@ -756,7 +803,9 @@ impl SherpaOnnxRecognition {
                 continue;
             }
             let frame_rate = frame.format.sample_rate.get();
-            let stream_rate = *self.stream_rate.get_or_insert(frame_rate);
+            let stream_rate = *self
+                .stream_rate
+                .get_or_insert_with(|| stream_rate(frame_rate).unwrap_or(MODEL_RATE));
             let samples = if frame_rate == stream_rate {
                 self.resampler = None;
                 samples
@@ -776,9 +825,9 @@ impl SherpaOnnxRecognition {
         }
         let ended = self.output.input_ended();
         if ended {
-            if let Some(stream_rate) = self.stream_rate {
-                let padding =
-                    usize::try_from(stream_rate).unwrap_or(0) * TAIL_PADDING_HUNDREDTHS / 100;
+            if let Some(stream_rate) = self.stream_rate
+                && let Ok(padding) = tail_padding(stream_rate)
+            {
                 self.stream
                     .accept_waveform(native_rate(stream_rate), &vec![0.0; padding]);
             }
