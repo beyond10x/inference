@@ -1563,7 +1563,10 @@ mod tests {
                 epoch: 1,
             }),
             delta(segment_id, generation_id),
-            SessionEvent::GenerationCompleted(GenerationCompleted { generation_id }),
+            SessionEvent::GenerationCompleted(GenerationCompleted {
+                generation_id,
+                stop_reason: None,
+            }),
         ] {
             assert!(generations.admit(None, &event));
         }
@@ -1611,7 +1614,8 @@ mod tests {
         assert!(generations.admit(
             None,
             &SessionEvent::GenerationCompleted(GenerationCompleted {
-                generation_id: second
+                generation_id: second,
+                stop_reason: None,
             }),
         ));
         assert!(
@@ -1628,6 +1632,7 @@ mod tests {
             }),
             SessionEvent::GenerationCompleted(GenerationCompleted {
                 generation_id: silent,
+                stop_reason: None,
             }),
         ] {
             assert!(generations.admit(None, &event));

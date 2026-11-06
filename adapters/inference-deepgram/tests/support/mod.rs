@@ -289,6 +289,7 @@ async fn serve(
     let record = |update: &dyn Fn(&mut Seen)| update(&mut seen.lock().unwrap()[index]);
     let head = Arc::new(Mutex::new((String::new(), String::new(), None)));
     let callback_head = Arc::clone(&head);
+    let callback_seen = Arc::clone(&seen);
     let refusal = match &script {
         Script::Refuse(status) => Some(*status),
         Script::Steps(_) => None,
@@ -299,6 +300,13 @@ async fn serve(
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        {
+            let mut seen = callback_seen.lock().unwrap();
+            let seen = &mut seen[index];
+            seen.path = request.uri().path().to_owned();
+            seen.query = request.uri().query().unwrap_or_default().to_owned();
+            seen.authorization.clone_from(&authorization);
+        }
         *callback_head.lock().unwrap() = (
             request.uri().path().to_owned(),
             request.uri().query().unwrap_or_default().to_owned(),

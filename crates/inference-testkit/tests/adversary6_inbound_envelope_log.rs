@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use inference_core::envelope::{EventEnvelope, EventId, Timebase};
 use inference_core::generation::{
-    GenerationCancelled, GenerationCompleted, GenerationStarted, GenerationSuperseded,
+    GenerationCancelled, GenerationCompleted, GenerationRefused, GenerationStarted,
+    GenerationSuperseded,
 };
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_testkit::stream::{EnvelopeRefusal, EventLog, StreamEvent};
@@ -110,9 +111,16 @@ fn one_of_each(generation_id: GenerationId) -> Vec<StreamEvent> {
             run_id: RunId::from(id(0x2000)),
             epoch: 1,
         }),
-        StreamEvent::GenerationCompleted(GenerationCompleted { generation_id }),
+        StreamEvent::GenerationCompleted(GenerationCompleted {
+            generation_id,
+            stop_reason: None,
+        }),
         StreamEvent::GenerationSuperseded(GenerationSuperseded { generation_id }),
         StreamEvent::GenerationCancelled(GenerationCancelled { generation_id }),
+        StreamEvent::GenerationRefused(GenerationRefused {
+            generation_id,
+            text: "I cannot help with that.".to_owned(),
+        }),
         StreamEvent::TextDelta(TextDelta {
             segment_id,
             generation_id,
@@ -171,8 +179,9 @@ fn every_stream_event_is_named_and_carries_a_generation_exactly_as_stream_yaml_d
     let events = declared("events");
     assert_eq!(
         events.len(),
-        17,
-        "stream.yaml declares 17 events: {events:?}"
+        18,
+        "stream.yaml declares 18 events, GenerationRefused added by \
+         story:llm-wrapper-outcomes-and-debug: {events:?}"
     );
     let carried = generation(9);
     let all = one_of_each(carried);

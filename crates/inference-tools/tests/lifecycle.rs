@@ -180,7 +180,7 @@ fn the_default_path_bars_a_hypothesis_for_every_class_and_the_speculative_path_a
 fn a_generation_that_is_not_active_proposes_nothing_before_the_barrier_is_read() {
     for (stale, state) in [
         (
-            generation().complete().expect("completes").0,
+            generation().complete(None).expect("completes").0,
             GenerationState::Completed,
         ),
         (
