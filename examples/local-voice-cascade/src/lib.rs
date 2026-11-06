@@ -84,7 +84,7 @@ use std::time::Duration;
 
 use inference_audio::AudioFrame;
 use inference_audio_device::acknowledging::{
-    AcknowledgingHandle, AcknowledgingSink, Playable, PlaybackPayload,
+    AcknowledgingHandle, AcknowledgingSink, FirstFrame, Playable, PlaybackPayload,
 };
 use inference_audio_device::{AudioHost, DeviceError, DeviceSelector, PlayoutConfig, Speaker};
 use inference_core::envelope::ControlKind;
@@ -93,7 +93,7 @@ use inference_core::model::{Adapter, AdapterId, Capability, Locality};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_llm::Generator;
 use inference_pipeline::nodes::commit_gate::{
-    CommitGate, CommitGateHandle, GateLane, GatePayload, Gated,
+    CommitGate, CommitGateHandle, GateLane, GatePayload, Gated, PassedTurn,
 };
 use inference_pipeline::nodes::turn_policy::{
     TurnEvent, TurnPayload, TurnPolicy, TurnPolicyHandle,
@@ -295,6 +295,9 @@ impl GatePayload for VoicePayload {
             },
             StreamEvent::TextSegmentCommitted(committed) => Gated::SegmentCommitted {
                 segment_id: committed.segment_id,
+            },
+            StreamEvent::SegmentDiscarded(discarded) => Gated::SegmentDiscarded {
+                segment_id: discarded.segment_id,
             },
             StreamEvent::GenerationCompleted(ended) => Gated::GenerationEnded {
                 generation_id: ended.generation_id,
@@ -699,8 +702,8 @@ pub struct CascadeHandles {
 }
 
 /// The "committed input to first playable audio" of one turn: the time from the input gate
-/// passing the turn's completion to the sink handing the first frame after it to the speaker,
-/// `None` while no frame followed.
+/// passing the turn's completion to the sink handing the first frame after it that no earlier
+/// turn took to the speaker, `None` while no such frame followed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnMeasure {
     pub turn_id: TurnId,
@@ -719,18 +722,7 @@ impl CascadeHandles {
     /// The measure of every turn whose completion the input gate passed, in the order passed.
     #[must_use]
     pub fn committed_input_to_first_audio(&self) -> Vec<TurnMeasure> {
-        let first_frames = self.sink.first_frames();
-        self.input_gate
-            .turns_passed()
-            .into_iter()
-            .map(|passed| TurnMeasure {
-                turn_id: passed.turn_id,
-                first_audio: first_frames
-                    .iter()
-                    .find(|first| first.at >= passed.at)
-                    .map(|first| first.at.duration_since(passed.at)),
-            })
-            .collect()
+        first_audio(&self.input_gate.turns_passed(), &self.sink.first_frames())
     }
 
     /// The measure of every interruption, in the order the turns opened.
@@ -745,6 +737,29 @@ impl CascadeHandles {
             })
             .collect()
     }
+}
+
+/// Pairs each passed turn, in the order passed, with the first frame at or after its passing that
+/// no earlier turn took, so two turns passed before any audio take two frames, not one.
+fn first_audio(passed: &[PassedTurn], first_frames: &[FirstFrame]) -> Vec<TurnMeasure> {
+    let mut taken = 0;
+    passed
+        .iter()
+        .map(|passed| {
+            let found = first_frames
+                .iter()
+                .enumerate()
+                .skip(taken)
+                .find(|(_, first)| first.at >= passed.at);
+            TurnMeasure {
+                turn_id: passed.turn_id,
+                first_audio: found.map(|(index, first)| {
+                    taken = index + 1;
+                    first.at.duration_since(passed.at)
+                }),
+            }
+        })
+        .collect()
 }
 
 /// The models of one run's three model nodes, and the reply the LLM node asks its generator for
@@ -908,7 +923,86 @@ impl LocalCascade {
 
 #[cfg(test)]
 mod tests {
-    use super::Handoff;
+    use std::time::{Duration, Instant};
+
+    use inference_audio_device::acknowledging::FirstFrame;
+    use inference_pipeline::nodes::commit_gate::{GatePayload, Gated, PassedTurn};
+    use inference_testkit::stream::StreamEvent;
+    use inference_text::{SegmentDiscarded, SegmentId, TurnId};
+
+    use super::{Handoff, TurnMeasure, VoicePayload, first_audio};
+
+    #[test]
+    fn a_discarded_segment_reaches_the_gate_as_discarded() {
+        let segment_id = SegmentId::generate();
+        let payload = VoicePayload::Stream(StreamEvent::SegmentDiscarded(SegmentDiscarded {
+            segment_id,
+        }));
+        assert_eq!(payload.gated(), Gated::SegmentDiscarded { segment_id });
+    }
+
+    #[test]
+    fn two_turns_committed_before_any_audio_take_two_frames() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let (first, second) = (TurnId::generate(), TurnId::generate());
+        let passed = [
+            PassedTurn {
+                turn_id: first,
+                at: at(0),
+            },
+            PassedTurn {
+                turn_id: second,
+                at: at(10),
+            },
+        ];
+        let frame = |ms| FirstFrame {
+            segment_id: SegmentId::generate(),
+            at: at(ms),
+        };
+        assert_eq!(
+            first_audio(&passed, &[frame(100), frame(250)]),
+            vec![
+                TurnMeasure {
+                    turn_id: first,
+                    first_audio: Some(Duration::from_millis(100)),
+                },
+                TurnMeasure {
+                    turn_id: second,
+                    first_audio: Some(Duration::from_millis(240)),
+                },
+            ],
+            "each turn is paired with the first frame after it that no earlier turn took"
+        );
+        assert_eq!(
+            first_audio(&passed, &[frame(100)]),
+            vec![
+                TurnMeasure {
+                    turn_id: first,
+                    first_audio: Some(Duration::from_millis(100)),
+                },
+                TurnMeasure {
+                    turn_id: second,
+                    first_audio: None,
+                },
+            ],
+            "a turn whose frame an earlier turn took has none yet"
+        );
+        assert_eq!(
+            first_audio(&passed, &[frame(5), frame(20)]),
+            vec![
+                TurnMeasure {
+                    turn_id: first,
+                    first_audio: Some(Duration::from_millis(5)),
+                },
+                TurnMeasure {
+                    turn_id: second,
+                    first_audio: Some(Duration::from_millis(10)),
+                },
+            ],
+            "a frame before a turn's commit is never that turn's"
+        );
+    }
 
     #[test]
     fn a_handoff_and_every_copy_of_it_give_the_value_once() {
