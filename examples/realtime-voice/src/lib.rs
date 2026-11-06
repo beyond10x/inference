@@ -172,6 +172,27 @@ pub fn nova_config() -> SessionConfig {
     }
 }
 
+/// The session the demo opens with an ElevenLabs agent: PCM16 at 16 kHz both ways, the formats
+/// the agent must be configured with (its configuration chooses them, a session cannot), the
+/// agent's own turn-taking, responses and barge-in, and the demo tool, which the agent calls
+/// only when it is configured as a client tool of the agent. Voice and instructions are the
+/// agent's own.
+#[must_use]
+pub fn elevenlabs_config() -> SessionConfig {
+    SessionConfig {
+        voice: String::new(),
+        instructions: String::new(),
+        input_format: pcm16(16_000),
+        output_format: pcm16(16_000),
+        turn_detection: TurnDetection::ServerVad,
+        turn_tuning: TurnTuning::default(),
+        auto_response: true,
+        auto_interrupt: true,
+        tools: vec![time_tool()],
+        idle_limit: Duration::from_secs(30),
+    }
+}
+
 /// How a [`Conversation`] paces itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
