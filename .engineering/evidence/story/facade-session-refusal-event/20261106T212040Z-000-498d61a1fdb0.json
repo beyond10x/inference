@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-06T21:20:40Z",
+  "actor": "human:timo",
+  "artifact": "story:facade-session-refusal-event",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate-0.23.0: ess validate, aep validate, docs check, fmt, clippy --all-features -D warnings, cargo test --all-features over every crate; s1-s3b EXIT=0, s3c re-run EXIT=0 at fb22b09"
+  }
+}

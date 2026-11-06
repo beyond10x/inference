@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:facade-session-refusal-event
 kind: story
-status: active
+status: implemented
 title: The facade's session events carry a model's refusal
 summary: A refused generation reaches a facade application as a session event with its text.
 relations:
 - serves: vision:inference
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-06T19:11:13Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-06T19:11:13Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-06T21:20:41Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 # Story: the facade's session events carry a model's refusal
 

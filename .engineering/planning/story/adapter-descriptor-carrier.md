@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:adapter-descriptor-carrier
 kind: story
-status: active
+status: implemented
 title: The adapter carries its AdapterDescriptor
 summary: DeclareAdapter and Adapter carry the AdapterDescriptor added in 0.19.0 (N15); every DeclareAdapter literal is updated
 tags:
@@ -10,10 +10,11 @@ tags:
 relations:
 - informed_by: review-result:full-codebase-2026-11-06
 - serves: vision:inference
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-06T19:11:13Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-11-06T19:11:13Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-11-06T21:20:42Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 # Story: the adapter carries its AdapterDescriptor
 
