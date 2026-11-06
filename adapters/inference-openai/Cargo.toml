@@ -119,5 +119,13 @@ required-features = ["duplex"]
 name = "adversary16_u2_tool_descriptions"
 required-features = ["gpt-live", "duplex"]
 
+[[test]]
+name = "adversary_rf1_speech_transport"
+required-features = ["speech"]
+
+[[test]]
+name = "adversary_rf1_speech_audio"
+required-features = ["speech"]
+
 [lints]
 workspace = true
