@@ -781,7 +781,7 @@ mod tests {
             "revise",
             "error",
             "inference.stream.TextDelta",
-            "inference.audio.AudioFrame",
+            "inference.audio.AudioChunk",
             "inference.tools.ToolCallProposed",
         ] {
             assert_eq!(DecisionKind::of(content), None, "{content}");

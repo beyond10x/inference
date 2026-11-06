@@ -199,7 +199,7 @@ fn cancel_unread(reply: fn(&str) -> String) {
             producer,
             stream_id,
             sequence,
-            "inference.audio.AudioFrame",
+            "inference.audio.AudioChunk",
             position,
             CascadePayload::Audio(frame),
         );

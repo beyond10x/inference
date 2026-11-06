@@ -250,7 +250,7 @@ fn the_utterance_through_the_ingress_comes_out_as_transcript_reply_text_and_spee
             + i64::from(frame.sample_count);
         let timestamp = i64::try_from(frame.position.get()).expect("within i64");
         let envelope = microphone.envelope(
-            "inference.audio.AudioFrame",
+            "inference.audio.AudioChunk",
             timestamp,
             CascadePayload::Audio(frame),
         );
