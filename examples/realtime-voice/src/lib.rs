@@ -27,7 +27,10 @@
 //! any response queued behind it at its first sample. A model that takes neither, such as one that
 //! cancels on its own side, only has its playout stopped. Audio of a response the conversation
 //! truncated that still arrives, such as the deltas a provider had in flight when it cut the
-//! response on its own side, is the cut answer and is dropped.
+//! response on its own side, is the cut answer and is dropped. With `auto_interrupt` on, so is
+//! later audio of the response in progress or playing at the speech start, even when the speaker
+//! held none of it and nothing was truncated; a model's next words after the stop come on a new
+//! response and play.
 //!
 //! Every binding reports the speech start the conversation stops on, in its own way: OpenAI
 //! Realtime from the server's voice activity detection, Nova Sonic at the provider's
@@ -273,7 +276,10 @@ pub struct Conversation<S> {
     finished: bool,
     follow_up: HashSet<ResponseId>,
     current: Option<ResponseId>,
-    truncated: HashSet<ResponseId>,
+    /// The responses whose later audio is the cut answer and is dropped: those the conversation
+    /// truncated, and with `auto_interrupt` on the one in progress and the one playing at a
+    /// speech start.
+    cut: HashSet<ResponseId>,
     frames_sent: u64,
 }
 
@@ -334,7 +340,7 @@ impl<S: SpeechSessionHandle> Conversation<S> {
             finished: true,
             follow_up: HashSet::new(),
             current: None,
-            truncated: HashSet::new(),
+            cut: HashSet::new(),
             frames_sent: 0,
         })
     }
@@ -439,7 +445,7 @@ impl<S: SpeechSessionHandle> Conversation<S> {
                 text: delta.text,
             }),
             SessionEvent::OutputAudio(audio) => {
-                if !self.truncated.contains(&audio.response_id) {
+                if !self.cut.contains(&audio.response_id) {
                     self.backlog.push_back((audio.response_id, audio.frame));
                     self.feed_speaker(notes);
                 }
@@ -518,9 +524,20 @@ impl<S: SpeechSessionHandle> Conversation<S> {
     /// The response in progress is the one the events handled so far say, not the session's
     /// record: the record may already hold a response created after the speech that started
     /// this barge-in, and that response is the answer to it.
+    ///
+    /// With `auto_interrupt` on the model cuts its response itself at the speech start, so the
+    /// response in progress and the one playing are cut whether or not the speaker still holds
+    /// any of their audio: what still arrives on them is the rest of the cut answer, such as
+    /// deltas the provider had in flight, and is dropped. A model that speaks again after the
+    /// stop does so on a new response, as the GPT-Live binding opens one for its next words.
     fn barge_in(&mut self, cancelled: Option<ResponseId>, notes: &mut Vec<Note>) {
+        let auto_interrupt = self.session.ledger().session().config().auto_interrupt;
+        if cancelled.is_none() && auto_interrupt {
+            self.cut
+                .extend(self.current.into_iter().chain(self.playing));
+        }
         if cancelled.is_none()
-            && !self.session.ledger().session().config().auto_interrupt
+            && !auto_interrupt
             && self.capabilities.client_cancel
             && let Some(response_id) = self.current
             && self.session.ledger().in_progress() == Some(response_id)
@@ -555,7 +572,7 @@ impl<S: SpeechSessionHandle> Conversation<S> {
         for (response_id, heard) in cuts {
             match self.session.truncate_output(response_id, heard) {
                 Ok(()) => {
-                    self.truncated.insert(response_id);
+                    self.cut.insert(response_id);
                 }
                 Err(error) => notes.push(Note::Refused(format!("truncate: {error}"))),
             }

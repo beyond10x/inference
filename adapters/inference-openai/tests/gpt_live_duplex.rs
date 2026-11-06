@@ -1577,3 +1577,134 @@ fn a_wait_of_duration_max_ends_with_the_next_event() {
         "{events:#?}"
     );
 }
+
+/// A server that speaks an answer, is spoken over, streams the rest of the cut sentence, then
+/// speaks its next words after the caller's speech ended, each answer with one backend response
+/// of its own; it answers the close with `session.closed`.
+fn spoken_over() -> Server {
+    Server::start(|mut socket| async move {
+        accept_start(&mut socket).await;
+        send(&mut socket, said(" Once upon a time", 0)).await;
+        send(&mut socket, voiced()).await;
+        send(&mut socket, said(" there was", 200)).await;
+        send(&mut socket, voiced()).await;
+        send(
+            &mut socket,
+            backend("del_1", backend_completed("resp_1", 12, 4, 3)),
+        )
+        .await;
+        send(&mut socket, heard("wait", 300)).await;
+        send(&mut socket, voiced()).await;
+        send(&mut socket, said(" a ship", 400)).await;
+        send(&mut socket, voiced()).await;
+        send(&mut socket, heard(" stop", 600)).await;
+        send(&mut socket, voiced()).await;
+        send(&mut socket, said(" Sure.", 900)).await;
+        send(&mut socket, voiced()).await;
+        send(&mut socket, voiced()).await;
+        send(
+            &mut socket,
+            backend("del_1", backend_completed("resp_2", 20, 0, 7)),
+        )
+        .await;
+        for _ in 0..8 {
+            send(&mut socket, silent()).await;
+        }
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        send(
+            &mut socket,
+            json!({"type": "session.closed", "event_id": "evt_c", "reason": "close_requested", "session": {"id": "live_123", "model": "gpt-live-1", "status": "active"}, "usage": {"seconds": 1.5}}),
+        )
+        .await;
+        let _ = socket.close(None).await;
+    })
+}
+
+/// The index of the first event among `events` that `which` accepts.
+fn at(events: &[SessionEvent], which: impl Fn(&SessionEvent) -> bool) -> usize {
+    events
+        .iter()
+        .position(which)
+        .unwrap_or_else(|| panic!("no such event: {events:#?}"))
+}
+
+/// Speech over an answer cuts it: what the model streams from the speech start until it speaks
+/// again after the speech ended (here the rest of the cut sentence, " a ship", and its audio)
+/// stays on the cut response, which completes before anything else. The model's next words, the
+/// first output fragment starting at or after the end of the caller's speech, open a new
+/// response, and the audio after them is on it. Each keeps the backend usage summed onto it.
+#[test]
+fn the_next_words_after_speech_over_an_answer_are_a_new_response() {
+    let server = spoken_over();
+    let mut model = server.model();
+    let mut session = model.open(config()).expect("the session opens");
+    let mut events = completed(&mut session, 2);
+    session.close().expect("open");
+    server.finish();
+    events.extend(std::iter::from_fn(|| session.next_event(Duration::ZERO)));
+
+    let ids = created(&events);
+    assert_eq!(
+        ids.len(),
+        2,
+        "the cut answer and the next words: {events:#?}"
+    );
+    let (cut, next) = (ids[0], ids[1]);
+    assert_eq!(
+        transcript(&events, cut),
+        " Once upon a time there was a ship"
+    );
+    assert_eq!(transcript(&events, next), " Sure.");
+
+    let started = at(&events, |event| {
+        matches!(event, SessionEvent::SpeechStarted(_))
+    });
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::SpeechStarted(_)))
+            .count(),
+        1,
+        "one interruption: {events:#?}"
+    );
+    let cut_done = at(
+        &events,
+        |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id == cut),
+    );
+    let next_created = at(
+        &events,
+        |event| matches!(event, SessionEvent::ResponseCreated(created) if created.response_id == next),
+    );
+    assert!(
+        started < cut_done && cut_done < next_created,
+        "the cut answer completes at the next words, before they begin: {events:#?}"
+    );
+    let of_cut = |event: &SessionEvent| matches!(event, SessionEvent::OutputAudio(output) if output.response_id == cut);
+    assert_eq!(
+        events[started..]
+            .iter()
+            .filter(|event| of_cut(event))
+            .count(),
+        3,
+        "the frames between the speech start and the next words are the cut answer's: {events:#?}"
+    );
+    assert!(
+        !events[next_created..].iter().any(of_cut),
+        "no frame of the cut answer after the next words began: {events:#?}"
+    );
+    let following = frames(&events, next);
+    assert_eq!(following.len(), 2 + 8, "{events:#?}");
+    assert_eq!(following[0], (0, FRAME, true), "the new response's clock");
+
+    assert_eq!(
+        quantity(&events, cut, QuantityKind::OutputTextTokens),
+        Some(3),
+        "the cut answer keeps its backend usage"
+    );
+    assert_eq!(
+        quantity(&events, next, QuantityKind::OutputTextTokens),
+        Some(7),
+        "the next words have theirs"
+    );
+}

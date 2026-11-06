@@ -25,15 +25,12 @@
 //! speech start and the session's ledger refuses its later output, so no binding delivers any.
 //!
 //! * The OpenAI Realtime session with `auto_interrupt` on: the server cuts the response itself
-//!   and the deltas it had in flight still reach the session; `Conversation` truncated that
-//!   response at the barge-in and drops them.
-//! * GPT-Live, which claims no truncation, as its binding does: `Conversation` plays audio the
-//!   session delivers on the response after the stop, since GPT-Live speaks on through one
-//!   response and `adversary1_gpt_live_transcript.rs` holds that what the model sends after the
-//!   stop plays. Nothing in the session tells the rest of the cut sentence from the model's next
-//!   words on that response, so the case records that the streamed frames play during the
-//!   talk-over today, and that none plays once it has ended;
-//!   `story:cut-response-audio-is-told-from-the-next-words` is to change that.
+//!   and the deltas it had in flight still reach the session; `Conversation` drops them, the
+//!   response being cut at the speech start whether or not the speaker still held any of it.
+//! * GPT-Live, which claims no truncation, as its binding does: the binding delivers the rest of
+//!   the cut sentence on the cut response and opens a new response for the model's next words
+//!   (`adapters/inference-openai/src/live_duplex.rs`), so `Conversation` drops the streamed
+//!   frames, and `adversary1_gpt_live_transcript.rs` holds that the next words play.
 //! * No Nova Sonic case: its binding records the speech start and cancels the response in the
 //!   same call at the provider's interruption notice (`adapters/inference-aws/src/duplex.rs`
 //!   755-764), and completes it at the user's next transcript (806-811), and the ledger refuses
@@ -493,8 +490,6 @@ enum Over {
 struct Outcome {
     provider: Provider,
     cut: ResponseId,
-    /// The ticks the caller spoke for.
-    talk: usize,
     /// The ticks of the talk-over in which playout was stopped for a barge-in.
     stopped: Vec<usize>,
     /// The ticks of the talk-over or after in which the device played the cut answer.
@@ -574,7 +569,6 @@ fn talk_over(provider: Provider, talk_ms: usize, late: usize, over: Over) -> Out
     Outcome {
         provider,
         cut,
-        talk: talk_ms / TICK_MS,
         stopped,
         cut_played,
         played_after,
@@ -610,33 +604,6 @@ impl Outcome {
             self.played_after,
             [2],
             "{:?}: only the next answer plays after the talk-over started: {self:#?}",
-            self.provider
-        );
-        self
-    }
-
-    /// What the provider streamed of the cut response after the speech start played in the
-    /// talk-over's first ticks, as it arrived, and nothing of it once the talk-over had ended;
-    /// then only the next answer. Today's behaviour, pinned.
-    fn plays_the_streamed_frames_during_the_talk_over_only(&self) -> &Self {
-        let story = "story:long-talk-over-does-not-resume-the-cut-answer, until \
-                     story:cut-response-audio-is-told-from-the-next-words";
-        assert_eq!(
-            self.cut_played,
-            (0..LATE_FRAMES).collect::<Vec<_>>(),
-            "{:?}: {story}: the frames streamed after the speech start play as they arrive, \
-             one a tick, today: {self:#?}",
-            self.provider
-        );
-        assert!(
-            self.cut_played.iter().all(|at| *at < self.talk),
-            "{:?}: {story}: no frame of the cut answer plays once the talk-over ended: {self:#?}",
-            self.provider
-        );
-        assert_eq!(
-            self.played_after,
-            [1, 2],
-            "{:?}: {story}: the streamed frames, then the next answer: {self:#?}",
             self.provider
         );
         self
@@ -747,41 +714,52 @@ mod openai_interrupting_streaming_on {
             .never_plays_the_cut_answer_again()
             .answers_the_talk_over();
     }
+
+    /// The speaker has played all it was given of the answer when the caller starts a 6 s
+    /// talk-over, so there is nothing to stop or truncate, and the deltas the server still had in
+    /// flight for the response it cut arrive after: none of them plays.
+    #[test]
+    fn frames_in_flight_after_the_speaker_ran_dry_are_dropped_during_a_6_s_talk_over() {
+        talk_over(PROVIDER, 6_000, LATE_FRAMES, Over::RanDry)
+            .never_plays_the_cut_answer_again()
+            .answers_the_talk_over();
+    }
 }
 
-/// The provider-side cases on GPT-Live, pinned as today's behaviour.
+/// The provider-side cases on GPT-Live: the session goes on streaming the cut response after the
+/// speech start, as the binding delivers the rest of the cut sentence on it, and `Conversation`
+/// drops what comes; the next answer, a new response, plays.
 mod gpt_live_streaming_on {
     use super::{LATE_FRAMES, Over, Provider, talk_over};
 
     const PROVIDER: Provider = Provider::GptLive;
 
     /// The provider streams half a second more of the cut response after the caller started a
-    /// 6 s talk-over, then completes it: those frames play as they arrive, during the talk-over,
-    /// today; none plays once it has ended, and the next answer answers the talk-over.
+    /// 6 s talk-over, then completes it: none of those frames plays, and the next answer answers
+    /// the talk-over.
     #[test]
-    fn frames_streamed_on_the_cut_answer_play_today_during_a_6_s_talk_over_never_after_it() {
+    fn frames_streamed_on_the_cut_answer_are_dropped_during_a_6_s_talk_over() {
         talk_over(PROVIDER, 6_000, LATE_FRAMES, Over::Queued)
             .stops_at_once()
-            .plays_the_streamed_frames_during_the_talk_over_only()
+            .never_plays_the_cut_answer_again()
             .answers_the_talk_over();
     }
 
     #[test]
-    fn frames_streamed_on_the_cut_answer_play_today_during_a_12_s_talk_over_never_after_it() {
+    fn frames_streamed_on_the_cut_answer_are_dropped_during_a_12_s_talk_over() {
         talk_over(PROVIDER, 12_000, LATE_FRAMES, Over::Queued)
             .stops_at_once()
-            .plays_the_streamed_frames_during_the_talk_over_only()
+            .never_plays_the_cut_answer_again()
             .answers_the_talk_over();
     }
 
     /// The provider streams slower than the speaker plays: the speaker has played all it was
     /// given when the caller starts a 6 s talk-over, so there is nothing to stop, and the rest of
-    /// the response arrives after: it plays as it arrives, during the talk-over, today, and none
-    /// of it once the talk-over has ended.
+    /// the response arrives after: none of it plays.
     #[test]
-    fn frames_of_the_cut_answer_after_the_speaker_ran_dry_play_today_during_the_talk_over() {
+    fn frames_of_the_cut_answer_after_the_speaker_ran_dry_are_dropped_during_the_talk_over() {
         talk_over(PROVIDER, 6_000, LATE_FRAMES, Over::RanDry)
-            .plays_the_streamed_frames_during_the_talk_over_only()
+            .never_plays_the_cut_answer_again()
             .answers_the_talk_over();
     }
 }
