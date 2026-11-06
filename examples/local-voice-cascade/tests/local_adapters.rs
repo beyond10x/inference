@@ -1231,7 +1231,12 @@ fn a_server_whose_host_is_not_loopback_is_refused_before_anything_opens() {
             matches!(refused, LocalRefused::NotLoopback { .. }),
             "{url} is refused before the checkpoint is read: {refused}"
         );
-        assert!(refused.to_string().contains(url), "{refused}");
+        let origin = url.split("/v1").next().unwrap_or(url);
+        assert!(
+            refused.to_string().contains(origin),
+            "story:llama-server-loopback-only: the refusal names the URL's scheme, host and port, \
+             not its path: {refused}"
+        );
     }
     for url in [
         "http://127.0.0.1:8080/v1",
@@ -1241,6 +1246,36 @@ fn a_server_whose_host_is_not_loopback_is_refused_before_anything_opens() {
         "HTTP://LOCALHOST/v1",
     ] {
         assert_eq!(loopback(url).ok(), Some(()), "{url} is loopback");
+    }
+}
+
+#[test]
+fn a_refused_server_url_is_printed_without_its_userinfo() {
+    let url = "http://user:pass@10.0.0.5:8080/v1";
+    let config = LocalConfig {
+        stt: SttConfig::SherpaOnnx {
+            dir: "no such directory".into(),
+        },
+        server_url: url.to_owned(),
+        server_model: "qwen".to_owned(),
+        max_output_tokens: 32,
+    };
+    for refused in [
+        loopback(url).expect_err("refused"),
+        LocalModels::open(&config).expect_err("refused"),
+    ] {
+        assert!(
+            matches!(refused, LocalRefused::NotLoopback { .. }),
+            "{refused:?}"
+        );
+        for text in [refused.to_string(), format!("{refused:?}")] {
+            assert!(!text.contains("user"), "the user is not printed: {text}");
+            assert!(
+                !text.contains("pass"),
+                "the password is not printed: {text}"
+            );
+            assert!(text.contains("http://10.0.0.5:8080"), "{text}");
+        }
     }
 }
 
