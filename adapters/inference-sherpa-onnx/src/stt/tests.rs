@@ -9,8 +9,8 @@ use inference_stt::inference_text::{SpanState, TurnId};
 use inference_stt::{RecognitionRequest, TranscriptEvent, TranscriptOutput};
 
 use super::{
-    MAX_STREAM_RATE, MODEL_RATE, Resampler, UnsupportedRate, Utterance, declare_adapter,
-    declare_model, stream_rate, tail_padding,
+    MAX_STREAM_RATE, MIN_STREAM_RATE, Resampler, UnsupportedRate, Utterance, admit_rate,
+    declare_adapter, declare_model, stream_rate, tail_padding,
 };
 
 fn output(first_sequence: i64) -> TranscriptOutput {
@@ -166,17 +166,50 @@ fn an_absurd_rate_is_refused_before_the_tail_padding_is_allocated() {
     );
     assert_eq!(tail_padding(16_000), Ok(10_560));
     assert_eq!(tail_padding(MAX_STREAM_RATE), Ok(253_440));
+    assert_eq!(tail_padding(1), Err(UnsupportedRate { rate: 1 }));
 }
 
 #[test]
-fn a_first_frame_at_an_absurd_rate_gives_the_stream_the_models_rate() {
+fn a_rate_outside_the_bounds_is_refused_and_the_bounds_are_taken() {
     assert_eq!(
         stream_rate(u32::MAX),
         Err(UnsupportedRate { rate: u32::MAX })
     );
+    assert_eq!(stream_rate(1), Err(UnsupportedRate { rate: 1 }));
+    assert_eq!(
+        stream_rate(MIN_STREAM_RATE - 1),
+        Err(UnsupportedRate {
+            rate: MIN_STREAM_RATE - 1
+        })
+    );
+    assert_eq!(stream_rate(MIN_STREAM_RATE), Ok(MIN_STREAM_RATE));
+    assert_eq!(stream_rate(MAX_STREAM_RATE), Ok(MAX_STREAM_RATE));
     assert_eq!(stream_rate(48_000), Ok(48_000));
-    assert_eq!(stream_rate(8_000), Ok(8_000));
-    assert_eq!(MODEL_RATE, 16_000);
-    let resampled = Resampler::new(u32::MAX, MODEL_RATE).push(&ramp(1_000));
-    assert!(resampled.len() <= 1, "{resampled:?}");
+}
+
+#[test]
+fn a_first_frame_at_a_refused_rate_does_not_set_the_streams_rate() {
+    for rate in [u32::MAX, 1] {
+        let mut stream = None;
+        assert_eq!(admit_rate(&mut stream, rate), Err(UnsupportedRate { rate }));
+        assert_eq!(
+            stream, None,
+            "a refused {rate} Hz frame sets no stream rate"
+        );
+    }
+    let mut stream = None;
+    assert_eq!(admit_rate(&mut stream, 8_000), Ok(8_000));
+    assert_eq!(stream, Some(8_000));
+}
+
+#[test]
+fn a_later_frame_at_a_refused_rate_is_refused_and_the_stream_keeps_its_rate() {
+    let mut stream = Some(MAX_STREAM_RATE);
+    assert_eq!(admit_rate(&mut stream, 1), Err(UnsupportedRate { rate: 1 }));
+    assert_eq!(
+        admit_rate(&mut stream, u32::MAX),
+        Err(UnsupportedRate { rate: u32::MAX })
+    );
+    assert_eq!(stream, Some(MAX_STREAM_RATE));
+    assert_eq!(admit_rate(&mut stream, 16_000), Ok(MAX_STREAM_RATE));
 }

@@ -15,13 +15,14 @@
 //! recogniser. Iterating its handle takes the frames offered so far through
 //! [`TranscriptOutput::take_input`], decodes each to mono f32 ([`mono_samples`]), passes it to the
 //! stream, which resamples what is not at 16 kHz, and decodes while the stream is ready. A stream
-//! is given one sample rate only, that of its first frame ([`MODEL_RATE`] when that is above
-//! [`MAX_STREAM_RATE`], refused by [`stream_rate`]), because sherpa-onnx ends the process
+//! is given one sample rate only, that of its first frame, because sherpa-onnx ends the process
 //! when one stream is given a second: a later frame at another rate is resampled to the first
 //! by linear interpolation, each run of consecutive frames at one rate as one signal, with no
-//! low-pass filter. The first non-empty partial result emits a Hypothesis span, a changed result
-//! revises it, and an endpoint, by sherpa-onnx's endpoint rules, commits it and resets the
-//! stream for the next utterance; an utterance with no text emits nothing. At the end of input
+//! low-pass filter. A frame at a rate [`stream_rate`] refuses, below [`MIN_STREAM_RATE`] or above
+//! [`MAX_STREAM_RATE`], is not passed to the stream at all, first or later, so neither the tail
+//! padding nor the resampler is sized from it. The first non-empty partial result emits a
+//! Hypothesis span, a changed result revises it, and an endpoint, by sherpa-onnx's endpoint
+//! rules, commits it and resets the stream for the next utterance; an utterance with no text emits nothing. At the end of input
 //! the stream is flushed and the last span committed.
 //!
 //! The recognition's usage record, the contract's [`TranscriptOutput::usage`], is its last event,
@@ -115,15 +116,17 @@ pub const DEFAULT_MAX_CONCURRENCY: i64 = 1;
 /// last chunk is decoded rather than held back as context.
 const TAIL_PADDING_HUNDREDTHS: usize = 66;
 
-/// The sample rate the checkpoint's features are computed at, given to a stream whose first
-/// frame's rate is refused by [`stream_rate`].
-pub const MODEL_RATE: u32 = 16_000;
+/// The lowest sample rate a frame is taken at, the narrowband telephone rate: below it a frame
+/// is not speech the checkpoint can recognise, and resampling it to a stream's rate would
+/// multiply its samples by the ratio of the two.
+pub const MIN_STREAM_RATE: u32 = 8_000;
 
-/// The highest sample rate a stream is given, the highest an audio interface commonly delivers.
+/// The highest sample rate a frame is taken at, the highest an audio interface commonly
+/// delivers.
 pub const MAX_STREAM_RATE: u32 = 384_000;
 
-/// A sample rate above [`MAX_STREAM_RATE`], refused as a stream's rate before anything is
-/// allocated from it.
+/// A sample rate outside [`MIN_STREAM_RATE`]..=[`MAX_STREAM_RATE`], refused before anything is
+/// allocated or resampled from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnsupportedRate {
     pub rate: u32,
@@ -133,7 +136,8 @@ impl fmt::Display for UnsupportedRate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "a sample rate of {} Hz is above the {MAX_STREAM_RATE} Hz a stream takes",
+            "a sample rate of {} Hz is outside the {MIN_STREAM_RATE} to {MAX_STREAM_RATE} Hz a \
+             stream takes",
             self.rate
         )
     }
@@ -141,17 +145,25 @@ impl fmt::Display for UnsupportedRate {
 
 impl Error for UnsupportedRate {}
 
-/// The rate a stream whose first frame is at `frame_rate` is given: that rate itself.
+/// `frame_rate` when a stream takes frames at it.
 ///
 /// # Errors
 ///
-/// [`UnsupportedRate`] when `frame_rate` is above [`MAX_STREAM_RATE`]; the recognition then gives
-/// its stream [`MODEL_RATE`] and resamples every frame to it.
+/// [`UnsupportedRate`] when `frame_rate` is below [`MIN_STREAM_RATE`] or above
+/// [`MAX_STREAM_RATE`]; the recognition passes no frame at such a rate to its stream.
 pub const fn stream_rate(frame_rate: u32) -> Result<u32, UnsupportedRate> {
-    if frame_rate > MAX_STREAM_RATE {
+    if frame_rate < MIN_STREAM_RATE || frame_rate > MAX_STREAM_RATE {
         return Err(UnsupportedRate { rate: frame_rate });
     }
     Ok(frame_rate)
+}
+
+/// The rate decision of one frame at `frame_rate` for a stream whose rate is `stream`: the
+/// stream's rate, set to `frame_rate` by the first frame taken, which the frame is passed at,
+/// resampled when it is at another. Nothing is set by a refused frame.
+fn admit_rate(stream: &mut Option<u32>, frame_rate: u32) -> Result<u32, UnsupportedRate> {
+    let frame_rate = stream_rate(frame_rate)?;
+    Ok(*stream.get_or_insert(frame_rate))
 }
 
 /// The samples of silence appended at the end of input to a stream at `stream_rate`.
@@ -700,9 +712,9 @@ pub struct SherpaOnnxRecognition {
     output: TranscriptOutput,
     utterance: Utterance,
     delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
-    /// The sample rate of the first frame the stream took, or [`MODEL_RATE`] when [`stream_rate`]
-    /// refused it, the only rate it is ever given: sherpa-onnx ends the process when one stream
-    /// is given a second rate.
+    /// The sample rate of the first frame the stream took at a rate [`stream_rate`] admits, the
+    /// only rate it is ever given: sherpa-onnx ends the process when one stream is given a
+    /// second rate.
     stream_rate: Option<u32>,
     /// The resampler of the current run of frames at another rate than `stream_rate`.
     resampler: Option<Resampler>,
@@ -803,9 +815,9 @@ impl SherpaOnnxRecognition {
                 continue;
             }
             let frame_rate = frame.format.sample_rate.get();
-            let stream_rate = *self
-                .stream_rate
-                .get_or_insert_with(|| stream_rate(frame_rate).unwrap_or(MODEL_RATE));
+            let Ok(stream_rate) = admit_rate(&mut self.stream_rate, frame_rate) else {
+                continue;
+            };
             let samples = if frame_rate == stream_rate {
                 self.resampler = None;
                 samples
