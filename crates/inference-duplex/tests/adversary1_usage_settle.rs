@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use inference_duplex::inference_audio::{AudioEncoding, AudioFormat};
 use inference_duplex::inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_duplex::{
     Quantity, QuantityKind, ResponseId, ResponseState, ResponseStateConflict, ResponseUsage,
@@ -36,6 +37,7 @@ fn adapter() -> Adapter {
             locality: Locality::ExternalProvider,
             capabilities: vec![Capability::ConcurrentInputOutput],
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         },
     )
     .expect("a positive concurrency")

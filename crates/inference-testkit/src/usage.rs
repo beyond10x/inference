@@ -247,8 +247,8 @@ impl UsageDomain {
 #[cfg(test)]
 mod tests {
     use inference_core::model::{
-        AdapterId, AdapterNotFound, DeclareAdapter, DeclareModel, ExecutionForm, Locality,
-        Modality, ModelId, ModelNotFound,
+        AdapterDescriptor, AdapterId, AdapterNotFound, DeclareAdapter, DeclareModel, ExecutionForm,
+        Locality, Modality, ModelId, ModelNotFound,
     };
     use inference_core::usage::{
         CostLine, CostTotal, PriceUsage, Quantity, QuantityKind, RecordUsage, UsageRecordId,
@@ -284,6 +284,7 @@ mod tests {
                 locality: Locality::SameProcess,
                 capabilities: Vec::new(),
                 max_concurrency: 1,
+                descriptor: AdapterDescriptor::default(),
             })
             .expect("declared")
             .adapter_id;

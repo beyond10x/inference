@@ -34,6 +34,7 @@ timeline:
       locality: external_provider
       capabilities: [output_streaming]
       max_concurrency: 1
+      descriptor: {voices: [], codecs: [], rate_limits: []}
     outcome: declared
     capture: {instance: adapter, event: inference.model.AdapterDeclared, field: adapter_id}
   - at: 2026-01-05T09:00:02Z

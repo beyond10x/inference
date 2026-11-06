@@ -15,7 +15,8 @@ use inference_duplex::inference_audio::{
     AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition,
 };
 use inference_duplex::inference_core::model::{
-    Adapter, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, AdapterId, Capability, DeclareAdapter, ExecutionForm, Locality,
+    ModelId,
 };
 use inference_duplex::inference_tools::{DeclareTool, SideEffectClass, Tool};
 use inference_duplex::{
@@ -44,6 +45,7 @@ fn ledger(now: Instant) -> SessionLedger {
             locality: Locality::ExternalProvider,
             capabilities: vec![Capability::ConcurrentInputOutput, Capability::ToolCalling],
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         },
     )
     .expect("a positive concurrency")

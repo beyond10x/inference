@@ -212,6 +212,7 @@ fn adapter(target: &Target) -> Node {
                 ("locality", text("same_process")),
                 ("capabilities", list(&["interruptible"])),
                 ("max_concurrency", float(1.0)),
+                ("descriptor", Node::Map(BTreeMap::new())),
             ],
         ),
         "adapter_id",

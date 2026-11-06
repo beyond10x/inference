@@ -70,6 +70,7 @@ fn adversary2_declare_adapter_refuses_a_braced_model_id() {
         "execution_form": "in_process",
         "locality": "same_process",
         "max_concurrency": 1,
+        "descriptor": {},
         "model_id": format!("{{{CANONICAL}}}"),
     });
     let parsed: Result<inference_core::model::DeclareAdapter, _> = serde_json::from_value(input);

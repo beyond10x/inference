@@ -78,6 +78,7 @@ fn declare_adapter_input(model_id: Node, max_concurrency: Node) -> Vec<(&'static
         ("locality", text("same_process")),
         ("capabilities", list(&["tool_calling", "native_duplex"])),
         ("max_concurrency", max_concurrency),
+        ("descriptor", Node::Map(BTreeMap::new())),
     ]
 }
 

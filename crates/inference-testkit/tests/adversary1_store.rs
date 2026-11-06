@@ -2,7 +2,8 @@
 //! an `unknown-model` refusal, the declaration order of the views, and the identities of two runs.
 
 use inference_core::model::{
-    Capability, DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality, ModelId,
+    AdapterDescriptor, Capability, DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality,
+    ModelId,
 };
 use inference_testkit::model::{DeclareAdapterError, ModelDomain};
 
@@ -29,6 +30,7 @@ fn declare_adapter(model_id: ModelId, backend: &str, max_concurrency: i64) -> De
         locality: Locality::SameProcess,
         capabilities: vec![Capability::OutputStreaming],
         max_concurrency,
+        descriptor: AdapterDescriptor::default(),
     }
 }
 

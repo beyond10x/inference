@@ -35,7 +35,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use inference_core::model::{
-    Adapter, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference_duplex::inference_audio::{
     AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition,
@@ -276,6 +276,7 @@ impl MockSpeechModel {
             locality: Locality::SameProcess,
             capabilities: claims,
             max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
         })
         .unwrap_or_else(|_| unreachable!("a concurrency of one is positive"));
         adapter

@@ -1160,7 +1160,8 @@ pub use nodes::{PipelinePayload, RunLog, SinkHandle, SourceHandle, TextSink, Tex
 #[cfg(test)]
 mod tests {
     use inference_core::model::{
-        Capability, DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality,
+        AdapterDescriptor, Capability, DeclareAdapter, DeclareModel, ExecutionForm, Locality,
+        Modality,
     };
     use inference_core::policy::{DeclareProfile, Egress, ProfileKind, ProfileNotFound};
     use inference_pipeline::{
@@ -1203,6 +1204,7 @@ mod tests {
                 locality: Locality::SameProcess,
                 capabilities: vec![Capability::OutputStreaming],
                 max_concurrency: 1,
+                descriptor: AdapterDescriptor::default(),
             })
             .expect("declared");
         (policy, model)

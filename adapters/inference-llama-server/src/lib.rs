@@ -89,7 +89,8 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 
 use inference_core::model::{
-    Capability, DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality, ModelId,
+    AdapterDescriptor, Capability, DeclareAdapter, DeclareModel, ExecutionForm, Locality, Modality,
+    ModelId,
 };
 use inference_llm::{CONTRACT_REVISION, CapabilityNotDeclared, Generator};
 use llm_blocking::BlockingModel;
@@ -364,6 +365,7 @@ pub fn declare_adapter(model_id: ModelId, config: &Config) -> DeclareAdapter {
         locality: Locality::LocalWorker,
         capabilities,
         max_concurrency: config.max_concurrency,
+        descriptor: AdapterDescriptor::default(),
     }
 }
 
