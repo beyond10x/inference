@@ -129,3 +129,7 @@ required-features = ["speech"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "adversary1_usage_openai"
+required-features = ["duplex"]
