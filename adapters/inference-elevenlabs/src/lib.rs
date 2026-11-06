@@ -25,9 +25,16 @@
 //!
 //! A cancel is a discard of the segment being spoken, as a barge-in makes it: the binding ends
 //! that segment's context, drops every later message of it and emits nothing more of it, without
-//! waiting for the server; the connection stays open and the next segment speaks on it.
-//! Dropping the handle closes the connection. A connection that closes, stalls or sends
-//! something outside the protocol fails the synthesis with an [`ElevenLabsError`]
+//! waiting for the server; the connection stays open and the next segment speaks on it. A cancel
+//! stops nothing at the server: the context was flushed and closed when its text was sent, so
+//! the endpoint still generates and sends the whole cancelled segment, and a barge-in still pays
+//! for it. It saves playback, not cost. Dropping the handle closes the connection.
+//!
+//! A connection that ends between segments, as the endpoint's inactivity timeout may end it, is
+//! reopened once for the next segment: when sending its context fails because the connection
+//! ended, or the connection ends before any message of that context arrives, the binding opens a
+//! new connection and sends the context again; a second failure fails the synthesis. Any other
+//! close, stall or message outside the protocol fails the synthesis with an [`ElevenLabsError`]
 //! ([`ElevenLabsSynthesis::failure`]), never a panic or a hang: the handshake is bounded by the
 //! endpoint's connect timeout, every write by its read timeout, and every wait for the segment
 //! being spoken by its read timeout from that segment's last message.

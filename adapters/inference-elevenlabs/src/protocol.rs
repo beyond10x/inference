@@ -63,7 +63,8 @@
 //! - Audio: an object whose `audio` is the base64 of a chunk in the requested output format and
 //!   whose `contextId` names the context. `alignment` and `normalizedAlignment`, when present,
 //!   are ignored.
-//! - The final message of a context: `isFinal` true, with its `contextId`. It ends the segment.
+//! - The final message of a context: `isFinal` (or `is_final`, see below) true, with its
+//!   `contextId`. It ends the segment.
 //! - Anything else ends the synthesis as failed ([`parse_server_message`]), and so does a
 //!   message of a context the binding is not speaking and has not cancelled.
 //!
@@ -76,6 +77,11 @@
 //! connection stays open, and the next segment opens the next context on it. Messages of a
 //! cancelled context move no read deadline, so a server that keeps streaming one cannot hold the
 //! next segment past the read timeout.
+//!
+//! A cancel stops nothing at the server: the context was flushed and closed when its text was
+//! sent, and the specification says a context set to flush "will continue flushing" when closed.
+//! So the endpoint still generates, sends and bills the whole cancelled segment; a barge-in saves
+//! playback, not cost.
 //!
 //! # Points the documentation leaves open, and what the binding decided
 //!
@@ -94,9 +100,11 @@
 //!   without `contextId` is a protocol failure rather than a guess.
 //! - **An idle connection.** Contexts time out after `inactivity_timeout` (20 s unless
 //!   configured, at most 180 s). Whether the connection itself closes when no context is open is
-//!   not stated; a connection the endpoint closed between segments fails the next segment as
-//!   closed. An utterance whose segments come further apart than the timeout configures a longer
-//!   one.
+//!   not stated. A synthesis can outlive a turn, so the gap between two segments can pass the
+//!   timeout: when sending a context fails because the connection ended, or the connection ends
+//!   before any message of the context arrives, the binding opens a new connection once and sends
+//!   that context again on it; a second failure fails the synthesis. Contexts cancelled on the
+//!   old connection are forgotten with it.
 //! - **Five contexts per connection.** The guide caps concurrent contexts at five. The binding
 //!   speaks one at a time; a cancelled context the endpoint is still flushing counts until its
 //!   final message, so more than four barge-ins within one context's flush could meet the cap,
@@ -115,8 +123,10 @@
 //! - **Plaintext.** The key travels in a header, so `ws://` would send it in the clear. The
 //!   binding takes `ws://` only to a loopback host (`127.0.0.0/8`, `::1`, `localhost`), as a
 //!   local test server is, and `wss://` to any host.
-//! - **`isFinal` spelling.** The guide's example reads `is_final`; the specification says
-//!   `isFinal`, which is what the binding reads.
+//! - **The final flag's spelling.** The documentation contradicts itself: the AsyncAPI page
+//!   names it `isFinal`, while the multi-context guide's Python and JavaScript examples both read
+//!   `is_final`. The binding takes either as the final flag ([`FINAL_SPELLINGS`]); a message
+//!   whose flag is true under either spelling ends its context.
 //! - **The model.** The specification's default is a slower model than the latency guide
 //!   recommends, so the binding always names one, `eleven_flash_v2_5` unless configured.
 
@@ -132,6 +142,10 @@ pub const PATH: &str = "/v1/text-to-speech/{voice_id}/multi-stream-input";
 
 /// The message that closes every context and the connection, at the end of an utterance.
 pub const CLOSE_SOCKET: &str = r#"{"close_socket":true}"#;
+
+/// The spellings of the final flag the binding reads: `isFinal`, as the specification names it,
+/// and `is_final`, as the multi-context guide's examples read it.
+pub const FINAL_SPELLINGS: [&str; 2] = ["isFinal", "is_final"];
 
 /// The most characters of a server's error message an error keeps.
 pub const SERVER_MESSAGE_LIMIT: usize = 256;
@@ -246,7 +260,7 @@ pub fn close_context_message(context_id: &str) -> String {
 pub struct ServerMessage {
     /// The decoded bytes of `audio`, when it is a non-empty string.
     pub audio: Option<Vec<u8>>,
-    /// Whether `isFinal` is true.
+    /// Whether the final flag, `isFinal` or `is_final`, is true.
     pub is_final: bool,
     /// The context it belongs to, `contextId`, when it names one.
     pub context_id: Option<String>,
@@ -258,9 +272,9 @@ pub struct ServerMessage {
 /// [`ElevenLabsError::Server`] for an object carrying `message`, `error` or `detail` and no audio,
 /// where audio is an `audio` that is a non-empty string, so an error whose `audio` is null or
 /// empty is the server's error too; [`ElevenLabsError::Protocol`] for text that is not a JSON
-/// object, an `audio` that is neither a string nor null or not base64, an `isFinal` that is
-/// neither a boolean nor null, a `contextId` that is neither a string nor null, and an object
-/// with neither `audio` nor `isFinal`. The error never quotes the
+/// object, an `audio` that is neither a string nor null or not base64, an `isFinal` or
+/// `is_final` that is neither a boolean nor null, a `contextId` that is neither a string nor
+/// null, and an object with neither `audio` nor a final flag. The error never quotes the
 /// message itself, only the server's own error text.
 pub fn parse_server_message(text: &str) -> Result<ServerMessage, ElevenLabsError> {
     let Ok(Value::Object(object)) = serde_json::from_str::<Value>(text) else {
@@ -278,7 +292,11 @@ pub fn parse_server_message(text: &str) -> Result<ServerMessage, ElevenLabsError
         {
             return Err(ElevenLabsError::Server(said));
         }
-        if !object.contains_key("audio") && !object.contains_key("isFinal") {
+        if !object.contains_key("audio")
+            && !FINAL_SPELLINGS
+                .iter()
+                .any(|spelling| object.contains_key(*spelling))
+        {
             return Err(ElevenLabsError::Protocol(
                 "an object with neither `audio` nor `isFinal`".to_owned(),
             ));
@@ -299,15 +317,18 @@ pub fn parse_server_message(text: &str) -> Result<ServerMessage, ElevenLabsError
             ));
         }
     };
-    let is_final = match object.get("isFinal") {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(is_final)) => *is_final,
-        Some(_) => {
-            return Err(ElevenLabsError::Protocol(
-                "`isFinal` is neither a boolean nor null".to_owned(),
-            ));
+    let mut is_final = false;
+    for spelling in FINAL_SPELLINGS {
+        match object.get(spelling) {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(flag)) => is_final |= *flag,
+            Some(_) => {
+                return Err(ElevenLabsError::Protocol(format!(
+                    "`{spelling}` is neither a boolean nor null"
+                )));
+            }
         }
-    };
+    }
     let context_id = match object.get("contextId") {
         None | Some(Value::Null) => None,
         Some(Value::String(context_id)) => Some(context_id.clone()),
@@ -469,6 +490,26 @@ mod tests {
         assert_eq!(close, json!({"context_id": "s2", "close_context": true}));
         let socket: Value = serde_json::from_str(CLOSE_SOCKET).unwrap();
         assert_eq!(socket, json!({"close_socket": true}));
+    }
+
+    #[test]
+    fn the_final_flag_is_read_under_both_documented_spellings() {
+        for message in [
+            r#"{"isFinal":true,"contextId":"s0"}"#,
+            r#"{"is_final":true,"contextId":"s0"}"#,
+            r#"{"isFinal":false,"is_final":true,"contextId":"s0"}"#,
+        ] {
+            assert!(parse_server_message(message).unwrap().is_final, "{message}");
+        }
+        assert!(
+            !parse_server_message(r#"{"is_final":null,"contextId":"s0"}"#)
+                .unwrap()
+                .is_final
+        );
+        assert!(matches!(
+            parse_server_message(r#"{"is_final":"yes"}"#),
+            Err(ElevenLabsError::Protocol(detail)) if detail.contains("is_final")
+        ));
     }
 
     #[test]
