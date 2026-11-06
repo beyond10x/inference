@@ -2205,6 +2205,7 @@ version = "0.16.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
+ "inference-duplex",
  "inference-testkit",
  "inference-tts",
  "keyring-core",
@@ -3478,6 +3479,7 @@ dependencies = [
  "inference-audio-device",
  "inference-aws",
  "inference-duplex",
+ "inference-elevenlabs",
  "inference-openai",
  "inference-testkit",
  "serde_json",

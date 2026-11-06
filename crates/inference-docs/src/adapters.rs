@@ -87,6 +87,15 @@ const BINDINGS: &[Binding] = &[
         licence: "hosted service: text leaves the machine",
     },
     Binding {
+        name: "ElevenLabs agent conversation",
+        package: "inference-elevenlabs",
+        runs: "native speech (duplex); hosted, WebSocket (`v1/convai/conversation`), the agent's own model, voice and formats",
+        features: &[],
+        record: Record::Claims("records/claims-agent.json"),
+        environment: "`ELEVENLABS_AGENT_ID` for a public agent, or `ELEVENLABS_AGENT_SIGNED_URL` for a private one (the live test and `compare`)",
+        licence: "hosted service: audio leaves the machine",
+    },
+    Binding {
         name: "Deepgram streaming STT",
         package: "inference-deepgram",
         runs: "STT, streaming; hosted, WebSocket (`v1/listen`), one connection per recognition",
