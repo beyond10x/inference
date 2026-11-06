@@ -36,7 +36,8 @@ use crate::wire::{self, WireError, Writer};
 
 pub use crate::wire::WireError as ProtocolError;
 
-/// How deep a `google.protobuf.Struct` may nest before it is refused.
+/// How many JSON objects and lists may nest in a `google.protobuf.Struct`, the outermost object
+/// counted as one; one more is refused. The `Value` messages that carry a member add no level.
 pub const STRUCT_DEPTH: usize = 32;
 
 /// `SampleFormat.SIGNED_16_BIT`, the only sample format the binding sends: the definition says
@@ -517,7 +518,7 @@ fn read_tool(bytes: &[u8]) -> Result<ToolDefinition, WireError> {
         match field {
             1 => tool.name = value.string(field)?,
             2 => tool.description = Some(value.string(field)?),
-            3 => tool.parameters = Some(Json::Object(read_struct(value.bytes(field)?, 0)?)),
+            3 => tool.parameters = Some(Json::Object(read_struct(value.bytes(field)?, 1)?)),
             _ => {}
         }
         Ok(())
@@ -902,7 +903,7 @@ fn read_tool_call(bytes: &[u8]) -> Result<ClientBound, WireError> {
         match field {
             1 => id = value.string(field)?,
             2 => name = value.string(field)?,
-            3 => parameters = read_struct(value.bytes(field)?, 0)?,
+            3 => parameters = read_struct(value.bytes(field)?, 1)?,
             4 => turn_id = Some(value.uint32(field)?),
             _ => {}
         }
@@ -945,6 +946,8 @@ fn write_value(out: &mut Writer, value: &Json) {
     }
 }
 
+/// A `Struct` at nesting `depth`, the outermost one at 1. Its members' values are at the same
+/// depth: an object or a list among them is one level deeper, however many messages carry it.
 fn read_struct(bytes: &[u8], depth: usize) -> Result<Map<String, Json>, WireError> {
     if depth > STRUCT_DEPTH {
         return Err(WireError::Depth);
@@ -956,7 +959,7 @@ fn read_struct(bytes: &[u8], depth: usize) -> Result<Map<String, Json>, WireErro
             wire::fields(value.bytes(field)?, |field, value| {
                 match field {
                     1 => key = value.string(field)?,
-                    2 => member = read_value(value.bytes(field)?, depth + 1)?,
+                    2 => member = read_value(value.bytes(field)?, depth)?,
                     _ => {}
                 }
                 Ok(())
@@ -968,6 +971,7 @@ fn read_struct(bytes: &[u8], depth: usize) -> Result<Map<String, Json>, WireErro
     Ok(object)
 }
 
+/// A `Value` held by a container at nesting `depth`; a list's items are held one level deeper.
 fn read_value(bytes: &[u8], depth: usize) -> Result<Json, WireError> {
     if depth > STRUCT_DEPTH {
         return Err(WireError::Depth);
@@ -1115,6 +1119,39 @@ mod tests {
             turn_id: Some(0),
         };
         assert_eq!(ClientBound::decode(&call.encode()), Ok(call));
+    }
+
+    #[test]
+    fn a_struct_nested_to_the_bound_is_read() {
+        let mut value = json!("leaf");
+        for _ in 0..STRUCT_DEPTH {
+            value = json!({ "a": value });
+        }
+        let call = ClientBound::ToolCallRequest {
+            id: "c".to_owned(),
+            name: "t".to_owned(),
+            parameters: value,
+            turn_id: None,
+        };
+        assert_eq!(ClientBound::decode(&call.encode()), Ok(call));
+        let mut list = json!("leaf");
+        for _ in 1..STRUCT_DEPTH {
+            list = Json::Array(vec![list]);
+        }
+        let call = ClientBound::ToolCallRequest {
+            id: "c".to_owned(),
+            name: "t".to_owned(),
+            parameters: json!({ "a": list.clone() }),
+            turn_id: None,
+        };
+        assert_eq!(ClientBound::decode(&call.encode()), Ok(call));
+        let call = ClientBound::ToolCallRequest {
+            id: "c".to_owned(),
+            name: "t".to_owned(),
+            parameters: json!({ "a": [list] }),
+            turn_id: None,
+        };
+        assert_eq!(ClientBound::decode(&call.encode()), Err(WireError::Depth));
     }
 
     #[test]

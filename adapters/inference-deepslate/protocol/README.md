@@ -27,8 +27,10 @@ The documentation does not say these, so the binding does not rely on them:
   such text for the turn.
 - Whether a turn's audio can arrive after its `ResponseEnd` or after `PlaybackClearBuffer`. The
   binding drops and counts it.
-- Whether a tool call's answer continues the same `turn_id` or opens a new one. The binding begins
-  a new response when the call's turn has ended.
+- Whether a tool call's answer continues the same `turn_id` or opens a new one. The binding takes
+  either: what follows an answer on the call's own turn is a new response, as is a new turn.
+- What a client should answer a call of a tool it never offered. The binding answers at once with
+  a short JSON error saying the tool is not available in this session, and the session goes on.
 - Whether a `PlaybackPositionReport` sent after the server's own interruption still truncates the
   context. The binding sends none and claims no truncation.
 - Whether `ResponseBegin` of a new turn can come while an earlier turn's response has had no
