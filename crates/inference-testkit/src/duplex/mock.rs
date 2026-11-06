@@ -16,8 +16,8 @@
 //! A turn that ends while a response is in progress and was not interrupted is input during
 //! output: [`MockSpeechModel::native`] speaks its reply on that same response before it
 //! completes, which gives the evidence `inference_duplex::conformance::native_duplex_evidence`
-//! asks for; [`MockSpeechModel::restarting`] cancels the response and answers in a new one, which
-//! fails it.
+//! asks for, or proposes its [`Reply::Call`] there; [`MockSpeechModel::restarting`] cancels the
+//! response and answers in a new one, which fails it.
 //!
 //! A response streams one step per [`SpeechSessionHandle::next_event`]: its transcript, then
 //! [`AUDIO_FRAMES`] frames of 20 ms silence in the output format, then its usage and its
@@ -436,8 +436,9 @@ impl MockSpeechSession {
     }
 
     /// The user turn ended: the next turn of the script is taken, what was heard is
-    /// transcribed, and the reply is spoken on the response in progress, in a new one after a
-    /// restart, or awaits the next response, which `auto_response` creates at once.
+    /// transcribed, and the reply is spoken or its call proposed on the response in progress,
+    /// in a new one after a restart, or awaits the next response, which `auto_response` creates
+    /// at once.
     fn end_turn(&mut self) -> Result<(), SessionError> {
         let recognised = self.recognised();
         let Some(turn) = self.script.pop_front() else {
@@ -461,19 +462,27 @@ impl MockSpeechSession {
                 self.pending = Some(reply);
                 return self.start_response();
             }
-            if let Reply::Say(text) = reply {
-                let at = self
-                    .plan
-                    .iter()
-                    .position(|step| matches!(step, Step::Usage | Step::Complete))
-                    .unwrap_or(self.plan.len());
-                for (offset, step) in Self::spoken(text)
+            let steps: Vec<Step> = match reply {
+                Reply::Say(text) => Self::spoken(text)
                     .into_iter()
                     .filter(|step| !matches!(step, Step::Usage | Step::Complete))
-                    .enumerate()
-                {
-                    self.plan.insert(at + offset, step);
+                    .collect(),
+                Reply::Call {
+                    tool,
+                    arguments,
+                    then,
+                } => {
+                    self.after_result = Some(then);
+                    vec![Step::Call { tool, arguments }]
                 }
+            };
+            let at = self
+                .plan
+                .iter()
+                .position(|step| matches!(step, Step::Usage | Step::Complete))
+                .unwrap_or(self.plan.len());
+            for (offset, step) in steps.into_iter().enumerate() {
+                self.plan.insert(at + offset, step);
             }
             return Ok(());
         }
@@ -1095,6 +1104,66 @@ mod tests {
             .position(|event| matches!(event, SessionEvent::ResponseCompleted(_)))
             .expect("the response completes");
         assert!(heard < dependent && dependent < completed, "{events:#?}");
+    }
+
+    #[test]
+    fn a_call_scripted_for_input_during_output_is_proposed_on_the_same_response() {
+        let mut model = MockSpeechModel::native(vec![
+            turn("what is the weather", "The weather is"),
+            ScriptedTurn {
+                heard: "in Berlin".to_owned(),
+                reply: Reply::Call {
+                    tool: "weather".to_owned(),
+                    arguments: json!({"city": "Berlin"}),
+                    then: "It is {result} degrees".to_owned(),
+                },
+            },
+        ]);
+        let mut caller = config(TurnDetection::ServerVad, true);
+        caller.auto_interrupt = false;
+        let mut session = model
+            .open(caller)
+            .expect("the model takes the configuration");
+        speak(&mut session, 0, 2);
+        let mut events = Vec::new();
+        while !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::OutputTranscriptDelta(_)))
+        {
+            events.push(session.next_event(WAIT).expect("the response streams"));
+        }
+        speak(&mut session, 960, 2);
+        events.extend(drain(&mut session));
+
+        let responses = created(&events);
+        assert_eq!(responses.len(), 1, "no second response id: {events:#?}");
+        let (call_id, response_id) = events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::SpeechToolCallProposed(proposed) => {
+                    Some((proposed.call_id.clone(), proposed.response_id))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the scripted call is proposed: {events:#?}"));
+        assert_eq!(response_id, responses[0]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::SpeechSessionFailed(_))),
+            "{events:#?}"
+        );
+
+        session
+            .submit_tool_result(&call_id, json!(21))
+            .expect("the call awaits its result");
+        session
+            .create_response()
+            .expect("the first response completed");
+        let answer = drain(&mut session);
+        let second = created(&answer);
+        assert_eq!(second.len(), 1, "{answer:#?}");
+        assert_eq!(transcript(&answer, second[0]), "It is 21 degrees");
     }
 
     #[test]
