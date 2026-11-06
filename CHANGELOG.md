@@ -13,15 +13,17 @@
 
 ### Added
 
-- `inference-core`: `StopReason` and the event `GenerationRefused`, also declared in
-  `ess/domains/stream.yaml`.
+- `inference-core`: `StopReason`, the event `GenerationRefused` and `Generation::refuse`, also
+  declared in `ess/domains/stream.yaml` with the command `RefuseGeneration`.
+- `inference-testkit`: `StreamDomain::refuse_generation`.
 
 ### Changed
 
 - `inference-llm`: a generation completes with the stop reason of its last turn; a model's
-  refusal is delivered as `GenerationEvent::Refused` with its text, not as a text segment.
-- `inference-llm`: a failed turn's usage record keeps the counts the provider reported, never
-  final; `GenerationHandle`'s `Debug` shows ids, counts and the failure's error code only, no
+  refusal is delivered as `GenerationEvent::Refused` with its text, not as a text segment, and a
+  refusal of a turn that ended survives a later failed turn, a supersede or a cancel.
+- `inference-llm`: a failed turn's usage record keeps the counts and the final mark the provider
+  reported; `GenerationHandle`'s `Debug` shows ids, counts and the failure's error code only, no
   conversation text.
 - `inference-testkit`: the duplex mock fails the session when its ledger refuses a scripted step,
   also for a call scripted on a turn that ends during output, where an offered tool is now proposed
