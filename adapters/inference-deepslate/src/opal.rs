@@ -74,9 +74,12 @@
 //! * A `ToolCallRequest` for a tool the session offers is proposed on its turn's response
 //!   (`SpeechToolCallProposed`); [`SpeechSessionHandle::submit_tool_result`] sends
 //!   `ToolCallResponse` with the call's id, the result as its text (a JSON string as it is, any
-//!   other value as its JSON text). One the session does not offer fails the session as a
-//!   provider error naming it ([`DeepslateError::ToolNotOffered`]): the model waits for an
-//!   answer to every request.
+//!   other value as its JSON text). An answer the caller gives while the call's response is
+//!   still in progress makes what follows on that turn a new response, the one that answers the
+//!   result; the call's response completes when it begins, or at the turn's `ResponseEnd` when
+//!   nothing follows. A call of a tool the session does not offer is answered at once with
+//!   [`tool_unavailable`], since the model waits for an answer to every request, and recorded
+//!   in the ledger's dropped events as `ToolNotOffered`; the session goes on.
 //! * `SessionErrorNotification` fails the session as a provider error
 //!   ([`DeepslateError::Server`], with its category, message and trace id). A close by the
 //!   server or a failed read fails it as a closed transport. [`DeepslateOpalSession::failure_cause`]
@@ -85,7 +88,7 @@
 //!   session ([`SessionLedger::unreadable_frames`]) and read past.
 //! * Usage: no message carries any, so each response's usage record carries every count unknown.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -437,6 +440,8 @@ impl NativeSpeechModel for DeepslateOpal {
             write_timeout: self.endpoint.read_timeout,
             turns: HashMap::new(),
             last_turn: None,
+            call_turns: HashMap::new(),
+            answered: HashSet::new(),
             emitted: 0,
             carry: Vec::new(),
             input_samples: 0,
@@ -525,6 +530,14 @@ async fn await_ready(
             early.push(inbound);
         }
     }
+}
+
+/// The result the binding answers a call of the tool `name` with when the session does not
+/// offer it: a short JSON error, as its text.
+#[must_use]
+pub fn tool_unavailable(name: &str) -> String {
+    serde_json::json!({"error": format!("the tool `{name}` is not available in this session")})
+        .to_string()
 }
 
 fn server_error(
@@ -796,6 +809,9 @@ async fn write(socket: &mut Socket, bytes: Vec<u8>, bound: Duration) -> Result<(
 enum Target {
     /// The response in progress that holds it.
     Live(ResponseId),
+    /// The response in progress that holds it proposed a call the caller answered: what comes
+    /// next for the turn is the answer, a new response.
+    Answered(ResponseId),
     /// Its response ended: what comes for it is late.
     Ended,
     /// No response holds it yet.
@@ -817,6 +833,10 @@ pub struct DeepslateOpalSession {
     turns: HashMap<u32, ResponseId>,
     /// The turn of the latest `ResponseBegin`.
     last_turn: Option<u32>,
+    /// The turn of each call proposed and not yet answered.
+    call_turns: HashMap<String, u32>,
+    /// Turns whose response in progress proposed a call the caller answered.
+    answered: HashSet<u32>,
     /// The samples the response in progress emitted, the position of its next frame.
     emitted: u64,
     /// The half sample the last chunk of the response in progress ended in.
@@ -933,6 +953,9 @@ impl DeepslateOpalSession {
         let in_progress = self.ledger.in_progress();
         match turn.or(self.last_turn) {
             Some(turn) => match self.turns.get(&turn) {
+                Some(id) if Some(*id) == in_progress && self.answered.contains(&turn) => {
+                    Target::Answered(*id)
+                }
                 Some(id) if Some(*id) == in_progress => Target::Live(*id),
                 Some(_) => Target::Ended,
                 None => Target::Unheld,
@@ -956,6 +979,7 @@ impl DeepslateOpalSession {
         self.emitted = 0;
         self.carry.clear();
         if let Some(turn) = turn {
+            self.answered.remove(&turn);
             self.turns.insert(turn, id);
             self.last_turn = Some(turn);
             if let Some(text) = self.held.remove(&turn) {
@@ -967,12 +991,12 @@ impl DeepslateOpalSession {
     }
 
     /// The response in progress for the output of `turn`, begun when no response holds the
-    /// turn; `None` when the turn's response ended.
+    /// turn or when it is the answer to a call; `None` when the turn's response ended.
     fn live(&mut self, turn: Option<u32>, now: Instant) -> Option<ResponseId> {
         match self.target(turn) {
             Target::Live(id) => Some(id),
             Target::Ended => None,
-            Target::Unheld => self.begin(turn.or(self.last_turn), now),
+            Target::Unheld | Target::Answered(_) => self.begin(turn.or(self.last_turn), now),
         }
     }
 
@@ -1073,13 +1097,19 @@ impl DeepslateOpalSession {
             },
             ClientBound::ModelTextFragment { text, turn_id } => match self.target(Some(turn_id)) {
                 Target::Live(id) => self.said(id, &text, now),
+                Target::Answered(_) => {
+                    if let Some(id) = self.begin(Some(turn_id), now) {
+                        self.said(id, &text, now);
+                    }
+                }
                 Target::Ended => {
                     self.text_dropped = self.text_dropped.saturating_add(text.len() as u64);
                 }
                 Target::Unheld => self.hold(turn_id, &text),
             },
             ClientBound::ResponseEnd { turn_id } => {
-                if let Target::Live(id) = self.target(Some(turn_id)) {
+                if let Target::Live(id) | Target::Answered(id) = self.target(Some(turn_id)) {
+                    self.answered.remove(&turn_id);
                     let done = self.ledger.response_completed(id, now);
                     self.or_drop(done);
                     self.carry.clear();
@@ -1124,14 +1154,29 @@ impl DeepslateOpalSession {
             } => {
                 let offered = self.ledger.tools().iter().any(|tool| tool.name() == name);
                 if !offered {
-                    self.fail_with(DeepslateError::ToolNotOffered { name });
+                    let refusal = ServiceBound::ToolCallResponse {
+                        id,
+                        result: tool_unavailable(&name),
+                    };
+                    self.ledger.dropped(SessionError::ToolNotOffered { name });
+                    let _ = self.send(refusal.encode());
                     return;
                 }
                 let response = match self.target(turn_id) {
                     Target::Live(response) => Some(response),
-                    Target::Ended | Target::Unheld => self.begin(turn_id, now),
+                    Target::Answered(_) | Target::Ended | Target::Unheld => {
+                        self.begin(turn_id, now)
+                    }
                 };
                 if let Some(response) = response {
+                    let turn = self
+                        .turns
+                        .iter()
+                        .find(|(_, held)| **held == response)
+                        .map(|(turn, _)| *turn);
+                    if let Some(turn) = turn {
+                        self.call_turns.insert(id.clone(), turn);
+                    }
                     let proposed = self.ledger.tool_call(
                         SpeechCallId::new(id),
                         response,
@@ -1240,6 +1285,11 @@ impl SpeechSessionHandle for DeepslateOpalSession {
             other => other.to_string(),
         };
         self.ledger.answer(call_id, result)?;
+        if let Some(turn) = self.call_turns.remove(call_id.as_str())
+            && matches!(self.target(Some(turn)), Target::Live(_))
+        {
+            self.answered.insert(turn);
+        }
         self.send(
             ServiceBound::ToolCallResponse {
                 id: call_id.as_str().to_owned(),

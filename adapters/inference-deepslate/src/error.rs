@@ -16,6 +16,12 @@ pub enum ConfigError {
     PathSegment(&'static str),
     /// The ping interval is zero.
     PingInterval,
+    /// The read timeout is not longer than the ping interval, so a healthy server that only
+    /// answers pings would be failed as stalled.
+    ReadTimeout {
+        read_timeout: Duration,
+        ping_interval: Duration,
+    },
     /// The environment variable, named, is not set.
     Missing(&'static str),
     /// The adapter record could not be declared with a concurrency of one.
@@ -31,6 +37,15 @@ impl fmt::Display for ConfigError {
                 "the {what} must be 1 to 128 ASCII letters, digits, `-`, `_` or `.`"
             ),
             Self::PingInterval => f.write_str("the ping interval must not be zero"),
+            Self::ReadTimeout {
+                read_timeout,
+                ping_interval,
+            } => write!(
+                f,
+                "the read timeout ({} ms) must be longer than the ping interval ({} ms)",
+                read_timeout.as_millis(),
+                ping_interval.as_millis()
+            ),
             Self::Missing(variable) => write!(f, "{variable} is not set"),
             Self::MaxConcurrency => f.write_str("the adapter record could not be declared"),
         }
@@ -67,8 +82,6 @@ pub enum DeepslateError {
     },
     /// The server closed the connection before `SessionReady`.
     ClosedBeforeReady { code: Option<u16>, reason: String },
-    /// The model asked for a tool the session does not offer.
-    ToolNotOffered { name: String },
     /// The thread or runtime that drives the connection could not be started.
     Runtime(String),
     /// The endpoint was refused before connecting.
@@ -101,10 +114,6 @@ impl fmt::Display for DeepslateError {
                 ),
                 None => f.write_str("the server closed the connection before SessionReady"),
             },
-            Self::ToolNotOffered { name } => write!(
-                f,
-                "the model asked for the tool `{name}`, which the session does not offer"
-            ),
             Self::Runtime(detail) => write!(f, "the session's runtime failed: {detail}"),
             Self::Config(error) => write!(f, "configuration refused: {error}"),
         }

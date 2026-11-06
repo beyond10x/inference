@@ -129,11 +129,18 @@ impl Endpoint {
     /// (`127.0.0.0/8`, `::1`, `localhost`), or carries a path, a query, a fragment or a user
     /// part; [`ConfigError::PathSegment`] when the vendor id, the organization id or the model is
     /// empty, longer than [`MAX_PATH_SEGMENT`], or holds anything but ASCII letters, digits, `-`,
-    /// `_` and `.`; [`ConfigError::PingInterval`] for a zero ping interval. No error carries the
-    /// URL.
+    /// `_` and `.`; [`ConfigError::PingInterval`] for a zero ping interval;
+    /// [`ConfigError::ReadTimeout`] for a read timeout not longer than the ping interval, since a
+    /// silent, healthy server is heard only by its pongs. No error carries the URL.
     pub fn url(&self) -> Result<String, ConfigError> {
         if self.ping_interval.is_zero() {
             return Err(ConfigError::PingInterval);
+        }
+        if self.read_timeout <= self.ping_interval {
+            return Err(ConfigError::ReadTimeout {
+                read_timeout: self.read_timeout,
+                ping_interval: self.ping_interval,
+            });
         }
         let base = checked_base(&self.url)?;
         let vendor = segment("vendor id", &self.vendor_id)?;
@@ -288,5 +295,25 @@ mod tests {
                 .url(),
             Err(ConfigError::PingInterval)
         );
+    }
+
+    #[test]
+    fn a_read_timeout_not_past_the_ping_interval_is_refused() {
+        let at = |read: u64, ping: u64| {
+            Endpoint::new("v", "o")
+                .with_read_timeout(Duration::from_secs(read))
+                .with_ping_interval(Duration::from_secs(ping))
+                .url()
+        };
+        assert_eq!(
+            at(3, 10),
+            Err(ConfigError::ReadTimeout {
+                read_timeout: Duration::from_secs(3),
+                ping_interval: Duration::from_secs(10),
+            })
+        );
+        assert!(matches!(at(10, 10), Err(ConfigError::ReadTimeout { .. })));
+        assert!(at(11, 10).is_ok());
+        assert!(Endpoint::new("v", "o").url().is_ok());
     }
 }

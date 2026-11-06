@@ -54,5 +54,5 @@ pub use error::{ConfigError, ConnectError, DeepslateError};
 pub use inference_duplex;
 pub use opal::{
     BACKEND, DeepslateOpal, DeepslateOpalSession, INBOUND_DEPTH, MODEL, OUTBOUND_QUEUE,
-    SAMPLE_RATES, TEXT_LIMIT, capabilities, claims, native_duplex_verdict,
+    SAMPLE_RATES, TEXT_LIMIT, capabilities, claims, native_duplex_verdict, tool_unavailable,
 };

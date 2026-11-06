@@ -33,6 +33,7 @@ use inference_deepslate::protocol::{
 use inference_deepslate::{
     CLOSE_BOUND, CredentialError, CredentialSource, DeepslateError, DeepslateOpal,
     DeepslateOpalSession, Endpoint, OpalConfig, capabilities, claims, native_duplex_verdict,
+    tool_unavailable,
 };
 use serde_json::json;
 use support::{
@@ -99,6 +100,7 @@ fn endpoint(server: &OpalServer) -> Endpoint {
         .with_url(&server.url)
         .with_open_timeout(Duration::from_secs(3))
         .with_read_timeout(Duration::from_secs(3))
+        .with_ping_interval(Duration::from_secs(1))
 }
 
 fn model_with(endpoint: Endpoint, source: Arc<dyn CredentialSource>) -> DeepslateOpal {
@@ -608,8 +610,22 @@ fn a_tool_call_is_proposed_and_its_result_goes_back_by_id() {
                 json!({"temperature": 22, "condition": "sunny"}),
             )
             .unwrap();
-        let rest = events_until(&mut session, completed);
-        assert_eq!(said(&rest, created(&events)[0]), "It is sunny.");
+        let rest = events_until(
+            &mut session,
+            |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id != proposed.response_id),
+        );
+        let answers = created(&rest);
+        assert_eq!(answers.len(), 1, "{rest:?}");
+        let first_done = rest.iter().position(|event| {
+            matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id == proposed.response_id)
+        });
+        let answer_made = rest
+            .iter()
+            .position(|event| matches!(event, SessionEvent::ResponseCreated(_)));
+        assert!(first_done.is_some() && first_done < answer_made, "{rest:?}");
+        assert_eq!(said(&rest, proposed.response_id), "");
+        assert_eq!(said(&rest, answers[0]), "It is sunny.");
+        assert_eq!(audio_of(&rest, answers[0]), vec![(0, 320)]);
         let seen = server.seen(0);
         assert_eq!(
             seen.tool_responses(),
@@ -663,9 +679,9 @@ fn a_string_result_is_sent_as_it_is() {
 }
 
 #[test]
-fn a_tool_the_session_does_not_offer_fails_the_session() {
+fn a_tool_the_session_does_not_offer_is_answered_unavailable_and_the_session_goes_on() {
     within_deadline(|| {
-        let server = OpalServer::start(Script::new(vec![
+        let mut steps = vec![
             begin(0),
             Step::Send(ClientBound::ToolCallRequest {
                 id: "c9".to_owned(),
@@ -673,19 +689,40 @@ fn a_tool_the_session_does_not_offer_fails_the_session() {
                 parameters: json!({}),
                 turn_id: Some(0),
             }),
-            Step::Pause(Duration::from_secs(10)),
-        ]));
+            Step::AwaitToolResponse("c9"),
+            text(0, "I cannot open doors."),
+            end(0),
+        ];
+        steps.extend(reply(1, "Anything else?", 1, 640));
+        let server = OpalServer::start(Script::new(steps));
         let mut session = open(&server);
-        let events = events_until(&mut session, ended);
-        let (kind, detail) = failure_of(&events).expect("the session failed");
-        assert_eq!(kind, SessionFailureKind::ProviderError);
-        assert!(detail.contains("open_door"), "{detail}");
-        assert_eq!(
-            session.failure_cause(),
-            Some(&DeepslateError::ToolNotOffered {
-                name: "open_door".to_owned()
-            })
+        let events = events_until(&mut session, |event| completed(event) || ended(event));
+        let mut events = events;
+        events.extend(events_until(&mut session, |event| {
+            completed(event) || ended(event)
+        }));
+        assert_eq!(failure_of(&events), None, "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::SpeechToolCallProposed(_)))
         );
+        let ids = created(&events);
+        assert_eq!(ids.len(), 2, "{events:?}");
+        assert_eq!(said(&events, ids[0]), "I cannot open doors.");
+        assert_eq!(said(&events, ids[1]), "Anything else?");
+        assert_eq!(
+            session.ledger().dropped_events(),
+            &[SessionError::ToolNotOffered {
+                name: "open_door".to_owned()
+            }]
+        );
+        assert_eq!(
+            server.seen(0).tool_responses(),
+            vec![("c9".to_owned(), tool_unavailable("open_door"))]
+        );
+        assert!(tool_unavailable("open_door").contains("not available in this session"));
+        session.close().unwrap();
     });
 }
 
