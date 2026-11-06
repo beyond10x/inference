@@ -40,9 +40,22 @@
 //!   has spoken (its first output fragment's `start_ms` to its latest fragment's `end_ms`) is
 //!   the user speaking over it, and `SpeechStarted` precedes that fragment's `InputTranscribed`,
 //!   at the fragment's start on the input, once per interruption: later fragments extend the
-//!   user's speech until an output fragment of the response starts at or after its latest
-//!   `end_ms`, the model speaking again, and the next fragment inside then is reported again
-//!   (a pause shorter than [`Segmentation::gap`] keeps one response). A fragment starting before that
+//!   user's speech until the model speaks again. The boundary between the cut answer and the
+//!   model's next words is the first output fragment that does not continue the cut output and
+//!   does not overlap the user's speech: its `start_ms` is later than the latest `end_ms` the
+//!   response has spoken (a pause in the model's output) and at or after the latest input
+//!   `end_ms`. The cut response ends there as completed, and the fragment begins a new
+//!   response, on which the audio after it is delivered and over which the next fragment
+//!   inside is reported again. What arrives from the speech start up to the boundary, the rest
+//!   of the cut sentence, fragments that follow it without a pause and fragments starting
+//!   before the user's speech ended, stays
+//!   on the cut response, so a caller that drops the audio of a response it was spoken over
+//!   drops the cut part and plays the next words. The protocol notes do not say that an output
+//!   fragment precedes the audio it transcribes (the replays assume it, as two live sessions
+//!   showed), nor that the model's next words start with a fragment: audio of them before their
+//!   first fragment stays on the cut response, and without any fragment the cut response ends
+//!   at [`Segmentation::gap`] of silence and the next voiced frame begins a new one. Backend
+//!   usage arriving after the boundary is summed onto the new response. A fragment starting before that
 //!   interval, the tail of the question the response answers, or after it, in the response's
 //!   trailing silence, reports none; nor does any while the response has no output transcript.
 //!   That the two transcripts share one timeline is read from the protocol documents, not
@@ -722,6 +735,32 @@ impl OpenAiLiveSession {
         self.or_drop(refused);
     }
 
+    /// The model speaks again after speech over the response in progress: an output transcript
+    /// fragment starting at `start_ms` after a pause in the model's output (later than the
+    /// latest `end_ms` the response has spoken) and at or after the end of that speech so far
+    /// ([`Spoken::interrupted`]) ends the cut response as completed, so the fragment and the
+    /// audio after it begin a new one. A fragment that continues the output without a pause, or
+    /// starts while the caller is still speaking, is the rest of the cut sentence and stays on
+    /// the cut response, as does the audio before the boundary.
+    fn resumed(&mut self, start_ms: u64, now: Instant) {
+        let Some(Spoken {
+            response,
+            end_ms,
+            interrupted: Some(speech_end),
+            ..
+        }) = self.spoken
+        else {
+            return;
+        };
+        if self.current != Some(response) || start_ms <= end_ms || start_ms < speech_end {
+            return;
+        }
+        let refused = self.ledger.response_completed(response, now);
+        self.or_drop(refused);
+        self.current = None;
+        self.silent_run = 0;
+    }
+
     fn output(&mut self, audio: Vec<u8>, now: Instant) {
         let width = self.format.sample_width();
         let whole = audio.len() - audio.len() % width;
@@ -929,15 +968,13 @@ impl OpenAiLiveSession {
                 start_ms,
                 end_ms,
             } => {
+                self.resumed(start_ms, now);
                 if let Some(id) = self.begin(now) {
                     self.silent_run = 0;
                     self.spoken = Some(match self.spoken {
                         Some(spoken) if spoken.response == id => Spoken {
                             start_ms: spoken.start_ms.min(start_ms),
                             end_ms: spoken.end_ms.max(end_ms),
-                            interrupted: spoken
-                                .interrupted
-                                .filter(|&speech_end| start_ms < speech_end),
                             ..spoken
                         },
                         _ => Spoken {

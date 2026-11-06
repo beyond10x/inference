@@ -8,7 +8,10 @@
 //! per response (`speech_over`); an output transcript fragment or a voiced output frame begins a
 //! response when none is in progress (`begin`, `output`); silent output is delivered on the
 //! response in progress until the silence gap completes it; a backend function call is proposed on
-//! the response in progress. The test pushes the server's events and steps the conversation.
+//! the response in progress. An output transcript fragment after speech over the response, which
+//! here always starts after that speech ended, completes the cut response and begins a new one
+//! for the model's next words (`resumed`). The test pushes the server's events and steps the
+//! conversation.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -67,6 +70,8 @@ struct LiveSession {
     feed: Feed,
     current: Option<ResponseId>,
     emitted: u64,
+    /// Speech was reported over the response in progress and the model has not spoken since.
+    interrupted: bool,
     cancels: Vec<ResponseId>,
     truncations: Vec<ResponseId>,
     results: Vec<SpeechCallId>,
@@ -96,6 +101,7 @@ impl NativeSpeechModel for Live {
             feed: Rc::clone(&self.feed),
             current: None,
             emitted: 0,
+            interrupted: false,
             cancels: Vec::new(),
             truncations: Vec::new(),
             results: Vec::new(),
@@ -153,6 +159,7 @@ impl LiveSession {
                 .input_transcribed(text.to_owned(), now)
                 .expect("open"),
             Server::HeardOver(text) => {
+                self.interrupted = self.current.is_some();
                 self.ledger
                     .speech_started(SampleClockPosition::new(0).unwrap(), now)
                     .expect("open");
@@ -161,6 +168,13 @@ impl LiveSession {
                     .expect("open");
             }
             Server::Said(text) => {
+                if std::mem::take(&mut self.interrupted)
+                    && let Some(cut) = self.current.take()
+                {
+                    self.ledger
+                        .response_completed(cut, now)
+                        .expect("the cut response is in progress");
+                }
                 let id = self.begin();
                 self.ledger
                     .output_transcript(id, text.to_owned(), now)
