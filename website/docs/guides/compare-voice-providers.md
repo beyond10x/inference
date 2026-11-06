@@ -76,9 +76,11 @@ Options:
           - openai:      The OpenAI Realtime API
           - openai-live: OpenAI GPT-Live
           - nova:        Amazon Nova Sonic on Bedrock
+          - elevenlabs:  An ElevenLabs agent conversation
+          - deepgram:    A Deepgram Voice Agent session
           - cascade:     The local voice cascade's recogniser and LLM, speaking with ElevenLabs
           
-          [default: openai,openai-live,nova,cascade]
+          [default: openai,openai-live,nova,elevenlabs,deepgram,cascade]
 
       --runs <RUNS>
           The runs of each provider
