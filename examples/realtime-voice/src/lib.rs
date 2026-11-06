@@ -193,6 +193,31 @@ pub fn elevenlabs_config() -> SessionConfig {
     }
 }
 
+/// The session the demo opens on the Deepgram Voice Agent: G.711 μ-law at 8 kHz both ways, the
+/// telephony format it takes end to end, the agent's own turn-taking, responses and barge-in,
+/// the demo instructions as its prompt and the demo tool as a client-side function. The voice is
+/// left empty, so the speak model of the agent configuration applies.
+#[must_use]
+pub fn deepgram_config() -> SessionConfig {
+    let mulaw = AudioFormat {
+        encoding: AudioEncoding::PcmMulaw,
+        sample_rate: NonZeroU32::new(8_000).unwrap_or(NonZeroU32::MIN),
+        channels: NonZeroU16::MIN,
+    };
+    SessionConfig {
+        voice: String::new(),
+        instructions: INSTRUCTIONS.to_owned(),
+        input_format: mulaw,
+        output_format: mulaw,
+        turn_detection: TurnDetection::ServerVad,
+        turn_tuning: TurnTuning::default(),
+        auto_response: true,
+        auto_interrupt: true,
+        tools: vec![time_tool()],
+        idle_limit: Duration::from_secs(30),
+    }
+}
+
 /// How a [`Conversation`] paces itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {

@@ -21,6 +21,10 @@ pub enum ConfigError {
     InvalidUrl(String),
     /// The maximum concurrency is not positive.
     MaxConcurrency(i64),
+    /// The Voice Agent's `Authorization` scheme is not 1 to 32 ASCII letters.
+    AuthScheme,
+    /// A Voice Agent provider's `type` or `model` is empty, or longer than 128 characters.
+    AgentProvider,
 }
 
 impl fmt::Display for ConfigError {
@@ -38,6 +42,12 @@ impl fmt::Display for ConfigError {
             Self::KeepAliveInterval => f.write_str("the keep-alive interval must not be zero"),
             Self::InvalidUrl(detail) => write!(f, "invalid base URL: {detail}"),
             Self::MaxConcurrency(max) => write!(f, "maximum concurrency {max} is not positive"),
+            Self::AuthScheme => {
+                f.write_str("the Authorization scheme must be 1 to 32 ASCII letters")
+            }
+            Self::AgentProvider => f.write_str(
+                "a Voice Agent provider's type and model must each be 1 to 128 characters",
+            ),
         }
     }
 }
@@ -112,6 +122,16 @@ pub enum DeepgramError {
     UnsupportedAudio(String),
     /// The thread or runtime that drives the connection could not be started.
     Runtime(String),
+    /// The caller cancelled the opening of a Voice Agent session.
+    Cancelled,
+    /// The Voice Agent closed the connection before `SettingsApplied`, with the close code and
+    /// reason when it gave one.
+    ClosedBeforeSettings { code: Option<u16>, reason: String },
+    /// The Voice Agent asked for a client-side function the session does not offer.
+    FunctionNotOffered { name: String },
+    /// The session configuration asks the Voice Agent for something the binding refuses, such as
+    /// a voice longer than a provider field may be.
+    Config(ConfigError),
 }
 
 impl fmt::Display for DeepgramError {
@@ -132,6 +152,19 @@ impl fmt::Display for DeepgramError {
             },
             Self::UnsupportedAudio(detail) => write!(f, "unsupported audio: {detail}"),
             Self::Runtime(detail) => write!(f, "the recognition's runtime failed: {detail}"),
+            Self::Cancelled => f.write_str("the caller cancelled the open"),
+            Self::ClosedBeforeSettings { code, reason } => match code {
+                Some(code) => write!(
+                    f,
+                    "the server closed the connection before SettingsApplied ({code}): {reason}"
+                ),
+                None => f.write_str("the server closed the connection before SettingsApplied"),
+            },
+            Self::Config(error) => write!(f, "configuration refused: {error}"),
+            Self::FunctionNotOffered { name } => write!(
+                f,
+                "the agent asked for the client-side function `{name}`, which the session does not offer"
+            ),
         }
     }
 }
