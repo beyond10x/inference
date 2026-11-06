@@ -34,6 +34,12 @@
 //! emitted; a turn that showed no delta gives the assistant text of its outcome as one segment
 //! when it ends.
 //!
+//! A refusal is not prose: the model's refusal item of a turn that ended is delivered as
+//! [`GenerationEvent::Refused`] with its text, after that turn's text and before its usage
+//! record, and makes no segment. The [`GenerationCompleted`] a generation ends with carries the
+//! stop reason of the turn that ended last, so an answer cut by the maximum output tokens is told
+//! from a whole one; it carries none when no turn ended or the completion cut a running turn.
+//!
 //! Every turn is one model call, and every turn that ended yields one usage record,
 //! [`GenerationEvent::Usage`], delivered after the events of that turn: the
 //! `inference.usage.UsageRecorded` of [`usage_of_turn`] over the usage `llm` observed for it, its
@@ -108,8 +114,8 @@ use std::thread::{self, Thread};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use inference_core::generation::{
-    Generation, GenerationCancelled, GenerationCompleted, GenerationStarted, GenerationState,
-    GenerationStateConflict, GenerationSuperseded, StartGeneration,
+    Generation, GenerationCancelled, GenerationCompleted, GenerationRefused, GenerationStarted,
+    GenerationState, GenerationStateConflict, GenerationSuperseded, StartGeneration, StopReason,
 };
 use inference_core::id::{GenerationId, NodeId, RunId};
 use inference_core::model::{Adapter, Capability};
@@ -207,6 +213,17 @@ pub fn usage_of_turn(
     UsageRecord::record(input).1
 }
 
+/// The `inference.stream.StopReason` of `llm`'s stop reason; an incomplete turn's own reason
+/// stays in its [`TurnOutcome`].
+const fn stop_reason_of(stop_reason: &llm_core::StopReason) -> StopReason {
+    match stop_reason {
+        llm_core::StopReason::EndTurn => StopReason::EndTurn,
+        llm_core::StopReason::ToolCalls => StopReason::ToolCalls,
+        llm_core::StopReason::MaxOutputTokens => StopReason::MaxOutputTokens,
+        llm_core::StopReason::Incomplete { .. } => StopReason::Incomplete,
+    }
+}
+
 /// Now, in Unix epoch milliseconds on the wall clock; 0 before the epoch.
 fn wall_clock_ms() -> i64 {
     SystemTime::now()
@@ -217,7 +234,9 @@ fn wall_clock_ms() -> i64 {
 }
 
 /// An event of one generation, as a [`GenerationHandle`] yields it, in the order its commands ran.
+/// It is `#[non_exhaustive]`: a match on it keeps an arm for events added later.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GenerationEvent {
     /// `inference.stream.GenerationStarted`, always the first.
     Started(GenerationStarted),
@@ -228,7 +247,13 @@ pub enum GenerationEvent {
     /// `inference.usage.UsageRecorded`: the usage of one turn that ended, delivered after the
     /// events of that turn; see the crate documentation.
     Usage(UsageRecorded),
+    /// `inference.stream.GenerationRefused`: a turn that ended carried the model's refusal, with
+    /// its text, delivered after the text of that turn and before its usage record. A refusal
+    /// makes no segment, so it never reaches a sink as an answer.
+    Refused(GenerationRefused),
     /// `inference.stream.GenerationCompleted`, always the last of a generation that completes.
+    /// Its `stop_reason` is that of the turn that ended last, when the generation completed
+    /// with no turn running; none when no turn ended or a completion cut a running turn.
     Completed(GenerationCompleted),
     /// `inference.stream.GenerationCancelled` of a generation whose turn failed, with the
     /// `SegmentDiscarded` of each segment the cancel discarded, in emission order; always the
@@ -486,13 +511,17 @@ impl GenerationOutput {
         refusal.map_or(Ok(events), Err)
     }
 
-    /// Runs `inference.stream.CompleteGeneration`.
+    /// Runs `inference.stream.CompleteGeneration` with its `stop_reason` input, which the
+    /// [`GenerationCompleted`] carries.
     ///
     /// # Errors
     ///
     /// [`GenerationStateConflict`] carrying the held state when the generation is not Active.
-    pub fn complete(&mut self) -> Result<GenerationCompleted, GenerationStateConflict> {
-        let (generation, event) = self.generation.complete()?;
+    pub fn complete(
+        &mut self,
+        stop_reason: Option<StopReason>,
+    ) -> Result<GenerationCompleted, GenerationStateConflict> {
+        let (generation, event) = self.generation.complete(stop_reason)?;
         self.generation = generation;
         Ok(event)
     }
@@ -792,6 +821,7 @@ impl Generator {
             ending: None,
             text: String::new(),
             shown: false,
+            stop_reason: None,
             outcomes: Vec::new(),
             failure: None,
             _slot: slot,
@@ -882,6 +912,8 @@ pub struct GenerationHandle {
     text: String,
     /// Whether the running turn showed a text delta.
     shown: bool,
+    /// Why the turn that ended last stopped; none before a turn ended and while one runs.
+    stop_reason: Option<StopReason>,
     outcomes: Vec<TurnOutcome>,
     failure: Option<llm_core::Error>,
     _slot: Slot,
@@ -1172,6 +1204,7 @@ impl GenerationHandle {
         }
         self.answered = false;
         self.shown = false;
+        self.stop_reason = None;
         let request = self.conversation.clone();
         let model = Arc::clone(&self.model);
         let cancel = self.cancel.clone();
@@ -1248,6 +1281,20 @@ impl GenerationHandle {
         if !text.is_empty() {
             self.segment(text);
         }
+        self.stop_reason = Some(stop_reason_of(&outcome.stop_reason));
+        let generation_id = self.output.generation().generation_id();
+        let refusals = outcome.items.iter().filter_map(|item| match item {
+            Item::AssistantRefusal { text } => Some(GenerationEvent::Refused(GenerationRefused {
+                generation_id,
+                text: text.clone(),
+            })),
+            _ => None,
+        });
+        if self.streams {
+            self.delivered.extend(refusals);
+        } else {
+            self.held.extend(refusals);
+        }
         let observation = &outcome.observation;
         let recorded = usage_of_turn(
             &self.adapter,
@@ -1321,9 +1368,15 @@ impl GenerationHandle {
 
     /// Completes the generation, delivering what an adapter that does not stream held, then the
     /// usage record of the turn the completion cut, if one ran, once its model returns, and
-    /// [`GenerationEvent::Completed`] last.
+    /// [`GenerationEvent::Completed`] last, carrying the stop reason of the turn that ended last
+    /// when no turn runs, and none when a turn runs, as the completion cuts it.
     fn finish(&mut self) {
-        if let Ok(completed) = self.output.complete() {
+        let stop_reason = if self.turn.is_some() {
+            None
+        } else {
+            self.stop_reason
+        };
+        if let Ok(completed) = self.output.complete(stop_reason) {
             self.stop();
             self.delivered.extend(self.held.drain(..));
             let completed = GenerationEvent::Completed(completed);

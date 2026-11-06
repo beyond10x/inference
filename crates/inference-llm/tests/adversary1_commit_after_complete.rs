@@ -39,7 +39,7 @@ fn a_tentative_segment_of_a_completed_generation_commits_as_ess_declares() {
     let delta = output
         .emit("last".to_owned())
         .expect("Active takes a delta");
-    output.complete().expect("Active completes");
+    output.complete(None).expect("Active completes");
 
     let committed = output.commit_tentative();
 

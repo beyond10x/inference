@@ -136,6 +136,7 @@ fn a_stream_event_whose_payload_generation_differs_from_the_envelope_is_refused(
     let mut completed = delta(3, 1);
     completed.payload = StreamEvent::GenerationCompleted(GenerationCompleted {
         generation_id: generation(3),
+        stop_reason: None,
     });
     completed.kind = completed.payload.name().to_owned();
     assert_eq!(
