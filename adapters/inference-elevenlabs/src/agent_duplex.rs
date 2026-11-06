@@ -14,7 +14,8 @@
 //! within [`AgentEndpoint::metadata_timeout`] for `conversation_initiation_metadata`, answering
 //! pings meanwhile. Both waits race [`OpenCanceller::cancel`]: a cancel drops a handshake in
 //! progress, which closes the TCP connection at once, or sends a close frame, bounded by
-//! [`CLOSE_BOUND`], once the WebSocket is open. The agent's configuration chooses its audio
+//! [`CLOSE_BOUND`], once the WebSocket is open. A cancel reaches only an open in progress when
+//! it is issued; one issued while none is does nothing. The agent's configuration chooses its audio
 //! formats and a session cannot; the session configuration states the formats it expects, and
 //! an agent reporting others fails the open as [`Unsupported::InputFormat`] or
 //! [`Unsupported::OutputFormat`], [`ElevenLabsAgent::open_error`] naming what it reported. No
@@ -26,9 +27,10 @@
 //!
 //! Each session runs a runtime of one worker thread, on which one task owns the socket: it
 //! reads every message, answers each `ping` at once with a `pong` carrying its `event_id`
-//! (whether or not the caller is reading), writes what the session sends, and hands what it
-//! read to the session through a queue of [`INBOUND_QUEUE`] messages; while that queue is full
-//! it reads nothing more. The session's writes go through a queue of [`OUTBOUND_QUEUE`]
+//! (whether or not the caller is reading; a `ping` takes no slot of the queue below), writes
+//! what the session sends, and hands every other message it read to the session through a
+//! queue of [`INBOUND_QUEUE`] messages, reading it before it waits for a slot; while that queue
+//! is full it reads nothing more. The session's writes go through a queue of [`OUTBOUND_QUEUE`]
 //! messages, each send waiting at most [`AgentEndpoint::read_timeout`]. A message or frame
 //! larger than [`MAX_MESSAGE_BYTES`] fails the session as a provider error
 //! ([`AgentError::Oversize`]), and a connection that sends nothing for
@@ -49,8 +51,15 @@
 //!   `agent_response` or a `client_tool_call` while none is. Its audio frames count samples from
 //!   its start; PCM ending in half a sample keeps that byte for the next chunk. An
 //!   `agent_response` gives the response its `OutputTranscriptDelta`, the whole text of the
-//!   message, and completes it (`ResponseCompleted`): the documented order is audio, then
-//!   `agent_response` ([`crate::agent`]). Its `response_id`, where present, is kept as the
+//!   message, and leaves it in progress, since audio of the message may still follow it. The
+//!   response completes (`ResponseCompleted`) at the first of: the user's next turn
+//!   (`user_transcript`), audio whose `event_id` is greater than that `agent_response`'s (a
+//!   new message, which opens its own response), the next `agent_response`, a close by the
+//!   caller, or [`MESSAGE_QUIET`] (1 s, or half the idle limit when that is shorter) with no
+//!   audio of it. Audio up to then stays on it, so none is dropped and no stray response
+//!   opens; and a silent agent leaves no response in progress, so the idle limit fails no
+//!   healthy session. An `interruption` cancels it like any response in progress, since its
+//!   audio was cut. This rule is inferred, not stated ([`crate::agent`]). Its `response_id`, where present, is kept as the
 //!   provider's name of the response ([`ElevenLabsAgentSession::provider_response_id`]).
 //! * An `interruption` is the agent hearing the user over it: `SpeechStarted` at the input sent
 //!   so far, then the response in progress ends as cancelled (`ResponseCancelled`). Audio whose
@@ -79,7 +88,7 @@
 //!   usage record carries every count unknown.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -115,6 +124,10 @@ pub const AGENT_BACKEND: &str = "elevenlabs-agent";
 
 /// The model the claims record names: the agent's configuration chooses it, not the binding.
 pub const AGENT_MODEL: &str = "agent-configured";
+
+/// How long a response whose `agent_response` arrived waits for more audio of its message
+/// before it completes, unless half the session's idle limit is shorter.
+pub const MESSAGE_QUIET: Duration = Duration::from_secs(1);
 
 /// How many server messages the connection task holds for the session before it stops reading.
 pub const INBOUND_QUEUE: usize = 256;
@@ -178,15 +191,63 @@ pub fn agent_native_duplex_verdict(
     Ok(agent_claims().contains(&Capability::NativeDuplex) == outcome.is_ok())
 }
 
-/// Cancels the open in progress on the model it came from. A cancel that finds no open in
-/// progress cancels the next one.
+/// Cancels the open in progress on the model it came from. A cancel issued while no open is in
+/// progress does nothing: it never reaches a later open.
 #[derive(Debug, Clone)]
-pub struct OpenCanceller(Arc<Notify>);
+pub struct OpenCanceller(Arc<CancelState>);
 
 impl OpenCanceller {
-    /// Cancels the open in progress, or the next one.
+    /// Cancels the open in progress, if one is.
     pub fn cancel(&self) {
-        self.0.notify_one();
+        self.0.cancel();
+    }
+}
+
+/// Which open is in progress and which one a cancel named, by generation; 0 is none.
+#[derive(Debug, Default)]
+struct CancelState {
+    opens: Mutex<(u64, u64)>,
+    notify: Notify,
+}
+
+impl CancelState {
+    fn opens(&self) -> std::sync::MutexGuard<'_, (u64, u64)> {
+        self.opens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The open of `generation` is in progress.
+    fn begin(&self, generation: u64) {
+        self.opens().0 = generation;
+    }
+
+    /// No open is in progress.
+    fn end(&self) {
+        self.opens().0 = 0;
+    }
+
+    /// Cancels the open in progress, if one is.
+    fn cancel(&self) {
+        let mut opens = self.opens();
+        if opens.0 != 0 {
+            opens.1 = opens.0;
+            drop(opens);
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// Resolves once the open of `generation` is cancelled.
+    async fn cancelled(&self, generation: u64) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.opens().1 == generation {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -232,7 +293,8 @@ pub struct ElevenLabsAgent {
     target: Target,
     endpoint: AgentEndpoint,
     capabilities: SpeechCapabilities,
-    cancel: Arc<Notify>,
+    cancel: Arc<CancelState>,
+    generation: u64,
     open_error: Option<AgentError>,
 }
 
@@ -284,7 +346,8 @@ impl ElevenLabsAgent {
             target,
             endpoint,
             capabilities: agent_capabilities(),
-            cancel: Arc::new(Notify::new()),
+            cancel: Arc::new(CancelState::default()),
+            generation: 0,
             open_error: None,
         }
     }
@@ -356,7 +419,15 @@ impl NativeSpeechModel for ElevenLabsAgent {
             Ok(runtime) => runtime,
             Err(error) => return Err(self.failed(AgentError::Runtime(error.to_string()))),
         };
-        let opened = runtime.block_on(connect(&self.target, &self.endpoint, &self.cancel));
+        self.generation += 1;
+        self.cancel.begin(self.generation);
+        let opened = runtime.block_on(connect(
+            &self.target,
+            &self.endpoint,
+            &self.cancel,
+            self.generation,
+        ));
+        self.cancel.end();
         let (socket, metadata, early) = match opened {
             Ok(opened) => opened,
             Err(error) => return Err(self.failed(error)),
@@ -408,6 +479,8 @@ impl NativeSpeechModel for ElevenLabsAgent {
             provider_ids: HashMap::new(),
             transcripts: HashMap::new(),
             late_audio: 0,
+            finishing: None,
+            quiet: MESSAGE_QUIET.min(config.idle_limit / 2),
             failure: None,
             closing: false,
         };
@@ -417,6 +490,12 @@ impl NativeSpeechModel for ElevenLabsAgent {
         }
         Ok(session)
     }
+}
+
+/// A response whose message's `agent_response` arrived, waiting for the rest of its audio.
+struct Finishing {
+    event_id: Option<u64>,
+    last: Instant,
 }
 
 /// What the metadata said.
@@ -439,17 +518,18 @@ fn socket_config() -> WebSocketConfig {
 async fn connect(
     target: &Target,
     endpoint: &AgentEndpoint,
-    cancel: &Notify,
+    cancel: &CancelState,
+    generation: u64,
 ) -> Result<(Socket, Metadata, Vec<ServerMessage>), AgentError> {
     let mut socket = tokio::select! {
         biased;
-        () = cancel.notified() => return Err(AgentError::Cancelled),
+        () = cancel.cancelled(generation) => return Err(AgentError::Cancelled),
         connected = handshake(target, endpoint) => connected?,
     };
     let metadata_timeout = endpoint.metadata_timeout;
     let waited = tokio::select! {
         biased;
-        () = cancel.notified() => Err(AgentError::Cancelled),
+        () = cancel.cancelled(generation) => Err(AgentError::Cancelled),
         waited = tokio::time::timeout(metadata_timeout, await_metadata(&mut socket)) => {
             waited.unwrap_or(Err(AgentError::Stalled(metadata_timeout)))
         }
@@ -631,8 +711,55 @@ enum Woken {
     Frame(Result<Frame, tokio::time::error::Elapsed>),
 }
 
+/// Whether the connection task goes on after handing something over.
+enum Handed {
+    On,
+    /// The session stopped the task or dropped its queues.
+    Stopped,
+    /// A write failed; the task ends.
+    Failed,
+}
+
+/// Hands `item` to the session, waiting for a slot of the inbound queue; meanwhile it still
+/// writes what the session sends and obeys a stop.
+async fn hand_over(
+    socket: &mut Socket,
+    commands: &mut mpsc::Receiver<String>,
+    stop: &mut oneshot::Receiver<()>,
+    inbound: &mpsc::Sender<Inbound>,
+    item: Inbound,
+    read_timeout: Duration,
+) -> Handed {
+    loop {
+        let command = tokio::select! {
+            biased;
+            _ = &mut *stop => return Handed::Stopped,
+            permit = inbound.reserve() => {
+                return match permit {
+                    Ok(permit) => {
+                        permit.send(item);
+                        Handed::On
+                    }
+                    Err(_) => Handed::Stopped,
+                };
+            }
+            command = commands.recv() => command,
+        };
+        let Some(text) = command else {
+            return Handed::Stopped;
+        };
+        if let Err(error) = write(socket, text, read_timeout).await {
+            let _ = inbound.try_send(Inbound::Ended(error));
+            return Handed::Failed;
+        }
+    }
+}
+
 /// The connection task: reads, answers pings, writes what the session sends, until the session
-/// stops it or drops its queue, or the connection ends.
+/// stops it or drops its queue, or the connection ends. A `ping` is answered as soon as it is
+/// read and takes no slot of the inbound queue: the session is told of it only when a slot is
+/// free at once, as a sign of life. Every other message is read before a slot is reserved for
+/// it, and while none is free the task reads nothing more.
 async fn pump(
     mut socket: Socket,
     mut commands: mpsc::Receiver<String>,
@@ -642,24 +769,6 @@ async fn pump(
 ) {
     let mut last = tokio::time::Instant::now();
     loop {
-        let permit = tokio::select! {
-            biased;
-            _ = &mut stop => break,
-            command = commands.recv() => match command {
-                Some(text) => {
-                    if let Err(error) = write(&mut socket, text, read_timeout).await {
-                        let _ = inbound.send(Inbound::Ended(error)).await;
-                        return;
-                    }
-                    continue;
-                }
-                None => break,
-            },
-            permit = inbound.reserve() => match permit {
-                Ok(permit) => permit,
-                Err(_) => break,
-            },
-        };
         let deadline = last + read_timeout;
         let woken = tokio::select! {
             biased;
@@ -667,18 +776,16 @@ async fn pump(
             command = commands.recv() => Woken::Command(command),
             frame = tokio::time::timeout_at(deadline, next_frame(&mut socket)) => Woken::Frame(frame),
         };
-        match woken {
+        let (item, ends) = match woken {
             Woken::Stop | Woken::Command(None) => break,
             Woken::Command(Some(text)) => {
                 if let Err(error) = write(&mut socket, text, read_timeout).await {
-                    permit.send(Inbound::Ended(error));
+                    let _ = inbound.try_send(Inbound::Ended(error));
                     return;
                 }
+                continue;
             }
-            Woken::Frame(Err(_)) => {
-                permit.send(Inbound::Ended(AgentError::Stalled(read_timeout)));
-                break;
-            }
+            Woken::Frame(Err(_)) => (Inbound::Ended(AgentError::Stalled(read_timeout)), true),
             Woken::Frame(Ok(frame)) => {
                 last = tokio::time::Instant::now();
                 match frame {
@@ -687,27 +794,42 @@ async fn pump(
                             if let Err(error) =
                                 write(&mut socket, agent::pong(event_id), read_timeout).await
                             {
-                                permit.send(Inbound::Ended(error));
+                                let _ = inbound.try_send(Inbound::Ended(error));
                                 return;
                             }
-                            permit.send(Inbound::Message(ServerMessage::Ping { event_id }));
+                            let _ = inbound
+                                .try_send(Inbound::Message(ServerMessage::Ping { event_id }));
+                            continue;
                         }
-                        Ok(message) => permit.send(Inbound::Message(message)),
-                        Err(what) => permit.send(Inbound::Unreadable(what)),
+                        Ok(message) => (Inbound::Message(message), false),
+                        Err(what) => (Inbound::Unreadable(what), false),
                     },
-                    Frame::Binary(bytes) => permit.send(Inbound::Unreadable(format!(
-                        "a binary message of {bytes} bytes; the agent sends text"
-                    ))),
+                    Frame::Binary(bytes) => (
+                        Inbound::Unreadable(format!(
+                            "a binary message of {bytes} bytes; the agent sends text"
+                        )),
+                        false,
+                    ),
                     Frame::Closed { code, reason } => {
-                        permit.send(Inbound::Ended(AgentError::Closed { code, reason }));
-                        return;
+                        (Inbound::Ended(AgentError::Closed { code, reason }), true)
                     }
-                    Frame::Failed(error) => {
-                        permit.send(Inbound::Ended(error));
-                        return;
-                    }
+                    Frame::Failed(error) => (Inbound::Ended(error), true),
                 }
             }
+        };
+        match hand_over(
+            &mut socket,
+            &mut commands,
+            &mut stop,
+            &inbound,
+            item,
+            read_timeout,
+        )
+        .await
+        {
+            Handed::On if !ends => {}
+            Handed::On | Handed::Stopped => break,
+            Handed::Failed => return,
         }
     }
     close_socket(socket).await;
@@ -749,6 +871,12 @@ pub struct ElevenLabsAgentSession {
     provider_ids: HashMap<ResponseId, String>,
     transcripts: HashMap<ResponseId, String>,
     late_audio: u64,
+    /// The response in progress whose `agent_response` arrived: its message's `event_id` and
+    /// when audio of it, or the `agent_response`, last arrived.
+    finishing: Option<Finishing>,
+    /// How long a finishing response waits for more audio of its message ([`MESSAGE_QUIET`],
+    /// or half the idle limit when that is shorter).
+    quiet: Duration,
     failure: Option<AgentError>,
     /// The caller is closing: what would fail the session is not recorded.
     closing: bool,
@@ -858,6 +986,33 @@ impl ElevenLabsAgentSession {
     fn end_current(&mut self) {
         self.current = None;
         self.carry.clear();
+        self.finishing = None;
+    }
+
+    /// Completes the response whose message finished, if one is in progress.
+    fn finish(&mut self, now: Instant) {
+        if self.finishing.is_none() {
+            return;
+        }
+        if let Some(id) = self.current {
+            let done = self.ledger.response_completed(id, now);
+            self.or_drop(done);
+        }
+        self.end_current();
+    }
+
+    /// When the finishing response completes for want of more audio, if one is in progress.
+    fn quiet_due(&self) -> Option<Instant> {
+        self.finishing
+            .as_ref()
+            .and_then(|finishing| finishing.last.checked_add(self.quiet))
+    }
+
+    /// Completes the finishing response once [`Self::quiet_due`] has passed at `now`.
+    fn finish_if_quiet(&mut self, now: Instant) {
+        if self.quiet_due().is_some_and(|due| now >= due) {
+            self.finish(now);
+        }
     }
 
     /// The response in progress, created when none is.
@@ -931,19 +1086,38 @@ impl ElevenLabsAgentSession {
                     self.late_audio += 1;
                     return;
                 }
+                let newer = match (&self.finishing, event_id) {
+                    (
+                        Some(Finishing {
+                            event_id: Some(done),
+                            ..
+                        }),
+                        Some(id),
+                    ) => id > *done,
+                    _ => false,
+                };
+                if newer {
+                    self.finish(now);
+                } else if let Some(finishing) = self.finishing.as_mut() {
+                    finishing.last = now;
+                }
                 if let Some(id) = self.begin(now) {
                     self.output(id, audio, now);
                 }
             }
             ServerMessage::UserTranscript { text } => {
+                self.finish(now);
                 let committed = self.ledger.input_committed(now);
                 self.or_drop(committed);
                 let heard = self.ledger.input_transcribed(text, now);
                 self.or_drop(heard);
             }
             ServerMessage::AgentResponse {
-                text, response_id, ..
+                text,
+                event_id,
+                response_id,
             } => {
+                self.finish(now);
                 let Some(id) = self.begin(now) else { return };
                 let said = self.ledger.output_transcript(id, text.clone(), now);
                 self.or_drop(said);
@@ -951,9 +1125,10 @@ impl ElevenLabsAgentSession {
                 if let Some(provider) = response_id {
                     self.provider_ids.insert(id, provider);
                 }
-                let done = self.ledger.response_completed(id, now);
-                self.or_drop(done);
-                self.end_current();
+                self.finishing = Some(Finishing {
+                    event_id,
+                    last: now,
+                });
             }
             ServerMessage::AgentResponseCorrection {
                 corrected,
@@ -1115,6 +1290,7 @@ impl SpeechSessionHandle for ElevenLabsAgentSession {
         if self.require_open().is_ok() {
             self.closing = true;
             self.record_arrived();
+            self.finish(Instant::now());
             self.shutdown(true);
         }
         self.ledger.close()?;
@@ -1128,9 +1304,16 @@ impl SpeechSessionHandle for ElevenLabsAgentSession {
             if let Some(event) = self.ledger.next_event() {
                 return Some(event);
             }
-            let left = deadline.map_or(wait, |deadline| {
+            self.finish_if_quiet(Instant::now());
+            if let Some(event) = self.ledger.next_event() {
+                return Some(event);
+            }
+            let mut left = deadline.map_or(wait, |deadline| {
                 deadline.saturating_duration_since(Instant::now())
             });
+            if let Some(due) = self.quiet_due() {
+                left = left.min(due.saturating_duration_since(Instant::now()));
+            }
             if left.is_zero() || self.require_open().is_err() {
                 self.ledger.check_liveness(Instant::now());
                 return self.ledger.next_event();
@@ -1145,6 +1328,7 @@ impl SpeechSessionHandle for ElevenLabsAgentSession {
                     reason: "the connection task ended".to_owned(),
                 }),
                 Err(_) => {
+                    self.finish_if_quiet(Instant::now());
                     self.ledger.check_liveness(Instant::now());
                 }
             }
