@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-06T17:12:25Z",
+  "actor": "human:timo",
+  "artifact": "story:voice-topology-latency-per-step",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local full gate, staged s1-s3c each rc=0: fmt, ess validate, aep validate, docs check, clippy --all-features, workspace tests 3280 passed, 0 failed, 480 suites",
+    "reference": "impl/voice-topology-latency-per-step 8c6d876"
+  }
+}

@@ -1,32 +1,40 @@
-//! Compare native speech providers on the same recorded utterances, without a microphone or a
-//! speaker: latency from the end of the question's speech to the answer's first audio, first
-//! transcript and end, barge-in to output stop, and the usage of each run. Every run is billed.
+//! Compare native speech providers and a cascade of STT, LLM and TTS on the same recorded
+//! utterances, without a microphone or a speaker: latency from the end of the question's speech
+//! to the answer's first audio, first transcript and end, barge-in to output stop, the
+//! cascade's own steps, and the usage of each run. Every run of a hosted provider is billed.
 //!
 //! ```text
 //! cargo run -p realtime-voice --example compare -- --providers openai,openai-live --runs 2
 //! INFERENCE_COMPARE_BARGE_IN_WAV=<a WAV file of speech> cargo run -p realtime-voice --example compare -- --runs 2
 //! cargo run -p realtime-voice --example compare -- --skip nova="no model access"
+//! cargo run -p realtime-voice --features local --example compare -- --providers openai,cascade
 //! ```
 //!
 //! The question is the OpenAI adapter's speech fixture ("What is the capital of France?"). The
 //! barge-in utterance is the 16-bit PCM WAV file `INFERENCE_COMPARE_BARGE_IN_WAV` names; without
 //! it no barge-in is sent and that column stays empty. `realtime_voice::compare` says how each
-//! figure is taken: on the client, at the receipt of each duplex event.
+//! figure is taken: on the client, at the receipt of each event.
 //!
-//! Each provider runs with the session configuration `talk` uses and its key or credentials as
-//! `talk` reads them. The ElevenLabs agent is `ELEVENLABS_AGENT_ID` for a public agent, or
-//! `ELEVENLABS_AGENT_SIGNED_URL` for a private one, and must take and give `pcm_16000`
-//! (`realtime_voice::elevenlabs_config`); it reports no usage. The Deepgram Voice Agent reads its key from
-//! `DEEPGRAM_API_KEY`, runs with the default providers of `inference_deepgram::agent::AgentConfig`
-//! in G.711 μ-law at 8 kHz (`realtime_voice::deepgram_config`), and reports no usage: it bills
-//! per minute, which no message carries. A provider whose model cannot be
-//! made or whose first session does not open
-//! is skipped with the reason; `--skip <provider>=<reason>` skips one without trying it. The
-//! local cascade is not a native speech model and is listed as skipped.
+//! Each native provider runs with the session configuration `talk` uses and its key or
+//! credentials as `talk` reads them. The ElevenLabs agent is `ELEVENLABS_AGENT_ID` for a public
+//! agent, or `ELEVENLABS_AGENT_SIGNED_URL` for a private one, and must take and give `pcm_16000`
+//! (`realtime_voice::elevenlabs_config`); it reports no usage. The Deepgram Voice Agent reads its
+//! key from `DEEPGRAM_API_KEY`, runs with the default providers of
+//! `inference_deepgram::agent::AgentConfig` in G.711 μ-law at 8 kHz
+//! (`realtime_voice::deepgram_config`), and reports no usage: it bills per minute, which no
+//! message carries. A provider whose model cannot be made or whose first session does not open is
+//! skipped with the reason; `--skip <provider>=<reason>` skips one without trying it.
+//!
+//! The cascade arm, `cascade`, speaks with ElevenLabs when its key resolves from
+//! `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` names a voice, in `pcm_24000`; otherwise it is
+//! skipped as "no hosted TTS configured". Its recogniser and LLM are those the local voice
+//! cascade configures (`local_voice_cascade::local::LocalConfig::from_env`), bound with feature
+//! `local`, with that cascade's detector; a missing one skips the arm, naming it.
 
 use std::error::Error;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
@@ -34,14 +42,16 @@ use inference_aws::duplex::NovaSonicSpeech;
 use inference_deepgram::agent::AgentConfig;
 use inference_deepgram::{AgentEndpoint as DeepgramEndpoint, DeepgramAgent};
 use inference_duplex::{NativeSpeechModel, SessionConfig};
-use inference_elevenlabs::ElevenLabsAgent;
 use inference_elevenlabs::agent::{AgentEndpoint, SignedUrl};
+use inference_elevenlabs::{ElevenLabsAgent, ElevenLabsSynthesiser};
 use inference_openai::duplex::OpenAiRealtime;
 use inference_openai::live_duplex::{OpenAiLive, OpenAiLiveSession};
 use inference_openai::{
     CredentialSource, Endpoint, EnvironmentSource, KeychainSource, OPENAI_KEY_NAME,
 };
-use realtime_voice::compare::{Billing, Clip, Comparison, Measured, Plan};
+use realtime_voice::compare::{
+    Billing, Clip, Comparison, Measured, Plan, Topology, VOICE_VARIABLE, hosted_tts,
+};
 use realtime_voice::{
     Reported, deepgram_config, elevenlabs_config, nova_config, openai_config, openai_live_config,
 };
@@ -55,11 +65,7 @@ const BARGE_IN_VARIABLE: &str = "INFERENCE_COMPARE_BARGE_IN_WAV";
 /// The variable that switches the OpenAI key from the keychain to `OPENAI_API_KEY`.
 const KEY_SOURCE_VARIABLE: &str = "INFERENCE_OPENAI_KEY_SOURCE";
 
-/// Why the local cascade is not in the comparison.
-const LOCAL_CASCADE: &str = "a pipeline of STT, LLM and TTS, not a native speech model; \
-     the local-voice-cascade example measures it";
-
-/// Compare native speech providers on recorded utterances.
+/// Compare native speech providers and a cascade on recorded utterances.
 #[derive(Debug, Parser)]
 struct Args {
     /// The providers to run, in order.
@@ -67,7 +73,7 @@ struct Args {
         long,
         value_enum,
         value_delimiter = ',',
-        default_value = "openai,openai-live,nova,elevenlabs,deepgram"
+        default_value = "openai,openai-live,nova,elevenlabs,deepgram,cascade"
     )]
     providers: Vec<Provider>,
     /// The runs of each provider.
@@ -93,6 +99,8 @@ enum Provider {
     Elevenlabs,
     /// A Deepgram Voice Agent session.
     Deepgram,
+    /// The local voice cascade's recogniser and LLM, speaking with ElevenLabs.
+    Cascade,
 }
 
 impl Provider {
@@ -103,6 +111,16 @@ impl Provider {
             Self::Nova => "nova",
             Self::Elevenlabs => "elevenlabs",
             Self::Deepgram => "deepgram",
+            Self::Cascade => "cascade",
+        }
+    }
+
+    const fn topology(self) -> Topology {
+        match self {
+            Self::Openai | Self::OpenaiLive | Self::Nova | Self::Elevenlabs | Self::Deepgram => {
+                Topology::Native
+            }
+            Self::Cascade => Topology::Cascade,
         }
     }
 }
@@ -157,10 +175,19 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
     for provider in &args.providers {
         let name = provider.name();
         if let Some(reason) = skipped(&args.skip, name) {
-            comparison.skipped(name, reason);
+            comparison.skipped_as(name, provider.topology(), reason);
             continue;
         }
         let outcome = match provider {
+            Provider::Cascade => {
+                match hosted()
+                    .and_then(|synthesiser| cascade::measure(synthesiser, &plan, args.runs))
+                {
+                    Ok(runs) => comparison.ran_as(name, provider.topology(), runs),
+                    Err(reason) => comparison.skipped_as(name, provider.topology(), &reason),
+                }
+                continue;
+            }
             Provider::Openai => openai_key().and_then(|source| {
                 let mut model = OpenAiRealtime::new(Endpoint::from_env(), source, OPENAI_KEY_NAME);
                 measure(
@@ -225,12 +252,93 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
             }
         };
         match outcome {
-            Ok(runs) => comparison.ran(name, runs),
-            Err(error) => comparison.skipped(name, &error.to_string()),
+            Ok(runs) => comparison.ran_as(name, provider.topology(), runs),
+            Err(error) => comparison.skipped_as(name, provider.topology(), &error.to_string()),
         }
     }
-    comparison.skipped("local cascade", LOCAL_CASCADE);
     Ok(comparison)
+}
+
+/// The cascade arm's synthesiser: ElevenLabs in `pcm_24000`, its key from `ELEVENLABS_API_KEY`
+/// and its voice from [`VOICE_VARIABLE`].
+fn hosted() -> Result<ElevenLabsSynthesiser, String> {
+    hosted_tts(
+        inference_elevenlabs::Endpoint::new(),
+        Arc::new(inference_elevenlabs::EnvironmentSource::elevenlabs()),
+        std::env::var(VOICE_VARIABLE).ok().as_deref(),
+        inference_elevenlabs::OutputFormat::Pcm24000,
+    )
+}
+
+/// The cascade arm over the local voice cascade's recogniser and LLM.
+#[cfg(feature = "local")]
+mod cascade {
+    use inference_elevenlabs::ElevenLabsSynthesiser;
+    use local_voice_cascade::local::{
+        LocalConfig, LocalModels, LocalRefused, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE,
+        SPEECH_VAD,
+    };
+    use realtime_voice::compare::{Cascade, ClientPlayout, Measured, Plan, run_cascade_live};
+    use realtime_voice::pcm16;
+
+    /// The reason a local step is missing for, naming it.
+    fn missing(refused: &LocalRefused) -> String {
+        let llm = match refused {
+            LocalRefused::Missing(name) => {
+                [SERVER_URL_VARIABLE, SERVER_MODEL_VARIABLE].contains(name)
+            }
+            LocalRefused::NotLoopback { .. } | LocalRefused::Server { .. } => true,
+            LocalRefused::UnknownBackend { .. }
+            | LocalRefused::SherpaOnnx(_)
+            | LocalRefused::WhisperCpp(_) => false,
+        };
+        let step = if llm { "LLM" } else { "STT" };
+        format!("no local {step} configured: {refused}")
+    }
+
+    /// `runs` runs of the plan over the local recogniser and LLM and `synthesiser`.
+    pub fn measure(
+        synthesiser: ElevenLabsSynthesiser,
+        plan: &Plan,
+        runs: usize,
+    ) -> Result<Vec<Measured>, String> {
+        let config = LocalConfig::from_env().map_err(|refused| missing(&refused))?;
+        let models = LocalModels::open(&config).map_err(|refused| missing(&refused))?;
+        let mut cascade = Cascade::new(
+            models.recogniser,
+            models.generator,
+            synthesiser,
+            pcm16(16_000),
+        );
+        cascade.attack = SPEECH_VAD.attack;
+        cascade.hold = SPEECH_VAD.hold;
+        Ok((1..=runs)
+            .map(|run| {
+                eprintln!("cascade: run {run} of {runs}");
+                run_cascade_live(&mut cascade, plan, &mut ClientPlayout)
+            })
+            .collect())
+    }
+}
+
+/// Without feature `local`, the cascade arm has no local recogniser or LLM.
+#[cfg(not(feature = "local"))]
+mod cascade {
+    use inference_elevenlabs::ElevenLabsSynthesiser;
+    use realtime_voice::compare::{Measured, Plan};
+
+    /// Skips the arm, naming the missing steps.
+    pub fn measure(
+        _synthesiser: ElevenLabsSynthesiser,
+        _plan: &Plan,
+        _runs: usize,
+    ) -> Result<Vec<Measured>, String> {
+        Err(
+            "no local STT or LLM configured: compare was built without feature local, \
+             which binds the local voice cascade's recogniser and LLM"
+                .to_owned(),
+        )
+    }
 }
 
 /// The reason `--skip` gives for `provider`.
