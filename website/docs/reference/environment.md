@@ -22,8 +22,8 @@ the live tests read the same ones and are ignored without them.
 | `AWS_REGION` | `inference-aws` | the Bedrock region for Nova Sonic; credentials come from the AWS default chain | none |
 | `INFERENCE_NOVA_SONIC_MODEL` | `inference-aws` | another Nova Sonic model | `amazon.nova-2-sonic-v1:0` |
 | `INFERENCE_COMPARE_BARGE_IN_WAV` | `realtime-voice`, example `compare` | a 16-bit PCM WAV file of speech sent over each answer as a barge-in | no barge-in |
-| `ELEVENLABS_API_KEY` | `inference-elevenlabs` (`EnvironmentSource::elevenlabs`), its example `live` | the ElevenLabs key, sent only in the `xi-api-key` header | the example `live` reads the OS keychain, secret `elevenlabs-api-key` |
-| `ELEVENLABS_VOICE_ID` | `inference-elevenlabs`, example `live` | the voice the live check speaks with | none: the example exits with status 2 |
+| `ELEVENLABS_API_KEY` | `inference-elevenlabs` (`EnvironmentSource::elevenlabs`), its example `live`; `realtime-voice`, example `compare` | the ElevenLabs key, sent only in the `xi-api-key` header, read at every connection | the example `live` reads the OS keychain, secret `elevenlabs-api-key`; the cascade arm of `compare` is skipped |
+| `ELEVENLABS_VOICE_ID` | `inference-elevenlabs`, example `live`; `realtime-voice`, example `compare` | the voice the live check and the cascade arm of `compare` speak with; with `ELEVENLABS_API_KEY` it configures the cascade arm's hosted TTS | none: the example `live` exits with status 2 and the cascade arm is skipped |
 | `ELEVENLABS_AGENT_ID` | `inference-elevenlabs` test `agent_duplex_live`, `realtime-voice` example `compare` | the ElevenLabs agent the live check and `compare` talk to | none: one of it and `ELEVENLABS_AGENT_SIGNED_URL` is required |
 | `ELEVENLABS_AGENT_SIGNED_URL` | as above | a signed conversation URL, used instead of the agent id and the key | none |
 | `DEEPGRAM_API_KEY` | `inference-deepgram` (`EnvironmentSource::deepgram`), its live tests | the Deepgram key, sent only as `Authorization: Token` in the handshake | none; with feature `keychain`, `KeychainSource` reads the OS keychain |
@@ -43,6 +43,11 @@ below it logs the handshake at trace level: see
 | `INFERENCE_WHISPERCPP_STT_CLIP` | none | a speech clip for the whisper.cpp live tests | none |
 | `INFERENCE_LLAMA_SERVER_URL` | `--server-url` | the base URL of a `llama-server` API on loopback; a host that is not loopback is refused | none |
 | `INFERENCE_LLAMA_SERVER_MODEL` | `--server-model` | the model the server answers to, its `--alias` | none |
+
+The `cascade` arm of the `realtime-voice` example `compare`, built with feature `local`, reads the
+same five variables as `talk`: `INFERENCE_CASCADE_STT`, `INFERENCE_SHERPA_ONNX_STT_DIR`,
+`INFERENCE_WHISPERCPP_STT_MODEL`, `INFERENCE_LLAMA_SERVER_URL` and `INFERENCE_LLAMA_SERVER_MODEL`.
+It has no options for them. A missing one skips the arm, naming the missing step.
 
 `talk` also takes `--max-output-tokens` (the most tokens of one answer, 64 by default), and `--input`
 and `--output` to pick devices by name.
