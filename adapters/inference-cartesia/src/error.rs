@@ -65,8 +65,8 @@ pub enum CartesiaError {
     /// within it.
     Stalled(Duration),
     /// The server sent something that is not a message of the protocol: a binary frame, text
-    /// that is not a JSON object, an unknown `type`, a `data` that is not base64, a context the
-    /// binding never opened, or PCM audio ending in part of a sample.
+    /// that is not a JSON object, a message without a `type`, a `data` that is not base64, a
+    /// context the binding never opened, or PCM audio ending in part of a sample.
     Protocol(String),
     /// The server sent an `error` message: its `status_code`, its `error_code` when it gave one,
     /// and its `title` and `message`, at most 256 characters of each.

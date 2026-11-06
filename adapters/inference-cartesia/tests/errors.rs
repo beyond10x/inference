@@ -53,6 +53,56 @@ fn an_error_message_fails_the_synthesis_with_the_servers_error() {
     });
 }
 
+/// The documentation does not say whether a connection stays usable after an error of one
+/// context, so an error of the segment being spoken fails the whole synthesis: its connection is
+/// closed and the segment offered after it is never sent (`docs/protocol.md`, an error's scope).
+#[test]
+fn an_error_of_the_live_context_ends_the_synthesis_and_no_later_segment_is_sent() {
+    within(|| {
+        let server = FixtureServer::scripted(FORMAT, vec![Script::ErrorAfterFirst, Script::Serve]);
+        let mut synthesiser = server.synthesiser(FORMAT);
+        let mut handle = synthesiser.start().unwrap();
+        let mut segments = committed(&["This one fails.", "This one is never sent."]).into_iter();
+        let failing = segments.next().unwrap();
+        let failing_id = failing.segment_id();
+        let later = segments.next().unwrap();
+        let later_id = later.segment_id();
+        handle.offer_segment(failing).unwrap();
+        handle.offer_segment(later).unwrap();
+        handle.end_utterance().unwrap();
+        let events: Vec<SynthesisEvent> = handle.by_ref().collect();
+        assert!(
+            matches!(handle.failure(), Some(CartesiaError::Server(_))),
+            "{:?}",
+            handle.failure()
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.segment_id() != Some(later_id)),
+            "the later segment was spoken"
+        );
+        assert_eq!(handle.output().frames_emitted(failing_id), Some(1));
+        assert_ne!(
+            handle.output().segment(later_id).map(|s| s.state()),
+            Some(SegmentState::Synthesized)
+        );
+        assert_eq!(
+            server.next_client_close(Duration::from_secs(5)),
+            Some(0),
+            "the failed synthesis closes its connection"
+        );
+        let seen = server.seen();
+        assert_eq!(seen.len(), 1, "no second connection");
+        assert_eq!(
+            seen[0].requests.len(),
+            1,
+            "the later segment was never sent"
+        );
+        assert_eq!(server.violations(), Vec::<String>::new());
+    });
+}
+
 #[test]
 fn a_close_mid_segment_fails_the_synthesis_with_the_close_code() {
     within(|| {

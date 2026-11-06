@@ -121,7 +121,8 @@ pub enum ServerMessage {
         error: ServerError,
     },
     /// `flush_done`, `timestamps` or `phoneme_timestamps`, which answer options the binding
-    /// never sets.
+    /// never sets, or a `type` the binding does not know that names a context: the API may add
+    /// output variants within a pinned version, so one is passed over.
     Ignored { context_id: String },
 }
 
@@ -140,9 +141,11 @@ impl ServerMessage {
 /// Reads one text message of the server.
 ///
 /// # Errors
-/// [`CartesiaError::Protocol`] for text that is not a JSON object, a `type` that is missing or
-/// unknown, a missing `context_id` where the type requires one, or a chunk whose `data` is not a
-/// base64 string or whose `done` is not a boolean. The error never quotes the message.
+/// [`CartesiaError::Protocol`] for text that is not a JSON object, a `type` that is missing, a
+/// missing `context_id` where the type requires one (every type but `error`, an unknown type
+/// included), or a chunk whose `data` is not a base64 string or whose `done` is not a boolean.
+/// An unknown `type` with a `context_id` is [`ServerMessage::Ignored`]. The error never quotes
+/// the message.
 pub fn parse_server_message(text: &str) -> Result<ServerMessage, CartesiaError> {
     let Ok(Value::Object(object)) = serde_json::from_str::<Value>(text) else {
         return Err(CartesiaError::Protocol(format!(
@@ -191,12 +194,9 @@ pub fn parse_server_message(text: &str) -> Result<ServerMessage, CartesiaError> 
             context_id: context().ok(),
             error: server_error(&object),
         }),
-        Some("flush_done" | "timestamps" | "phoneme_timestamps") => Ok(ServerMessage::Ignored {
+        Some(_) => Ok(ServerMessage::Ignored {
             context_id: context()?,
         }),
-        Some(_) => Err(CartesiaError::Protocol(
-            "a message of an unknown `type`".to_owned(),
-        )),
         None => Err(CartesiaError::Protocol(
             "a message without a string `type`".to_owned(),
         )),
@@ -336,6 +336,13 @@ mod tests {
             ),
             Ok(ServerMessage::Ignored { .. })
         ));
+        assert_eq!(
+            parse_server_message(r#"{"type":"something","done":false,"context_id":"s1"}"#).unwrap(),
+            ServerMessage::Ignored {
+                context_id: "s1".to_owned()
+            },
+            "story:cartesia-streaming-tts-adapter: a type added within the pinned version is passed over"
+        );
         for refused in [
             "not json",
             "[1]",
@@ -343,7 +350,7 @@ mod tests {
             r#"{"type":"chunk","data":"@@","context_id":"s1"}"#,
             r#"{"type":"chunk","data":"AA==","done":"yes","context_id":"s1"}"#,
             r#"{"type":"chunk","data":"AA=="}"#,
-            r#"{"type":"something","context_id":"s1"}"#,
+            r#"{"type":"something"}"#,
             r#"{"context_id":"s1"}"#,
         ] {
             assert!(
