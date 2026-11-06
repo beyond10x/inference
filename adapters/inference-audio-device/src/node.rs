@@ -7,7 +7,7 @@
 //! own, so the runtime that drives it commits to none.
 //!
 //! The source sends each frame its [`Microphone`] produces in an envelope of kind
-//! [`AUDIO_FRAME`], on [`Timebase::AudioFrameTime`] with the frame's position as its timestamp, on
+//! [`AUDIO_CHUNK`], on [`Timebase::AudioFrameTime`] with the frame's position as its timestamp, on
 //! one stream of its own numbered from 1. An edge that is full under the overload policy `fail`
 //! drops the frame, which [`SourceHandle::dropped`] counts: a microphone does not wait. Drained,
 //! it sends the frames already captured, then the end of input, a control event of kind `stop`
@@ -39,8 +39,9 @@ use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImpleme
 use crate::capture::Microphone;
 use crate::playout::{PushError, Speaker};
 
-/// The `kind` of an envelope carrying an audio frame.
-pub const AUDIO_FRAME: &str = "inference.audio.AudioFrame";
+/// The `kind` of an envelope carrying an audio frame: `inference.audio.AudioChunk`, the event
+/// `ess/domains/audio.yaml` declares for a frame, as `SynthesisEvent::name` names it.
+pub const AUDIO_CHUNK: &str = "inference.audio.AudioChunk";
 
 /// How long the source waits for a frame, and the sink for room, before looking at its flags
 /// again.
@@ -308,7 +309,7 @@ impl<P: DevicePayload> Sending<P> {
         self.next = frame.position.get() + u64::from(frame.sample_count);
         let envelope =
             self.emitter
-                .envelope(AUDIO_FRAME, frame.position.get(), P::from_audio(frame));
+                .envelope(AUDIO_CHUNK, frame.position.get(), P::from_audio(frame));
         match self
             .shared
             .unless_cancelled(self.output.send(envelope))

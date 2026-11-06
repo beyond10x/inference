@@ -211,7 +211,7 @@ fn talk(args: Args) -> Result<(), Box<dyn Error>> {
             sequence,
             producer,
             port: AUDIO_INGRESS.to_owned(),
-            kind: "inference.audio.AudioFrame".to_owned(),
+            kind: "inference.audio.AudioChunk".to_owned(),
             generation_id: None,
             timestamp: i64::try_from(frame.position.get()).unwrap_or(i64::MAX),
             timebase: Timebase::AudioFrameTime,

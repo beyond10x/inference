@@ -506,7 +506,7 @@ fn a_cancel_while_a_recognition_delivers_still_yields_its_usage_record() {
         .map(|frame| {
             let at = i64::try_from(frame.position.get()).expect("a short clip");
             audio.envelope(
-                "inference.audio.AudioFrame",
+                "inference.audio.AudioChunk",
                 Timebase::AudioFrameTime,
                 at,
                 CascadePayload::Audio(frame),
@@ -615,7 +615,7 @@ fn a_cancel_while_a_synthesis_delivers_still_yields_its_usage_record() {
         outputs: vec![
             NodeOutput {
                 port_id: PortId::generate(),
-                endpoint: Box::new(Edge::stalling_on("inference.audio.AudioFrame", tell)),
+                endpoint: Box::new(Edge::stalling_on("inference.audio.AudioChunk", tell)),
             },
             NodeOutput {
                 port_id: ids.usage.tts,

@@ -692,7 +692,7 @@ impl Microphone {
     fn speak(&mut self, ingress: &dyn OutputEndpoint<Payload>, frames: Vec<AudioFrame>) {
         for frame in frames {
             self.last = i64::try_from(frame.position.get()).expect("within i64");
-            let envelope = self.envelope("inference.audio.AudioFrame", Payload::Audio(frame));
+            let envelope = self.envelope("inference.audio.AudioChunk", Payload::Audio(frame));
             block_on(ingress.send(envelope)).expect("the ingress takes every frame");
         }
     }
