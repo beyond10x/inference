@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.17.0] — 2026-11-06
 
 ### Added
 
@@ -33,6 +33,11 @@
   the model's next words: the first output fragment after a pause in the model's output and after
   the user's speech ends begins a new response. Before, the next words stayed on the cut response,
   so a caller that dropped the cut response's audio dropped them too.
+
+### Changed
+
+- The `ess` pin moves to 0.87.0: CI's `ESS_VERSION`, the testkit's `ess-conformance` and
+  `ess-primitives` tags, and `requires` in `ess/ess-inputs.yaml`.
 
 ## [0.16.0] — 2026-11-05
 
