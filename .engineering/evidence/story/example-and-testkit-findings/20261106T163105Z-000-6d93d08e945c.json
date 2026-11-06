@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-06T16:31:05Z",
+  "actor": "human:timo",
+  "artifact": "story:example-and-testkit-findings",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local full gate, staged s1-s3c each rc=0: fmt, ess validate, aep validate, docs check, clippy --all-features, workspace tests 3269 passed, 0 failed, 477 suites",
+    "reference": "wave/2026-11-06-inference-review-fixes-3 d634888"
+  }
+}
