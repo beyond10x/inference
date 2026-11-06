@@ -36,9 +36,14 @@
 //! says. The recogniser takes the frames of a turn until [`Cascade::hold`] of silence follows
 //! speech, then its input ends; its committed spans are the turn's text, asked of the generator
 //! as user text; each committed segment of the answer is offered to the synthesiser as it
-//! arrives, and each frame of the synthesis is handed to the [`Playout`] as it arrives. The steps
-//! run one after the other on the caller's thread, each read on the caller's clock when it hands
-//! its event over. Three measures of the cascade's own steps run from the end of input speech:
+//! arrives, and each frame of the synthesis is handed to the [`Playout`] as it arrives. Each step
+//! runs on a worker thread of its own and reports its events to the arm's loop over a channel;
+//! the loop paces the input and reads each event on the caller's clock as it arrives, so a step
+//! that blocks, an LLM working on its next segment or a hosted synthesiser speaking one, holds no
+//! frame back. [`run_cascade_live`] runs on the wall clock and waits on the reports until the
+//! next frame is due; [`run_cascade`] runs on a simulated clock, which it moves on only once every
+//! worker is idle or parked on a pending future. Three measures of the cascade's own steps run
+//! from the end of input speech:
 //!
 //! * final transcript: the recogniser's last committed span of the turn;
 //! * first token: the answer's first text delta;
@@ -68,7 +73,10 @@ use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::task::{Context, Poll, Wake, Waker};
+use std::thread::{self, Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
 
 use inference_audio_device::convert::{LinearResampler, decode, encode};
@@ -921,18 +929,245 @@ enum Stage {
     Idle,
     /// The recogniser takes the turn's input.
     Listening,
-    /// The recogniser's input ended; its last events are read.
+    /// The recogniser's input ended; its last events are awaited.
     Recognising,
     /// The generator answers and the synthesiser speaks the answer.
     Answering,
 }
 
-struct CascadeRunner<'a, R: Recogniser, S: Synthesiser> {
+/// What a worker of a cascade arm hands the arm's loop.
+enum Heard {
+    /// An event of the recognition.
+    Transcript(TranscriptEvent),
+    /// The recognition delivered its last event after the end of its input.
+    Recognised,
+    /// An event of the generation, with the generation's failure when it was cancelled.
+    Generated(GenerationEvent, Option<String>),
+    /// The generation delivered its last event.
+    Answered,
+    /// An event of the synthesis.
+    Spoken(SynthesisEvent),
+    /// The synthesis delivered its last event after the end of the utterance.
+    Synthesised,
+    /// A step refused what it was given.
+    Note(String),
+    /// No worker owes the loop a report.
+    Idle,
+}
+
+/// What a worker hands the loop, and the turn it belongs to: a report of a turn that was cut is
+/// dropped.
+struct Report {
+    turn: u64,
+    heard: Heard,
+}
+
+/// What the workers of a cascade arm owe its loop: one count for each task handed to a worker and
+/// each wake of the generation, held until the worker reported what that task produced.
+struct Owing {
+    count: AtomicUsize,
+    reports: Sender<Report>,
+}
+
+/// One count of [`Owing`], released when dropped: by the worker once it reported what its task
+/// produced, or with a task that never reached a worker. The release of the last count reports
+/// [`Heard::Idle`], so a loop waiting on its workers wakes.
+struct Owed(Arc<Owing>);
+
+impl Owed {
+    fn new(owing: &Arc<Owing>) -> Self {
+        owing.count.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(owing))
+    }
+}
+
+impl Drop for Owed {
+    fn drop(&mut self) {
+        if self.0.count.fetch_sub(1, Ordering::SeqCst) == 1 {
+            let _ = self.0.reports.send(Report {
+                turn: 0,
+                heard: Heard::Idle,
+            });
+        }
+    }
+}
+
+/// A task handed to a worker, and the count it holds until the worker is done with it.
+struct Task<T> {
+    work: T,
+    owed: Owed,
+}
+
+/// Hands `work` to the worker `tasks` feeds, if there is one.
+fn hand<T>(tasks: Option<&Sender<Task<T>>>, owing: &Arc<Owing>, work: T) {
+    if let Some(tasks) = tasks {
+        let _ = tasks.send(Task {
+            work,
+            owed: Owed::new(owing),
+        });
+    }
+}
+
+/// What the recogniser's worker is asked.
+enum Listen {
+    Frame(AudioFrame),
+    End,
+}
+
+/// What the generator's worker is asked: to poll the generation, or to drop it.
+enum Generate {
+    Poll,
+    Stop,
+}
+
+/// What the synthesiser's worker is asked.
+enum Speak {
+    Segment(OutputSegment),
+    End,
+}
+
+/// The waker of the generator's worker: a wake hands the worker a [`Generate::Poll`], whose count
+/// keeps a simulated clock still until the worker polled.
+struct Prod {
+    tasks: Sender<Task<Generate>>,
+    owing: Arc<Owing>,
+}
+
+impl Wake for Prod {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        hand(Some(&self.tasks), &self.owing, Generate::Poll);
+    }
+}
+
+/// The recogniser's worker: offers each frame, ends the input, and reports every event the
+/// recognition has after each.
+fn listening<H: RecognitionHandle>(
+    mut recognition: H,
+    tasks: Receiver<Task<Listen>>,
+    report: impl Fn(Heard),
+) {
+    for Task { work, owed } in tasks {
+        let ended = match work {
+            Listen::Frame(frame) => {
+                if let Err(error) = recognition.offer_frame(frame) {
+                    report(Heard::Note(format!(
+                        "the recogniser refused input: {error}"
+                    )));
+                }
+                false
+            }
+            Listen::End => {
+                if let Err(error) = recognition.end_input() {
+                    report(Heard::Note(format!(
+                        "the recogniser's input did not end: {error}"
+                    )));
+                }
+                true
+            }
+        };
+        for event in recognition.by_ref() {
+            report(Heard::Transcript(event.payload));
+        }
+        if ended {
+            report(Heard::Recognised);
+        }
+        drop(owed);
+    }
+}
+
+/// The generator's worker: polls the generation at each wake and reports every event it is ready
+/// with, until it is told to stop; a pending poll leaves the worker parked.
+fn generating(
+    mut generation: GenerationHandle,
+    tasks: &Receiver<Task<Generate>>,
+    waker: &Waker,
+    report: impl Fn(Heard),
+) {
+    let mut context = Context::from_waker(waker);
+    let mut ended = false;
+    for Task { work, owed } in tasks {
+        if matches!(work, Generate::Stop) {
+            return;
+        }
+        while !ended {
+            match generation.poll_event(&mut context) {
+                Poll::Ready(Some(event)) => {
+                    let failure = matches!(event, GenerationEvent::Cancelled(..)).then(|| {
+                        generation.failure().map_or_else(
+                            || "no failure given".to_owned(),
+                            |error| format!("{error:?}"),
+                        )
+                    });
+                    report(Heard::Generated(event, failure));
+                }
+                Poll::Ready(None) => {
+                    ended = true;
+                    report(Heard::Answered);
+                }
+                Poll::Pending => break,
+            }
+        }
+        drop(owed);
+    }
+}
+
+/// The synthesiser's worker: offers each segment, ends the utterance, and reports every event the
+/// synthesis has after each.
+fn speaking<H: SynthesisHandle>(
+    mut synthesis: H,
+    tasks: Receiver<Task<Speak>>,
+    report: impl Fn(Heard),
+) {
+    for Task { work, owed } in tasks {
+        let ended = match work {
+            Speak::Segment(segment) => {
+                if let Err(refused) = synthesis.offer_segment(segment) {
+                    report(Heard::Note(format!(
+                        "the synthesiser refused a segment: {refused:?}"
+                    )));
+                }
+                false
+            }
+            Speak::End => {
+                if let Err(error) = synthesis.end_utterance() {
+                    report(Heard::Note(format!(
+                        "the synthesis's utterance did not end: {error}"
+                    )));
+                }
+                true
+            }
+        };
+        for event in synthesis.by_ref() {
+            report(Heard::Spoken(event));
+        }
+        if ended {
+            report(Heard::Synthesised);
+        }
+        drop(owed);
+    }
+}
+
+struct CascadeRunner<'a, 's, 'e, R: Recogniser, S: Synthesiser> {
     cascade: &'a mut Cascade<R, S>,
     plan: &'a Plan,
     clock: &'a dyn Fn() -> Instant,
-    wait: &'a dyn Fn(Duration),
+    /// The simulated clock's advance; none on the wall clock.
+    advance: Option<&'a dyn Fn(Duration)>,
     playout: &'a mut dyn Playout,
+    scope: &'s Scope<'s, 'e>,
+    reports: Receiver<Report>,
+    sender: Sender<Report>,
+    owing: Arc<Owing>,
+    /// The turn the workers that run belong to.
+    turn: u64,
+    listen: Option<Sender<Task<Listen>>>,
+    generate: Option<Sender<Task<Generate>>>,
+    speak: Option<Sender<Task<Speak>>>,
+    workers: Vec<ScopedJoinHandle<'s, ()>>,
     run_id: RunId,
     stt: NodeId,
     llm: NodeId,
@@ -951,82 +1186,140 @@ struct CascadeRunner<'a, R: Recogniser, S: Synthesiser> {
     /// The barge-in's voiced input sent so far.
     barge_voiced: Duration,
     stage: Stage,
-    recognition: Option<R::Handle>,
     heard: Vec<String>,
     /// Whether the turn's input was voiced yet, and the silence sent since its last voiced frame.
     voiced: bool,
     silent_for: Duration,
-    generation: Option<GenerationHandle>,
     record: Option<Generation>,
     tentative: HashMap<SegmentId, OutputSegment>,
-    synthesis: Option<S::Handle>,
     utterance_ended: bool,
     measured: Measured,
 }
 
-/// Runs the plan once over `cascade`, on `clock`, waiting with `wait` until the next frame is
-/// due when no step has anything to hand over, and playing the answer's audio on `playout`, and
-/// returns what it measured; see the module documentation. Every failure is a note of the run.
-pub fn run_cascade<R: Recogniser, S: Synthesiser>(
+/// Runs the plan once over `cascade` on a simulated clock: `clock` is read, and `wait` moves it
+/// on until the next frame is due, called only once every worker is idle or parked on a pending
+/// future. The answer's audio is played on `playout`. Returns what it measured; see the module
+/// documentation. Every failure is a note of the run.
+pub fn run_cascade<R, S>(
     cascade: &mut Cascade<R, S>,
     plan: &Plan,
     clock: &dyn Fn() -> Instant,
     wait: &dyn Fn(Duration),
     playout: &mut dyn Playout,
-) -> Measured {
-    let (question, barge_in, barge_lead) = inputs(plan, cascade.input_format);
-    let now = clock();
-    let mut runner = CascadeRunner {
-        cascade,
-        plan,
-        clock,
-        wait,
-        playout,
-        run_id: RunId::generate(),
-        stt: NodeId::generate(),
-        llm: NodeId::generate(),
-        epoch: 0,
-        queue: question.iter().cloned().collect(),
-        question,
-        barge_in,
-        barge_lead,
-        position: 0,
-        phase: Phase::Latency,
-        turn_started: now,
-        latency: Steps::default(),
-        barge: Steps::default(),
-        barge_queued: false,
-        barge_start: None,
-        barge_voiced: Duration::ZERO,
-        stage: Stage::Idle,
-        recognition: None,
-        heard: Vec::new(),
-        voiced: false,
-        silent_for: Duration::ZERO,
-        generation: None,
-        record: None,
-        tentative: HashMap::new(),
-        synthesis: None,
-        utterance_ended: false,
-        measured: Measured {
-            topology: Topology::Cascade,
-            ..Measured::default()
-        },
-    };
-    runner.listen();
-    runner.drive(now);
-    runner.cut();
-    let latency = &runner.latency;
-    let mut measured = std::mem::take(&mut runner.measured);
-    measured.first_audio = latency.since_speech_end(latency.tts_first_audio);
-    measured.response_end = latency.since_speech_end(latency.ended);
-    measured.final_transcript = latency.since_speech_end(latency.final_transcript);
-    measured.first_token = latency.since_speech_end(latency.first_token);
-    measured.tts_first_audio = latency.since_speech_end(latency.tts_first_audio);
-    measured
+) -> Measured
+where
+    R: Recogniser,
+    R::Handle: Send,
+    S: Synthesiser,
+    S::Handle: Send,
+{
+    run_paced(cascade, plan, clock, Some(wait), playout)
 }
 
-impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
+/// Runs the plan once over `cascade` on the wall clock, waiting on the workers' reports until the
+/// next frame is due, and playing the answer's audio on `playout`. Returns what it measured; see
+/// the module documentation. Every failure is a note of the run.
+pub fn run_cascade_live<R, S>(
+    cascade: &mut Cascade<R, S>,
+    plan: &Plan,
+    playout: &mut dyn Playout,
+) -> Measured
+where
+    R: Recogniser,
+    R::Handle: Send,
+    S: Synthesiser,
+    S::Handle: Send,
+{
+    run_paced(cascade, plan, &Instant::now, None, playout)
+}
+
+fn run_paced<R, S>(
+    cascade: &mut Cascade<R, S>,
+    plan: &Plan,
+    clock: &dyn Fn() -> Instant,
+    advance: Option<&dyn Fn(Duration)>,
+    playout: &mut dyn Playout,
+) -> Measured
+where
+    R: Recogniser,
+    R::Handle: Send,
+    S: Synthesiser,
+    S::Handle: Send,
+{
+    let (question, barge_in, barge_lead) = inputs(plan, cascade.input_format);
+    let (sender, reports) = mpsc::channel();
+    let owing = Arc::new(Owing {
+        count: AtomicUsize::new(0),
+        reports: sender.clone(),
+    });
+    let now = clock();
+    thread::scope(|scope| {
+        let mut runner = CascadeRunner {
+            cascade,
+            plan,
+            clock,
+            advance,
+            playout,
+            scope,
+            reports,
+            sender,
+            owing,
+            turn: 0,
+            listen: None,
+            generate: None,
+            speak: None,
+            workers: Vec::new(),
+            run_id: RunId::generate(),
+            stt: NodeId::generate(),
+            llm: NodeId::generate(),
+            epoch: 0,
+            queue: question.iter().cloned().collect(),
+            question,
+            barge_in,
+            barge_lead,
+            position: 0,
+            phase: Phase::Latency,
+            turn_started: now,
+            latency: Steps::default(),
+            barge: Steps::default(),
+            barge_queued: false,
+            barge_start: None,
+            barge_voiced: Duration::ZERO,
+            stage: Stage::Idle,
+            heard: Vec::new(),
+            voiced: false,
+            silent_for: Duration::ZERO,
+            record: None,
+            tentative: HashMap::new(),
+            utterance_ended: false,
+            measured: Measured {
+                topology: Topology::Cascade,
+                ..Measured::default()
+            },
+        };
+        runner.listen();
+        runner.drive(now);
+        runner.cut();
+        let latency = &runner.latency;
+        let mut measured = std::mem::take(&mut runner.measured);
+        measured.first_audio = latency.since_speech_end(latency.tts_first_audio);
+        measured.response_end = latency.since_speech_end(latency.ended);
+        measured.final_transcript = latency.since_speech_end(latency.final_transcript);
+        measured.first_token = latency.since_speech_end(latency.first_token);
+        measured.tts_first_audio = latency.since_speech_end(latency.tts_first_audio);
+        measured
+    })
+}
+
+impl<'s, R, S> CascadeRunner<'_, 's, '_, R, S>
+where
+    R: Recogniser,
+    R::Handle: Send + 's,
+    S: Synthesiser,
+    S::Handle: Send + 's,
+{
+    /// Sends a frame each time one is due and takes the workers' reports as they arrive; on a
+    /// simulated clock, moves the clock on only once no worker owes a report.
     fn drive(&mut self, start: Instant) {
         let mut next_send = start + self.plan.frame;
         loop {
@@ -1040,8 +1333,24 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
                 next_send += self.plan.frame;
                 continue;
             }
-            if !self.work() {
-                (self.wait)(next_send - now);
+            if let Ok(report) = self.reports.try_recv() {
+                self.take(report);
+                continue;
+            }
+            let until = next_send - now;
+            let report = match self.advance {
+                None => self.reports.recv_timeout(until).ok(),
+                Some(advance) if self.owing.count.load(Ordering::SeqCst) == 0 => {
+                    let report = self.reports.try_recv().ok();
+                    if report.is_none() {
+                        advance(until);
+                    }
+                    report
+                }
+                Some(_) => self.reports.recv().ok(),
+            };
+            if let Some(report) = report {
+                self.take(report);
             }
         }
     }
@@ -1056,6 +1365,15 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
             Phase::Latency => Some(&mut self.latency),
             Phase::BargeIn => Some(&mut self.barge),
             _ => None,
+        }
+    }
+
+    /// The reporter of a worker of the turn that runs.
+    fn reporter(&self) -> impl Fn(Heard) + Send + 'static {
+        let reports = self.sender.clone();
+        let turn = self.turn;
+        move |heard| {
+            let _ = reports.send(Report { turn, heard });
         }
     }
 
@@ -1110,7 +1428,8 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
         }
     }
 
-    /// Starts the recognition of a turn, after dropping every step of the one before.
+    /// Starts the recognition of a turn on its worker, after dropping every step of the one
+    /// before.
     fn listen(&mut self) {
         self.cut();
         self.voiced = false;
@@ -1125,7 +1444,13 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
         );
         match self.cascade.recogniser.start(request) {
             Ok(recognition) => {
-                self.recognition = Some(recognition);
+                let (tasks, receiver) = mpsc::channel();
+                let report = self.reporter();
+                self.workers.push(
+                    self.scope
+                        .spawn(move || listening(recognition, receiver, report)),
+                );
+                self.listen = Some(tasks);
                 self.stage = Stage::Listening;
             }
             Err(error) => {
@@ -1135,13 +1460,22 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
         }
     }
 
-    /// Drops every step that runs.
+    /// Drops every step that runs: tells each worker of the turn to stop and waits until it
+    /// stopped, so a step's next turn finds its handle dropped.
     fn cut(&mut self) {
-        self.recognition = None;
-        self.generation = None;
+        self.turn += 1;
+        self.listen = None;
+        self.speak = None;
+        if let Some(tasks) = self.generate.take() {
+            hand(Some(&tasks), &self.owing, Generate::Stop);
+        }
+        for worker in self.workers.drain(..) {
+            if let Err(panic) = worker.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
         self.record = None;
         self.tentative.clear();
-        self.synthesis = None;
         self.utterance_ended = false;
         self.stage = Stage::Idle;
     }
@@ -1154,8 +1488,8 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
         self.cut();
     }
 
-    /// Sends the next frame of input, silence when none is queued, to the recogniser while it
-    /// takes the turn's input and to the arm's detector.
+    /// Sends the next frame of input, silence when none is queued, to the recogniser's worker
+    /// while it takes the turn's input and to the arm's detector.
     fn send(&mut self, now: Instant) {
         let input = self.queue.pop_front().unwrap_or_else(|| {
             let format = self.cascade.input_format;
@@ -1189,22 +1523,14 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
             Mark::None => {}
         }
         if self.stage == Stage::Listening {
-            if let Some(recognition) = self.recognition.as_mut()
-                && let Err(error) = recognition.offer_frame(frame)
-            {
-                self.note(format!("the recogniser refused input: {error}"));
-            }
+            hand(self.listen.as_ref(), &self.owing, Listen::Frame(frame));
             if input.voiced {
                 self.voiced = true;
                 self.silent_for = Duration::ZERO;
             } else if self.voiced {
                 self.silent_for += length;
                 if self.silent_for >= self.cascade.hold {
-                    if let Some(recognition) = self.recognition.as_mut()
-                        && let Err(error) = recognition.end_input()
-                    {
-                        self.note(format!("the recogniser's input did not end: {error}"));
-                    }
+                    hand(self.listen.as_ref(), &self.owing, Listen::End);
                     self.stage = Stage::Recognising;
                 }
             }
@@ -1260,28 +1586,32 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
         self.phase = Phase::Done;
     }
 
-    /// Takes one event of the step that runs; whether there was one, or the step moved on.
-    fn work(&mut self) -> bool {
-        match self.stage {
-            Stage::Idle => false,
-            Stage::Listening => match self.recognition.as_mut().and_then(Iterator::next) {
-                Some(event) => {
-                    self.transcribed(event.payload);
-                    true
+    /// Takes a worker's report as it arrives; one of a turn that was cut is dropped.
+    fn take(&mut self, report: Report) {
+        if report.turn != self.turn {
+            return;
+        }
+        match report.heard {
+            Heard::Transcript(event) => self.transcribed(event),
+            Heard::Recognised => {
+                if self.stage == Stage::Recognising {
+                    self.recognised();
                 }
-                None => false,
-            },
-            Stage::Recognising => {
-                match self.recognition.as_mut().and_then(Iterator::next) {
-                    Some(event) => self.transcribed(event.payload),
-                    None => self.recognised(),
+            }
+            Heard::Generated(event, failure) => self.generated(event, failure),
+            Heard::Answered => self.end_utterance(),
+            Heard::Spoken(event) => self.spoken(event),
+            Heard::Synthesised => {
+                if self
+                    .steps()
+                    .is_some_and(|steps| steps.tts_first_audio.is_none())
+                {
+                    self.note("the synthesis gave no audio".to_owned());
                 }
-                true
+                self.finish();
             }
-            Stage::Answering => {
-                self.answer();
-                true
-            }
+            Heard::Note(note) => self.note(note),
+            Heard::Idle => {}
         }
     }
 
@@ -1296,9 +1626,9 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
     }
 
     /// The recognition ended: asks the generator for an answer to its text and starts the
-    /// synthesis of the answer.
+    /// synthesis of the answer, each on its worker.
     fn recognised(&mut self) {
-        self.recognition = None;
+        self.listen = None;
         let text = self.heard.join(" ").trim().to_owned();
         if text.is_empty() {
             self.note("the recogniser committed no text".to_owned());
@@ -1321,7 +1651,20 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
             turn: TurnRequest::new(model.as_str(), vec![Item::user(text)]),
         };
         match self.cascade.generator.start(request) {
-            Ok(generation) => self.generation = Some(generation),
+            Ok(generation) => {
+                let (tasks, receiver) = mpsc::channel();
+                let waker = Waker::from(Arc::new(Prod {
+                    tasks: tasks.clone(),
+                    owing: Arc::clone(&self.owing),
+                }));
+                hand(Some(&tasks), &self.owing, Generate::Poll);
+                let report = self.reporter();
+                self.workers.push(
+                    self.scope
+                        .spawn(move || generating(generation, &receiver, &waker, report)),
+                );
+                self.generate = Some(tasks);
+            }
             Err(error) => {
                 self.note(format!("the generator refused the turn: {error}"));
                 self.finish();
@@ -1329,7 +1672,15 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
             }
         }
         match self.cascade.synthesiser.start() {
-            Ok(synthesis) => self.synthesis = Some(synthesis),
+            Ok(synthesis) => {
+                let (tasks, receiver) = mpsc::channel();
+                let report = self.reporter();
+                self.workers.push(
+                    self.scope
+                        .spawn(move || speaking(synthesis, receiver, report)),
+                );
+                self.speak = Some(tasks);
+            }
             Err(error) => {
                 self.note(format!("the synthesiser refused the turn: {error}"));
                 self.finish();
@@ -1340,30 +1691,7 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
         self.stage = Stage::Answering;
     }
 
-    /// Takes the synthesis's next event, or else the generation's, or ends the turn once the
-    /// synthesis of the whole answer ended.
-    fn answer(&mut self) {
-        if let Some(event) = self.synthesis.as_mut().and_then(Iterator::next) {
-            self.spoken(event);
-            return;
-        }
-        if self.utterance_ended {
-            if self
-                .steps()
-                .is_some_and(|steps| steps.tts_first_audio.is_none())
-            {
-                self.note("the synthesis gave no audio".to_owned());
-            }
-            self.finish();
-            return;
-        }
-        match self.generation.as_mut().and_then(Iterator::next) {
-            Some(event) => self.generated(event),
-            None => self.end_utterance(),
-        }
-    }
-
-    fn generated(&mut self, event: GenerationEvent) {
+    fn generated(&mut self, event: GenerationEvent, failure: Option<String>) {
         match event {
             GenerationEvent::Started(started) => {
                 let (record, _) = Generation::start_as(
@@ -1395,28 +1723,16 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
                 let Some(segment) = self.tentative.remove(&committed.segment_id) else {
                     return;
                 };
-                let refused = match segment.commit() {
-                    Ok((segment, _)) => self
-                        .synthesis
-                        .as_mut()
-                        .and_then(|synthesis| synthesis.offer_segment(segment).err())
-                        .map(|refused| format!("the synthesiser refused a segment: {refused:?}")),
-                    Err(refused) => Some(format!("a segment did not commit: {refused:?}")),
-                };
-                if let Some(refused) = refused {
-                    self.note(refused);
+                match segment.commit() {
+                    Ok((segment, _)) => {
+                        hand(self.speak.as_ref(), &self.owing, Speak::Segment(segment));
+                    }
+                    Err(refused) => self.note(format!("a segment did not commit: {refused:?}")),
                 }
             }
             GenerationEvent::Completed(_) => self.end_utterance(),
             GenerationEvent::Cancelled(..) => {
-                let failure = self
-                    .generation
-                    .as_ref()
-                    .and_then(GenerationHandle::failure)
-                    .map_or_else(
-                        || "no failure given".to_owned(),
-                        |error| format!("{error:?}"),
-                    );
+                let failure = failure.unwrap_or_else(|| "no failure given".to_owned());
                 self.note(format!("the generation was cancelled: {failure}"));
                 self.end_utterance();
             }
@@ -1430,11 +1746,7 @@ impl<R: Recogniser, S: Synthesiser> CascadeRunner<'_, R, S> {
             return;
         }
         self.utterance_ended = true;
-        if let Some(synthesis) = self.synthesis.as_mut()
-            && let Err(error) = synthesis.end_utterance()
-        {
-            self.note(format!("the synthesis's utterance did not end: {error}"));
-        }
+        hand(self.speak.as_ref(), &self.owing, Speak::End);
     }
 
     /// Takes an event of the synthesis: a frame is played on the client's model from its receipt
