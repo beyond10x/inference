@@ -22,8 +22,12 @@
 //! key from `DEEPGRAM_API_KEY`, runs with the default providers of
 //! `inference_deepgram::agent::AgentConfig` in G.711 μ-law at 8 kHz
 //! (`realtime_voice::deepgram_config`), and reports no usage: it bills per minute, which no
-//! message carries. A provider whose model cannot be made or whose first session does not open is
-//! skipped with the reason; `--skip <provider>=<reason>` skips one without trying it.
+//! message carries. Deepslate Opal reads its key from `DEEPSLATE_API_KEY`, its vendor and
+//! organization from `DEEPSLATE_VENDOR_ID` and `DEEPSLATE_ORGANIZATION_ID`, and the hosted voice
+//! it speaks with from `DEEPSLATE_VOICE_ID`, without which it is skipped; it runs in 16-bit PCM
+//! at 16 kHz and reports no usage, which no message carries. A provider whose model cannot be
+//! made or whose first session does not open is skipped with the reason;
+//! `--skip <provider>=<reason>` skips one without trying it.
 //!
 //! The cascade arm, `cascade`, speaks with ElevenLabs when its key resolves from
 //! `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` names a voice, in `pcm_24000`; otherwise it is
@@ -41,6 +45,7 @@ use clap::{Parser, ValueEnum};
 use inference_aws::duplex::NovaSonicSpeech;
 use inference_deepgram::agent::AgentConfig;
 use inference_deepgram::{AgentEndpoint as DeepgramEndpoint, DeepgramAgent};
+use inference_deepslate::{DeepslateOpal, OpalConfig};
 use inference_duplex::{NativeSpeechModel, SessionConfig};
 use inference_elevenlabs::agent::{AgentEndpoint, SignedUrl};
 use inference_elevenlabs::{ElevenLabsAgent, ElevenLabsSynthesiser};
@@ -54,6 +59,7 @@ use realtime_voice::compare::{
 };
 use realtime_voice::{
     Reported, deepgram_config, elevenlabs_config, nova_config, openai_config, openai_live_config,
+    pcm16,
 };
 
 const QUESTION: &[u8] =
@@ -73,7 +79,7 @@ struct Args {
         long,
         value_enum,
         value_delimiter = ',',
-        default_value = "openai,openai-live,nova,elevenlabs,deepgram,cascade"
+        default_value = "openai,openai-live,nova,elevenlabs,deepgram,deepslate,cascade"
     )]
     providers: Vec<Provider>,
     /// The runs of each provider.
@@ -99,6 +105,8 @@ enum Provider {
     Elevenlabs,
     /// A Deepgram Voice Agent session.
     Deepgram,
+    /// A Deepslate Opal session.
+    Deepslate,
     /// The local voice cascade's recogniser and LLM, speaking with ElevenLabs.
     Cascade,
 }
@@ -111,15 +119,19 @@ impl Provider {
             Self::Nova => "nova",
             Self::Elevenlabs => "elevenlabs",
             Self::Deepgram => "deepgram",
+            Self::Deepslate => "deepslate",
             Self::Cascade => "cascade",
         }
     }
 
     const fn topology(self) -> Topology {
         match self {
-            Self::Openai | Self::OpenaiLive | Self::Nova | Self::Elevenlabs | Self::Deepgram => {
-                Topology::Native
-            }
+            Self::Openai
+            | Self::OpenaiLive
+            | Self::Nova
+            | Self::Elevenlabs
+            | Self::Deepgram
+            | Self::Deepslate => Topology::Native,
             Self::Cascade => Topology::Cascade,
         }
     }
@@ -154,6 +166,24 @@ fn main() -> ExitCode {
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// What no Deepslate Opal message reports: every count.
+const DEEPSLATE_REPORTED: Reported = DEEPGRAM_REPORTED;
+
+/// The variable naming the hosted voice Deepslate Opal speaks with.
+const DEEPSLATE_VOICE_VARIABLE: &str = "DEEPSLATE_VOICE_ID";
+
+/// The session `compare` opens on Deepslate Opal: 16-bit PCM at 16 kHz both ways, its own
+/// turn-taking, responses and barge-in, the hosted voice `DEEPSLATE_VOICE_ID` names, the demo
+/// instructions and tool.
+fn deepslate_config() -> SessionConfig {
+    SessionConfig {
+        voice: std::env::var(DEEPSLATE_VOICE_VARIABLE).unwrap_or_default(),
+        input_format: pcm16(16_000),
+        output_format: pcm16(16_000),
+        ..deepgram_config()
     }
 }
 
@@ -250,6 +280,21 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                         )
                     })
             }
+            Provider::Deepslate => match std::env::var_os(DEEPSLATE_VOICE_VARIABLE) {
+                None => Err(format!("{DEEPSLATE_VOICE_VARIABLE} names no hosted voice").into()),
+                Some(_) => DeepslateOpal::from_env(OpalConfig::new())
+                    .map_err(Box::<dyn Error>::from)
+                    .and_then(|mut model| {
+                        measure(
+                            name,
+                            &mut model,
+                            deepslate_config,
+                            &plan,
+                            args.runs,
+                            &Billing::tokens(DEEPSLATE_REPORTED),
+                        )
+                    }),
+            },
         };
         match outcome {
             Ok(runs) => comparison.ran_as(name, provider.topology(), runs),
