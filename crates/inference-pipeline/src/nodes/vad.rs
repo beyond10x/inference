@@ -22,8 +22,8 @@
 //! drain, speech still going ends: its offset is the first sample of the quiet run going, if one
 //! is shorter than the hold time, and otherwise the position just past the last frame; the change
 //! is decided just past the last frame and names no cause. On a `stop` the end of input is then
-//! passed on. Then the node ends. Cancelled, it sends nothing more. Content other than an audio
-//! frame fails the node.
+//! passed on. Then the node ends. Cancelled, it sends nothing more, and a send waiting for room
+//! on a full edge ends at the cancel. Content other than an audio frame fails the node.
 
 use std::fmt;
 use std::future;
@@ -36,6 +36,7 @@ use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{NodeId, RunId};
 use serde::{Deserialize, Serialize};
 
+use super::tool_authority::send_unless;
 use super::{Emitter, Next, Task, Watched, block_on, next, one_in_one_out};
 use crate::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
 
@@ -310,15 +311,16 @@ struct Exchanging<P> {
 }
 
 impl<P: AudioPayload> Exchanging<P> {
-    /// Sends `envelope` on, unless the detector was cancelled: it then sends nothing more.
+    /// Sends `envelope` on, unless the detector was cancelled: it then sends nothing more, and a
+    /// cancel taken while the send waits for room ends the wait ([`send_unless`]).
     async fn send(&self, envelope: EventEnvelope<P>) -> Result<(), String> {
-        if self.state.read(|state| state.cancelled) {
-            return Ok(());
-        }
-        self.output
-            .send(envelope)
-            .await
-            .map_err(|refused| refused.to_string())
+        send_unless(
+            &self.state,
+            |state| state.cancelled,
+            self.output.as_ref(),
+            envelope,
+        )
+        .await
     }
 
     /// Sends `activity` on, decided at `decided`, the position just past the frame of `cause`.
