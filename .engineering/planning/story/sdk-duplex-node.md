@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-duplex-node
 kind: story
-status: draft
+status: active
 title: A native speech model runs as a graph node inside a session
 relations:
 - decomposes: epic:sdk
@@ -23,7 +23,10 @@ scope:
   path: crates/inference-testkit/src/duplex/mock.rs
 - confidence: inferred
   path: crates/inference-testkit/tests/duplex_node.rs
-revision: 18
+revision: 20
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T22:09:35Z", actor: "human:timo", revision: 19, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-06T22:09:35Z", actor: "human:timo", revision: 20, decided_on: {"recorded":{"approval":1}}}
 ---
 ## Context
 
