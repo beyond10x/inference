@@ -21,8 +21,8 @@ pub const DEFAULT_LANGUAGE: &str = "en";
 /// How long the TCP connection, TLS and the WebSocket handshake may take together.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a recognition waits for each server message once input has ended, and how long a
-/// write may take.
+/// How long a recognition waits, in total, from sending `CloseStream` to the summary `Metadata`,
+/// and how long a write may take.
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the binding goes without sending audio before it sends a `KeepAlive`: within the
@@ -53,8 +53,8 @@ impl Region {
     }
 }
 
-/// Where a recognition connects: the base URL and the bounds on the handshake and on every read
-/// after the end of input.
+/// Where a recognition connects: the base URL, the bound on the handshake, and the bound on the
+/// whole wait from the end of input to the summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     /// Scheme and host (and port), no path, query or fragment: `wss://` to any host, `ws://`

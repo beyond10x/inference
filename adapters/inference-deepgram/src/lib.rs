@@ -26,8 +26,15 @@
 //!   is ignored.
 //! - A `Results` whose transcript is empty or blank emits nothing; when it is final it still
 //!   commits a span left open.
+//! - **Audio committed once.** The binding keeps where the audio of the committed spans ends
+//!   (`start` plus `duration` of their results). A `Results` whose audio ends no later than that,
+//!   while no span is open, is dropped: after an `UtteranceEnd` committed an interim span, the
+//!   final result of the same audio does not commit the words again. A result without both
+//!   numbers is never dropped.
 //! - After `CloseStream`, the summary `Metadata` commits a span still open and ends the
-//!   recognition; its usage record is then its last event.
+//!   recognition; its usage record is then its last event. Whether a `Metadata` is the summary
+//!   is decided by the thread driving the connection, from whether it has sent `CloseStream`; any
+//!   other `Metadata` is ignored.
 //!
 //! # Usage
 //!
@@ -42,9 +49,19 @@
 //! `Metadata` (1008 `DATA-0000`, 1011 `NET-0000`, `NET-0001`, `NET-0002` or any other), a text
 //! message outside the protocol, and a server silent past the read timeout once input has ended
 //! each fail the recognition with a [`DeepgramError`] ([`DeepgramRecognition::failure`]), never a
-//! panic or a hang. The handshake is bounded by the connect timeout, every write and every read
-//! after the end of input by the read timeout. [`DeepgramRecognition::cancel`] and dropping the
-//! handle close the connection and deliver nothing more.
+//! panic or a hang. The handshake is bounded by the connect timeout and every write by the read
+//! timeout. **One total deadline** bounds the end: from sending `CloseStream`, the summary
+//! `Metadata` must arrive within the read timeout, however many messages come before it; the
+//! handle waits at most that plus [`CLOSE_BOUND`]. [`DeepgramRecognition::cancel`] and dropping
+//! the handle close the connection and deliver nothing more, during the opening handshake too:
+//! the attempt is dropped at once.
+//!
+//! # Bounds on what the server sends
+//!
+//! A message or frame larger than [`listen::MAX_MESSAGE_SIZE`] (4 MiB) fails the recognition as a
+//! transport error instead of being buffered. At most [`listen::INBOUND_DEPTH`] (32) server
+//! messages wait for the caller; while that many wait, the connection is not read until the
+//! caller iterates, and `KeepAlive` and the caller's audio still go out.
 //!
 //! The connection is driven on a thread of its own with a runtime of its own, so the handle may
 //! be iterated from any thread, an async worker among them; once input has ended an iteration
