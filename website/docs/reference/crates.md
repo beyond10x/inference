@@ -51,7 +51,7 @@ Runnable programs (`publish = false`); [Examples](../examples/index.md) says wha
 | Package | Features | What it is |
 |---|---|---|
 | [`local-voice-cascade`](https://github.com/beyond10x/inference/tree/main/examples/local-voice-cascade) | `local` | Example: the local voice cascade, STT, LLM and TTS through commit gates to a speaker that acknowledges playback, on the testkit mocks or the local adapters, its recogniser sherpa-onnx or whisper.cpp by configuration, and an audio host. |
-| [`realtime-voice`](https://github.com/beyond10x/inference/tree/main/examples/realtime-voice) | none | Example: a spoken conversation with a native speech model, microphone in and speaker out, with barge-in and one demo tool. |
+| [`realtime-voice`](https://github.com/beyond10x/inference/tree/main/examples/realtime-voice) | `local` | Example: a spoken conversation with a native speech model, microphone in and speaker out, with barge-in and one demo tool. |
 | [`repo-podcast`](https://github.com/beyond10x/inference/tree/main/examples/repo-podcast) | none | Example: Claude distils a repository into a brief, and two voice models discuss it as a podcast over the speaker, in a terminal UI. |
 | [`stt-only`](https://github.com/beyond10x/inference/tree/main/examples/stt-only) | none | Example: speech recognition alone, against the STT contract and the mock recogniser. |
 | [`stt-sherpa-onnx`](https://github.com/beyond10x/inference/tree/main/examples/stt-sherpa-onnx) | none | Example: speech recognition alone, against the STT contract and the local sherpa-onnx recogniser. |
