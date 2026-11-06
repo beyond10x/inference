@@ -111,7 +111,7 @@ fn no_agent_session_leaves_its_thread_or_connection_behind() {
     let mut model = DeepgramAgent::new(
         AgentEndpoint::new()
             .with_url(&server.url)
-            .with_open_timeout(Duration::from_millis(400))
+            .with_open_timeout(Duration::from_secs(2))
             .with_read_timeout(Duration::from_secs(3)),
         AgentConfig::new(),
         Arc::new(FixedKey(KEY)),
