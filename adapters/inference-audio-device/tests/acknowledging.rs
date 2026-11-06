@@ -15,11 +15,16 @@ use std::time::{Duration, Instant};
 
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 use inference_audio_device::acknowledging::{
-    ACKNOWLEDGE_PLAYBACK, AcknowledgingSink, Playable, PlaybackPayload,
+    ACKNOWLEDGE_PLAYBACK, AcknowledgingSink, PLAYBACK_PATIENCE, Playable, PlaybackFault,
+    PlaybackPayload,
 };
 use inference_audio_device::convert::encode;
 use inference_audio_device::fake::FakeHost;
-use inference_audio_device::{DeviceSelector, PlayoutConfig, Speaker};
+use inference_audio_device::host::{MakeCapture, MakePlayout};
+use inference_audio_device::{
+    AudioHost, CaptureBuffer, DeviceError, DeviceInfo, DeviceSelector, OpenStream, PlayoutBuffer,
+    PlayoutConfig, Speaker,
+};
 use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{Generation, StartGeneration};
@@ -96,6 +101,79 @@ fn block_on<F: Future>(future: F) -> F::Output {
             return output;
         }
         thread::park_timeout(Duration::from_millis(10));
+    }
+}
+
+/// Polls `future` for at most `limit`: its output, or `None` when it was still pending.
+fn block_on_within<F: Future>(future: F, limit: Duration) -> Option<F::Output> {
+    let deadline = Instant::now() + limit;
+    let waker = Waker::from(Arc::new(Unpark(thread::current())));
+    let mut future = pin!(future);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut Context::from_waker(&waker)) {
+            return Some(output);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        thread::park_timeout(left.min(Duration::from_millis(10)));
+    }
+}
+
+/// The fake host, keeping the playout buffer of the output stream it opens, so that a test can
+/// report an error of that stream as the device's callback would.
+#[derive(Debug, Clone)]
+struct Spy {
+    fake: FakeHost,
+    buffer: Arc<Mutex<Option<Arc<PlayoutBuffer>>>>,
+}
+
+impl Spy {
+    fn new(fake: FakeHost) -> Self {
+        Self {
+            fake,
+            buffer: Arc::default(),
+        }
+    }
+
+    fn report_output_error(&self, message: &str) {
+        self.buffer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .expect("an output stream was opened")
+            .report_error(message);
+    }
+}
+
+impl AudioHost for Spy {
+    fn devices(&self) -> Result<Vec<DeviceInfo>, DeviceError> {
+        self.fake.devices()
+    }
+
+    fn open_input(
+        &self,
+        device: &DeviceSelector,
+        make: MakeCapture,
+    ) -> Result<OpenStream<CaptureBuffer>, DeviceError> {
+        self.fake.open_input(device, make)
+    }
+
+    fn open_output(
+        &self,
+        device: &DeviceSelector,
+        make: MakePlayout,
+    ) -> Result<OpenStream<PlayoutBuffer>, DeviceError> {
+        let slot = Arc::clone(&self.buffer);
+        self.fake.open_output(
+            device,
+            Box::new(move |resolved| {
+                let buffer = make(resolved);
+                *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&buffer));
+                buffer
+            }),
+        )
     }
 }
 
@@ -395,11 +473,18 @@ struct Started {
 }
 
 fn started() -> Started {
-    let nodes = declared();
     let host = FakeHost::laptop();
-    let speaker = Speaker::open(&host, &DeviceSelector::Default, PlayoutConfig::default())
+    started_on(&host.clone(), host, PLAYBACK_PATIENCE)
+}
+
+/// A started sink waiting `patience` for a stalled speaker, its speaker opened on `opener`,
+/// whose output stream `host` drives.
+fn started_on(opener: &dyn AudioHost, host: FakeHost, patience: Duration) -> Started {
+    let nodes = declared();
+    let speaker = Speaker::open(opener, &DeviceSelector::Default, PlayoutConfig::default())
         .expect("the default output opens");
-    let mut sink = AcknowledgingSink::new(RunId::generate(), speaker);
+    let mut sink =
+        AcknowledgingSink::new(RunId::generate(), speaker).with_playback_patience(patience);
     let (speech, receipts) = (Edge::default(), Edge::default());
     let node: &mut dyn NodeImplementation<Payload> = &mut sink;
     block_on(node.describe(&nodes.sink));
@@ -710,9 +795,10 @@ fn a_turn_opened_while_audio_waits_stops_the_speaker_and_drops_the_older_generat
     let interruption = handle.interruptions()[0];
     assert_eq!(interruption.turn_id, turn_id);
     assert!(interruption.cleared > 0, "unplayed samples were cleared");
-    assert!(
-        interruption.position.is_some(),
-        "the played position was read"
+    assert_eq!(
+        interruption.position,
+        SampleClockPosition::new(u64::from(FRAME)),
+        "the stop answered the played position: one device pull of 20 ms, one frame"
     );
     assert_eq!(
         interruption.played_after, None,
@@ -728,8 +814,9 @@ fn a_turn_opened_while_audio_waits_stops_the_speaker_and_drops_the_older_generat
     assert_eq!(stale.segment_id, segment);
     assert_eq!(stale.generation_id, Some(run.synthesis.generation_id()));
     assert_eq!(
-        stale.played, interruption.played_after,
-        "the played position is unchanged"
+        stale.played, None,
+        "story:acknowledging-sink-drain-ends: the stop cleared the queue and nothing was queued \
+         since, the stale frame included, so the speaker has no played position when it is dropped"
     );
     assert_eq!(
         handle.pushed(),
@@ -894,4 +981,217 @@ fn a_generation_of_the_turn_before_that_is_never_superseded_makes_no_interruptio
     let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
     block_on(node.cancel());
     block_on(node.stop());
+}
+
+#[test]
+fn a_speaker_whose_callback_stopped_fails_the_drain_within_the_stated_patience() {
+    let patience = Duration::from_millis(300);
+    let host = FakeHost::laptop();
+    let mut run = started_on(&host.clone(), host, patience);
+    let handle = run.sink.handle();
+    let segment = run.synthesis.segment("never heard to the end");
+    for _ in 0..2 {
+        let frame = run.synthesis.frame(segment);
+        run.feed.send(frame);
+    }
+    assert!(eventually(|| handle.pushed() == 2));
+    let _ = run.host.pull(DEVICE_FRAME);
+    let completed = run.synthesis.complete(segment);
+    run.feed.send(completed);
+    run.feed.send(Payload::Control(ControlKind::Stop));
+
+    // The device calls back no more: the second frame is never played.
+    let began = Instant::now();
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    let drained = block_on_within(node.drain(), PATIENCE)
+        .expect("the drain ends within the patience, not never");
+    let took = began.elapsed();
+    let failure = drained.expect_err("a drain the device never finished fails");
+    assert!(
+        took < patience + Duration::from_secs(1),
+        "the drain failed {took:?} after it began, well past the patience of {patience:?}"
+    );
+    let fault = PlaybackFault::Stalled {
+        patience,
+        played: SampleClockPosition::new(u64::from(FRAME)),
+        queued: FRAME as usize,
+    };
+    assert_eq!(handle.fault(), Some(fault.clone()));
+    assert_eq!(failure.detail(), fault.to_string());
+    assert_eq!(handle.failure(), Some(fault.to_string()));
+    assert_eq!(settled(&run.receipts), 0, "nothing was acknowledged");
+    block_on(node.stop());
+    assert!(!run.host.output_open(), "the speaker is closed");
+}
+
+#[test]
+fn a_stream_error_fails_the_drain_at_once() {
+    let host = FakeHost::laptop();
+    let spy = Spy::new(host.clone());
+    let mut run = started_on(&spy, host, PLAYBACK_PATIENCE);
+    let handle = run.sink.handle();
+    let segment = run.synthesis.segment("the device was unplugged");
+    let frame = run.synthesis.frame(segment);
+    run.feed.send(frame);
+    let completed = run.synthesis.complete(segment);
+    run.feed.send(completed);
+    run.feed.send(Payload::Control(ControlKind::Stop));
+    assert!(eventually(|| handle.pushed() == 1));
+    spy.report_output_error("the device is no longer available");
+
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    let drained = block_on_within(node.drain(), PLAYBACK_PATIENCE / 2)
+        .expect("a recorded stream error ends the drain before any patience runs out");
+    let failure = drained.expect_err("a drain on a failed output stream fails");
+    let fault = PlaybackFault::StreamError {
+        errors: 1,
+        last_error: Some("the device is no longer available".to_owned()),
+    };
+    assert_eq!(handle.fault(), Some(fault.clone()));
+    assert_eq!(failure.detail(), fault.to_string());
+    assert_eq!(settled(&run.receipts), 0, "nothing was acknowledged");
+    block_on(node.stop());
+    assert!(!run.host.output_open(), "the speaker is closed");
+}
+
+#[test]
+fn a_turn_opened_after_the_last_frame_played_still_acknowledges_the_segment() {
+    let (mut run, turns) = started_with_turns();
+    let handle = run.sink.handle();
+    let segment = run.synthesis.segment("heard in full");
+    for _ in 0..2 {
+        let frame = run.synthesis.frame(segment);
+        run.feed.send(frame);
+    }
+    assert!(eventually(|| handle.pushed() == 2));
+    let _ = run.host.pull(4 * DEVICE_FRAME);
+    assert_eq!(
+        settled(&run.receipts),
+        0,
+        "played to its end, but its synthesis has not completed it"
+    );
+
+    // The user speaks after the last frame played and before the segment's completion arrived.
+    open_turn(&turns, TurnId::generate());
+    assert!(eventually(|| turns.len() == 0), "the sink took the turn");
+    let completed = run.synthesis.complete(segment);
+    run.feed.send(completed);
+    assert!(
+        played_until(&run, 1),
+        "the audio the user heard in full is acknowledged"
+    );
+    let (named, receipt) = receipt(run.receipts.taken().remove(0));
+    assert_eq!((named, receipt.frames()), (segment, 2));
+    run.synthesis
+        .output
+        .acknowledge_playback(segment, receipt)
+        .expect("the synthesis takes the receipt");
+    assert_eq!(run.synthesis.state(segment), Some(SegmentState::Played));
+    assert_eq!(handle.interruptions(), [], "nothing was left to stop");
+    assert_eq!(handle.stale_frames(), []);
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    block_on(node.cancel());
+    block_on(node.stop());
+}
+
+#[test]
+fn a_frame_after_a_turn_of_a_segment_heard_so_far_forgets_the_segment() {
+    let (mut run, turns) = started_with_turns();
+    let handle = run.sink.handle();
+    let segment = run.synthesis.segment("heard so far, then cut");
+    for _ in 0..2 {
+        let frame = run.synthesis.frame(segment);
+        run.feed.send(frame);
+    }
+    assert!(eventually(|| handle.pushed() == 2));
+    let _ = run.host.pull(4 * DEVICE_FRAME);
+    open_turn(&turns, TurnId::generate());
+    assert!(eventually(|| turns.len() == 0), "the sink took the turn");
+
+    let late = run.synthesis.frame(segment);
+    run.feed.send(late);
+    let completed = run.synthesis.complete(segment);
+    run.feed.send(completed);
+    assert!(eventually(|| handle.stale_frames().len() == 1));
+    assert_eq!(
+        handle.pushed(),
+        2,
+        "the late frame never reached the speaker"
+    );
+    let _ = run.host.pull(4 * DEVICE_FRAME);
+    assert_eq!(
+        settled(&run.receipts),
+        0,
+        "a segment not all of which was heard is never acknowledged"
+    );
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    block_on(node.cancel());
+    block_on(node.stop());
+}
+
+#[test]
+fn a_frame_whose_clock_goes_back_below_held_audio_is_refused() {
+    let mut run = started();
+    let handle = run.sink.handle();
+    let segment = run.synthesis.segment("on the first clock");
+    for _ in 0..2 {
+        let frame = run.synthesis.frame(segment);
+        run.feed.send(frame);
+    }
+    assert!(eventually(|| handle.pushed() == 2));
+
+    // A second synthesis starts its own clock at 0, below the end of the audio still held.
+    let mut next = Synthesis::new();
+    run.feed.generation_id = next.generation_id();
+    let answer = next.segment("on a second clock");
+    let frame = next.frame(answer);
+    run.feed.send(frame);
+    let completed = run.synthesis.complete(segment);
+    run.feed.send(completed);
+    run.feed.send(Payload::Control(ControlKind::Stop));
+    assert!(
+        eventually(|| handle.ended()),
+        "the sink refuses the frame and ends instead of waiting forever"
+    );
+    assert_eq!(
+        handle.fault(),
+        Some(PlaybackFault::ClockRegression {
+            segment_id: answer,
+            position: 0,
+            held_end: 2 * u64::from(FRAME),
+        })
+    );
+    assert_eq!(handle.pushed(), 2, "the refused frame was not pushed");
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    let failure = block_on(node.drain()).expect_err("the drain answers the refusal");
+    assert_eq!(
+        Some(failure.detail().to_owned()),
+        handle.fault().map(|fault| fault.to_string())
+    );
+    block_on(node.stop());
+}
+
+#[test]
+fn a_segment_never_completed_by_the_end_of_input_is_forgotten_and_the_drain_ends() {
+    let mut run = started();
+    let handle = run.sink.handle();
+    let segment = run.synthesis.segment("its synthesis never completes");
+    let frame = run.synthesis.frame(segment);
+    run.feed.send(frame);
+    run.feed.send(Payload::Control(ControlKind::Stop));
+    assert!(eventually(|| handle.pushed() == 1));
+    assert!(
+        played_until(&run, 1),
+        "the end of input is passed on, no receipt before it"
+    );
+    let end = run.receipts.taken().remove(0);
+    assert_eq!(end.kind, ControlKind::Stop.as_str());
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    block_on_within(node.drain(), PATIENCE)
+        .expect("the drain ends")
+        .expect("the sink drains");
+    assert_eq!(handle.receipts(), [], "no receipt is made of it");
+    assert_eq!(handle.fault(), None);
+    block_on(node.stop());
+    assert!(!run.host.output_open(), "the speaker is closed");
 }
