@@ -41,8 +41,18 @@
 //!   the user speaking over it, and `SpeechStarted` precedes that fragment's `InputTranscribed`,
 //!   at the fragment's start on the input, once per interruption: later fragments extend the
 //!   user's speech until an output fragment of the response starts at or after its latest
-//!   `end_ms`, the model speaking again, and the next fragment inside then is reported again
-//!   (a pause shorter than [`Segmentation::gap`] keeps one response). A fragment starting before that
+//!   `end_ms`, the model speaking again. That fragment is the boundary between the cut answer
+//!   and the model's next words: the cut response ends there as completed, and the fragment
+//!   begins a new response, on which the audio after it is delivered and over which the next
+//!   fragment inside is reported again. What arrives from the speech start up to the boundary,
+//!   the rest of the cut sentence and output fragments starting before the speech ended, stays
+//!   on the cut response, so a caller that drops the audio of a response it was spoken over
+//!   drops the cut part and plays the next words. The protocol notes do not say that an output
+//!   fragment precedes the audio it transcribes (the replays assume it, as two live sessions
+//!   showed), nor that the model's next words start with a fragment: audio of them before their
+//!   first fragment stays on the cut response, and without any fragment the cut response ends
+//!   at [`Segmentation::gap`] of silence and the next voiced frame begins a new one. Backend
+//!   usage arriving after the boundary is summed onto the new response. A fragment starting before that
 //!   interval, the tail of the question the response answers, or after it, in the response's
 //!   trailing silence, reports none; nor does any while the response has no output transcript.
 //!   That the two transcripts share one timeline is read from the protocol documents, not
@@ -722,6 +732,29 @@ impl OpenAiLiveSession {
         self.or_drop(refused);
     }
 
+    /// The model speaks again after speech over the response in progress: an output transcript
+    /// fragment starting at `start_ms`, at or after the end of that speech so far
+    /// ([`Spoken::interrupted`]), ends the cut response as completed, so the fragment and the
+    /// audio after it begin a new one. A fragment starting earlier is the rest of the cut
+    /// sentence and stays on the cut response, as does the audio before the boundary.
+    fn resumed(&mut self, start_ms: u64, now: Instant) {
+        let Some(Spoken {
+            response,
+            interrupted: Some(speech_end),
+            ..
+        }) = self.spoken
+        else {
+            return;
+        };
+        if self.current != Some(response) || start_ms < speech_end {
+            return;
+        }
+        let refused = self.ledger.response_completed(response, now);
+        self.or_drop(refused);
+        self.current = None;
+        self.silent_run = 0;
+    }
+
     fn output(&mut self, audio: Vec<u8>, now: Instant) {
         let width = self.format.sample_width();
         let whole = audio.len() - audio.len() % width;
@@ -929,15 +962,13 @@ impl OpenAiLiveSession {
                 start_ms,
                 end_ms,
             } => {
+                self.resumed(start_ms, now);
                 if let Some(id) = self.begin(now) {
                     self.silent_run = 0;
                     self.spoken = Some(match self.spoken {
                         Some(spoken) if spoken.response == id => Spoken {
                             start_ms: spoken.start_ms.min(start_ms),
                             end_ms: spoken.end_ms.max(end_ms),
-                            interrupted: spoken
-                                .interrupted
-                                .filter(|&speech_end| start_ms < speech_end),
                             ..spoken
                         },
                         _ => Spoken {
