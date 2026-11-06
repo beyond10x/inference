@@ -24,10 +24,25 @@
 //! flight before the session closes, so nothing the run produced arrives after the close and
 //! what it delivers still joins the history. The session delivers `RunCompleted` and then
 //! `SessionClosed` last; [`LiveSession::receive`] answers none once every egress has ended and
-//! every event of the session was delivered. An application that lets go of its handle lets go
-//! of what was in flight and cancels the run, if it has not ended: the session closes once the
-//! run has ended, by `CompleteSessionClose` when the run completed while the session drains,
-//! otherwise by `CancelSession`.
+//! every event of the session was delivered. A run that fails, or that another holder of its
+//! requests cancels, while the session drains ends the drain all the same: the session delivers
+//! `RunFailed` or `RunCancelled`, runs `CompleteSessionClose` and delivers `SessionClosed` last,
+//! and does not stay Draining. An application that lets go of its handle lets go of what was in
+//! flight and cancels the run, if it has not ended: the session closes once the run has ended,
+//! by `CompleteSessionClose` when the session drains, otherwise by `CancelSession`.
+//!
+//! Two things the session keeps are bounded, whatever the length of the session and the rate of
+//! its input. The state machine's event log ([`LiveSessions::events`]) counts consecutive inputs
+//! of a session as one `InputSent` and keeps at most [`Sessions::EVENT_LOG_BOUND`] events, the
+//! newest, releasing its oldest half when full ([`LiveSessions::events_released`]);
+//! [`LiveSessions::inputs_sent`] counts every input a session's run took, and `InputSent` is
+//! recorded only once the ingress took the input. The bookkeeping of the generations an interrupt
+//! cuts is released once nothing of a generation can still arrive, its end read and the playback
+//! of each of its segments ended, and is kept for at most 256 generations: past them the oldest
+//! is let go, and a late event of it is delivered after an interrupt, the one exception to the
+//! cut ([`LiveSession::interrupt`]). What is not bounded: a session's history grows with its
+//! turns, and its row and history stay for as long as the session's state machine lives, Closed
+//! included, as the history contract requires ([`crate::history`]).
 //!
 //! The session records its history ([`crate::history`]) from what it accepts and delivers: the
 //! committed input texts the application sent since its last commit as one user turn at
@@ -127,9 +142,6 @@ struct Inbox {
     /// No run of the session sends anything more: its current run ended, or it has none and the
     /// run it left at a switch ended.
     ended: bool,
-    /// The run ended Completed, or the session has no run in flight, so a draining session
-    /// closes once what was in flight was delivered.
-    completed: bool,
     /// The application let go of its handle: nothing more is delivered.
     released: bool,
     /// The application cancelled the session: once the run has ended, `CancelSession` closes it.
@@ -169,14 +181,104 @@ impl Inbox {
     }
 }
 
+/// The most generations a live session keeps the bookkeeping of: a memory backstop for
+/// generations whose end the session never reads, such as those of a pipeline whose egress
+/// carries no generation end or no playback. Past it the oldest generation is released, and an
+/// interrupt no longer cuts an event of it that arrives late; that is the one case in which a
+/// late event of a delivered generation is delivered after an interrupt.
+pub(crate) const GENERATIONS_KEPT: usize = 256;
+
 /// The generations a live session delivered an event of, those an interrupt cut, and the
-/// generation of each segment a delta named: the session delivers nothing more of a cut
-/// generation, a segment's events among it.
+/// generation of each segment a delta named whose playback has not ended: the session delivers
+/// nothing more of a cut generation, a segment's events among it.
+///
+/// A generation's bookkeeping is released once nothing of it can still arrive: it ended, by
+/// `GenerationCompleted`, `GenerationSuperseded` or `GenerationCancelled`, and the playback of
+/// every segment a delta of it named ended, by `AudioPlayed`, whether the generation was cut or
+/// not. A generation's text ends before its audio is played, so one that ended with a segment not
+/// yet played is kept. Past [`GENERATIONS_KEPT`] generations kept, the oldest is released.
 #[derive(Debug, Default)]
 pub(crate) struct Generations {
     delivered: HashSet<GenerationId>,
     cut: HashSet<GenerationId>,
     segments: HashMap<SegmentId, GenerationId>,
+    /// The generations whose end the session read.
+    ended: HashSet<GenerationId>,
+    /// Every generation kept, the oldest first.
+    kept: VecDeque<GenerationId>,
+}
+
+impl Generations {
+    /// Reads an event of an envelope naming `generation`: whether it is delivered, which it is
+    /// not when its generation was cut. Its generation is the envelope's, or the one the event
+    /// names, or, for an event naming only its segment, the generation a delta of that segment
+    /// named; a delta records the generation of its segment. The generation's end, or the
+    /// playback of its last segment, releases its bookkeeping.
+    fn admit(&mut self, generation: Option<GenerationId>, event: &SessionEvent) -> bool {
+        let generation = generation.or_else(|| generation_of(event)).or_else(|| {
+            segment_of(event).and_then(|segment_id| self.segments.get(&segment_id).copied())
+        });
+        let Some(generation_id) = generation else {
+            return true;
+        };
+        self.keep(generation_id);
+        if let SessionEvent::TextDelta(delta) = event {
+            self.segments.insert(delta.segment_id, generation_id);
+        }
+        let admitted = !self.cut.contains(&generation_id);
+        if admitted {
+            self.delivered.insert(generation_id);
+        }
+        let last = match event {
+            SessionEvent::GenerationCompleted(_)
+            | SessionEvent::GenerationSuperseded(_)
+            | SessionEvent::GenerationCancelled(_) => {
+                self.ended.insert(generation_id);
+                true
+            }
+            SessionEvent::AudioPlayed(played) => {
+                self.segments.remove(&played.segment_id);
+                true
+            }
+            _ => false,
+        };
+        if last
+            && self.ended.contains(&generation_id)
+            && !self.segments.values().any(|kept| *kept == generation_id)
+        {
+            self.release(generation_id);
+        }
+        admitted
+    }
+
+    /// Keeps the bookkeeping of `generation_id`; past [`GENERATIONS_KEPT`], the oldest
+    /// generation's is released.
+    fn keep(&mut self, generation_id: GenerationId) {
+        if self.kept.contains(&generation_id) {
+            return;
+        }
+        self.kept.push_back(generation_id);
+        while self.kept.len() > GENERATIONS_KEPT {
+            if let Some(oldest) = self.kept.front().copied() {
+                self.release(oldest);
+            }
+        }
+    }
+
+    /// Releases every record of `generation_id`.
+    fn release(&mut self, generation_id: GenerationId) {
+        self.delivered.remove(&generation_id);
+        self.cut.remove(&generation_id);
+        self.ended.remove(&generation_id);
+        self.segments.retain(|_, kept| *kept != generation_id);
+        self.kept.retain(|kept| *kept != generation_id);
+    }
+
+    /// Cuts every generation delivered so far.
+    fn interrupt(&mut self) {
+        let delivered: Vec<GenerationId> = self.delivered.drain().collect();
+        self.cut.extend(delivered);
+    }
 }
 
 /// The user turn the application is sending: the committed input texts it sent since its last
@@ -235,7 +337,6 @@ impl Shared {
         let mut inbox = lock(&self.inbox);
         inbox.run = Some(run_id);
         inbox.ended = false;
-        inbox.completed = false;
         inbox.state = None;
     }
 
@@ -281,7 +382,7 @@ impl Shared {
         if inbox.run == Some(run_id) {
             inbox.state = Some(state);
             drop(inbox);
-            self.end(ending, state == RunState::Completed);
+            self.end(ending);
             return;
         }
         inbox.left_ending.extend(ending);
@@ -289,7 +390,6 @@ impl Shared {
         inbox.leaving = false;
         let now = inbox.run.is_none() && {
             inbox.ended = true;
-            inbox.completed = state == RunState::Completed;
             inbox.released || inbox.cancelling
         };
         inbox.wake();
@@ -328,12 +428,11 @@ impl Shared {
     /// delivered after what the egresses still hold. A session whose application let go of its
     /// handle has nothing left in flight, and one being cancelled delivers nothing more, so
     /// either finishes its close at once.
-    fn end(&self, ending: impl IntoIterator<Item = SessionEvent>, completed: bool) {
+    fn end(&self, ending: impl IntoIterator<Item = SessionEvent>) {
         let now = {
             let mut inbox = lock(&self.inbox);
             inbox.ending.extend(ending);
             inbox.ended = true;
-            inbox.completed = completed;
             if let Some(waker) = inbox.waker.take() {
                 waker.wake();
             }
@@ -368,7 +467,6 @@ impl Shared {
             let idle = inbox.idle();
             if idle {
                 inbox.ended = true;
-                inbox.completed = true;
             }
             idle
         };
@@ -389,16 +487,18 @@ impl Shared {
     }
 
     /// Closes the session, once, after its run ended: `CancelSession` for a session being
-    /// cancelled, whatever its run's end, otherwise `CompleteSessionClose` for a run that completed
-    /// while the session drains, so that the drain completed what was in flight before the
-    /// session closes. A session whose application let go of its handle is closed by
-    /// `CancelSession` when `CompleteSessionClose` does not close it. The `SessionClosed` is the
-    /// last event delivered. The inbox stays locked from the check to the `SessionClosed` queued,
-    /// so that a receive finishing the close as the driver does reads the `SessionClosed` the
-    /// driver queued, and the lock order is the inbox's, then the state machine's.
+    /// cancelled, whatever its run's end, otherwise `CompleteSessionClose` for a session that
+    /// drains, whether its run completed, failed or was cancelled by another holder of its
+    /// requests: the drain finished what was in flight, or nothing is in flight any more. A
+    /// session that does not drain is left as it is. A session whose application let go of its
+    /// handle is closed by `CancelSession` when `CompleteSessionClose` does not close it. The
+    /// `SessionClosed` is the last event delivered, after the run's end. The inbox stays locked
+    /// from the check to the `SessionClosed` queued, so that a receive finishing the close as the
+    /// driver does reads the `SessionClosed` the driver queued, and the lock order is the inbox's,
+    /// then the state machine's.
     fn finish(&self) {
         let mut inbox = lock(&self.inbox);
-        if inbox.finished || !(inbox.cancelling || inbox.released || inbox.completed) {
+        if inbox.finished || !(inbox.cancelling || inbox.released || inbox.ended) {
             return;
         }
         let closed = {
@@ -573,10 +673,26 @@ impl LiveSessions {
         lock(&self.sessions).sessions_view()
     }
 
-    /// Every session event the state machine recorded, in order, across every session.
+    /// The session events the state machine recorded, in order, across every session: at most
+    /// [`Sessions::EVENT_LOG_BOUND`], the newest, consecutive inputs of one session counted as one
+    /// `InputSent` ([`Sessions::events`]).
     #[must_use]
     pub fn events(&self) -> Vec<SessionEvent> {
         lock(&self.sessions).events().to_vec()
+    }
+
+    /// How many events the state machine's log released, the oldest first, to stay within its
+    /// bound ([`Sessions::events_released`]); none of them is in [`LiveSessions::events`] any
+    /// more.
+    #[must_use]
+    pub fn events_released(&self) -> u64 {
+        lock(&self.sessions).events_released()
+    }
+
+    /// How many inputs the run of the session `session_id` took ([`Sessions::inputs_sent`]).
+    #[must_use]
+    pub fn inputs_sent(&self, session_id: SessionId) -> u64 {
+        lock(&self.sessions).inputs_sent(session_id)
     }
 
     /// The history of the session `session_id`, in the order it was recorded, read at the call:
@@ -733,7 +849,7 @@ fn abandon(shared: &Shared) {
     if let Ok(event) = draining {
         shared.record(SessionEvent::SessionDraining(event));
     }
-    shared.end(closed.map(SessionEvent::SessionClosed), false);
+    shared.end(closed.map(SessionEvent::SessionClosed));
 }
 
 /// An end the session reads off its run: an egress, whose events it delivers, or the sink of a
@@ -832,26 +948,25 @@ impl<P: SessionPayload> LiveSession<P> {
         lock(&self.shared.pricer).price_with(&mut usage.cost, pricing)
     }
 
-    /// `send`: runs `SendInput` and forwards `envelope` to the ingress its `port` names, stamped
-    /// with the session's identity and its current run.
+    /// `send`: forwards `envelope` to the ingress its `port` names, stamped with the session's
+    /// identity and its current run, and runs `SendInput` once the ingress took it, so that
+    /// `InputSent` names only input the run took.
     ///
     /// # Errors
     ///
     /// [`InputError::Refused`] when the session is not Ready, [`InputError::UnknownIngress`] when
     /// the pipeline exposes no ingress under `port`; nothing is forwarded and no event recorded.
-    /// [`InputError::Forward`] when the ingress refused the envelope.
+    /// [`InputError::Forward`] when the ingress refused the envelope; no event is recorded.
+    /// [`InputError::Refused`] as well when the session was cancelled while the ingress took the
+    /// envelope, which the cancelled run then discards; no event is recorded.
     pub async fn send(&self, mut envelope: EventEnvelope<P>) -> Result<(), InputError<P>> {
         let ingress = self
             .ingresses
             .iter()
             .find(|ingress| ingress.name == envelope.port);
-        if ingress.is_none() && self.shared.state() == Some(SessionState::Ready) {
-            return Err(InputError::UnknownIngress(envelope.port));
-        }
-        let sent = lock(&self.shared.sessions)
-            .send_input(self.shared.session_id)
+        lock(&self.shared.sessions)
+            .admits_input(self.shared.session_id)
             .map_err(InputError::Refused)?;
-        self.shared.record(SessionEvent::InputSent(sent));
         let Some(ingress) = ingress else {
             return Err(InputError::UnknownIngress(envelope.port));
         };
@@ -866,6 +981,10 @@ impl<P: SessionPayload> LiveSession<P> {
             .send(envelope)
             .await
             .map_err(|error| InputError::Forward(Box::new(error)))?;
+        let sent = lock(&self.shared.sessions)
+            .send_input(self.shared.session_id)
+            .map_err(InputError::Refused)?;
+        self.shared.record(SessionEvent::InputSent(sent));
         if let Some(text) = input {
             lock(&self.turn).texts.push(text);
         }
@@ -931,6 +1050,11 @@ impl<P: SessionPayload> LiveSession<P> {
     /// the node's; the session stays Ready, and a generation it has not delivered yet, the next
     /// one, is delivered.
     ///
+    /// The session keeps what it needs to cut a generation until nothing of it can still arrive:
+    /// the generation ended and the playback of each of its segments ended. It keeps that for at
+    /// most 256 generations; past them it lets go of the oldest, and a late event of a generation
+    /// let go of that way is delivered after an interrupt. That is the one exception to the cut.
+    ///
     /// # Errors
     ///
     /// [`InputError::Refused`] when the session is not Ready; nothing is cut or sent and no event
@@ -941,11 +1065,7 @@ impl<P: SessionPayload> LiveSession<P> {
             .map_err(InputError::Refused)?;
         self.shared
             .record(SessionEvent::SessionInterrupted(interrupted));
-        {
-            let mut generations = lock(&self.generations);
-            let delivered: Vec<GenerationId> = generations.delivered.drain().collect();
-            generations.cut.extend(delivered);
-        }
+        lock(&self.generations).interrupt();
         for ingress in &self.ingresses {
             ingress
                 .endpoint
@@ -1066,24 +1186,8 @@ impl<P: SessionPayload> LiveSession<P> {
         if self.cancelled.load(Ordering::Acquire) {
             return None;
         }
-        {
-            let mut generations = lock(&self.generations);
-            let generation = envelope
-                .generation_id
-                .or_else(|| generation_of(&event))
-                .or_else(|| {
-                    segment_of(&event)
-                        .and_then(|segment_id| generations.segments.get(&segment_id).copied())
-                });
-            if let Some(generation_id) = generation {
-                if let SessionEvent::TextDelta(delta) = &event {
-                    generations.segments.insert(delta.segment_id, generation_id);
-                }
-                if generations.cut.contains(&generation_id) {
-                    return None;
-                }
-                generations.delivered.insert(generation_id);
-            }
+        if !lock(&self.generations).admit(envelope.generation_id, &event) {
+            return None;
         }
         match &event {
             SessionEvent::TranscriptCommitted(committed) => {
@@ -1295,10 +1399,11 @@ impl<P: SessionPayload> SessionDriver<P> {
 
     /// Drives the run to its end ([`RunController::drive`]), lets go of the run's queues and
     /// delivers how the run ended, `RunCompleted`, `RunCancelled` or `RunFailed`, after every
-    /// event its egresses still hold. A run that completed while the session drains closes the
-    /// session (`CompleteSessionClose`) once the application received what the egresses held, or
-    /// at once when it let go of its handle, and `SessionClosed` is delivered last. Answers the
-    /// run as it ended.
+    /// event its egresses still hold. A run that ends while the session drains, whether it
+    /// completed, failed or was cancelled by another holder of its requests, closes the session
+    /// (`CompleteSessionClose`) once the application received what the egresses held, or at once
+    /// when it let go of its handle, and `SessionClosed` is delivered last, after the run's end.
+    /// Answers the run as it ended.
     ///
     /// # Errors
     ///
@@ -1339,5 +1444,260 @@ impl<P: Send + 'static> fmt::Debug for SessionDriver<P> {
             .field("session_id", &self.shared.session_id)
             .field("run_id", &self.controller.run().run_id())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use inference_core::generation::{GenerationCancelled, GenerationCompleted, GenerationStarted};
+    use inference_pipeline::PipelineState;
+    use inference_text::{AudioPlayed, TextDelta};
+
+    use super::*;
+    use crate::session::SessionClosed;
+
+    /// One Planned turn-based pipeline, which every run executes.
+    struct OnePipeline(PipelineId);
+
+    impl Graph for OnePipeline {
+        fn pipeline(&self, pipeline_id: PipelineId) -> Option<GraphPipeline> {
+            (pipeline_id == self.0).then_some(GraphPipeline {
+                state: PipelineState::Planned,
+                mode: InteractionMode::TurnBased,
+            })
+        }
+
+        fn run_pipeline(&self, _: RunId) -> Option<PipelineId> {
+            Some(self.0)
+        }
+    }
+
+    /// What a live session shares with its driver once `close()` left it Draining, its run
+    /// still in flight.
+    fn draining() -> (Arc<Shared>, RunId) {
+        let graph = OnePipeline(PipelineId::generate());
+        let sessions = Arc::new(Mutex::new(Sessions::counted_in(3)));
+        let session_id = lock(&sessions)
+            .open_session(
+                &graph,
+                OpenSession {
+                    pipeline_id: graph.0,
+                    mode: InteractionMode::TurnBased,
+                },
+            )
+            .expect("opens")
+            .session_id;
+        let shared = Arc::new(Shared {
+            sessions: Arc::clone(&sessions),
+            session_id,
+            inbox: Mutex::new(Inbox::default()),
+            usage: Mutex::new(SessionUsage::default()),
+            #[cfg(feature = "cost")]
+            pricer: Mutex::new(crate::cost::Pricer::default()),
+        });
+        let run_id = RunId::generate();
+        shared.follow(run_id);
+        {
+            let mut sessions = lock(&sessions);
+            sessions
+                .attach_run(&graph, AttachRun { session_id, run_id })
+                .expect("attached");
+            sessions.mark_session_ready(session_id).expect("ready");
+            sessions.close_session(session_id).expect("drains");
+        }
+        shared.closing();
+        (shared, run_id)
+    }
+
+    /// Everything the session delivers once every egress has ended, to its last event.
+    fn after_egress(shared: &Shared) -> Vec<SessionEvent> {
+        let mut received = Vec::new();
+        loop {
+            match shared.after_egress() {
+                Poll::Ready(Some(event)) => received.push(event),
+                Poll::Ready(None) => return received,
+                Poll::Pending => panic!("the run has ended: nothing is pending"),
+            }
+        }
+    }
+
+    /// `close()`, then another holder of the run's requests cancels it: the session delivers
+    /// `RunCancelled`, then `SessionClosed` last, and is Closed.
+    #[test]
+    fn a_draining_session_whose_run_another_holder_cancelled_closes() {
+        let (shared, run_id) = draining();
+        shared.run_ended(
+            run_id,
+            RunState::Cancelled,
+            vec![SessionEvent::RunCancelled(RunCancelled { run_id })],
+        );
+        assert_eq!(
+            after_egress(&shared),
+            [
+                SessionEvent::RunCancelled(RunCancelled { run_id }),
+                SessionEvent::SessionClosed(SessionClosed {
+                    session_id: shared.session_id,
+                }),
+            ],
+            "the run's end, then SessionClosed last"
+        );
+        assert_eq!(shared.state(), Some(SessionState::Closed));
+    }
+
+    fn delta(segment_id: SegmentId, generation_id: GenerationId) -> SessionEvent {
+        SessionEvent::TextDelta(TextDelta {
+            segment_id,
+            generation_id,
+            sequence: 1,
+            text: "a".to_owned(),
+        })
+    }
+
+    /// One generation from its start to its completion, with one segment.
+    fn generation(generations: &mut Generations) -> (GenerationId, SegmentId) {
+        let (generation_id, segment_id) = (GenerationId::generate(), SegmentId::generate());
+        for event in [
+            SessionEvent::GenerationStarted(GenerationStarted {
+                generation_id,
+                run_id: RunId::generate(),
+                epoch: 1,
+            }),
+            delta(segment_id, generation_id),
+            SessionEvent::GenerationCompleted(GenerationCompleted { generation_id }),
+        ] {
+            assert!(generations.admit(None, &event));
+        }
+        (generation_id, segment_id)
+    }
+
+    /// Whether `generations` keeps anything of `generation_id`.
+    fn keeps(generations: &Generations, generation_id: GenerationId) -> bool {
+        generations.delivered.contains(&generation_id)
+            || generations.cut.contains(&generation_id)
+            || generations
+                .segments
+                .values()
+                .any(|kept| *kept == generation_id)
+    }
+
+    fn played(segment_id: SegmentId) -> SessionEvent {
+        SessionEvent::AudioPlayed(AudioPlayed { segment_id })
+    }
+
+    /// A generation's bookkeeping is released once nothing of it can still arrive: it ended and
+    /// its segment's playback ended, in either order.
+    #[test]
+    fn generation_bookkeeping_is_released_after_a_generation_ends() {
+        let mut generations = Generations::default();
+        let (first, segment) = generation(&mut generations);
+        assert!(
+            keeps(&generations, first),
+            "an ended generation whose segment is not played yet is kept"
+        );
+        assert!(generations.admit(None, &played(segment)));
+        assert!(
+            !keeps(&generations, first),
+            "an ended generation whose playback ended is released"
+        );
+        assert!(generations.kept.is_empty() && generations.ended.is_empty());
+
+        let (second, segment) = (GenerationId::generate(), SegmentId::generate());
+        assert!(generations.admit(None, &delta(segment, second)));
+        assert!(generations.admit(None, &played(segment)));
+        assert!(
+            keeps(&generations, second),
+            "a generation not ended is kept"
+        );
+        assert!(generations.admit(
+            None,
+            &SessionEvent::GenerationCompleted(GenerationCompleted {
+                generation_id: second
+            }),
+        ));
+        assert!(
+            !keeps(&generations, second),
+            "played before it ended, released at its end"
+        );
+
+        let silent = GenerationId::generate();
+        for event in [
+            SessionEvent::GenerationStarted(GenerationStarted {
+                generation_id: silent,
+                run_id: RunId::generate(),
+                epoch: 1,
+            }),
+            SessionEvent::GenerationCompleted(GenerationCompleted {
+                generation_id: silent,
+            }),
+        ] {
+            assert!(generations.admit(None, &event));
+        }
+        assert!(
+            !keeps(&generations, silent),
+            "a generation with no segment is released at its end"
+        );
+        assert!(generations.kept.is_empty());
+    }
+
+    /// A cut generation is kept, so that its late events stay cut, until nothing of it can still
+    /// arrive; then it is released.
+    #[test]
+    fn a_cut_generation_is_released_once_its_end_and_playback_were_read() {
+        let mut generations = Generations::default();
+        let (cut, segment) = (GenerationId::generate(), SegmentId::generate());
+        assert!(generations.admit(None, &delta(segment, cut)));
+        generations.interrupt();
+        assert!(!generations.admit(
+            None,
+            &SessionEvent::GenerationCancelled(GenerationCancelled { generation_id: cut }),
+        ));
+        assert!(keeps(&generations, cut), "its segment may still be played");
+        assert!(
+            !generations.admit(None, &delta(segment, cut)),
+            "a late delta of the cut generation stays cut"
+        );
+        assert!(
+            !generations.admit(None, &played(segment)),
+            "its playback is cut"
+        );
+        assert!(!keeps(&generations, cut), "then it is released");
+    }
+
+    /// Generations whose end the session never reads, as on a pipeline whose egress carries no
+    /// generation end and no playback, are kept within the backstop.
+    #[test]
+    fn generations_that_never_end_stay_within_the_backstop() {
+        let mut generations = Generations::default();
+        let first = GenerationId::generate();
+        assert!(generations.admit(None, &delta(SegmentId::generate(), first)));
+        for _ in 0..1000 {
+            let generation_id = GenerationId::generate();
+            assert!(generations.admit(None, &delta(SegmentId::generate(), generation_id)));
+        }
+        assert!(
+            generations.kept.len() <= GENERATIONS_KEPT
+                && generations.delivered.len() <= GENERATIONS_KEPT
+                && generations.segments.len() <= GENERATIONS_KEPT,
+            "{} kept, {} delivered, {} segments past the backstop of {GENERATIONS_KEPT}",
+            generations.kept.len(),
+            generations.delivered.len(),
+            generations.segments.len()
+        );
+        assert!(!keeps(&generations, first), "the oldest is let go");
+        generations.interrupt();
+        assert!(generations.cut.len() <= GENERATIONS_KEPT);
+    }
+
+    /// An interrupt still cuts the playback of a generation that completed: an ended generation's
+    /// bookkeeping outlives its last text event, since its audio is played after it.
+    #[test]
+    fn an_interrupt_cuts_the_playback_of_a_generation_that_completed() {
+        let mut generations = Generations::default();
+        let (_, segment_id) = generation(&mut generations);
+        generations.interrupt();
+        assert!(
+            !generations.admit(None, &SessionEvent::AudioPlayed(AudioPlayed { segment_id })),
+            "the completed generation's playback is cut"
+        );
     }
 }
