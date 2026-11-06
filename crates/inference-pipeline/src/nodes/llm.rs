@@ -1,6 +1,6 @@
 //! The model node of a text-only pipeline: a node of role `model` whose implementation is an
-//! `inference-llm` [`Generator`] over an `llm` model, such as a mock's, claiming `output_streaming` and
-//! `concurrent_input_output`.
+//! `inference-llm` [`Generator`] over an `llm` model, such as a mock's, claiming
+//! `output_streaming` and `concurrent_input_output`.
 //!
 //! When it starts, the node starts one `inference.stream.Generation` of the run on its generator
 //! and emits its `GenerationStarted`, on a request carrying no items and the tools it was given,
@@ -44,9 +44,9 @@
 //! segment with it. The node runs one generation per run, and only that generation's events name
 //! it: its end of input names none.
 //!
-//! The node is generic over the payload of the run's edges ([`ModelPayload`]). Given tools ([`ModelNode::with_tools`]), it has a
-//! `tool_call` output port and a `tool_result` input port, both Structured (design 581-584), and
-//! runs the tool loop of its generation:
+//! The node is generic over the payload of the run's edges ([`ModelPayload`]). Given tools
+//! ([`ModelNode::with_tools`]), it has a `tool_call` output port and a `tool_result` input port,
+//! both Structured (design 581-584), and runs the tool loop of its generation:
 //!
 //! * once the turn an input or a round of outcomes ran has delivered its segment, each `llm`
 //!   tool call it ended with becomes `inference.tools.ProposeToolCall` of the generation, of the

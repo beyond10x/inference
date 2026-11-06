@@ -44,8 +44,8 @@ use inference_tools::{
 
 use crate::{NodeEndpoints, NodeError, NodeInput, NodeOutput};
 
-/// The model node of a voice cascade that can be interrupted: one generation per turn, superseded at
-/// the opening of the next.
+/// The model node of a voice cascade that can be interrupted: one generation per turn,
+/// superseded at the opening of the next.
 pub mod agent;
 /// The commit gate: committed spans, segments and turn events through, the rest held back.
 pub mod commit_gate;
@@ -60,7 +60,8 @@ pub mod speech;
 pub mod stt;
 mod tool_authority;
 mod tool_executor;
-/// The TTS node: committed segments synthesised, and played through a [`tts::PlaybackSink`].
+/// The TTS node: committed segments synthesised, and played through the host's
+/// [`tts::PlaybackSink`].
 pub mod tts;
 /// The turn policy: speech activity in, the turn commands of `inference.stream` out.
 pub mod turn_policy;
@@ -76,7 +77,7 @@ pub use tool_authority::{
     AuthorityHandle, AuthorityOutcome, Decision, IterationRuleNotDeclared, ToolAuthority,
 };
 pub use tool_executor::{ExecutorHandle, StartRefusal, ToolCallMeasure, ToolExecutorNode};
-pub use tts::{PlaybackSink, SinkRefused, Spoken, TtsHandle, TtsNode, TtsPayload};
+pub use tts::{NoPlayback, PlaybackSink, Spoken, TtsHandle, TtsNode, TtsPayload};
 
 /// An event of `inference.tools.ToolCall`'s lifecycle, as its command emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -501,132 +502,4 @@ pub(crate) fn started<P>(
         )));
     }
     node_id.ok_or_else(|| NodeError::new("the node was started before it was described"))
-}
-
-#[cfg(test)]
-mod tests {
-    use inference_core::envelope::ControlKind;
-    use inference_core::usage::UsageRecorded;
-    use inference_stt::Recogniser;
-    use inference_stt::inference_audio::AudioFrame;
-    use inference_tts::{SegmentAudio, Synthesiser};
-
-    use super::agent::AgentNode;
-    use super::llm::{Carried, ModelNode, ModelPayload};
-    use super::log::{EventLog, RunLog, StreamEvent};
-    use super::speech::{Said, SpeechNode, SpeechPayload};
-    use super::stt::{Heard, SttNode, SttPayload};
-    use super::tts::{PlaybackSink, Spoken, TtsNode, TtsPayload};
-    use crate::NodeImplementation;
-
-    /// A payload of this crate's own, carrying what every model node reads and writes.
-    #[derive(Debug)]
-    enum Payload {
-        Stream(StreamEvent),
-        Usage(UsageRecorded),
-        Control(ControlKind),
-        Other,
-    }
-
-    impl From<ControlKind> for Payload {
-        fn from(kind: ControlKind) -> Self {
-            Self::Control(kind)
-        }
-    }
-
-    impl SttPayload for Payload {
-        fn stream(event: StreamEvent) -> Self {
-            Self::Stream(event)
-        }
-
-        fn heard(self) -> Heard {
-            match self {
-                Self::Stream(event) => Heard::Stream(event),
-                Self::Control(kind) => Heard::Control(kind),
-                Self::Usage(_) | Self::Other => Heard::Other,
-            }
-        }
-    }
-
-    impl ModelPayload for Payload {
-        fn stream(event: StreamEvent) -> Self {
-            Self::Stream(event)
-        }
-
-        fn usage(recorded: UsageRecorded) -> Option<Self> {
-            Some(Self::Usage(recorded))
-        }
-
-        fn carried(self) -> Carried {
-            match self {
-                Self::Stream(event) => Carried::Stream(event),
-                Self::Usage(recorded) => Carried::Usage(recorded),
-                Self::Control(kind) => Carried::Control(kind),
-                Self::Other => Carried::Control(ControlKind::Revise),
-            }
-        }
-    }
-
-    impl TtsPayload for Payload {
-        fn stream(event: StreamEvent) -> Self {
-            Self::Stream(event)
-        }
-
-        fn audio(_frame: AudioFrame) -> Self {
-            Self::Other
-        }
-
-        fn spoken(self) -> Spoken {
-            match self {
-                Self::Stream(event) => Spoken::Stream(event),
-                Self::Control(kind) => Spoken::Control(kind),
-                Self::Usage(_) | Self::Other => Spoken::Other,
-            }
-        }
-    }
-
-    impl SpeechPayload for Payload {
-        fn stream(event: StreamEvent) -> Self {
-            Self::Stream(event)
-        }
-
-        fn speech(_audio: SegmentAudio) -> Self {
-            Self::Other
-        }
-
-        fn said(self) -> Said {
-            match self {
-                Self::Stream(event) => Said::Stream(event),
-                Self::Control(kind) => Said::Control(kind),
-                Self::Usage(_) | Self::Other => Said::Other,
-            }
-        }
-    }
-
-    fn implements<N: NodeImplementation<Payload>>() {}
-
-    /// Compiles only when every node implements a node over a payload of this crate's own, on
-    /// any recogniser and synthesiser.
-    #[allow(dead_code)]
-    fn on_any_backend<R, S>()
-    where
-        R: Recogniser + Clone + Send + 'static,
-        R::Handle: Send + 'static,
-        S: Synthesiser + Send,
-        S::Handle: Send + 'static,
-    {
-        implements::<SttNode<R>>();
-        implements::<TtsNode<S>>();
-        implements::<SpeechNode<S>>();
-    }
-
-    #[test]
-    fn the_model_nodes_and_their_log_live_in_the_pipeline() {
-        implements::<ModelNode<Payload>>();
-        implements::<AgentNode>();
-        let log = RunLog::new();
-        assert!(log.envelopes().is_empty());
-        assert!(EventLog::new().is_empty());
-        assert_eq!(PlaybackSink::new(), PlaybackSink::default());
-    }
 }

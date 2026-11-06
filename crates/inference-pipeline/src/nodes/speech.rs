@@ -1,5 +1,6 @@
 //! The TTS node of a cascade whose playback a media sink acknowledges: a node of role `model`
-//! over any [`Synthesiser`] of `inference-tts`, a mock or a local adapter's, with two input ports and one output port, as [`SpeechPorts`] names them.
+//! over any [`Synthesiser`] of `inference-tts`, a mock or a local adapter's, with two input ports
+//! and one output port, as [`SpeechPorts`] names them.
 //!
 //! When it starts, the node starts one synthesis on its synthesiser, which runs until the end of
 //! input. On `text` it takes the output of an LLM node, as a commit gate passes it, and rebuilds
