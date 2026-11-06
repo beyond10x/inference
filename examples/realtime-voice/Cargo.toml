@@ -26,6 +26,7 @@ serde_json.workspace = true
 clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
 inference-audio-device = { path = "../../adapters/inference-audio-device" }
 inference-aws = { path = "../../adapters/inference-aws", features = ["duplex"] }
+inference-cartesia = { path = "../../adapters/inference-cartesia" }
 inference-deepgram = { path = "../../adapters/inference-deepgram", features = ["duplex"] }
 inference-deepslate = { path = "../../adapters/inference-deepslate" }
 inference-elevenlabs = { path = "../../adapters/inference-elevenlabs", features = ["duplex"] }
