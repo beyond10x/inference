@@ -1,7 +1,8 @@
 //! The usage of one recognition (`story:usage-stt`): once input has ended, `TranscriptOutput`
 //! records it as the recognition's `inference.usage.UsageRecorded`, enveloped at the next
-//! sequence of the request's stream. It measures the audio offered, samples over sample rate, and
-//! one request, so every recogniser reports both without code of its own; the local compute is
+//! sequence of the request's stream. It measures the audio, samples over sample rate (on a call
+//! marked failed the audio taken, on any other all the audio offered, taken or not), and one
+//! request, so every recogniser reports both without code of its own; the local compute is
 //! what the implementation added, `measured`, or `unknown` when it added none. The record names
 //! the adapter and the model and no run, node or session, which the node placing it fills.
 //! It is the last event of the recognition: refused while a span is not committed, and once it
@@ -189,21 +190,44 @@ fn the_audio_counted_is_the_audio_taken_at_each_frame_rate() {
 }
 
 #[test]
-fn audio_offered_and_never_taken_counts_nothing() {
+fn a_final_record_counts_audio_offered_and_never_taken() {
     let mut output = TranscriptOutput::start(&adapter(Vec::new()), request());
     output
         .offer(frame(0, 16_000, 16_000, 1))
         .expect("input has not ended");
     output.end_input().expect("input ends once");
+    assert_eq!(output.input_audio_ms(), 0, "none of it taken");
 
     let envelope = output.usage().expect("input has ended");
 
+    let record = recorded(&envelope.payload);
+    assert!(record.r#final);
     assert_eq!(
-        quantity(recorded(&envelope.payload), QuantityKind::InputAudioMs),
-        Quantity::measured(QuantityKind::InputAudioMs, 0),
-        "the backend took none of it (story:contract-usage-and-naming-drift)"
+        quantity(record, QuantityKind::InputAudioMs),
+        Quantity::measured(QuantityKind::InputAudioMs, 1_000),
+        "a final record leaves no input out (story:contract-usage-and-naming-drift)"
     );
     assert_eq!(envelope.timestamp, 0, "no sample was taken");
+}
+
+#[test]
+fn a_failed_call_counts_only_the_audio_it_took() {
+    let mut output = TranscriptOutput::start(&adapter(Vec::new()), request());
+    output
+        .offer(frame(0, 16_000, 16_000, 1))
+        .expect("input has not ended");
+    output.end_input().expect("input ends once");
+    output.mark_failed();
+
+    let envelope = output.usage().expect("a failed call is still counted");
+
+    let record = recorded(&envelope.payload);
+    assert!(!record.r#final);
+    assert_eq!(
+        quantity(record, QuantityKind::InputAudioMs),
+        Quantity::measured(QuantityKind::InputAudioMs, 0),
+        "the failed call took none of it (story:contract-usage-and-naming-drift)"
+    );
 }
 
 #[test]

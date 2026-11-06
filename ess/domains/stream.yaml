@@ -917,9 +917,9 @@ events:
   # each event below is the payload of one, named by the envelope's kind.
   # read from: docs/design/inference.md:303-318
   # UNMAPPED: design event names not declared here (names are not frozen,
-  # docs/design/inference.md:342): StructuredOutput (LLM), SynthesisStarted, AudioChunk and
-  # alignment updates (TTS), and the duplex family (docs/design/inference.md:334-337). No command
-  # here causes them yet.
+  # docs/design/inference.md:342): StructuredOutput (LLM), SynthesisStarted and alignment updates
+  # (TTS), and the duplex family (docs/design/inference.md:334-337). No command here causes them
+  # yet. AudioChunk (TTS) is declared as inference.audio.AudioChunk in audio.yaml.
 
   # Speech activity started in the audio of a stream: onset is the sample clock position of the
   # first sample of the speech. A voice activity detector, a policy node, emits it; no command of

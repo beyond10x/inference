@@ -278,8 +278,8 @@ impl DeepgramRecognition {
     }
 
     /// The seconds of audio the endpoint reported processing in its summary `Metadata`, once it
-    /// has arrived. The usage record does not carry it: its `input_audio_ms` is the audio offered,
-    /// as the contract measures it.
+    /// has arrived. The usage record does not carry it: its `input_audio_ms` is the audio
+    /// offered (on a failed call, the audio forwarded), as the contract measures it.
     pub fn provider_duration(&self) -> Option<f64> {
         self.duration
     }
@@ -308,45 +308,55 @@ impl DeepgramRecognition {
         self.failure = Some(error);
     }
 
-    /// Sends every frame offered and not yet taken, connecting at the first. A frame the
-    /// connection's thread can no longer take is dropped: that thread has stopped, and why
-    /// arrives through its own message, or as its silence once input has ended.
+    /// Sends every frame offered and not yet taken, connecting at the first. A frame is taken
+    /// only once it can be sent: the first the binding refuses fails the recognition and stays
+    /// offered with every frame after it, so a failed call's usage counts only the audio
+    /// forwarded. A frame the connection's thread can no longer take is dropped: that thread has
+    /// stopped, and why arrives through its own message, or as its silence once input has ended.
     fn forward_input(&mut self) {
-        let Ok(frames) = self.output.take_input() else {
-            return;
-        };
-        for frame in frames {
-            if self.failure.is_some() {
+        while self.failure.is_none() {
+            let Some(format) = self.output.next_offered().map(|frame| frame.format) else {
+                return;
+            };
+            if let Err(error) = self.prepare(format) {
+                self.fail(error);
                 return;
             }
-            if let Err(error) = self.forward(frame) {
-                self.fail(error);
-            }
+            let Ok(Some(frame)) = self.output.take_next() else {
+                return;
+            };
+            self.forward(frame);
         }
     }
 
-    fn forward(&mut self, frame: AudioFrame) -> Result<(), DeepgramError> {
+    /// Readies the connection for a frame in `format`: connects at the first frame, and refuses
+    /// a frame in another format than the first's.
+    fn prepare(&mut self, format: AudioFormat) -> Result<(), DeepgramError> {
         match self.format {
             None => {
-                let url = request_url(&self.shared, frame.format)?;
+                let url = request_url(&self.shared, format)?;
                 self.worker = Some(spawn(Arc::clone(&self.shared), url)?);
-                self.format = Some(frame.format);
+                self.format = Some(format);
             }
-            Some(format) if format != frame.format => {
+            Some(first) if first != format => {
                 return Err(DeepgramError::UnsupportedAudio(format!(
-                    "a frame in {:?} after frames in {:?}; one recognition takes one format",
-                    frame.format, format
+                    "a frame in {format:?} after frames in {first:?}; one recognition takes one \
+                     format"
                 )));
             }
             Some(_) => {}
         }
+        Ok(())
+    }
+
+    /// Sends `frame`, taken and in the connection's format; an empty frame is not sent.
+    fn forward(&mut self, frame: AudioFrame) {
         if frame.data.is_empty() {
-            return Ok(());
+            return;
         }
         if let Some(worker) = self.worker.as_ref() {
             let _ = worker.commands.send(Command::Audio(frame.data));
         }
-        Ok(())
     }
 
     /// The next thing the connection's thread said: without waiting before the end of input,
@@ -998,7 +1008,7 @@ mod tests {
         });
         let frame = inference_testkit::stt::frames(1).remove(0);
         assert!(matches!(
-            recognition.forward(frame),
+            recognition.prepare(frame.format),
             Err(DeepgramError::UnsupportedAudio(_))
         ));
     }
