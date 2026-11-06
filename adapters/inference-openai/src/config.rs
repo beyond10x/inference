@@ -21,21 +21,41 @@ pub const DEFAULT_URL: &str = "wss://api.openai.com/v1/realtime";
 /// without a deadline.
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Where a session connects: the WebSocket URL, the model id and the read timeout.
+/// How long the opening handshake may take in all: the TCP connection, TLS for `wss://` and the
+/// HTTP upgrade together. A handshake that has not completed by then fails as
+/// [`RealtimeError::Connect`](crate::RealtimeError::Connect) without a status. A timeout too
+/// large to add to the current instant, such as `Duration::MAX`, is no bound.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long one write of a client event or a ping may take, from the call to the message being
+/// handed to the socket. A peer that stops draining the connection fails the write as
+/// [`RealtimeError::Transport`](crate::RealtimeError::Transport) once it passes; the connection
+/// may then hold part of the message, so the session is not written to again. A timeout too large
+/// to add to the current instant, such as `Duration::MAX`, is no bound.
+pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Where a session connects: the WebSocket URL, the model id, the read timeout, the deadline of
+/// the opening handshake and the deadline of each write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     pub url: String,
     pub model: String,
     pub read_timeout: Duration,
+    /// The deadline of the whole opening handshake ([`DEFAULT_CONNECT_TIMEOUT`]).
+    pub connect_timeout: Duration,
+    /// The deadline of each write ([`DEFAULT_WRITE_TIMEOUT`]).
+    pub write_timeout: Duration,
 }
 
 impl Endpoint {
-    /// The hosted endpoint for `model`, with the default read timeout.
+    /// The hosted endpoint for `model`, with the default read, connect and write timeouts.
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             url: DEFAULT_URL.to_owned(),
             model: model.into(),
             read_timeout: DEFAULT_READ_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
         }
     }
 
@@ -49,7 +69,20 @@ impl Endpoint {
         Self::new(model)
     }
 
-    /// This endpoint at another URL, such as a local test server.
+    /// This endpoint with another deadline for the opening handshake.
+    pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
+    }
+
+    /// This endpoint with another deadline for each write.
+    pub fn with_write_timeout(mut self, write_timeout: Duration) -> Self {
+        self.write_timeout = write_timeout;
+        self
+    }
+
+    /// This endpoint at another URL, such as a local test server. The URL is checked when a
+    /// session connects: `wss://`, or `ws://` only to a loopback host.
     pub fn with_url(mut self, url: impl Into<String>) -> Self {
         self.url = url.into();
         self
