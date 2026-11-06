@@ -65,10 +65,10 @@
 //! [`LocalCascade::nodes`] makes the implementations of one run's nodes, generic over the audio
 //! host the speaker is opened on, and the handles a caller reads them through. Through them the
 //! wiring records, per turn, the time from the input gate passing the turn's completion to the
-//! sink handing the first frame after it to the speaker, the design's "committed input to first
-//! playable audio" (1022): [`CascadeHandles::committed_input_to_first_audio`]; and, per
-//! interruption, the time from the sink taking the `TurnOpened` to the speaker's stop returning,
-//! the design's "interruption to playback stop" (1023):
+//! sink handing the first frame of the turn's own answer to the speaker, the design's "committed
+//! input to first playable audio" (1022): [`CascadeHandles::committed_input_to_first_audio`]; and,
+//! per interruption, the time from the sink taking the `TurnOpened` to the speaker's stop
+//! returning, the design's "interruption to playback stop" (1023):
 //! [`CascadeHandles::interruption_to_playback_stop`]. Each is a value recorded, not a target
 //! asserted. [`LocalCascade::nodes_with`] makes the same nodes over another synthesiser made of
 //! the mock, such as one scripted to emit late.
@@ -702,8 +702,8 @@ pub struct CascadeHandles {
 }
 
 /// The "committed input to first playable audio" of one turn: the time from the input gate
-/// passing the turn's completion to the sink handing the first frame after it that no earlier
-/// turn took to the speaker, `None` while no such frame followed.
+/// passing the turn's completion to the sink handing the first frame of the turn's own answer to
+/// the speaker, `None` while none of its answer's segments reached the speaker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnMeasure {
     pub turn_id: TurnId,
@@ -722,7 +722,22 @@ impl CascadeHandles {
     /// The measure of every turn whose completion the input gate passed, in the order passed.
     #[must_use]
     pub fn committed_input_to_first_audio(&self) -> Vec<TurnMeasure> {
-        first_audio(&self.input_gate.turns_passed(), &self.sink.first_frames())
+        let turn_of = self
+            .llm
+            .generations()
+            .into_iter()
+            .flat_map(|generation| {
+                generation
+                    .segments
+                    .into_iter()
+                    .map(move |segment| (segment.segment_id(), generation.turn_id))
+            })
+            .collect();
+        first_audio(
+            &self.input_gate.turns_passed(),
+            &self.sink.first_frames(),
+            &turn_of,
+        )
     }
 
     /// The measure of every interruption, in the order the turns opened.
@@ -739,25 +754,25 @@ impl CascadeHandles {
     }
 }
 
-/// Pairs each passed turn, in the order passed, with the first frame at or after its passing that
-/// no earlier turn took, so two turns passed before any audio take two frames, not one.
-fn first_audio(passed: &[PassedTurn], first_frames: &[FirstFrame]) -> Vec<TurnMeasure> {
-    let mut taken = 0;
+/// Pairs each passed turn with the earliest first frame of a segment of its own answer, the turn
+/// each segment answers read from `turn_of`. A turn none of whose segments reached the speaker,
+/// such as one superseded before any of its audio played, measures `None` and takes no other
+/// turn's frame.
+fn first_audio(
+    passed: &[PassedTurn],
+    first_frames: &[FirstFrame],
+    turn_of: &HashMap<SegmentId, TurnId>,
+) -> Vec<TurnMeasure> {
     passed
         .iter()
-        .map(|passed| {
-            let found = first_frames
+        .map(|passed| TurnMeasure {
+            turn_id: passed.turn_id,
+            first_audio: first_frames
                 .iter()
-                .enumerate()
-                .skip(taken)
-                .find(|(_, first)| first.at >= passed.at);
-            TurnMeasure {
-                turn_id: passed.turn_id,
-                first_audio: found.map(|(index, first)| {
-                    taken = index + 1;
-                    first.at.duration_since(passed.at)
-                }),
-            }
+                .filter(|first| turn_of.get(&first.segment_id) == Some(&passed.turn_id))
+                .map(|first| first.at)
+                .min()
+                .map(|at| at.saturating_duration_since(passed.at)),
         })
         .collect()
 }
@@ -923,6 +938,7 @@ impl LocalCascade {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
     use inference_audio_device::acknowledging::FirstFrame;
@@ -942,65 +958,68 @@ mod tests {
     }
 
     #[test]
-    fn two_turns_committed_before_any_audio_take_two_frames() {
+    fn each_turn_measures_the_first_frame_of_its_own_answer() {
         let start = Instant::now();
         let at = |ms| start + Duration::from_millis(ms);
-        let (first, second) = (TurnId::generate(), TurnId::generate());
+        let (superseded, answered, later) =
+            (TurnId::generate(), TurnId::generate(), TurnId::generate());
         let passed = [
             PassedTurn {
-                turn_id: first,
+                turn_id: superseded,
                 at: at(0),
             },
             PassedTurn {
-                turn_id: second,
+                turn_id: answered,
                 at: at(10),
             },
+            PassedTurn {
+                turn_id: later,
+                at: at(500),
+            },
         ];
-        let frame = |ms| FirstFrame {
-            segment_id: SegmentId::generate(),
+        let segments: [SegmentId; 4] = std::array::from_fn(|_| SegmentId::generate());
+        let turn_of = HashMap::from([
+            (segments[0], superseded),
+            (segments[1], answered),
+            (segments[2], answered),
+            (segments[3], later),
+        ]);
+        let frame = |segment: usize, ms| FirstFrame {
+            segment_id: segments[segment],
             at: at(ms),
         };
+        let unknown = FirstFrame {
+            segment_id: SegmentId::generate(),
+            at: at(20),
+        };
         assert_eq!(
-            first_audio(&passed, &[frame(100), frame(250)]),
+            first_audio(
+                &passed,
+                &[unknown, frame(1, 100), frame(2, 180), frame(3, 650)],
+                &turn_of
+            ),
             vec![
                 TurnMeasure {
-                    turn_id: first,
-                    first_audio: Some(Duration::from_millis(100)),
-                },
-                TurnMeasure {
-                    turn_id: second,
-                    first_audio: Some(Duration::from_millis(240)),
-                },
-            ],
-            "each turn is paired with the first frame after it that no earlier turn took"
-        );
-        assert_eq!(
-            first_audio(&passed, &[frame(100)]),
-            vec![
-                TurnMeasure {
-                    turn_id: first,
-                    first_audio: Some(Duration::from_millis(100)),
-                },
-                TurnMeasure {
-                    turn_id: second,
+                    turn_id: superseded,
                     first_audio: None,
                 },
+                TurnMeasure {
+                    turn_id: answered,
+                    first_audio: Some(Duration::from_millis(90)),
+                },
+                TurnMeasure {
+                    turn_id: later,
+                    first_audio: Some(Duration::from_millis(150)),
+                },
             ],
-            "a turn whose frame an earlier turn took has none yet"
+            "the first turn, superseded before its segment played, takes no frame; the second \
+             takes its own answer's earliest frame, not its second segment's; a frame of no \
+             known answer is nobody's"
         );
         assert_eq!(
-            first_audio(&passed, &[frame(5), frame(20)]),
-            vec![
-                TurnMeasure {
-                    turn_id: first,
-                    first_audio: Some(Duration::from_millis(5)),
-                },
-                TurnMeasure {
-                    turn_id: second,
-                    first_audio: Some(Duration::from_millis(10)),
-                },
-            ],
-            "a frame before a turn's commit is never that turn's"
+            first_audio(&passed[..2], &[frame(2, 180), frame(1, 100)], &turn_of)[1].first_audio,
+            Some(Duration::from_millis(90)),
+            "the earliest of the turn's frames counts, in whatever order the sink recorded them"
         );
     }
 
