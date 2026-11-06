@@ -121,3 +121,57 @@ fn a_refusal_is_delivered_as_one_session_event_naming_its_generation_and_no_text
         );
     });
 }
+
+/// The refusal is the reply to the user turn it answers: the history holds the turn and, after
+/// it, the refusal with its text, as `llm`'s conversation keeps the refusal item.
+#[test]
+fn a_delivered_refusal_joins_the_history_after_the_turn_it_answers() {
+    within_deadline(|| {
+        let generator = generator(Vec::<String>::new()).refusing(REFUSAL);
+        let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
+        let sessions = LiveSessions::new();
+        let (mut session, driver) = block_on(sessions.open(
+            &declaration,
+            &planned,
+            InteractionMode::TurnBased,
+            implement(&generator),
+        ))
+        .expect("a session opens over a planned pipeline of its mode");
+        let session_id = session.session_id();
+        let run_id = session.run_id();
+        let drive = thread::spawn(move || block_on(driver.drive()));
+
+        let mut application = Application::new(run_id);
+        block_on(session.send(application.text("say something forbidden")))
+            .expect("a Ready session takes input");
+        block_on(session.commit_input()).expect("a Ready session takes a commit");
+        block_on(session.close()).expect("a Ready session drains");
+        while block_on(session.receive()).is_some() {}
+        let run = drive
+            .join()
+            .expect("the driver does not panic")
+            .expect("the run ends");
+        assert_eq!(run.state(), RunState::Completed);
+
+        let history: Vec<_> = sessions
+            .history(session_id)
+            .iter()
+            .map(|entry| {
+                (
+                    entry.position(),
+                    entry.kind().as_str(),
+                    entry.text().to_owned(),
+                    entry.run_id(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            history,
+            [
+                (1, "user_turn", "say something forbidden".to_owned(), run_id),
+                (2, "assistant_refusal", REFUSAL.to_owned(), run_id),
+            ],
+            "the refusal is recorded after the turn it answers, with its text"
+        );
+    });
+}

@@ -3,7 +3,8 @@
 //!
 //! Conversation state is kept apart from model inference state and media state
 //! (`docs/design/inference.md` 735-741): an entry is one committed fact the session accepted or
-//! delivered, the committed input text of a user turn, the text of a committed output segment or
+//! delivered, the committed input text of a user turn, the text of a committed output segment, the
+//! text of a refusal the model gave instead of an answer or
 //! the outcome of a tool call, and never a hypothesis, a tentative segment, a delta or audio. Each
 //! entry names the run the session held when it was recorded and its position in the session,
 //! from 1, and it lives as long as the session row does, past the run that produced it, so that
@@ -33,13 +34,20 @@ pub enum HistoryKind {
     UserTurn,
     /// The text of one committed output segment.
     AssistantSegment,
+    /// The text of one refusal the model gave instead of an answer, which makes no segment.
+    AssistantRefusal,
     /// The outcome of one tool call.
     ToolResult,
 }
 
 impl HistoryKind {
     /// Every kind, in the order `ess/domains/session.yaml` lists them.
-    pub const ALL: [Self; 3] = [Self::UserTurn, Self::AssistantSegment, Self::ToolResult];
+    pub const ALL: [Self; 4] = [
+        Self::UserTurn,
+        Self::AssistantSegment,
+        Self::AssistantRefusal,
+        Self::ToolResult,
+    ];
 
     /// The kind as ESS writes it.
     #[must_use]
@@ -47,6 +55,7 @@ impl HistoryKind {
         match self {
             Self::UserTurn => "user_turn",
             Self::AssistantSegment => "assistant_segment",
+            Self::AssistantRefusal => "assistant_refusal",
             Self::ToolResult => "tool_result",
         }
     }
