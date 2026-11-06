@@ -149,7 +149,7 @@ fn a_recognition_of_one_and_a_half_seconds_records_its_audio_and_one_request() {
 }
 
 #[test]
-fn the_audio_counted_is_the_audio_offered_at_each_frame_rate() {
+fn the_audio_counted_is_the_audio_taken_at_each_frame_rate() {
     let mut output = TranscriptOutput::start(&adapter(Vec::new()), request());
     output
         .offer(frame(0, 8_000, 8_000, 2))
@@ -162,20 +162,47 @@ fn the_audio_counted_is_the_audio_offered_at_each_frame_rate() {
         .expect("input has not ended");
     assert_eq!(
         output.input_audio_ms(),
+        0,
+        "offered, not taken (story:contract-usage-and-naming-drift)"
+    );
+    output.end_input().expect("input ends once");
+    output.take_input().expect("input has ended");
+    assert_eq!(
+        output.input_audio_ms(),
         1_020,
         "1 s on two channels, 10 ms and 10 ms"
     );
-    output.end_input().expect("input ends once");
 
     let envelope = output
         .usage()
-        .expect("input has ended, taken or not: the audio offered is counted");
+        .expect("input has ended: the audio taken is counted");
 
     assert_eq!(
         quantity(recorded(&envelope.payload), QuantityKind::InputAudioMs),
         Quantity::measured(QuantityKind::InputAudioMs, 1_020)
     );
     assert_eq!(envelope.sequence, 1, "the first event of the stream");
+    assert_eq!(
+        envelope.timestamp, 8_601,
+        "past the last sample taken (story:contract-usage-and-naming-drift)"
+    );
+}
+
+#[test]
+fn audio_offered_and_never_taken_counts_nothing() {
+    let mut output = TranscriptOutput::start(&adapter(Vec::new()), request());
+    output
+        .offer(frame(0, 16_000, 16_000, 1))
+        .expect("input has not ended");
+    output.end_input().expect("input ends once");
+
+    let envelope = output.usage().expect("input has ended");
+
+    assert_eq!(
+        quantity(recorded(&envelope.payload), QuantityKind::InputAudioMs),
+        Quantity::measured(QuantityKind::InputAudioMs, 0),
+        "the backend took none of it (story:contract-usage-and-naming-drift)"
+    );
     assert_eq!(envelope.timestamp, 0, "no sample was taken");
 }
 
@@ -329,6 +356,9 @@ fn a_failed_backend_call_records_what_was_measured_with_counts_not_final() {
         .offer(frame(0, 16_000, 16_000, 1))
         .expect("input has not ended");
     output.end_input().expect("input ends once");
+    output
+        .take_input()
+        .expect("the call took its audio before it failed (story:contract-usage-and-naming-drift)");
     output.add_local_compute(Duration::from_millis(12));
     assert!(!output.failed());
     output.mark_failed();
@@ -359,6 +389,9 @@ fn a_failed_backend_call_is_recorded_with_a_span_not_committed_and_ends_the_reco
         .offer(frame(0, 16_000, 16_000, 1))
         .expect("input has not ended");
     output.end_input().expect("input ends once");
+    output
+        .take_input()
+        .expect("the call took its audio before it failed (story:contract-usage-and-naming-drift)");
     let open = output.hypothesis("cut".to_owned()).expect("a span");
     let open = open.payload.span_id().expect("a span event");
     assert_eq!(
