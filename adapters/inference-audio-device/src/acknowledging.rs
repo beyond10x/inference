@@ -76,6 +76,12 @@
 //! [`AcknowledgingHandle`] reads what the sink has done: the frames it pushed, the first frame of
 //! each segment handed to the speaker and when, each receipt it sent, each interruption and each
 //! stale frame it dropped.
+//!
+//! The sink plays through a [`Playout`]: [`AcknowledgingSink::new`] through a [`Speaker`],
+//! [`AcknowledgingSink::over`] through any other. [`AcknowledgingSink::cutting`] off, the sink
+//! takes each `TurnOpened` and acts on none: it stops nothing, makes no generation stale and
+//! records no interruption. [`AcknowledgingSink::on_interruption`] is called with each
+//! interruption the sink records.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -86,7 +92,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use inference_audio::SampleClockPosition;
+use inference_audio::{AudioFrame, SampleClockPosition};
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
@@ -94,7 +100,71 @@ use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImpleme
 use inference_tts::inference_text::{SegmentId, TurnId};
 use inference_tts::{PlaybackReceipt, SegmentAudio};
 
-use crate::playout::{PushError, Speaker};
+use crate::playout::{PlayoutStats, PushError, Speaker};
+
+/// What the sink plays through: the [`Speaker`] methods its exchange calls, with their
+/// signatures and meaning.
+pub trait Playout: Send {
+    /// Queues `frame` if there is room for it now.
+    ///
+    /// # Errors
+    ///
+    /// [`PushError`]; nothing of the frame is queued.
+    fn try_push(&self, frame: &AudioFrame) -> Result<(), PushError>;
+
+    /// Marks the end of the audio pushed so far.
+    fn finish(&self);
+
+    /// Clears every queued sample and answers the played position reached, or `None` when no
+    /// frame was pushed since the last stop.
+    fn stop(&self) -> Option<SampleClockPosition>;
+
+    /// The position, on the frames' clock, of the first sample not yet handed out; `None` when
+    /// no frame was pushed since the last stop.
+    fn played(&self) -> Option<SampleClockPosition>;
+
+    /// How many samples are queued and not yet handed out.
+    fn queued(&self) -> usize;
+
+    /// The underruns and stream errors of the device played to; none by default, for a playout
+    /// with no device.
+    fn stats(&self) -> PlayoutStats {
+        PlayoutStats {
+            underruns: 0,
+            stream_errors: 0,
+            last_error: None,
+        }
+    }
+}
+
+impl Playout for Speaker {
+    fn try_push(&self, frame: &AudioFrame) -> Result<(), PushError> {
+        Self::try_push(self, frame)
+    }
+
+    fn finish(&self) {
+        Self::finish(self);
+    }
+
+    fn stop(&self) -> Option<SampleClockPosition> {
+        Self::stop(self)
+    }
+
+    fn played(&self) -> Option<SampleClockPosition> {
+        Self::played(self)
+    }
+
+    fn queued(&self) -> usize {
+        Self::queued(self)
+    }
+
+    fn stats(&self) -> PlayoutStats {
+        Self::stats(self)
+    }
+}
+
+/// What the sink calls with each interruption it records.
+type OnInterruption = Box<dyn Fn(&Interruption) + Send>;
 
 /// The `kind` of the envelope carrying a receipt: the command the receiver runs with it.
 pub const ACKNOWLEDGE_PLAYBACK: &str = "inference.stream.AcknowledgePlayback";
@@ -359,7 +429,7 @@ struct Playing<P> {
     port: String,
     stream_id: StreamId,
     sequence: i64,
-    speaker: Speaker,
+    speaker: Box<dyn Playout>,
     input: Box<dyn InputEndpoint<P>>,
     /// The edge at the turns port, if the sink was given one, until it ended.
     turns: Option<Box<dyn InputEndpoint<P>>>,
@@ -392,6 +462,9 @@ struct Playing<P> {
     errors_at_start: u64,
     /// The played position the end of input last saw move, and since when it stayed there.
     watch: Option<(Option<SampleClockPosition>, Instant)>,
+    /// Whether the opening of a turn cuts.
+    cutting: bool,
+    on_interruption: Option<OnInterruption>,
 }
 
 impl<P: PlaybackPayload> Playing<P> {
@@ -439,6 +512,15 @@ impl<P: PlaybackPayload> Playing<P> {
                 return sent.map_err(|refused| refused.to_string());
             }
             thread::park_timeout(POLL);
+        }
+    }
+
+    /// Records `interruption` and calls the sink's interruption callback with it.
+    fn interrupted(&self, interruption: Interruption) {
+        self.shared
+            .update(|state| state.interruptions.push(interruption));
+        if let Some(on_interruption) = &self.on_interruption {
+            on_interruption(&interruption);
         }
     }
 
@@ -632,6 +714,9 @@ impl<P: PlaybackPayload> Playing<P> {
     /// The opening of the turn `turn_id`: every generation that began before it is stale; audio
     /// still to play is stopped at once and its segments forgotten.
     fn turn_opened(&mut self, turn_id: TurnId) {
+        if !self.cutting {
+            return;
+        }
         let at = Instant::now();
         self.opened += 1;
         self.stale.extend(self.seen.iter().copied());
@@ -660,15 +745,13 @@ impl<P: PlaybackPayload> Playing<P> {
             && self.stale.contains(&cut.generation_id)
         {
             self.awaiting = None;
-            self.shared.update(|state| {
-                state.interruptions.push(Interruption {
-                    turn_id,
-                    at: cut.at,
-                    stop: cut.stop,
-                    cleared: cut.cleared,
-                    position: cut.position,
-                    played_after: cut.played_after,
-                });
+            self.interrupted(Interruption {
+                turn_id,
+                at: cut.at,
+                stop: cut.stop,
+                cleared: cut.cleared,
+                position: cut.position,
+                played_after: cut.played_after,
             });
             return;
         }
@@ -691,15 +774,13 @@ impl<P: PlaybackPayload> Playing<P> {
         let played_after = self.speaker.played();
         self.mark_heard(position);
         self.forget_held();
-        self.shared.update(|state| {
-            state.interruptions.push(Interruption {
-                turn_id,
-                at,
-                stop,
-                cleared,
-                position,
-                played_after,
-            });
+        self.interrupted(Interruption {
+            turn_id,
+            at,
+            stop,
+            cleared,
+            position,
+            played_after,
         });
     }
 
@@ -737,8 +818,7 @@ impl<P: PlaybackPayload> Playing<P> {
             });
         }
         if by_turn && let Some(interruption) = self.awaiting.take() {
-            self.shared
-                .update(|state| state.interruptions.push(interruption));
+            self.interrupted(interruption);
         }
     }
 
@@ -912,7 +992,9 @@ pub struct AcknowledgingSink {
     turns: Option<PortId>,
     patience: Duration,
     node_id: Option<NodeId>,
-    speaker: Option<Speaker>,
+    speaker: Option<Box<dyn Playout>>,
+    cutting: bool,
+    on_interruption: Option<OnInterruption>,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
 }
@@ -922,7 +1004,8 @@ impl fmt::Debug for AcknowledgingSink {
         f.debug_struct("AcknowledgingSink")
             .field("run_id", &self.run_id)
             .field("node_id", &self.node_id)
-            .field("speaker", &self.speaker)
+            .field("playout_unused", &self.speaker.is_some())
+            .field("cutting", &self.cutting)
             .field("shared", &self.shared)
             .finish_non_exhaustive()
     }
@@ -933,15 +1016,43 @@ impl AcknowledgingSink {
     /// ended.
     #[must_use]
     pub fn new(run_id: RunId, speaker: Speaker) -> Self {
+        Self::over(run_id, Box::new(speaker))
+    }
+
+    /// The same sink of the run `run_id` playing through `playout`, which it owns and drops once
+    /// it ended.
+    #[must_use]
+    pub fn over(run_id: RunId, playout: Box<dyn Playout>) -> Self {
         Self {
             run_id,
             turns: None,
             patience: PLAYBACK_PATIENCE,
             node_id: None,
-            speaker: Some(speaker),
+            speaker: Some(playout),
+            cutting: true,
+            on_interruption: None,
             shared: Arc::default(),
             thread: None,
         }
+    }
+
+    /// The same sink cutting at the opening of a turn when `cutting`, as by default; when not,
+    /// it takes each `TurnOpened` and acts on none: it stops nothing, makes no generation stale
+    /// and records no interruption.
+    #[must_use]
+    pub const fn cutting(mut self, cutting: bool) -> Self {
+        self.cutting = cutting;
+        self
+    }
+
+    /// The same sink calling `on_interruption` with each interruption it records.
+    #[must_use]
+    pub fn on_interruption(
+        mut self,
+        on_interruption: impl Fn(&Interruption) + Send + 'static,
+    ) -> Self {
+        self.on_interruption = Some(Box::new(on_interruption));
+        self
     }
 
     /// The same sink given a turns port, `turns`: an edge arriving there carries the turn
@@ -1114,6 +1225,8 @@ impl<P: PlaybackPayload> NodeImplementation<P> for AcknowledgingSink {
                 patience: self.patience,
                 errors_at_start,
                 watch: None,
+                cutting: self.cutting,
+                on_interruption: self.on_interruption.take(),
             };
             let done = Done(Arc::clone(&self.shared));
             self.thread = Some(thread::spawn(move || {
