@@ -1,12 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [0.25.0] — 2026-11-07
 
 ### Breaking
 
-- `inference-pipeline`: the tool authority reads `format`, `title` and `description` as
-  annotations, which must be strings, and validates `minimum` and `maximum`, refusing a number
-  outside the bound as `schema_invalid`.
+- `inference-pipeline`: the tool authority admits `format` as an annotation and validates
+  `minimum` and `maximum`, refusing a number outside the bound as `schema_invalid`; an annotation
+  in a form other than JSON Schema's fails preparation (`title`, `description`, `format`,
+  `$schema`, `$id` and `$comment` must be strings, `examples` an array).
 - `inference-pipeline`: `PortTraits::of(Modality)` gives each modality's default traits, and
   `PipelineBuilder::input_port` and `output_port` use them; `input` and `output` keep explicit
   traits.
@@ -28,6 +29,10 @@
 
 - The hosted adapters build the auth header over the zeroizing key buffer, so the header holds no
   other copy of the key, and each crate's documentation names every remaining copy.
+
+### Changed
+
+- The CI and the testkit's `ess-conformance` and `ess-primitives` move to `ess` 0.90.0.
 
 ## [0.24.0] — 2026-11-07
 
