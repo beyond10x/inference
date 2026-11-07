@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `inference`: `Recipe` with the five built-ins `chat`, `transcribe`, `speak`, `voice_cascade` and
+  `native_voice`; `Recipe::declaration`, `Recipe::declare_into` over a caller's declaration,
+  catalog and profile, and `Recipe::instantiate` over a stack, which refuses an unbound role with
+  `Error::RoleUnbound` and a denied locality with `Error::ProfileDenies`; application recipes
+  through `Recipe::custom`, `Recipe::role`, `Recipe::register` and `Recipe::named`;
+  `Recipe::exposure_capacity`, `EXPOSURE_CAPACITY` (64) and `MAX_TOOL_ITERATIONS` (4).
+- `ess/domains/sdk.yaml`: `inference.sdk.RegisterRecipe` (`registered`, `name-taken`) and
+  `inference.sdk.InstantiateRecipe` (`instantiated`, `role-unbound`, `profile-denies`), answered
+  by the testkit conformance target.
+
 ## [0.25.0] — 2026-11-07
 
 ### Breaking
