@@ -179,7 +179,7 @@ fn one_turn(
     implement: impl FnMut(RunId, &Node) -> Box<dyn NodeImplementation<PipelinePayload>>,
 ) -> Turned {
     let sessions = LiveSessions::new();
-    let (mut session, driver) =
+    let (session, driver) =
         block_on(sessions.open(declaration, planned, InteractionMode::TurnBased, implement))
             .expect("a session opens");
     let run_id = session.run_id();

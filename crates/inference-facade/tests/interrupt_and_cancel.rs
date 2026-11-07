@@ -10,16 +10,20 @@
 
 mod text;
 
-use std::future;
+use std::future::{self, Future};
 use std::num::NonZeroUsize;
+use std::pin::pin;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::model::Capability;
 use inference_facade::events::SessionEvent;
-use inference_facade::live::LiveSessions;
+use inference_facade::live::{LiveSession, LiveSessions};
 use inference_facade::session::{
     SessionClosed, SessionInterrupted, SessionMoveError, SessionState, SessionStateConflict,
 };
@@ -223,7 +227,7 @@ fn after_an_interrupt_nothing_of_the_cut_generation_is_delivered_and_the_next_in
     );
     let controls = Arc::new(Mutex::new(Vec::new()));
     let sessions = LiveSessions::new();
-    let (mut session, driver) = {
+    let (session, driver) = {
         let controls = Arc::clone(&controls);
         let generator = generator.clone();
         block_on(sessions.open(
@@ -330,7 +334,7 @@ fn cancelling_a_ready_session_closes_it_without_a_drain_with_the_run_cancelled_a
     let generator = generator(long_reply());
     let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,
@@ -400,7 +404,7 @@ fn cancelling_a_draining_session_cuts_a_drain_that_has_not_finished() {
         NonZeroUsize::new(2).expect("2"),
     );
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,
@@ -561,7 +565,7 @@ fn an_interrupt_cuts_every_event_of_a_segment_of_the_cut_generation_and_nothing_
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = echo_planned(&generator);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,
@@ -632,5 +636,167 @@ fn an_interrupt_cuts_every_event_of_a_segment_of_the_cut_generation_and_nothing_
             (HistoryKind::AssistantSegment, "unnamed".to_owned()),
             (HistoryKind::AssistantSegment, "answered".to_owned()),
         ]
+    );
+}
+
+/// A node that reads nothing from its input until `gate` opens, then records what each input
+/// envelope carries, in order, until the end of input, which it passes on.
+struct HeldIngressNode {
+    gate: Option<mpsc::Receiver<()>>,
+    taken: Arc<Mutex<Vec<String>>>,
+    exchange: Option<JoinHandle<()>>,
+}
+
+impl NodeImplementation<PipelinePayload> for HeldIngressNode {
+    fn describe(&mut self, _: &Node) -> NodeFuture<'_, ()> {
+        Box::pin(future::ready(()))
+    }
+
+    fn prepare(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        Box::pin(future::ready(Ok(())))
+    }
+
+    fn start(
+        &mut self,
+        endpoints: NodeEndpoints<PipelinePayload>,
+    ) -> NodeFuture<'_, Result<(), NodeError>> {
+        let NodeEndpoints { inputs, outputs } = endpoints;
+        let (Some(mut input), Some(output), Some(gate)) = (
+            inputs.into_iter().next(),
+            outputs.into_iter().next(),
+            self.gate.take(),
+        ) else {
+            return Box::pin(future::ready(Err(NodeError::new(
+                "one input, one output and a gate",
+            ))));
+        };
+        let taken = Arc::clone(&self.taken);
+        self.exchange = Some(thread::spawn(move || {
+            let _ = gate.recv();
+            while let Some(envelope) = block_on(input.endpoint.recv()) {
+                let what = match &envelope.payload {
+                    PipelinePayload::Stream(StreamEvent::TranscriptCommitted(committed)) => {
+                        committed.text.clone()
+                    }
+                    PipelinePayload::Control(kind) => kind.as_str().to_owned(),
+                    _ => continue,
+                };
+                taken.lock().expect("the record").push(what);
+                if matches!(
+                    envelope.payload,
+                    PipelinePayload::Control(ControlKind::Stop)
+                ) {
+                    let _ = block_on(output.endpoint.send(envelope));
+                    return;
+                }
+            }
+        }));
+        Box::pin(future::ready(Ok(())))
+    }
+
+    fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        if let Some(exchange) = self.exchange.take() {
+            exchange.join().expect("the node does not panic");
+        }
+        Box::pin(future::ready(Ok(())))
+    }
+
+    fn cancel(&mut self) -> NodeFuture<'_, ()> {
+        Box::pin(future::ready(()))
+    }
+
+    fn stop(&mut self) -> NodeFuture<'_, ()> {
+        drop(self.exchange.take());
+        Box::pin(future::ready(()))
+    }
+}
+
+/// The events the session holds ready now, received without waiting.
+fn readable(session: &LiveSession<PipelinePayload>) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+    loop {
+        let mut receive = pin!(session.receive());
+        match receive
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(Some(event)) => events.push(event),
+            Poll::Ready(None) | Poll::Pending => return events,
+        }
+    }
+}
+
+/// `SessionInterrupted` is recorded only once the `cancel` is in every ingress: while an ingress
+/// is full and its node reads nothing, the interrupt waits and no `SessionInterrupted` is
+/// readable; once the node reads, the interrupt returns and the `cancel` follows the inputs sent
+/// before it.
+#[test]
+fn session_interrupted_is_recorded_only_after_the_cancel_is_in_every_ingress() {
+    let generator = generator(long_reply());
+    let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
+    let taken = Arc::new(Mutex::new(Vec::new()));
+    let (open_gate, gate) = mpsc::channel();
+    let mut gate = Some(gate);
+    let sessions = LiveSessions::new();
+    let (session, driver) = {
+        let taken = Arc::clone(&taken);
+        block_on(sessions.open(
+            &declaration,
+            &planned,
+            InteractionMode::TurnBased,
+            move |_, _| {
+                Box::new(HeldIngressNode {
+                    gate: gate.take(),
+                    taken: Arc::clone(&taken),
+                    exchange: None,
+                }) as Box<dyn NodeImplementation<PipelinePayload>>
+            },
+        ))
+        .expect("opens")
+    };
+    let session_id = session.session_id();
+    let drive = thread::spawn(move || block_on(driver.drive()));
+    let session = Arc::new(session);
+    let mut application = Application::new(session.run_id());
+    for prompt in ["p1", "p2", "p3", "p4"] {
+        block_on(session.send(application.text(prompt))).expect("the ingress has room for four");
+    }
+    let interrupted = SessionEvent::SessionInterrupted(SessionInterrupted { session_id });
+
+    let (returned, interrupt) = mpsc::channel();
+    let interrupting = {
+        let session = Arc::clone(&session);
+        thread::spawn(move || {
+            let _ = returned.send(block_on(session.interrupt()));
+        })
+    };
+    assert!(
+        interrupt.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the interrupt waits on the full ingress"
+    );
+    let before = readable(&session);
+    assert!(
+        !before.contains(&interrupted),
+        "no SessionInterrupted is readable before the cancel is in the ingress: {before:#?}"
+    );
+
+    open_gate.send(()).expect("the node waits on the gate");
+    let result = interrupt
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the interrupt returns once the node reads");
+    assert!(result.is_ok(), "{result:?}");
+    interrupting.join().expect("no panic");
+    let mut after = readable(&session);
+    while !after.contains(&interrupted) {
+        after.push(block_on(session.receive()).expect("the session goes on"));
+    }
+
+    block_on(session.close()).expect("drains");
+    while block_on(session.receive()).is_some() {}
+    drive.join().expect("no panic").expect("the run ends");
+    assert_eq!(
+        *taken.lock().expect("the record"),
+        ["p1", "p2", "p3", "p4", "cancel", "stop"],
+        "the node's input holds the cancel after the four prompts"
     );
 }

@@ -75,7 +75,7 @@ fn a_draining_session_whose_run_fails_closes_and_delivers_session_closed_last() 
     let unused = generator(Vec::<String>::new());
     let (declaration, planned) = echo_planned(&unused);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,
@@ -142,7 +142,7 @@ fn an_input_the_ingress_refused_records_no_input_sent() {
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,

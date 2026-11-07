@@ -276,7 +276,7 @@ mod tests {
             .expect("the cascade plans over the mocks");
         assert!(instantiation.sink().is_none(), "no run is open");
         let sessions = LiveSessions::new();
-        let (mut session, driver) =
+        let (session, driver) =
             block_on(instantiation.open(&stack, &sessions)).expect("the cascade's run opens");
         let sink = instantiation
             .sink()
@@ -852,7 +852,7 @@ mod tests {
     impl Barged {
         /// Hands out every frame routed from now on, so the speaker drains, then closes the
         /// session and waits for the run to complete.
-        fn end(mut self) {
+        fn end(self) {
             self.route.played.store(u64::MAX >> 1, Ordering::SeqCst);
             block_on(self.session.close()).expect("the session drains");
             while block_on(self.session.receive()).is_some() {}
