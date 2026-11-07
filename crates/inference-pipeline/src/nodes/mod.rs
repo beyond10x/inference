@@ -9,6 +9,21 @@
 //! ([`commit_gate::CommitGate`]), a policy node that passes committed content and holds back what
 //! is not committed, between STT and LLM and between LLM and TTS (§11.3, 624-628).
 //!
+//! The model nodes, each over the contract of its model and behind the feature of that contract:
+//! the STT node (`SttNode`) over an `inference-stt` recogniser, the model node (`ModelNode`) and
+//! the interruptible agent node (`AgentNode`) over an `inference-llm` generator, and the TTS nodes
+//! (`TtsNode`, `SpeechNode`) over an `inference-tts` synthesiser. Each records every
+//! `inference.stream` event it emits ([`StreamEvent`]) in its envelope in the run's [`RunLog`], and
+//! reads and writes the payload of its run through a payload trait of its own, such as
+//! `SttPayload`. The features:
+//!
+//! - `stt`: `stt`, the STT node.
+//! - `llm`: `llm` and `agent`, the model node and the agent node.
+//! - `tts`: `tts` and `speech`, the TTS node and the speech node.
+//! - `duplex`: `duplex`, the duplex node over an `inference-duplex` native speech model.
+//!
+//! The nodes that carry no model and the modules `log` and `descriptors` need none of them.
+//!
 //! A tool call travels along the edges as a [`ToolCallUpdate`], a Structured payload: the call as
 //! the last command left it and the event that command emitted. A run carries one payload type on
 //! every edge, so the nodes read and write it through [`ToolPayload`], which that payload
@@ -22,6 +37,8 @@
 use std::fmt;
 use std::future::{self, Future};
 use std::pin::pin;
+#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
+use std::sync::Weak;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};
@@ -37,20 +54,53 @@ use inference_tools::{
 
 use crate::{NodeEndpoints, NodeError, NodeInput, NodeOutput};
 
+/// The model node of a voice cascade that can be interrupted: one generation per turn,
+/// superseded at the opening of the next.
+#[cfg(feature = "llm")]
+pub mod agent;
 /// The commit gate: committed spans, segments and turn events through, the rest held back.
 pub mod commit_gate;
 pub mod descriptors;
+/// The duplex node: an `inference-duplex` native speech model's session run as one node.
+#[cfg(feature = "duplex")]
+pub mod duplex;
+/// The model node: one generation of an `inference-llm` generator per run, with its tool loop.
+#[cfg(feature = "llm")]
+pub mod llm;
+/// The `inference.stream` events the model nodes emit and the run's log of them.
+pub mod log;
+/// The TTS node of a cascade whose playback a media sink acknowledges.
+#[cfg(feature = "tts")]
+pub mod speech;
+/// The STT node: each turn the turn policy opens recognised on one recognition.
+#[cfg(feature = "stt")]
+pub mod stt;
 mod tool_authority;
 mod tool_executor;
+/// The TTS node: committed segments synthesised, and played through the host's
+/// [`tts::PlaybackSink`].
+#[cfg(feature = "tts")]
+pub mod tts;
 /// The turn policy: speech activity in, the turn commands of `inference.stream` out.
 pub mod turn_policy;
 /// The voice activity detector: audio frames in, speech activity out, by an energy threshold.
 pub mod vad;
 
+#[cfg(feature = "llm")]
+pub use agent::{AgentHandle, AgentNode};
+#[cfg(feature = "llm")]
+pub use llm::{Carried, ModelHandle, ModelNode, ModelPayload};
+pub use log::{EnvelopeRefusal, EventLog, RunLog, StreamEvent};
+#[cfg(feature = "tts")]
+pub use speech::{Said, SpeechHandle, SpeechNode, SpeechPayload, SpeechPorts};
+#[cfg(feature = "stt")]
+pub use stt::{Heard, SttHandle, SttNode, SttPayload, SttPorts};
 pub use tool_authority::{
     AuthorityHandle, AuthorityOutcome, Decision, IterationRuleNotDeclared, ToolAuthority,
 };
 pub use tool_executor::{ExecutorHandle, StartRefusal, ToolCallMeasure, ToolExecutorNode};
+#[cfg(feature = "tts")]
+pub use tts::{NoPlayback, PlaybackSink, Spoken, TtsHandle, TtsNode, TtsPayload};
 
 /// An event of `inference.tools.ToolCall`'s lifecycle, as its command emitted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,4 +425,111 @@ pub(crate) fn one_in_one_out<P>(
     let input = endpoints.inputs.remove(0);
     let output = endpoints.outputs.remove(0);
     Ok((node_id, input, output))
+}
+
+/// The exchange task of one model node: the thread it runs on once started, and the token that
+/// thread holds while it runs, so that the node's handle, holding a weak reference to it, sees
+/// the task gone once the thread has ended and dropped its endpoints.
+#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
+pub(crate) struct Exchange {
+    token: Option<Arc<()>>,
+    probe: Weak<()>,
+    done: Arc<Watched<bool>>,
+    thread: Option<JoinHandle<()>>,
+    panicked: Option<String>,
+}
+
+/// Marks the task done when its thread leaves its work, returning or unwinding.
+#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
+struct Done(Arc<Watched<bool>>);
+
+#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
+impl Drop for Done {
+    fn drop(&mut self) {
+        self.0.update(|done| *done = true);
+    }
+}
+
+#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
+impl Exchange {
+    pub(crate) fn new() -> Self {
+        let token = Arc::new(());
+        Self {
+            probe: Arc::downgrade(&token),
+            token: Some(token),
+            done: Arc::new(Watched::new(false)),
+            thread: None,
+            panicked: None,
+        }
+    }
+
+    /// Nothing, unless the task's thread panicked: then the error naming the panic.
+    pub(crate) fn panic(&self) -> Result<(), NodeError> {
+        self.panicked
+            .clone()
+            .map_or(Ok(()), |panic| Err(NodeError::new(panic)))
+    }
+
+    /// A weak reference to the task's token: alive until the task ended.
+    #[cfg(any(feature = "llm", feature = "stt", feature = "tts"))]
+    pub(crate) fn probe(&self) -> Weak<()> {
+        Weak::clone(&self.probe)
+    }
+
+    /// Runs `work` on a thread of its own, which holds the token until `work` returned and
+    /// dropped what it took.
+    pub(crate) fn spawn(&mut self, work: impl FnOnce() + Send + 'static) {
+        let token = self.token.take();
+        let done = Done(Arc::clone(&self.done));
+        self.thread = Some(thread::spawn(move || {
+            let _done = done;
+            work();
+            drop(token);
+        }));
+    }
+
+    /// Waits until the task ended, then joins its thread; a task never spawned has ended. A
+    /// panic of the thread is kept for [`Exchange::panic`].
+    pub(crate) async fn finished(&mut self) {
+        self.token = None;
+        if let Some(thread) = self.thread.take() {
+            self.done.until(|done| done.then_some(())).await;
+            if let Err(panic) = thread.join() {
+                let message = panic
+                    .downcast_ref::<&str>()
+                    .map(|message| (*message).to_owned())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "a panic without a message".to_owned());
+                self.panicked = Some(format!("the node's exchange panicked: {message}"));
+            }
+        }
+    }
+}
+
+#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
+impl fmt::Debug for Exchange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Exchange")
+            .field("running", &(self.probe.strong_count() > 0))
+            .finish_non_exhaustive()
+    }
+}
+
+/// The node's identity, once it was described and handed `inputs` input edges and `outputs`
+/// output edges; otherwise the error saying which of the two it was not.
+#[cfg(any(feature = "llm", feature = "tts"))]
+pub(crate) fn started<P>(
+    node_id: Option<NodeId>,
+    endpoints: &NodeEndpoints<P>,
+    inputs: usize,
+    outputs: usize,
+) -> Result<NodeId, NodeError> {
+    if endpoints.inputs.len() != inputs || endpoints.outputs.len() != outputs {
+        return Err(NodeError::new(format!(
+            "the node takes {inputs} input and {outputs} output edge(s) and was handed {} and {}",
+            endpoints.inputs.len(),
+            endpoints.outputs.len()
+        )));
+    }
+    node_id.ok_or_else(|| NodeError::new("the node was started before it was described"))
 }

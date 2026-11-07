@@ -30,10 +30,11 @@
 //! mock synthesiser speaks one 10 ms frame of silence per word, so `talk` plays silence where the
 //! answer will be heard once the TTS adapter replaces it at the same binding.
 //!
-//! The LLM node is the testkit's `AgentNode`, which answers a turn's committed spans with the
-//! generator's answer to their text ([`identity`]). The server's adapter claims output streaming
-//! only, so the node asks each turn's spans as the user text of the request it starts the turn's
-//! generation with; each delta the server streams is a segment committed as it arrives.
+//! The LLM node is `inference-pipeline`'s `AgentNode`, which answers a turn's committed spans
+//! with the generator's answer to their text ([`identity`]). The server's adapter claims output
+//! streaming only, so the node asks each turn's spans as the user text of the request it starts
+//! the turn's generation with; each delta the server streams is a segment committed as it
+//! arrives.
 //!
 //! The recorded speech of a person pauses longer than the synthetic utterance of the mock tests:
 //! the checkpoint's LibriSpeech clip pauses for up to 570 ms below the mock detector's threshold

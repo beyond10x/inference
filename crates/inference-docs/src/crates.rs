@@ -111,7 +111,7 @@ pub fn packages(metadata: &Value) -> Result<Vec<Package>> {
                 .filter_map(Value::as_str)
                 .collect();
             let target_name = target["name"].as_str().unwrap_or_default().to_owned();
-            if kinds.contains(&"lib") {
+            if kinds.contains(&"lib") || kinds.contains(&"proc-macro") {
                 lib = Some(target_name);
             } else if kinds.contains(&"bin") {
                 bins.push(target_name);

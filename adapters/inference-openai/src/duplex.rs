@@ -145,6 +145,31 @@ fn formats() -> Vec<AudioFormat> {
     ]
 }
 
+/// The session a Realtime model opens with unless told otherwise: voice `marin`, PCM16 at 24 kHz
+/// both ways, server voice activity detection creating each response (`auto_response` on),
+/// `auto_interrupt` off so barge-in is the caller's decision, an idle limit of 30 s, no
+/// instructions and no tools. [`capabilities`] admits it.
+#[must_use]
+pub fn default_session_config() -> SpeechConfig {
+    let pcm16 = AudioFormat {
+        encoding: AudioEncoding::PcmS16le,
+        sample_rate: std::num::NonZeroU32::new(24_000).unwrap_or(std::num::NonZeroU32::MIN),
+        channels: std::num::NonZeroU16::MIN,
+    };
+    SpeechConfig {
+        voice: "marin".to_owned(),
+        instructions: String::new(),
+        input_format: pcm16,
+        output_format: pcm16,
+        turn_detection: SpeechTurnDetection::ServerVad,
+        turn_tuning: inference_duplex::TurnTuning::default(),
+        auto_response: true,
+        auto_interrupt: false,
+        tools: Vec::new(),
+        idle_limit: Duration::from_secs(30),
+    }
+}
+
 /// What the Realtime API takes, as the duplex contract states it: PCM16 at 24 kHz and G.711
 /// mu-law and A-law at 8 kHz both ways, every turn detection mode with its tuning, manual
 /// commit, responses and interruption, cancellation and truncation by the caller, and tools.

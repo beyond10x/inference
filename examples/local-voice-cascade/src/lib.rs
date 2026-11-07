@@ -11,13 +11,13 @@
 //! | `split` | fan_out | the testkit's `FanOut`: every frame to the detector and the STT node |
 //! | `vad` | policy | `inference-pipeline`'s voice activity detector, [`VAD`] |
 //! | `turn policy` | policy | `inference-pipeline`'s turn policy, answered by a [`TurnStore`] |
-//! | `stt` | model | the testkit's `SttNode` over its mock recogniser |
+//! | `stt` | model | `inference-pipeline`'s `SttNode` over the testkit's mock recogniser |
 //! | `input gate` | policy | a [`CommitGate`] of two lanes: the transcript, and the turn events |
 //! | `turn split` | fan_out | `FanOut`: the gate's turn events to the LLM and the speaker |
-//! | `agent` | model | the testkit's [`AgentNode`] over its mock generator: one generation per turn |
+//! | `agent` | model | `inference-pipeline`'s [`AgentNode`] over the testkit's mock generator: one generation per turn |
 //! | `text split` | fan_out | `FanOut`: the LLM's output to the output gate and the egress |
 //! | `output gate` | policy | a [`CommitGate`] of one lane: the LLM's output |
-//! | `tts` | model | the testkit's [`SpeechNode`] over its mock synthesiser |
+//! | `tts` | model | `inference-pipeline`'s [`SpeechNode`] over the testkit's mock synthesiser |
 //! | `speaker` | sink | the device adapter's [`AcknowledgingSink`] on the audio host's speaker |
 //!
 //! The model nodes require what their mocks claim, except `stt`, which requires nothing
@@ -92,9 +92,16 @@ use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Adapter, AdapterId, Capability, Locality};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_llm::Generator;
+use inference_pipeline::nodes::agent::{AgentHandle, AgentNode};
 use inference_pipeline::nodes::commit_gate::{
     CommitGate, CommitGateHandle, GateLane, GatePayload, Gated, PassedTurn,
 };
+use inference_pipeline::nodes::llm::{Carried, ModelPayload};
+use inference_pipeline::nodes::log::{RunLog, StreamEvent};
+use inference_pipeline::nodes::speech::{
+    Said, SpeechHandle, SpeechNode, SpeechPayload, SpeechPorts,
+};
+use inference_pipeline::nodes::stt::{Heard, SttHandle, SttNode, SttPayload, SttPorts};
 use inference_pipeline::nodes::turn_policy::{
     TurnEvent, TurnPayload, TurnPolicy, TurnPolicyHandle,
 };
@@ -105,16 +112,9 @@ use inference_pipeline::{
     Catalog, Declaration, Delivery, Essentiality, InteractionMode, NodeImplementation, NodeRole,
     OverloadPolicy, PipelineId, PipelineSpec, PlannedPipeline, PortId, PortTraits, modality,
 };
-use inference_testkit::cascade::agent::{AgentHandle, AgentNode};
-use inference_testkit::cascade::speech::{
-    Said, SpeechHandle, SpeechNode, SpeechPayload, SpeechPorts,
-};
 use inference_testkit::cascade::{CascadeRefused, Mocks, TurnStore};
-use inference_testkit::graph::RunLog;
-use inference_testkit::llm::{Carried, ModelPayload};
-use inference_testkit::stream::StreamEvent;
+use inference_testkit::stt::FanOut;
 use inference_testkit::stt::inference_stt::Recogniser;
-use inference_testkit::stt::{FanOut, Heard, SttHandle, SttNode, SttPayload, SttPorts};
 use inference_testkit::tts::MockSynthesiser;
 use inference_text::{SegmentId, TurnId};
 use inference_tts::{PlaybackReceipt, SegmentAudio, Synthesiser};

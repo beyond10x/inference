@@ -525,9 +525,8 @@ impl SherpaOnnxRecogniser {
     /// `dir`; [`OpenRefused::ChecksumMismatch`] naming the first whose sha256 differs from its
     /// pin; [`OpenRefused::PathNotUnicode`] when a file's path is not Unicode; and
     /// [`OpenRefused::BackendRefused`] when sherpa-onnx does not create the online recogniser.
-    /// Nothing is declared then.
+    /// No recogniser is returned then.
     pub fn open_with(dir: impl AsRef<Path>, max_concurrency: i64) -> Result<Self, OpenRefused> {
-        let dir = dir.as_ref();
         if max_concurrency < 1 {
             return Err(OpenRefused::NonPositiveConcurrency(
                 NonPositiveConcurrency {
@@ -535,6 +534,27 @@ impl SherpaOnnxRecogniser {
                 },
             ));
         }
+        let (model, _) = declare_model();
+        let (adapter, _) = declare_adapter(model.model_id(), max_concurrency)
+            .map_err(OpenRefused::NonPositiveConcurrency)?;
+        Self::open_declared(dir, model, adapter)
+    }
+
+    /// Opens the pinned checkpoint in `dir` as the `model` and `adapter` already declared by
+    /// [`declare_model`] and [`declare_adapter`], so a caller that declared them before any file
+    /// was read keeps their ids. Every file is checked against its pinned sha256 before
+    /// sherpa-onnx reads any.
+    ///
+    /// # Errors
+    ///
+    /// The [`OpenRefused`] of [`SherpaOnnxRecogniser::open_with`] but
+    /// [`OpenRefused::NonPositiveConcurrency`].
+    pub fn open_declared(
+        dir: impl AsRef<Path>,
+        model: Model,
+        adapter: Adapter,
+    ) -> Result<Self, OpenRefused> {
+        let dir = dir.as_ref();
         for file in FILES {
             let path = dir.join(file.name);
             match path.metadata() {
@@ -593,9 +613,6 @@ impl SherpaOnnxRecogniser {
             OnlineRecognizer::create(&config).ok_or_else(|| OpenRefused::BackendRefused {
                 dir: dir.to_path_buf(),
             })?;
-        let (model, _) = declare_model();
-        let (adapter, _) = declare_adapter(model.model_id(), max_concurrency)
-            .map_err(OpenRefused::NonPositiveConcurrency)?;
         Ok(Self {
             model,
             adapter,

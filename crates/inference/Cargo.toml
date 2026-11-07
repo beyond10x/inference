@@ -1,0 +1,88 @@
+[package]
+name = "inference"
+description = "The inference SDK: one dependency and one import for one-call functions, handles, recipes, stacks chosen by configuration, the graph over one payload and every contract crate beneath, with one error that names its fix."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+sherpa-onnx = ["dep:inference-sherpa-onnx", "inference-sherpa-onnx/stt"]
+whispercpp = ["dep:inference-whispercpp"]
+llama-server = ["dep:inference-llama-server", "inference-llama-server/tools"]
+openai = ["dep:inference-openai", "inference-openai/duplex"]
+openai-live = ["openai", "inference-openai/gpt-live"]
+aws = ["dep:inference-aws", "inference-aws/duplex"]
+audio-host = ["dep:inference-audio-device"]
+audio-device = ["audio-host", "inference-audio-device/device"]
+cost = ["inference-facade/cost"]
+testing = [
+    "audio-host",
+    "dep:inference-testkit",
+    "inference-testkit/run",
+    "inference-testkit/stt",
+    "inference-testkit/llm",
+    "inference-testkit/tts",
+    "inference-testkit/duplex",
+]
+
+[dependencies]
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+hound = "3.5"
+inference-audio = { path = "../inference-audio" }
+inference-audio-device = { path = "../../adapters/inference-audio-device", default-features = false, features = ["pipeline"], optional = true }
+inference-aws = { path = "../../adapters/inference-aws", optional = true }
+inference-core = { path = "../inference-core" }
+inference-duplex = { path = "../inference-duplex" }
+inference-facade = { path = "../inference-facade" }
+inference-llama-server = { path = "../../adapters/inference-llama-server", optional = true }
+inference-llm = { path = "../inference-llm", features = ["tools"] }
+inference-macros = { path = "../inference-macros" }
+inference-openai = { path = "../../adapters/inference-openai", optional = true }
+inference-pipeline = { path = "../inference-pipeline", features = ["duplex", "llm", "stt", "tts"] }
+inference-runtime = { path = "../inference-runtime" }
+inference-sherpa-onnx = { path = "../../adapters/inference-sherpa-onnx", optional = true }
+inference-stt = { path = "../inference-stt" }
+inference-testkit = { path = "../inference-testkit", optional = true }
+inference-text = { path = "../inference-text" }
+inference-tools = { path = "../inference-tools" }
+inference-tts = { path = "../inference-tts" }
+inference-whispercpp = { path = "../../adapters/inference-whispercpp", optional = true }
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+toml = "1"
+
+[dev-dependencies]
+inference-audio-device = { path = "../../adapters/inference-audio-device", default-features = false, features = ["pipeline"] }
+inference-testkit = { path = "../inference-testkit", features = ["run", "stt", "llm", "tts", "duplex"] }
+tempfile = "3"
+trybuild = "1"
+
+[[test]]
+name = "usage_cost"
+required-features = ["cost"]
+
+[[test]]
+name = "agent"
+required-features = ["testing"]
+
+[[test]]
+name = "oneshot"
+required-features = ["testing"]
+
+[[test]]
+name = "testing"
+required-features = ["testing"]
+
+[[test]]
+name = "recipes"
+required-features = ["testing"]
+
+[lints]
+workspace = true

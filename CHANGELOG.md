@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.24.0] — 2026-11-07
+
+### Breaking
+
+- `inference-pipeline` now holds the STT, LLM, agent, TTS and speech nodes
+  (`nodes::{stt, llm, agent, tts, speech}`) and the `inference.stream` events and run log they
+  record into (`nodes::log`: `StreamEvent`, `EventLog`, `EnvelopeRefusal`, `RunLog`);
+  `inference-testkit` re-exports them under their old paths. `ModelNode::new` is generic over the
+  payload. Each node family is behind an `inference-pipeline` feature: `stt` (`nodes::stt`), `llm`
+  (`nodes::llm`, `nodes::agent`), `tts` (`nodes::tts`, `nodes::speech`) and `duplex`
+  (`nodes::duplex`); a direct dependent turns on the ones it uses. `inference-testkit`'s features
+  of the same names and the `inference` crate turn them on.
+- `inference-pipeline`: `TtsNode` takes a second type parameter, the host's `PlaybackSink`
+  (`NoPlayback` by default); `TtsNode::playing_through(sink)` plays through a sink the host
+  supplies. The testkit's `TtsNode` plays through its `MockSink`.
+- `inference-facade`: `SessionEvent` gains `SpeechStarted`, `SpeechResponseFailed`,
+  `SpeechSessionClosed` and `SpeechSessionFailed`.
+- `inference`: `Error::StackFile` carries a `source`, the typed refusal behind it.
+
+### Added
+
+- The `inference` crate: feature-selected re-exports of the workspace, `inference::prelude`, and
+  one `inference::Error` with `ErrorKind` whose message names its fix; `inference-macros` reserves
+  `#[inference::tool]` and `#[inference::main]`.
+- `inference`: a stack binds each role (stt, llm, tts, speech) to a registered adapter from the
+  builder, `INFERENCE_<ROLE>_ADAPTER` variables or TOML stack files (the file `INFERENCE_STACK`
+  names, `./inference.toml`, `$XDG_CONFIG_HOME/inference/inference.toml`), in that order, under a
+  deployment profile that defaults to `offline_strict`; applications register their own adapters
+  with `Registry::register`, and resolving opens no connection, credential or checkpoint.
+- `inference-pipeline` (feature `duplex`): `DuplexNode` runs a native speech model as a graph node; each committed
+  turn is its own tool calls' basis.
+- `inference-sherpa-onnx`, `inference-whispercpp`: `open_declared` opens a recogniser under a
+  model and adapter declared earlier.
+
+### Fixed
+
+- `inference-docs`: a proc-macro crate is listed as a library in the crate reference.
+
+### Changed
+
+- The `ess` pin moves to 0.89.0: CI's `ESS_VERSION`, the testkit's `ess-conformance` and
+  `ess-primitives` tags, and `requires` in `ess/ess-inputs.yaml`.
+
 ## [0.23.0] — 2026-11-06
 
 ### Breaking

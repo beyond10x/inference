@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-model-nodes
 kind: story
-status: draft
+status: implemented
 title: The STT, LLM, agent, TTS and speech nodes live in inference-pipeline, not the testkit
 relations:
 - decomposes: epic:sdk
@@ -48,7 +48,11 @@ scope:
   path: crates/inference-testkit/src/tts/node.rs
 - confidence: inferred
   path: examples/local-voice-cascade/src/lib.rs
-revision: 8
+revision: 11
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T22:09:35Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-06T22:09:35Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"approval":1}}}
+- {from: "active", to: "implemented", at: "2026-11-07T04:23:03Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"test_result":1,"approval":1,"review_outcome":2}}}
 ---
 ## Context
 
