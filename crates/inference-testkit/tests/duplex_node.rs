@@ -43,7 +43,7 @@ use inference_pipeline::{
     NodeRole, OverloadPolicy, PipelineId, PipelineSpec, PlannedPipeline, PortDirection, PortTraits,
     modality,
 };
-use inference_runtime::{RunController, RunError};
+use inference_runtime::{RunController, RunError, RunRequests};
 use inference_testkit::duplex::mock::{
     AUDIO_FRAMES, Faults, MockSpeechModel, MockSpeechSession, Reply, ScriptedTurn, pcm, utterance,
 };
@@ -1333,6 +1333,7 @@ struct Run {
     events: Box<dyn InputEndpoint<Voice>>,
     tool_call: Box<dyn InputEndpoint<Voice>>,
     driver: mpsc::Receiver<Result<(), RunError>>,
+    requests: RunRequests,
     sender: Sender,
     call_ids: CallIds,
 }
@@ -1371,12 +1372,14 @@ fn run(model: &Held, config: SessionConfig, tools: Vec<Tool>) -> Run {
         .collect();
     let events = ends.egress(EVENTS).expect("events is exposed");
     let tool_call = ends.egress(TOOL_CALL).expect("tool_call is exposed");
+    let requests = controller.requests();
     let driver = spawn(move || async move { controller.drive().await });
     Run {
         ingress,
         events,
         tool_call,
         driver,
+        requests,
         sender: Sender::new(),
         call_ids,
     }
@@ -1686,4 +1689,33 @@ fn a_proposal_of_a_tool_the_node_was_not_given_is_denied_to_the_model() {
     assert!(submitted[0].1.get("error").is_some(), "{submitted:#?}");
     let carried = run.finish();
     assert!(carried.is_empty(), "{carried:#?}");
+}
+
+/// The run's drain, with a tool loop around the node: the node ends `events` and `tool_call`, and
+/// still takes what arrives on `tool_result` until that edge has ended, as the loop's other nodes
+/// send their end of input there only once `tool_call` ended. The run completes only then.
+#[test]
+fn under_the_runs_drain_the_node_ends_once_tool_result_has_ended() {
+    start();
+    let model = Held::over(MockSpeechModel::native(vec![say("hello", "Hi")]));
+    let mut run = run(&model, config(vec![weather()]), vec![weather()]);
+    run.feed(utterances(1).remove(0));
+    run.events_until(completed_stream);
+    run.requests.drain();
+    let end = wait(run.tool_call.recv()).expect("tool_call carries its end");
+    assert!(
+        matches!(end.payload, Voice::Control(ControlKind::Stop)),
+        "only its end: {:?}",
+        end.payload
+    );
+    run.events_until(|payload| matches!(payload, Voice::Control(ControlKind::Stop)));
+    assert!(
+        run.driver.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the run does not complete before tool_result has ended"
+    );
+    let stop = run.sender.control(TOOL_RESULT, ControlKind::Stop);
+    if wait(run.ingress[TOOL_RESULT].send(stop)).is_err() {
+        panic!("tool_result still takes its end");
+    }
+    joined(&run.driver).expect("the run completes");
 }
