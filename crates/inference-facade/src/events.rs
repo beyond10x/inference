@@ -14,6 +14,7 @@
 //! | synthesis audio | `AudioChunk`, `SynthesisCompleted`, `AudioPlayed` |
 //! | tools | `ToolCallProposed`, `ToolCallAuthorized`, `ToolCallRejected`, `ToolCallStarted`, `ToolCallResult`, `ToolCallFailed` |
 //! | usage | `UsageRecorded` |
+//! | native speech | `SpeechStarted`, `SpeechResponseFailed`, `SpeechSessionClosed`, `SpeechSessionFailed` |
 //! | run | `RunCompleted`, `RunCancelled`, `RunFailed` |
 //!
 //! A topology emits the subset it produces. The session lifecycle events are the session state
@@ -28,6 +29,7 @@ use inference_core::generation::{
     GenerationSuperseded,
 };
 use inference_core::usage::UsageRecorded;
+use inference_duplex::{ResponseFailed, SpeechSessionClosed, SpeechSessionFailed, SpeechStarted};
 use inference_runtime::run::{RunCancelled, RunCompleted, RunFailed};
 use inference_text::{
     AudioPlayed, SynthesisCompleted, TextDelta, TextSegmentCommitted, TranscriptCommitted,
@@ -115,6 +117,18 @@ pub enum SessionEvent {
     /// an egress the pipeline exposes a model node's `usage` port on. An interrupt does not cut
     /// it, and the session adds it to its usage view ([`crate::usage`]).
     UsageRecorded(UsageRecorded),
+    /// `inference.duplex.SpeechStarted`: a native speech model heard the user start speaking.
+    SpeechStarted(SpeechStarted),
+    /// `inference.duplex.ResponseFailed`: a native speech model's response failed. Its
+    /// generation is cancelled right after, as a cancelled response's is, so this is the one
+    /// event that tells the two apart.
+    SpeechResponseFailed(ResponseFailed),
+    /// `inference.duplex.SpeechSessionClosed`: a native speech model closed its session by
+    /// itself. A node cannot end its run, so the application closes the session on it.
+    SpeechSessionClosed(SpeechSessionClosed),
+    /// `inference.duplex.SpeechSessionFailed`: a native speech model's session failed; its node
+    /// takes no more input.
+    SpeechSessionFailed(SpeechSessionFailed),
     /// `inference.graph.RunCompleted`: the session's run drained and completed.
     RunCompleted(RunCompleted),
     /// `inference.graph.RunCancelled`: the session's run was cancelled.

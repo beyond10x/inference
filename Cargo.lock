@@ -2307,6 +2307,7 @@ version = "0.23.0"
 dependencies = [
  "inference-audio",
  "inference-core",
+ "inference-duplex",
  "inference-llm",
  "inference-pipeline",
  "inference-runtime",
@@ -2407,6 +2408,7 @@ version = "0.23.0"
 dependencies = [
  "inference-audio",
  "inference-core",
+ "inference-duplex",
  "inference-llm",
  "inference-stt",
  "inference-text",

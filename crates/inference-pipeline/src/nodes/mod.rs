@@ -50,6 +50,8 @@ pub mod agent;
 /// The commit gate: committed spans, segments and turn events through, the rest held back.
 pub mod commit_gate;
 pub mod descriptors;
+/// The duplex node: an `inference-duplex` native speech model's session run as one node.
+pub mod duplex;
 /// The model node: one generation of an `inference-llm` generator per run, with its tool loop.
 pub mod llm;
 /// The `inference.stream` events the model nodes emit and the run's log of them.
