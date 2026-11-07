@@ -14,20 +14,19 @@
 //! sent, and a control event, told from user content by its envelope's `kind` alone, not
 //! recorded.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
+use inference_core::envelope::{EventEnvelope, EventId};
 use inference_core::generation::{
     GenerationCancelled, GenerationCompleted, GenerationRefused, GenerationStarted,
     GenerationSuperseded,
 };
-use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
+use inference_core::id::{GenerationId, StreamId};
 use inference_text::{
-    AudioPlayed, SegmentDiscarded, SegmentId, SegmentQueued, SynthesisCompleted, TextDelta,
+    AudioPlayed, SegmentDiscarded, SegmentQueued, SynthesisCompleted, TextDelta,
     TextSegmentCommitted, TranscriptCommitted, TranscriptHypothesis, TranscriptRevision,
     TurnCompleted, TurnOpened,
 };
@@ -310,100 +309,120 @@ impl RunLog {
     }
 }
 
-/// Wraps what one node emits on one output port in envelopes: one stream of its own, numbered
-/// from 1. An envelope names the generation its event names; an event naming only its segment,
-/// such as `TextSegmentCommitted`, is enveloped under the generation of the deltas this emitter
-/// sent of that segment, and under none when it sent none.
-pub(crate) struct StreamEmitter {
-    run_id: RunId,
-    producer: NodeId,
-    port: String,
-    stream_id: StreamId,
-    sequence: i64,
-    log: RunLog,
-    /// The generation of each segment a delta this emitter sent named.
-    segments: HashMap<SegmentId, GenerationId>,
-}
+#[cfg(any(feature = "llm", feature = "stt", feature = "tts"))]
+pub(crate) use emit::StreamEmitter;
 
-impl StreamEmitter {
-    pub(crate) fn new(run_id: RunId, producer: NodeId, port: String, log: RunLog) -> Self {
-        Self {
-            run_id,
-            producer,
-            port,
-            stream_id: StreamId::generate(),
-            sequence: 0,
-            log,
-            segments: HashMap::new(),
-        }
+/// What a model node emits, wrapped in envelopes and recorded in its run's [`RunLog`].
+#[cfg(any(feature = "llm", feature = "stt", feature = "tts"))]
+mod emit {
+    use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
+    use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
+    use inference_text::SegmentId;
+
+    use super::{EnvelopeRefusal, RunLog, StreamEvent};
+
+    /// Wraps what one node emits on one output port in envelopes: one stream of its own, numbered
+    /// from 1. An envelope names the generation its event names; an event naming only its segment,
+    /// such as `TextSegmentCommitted`, is enveloped under the generation of the deltas this emitter
+    /// sent of that segment, and under none when it sent none.
+    pub(crate) struct StreamEmitter {
+        run_id: RunId,
+        producer: NodeId,
+        port: String,
+        stream_id: StreamId,
+        sequence: i64,
+        log: RunLog,
+        /// The generation of each segment a delta this emitter sent named.
+        segments: HashMap<SegmentId, GenerationId>,
     }
 
-    /// The generation the envelope of `event` names: the one the event names, or the one of the
-    /// deltas sent of the segment the event names.
-    fn generation(&mut self, event: &StreamEvent) -> Option<GenerationId> {
-        let segment_id = match event {
-            StreamEvent::TextDelta(delta) => {
-                self.segments.insert(delta.segment_id, delta.generation_id);
-                return Some(delta.generation_id);
+    impl StreamEmitter {
+        pub(crate) fn new(run_id: RunId, producer: NodeId, port: String, log: RunLog) -> Self {
+            Self {
+                run_id,
+                producer,
+                port,
+                stream_id: StreamId::generate(),
+                sequence: 0,
+                log,
+                segments: HashMap::new(),
             }
-            StreamEvent::TextSegmentCommitted(event) => event.segment_id,
-            StreamEvent::SegmentQueued(event) => event.segment_id,
-            StreamEvent::SynthesisCompleted(event) => event.segment_id,
-            StreamEvent::AudioPlayed(event) => event.segment_id,
-            StreamEvent::SegmentDiscarded(event) => event.segment_id,
-            event => return event.generation_id(),
-        };
-        self.segments.get(&segment_id).copied()
-    }
-
-    fn envelope<Q>(&mut self, kind: String, payload: Q) -> EventEnvelope<Q> {
-        self.sequence += 1;
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| {
-                i64::try_from(since.as_micros()).unwrap_or(i64::MAX)
-            });
-        EventEnvelope {
-            schema_version: 1,
-            event_id: EventId::generate(),
-            run_id: self.run_id,
-            session_id: None,
-            stream_id: self.stream_id,
-            sequence: self.sequence,
-            producer: self.producer,
-            port: self.port.clone(),
-            kind,
-            generation_id: None,
-            timestamp,
-            timebase: Timebase::WallTime,
-            causation_id: None,
-            payload,
         }
-    }
 
-    /// The envelope of `event`, recorded in the run's log.
-    ///
-    /// # Errors
-    ///
-    /// The log's [`EnvelopeRefusal`]; the event is then neither recorded nor to be sent.
-    pub(crate) fn stream(
-        &mut self,
-        event: StreamEvent,
-    ) -> Result<EventEnvelope<StreamEvent>, EnvelopeRefusal> {
-        let generation_id = self.generation(&event);
-        let mut envelope = self.envelope(event.name().to_owned(), event);
-        envelope.generation_id = generation_id;
-        self.log.record(envelope.clone())?;
-        Ok(envelope)
-    }
+        /// The generation the envelope of `event` names: the one the event names, or the one of the
+        /// deltas sent of the segment the event names.
+        fn generation(&mut self, event: &StreamEvent) -> Option<GenerationId> {
+            let segment_id = match event {
+                StreamEvent::TextDelta(delta) => {
+                    self.segments.insert(delta.segment_id, delta.generation_id);
+                    return Some(delta.generation_id);
+                }
+                StreamEvent::TextSegmentCommitted(event) => event.segment_id,
+                StreamEvent::SegmentQueued(event) => event.segment_id,
+                StreamEvent::SynthesisCompleted(event) => event.segment_id,
+                StreamEvent::AudioPlayed(event) => event.segment_id,
+                StreamEvent::SegmentDiscarded(event) => event.segment_id,
+                event => return event.generation_id(),
+            };
+            self.segments.get(&segment_id).copied()
+        }
 
-    /// The envelope of the control event `kind`, on the same stream.
-    pub(crate) fn control<P: From<ControlKind>>(&mut self, kind: ControlKind) -> EventEnvelope<P> {
-        self.envelope(kind.as_str().to_owned(), P::from(kind))
+        fn envelope<Q>(&mut self, kind: String, payload: Q) -> EventEnvelope<Q> {
+            self.sequence += 1;
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| {
+                    i64::try_from(since.as_micros()).unwrap_or(i64::MAX)
+                });
+            EventEnvelope {
+                schema_version: 1,
+                event_id: EventId::generate(),
+                run_id: self.run_id,
+                session_id: None,
+                stream_id: self.stream_id,
+                sequence: self.sequence,
+                producer: self.producer,
+                port: self.port.clone(),
+                kind,
+                generation_id: None,
+                timestamp,
+                timebase: Timebase::WallTime,
+                causation_id: None,
+                payload,
+            }
+        }
+
+        /// The envelope of `event`, recorded in the run's log.
+        ///
+        /// # Errors
+        ///
+        /// The log's [`EnvelopeRefusal`]; the event is then neither recorded nor to be sent.
+        pub(crate) fn stream(
+            &mut self,
+            event: StreamEvent,
+        ) -> Result<EventEnvelope<StreamEvent>, EnvelopeRefusal> {
+            let generation_id = self.generation(&event);
+            let mut envelope = self.envelope(event.name().to_owned(), event);
+            envelope.generation_id = generation_id;
+            self.log.record(envelope.clone())?;
+            Ok(envelope)
+        }
+
+        /// The envelope of the control event `kind`, on the same stream.
+        pub(crate) fn control<P: From<ControlKind>>(
+            &mut self,
+            kind: ControlKind,
+        ) -> EventEnvelope<P> {
+            self.envelope(kind.as_str().to_owned(), P::from(kind))
+        }
     }
 }
 
 /// `envelope` carrying its event as `P`, built by `wrap`.
+#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
 pub(crate) fn carry<P>(
     envelope: EventEnvelope<StreamEvent>,
     wrap: impl FnOnce(StreamEvent) -> P,
