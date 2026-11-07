@@ -151,6 +151,26 @@ pub fn capabilities(model_id: &str) -> SpeechCapabilities {
     }
 }
 
+/// The session Nova Sonic opens with unless told otherwise: voice `matthew`, PCM16 at 16 kHz in
+/// and 24 kHz out, its own voice activity detection with its default sensitivity, responses and
+/// barge-in by the model (`auto_response` and `auto_interrupt` on), an idle limit of 30 s, no
+/// instructions and no tools. [`capabilities`] admits it.
+#[must_use]
+pub fn default_session_config() -> SessionConfig {
+    SessionConfig {
+        voice: "matthew".to_owned(),
+        instructions: String::new(),
+        input_format: lpcm(AudioRate::Hz16000),
+        output_format: lpcm(AudioRate::Hz24000),
+        turn_detection: TurnDetection::ServerVad,
+        turn_tuning: inference_duplex::TurnTuning::default(),
+        auto_response: true,
+        auto_interrupt: true,
+        tools: Vec::new(),
+        idle_limit: Duration::from_secs(30),
+    }
+}
+
 /// `pcm_s16le` mono at `rate`.
 fn lpcm(rate: AudioRate) -> AudioFormat {
     AudioFormat {
@@ -261,6 +281,44 @@ impl NovaSonicSpeech<NovaSonic> {
             io::Error::other("the runtime stopped while loading the configuration")
         })?;
         Ok(Self::declared(client, pool))
+    }
+}
+
+/// A [`Connector`] that loads the AWS configuration when a session opens, not when it is built:
+/// credentials and region from the AWS SDK's default chain, read by each connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deferred {
+    model_id: String,
+}
+
+impl Connector for Deferred {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn connect(
+        &self,
+        config: nova_sonic::SessionConfig,
+    ) -> impl Future<Output = Result<Session, NovaSonicError>> + Send + 'static {
+        let model_id = self.model_id.clone();
+        async move {
+            let sdk = aws_config::load_from_env().await;
+            NovaSonic::new(aws_sdk_bedrockruntime::Client::new(&sdk), model_id)
+                .start(&config)
+                .await
+        }
+    }
+}
+
+impl NovaSonicSpeech<Deferred> {
+    /// The model invoking `model_id`, its AWS configuration loaded when a session opens, so
+    /// building it reads no credential and makes no connection.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error of starting the binding's runtime.
+    pub fn deferred(model_id: String) -> io::Result<Self> {
+        Self::with_connector(Deferred { model_id })
     }
 }
 

@@ -459,10 +459,9 @@ impl WhisperCppRecogniser {
     /// [`OpenRefused::NonPositiveConcurrency`] when `max_concurrency` is below 1, before the file
     /// is read; [`OpenRefused::FileMissing`] when `path` is not a readable file;
     /// [`OpenRefused::ChecksumMismatch`] when its sha256 differs from the pin; and
-    /// [`OpenRefused::BackendRefused`] when whisper.cpp does not load it. Nothing is declared
-    /// then.
+    /// [`OpenRefused::BackendRefused`] when whisper.cpp does not load it. No recogniser is
+    /// returned then.
     pub fn open_with(path: impl AsRef<Path>, max_concurrency: i64) -> Result<Self, OpenRefused> {
-        let path = path.as_ref();
         if max_concurrency < 1 {
             return Err(OpenRefused::NonPositiveConcurrency(
                 NonPositiveConcurrency {
@@ -470,6 +469,27 @@ impl WhisperCppRecogniser {
                 },
             ));
         }
+        let (model, _) = declare_model();
+        let (adapter, _) = declare_adapter(model.model_id(), max_concurrency)
+            .map_err(OpenRefused::NonPositiveConcurrency)?;
+        Self::open_declared(path, model, adapter)
+    }
+
+    /// Opens the pinned checkpoint file at `path` as the `model` and `adapter` already declared
+    /// by [`declare_model`] and [`declare_adapter`], so a caller that declared them before the
+    /// file was read keeps their ids. The file is checked against [`SHA256`] before whisper.cpp
+    /// reads it, and loaded on the CPU.
+    ///
+    /// # Errors
+    ///
+    /// The [`OpenRefused`] of [`WhisperCppRecogniser::open_with`] but
+    /// [`OpenRefused::NonPositiveConcurrency`].
+    pub fn open_declared(
+        path: impl AsRef<Path>,
+        model: Model,
+        adapter: Adapter,
+    ) -> Result<Self, OpenRefused> {
+        let path = path.as_ref();
         let missing = |kind| OpenRefused::FileMissing {
             path: path.to_path_buf(),
             kind,
@@ -496,9 +516,6 @@ impl WhisperCppRecogniser {
                 detail: error.to_string(),
             }
         })?;
-        let (model, _) = declare_model();
-        let (adapter, _) = declare_adapter(model.model_id(), max_concurrency)
-            .map_err(OpenRefused::NonPositiveConcurrency)?;
         Ok(Self {
             model,
             adapter,
