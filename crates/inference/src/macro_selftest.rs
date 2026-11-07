@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn the_tool_macro_expands_inside_the_crate_into_a_tool_and_its_executor() {
-        let (tool, executor): (Tool, Box<dyn ToolExecutor>) = scaled_length.into();
+        let (tool, executor): (Tool, Box<dyn ToolExecutor>) = scaled_length();
         assert_eq!(tool.name(), "scaled_length");
         assert_eq!(
             tool.schema(),

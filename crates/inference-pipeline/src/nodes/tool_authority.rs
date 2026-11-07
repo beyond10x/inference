@@ -23,9 +23,10 @@
 //! handle.
 //!
 //! The schema is read as a subset of JSON Schema, the language `ess/domains/tools.yaml` leaves
-//! unmapped: `type`, `properties`, `required`, `additionalProperties`, `items` and `enum`, the
-//! annotations `title`, `description`, `$schema`, `$id`, `$comment`, `default` and `examples`,
-//! and the schemas `true` and `false`. `enum` compares numbers by value, as `integer` does. A
+//! unmapped: `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `minimum`
+//! and `maximum`, the annotations `title`, `description`, `$schema`, `$id`, `$comment`, `default`,
+//! `examples` and `format`, and the schemas `true` and `false`. `enum`, `minimum` and `maximum`
+//! compare numbers by value, as `integer` does. A
 //! tool whose schema uses another keyword, or one of these in a form other than JSON Schema's,
 //! fails the node's preparation rather than being validated in part.
 //!
@@ -52,6 +53,7 @@
 //! more: the check and each poll of a send are made under the lock the cancel is taken under, so
 //! a send is either complete before the cancel or not made.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
@@ -894,8 +896,9 @@ const TYPES: [&str; 7] = [
     "object", "array", "string", "boolean", "null", "number", "integer",
 ];
 
-/// The annotations a schema may carry, which validate nothing.
-const ANNOTATIONS: [&str; 7] = [
+/// The annotations a schema may carry, which validate nothing. `format` is one: JSON Schema 2020-12
+/// makes it an annotation unless a validator opts into asserting it.
+const ANNOTATIONS: [&str; 8] = [
     "title",
     "description",
     "$schema",
@@ -903,6 +906,7 @@ const ANNOTATIONS: [&str; 7] = [
     "$comment",
     "default",
     "examples",
+    "format",
 ];
 
 /// Nothing, when `schema` and every schema inside it uses only the keywords [`admits`]
@@ -938,6 +942,7 @@ fn supported(schema: &Json) -> Result<(), String> {
                 true
             }
             "enum" => value.is_array(),
+            "minimum" | "maximum" => value.is_number(),
             annotation if ANNOTATIONS.contains(&annotation) => true,
             other => return Err(format!("the keyword {other:?}")),
         };
@@ -989,6 +994,20 @@ fn equal(a: &Json, b: &Json) -> bool {
     }
 }
 
+/// How the number `a` compares with the number `b`, by value: exactly when both are integers,
+/// as floating point otherwise; `None` when either is not a number.
+fn compare(a: &Json, b: &Json) -> Option<Ordering> {
+    let integer = |n: &Json| {
+        n.as_i64()
+            .map(i128::from)
+            .or_else(|| n.as_u64().map(i128::from))
+    };
+    match (integer(a), integer(b)) {
+        (Some(x), Some(y)) => Some(x.cmp(&y)),
+        _ => a.as_f64()?.partial_cmp(&b.as_f64()?),
+    }
+}
+
 /// Whether `value` satisfies `schema`, read as the subset of JSON Schema [`supported`] admits.
 fn admits(schema: &Json, value: &Json) -> bool {
     let Json::Object(keywords) = schema else {
@@ -1007,7 +1026,18 @@ fn admits(schema: &Json, value: &Json) -> bool {
         Some(Json::Array(allowed)) => allowed.iter().any(|member| equal(member, value)),
         Some(_) => false,
     };
-    if !type_holds || !enum_holds {
+    let bound_holds = |keyword: &str, within: fn(Ordering) -> bool| match keywords.get(keyword) {
+        None => true,
+        Some(bound) if bound.is_number() => {
+            !value.is_number() || compare(value, bound).is_some_and(within)
+        }
+        Some(_) => false,
+    };
+    if !type_holds
+        || !enum_holds
+        || !bound_holds("minimum", Ordering::is_ge)
+        || !bound_holds("maximum", Ordering::is_le)
+    {
         return false;
     }
     if let Json::Object(members) = value {
@@ -1195,8 +1225,8 @@ mod tests {
             Err("the keyword \"pattern\"".to_owned())
         );
         assert_eq!(
-            supported(&json!({"properties": {"n": {"minimum": 1}}})),
-            Err("the keyword \"minimum\"".to_owned())
+            supported(&json!({"properties": {"n": {"exclusiveMinimum": 1}}})),
+            Err("the keyword \"exclusiveMinimum\"".to_owned())
         );
         assert_eq!(
             supported(&json!({"items": {"oneOf": []}})),
@@ -1227,5 +1257,52 @@ mod tests {
         ] {
             assert_eq!(supported(&well_formed), Ok(()), "{well_formed}");
         }
+    }
+
+    #[test]
+    fn format_is_an_annotation_that_validates_nothing() {
+        let schema = json!({"type": "integer", "format": "int64"});
+        assert_eq!(supported(&schema), Ok(()));
+        assert!(admits(&schema, &json!(3)));
+        assert!(!admits(&schema, &json!("3")));
+        let schema = json!({"type": "string", "format": "email"});
+        assert_eq!(supported(&schema), Ok(()));
+        assert!(admits(&schema, &json!("not an address")));
+    }
+
+    #[test]
+    fn minimum_refuses_a_number_below_it_and_admits_the_bound_and_what_is_not_a_number() {
+        let schema = json!({"type": "integer", "minimum": 0});
+        assert_eq!(supported(&schema), Ok(()));
+        for admitted in [json!(0), json!(255), json!(0.0)] {
+            assert!(admits(&schema, &admitted), "{admitted}");
+        }
+        for refused in [json!(-1), json!(-0.5), json!(i64::MIN)] {
+            assert!(!admits(&schema, &refused), "{refused}");
+        }
+        assert!(admits(&json!({"minimum": 1.5}), &json!("text")));
+        assert!(!admits(&json!({"minimum": 1.5}), &json!(1)));
+        assert!(supported(&json!({"minimum": "0"})).is_err());
+    }
+
+    #[test]
+    fn maximum_refuses_a_number_above_it_and_admits_the_bound_and_what_is_not_a_number() {
+        let schema = json!({"type": "integer", "minimum": 0, "maximum": 255});
+        assert_eq!(supported(&schema), Ok(()));
+        for admitted in [json!(255), json!(255.0), json!(7)] {
+            assert!(admits(&schema, &admitted), "{admitted}");
+        }
+        for refused in [json!(256), json!(u64::MAX), json!(255.5)] {
+            assert!(!admits(&schema, &refused), "{refused}");
+        }
+        assert!(admits(&json!({"maximum": 1}), &json!(["a", 2])));
+        assert!(
+            !admits(
+                &json!({"properties": {"level": {"maximum": 100}}}),
+                &json!({"level": 101})
+            ),
+            "a bound inside a property"
+        );
+        assert!(supported(&json!({"maximum": null})).is_err());
     }
 }

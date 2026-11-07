@@ -1,4 +1,4 @@
-//! A tool without arguments converts into the pair `Agent::tool` takes.
+//! A tool without arguments is a function answering the pair `Agent::tool` takes.
 
 use inference::tools::{Tool, ToolExecutor};
 
@@ -10,7 +10,7 @@ async fn local_time() -> String {
 
 #[allow(dead_code)]
 fn offered() -> (Tool, Box<dyn ToolExecutor>) {
-    local_time.into()
+    local_time()
 }
 
 fn main() {}

@@ -39,9 +39,7 @@ async fn scale(factor: f64) -> f64 {
 }
 
 /// A place on the map.
-#[derive(
-    inference::__private::serde::Deserialize, inference::__private::schemars::JsonSchema,
-)]
+#[derive(inference::__private::serde::Deserialize, inference::__private::schemars::JsonSchema)]
 #[serde(crate = "inference::__private::serde")]
 #[schemars(crate = "inference::__private::schemars")]
 struct Place {
@@ -109,8 +107,8 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
-fn pair(tool: impl Into<(Tool, Box<dyn ToolExecutor>)>) -> (Tool, Box<dyn ToolExecutor>) {
-    tool.into()
+fn pair(tool: impl FnOnce() -> (Tool, Box<dyn ToolExecutor>)) -> (Tool, Box<dyn ToolExecutor>) {
+    tool()
 }
 
 /// What `ToolAuthority::prepare` answers for an authority over the one macro tool `tool`.
@@ -141,7 +139,12 @@ fn a_macro_tool_with_an_unsigned_argument_prepares_under_the_authority() {
 
 #[test]
 fn a_macro_tool_with_a_float_argument_prepares_under_the_authority() {
-    assert_eq!(prepared(pair(scale).0), Ok(()), "{}", pair(scale).0.schema());
+    assert_eq!(
+        prepared(pair(scale).0),
+        Ok(()),
+        "{}",
+        pair(scale).0.schema()
+    );
 }
 
 #[test]
