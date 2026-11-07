@@ -38,7 +38,7 @@ scope:
   path: crates/inference/tests/agent.rs
 - confidence: cited
   path: crates/inference/tests/compile_fail
-revision: 36
+revision: 37
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-07T17:59:56Z", actor: "human:operator", revision: 35, decided_on: {"recorded":{"approval":1}}}
 - {from: "proposed", to: "active", at: "2026-11-07T17:59:56Z", actor: "human:operator", revision: 36, decided_on: {"recorded":{"approval":1}}}
@@ -117,7 +117,7 @@ events.
     returns the `Frame` entries only. `Played` is a `pub enum` in `fake.rs`.
   - Its sink accepts writes without a `pull`. `open_output` sets two crate-private hooks on the
     `PlayoutBuffer` it makes: a tap that keeps each pushed frame and records each stop as
-    `Cleared`, and no capacity bound, so `Speaker::push` never answers `Full`.
+    `Cleared`. The sink keeps its capacity bound by default, which existing playout and loopback tests rely on for `PushError::Full`; `FakeHost::unbounded()` lifts it, so `Speaker::push` never answers `Full`, and every Agent and device test builds its host with `FakeHost::new(..).unbounded()`.
   - `FakeHost::hold_sink() -> SinkHold`, a test gate: while the returned guard lives, a write to the
     output sink waits in the tap (a `Mutex<bool>` and `Condvar`) and nothing is recorded; dropping
     the guard releases the waiting writes in order. A write waiting in the hold when the speaker is
