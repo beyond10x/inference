@@ -57,7 +57,7 @@ ess specify validate --path ess
 cargo test -p inference-testkit --features run --test conform
 ```
 
-With ess 0.88.0, the release CI installs, the validation prints the following. Long lines are
+With ess 0.89.0, the release CI installs, the validation prints the following. Long lines are
 wrapped here, and their continuation lines are indented four spaces:
 
 ```text
@@ -68,8 +68,8 @@ warning[ESS-ENTITY-019]: `inference.session.HistoryEntry` stores `call_id`, type
   help: declare a `references` relation on `inference.session.HistoryEntry`:
     `{name: call_id, kind: references, target: inference.tools.ToolCall,
     cardinality: one, via: call_id}`
-  --> domains/session.yaml:173:5
-inference v1 — 11 file(s), 9 scenario(s), valid
+  --> domains/session.yaml:174:5
+inference v1 — 11 file(s), 10 scenario(s), valid
 ```
 
 The last lines of the test run:
@@ -77,7 +77,7 @@ The last lines of the test run:
 ```text
 test the_suite_runs_against_the_testkit_target ... ok
 
-test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.71s
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.72s
 ```
 
 ## Tests that need a model, a server or a key
