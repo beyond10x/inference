@@ -242,25 +242,12 @@ impl Recipe {
     ///
     /// # Errors
     ///
-    /// [`Error::Layer`] naming the name when a built-in recipe or an earlier registration holds
-    /// it; the table is unchanged.
+    /// [`Error::RecipeNameTaken`] naming the name when a built-in recipe or an earlier
+    /// registration holds it; the table is unchanged.
     pub fn register(self) -> Result<(), Error> {
         let mut table = table().lock().unwrap_or_else(PoisonError::into_inner);
-        let holder = if BUILT_IN.contains(&self.name.as_str()) {
-            Some("a built-in recipe")
-        } else if table.contains_key(&self.name) {
-            Some("an earlier registration")
-        } else {
-            None
-        };
-        if let Some(holder) = holder {
-            return Err(Error::Layer {
-                message: format!(
-                    "the recipe name `{}` is held by {holder}: register the recipe under another name",
-                    self.name
-                ),
-                source: None,
-            });
+        if BUILT_IN.contains(&self.name.as_str()) || table.contains_key(&self.name) {
+            return Err(Error::RecipeNameTaken { name: self.name });
         }
         table.insert(self.name.clone(), self);
         Ok(())
