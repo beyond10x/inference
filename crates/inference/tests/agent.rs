@@ -1,13 +1,25 @@
 //! The `Agent` over the testkit mocks: its builder, its event stream, its close and its end.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+use inference::duplex::SpeechCallId;
 use inference::facade::events::SessionEvent;
+use inference::facade::live::LiveSession;
 use inference::facade::session::SessionState;
-use inference::{Agent, Binding, BindingSource, Event, Role, Stack};
-use inference_testkit::duplex::mock::{MockSpeechModel, Reply, ScriptedTurn, pcm, utterance};
+use inference::pipeline::PlannedPipeline;
+use inference::tools::{
+    CancellationSignal, DeclareTool, ExecutionFuture, SideEffectClass, Tool, ToolCall, ToolCallId,
+    ToolExecutor,
+};
+use inference::{Agent, Binding, BindingSource, Description, Event, Payload, Role, Stack};
+use inference_testkit::duplex::mock::{
+    MockHistory, MockSpeechModel, Reply, ScriptedTurn, pcm, utterance,
+};
+use serde_json::json;
 
 const LIMIT: Duration = Duration::from_secs(5);
 
@@ -451,5 +463,283 @@ async fn dropping_an_unclosed_agent_closes_its_session() {
         }
         assert!(started.elapsed() < LIMIT, "{row:?}");
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits until the mock completed `count` responses.
+async fn completed(history: &MockHistory, count: usize) {
+    let started = Instant::now();
+    while history.completed() < count {
+        assert!(
+            started.elapsed() < LIMIT,
+            "{} of {count}",
+            history.completed()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Answers every call with "Berlin" and counts its runs.
+struct Berlin(Arc<AtomicUsize>);
+
+impl ToolExecutor for Berlin {
+    fn execute<'a>(
+        &'a self,
+        _: &'a ToolCall,
+        _: Instant,
+        _: &'a CancellationSignal,
+    ) -> ExecutionFuture<'a> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::ready(Ok(json!("Berlin"))))
+    }
+}
+
+/// The hand-built "lookup" pair and its executor's run count.
+fn lookup(requires_confirmation: bool) -> ((Tool, Box<dyn ToolExecutor>), Arc<AtomicUsize>) {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let tool = Tool::declare(DeclareTool {
+        name: "lookup".to_owned(),
+        description: "looks a city up".to_owned(),
+        schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+        schema_revision: "1".to_owned(),
+        side_effect: SideEffectClass::ReadOnly,
+        requires_confirmation,
+    })
+    .0;
+    let executor: Box<dyn ToolExecutor> = Box::new(Berlin(Arc::clone(&runs)));
+    ((tool, executor), runs)
+}
+
+fn call_turn() -> ScriptedTurn {
+    ScriptedTurn {
+        heard: "where is it".to_owned(),
+        reply: Reply::Call {
+            tool: "lookup".to_owned(),
+            arguments: json!({"city": "Berlin"}),
+            then: "It is {result}".to_owned(),
+        },
+    }
+}
+
+fn said(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Said { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_over_native_voice_is_called_then_answered() {
+    let model = MockSpeechModel::native(vec![call_turn()]);
+    let (pair, runs) = lookup(false);
+    let agent = Agent::voice_with(speech(model))
+        .tool(pair)
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    speak(&agent).await;
+    let seen = read_until(&mut events, "Said").await;
+    let called = seen
+        .iter()
+        .position(|event| {
+            matches!(event, Event::ToolCalled { name, speech_call_id, .. }
+                if name == "lookup" && *speech_call_id == Some(SpeechCallId::new("call_1")))
+        })
+        .unwrap_or_else(|| panic!("ToolCalled for call_1: {seen:#?}"));
+    assert!(called < seen.len() - 1, "{seen:#?}");
+    assert!(said(&seen)[0].contains("Berlin"), "{seen:#?}");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    agent.close().await.expect("closes");
+}
+
+/// What `held` answers: the agent, its stream, the events read, the runs and the call.
+type Held = (
+    Agent,
+    inference::Events,
+    Vec<Event>,
+    Arc<AtomicUsize>,
+    ToolCallId,
+);
+
+/// Starts an agent whose "lookup" requires confirmation, speaks, and reads until its
+/// `ConfirmationRequested`.
+async fn held() -> Held {
+    let model = MockSpeechModel::native(vec![call_turn()]);
+    let (pair, runs) = lookup(true);
+    let agent = Agent::voice_with(speech(model))
+        .tool(pair)
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    speak(&agent).await;
+    let seen = read_until(&mut events, "ConfirmationRequested").await;
+    let Some(Event::ConfirmationRequested { call_id, name, .. }) = seen.last() else {
+        unreachable!()
+    };
+    assert_eq!(name, "lookup");
+    let call_id = *call_id;
+    (agent, events, seen, runs, call_id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirmation_is_requested_after_its_call() {
+    let (agent, _events, seen, runs, call_id) = held().await;
+    let called = seen
+        .iter()
+        .position(|event| matches!(event, Event::ToolCalled { call_id: id, .. } if *id == call_id))
+        .unwrap_or_else(|| panic!("ToolCalled before ConfirmationRequested: {seen:#?}"));
+    assert!(called < seen.len() - 1, "{seen:#?}");
+    assert_eq!(
+        names(&seen)
+            .iter()
+            .filter(|name| **name == "ConfirmationRequested")
+            .count(),
+        1
+    );
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "a held call does not run");
+    agent.close().await.expect("closes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_call_answers_the_model_with_a_rejection() {
+    let (agent, mut events, _, runs, call_id) = held().await;
+    assert!(agent.reject(call_id));
+    let seen = read_until(&mut events, "Said").await;
+    assert!(said(&seen)[0].contains("rejected"), "{seen:#?}");
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    agent.close().await.expect("closes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirmed_call_runs_the_executor() {
+    let (agent, mut events, _, runs, call_id) = held().await;
+    assert!(agent.confirm(call_id));
+    let seen = read_until(&mut events, "Said").await;
+    assert!(said(&seen)[0].contains("Berlin"), "{seen:#?}");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    agent.close().await.expect("closes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_with_a_confirmation_held_ends_with_closed() {
+    let (agent, mut events, _, runs, _) = held().await;
+    agent.close().await.expect("closes");
+    let seen = read_all(&mut events).await;
+    assert_eq!(names(&seen).last(), Some(&"Closed"), "{seen:#?}");
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_is_yielded_in_emission_order() {
+    let model = MockSpeechModel::native(vec![turn("hi there")]);
+    let history = model.history();
+    let agent = Agent::voice_with(speech(model))
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    speak(&agent).await;
+    completed(&history, 1).await;
+    let mut seen = read_until(&mut events, "Said").await;
+    seen.extend(read_until(&mut events, "Usage").await);
+    assert_eq!(
+        names(&seen),
+        [
+            "Started", "Heard", "Usage", "Said", "Audio", "Audio", "Usage"
+        ],
+        "{seen:#?}"
+    );
+    agent.close().await.expect("closes");
+}
+
+/// A clock that always answers the instant it was made with.
+#[derive(Clone, Copy)]
+struct Fixed(Instant);
+
+impl inference::Clock for Fixed {
+    fn now(&self) -> Instant {
+        self.0
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_clock_sets_the_started_instant() {
+    let at = Instant::now() - Duration::from_secs(3600);
+    let model = MockSpeechModel::native(vec![turn("hi")]);
+    let agent = Agent::voice_with(speech(model))
+        .clock(Fixed(at))
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    let seen = read_until(&mut events, "Started").await;
+    let Some(Event::Started { at: started, .. }) = seen.last() else {
+        unreachable!()
+    };
+    assert_eq!(*started, at);
+    agent.close().await.expect("closes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_escape_method_returns_the_type_the_design_names() {
+    let model = MockSpeechModel::native(vec![turn("hi")]);
+    let agent = Agent::voice_with(speech(model))
+        .start()
+        .await
+        .expect("starts");
+    let s: &LiveSession<Payload> = agent.session();
+    let _ = s.session_id();
+    let p: &PlannedPipeline = agent.pipeline();
+    let described: Description = agent.describe();
+    let pipeline: &inference::facade::describe::Description =
+        described.pipeline.as_ref().expect("described");
+    assert_eq!(pipeline.pipeline_id, p.pipeline_id());
+    let mut events = agent.events();
+    let seen = read_until(&mut events, "Started").await;
+    let raw: Option<SessionEvent> = seen[0].raw();
+    assert!(matches!(raw, Some(SessionEvent::SessionReady(_))));
+    agent.close().await.expect("closes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_behind_by_four_is_told_lagged_four() {
+    const TURNS: usize = 171;
+    let script = (0..TURNS).map(|i| turn(&format!("reply {i}"))).collect();
+    let model = MockSpeechModel::native(script).closes();
+    let history = model.history();
+    let agent = Agent::voice_with(speech(model))
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    let mut at = 0;
+    for i in 0..TURNS {
+        completed(&history, i).await;
+        let spoken = utterance(pcm(24_000), at);
+        for frame in spoken.frames() {
+            agent.send_audio(frame).await.expect("sent");
+        }
+        at = spoken.next();
+    }
+    tokio::time::timeout(LIMIT, agent.closed())
+        .await
+        .expect("the agent ends within 5 s");
+    let seen = read_all(&mut events).await;
+    assert!(matches!(seen[0], Event::Lagged(4)), "{:?}", names(&seen));
+    let mut expected = vec!["Audio", "Audio", "Usage"];
+    for _ in 1..TURNS {
+        expected.extend(["Heard", "Usage", "Said", "Audio", "Audio", "Usage"]);
+    }
+    expected.push("Closed");
+    assert_eq!(names(&seen[1..]), expected);
+    let texts = said(&seen);
+    assert_eq!(texts.len(), TURNS - 1);
+    for (i, text) in texts.iter().enumerate() {
+        assert_eq!(*text, format!("reply {}", i + 1));
     }
 }
