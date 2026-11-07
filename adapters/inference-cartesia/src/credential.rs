@@ -55,8 +55,12 @@ impl Credential {
     /// zeroized when the value and every clone of it drop.
     ///
     /// # Errors
-    /// [`CredentialError::Invalid`] when the result cannot be a header value.
+    /// [`CredentialError::Invalid`] when the key is empty or only whitespace, or the result cannot
+    /// be a header value.
     pub(crate) fn into_header(self, prefix: &[u8]) -> Result<HeaderValue, CredentialError> {
+        if self.0.iter().all(u8::is_ascii_whitespace) {
+            return Err(CredentialError::Invalid);
+        }
         if prefix.is_empty() {
             return sensitive_header(self.0);
         }
