@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-stack
 kind: story
-status: active
+status: implemented
 title: A stack binds each role to one adapter from builder, environment or TOML, resolved in a fixed order
 relations:
 - decomposes: epic:sdk
@@ -46,10 +46,11 @@ scope:
   path: crates/inference/tests/stack.rs
 - confidence: inferred
   path: ess/domains/sdk.yaml
-revision: 26
+revision: 27
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-06T22:09:35Z", actor: "human:operator", revision: 24, decided_on: {"recorded":{"approval":1}}}
 - {from: "proposed", to: "active", at: "2026-11-06T22:09:35Z", actor: "human:operator", revision: 25, decided_on: {"recorded":{"approval":1}}}
+- {from: "active", to: "implemented", at: "2026-11-07T04:23:03Z", actor: "human:operator", revision: 27, decided_on: {"recorded":{"test_result":1,"approval":1,"review_outcome":1}}}
 ---
 ## Context
 
