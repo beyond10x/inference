@@ -9,7 +9,7 @@
 //! caller built: the graph runtime, which knows the producing node, its port and the stream it
 //! orders its events on, is the producer of envelopes, and no store knows those three.
 //!
-//! A node wraps what it emits on one output port with a [`StreamEmitter`]: one stream of its own,
+//! A node wraps what it emits on one output port with a `StreamEmitter`: one stream of its own,
 //! numbered from 1, every `inference.stream` event recorded in the run's [`RunLog`] before it is
 //! sent, and a control event, told from user content by its envelope's `kind` alone, not
 //! recorded.
