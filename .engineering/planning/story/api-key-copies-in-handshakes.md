@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:api-key-copies-in-handshakes
 kind: story
-status: draft
+status: active
 title: Hosted WebSocket adapters limit and document the copies of the API key
 tags:
 - from-finding
 relations:
 - informed_by: review-result:security-deepgram-stt-pass-1
+- serves: vision:inference
 scope:
 - confidence: inferred
   path: adapters/inference-cartesia/src/connection.rs
@@ -33,7 +34,10 @@ scope:
   path: adapters/inference-phonic/src/duplex.rs
 - confidence: inferred
   path: adapters/inference-phonic/src/lib.rs
-revision: 13
+revision: 15
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-07T09:15:07Z", actor: "human:timo", revision: 14, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-07T09:15:07Z", actor: "human:timo", revision: 15, decided_on: {"recorded":{"approval":1}}}
 ---
 ## Context
 
