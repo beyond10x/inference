@@ -18,6 +18,8 @@
   over any playout, `AcknowledgingSink::cutting(false)` makes it take each `TurnOpened` and act on
   none, and `AcknowledgingSink::on_interruption` is called with each interruption it records.
   `AcknowledgingSink::new` and `with_turns` are unchanged.
+- `inference-pipeline`: `AgentNode::keeping_replies`, a node that completes its generation at
+  every `TurnOpened` and never supersedes it, so a reply left unplayed by a new turn is kept.
 
 ## [0.25.0] — 2026-11-07
 
