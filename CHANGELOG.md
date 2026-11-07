@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.24.0] — 2026-11-07
 
 ### Breaking
 
@@ -37,6 +37,11 @@
 ### Fixed
 
 - `inference-docs`: a proc-macro crate is listed as a library in the crate reference.
+
+### Changed
+
+- The `ess` pin moves to 0.89.0: CI's `ESS_VERSION`, the testkit's `ess-conformance` and
+  `ess-primitives` tags, and `requires` in `ess/ess-inputs.yaml`.
 
 ## [0.23.0] — 2026-11-06
 
