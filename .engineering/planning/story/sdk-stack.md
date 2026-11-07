@@ -46,7 +46,7 @@ scope:
   path: crates/inference/tests/stack.rs
 - confidence: inferred
   path: ess/domains/sdk.yaml
-revision: 25
+revision: 26
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-06T22:09:35Z", actor: "human:operator", revision: 24, decided_on: {"recorded":{"approval":1}}}
 - {from: "proposed", to: "active", at: "2026-11-06T22:09:35Z", actor: "human:operator", revision: 25, decided_on: {"recorded":{"approval":1}}}
@@ -368,8 +368,10 @@ reads or sets the process environment, so the tests can run in parallel.
 - `Stack::from_env()` is `Stack::new().resolve_with(&Env::process())`:
   `rg -n 'Stack::new\(\)\.resolve_with\(&Env::process\(\)\)' crates/inference/src/stack.rs` matches.
 - `Stack::adapter(Role::Llm)` on a resolved stack returns the bound `inference_core::model::Adapter`
-  (`crates/inference-core/src/model.rs:330`) and its `CapabilityRecord` (`model.rs:508`), equal to
-  the ones the registry declared.
+  (`crates/inference-core/src/model.rs:330`), equal to the one the registry declared. Amended
+  2026-11-07 by the coordinator after adversary pass 1: no adapter produces a `CapabilityRecord` at
+  runtime (records are per-hardware files only tests read), so the stack returns no record; a
+  record belongs to the hardware a model ran on, not to a binding.
 - `Role` (R194): a test matches each of `Role::Stt`, `Role::Llm`, `Role::Tts`, `Role::Speech`
   with no wildcard arm, so a fifth variant fails to compile.
 - What `declare_into` takes (R197), feature `testing`: a stack file with `adapter = "mock"` for
