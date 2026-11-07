@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-07T10:41:17Z",
+  "actor": "human:timo",
+  "artifact": "story:api-key-copies-in-handshakes",
+  "kind": "story",
+  "revision": 15,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0: 545 test binaries, 3704 passed, 0 failed, 60 ignored (1a25038)",
+    "reference": "1a25038"
+  }
+}

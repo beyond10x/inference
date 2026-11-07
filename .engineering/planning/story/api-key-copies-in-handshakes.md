@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:api-key-copies-in-handshakes
 kind: story
-status: active
+status: implemented
 title: Hosted WebSocket adapters limit and document the copies of the API key
 tags:
 - from-finding
@@ -34,10 +34,11 @@ scope:
   path: adapters/inference-phonic/src/duplex.rs
 - confidence: inferred
   path: adapters/inference-phonic/src/lib.rs
-revision: 15
+revision: 16
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-07T09:15:07Z", actor: "human:timo", revision: 14, decided_on: {"recorded":{"approval":1}}}
 - {from: "proposed", to: "active", at: "2026-11-07T09:15:07Z", actor: "human:timo", revision: 15, decided_on: {"recorded":{"approval":1}}}
+- {from: "active", to: "implemented", at: "2026-11-07T10:41:18Z", actor: "human:timo", revision: 16, decided_on: {"recorded":{"test_result":1,"approval":1,"review_outcome":1}}}
 ---
 ## Context
 
