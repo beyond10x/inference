@@ -7,6 +7,9 @@
 - `inference`: `Binding::stt`, `Binding::tts` and `Binding::speech` also need the model's handle
   or session to be `Send + 'static` (`R::Handle`, `S::Handle`, `M::Session`), as the binding now
   owns the model and builds its role's node for each run from it.
+- `inference`: `StackBinding::generator()` answers `None` when the stack's profile does not admit
+  the adapter's locality, such as a hosted generator under `offline_strict`, as planning refuses
+  it; it handed the generator out. A run's role nodes are built from no such binding either.
 
 ### Added
 
