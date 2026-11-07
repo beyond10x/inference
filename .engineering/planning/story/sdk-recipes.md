@@ -31,7 +31,7 @@ scope:
   path: crates/inference/tests/recipes.rs
 - confidence: inferred
   path: ess/domains/sdk.yaml
-revision: 22
+revision: 23
 ---
 ## Context
 
@@ -433,3 +433,10 @@ Its diff lists none of `crates/inference/src/lib.rs`, `crates/inference/src/prel
 ## Out of scope
 
 Topologies C and E of `docs/design/inference.md` §14 (speech-aware hybrid, duplex text cascade).
+
+## Carried from the sdk-stack review (2026-11-07)
+
+review-result:adversary-w24-sdk-stack-pass-1 found that no SDK code refuses a denied locality yet:
+`StackBinding::generator()` (`crates/inference/src/stack.rs`) hands out a hosted generator under the
+default `offline_strict` profile, and `AdapterDescriptor`'s locality is compared with nothing. The
+refusal this story plans (R213, `profile-denies`) covers those accessors too, not only planning.
