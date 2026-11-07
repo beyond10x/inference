@@ -7,8 +7,6 @@ use std::fmt;
 use std::future;
 #[cfg(feature = "audio-host")]
 use std::sync::{Arc, Mutex, PoisonError};
-#[cfg(feature = "audio-host")]
-use std::time::Duration;
 
 use inference_core::id::RunId;
 use inference_pipeline::nodes::FanOut;
@@ -24,7 +22,7 @@ use inference_pipeline::nodes::stt::SttPorts;
 #[cfg(feature = "audio-host")]
 use inference_pipeline::nodes::turn_policy::{CompleteTurnRefused, TurnCommands, TurnPolicy};
 #[cfg(feature = "audio-host")]
-use inference_pipeline::nodes::vad::{VadConfig, VoiceActivityDetector};
+use inference_pipeline::nodes::vad::VoiceActivityDetector;
 use inference_pipeline::{
     Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeRole,
     PipelineId, PortId,
@@ -36,14 +34,6 @@ use super::{Recipe, Topology};
 use crate::graph::Implementation;
 use crate::stack::{Synthesis, default_session_config};
 use crate::{Error, Payload, Role, Stack};
-
-/// The detector of `voice_cascade`: the reference cascade's values.
-#[cfg(feature = "audio-host")]
-const VAD: VadConfig = VadConfig {
-    threshold: 0.05,
-    attack: Duration::from_millis(30),
-    hold: Duration::from_millis(200),
-};
 
 /// The user item a model node is asked: the input text as it came.
 fn reply(text: &str) -> String {
@@ -245,7 +235,12 @@ impl<'i> Run<'i> {
         #[cfg(feature = "audio-host")]
         if matches!(self.recipe.topology, Topology::VoiceCascade) {
             match node.name() {
-                "vad" => return Ok(Box::new(VoiceActivityDetector::new(run_id, VAD))),
+                "vad" => {
+                    return Ok(Box::new(VoiceActivityDetector::new(
+                        run_id,
+                        self.recipe.vad,
+                    )));
+                }
                 "turn policy" => {
                     return Ok(Box::new(TurnPolicy::new(run_id, self.turns.clone())));
                 }
@@ -389,5 +384,177 @@ impl NodeImplementation<Payload> for Refused {
 
     fn stop(&mut self) -> NodeFuture<'_, ()> {
         Box::pin(future::ready(()))
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use std::collections::{BTreeMap, VecDeque};
+    use std::future::{self, Future};
+    use std::num::{NonZeroU16, NonZeroU32};
+    use std::pin::pin;
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::thread::{self, Thread};
+    use std::time::Duration;
+
+    use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
+    use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
+    use inference_core::envelope::{EventEnvelope, EventId, Timebase};
+    use inference_core::id::{NodeId, RunId, StreamId};
+    use inference_pipeline::nodes::vad::{SpeechActivity, VadConfig};
+    use inference_pipeline::{NodeEndpoints, NodeInput, NodeOutput};
+
+    use super::Run;
+    use crate::recipe::VAD;
+    use crate::{Binding, Env, Payload, Recipe, Role, Stack};
+
+    /// Samples in one frame of the utterance: 20 ms at 16 kHz.
+    const FRAME: u32 = 320;
+
+    struct Unpark(Thread);
+
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(Unpark(thread::current())));
+        let mut future = pin!(future);
+        loop {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut Context::from_waker(&waker)) {
+                return output;
+            }
+            thread::park_timeout(Duration::from_millis(10));
+        }
+    }
+
+    /// An input edge holding the envelopes it hands out, closed once they are taken.
+    struct Feed(VecDeque<EventEnvelope<Payload>>);
+
+    impl InputEndpoint<Payload> for Feed {
+        fn recv(&mut self) -> EndpointFuture<'_, Option<EventEnvelope<Payload>>> {
+            Box::pin(future::ready(self.0.pop_front()))
+        }
+    }
+
+    /// An output edge keeping the kind of each envelope sent on it.
+    #[derive(Clone, Default)]
+    struct Kinds(Arc<Mutex<Vec<String>>>);
+
+    impl OutputEndpoint<Payload> for Kinds {
+        fn send(
+            &self,
+            envelope: EventEnvelope<Payload>,
+        ) -> EndpointFuture<'_, Result<(), SendError<Payload>>> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(envelope.kind);
+            Box::pin(future::ready(Ok(())))
+        }
+    }
+
+    /// Half a second of a tone at 0.5 of full scale, then half a second of silence, as 16 kHz
+    /// mono frames.
+    fn utterance() -> Vec<EventEnvelope<Payload>> {
+        let format = AudioFormat {
+            encoding: AudioEncoding::PcmS16le,
+            sample_rate: NonZeroU32::new(16_000).expect("a rate"),
+            channels: NonZeroU16::MIN,
+        };
+        (0_u64..50)
+            .map(|index| {
+                let level = if index < 25 { 16_384_i16 } else { 0 };
+                let frame = AudioFrame {
+                    format,
+                    position: SampleClockPosition::new(index * u64::from(FRAME))
+                        .expect("a position"),
+                    sample_count: FRAME,
+                    data: level.to_le_bytes().repeat(FRAME as usize),
+                };
+                EventEnvelope {
+                    schema_version: 1,
+                    event_id: EventId::generate(),
+                    run_id: RunId::generate(),
+                    session_id: None,
+                    stream_id: StreamId::generate(),
+                    sequence: i64::try_from(index).expect("a small index") + 1,
+                    producer: NodeId::generate(),
+                    port: "audio".to_owned(),
+                    kind: "inference.audio.AudioChunk".to_owned(),
+                    generation_id: None,
+                    timestamp: 0,
+                    timebase: Timebase::AudioFrameTime,
+                    causation_id: None,
+                    payload: Payload::Audio(frame),
+                }
+            })
+            .collect()
+    }
+
+    /// The `SpeechStarted` events the `vad` node of `recipe`'s run, built as an open builds it,
+    /// sends over [`utterance`].
+    fn speech_started(recipe: &Recipe) -> usize {
+        let stack = [Role::Stt, Role::Llm, Role::Tts]
+            .into_iter()
+            .fold(Stack::new(), |stack, role| {
+                stack.bind(Binding::named(role, "mock", BTreeMap::new()))
+            })
+            .resolve_with(&Env::new())
+            .expect("the stack resolves");
+        let instantiation = recipe
+            .instantiate(&stack)
+            .expect("the cascade plans over the mocks");
+        let node = instantiation
+            .declaration
+            .nodes()
+            .find(|node| node.name() == "vad")
+            .expect("the cascade has a detector")
+            .clone();
+        let mut run = Run::new(&instantiation, &stack);
+        let audio = run.port(&node, "audio").expect("the detector hears audio");
+        let activity = run
+            .port(&node, "activity")
+            .expect("the detector tells activity");
+        let mut detector = run
+            .node(RunId::generate(), &node)
+            .expect("the run builds its detector");
+        let kinds = Kinds::default();
+        block_on(detector.describe(&node));
+        block_on(detector.prepare()).expect("the detector prepares");
+        block_on(detector.start(NodeEndpoints {
+            inputs: vec![NodeInput {
+                port_id: audio,
+                endpoint: Box::new(Feed(utterance().into())),
+            }],
+            outputs: vec![NodeOutput {
+                port_id: activity,
+                endpoint: Box::new(kinds.clone()),
+            }],
+        }))
+        .expect("the detector starts");
+        block_on(detector.drain()).expect("the detector drains");
+        block_on(detector.stop());
+        let sent = kinds.0.lock().unwrap_or_else(PoisonError::into_inner);
+        sent.iter()
+            .filter(|kind| *kind == SpeechActivity::STARTED)
+            .count()
+    }
+
+    #[test]
+    fn the_cascades_detector_runs_with_the_recipes_vad() {
+        assert_eq!(
+            speech_started(&Recipe::voice_cascade()),
+            1,
+            "the default VAD"
+        );
+        let deaf = Recipe::voice_cascade().vad(VadConfig {
+            threshold: 0.9,
+            ..VAD
+        });
+        assert_eq!(speech_started(&deaf), 0, "a threshold above the tone");
     }
 }

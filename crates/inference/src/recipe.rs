@@ -35,12 +35,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
 use inference_core::model::{AdapterId, Capability, Locality};
 use inference_core::policy::{
     DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind, ProfileNotFound,
 };
 use inference_facade::live::{LiveSession, LiveSessions, SessionDriver};
+use inference_pipeline::nodes::vad::VadConfig;
 use inference_pipeline::{
     AdapterNotFound, BindNode, Catalog, Declaration, InteractionMode, LocalityDenied, PipelineId,
     PipelineSpec, PlanPipelineError, PlannedPipeline,
@@ -54,6 +56,14 @@ use crate::{Error, Payload, Role, Stack};
 /// bounds how far the application falls behind before the model's output pauses.
 /// [`Recipe::exposure_capacity`] sets it for one recipe.
 pub const EXPOSURE_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(63);
+
+/// The detector of `voice_cascade` unless [`Recipe::vad`] sets another: the reference cascade's
+/// values, a threshold of 0.05 of full scale, 30 ms of attack and 200 ms of hold.
+const VAD: VadConfig = VadConfig {
+    threshold: 0.05,
+    attack: Duration::from_millis(30),
+    hold: Duration::from_millis(200),
+};
 
 /// How many times `native_voice`'s tool loop may return a call to the model: 4.
 pub const MAX_TOOL_ITERATIONS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
@@ -89,6 +99,7 @@ pub struct Recipe {
     topology: Topology,
     roles: Vec<(String, Role)>,
     capacity: NonZeroUsize,
+    vad: VadConfig,
 }
 
 impl fmt::Debug for Recipe {
@@ -98,6 +109,7 @@ impl fmt::Debug for Recipe {
             .field("mode", &self.mode)
             .field("roles", &self.roles)
             .field("capacity", &self.capacity)
+            .field("vad", &self.vad)
             .finish_non_exhaustive()
     }
 }
@@ -118,6 +130,7 @@ impl Recipe {
                 .map(|(node, role)| ((*node).to_owned(), *role))
                 .collect(),
             capacity: EXPOSURE_CAPACITY,
+            vad: VAD,
         }
     }
 
@@ -195,6 +208,7 @@ impl Recipe {
             topology: Topology::Custom(Arc::new(declare)),
             roles: Vec::new(),
             capacity: EXPOSURE_CAPACITY,
+            vad: VAD,
         }
     }
 
@@ -215,6 +229,16 @@ impl Recipe {
     #[must_use]
     pub const fn exposure_capacity(mut self, capacity: NonZeroUsize) -> Self {
         self.capacity = capacity;
+        self
+    }
+
+    /// Sets the configuration of the voice activity detector of `voice_cascade`, which starts
+    /// and ends the user's turns; by default a threshold of 0.05 of full scale, 30 ms of attack
+    /// and 200 ms of hold, the reference cascade's. Every other recipe has no detector and keeps
+    /// it unused.
+    #[must_use]
+    pub const fn vad(mut self, config: VadConfig) -> Self {
+        self.vad = config;
         self
     }
 
