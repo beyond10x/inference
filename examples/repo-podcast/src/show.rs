@@ -435,7 +435,8 @@ impl<M: NativeSpeechModel> Show<M> {
     /// before the limit, and it ends at most two average turns after it, where it began the
     /// closing only once the limit was generated.
     fn time_to_close(&self, index: usize) -> bool {
-        let generated: Duration = self.played + self.queue.iter().map(Turn::audio).sum();
+        let generated: Duration =
+            self.played + self.queue.iter().map(Turn::audio).sum::<Duration>();
         let average = generated / u32::try_from(index.max(1)).unwrap_or(u32::MAX);
         let closing = match self.hosts[index % 2].role {
             Role::Guest => average * 2,
