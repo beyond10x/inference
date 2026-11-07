@@ -896,22 +896,11 @@ const TYPES: [&str; 7] = [
     "object", "array", "string", "boolean", "null", "number", "integer",
 ];
 
-/// The annotations a schema may carry, which validate nothing. `format` is one: JSON Schema 2020-12
-/// makes it an annotation unless a validator opts into asserting it.
-const ANNOTATIONS: [&str; 8] = [
-    "title",
-    "description",
-    "$schema",
-    "$id",
-    "$comment",
-    "default",
-    "examples",
-    "format",
-];
-
 /// Nothing, when `schema` and every schema inside it uses only the keywords [`admits`]
-/// validates, each in JSON Schema's form, and the [`ANNOTATIONS`]; otherwise what it uses
-/// instead.
+/// validates and the annotations, which validate nothing, each in JSON Schema's form; otherwise
+/// what it uses instead. `title`, `description`, `$schema`, `$id`, `$comment` and `format` are
+/// strings, `examples` an array and `default` any value. `format` is an annotation: JSON Schema
+/// 2020-12 makes it one unless a validator opts into asserting it.
 fn supported(schema: &Json) -> Result<(), String> {
     let keywords = match schema {
         Json::Bool(_) => return Ok(()),
@@ -943,7 +932,11 @@ fn supported(schema: &Json) -> Result<(), String> {
             }
             "enum" => value.is_array(),
             "minimum" | "maximum" => value.is_number(),
-            annotation if ANNOTATIONS.contains(&annotation) => true,
+            "title" | "description" | "$schema" | "$id" | "$comment" | "format" => {
+                value.is_string()
+            }
+            "examples" => value.is_array(),
+            "default" => true,
             other => return Err(format!("the keyword {other:?}")),
         };
         if !well_formed {
@@ -1256,6 +1249,46 @@ mod tests {
             json!({"items": true, "additionalProperties": {"type": "integer"}, "enum": []}),
         ] {
             assert_eq!(supported(&well_formed), Ok(()), "{well_formed}");
+        }
+    }
+
+    #[test]
+    fn an_annotation_in_a_form_other_than_json_schemas_is_unsupported() {
+        for keyword in [
+            "title",
+            "description",
+            "$schema",
+            "$id",
+            "$comment",
+            "format",
+        ] {
+            for value in [
+                json!(5),
+                json!(null),
+                json!(true),
+                json!(["a"]),
+                json!({"a": 1}),
+            ] {
+                let schema = json!({"type": "string", keyword: value});
+                assert!(supported(&schema).is_err(), "{schema}");
+            }
+            let schema = json!({"type": "string", keyword: "text"});
+            assert_eq!(supported(&schema), Ok(()), "{schema}");
+        }
+        for value in [json!(5), json!("a"), json!({"a": 1}), json!(null)] {
+            let schema = json!({"examples": value});
+            assert!(supported(&schema).is_err(), "{schema}");
+        }
+        assert_eq!(supported(&json!({"examples": ["a", 1]})), Ok(()));
+        for value in [
+            json!(5),
+            json!("a"),
+            json!(null),
+            json!({"a": 1}),
+            json!([]),
+        ] {
+            let schema = json!({"default": value});
+            assert_eq!(supported(&schema), Ok(()), "{schema}");
         }
     }
 

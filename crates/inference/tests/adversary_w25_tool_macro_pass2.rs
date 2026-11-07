@@ -87,15 +87,54 @@ fn prepared(tool: Tool) -> Result<(), String> {
     block_on(NodeImplementation::<Payload>::prepare(&mut authority)).map_err(|e| e.to_string())
 }
 
-/// The macro documents "every subschema inlined, so no `$defs` or `$ref`"; schemars inlines a
-/// type only while it is not already being generated, so a self-referential argument keeps both.
+/// The macro documents that non-recursive subschemas are inlined and a recursive argument keeps
+/// `$defs` and `$ref`, which the tool authority refuses at preparation: schemars inlines a type
+/// only while it is not already being generated, so a self-referential argument keeps both.
 #[test]
-fn a_self_referential_argument_carries_no_ref_or_defs() {
+fn a_self_referential_argument_fails_preparation() {
     let (tool, _) = count_nodes();
     let schema = tool.schema().to_string();
     assert!(
-        !schema.contains("$ref") && !schema.contains("$defs"),
+        schema.contains("$ref") && schema.contains("$defs"),
         "{schema}"
+    );
+    assert!(
+        prepared(tool).is_err(),
+        "a recursive schema was prepared with"
+    );
+}
+
+fn annotated(keyword: &str, value: serde_json::Value) -> Tool {
+    Tool::declare(DeclareTool {
+        name: "at".to_owned(),
+        description: "Something at a time.".to_owned(),
+        schema: json!({
+            "type": "object",
+            "properties": {"when": {"type": "string", keyword: value}},
+        }),
+        schema_revision: "1".to_owned(),
+        side_effect: SideEffectClass::ReadOnly,
+        requires_confirmation: false,
+    })
+    .0
+}
+
+/// JSON Schema's `title` is a string.
+#[test]
+fn a_title_that_is_not_a_string_fails_preparation() {
+    assert!(prepared(annotated("title", json!(5))).is_err());
+    assert!(prepared(annotated("title", json!({"text": "When"}))).is_err());
+    assert_eq!(prepared(annotated("title", json!("When"))), Ok(()));
+}
+
+/// JSON Schema's `description` is a string.
+#[test]
+fn a_description_that_is_not_a_string_fails_preparation() {
+    assert!(prepared(annotated("description", json!(["the time"]))).is_err());
+    assert!(prepared(annotated("description", json!(null))).is_err());
+    assert_eq!(
+        prepared(annotated("description", json!("The time."))),
+        Ok(())
     );
 }
 
