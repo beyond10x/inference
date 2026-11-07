@@ -62,7 +62,9 @@
 //! closes the model's session and forwards every event the session still yields up to its
 //! `SpeechSessionClosed`, which is the application's own close and is not emitted; then it ends
 //! `events` and `tool_call`. It keeps reading its inputs until each has ended, so a `stop` sent
-//! after the first is still taken. A session that closed itself was reported by
+//! after the first is still taken; under the run's drain it lets go of `audio` and `control` and
+//! ends once every edge into `tool_result` has ended, so that what a tool loop's other nodes send
+//! at their end, after `tool_call` ended, still finds it. A session that closed itself was reported by
 //! [`DuplexPayload::closed`]; the node then drops every frame and tool result that arrives and
 //! fails nothing, and at the drain ends its outputs at once. A session that failed is reported by
 //! [`DuplexPayload::failed`]; the node then lets go of its inputs, so the next envelope sent to
@@ -913,7 +915,11 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
             }
             self.take_inputs(&waker)?;
             if self.phase == Phase::Ended {
-                if drain || self.inputs.iter().all(|input| input.ended) {
+                let done = self
+                    .inputs
+                    .iter()
+                    .all(|input| input.ended || (drain && input.port != Port::ToolResult));
+                if done {
                     return Ok(());
                 }
                 thread::park_timeout(REST);

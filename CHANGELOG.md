@@ -49,6 +49,13 @@
 - `inference-pipeline`: `AgentNode::keeping_replies`, a node that completes its generation at
   every `TurnOpened` and never supersedes it, so a reply left unplayed by a new turn is kept.
 
+### Fixed
+
+- `inference-pipeline`: under the run's drain, `DuplexNode` ends only once every edge into
+  `tool_result` has ended, as `ModelNode` does. It let go of its inputs as soon as it ended its
+  outputs, so a tool authority or executor sending its end of input back to it failed the run
+  with a closed edge.
+
 ## [0.25.0] — 2026-11-07
 
 ### Breaking
