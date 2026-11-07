@@ -7,7 +7,10 @@
 //! become speech activity and speech activity becomes the turns of `inference.stream` (§11.1,
 //! 606), with the turn policy as their single authority (§12.5, 699); and the commit gate
 //! ([`commit_gate::CommitGate`]), a policy node that passes committed content and holds back what
-//! is not committed, between STT and LLM and between LLM and TTS (§11.3, 624-628).
+//! is not committed, between STT and LLM and between LLM and TTS (§11.3, 624-628); and the
+//! fan-out ([`FanOut`], role `fan_out`), which hands every envelope of its one input edge to each
+//! of its output edges, as a voice cascade's microphone reaches both its detector and its STT
+//! node.
 //!
 //! The model nodes, each over the contract of its model and behind the feature of that contract:
 //! the STT node (`SttNode`) over an `inference-stt` recogniser, the model node (`ModelNode`) and
@@ -37,7 +40,6 @@
 use std::fmt;
 use std::future::{self, Future};
 use std::pin::pin;
-#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
 use std::sync::Weak;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
@@ -64,6 +66,8 @@ pub mod descriptors;
 /// The duplex node: an `inference-duplex` native speech model's session run as one node.
 #[cfg(feature = "duplex")]
 pub mod duplex;
+/// The fan-out: every envelope of its one input edge handed to each of its output edges.
+pub mod fan_out;
 /// The model node: one generation of an `inference-llm` generator per run, with its tool loop.
 #[cfg(feature = "llm")]
 pub mod llm;
@@ -88,6 +92,7 @@ pub mod vad;
 
 #[cfg(feature = "llm")]
 pub use agent::{AgentHandle, AgentNode};
+pub use fan_out::FanOut;
 #[cfg(feature = "llm")]
 pub use llm::{Carried, ModelHandle, ModelNode, ModelPayload};
 pub use log::{EnvelopeRefusal, EventLog, RunLog, StreamEvent};
@@ -430,7 +435,6 @@ pub(crate) fn one_in_one_out<P>(
 /// The exchange task of one model node: the thread it runs on once started, and the token that
 /// thread holds while it runs, so that the node's handle, holding a weak reference to it, sees
 /// the task gone once the thread has ended and dropped its endpoints.
-#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
 pub(crate) struct Exchange {
     token: Option<Arc<()>>,
     probe: Weak<()>,
@@ -440,17 +444,14 @@ pub(crate) struct Exchange {
 }
 
 /// Marks the task done when its thread leaves its work, returning or unwinding.
-#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
 struct Done(Arc<Watched<bool>>);
 
-#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
 impl Drop for Done {
     fn drop(&mut self) {
         self.0.update(|done| *done = true);
     }
 }
 
-#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
 impl Exchange {
     pub(crate) fn new() -> Self {
         let token = Arc::new(());
@@ -506,7 +507,6 @@ impl Exchange {
     }
 }
 
-#[cfg(any(feature = "duplex", feature = "llm", feature = "stt", feature = "tts"))]
 impl fmt::Debug for Exchange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Exchange")

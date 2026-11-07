@@ -17,20 +17,30 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use inference_audio::{AudioEncoding, AudioFormat};
+use inference_core::id::RunId;
 use inference_core::model::{Adapter, AdapterId, Locality};
 use inference_core::policy::{
     DeclareProfile, DeploymentProfile, ProfileId, ProfileKind, TableRule,
 };
-use inference_duplex::{NativeSpeechModel, SessionConfig, TurnDetection, TurnTuning};
+use inference_duplex::{
+    NativeSpeechModel, OpenError, SessionConfig, SpeechCapabilities, TurnDetection, TurnTuning,
+};
 use inference_llm::Generator;
-use inference_pipeline::Catalog;
-use inference_stt::Recogniser;
+use inference_pipeline::nodes::duplex::{DuplexNode, DuplexPorts};
+use inference_pipeline::nodes::log::RunLog;
+use inference_pipeline::nodes::speech::{SpeechNode, SpeechPorts};
+use inference_pipeline::nodes::stt::{SttNode, SttPorts};
+use inference_pipeline::nodes::tts::TtsNode;
+use inference_pipeline::{Catalog, PortId};
+use inference_stt::{ConcurrencyLimitReached, Recogniser, RecognitionRequest};
 use inference_tts::Synthesiser;
 
 use crate::error::Error;
+use crate::graph::Implementation;
 use crate::registry;
 
 /// A role a stack binds to one adapter: `inference.sdk.Role`. Its lowercase name is the `<role>`
@@ -212,7 +222,8 @@ pub mod role {
     }
 }
 
-/// A recogniser bound to the `stt` role.
+/// A recogniser bound to the `stt` role. The binding owns the recogniser; each run's STT node is
+/// built over it by [`BoundRecogniser::node`].
 pub(crate) trait BoundRecogniser: Send {
     fn adapter(&self) -> &Adapter;
 
@@ -221,38 +232,197 @@ pub(crate) trait BoundRecogniser: Send {
     /// nothing; one already open does nothing again.
     #[allow(
         dead_code,
-        reason = "the session that starts a bound recogniser opens it; resolving never does"
+        reason = "building a run's node opens a deferred recogniser; resolving never does"
     )]
     fn open(&mut self) -> Result<(), Error> {
         Ok(())
     }
+
+    /// The STT node of the run `run_id` over the bound recogniser, through `ports`, recording
+    /// what it emits in `log`. A deferred recogniser is opened first.
+    ///
+    /// # Errors
+    ///
+    /// The refusal of opening a deferred recogniser; no node is built.
+    fn node(&self, run_id: RunId, ports: SttPorts, log: RunLog) -> Result<Implementation, Error>;
 }
 
-impl<T: Recogniser + Send + 'static> BoundRecogniser for T {
+impl<T> BoundRecogniser for T
+where
+    T: Recogniser + Clone + Send + 'static,
+    T::Handle: Send + 'static,
+{
     fn adapter(&self) -> &Adapter {
         Recogniser::adapter(self)
     }
-}
 
-/// A synthesiser bound to the `tts` role.
-pub(crate) trait BoundSynthesiser: Send {
-    fn adapter(&self) -> &Adapter;
-}
-
-impl<T: Synthesiser + Send + 'static> BoundSynthesiser for T {
-    fn adapter(&self) -> &Adapter {
-        Synthesiser::adapter(self)
+    fn node(&self, run_id: RunId, ports: SttPorts, log: RunLog) -> Result<Implementation, Error> {
+        Ok(Box::new(SttNode::new(run_id, self.clone(), ports, log)))
     }
 }
 
-/// A native speech model bound to the `speech` role.
-pub(crate) trait BoundSpeechModel: Send {
-    fn adapter(&self) -> &Adapter;
+/// What a run's synthesiser node is built as.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Synthesis {
+    /// A [`TtsNode`]: one input edge of text, one output edge of audio, no playback.
+    Plain,
+    /// A cascade's [`SpeechNode`] through `ports`, sending each segment's playback on its port
+    /// `playback`.
+    Speech {
+        ports: SpeechPorts,
+        playback: PortId,
+    },
 }
 
-impl<T: NativeSpeechModel + Send + 'static> BoundSpeechModel for T {
+/// A synthesiser bound to the `tts` role. The binding owns the synthesiser; each run's node is
+/// built over it by [`BoundSynthesiser::node`].
+pub(crate) trait BoundSynthesiser: Send {
+    fn adapter(&self) -> &Adapter;
+
+    /// The node of the run `run_id` over the bound synthesiser, built as `synthesis`, recording
+    /// what it emits in `log`.
+    fn node(&self, run_id: RunId, synthesis: Synthesis, log: RunLog) -> Implementation;
+}
+
+impl<T> BoundSynthesiser for T
+where
+    T: Synthesiser + Clone + Send + 'static,
+    T::Handle: Send + 'static,
+{
+    fn adapter(&self) -> &Adapter {
+        Synthesiser::adapter(self)
+    }
+
+    fn node(&self, run_id: RunId, synthesis: Synthesis, log: RunLog) -> Implementation {
+        match synthesis {
+            Synthesis::Plain => Box::new(TtsNode::<T>::new(run_id, self.clone(), log)),
+            Synthesis::Speech { ports, playback } => {
+                Box::new(SpeechNode::new(run_id, self.clone(), ports, log).with_playback(playback))
+            }
+        }
+    }
+}
+
+/// A native speech model bound to the `speech` role. The binding owns the model; each run's
+/// duplex node is built over it by [`BoundSpeechModel::node`].
+pub(crate) trait BoundSpeechModel: Send {
+    fn adapter(&self) -> &Adapter;
+
+    /// The duplex node of the run `run_id` over the bound model, opening its session from
+    /// `config`, wired through `ports`, recording what it emits in `log`.
+    fn node(
+        &self,
+        run_id: RunId,
+        config: SessionConfig,
+        ports: DuplexPorts,
+        log: RunLog,
+    ) -> Implementation;
+}
+
+impl<T> BoundSpeechModel for T
+where
+    T: NativeSpeechModel + Clone + Send + 'static,
+    T::Session: Send + 'static,
+{
     fn adapter(&self) -> &Adapter {
         NativeSpeechModel::adapter(self)
+    }
+
+    fn node(
+        &self,
+        run_id: RunId,
+        config: SessionConfig,
+        ports: DuplexPorts,
+        log: RunLog,
+    ) -> Implementation {
+        Box::new(DuplexNode::new(run_id, self.clone(), config, ports, log))
+    }
+}
+
+/// A model a binding owns, reached by the nodes of every run built over it: each node holds a
+/// clone, and every clone reaches the one model, so a model that is not `Clone` serves each run.
+pub(crate) struct Shared<T> {
+    model: Arc<Mutex<T>>,
+    adapter: Adapter,
+}
+
+impl<T> Clone for Shared<T> {
+    fn clone(&self) -> Self {
+        Self {
+            model: Arc::clone(&self.model),
+            adapter: self.adapter.clone(),
+        }
+    }
+}
+
+impl<T> Shared<T> {
+    fn new(model: T, adapter: Adapter) -> Self {
+        Self {
+            model: Arc::new(Mutex::new(model)),
+            adapter,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, T> {
+        self.model.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl<T: Recogniser> Recogniser for Shared<T> {
+    type Handle = T::Handle;
+
+    fn adapter(&self) -> &Adapter {
+        &self.adapter
+    }
+
+    fn start(
+        &mut self,
+        request: RecognitionRequest,
+    ) -> Result<Self::Handle, ConcurrencyLimitReached> {
+        self.lock().start(request)
+    }
+}
+
+impl<T: Synthesiser> Synthesiser for Shared<T> {
+    type Handle = T::Handle;
+
+    fn adapter(&self) -> &Adapter {
+        &self.adapter
+    }
+
+    fn start(&mut self) -> Result<Self::Handle, inference_tts::ConcurrencyLimitReached> {
+        self.lock().start()
+    }
+}
+
+/// A native speech model a binding owns, as [`Shared`], with the capabilities it claims.
+pub(crate) struct SharedSpeech<T> {
+    shared: Shared<T>,
+    capabilities: SpeechCapabilities,
+}
+
+impl<T> Clone for SharedSpeech<T> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+            capabilities: self.capabilities.clone(),
+        }
+    }
+}
+
+impl<T: NativeSpeechModel> NativeSpeechModel for SharedSpeech<T> {
+    type Session = T::Session;
+
+    fn adapter(&self) -> &Adapter {
+        &self.shared.adapter
+    }
+
+    fn capabilities(&self) -> &SpeechCapabilities {
+        &self.capabilities
+    }
+
+    fn open(&mut self, config: SessionConfig) -> Result<Self::Session, OpenError> {
+        self.shared.lock().open(config)
     }
 }
 
@@ -331,10 +501,16 @@ impl Binding {
         }
     }
 
-    /// The `stt` role bound to `recogniser`.
+    /// The `stt` role bound to `recogniser`. The binding owns it, and the STT node of each run is
+    /// built over it.
     #[must_use]
-    pub fn stt(recogniser: impl Recogniser + Send + 'static) -> Bound<role::Stt> {
-        Bound::of(Value::Stt(Box::new(recogniser)))
+    pub fn stt<R>(recogniser: R) -> Bound<role::Stt>
+    where
+        R: Recogniser + Send + 'static,
+        R::Handle: Send + 'static,
+    {
+        let adapter = recogniser.adapter().clone();
+        Bound::of(Value::Stt(Box::new(Shared::new(recogniser, adapter))))
     }
 
     /// The `stt` role bound to a recogniser a registration declared without opening it; its
@@ -357,16 +533,32 @@ impl Binding {
         Bound::of(Value::Llm(Box::new(generator.into())))
     }
 
-    /// The `tts` role bound to `synthesiser`.
+    /// The `tts` role bound to `synthesiser`. The binding owns it, and the synthesiser node of
+    /// each run is built over it.
     #[must_use]
-    pub fn tts(synthesiser: impl Synthesiser + Send + 'static) -> Bound<role::Tts> {
-        Bound::of(Value::Tts(Box::new(synthesiser)))
+    pub fn tts<S>(synthesiser: S) -> Bound<role::Tts>
+    where
+        S: Synthesiser + Send + 'static,
+        S::Handle: Send + 'static,
+    {
+        let adapter = synthesiser.adapter().clone();
+        Bound::of(Value::Tts(Box::new(Shared::new(synthesiser, adapter))))
     }
 
-    /// The `speech` role bound to `model`; it opens with [`default_session_config`].
+    /// The `speech` role bound to `model`; it opens with [`default_session_config`]. The binding
+    /// owns it, and the duplex node of each run is built over it.
     #[must_use]
-    pub fn speech(model: impl NativeSpeechModel + Send + 'static) -> Bound<role::Speech> {
-        Bound::of(Value::Speech(Box::new(model)))
+    pub fn speech<M>(model: M) -> Bound<role::Speech>
+    where
+        M: NativeSpeechModel + Send + 'static,
+        M::Session: Send + 'static,
+    {
+        let adapter = model.adapter().clone();
+        let capabilities = model.capabilities().clone();
+        Bound::of(Value::Speech(Box::new(SharedSpeech {
+            shared: Shared::new(model, adapter),
+            capabilities,
+        })))
     }
 
     /// The binding with the serving model name `name`, the role key `model`: the name a price
@@ -554,6 +746,33 @@ impl StackBinding {
     pub fn generator(&self) -> Option<&Generator> {
         match &self.value {
             Value::Llm(generator) => Some(generator.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// The recogniser of an `stt` binding, which builds each run's STT node; none for another
+    /// role.
+    pub(crate) fn recogniser(&self) -> Option<&dyn BoundRecogniser> {
+        match &self.value {
+            Value::Stt(recogniser) => Some(recogniser.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// The synthesiser of a `tts` binding, which builds each run's synthesiser node; none for
+    /// another role.
+    pub(crate) fn synthesiser(&self) -> Option<&dyn BoundSynthesiser> {
+        match &self.value {
+            Value::Tts(synthesiser) => Some(synthesiser.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// The model of a `speech` binding, which builds each run's duplex node; none for another
+    /// role.
+    pub(crate) fn speech_model(&self) -> Option<&dyn BoundSpeechModel> {
+        match &self.value {
+            Value::Speech(model) => Some(model.as_ref()),
             _ => None,
         }
     }
@@ -1219,6 +1438,13 @@ mod tests {
                 self.opened = true;
             }
             Ok(())
+        }
+
+        fn node(&self, _: RunId, _: SttPorts, _: RunLog) -> Result<Implementation, Error> {
+            Err(Error::Layer {
+                message: "the counting recogniser builds no node".to_owned(),
+                source: None,
+            })
         }
     }
 

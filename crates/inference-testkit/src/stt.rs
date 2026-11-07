@@ -104,12 +104,9 @@ pub mod conformance;
 mod node;
 
 /// The fan-out that hands a microphone's frames to the voice activity detector and the STT node
-/// alike, behind the `run` feature.
+/// alike, behind the `run` feature: `inference-pipeline`'s.
 #[cfg(feature = "run")]
-mod fan_out;
-
-#[cfg(feature = "run")]
-pub use fan_out::FanOut;
+pub use inference_pipeline::nodes::FanOut;
 #[cfg(feature = "run")]
 pub use node::{Heard, SttHandle, SttNode, SttPayload, SttPorts};
 

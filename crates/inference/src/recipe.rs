@@ -13,6 +13,7 @@
 //! [`Stack`], refusing a role the stack does not bind with [`Error::RoleUnbound`] and a bound
 //! adapter whose locality the stack's profile does not admit with [`Error::ProfileDenies`].
 
+mod run;
 #[cfg(feature = "audio-host")]
 #[cfg_attr(
     not(all(test, feature = "testing")),
@@ -33,13 +34,14 @@ use inference_core::model::{AdapterId, Capability, Locality};
 use inference_core::policy::{
     DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind, ProfileNotFound,
 };
+use inference_facade::live::{LiveSession, LiveSessions, SessionDriver};
 use inference_pipeline::{
     AdapterNotFound, BindNode, Catalog, Declaration, InteractionMode, LocalityDenied, PipelineId,
     PipelineSpec, PlanPipelineError, PlannedPipeline,
 };
 
 use crate::graph::Builder;
-use crate::{Error, Role, Stack};
+use crate::{Error, Payload, Role, Stack};
 
 /// What every exposure of the five recipes buffers, ingress and egress, under
 /// `OverloadPolicy::Pause`: 64 events. It trades latency against buffering; a smaller value
@@ -419,12 +421,14 @@ impl Recipe {
                 other => layer(&format!("the recipe `{}` does not plan", self.name), other),
             })?;
         Ok(Instantiation {
-            recipe: self.name.clone(),
+            recipe: self.clone(),
             pipeline_id,
             declaration,
             planned,
             #[cfg(feature = "audio-host")]
             speaker: None,
+            #[cfg(feature = "audio-host")]
+            sink: None,
         })
     }
 
@@ -483,19 +487,21 @@ impl Recipe {
 /// One recipe declared, validated and planned over one stack into one pipeline.
 #[derive(Debug, Clone)]
 pub struct Instantiation {
-    recipe: String,
+    recipe: Recipe,
     pipeline_id: PipelineId,
     declaration: Declaration,
     planned: PlannedPipeline,
     #[cfg(feature = "audio-host")]
     speaker: Option<speaker::Speaker>,
+    #[cfg(feature = "audio-host")]
+    sink: Option<inference_audio_device::acknowledging::AcknowledgingHandle>,
 }
 
 impl Instantiation {
     /// The name of the recipe instantiated.
     #[must_use]
     pub fn recipe(&self) -> &str {
-        &self.recipe
+        &self.recipe.name
     }
 
     /// The pipeline the recipe declared.
@@ -514,6 +520,79 @@ impl Instantiation {
     #[must_use]
     pub const fn planned(&self) -> &PlannedPipeline {
         &self.planned
+    }
+
+    /// Opens a live session of `sessions` over the planned pipeline in the recipe's interaction
+    /// mode, its run's nodes built for that run: each role-bound node over its role's binding in
+    /// `stack`, the stack the recipe was instantiated over, and every other node by the recipe.
+    /// The handles of the run's nodes, such as [`Instantiation::sink`], are the opened run's
+    /// until the next open.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Layer`] when a role-bound node's binding in `stack` is not the adapter the recipe
+    /// was planned with, when the recipe builds no implementation for one of its nodes (an
+    /// application recipe's nodes no role binds, `transcribe`, whose topology has no turn ports,
+    /// the tool nodes of `native_voice`, and `voice_cascade` instantiated without an audio
+    /// route), or when the session does not open (its source the facade's `OpenError`); the
+    /// refusal of a binding that builds no node, such as a deferred recogniser whose checkpoint
+    /// did not open. No session is left open.
+    pub async fn open(
+        &mut self,
+        stack: &Stack,
+        sessions: &LiveSessions,
+    ) -> Result<(LiveSession<Payload>, SessionDriver<Payload>), Error> {
+        #[cfg(feature = "audio-host")]
+        {
+            self.sink = None;
+        }
+        let mut refused: Option<Error> = None;
+        let mut nodes = run::Run::new(self, stack);
+        let opened = sessions
+            .open(
+                &self.declaration,
+                &self.planned,
+                self.recipe.mode,
+                |run_id, node| match nodes.node(run_id, node) {
+                    Ok(implementation) => implementation,
+                    Err(error) => {
+                        let reason = error.to_string();
+                        refused.get_or_insert(error);
+                        Box::new(run::Refused(reason))
+                    }
+                },
+            )
+            .await;
+        #[cfg(feature = "audio-host")]
+        let sink = nodes.into_sink();
+        #[cfg(not(feature = "audio-host"))]
+        drop(nodes);
+        let opened = match (opened, refused) {
+            (Ok(opened), None) => opened,
+            (Ok(_), Some(error)) | (Err(_), Some(error)) => return Err(error),
+            (Err(error), None) => {
+                return Err(layer(
+                    &format!("the run of the recipe `{}` did not open", self.recipe.name),
+                    error,
+                ));
+            }
+        };
+        #[cfg(feature = "audio-host")]
+        {
+            self.sink = sink;
+        }
+        Ok(opened)
+    }
+
+    /// The handle of the speaker sink of the run [`Instantiation::open`] opened last: the
+    /// reference cascade's acknowledging sink, playing through the route `voice_cascade` was
+    /// instantiated with. None before a run opened and for every other recipe.
+    #[cfg(feature = "audio-host")]
+    #[must_use]
+    pub const fn sink(
+        &self,
+    ) -> Option<&inference_audio_device::acknowledging::AcknowledgingHandle> {
+        self.sink.as_ref()
     }
 }
 

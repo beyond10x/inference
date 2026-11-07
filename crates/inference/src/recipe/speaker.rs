@@ -207,7 +207,9 @@ mod tests {
     use inference_core::model::{
         Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
     };
+    use inference_facade::live::LiveSessions;
     use inference_pipeline::{NodeEndpoints, NodeImplementation, NodeInput, NodeOutput};
+    use inference_runtime::run::RunState;
     use inference_text::{OutputSegment, SegmentId, TurnId};
     use inference_tts::{CONTRACT_REVISION, PlaybackReceipt, SynthesisEvent, SynthesisOutput};
 
@@ -254,6 +256,46 @@ mod tests {
                 .expect("plans")
                 .speaker()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn the_opened_cascade_answers_its_speakers_handle() {
+        let stack = [Role::Stt, Role::Llm, Role::Tts]
+            .into_iter()
+            .fold(Stack::new(), |stack, role| {
+                stack.bind(Binding::named(role, "mock", BTreeMap::new()))
+            })
+            .resolve_with(&Env::new())
+            .expect("the stack resolves");
+        let route: Arc<dyn AudioRoute> = Arc::new(Route::default());
+        let mut instantiation = super::instantiate(&Recipe::voice_cascade(), &stack, route, true)
+            .expect("the cascade plans over the mocks");
+        assert!(instantiation.sink().is_none(), "no run is open");
+        let sessions = LiveSessions::new();
+        let (mut session, driver) =
+            block_on(instantiation.open(&stack, &sessions)).expect("the cascade's run opens");
+        let sink = instantiation
+            .sink()
+            .cloned()
+            .expect("the open run's speaker answers");
+        assert_eq!(sink.pushed(), 0);
+        assert!(sink.interruptions().is_empty());
+        assert!(!sink.ended(), "the speaker runs");
+        let (done, ended) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = done.send(block_on(driver.drive()));
+        });
+        block_on(session.close()).expect("a Ready session drains");
+        while block_on(session.receive()).is_some() {}
+        let run = ended
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the run ends within 20 s")
+            .expect("the run ends");
+        assert_eq!(run.state(), RunState::Completed);
+        assert!(
+            sink.ended(),
+            "the handle is the run's speaker, which ended with it"
         );
     }
 
