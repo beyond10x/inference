@@ -215,6 +215,17 @@ pub mod role {
 /// A recogniser bound to the `stt` role.
 pub(crate) trait BoundRecogniser: Send {
     fn adapter(&self) -> &Adapter;
+
+    /// Opens what the recogniser reads before its first recognition: a local checkpoint a
+    /// registration deferred so that resolving reads nothing. A recogniser given open does
+    /// nothing; one already open does nothing again.
+    #[allow(
+        dead_code,
+        reason = "the session that starts a bound recogniser opens it; resolving never does"
+    )]
+    fn open(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 impl<T: Recogniser + Send + 'static> BoundRecogniser for T {
@@ -323,6 +334,19 @@ impl Binding {
     /// The `stt` role bound to `recogniser`.
     #[must_use]
     pub fn stt(recogniser: impl Recogniser + Send + 'static) -> Bound<role::Stt> {
+        Bound::of(Value::Stt(Box::new(recogniser)))
+    }
+
+    /// The `stt` role bound to a recogniser a registration declared without opening it; its
+    /// [`BoundRecogniser::open`] reads the checkpoint when a session starts it.
+    #[cfg_attr(
+        not(any(feature = "sherpa-onnx", feature = "whispercpp")),
+        allow(
+            dead_code,
+            reason = "only the local recognisers' registrations defer an open"
+        )
+    )]
+    pub(crate) fn deferred_stt(recogniser: impl BoundRecogniser + 'static) -> Bound<role::Stt> {
         Bound::of(Value::Stt(Box::new(recogniser)))
     }
 
@@ -640,6 +664,7 @@ impl Origin<'_> {
                 path: file.path.clone(),
                 key: format!("{role}.{key}"),
                 message: message.to_owned(),
+                source: None,
             },
             Self::Environment => Error::Layer {
                 message: format!(
@@ -681,6 +706,7 @@ impl StackFile {
                 "(the file)".to_owned()
             },
             message: format!("the file cannot be read: {error}"),
+            source: Some(Box::new(error)),
         })?;
         let table = text
             .parse::<toml::Table>()
@@ -688,6 +714,7 @@ impl StackFile {
                 path: path.clone(),
                 key: "(the document)".to_owned(),
                 message: format!("not TOML: {}", error.message()),
+                source: None,
             })?;
         Ok(Some(Self {
             path,
@@ -705,6 +732,7 @@ impl StackFile {
             path: self.path.clone(),
             key: "profile".to_owned(),
             message,
+            source: None,
         };
         let name = value
             .as_str()
@@ -724,6 +752,7 @@ impl StackFile {
             path: self.path.clone(),
             key: role.as_str().to_owned(),
             message: message.to_owned(),
+            source: None,
         };
         let table = value.as_table().ok_or_else(|| refuse("expected a table"))?;
         let mut adapter = None;
@@ -828,18 +857,27 @@ impl Stack {
     /// and `$XDG_CONFIG_HOME/inference/inference.toml` that names it, all read from `env`; the
     /// profile likewise. A role no source names stays unbound.
     ///
+    /// A builder binding replaces a binding an earlier resolve read from another source, so
+    /// [`Stack::bind`] onto [`Stack::from_env`] wins; only a second builder binding of one role
+    /// is refused. A stack file is read only while a role or the profile is still unsettled by
+    /// the sources above it, so a broken lower file does not fail a stack those sources settle.
+    ///
     /// # Errors
     ///
     /// [`Error::Layer`] for a role the builder binds twice, for an adapter no registration
     /// holds (named by the builder or a variable), for a constructor's binding of another role
     /// or by name, and for a variable a key names that `env` does not set;
     /// [`Error::StackFile`] for a file that cannot be read, is not TOML or has a wrong value,
-    /// an unregistered adapter among them; [`Error::AdapterNotCompiled`] for a built-in adapter
-    /// whose feature is off; and whatever a constructor returns.
+    /// an unregistered adapter among them, and for a relative `INFERENCE_STACK` when `env` has
+    /// no working directory; [`Error::AdapterNotCompiled`] for a built-in adapter whose feature
+    /// is off; and whatever a constructor returns.
     pub fn resolve_with(mut self, env: &Env) -> Result<Self, Error> {
         for binding in std::mem::take(&mut self.pending) {
             let role = binding.role;
-            if self.bindings[role.index()].is_some() {
+            if self.bindings[role.index()]
+                .as_ref()
+                .is_some_and(|bound| bound.source == BindingSource::Builder)
+            {
                 let refusal = RoleBoundTwice { role };
                 return Err(Error::Layer {
                     message: refusal.to_string(),
@@ -868,27 +906,17 @@ impl Stack {
             self.settle(resolved);
         }
 
-        let files = Self::files(env)?;
-
-        if self.profile_source.is_none() {
-            if let Some(name) = env.present("INFERENCE_PROFILE") {
-                let kind = profile_kind(name).ok_or_else(|| Error::Layer {
-                    message: format!(
-                        "the variable INFERENCE_PROFILE: \"{name}\" is not {PROFILE_NAMES}"
-                    ),
-                    source: None,
-                })?;
-                self.profile = declare_profile(kind);
-                self.profile_source = Some(BindingSource::Environment);
-            } else {
-                for file in &files {
-                    if let Some(kind) = file.profile()? {
-                        self.profile = declare_profile(kind);
-                        self.profile_source = Some(file.source);
-                        break;
-                    }
-                }
-            }
+        if self.profile_source.is_none()
+            && let Some(name) = env.present("INFERENCE_PROFILE")
+        {
+            let kind = profile_kind(name).ok_or_else(|| Error::Layer {
+                message: format!(
+                    "the variable INFERENCE_PROFILE: \"{name}\" is not {PROFILE_NAMES}"
+                ),
+                source: None,
+            })?;
+            self.profile = declare_profile(kind);
+            self.profile_source = Some(BindingSource::Environment);
         }
 
         for role in Role::ALL {
@@ -900,11 +928,28 @@ impl Stack {
                 let adapter = adapter.to_owned();
                 let resolved = Self::named(role, &adapter, keys, Origin::Environment, env)?;
                 self.settle(resolved);
-                continue;
             }
-            for file in &files {
+        }
+
+        for (path, source, required) in Self::file_paths(env) {
+            if self.settled() {
+                break;
+            }
+            let Some(file) = StackFile::read(path?, source, required)? else {
+                continue;
+            };
+            if self.profile_source.is_none()
+                && let Some(kind) = file.profile()?
+            {
+                self.profile = declare_profile(kind);
+                self.profile_source = Some(file.source);
+            }
+            for role in Role::ALL {
+                if self.bindings[role.index()].is_some() {
+                    continue;
+                }
                 if let Some((adapter, keys)) = file.role(role)? {
-                    let origin = Origin::File(file);
+                    let origin = Origin::File(&file);
                     let keys = keys
                         .into_iter()
                         .map(|(key, value)| {
@@ -915,39 +960,56 @@ impl Stack {
                         .collect::<Result<_, _>>()?;
                     let resolved = Self::named(role, &adapter, keys, origin, env)?;
                     self.settle(resolved);
-                    break;
                 }
             }
         }
         Ok(self)
     }
 
-    /// The stack files `env` names, in their order of precedence.
-    fn files(env: &Env) -> Result<Vec<StackFile>, Error> {
-        let mut files = Vec::new();
+    /// Whether every role and the profile are bound, so no lower source is read.
+    fn settled(&self) -> bool {
+        self.profile_source.is_some() && self.bindings.iter().all(Option::is_some)
+    }
+
+    /// The stack files `env` names, in their order of precedence, each with its source and
+    /// whether it must exist. A relative `INFERENCE_STACK` is joined to `env`'s working
+    /// directory; with none, its path is a refusal, never the process's current directory.
+    fn file_paths(env: &Env) -> Vec<(Result<PathBuf, Error>, BindingSource, bool)> {
+        let mut paths = Vec::new();
         if let Some(named) = env.present("INFERENCE_STACK") {
             let path = Path::new(named);
-            let path = match &env.working_dir {
-                Some(dir) if path.is_relative() => dir.join(path),
-                _ => path.to_path_buf(),
+            let path = if path.is_absolute() {
+                Ok(path.to_path_buf())
+            } else if let Some(dir) = &env.working_dir {
+                Ok(dir.join(path))
+            } else {
+                Err(Error::StackFile {
+                    path: path.to_path_buf(),
+                    key: "INFERENCE_STACK".to_owned(),
+                    message: "a relative path, and the environment has no working directory to \
+                              read it from; set INFERENCE_STACK to an absolute path, or give the \
+                              Env a working directory (Env::working_dir)"
+                        .to_owned(),
+                    source: None,
+                })
             };
-            files.extend(StackFile::read(path, BindingSource::StackFile, true)?);
+            paths.push((path, BindingSource::StackFile, true));
         }
         if let Some(dir) = &env.working_dir {
-            files.extend(StackFile::read(
-                dir.join("inference.toml"),
+            paths.push((
+                Ok(dir.join("inference.toml")),
                 BindingSource::WorkingDirectoryFile,
                 false,
-            )?);
+            ));
         }
         if let Some(home) = &env.config_home {
-            files.extend(StackFile::read(
-                home.join("inference").join("inference.toml"),
+            paths.push((
+                Ok(home.join("inference").join("inference.toml")),
                 BindingSource::UserConfigFile,
                 false,
-            )?);
+            ));
         }
-        Ok(files)
+        paths
     }
 
     /// The keys `INFERENCE_<ROLE>_<KEY>` of `role` but its adapter, lowercased and expanded.
@@ -988,6 +1050,14 @@ impl Stack {
             };
             return Err(match origin.refuse(role, "adapter", &refusal.to_string()) {
                 Error::Layer { message, .. } => Error::Layer {
+                    message,
+                    source: Some(Box::new(refusal)),
+                },
+                Error::StackFile {
+                    path, key, message, ..
+                } => Error::StackFile {
+                    path,
+                    key,
                     message,
                     source: Some(Box::new(refusal)),
                 },
@@ -1115,5 +1185,104 @@ impl Catalog for Stack {
             .flatten()
             .map(StackBinding::adapter)
             .find(|adapter| adapter.adapter_id() == adapter_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+
+    use inference_core::model::{
+        AdapterDescriptor as ModelDescriptor, DeclareAdapter, ExecutionForm, ModelId,
+    };
+
+    use super::*;
+    use crate::registry::{AdapterDescriptor, Registry};
+
+    /// A recogniser a registration declared and did not open: it counts its opens.
+    struct Deferred {
+        adapter: Adapter,
+        opens: Arc<AtomicUsize>,
+        opened: bool,
+    }
+
+    impl BoundRecogniser for Deferred {
+        fn adapter(&self) -> &Adapter {
+            &self.adapter
+        }
+
+        fn open(&mut self) -> Result<(), Error> {
+            if !self.opened {
+                self.opens.fetch_add(1, Ordering::SeqCst);
+                self.opened = true;
+            }
+            Ok(())
+        }
+    }
+
+    fn within<T: Send + 'static>(case: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done.send(case());
+        });
+        finished
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the case finishes within 20 s without panicking")
+    }
+
+    #[test]
+    fn a_deferred_recogniser_opens_when_its_session_starts_not_at_resolve() {
+        within(|| {
+            let opens = Arc::new(AtomicUsize::new(0));
+            let adapter = Adapter::declare(DeclareAdapter {
+                model_id: ModelId::generate(),
+                backend: "stack unit deferred".to_owned(),
+                contract_revision: "1".to_owned(),
+                execution_form: ExecutionForm::NativeFfi,
+                locality: Locality::SameProcess,
+                capabilities: Vec::new(),
+                max_concurrency: 1,
+                descriptor: ModelDescriptor::default(),
+            })
+            .expect("a concurrency of one is positive")
+            .0;
+            let declared = adapter.adapter_id();
+            let counted = Arc::clone(&opens);
+            Registry::register(
+                AdapterDescriptor::new("stack-unit-deferred", Locality::SameProcess).role(
+                    Role::Stt,
+                    move |_| {
+                        Ok(Binding::deferred_stt(Deferred {
+                            adapter: adapter.clone(),
+                            opens: Arc::clone(&counted),
+                            opened: false,
+                        })
+                        .into())
+                    },
+                ),
+            )
+            .expect("registers");
+            let mut stack = Stack::new()
+                .resolve_with(&Env::new().var("INFERENCE_STT_ADAPTER", "stack-unit-deferred"))
+                .expect("resolves");
+            assert_eq!(
+                opens.load(Ordering::SeqCst),
+                0,
+                "resolving opened the recogniser"
+            );
+            let binding = stack.bindings[Role::Stt.index()]
+                .as_mut()
+                .expect("stt is bound");
+            assert_eq!(binding.adapter().adapter_id(), declared);
+            let Value::Stt(recogniser) = &mut binding.value else {
+                panic!("stt holds a recogniser");
+            };
+            recogniser.open().expect("opens");
+            recogniser.open().expect("opens again as a no-op");
+            assert_eq!(opens.load(Ordering::SeqCst), 1);
+            assert_eq!(recogniser.adapter().adapter_id(), declared);
+        });
     }
 }
