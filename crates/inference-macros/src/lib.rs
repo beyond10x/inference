@@ -24,8 +24,10 @@ use syn::{
 /// it as it shadows any function. The arguments and the executor are types without a name outside
 /// that function. The tool's name is the function's, without the `r#` of a raw identifier, its
 /// description the doc comment, its schema the JSON schema of the arguments (an object, with
-/// `properties` even when there are none, and every subschema inlined, so no `$defs` or `$ref`),
-/// each of which is `Deserialize`. The executor reads the call's arguments into them, runs the
+/// `properties` even when there are none, and every non-recursive subschema inlined; a recursive
+/// argument keeps `$defs` and `$ref`, which the tool authority refuses at preparation), each of
+/// which is `Deserialize`. The function and the pair it returns are both
+/// `::inference::tools::IntoTool`, so a caller taking that accepts `weather` and `weather()`. The executor reads the call's arguments into them, runs the
 /// body and answers its value, which is `Serialize`; a body returning `Result` answers `Ok`'s
 /// value and fails with `ExecutionError` on `Err`, whose `Display` is the failure's detail, as
 /// are arguments that do not read.
