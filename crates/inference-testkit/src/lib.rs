@@ -44,6 +44,10 @@ pub mod session;
 /// tool calls, their views, and behind `duplex` the scripted mock native speech model.
 pub mod duplex;
 
+/// The marked reply audio of the mocks: which mock produced a frame, for which reply, as which
+/// frame of it ([`mark::encode`], [`mark::decode`]).
+pub mod mark;
+
 /// `inference.usage`: the in-memory store of the usage records of model calls, each of a
 /// declared adapter and model, and of the cost records that price them, each of a stored usage
 /// record.

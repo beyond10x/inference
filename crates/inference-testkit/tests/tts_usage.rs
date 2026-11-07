@@ -613,3 +613,44 @@ fn the_node_stamps_each_frame_with_the_name_its_synthesis_gives_a_frame() {
         delivered.spoken
     );
 }
+
+/// Each frame the mock synthesises is marked: the synthesiser mock, the segment's index in the
+/// synthesis as the reply, and the frame's index in the segment, one frame per word.
+#[test]
+fn each_synthesised_frame_is_marked_with_its_segment_and_its_index_in_it() {
+    use inference_testkit::mark::{Mark, MockId, decode};
+
+    for configuration in MockConfiguration::ALL {
+        let mut synthesiser =
+            MockSynthesiser::new(configuration, ModelId::generate(), format(16_000));
+        let mut handle = synthesiser
+            .start()
+            .expect("a fresh synthesiser runs nothing else");
+        let mut events = Vec::new();
+        for segment in committed(&["one two", "three four five"]) {
+            handle.offer_segment(segment).expect("a Committed segment");
+            events.extend(handle.by_ref());
+        }
+        handle.end_utterance().expect("the utterance ends once");
+        events.extend(handle.by_ref());
+        let marks: Vec<Option<Mark>> = events
+            .iter()
+            .filter_map(|event| match event {
+                SynthesisEvent::Audio(audio) => Some(decode(audio.frame())),
+                _ => None,
+            })
+            .collect();
+        let mark = |reply, frame| {
+            Some(Mark {
+                mock: MockId::Synthesiser,
+                reply,
+                frame,
+            })
+        };
+        assert_eq!(
+            marks,
+            [mark(0, 0), mark(0, 1), mark(1, 0), mark(1, 1), mark(1, 2)],
+            "{configuration:?}"
+        );
+    }
+}
