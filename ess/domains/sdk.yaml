@@ -168,6 +168,13 @@ entities:
       initial: Planned
       states: [Planned]
       terminal: [Planned]
+      transitions:
+        # Opening a run moves nothing: each open is one more live session over the same planned
+        # pipeline, so the instantiation stays Planned.
+        # read from: docs/design/sdk.md §3.3
+        - name: open
+          from: [Planned]
+          to: Planned
 
 errors:
   # read from: docs/design/sdk.md §4.1
@@ -225,6 +232,17 @@ errors:
     fields:
       - name: name
         type: inference.sdk.RecipeName
+
+  # The model node of a run keeps one generation for the whole run and offers it every input, so
+  # the adapter bound to the role must take input while it produces output.
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.ConcurrencyUnclaimed
+    summary: The adapter bound to a role the run keeps one generation of does not claim concurrent_input_output; no session was opened.
+    fields:
+      - name: role
+        type: inference.sdk.Role
+      - name: adapter
+        type: String
 
 commands:
   # An application recipe joins the process-wide table under its name. The table is
@@ -309,6 +327,38 @@ commands:
             stack_id: input.stack_id
             pipeline_id: {generated: true}
         summary: The recipe's pipeline is declared, validated and planned over the stack.
+
+  # A live session opened over an instantiation's planned pipeline in the recipe's mode
+  # (inference.session.OpenSession), its run's nodes built for that run over the stack's
+  # bindings. A model node keeps one generation for the whole run and offers it every input, so
+  # opening refuses up front a binding of such a node's role whose adapter does not claim
+  # concurrent_input_output; the claim is the adapter's, read from its binding, not a row.
+  # UNMAPPED: an identity no instantiation carries. The SDK's instantiation is a value the
+  # application holds and opens, so it has no lookup by identity that could miss.
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.OpenInstantiation
+    input:
+      - name: instantiation_id
+        type: inference.sdk.InstantiationId
+    outcomes:
+      - name: concurrency-unclaimed
+        external: the adapter bound to the role of a node that keeps one generation per run does not claim concurrent_input_output
+        error: inference.sdk.ConcurrencyUnclaimed
+        payload:
+          inference.sdk.ConcurrencyUnclaimed:
+            role: {generated: true}
+            adapter: {generated: true}
+        summary: Opening fails naming the role and its adapter, and no session is opened.
+
+      - name: opened
+        moves: inference.sdk.Instantiation.open
+        instance: instantiation_id
+        emits:
+          - inference.sdk.InstantiationOpened
+        payload:
+          inference.sdk.InstantiationOpened:
+            instantiation_id: input.instantiation_id
+        summary: A live session runs over the instantiation's pipeline, each node built for its run.
 
   # The bindings are the first found per role across the sources, in the order of
   # inference.sdk.BindingSource; a role no source names stays unbound. The stack declares its
@@ -407,3 +457,9 @@ events:
         type: inference.sdk.StackId
       - name: pipeline_id
         type: inference.graph.PipelineId
+
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.InstantiationOpened
+    fields:
+      - name: instantiation_id
+        type: inference.sdk.InstantiationId

@@ -35,6 +35,13 @@
 //! stack binding only `llm`, and a forced `profile-denies` `speak` over an `offline_strict` stack
 //! binding `tts` to the external provider's synthesiser below; each answer is the refusal the
 //! instantiation returned. An instantiation's identity counts in 9.
+//!
+//! `OpenInstantiation` runs `Instantiation::open` over a fresh `LiveSessions`, polled on this
+//! thread, on the instantiation the module holds under the sent identity, over the stack it was
+//! instantiated over; the opened session and its driver are dropped. A forced `concurrency-unclaimed` opens `chat` instantiated
+//! over a stack binding `llm` to a generator that claims only output streaming, and the answer
+//! is the refusal the open returned. The mocks this module registers claim
+//! `concurrent_input_output` for `llm`, as the crate's `mock` registration does.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -51,6 +58,7 @@ use inference::core::model::{
     Adapter, AdapterDescriptor as ModelDescriptor, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
 use inference::core::policy::ProfileKind;
+use inference::facade::live::LiveSessions;
 use inference::pipeline::{Catalog, InteractionMode, PipelineId};
 use inference::text::{AudioPlayed, OutputSegment, SegmentDiscarded, SegmentId, SegmentQueued};
 use inference::tts::{
@@ -58,8 +66,8 @@ use inference::tts::{
     SynthesisEvent, SynthesisHandle, SynthesisOutput, Synthesiser, UtteranceEnded,
 };
 use inference::{
-    AdapterDescriptor, Binding, BindingSource, Env, Error, ErrorKind, Recipe, Registry, Role,
-    RoleBoundTwice, Stack,
+    AdapterDescriptor, Binding, BindingSource, Env, Error, ErrorKind, Instantiation, Recipe,
+    Registry, Role, RoleBoundTwice, Stack,
 };
 use inference_testkit::duplex::mock::MockSpeechModel;
 use inference_testkit::llm::{self, MockGenerator};
@@ -78,6 +86,9 @@ const ADAPTER_NOT_REGISTERED: &str = "inference.sdk.AdapterNotRegistered";
 const LOCALITY_DENIED: &str = "inference.sdk.LocalityDenied";
 const REGISTER_RECIPE: &str = "inference.sdk.RegisterRecipe";
 const INSTANTIATE_RECIPE: &str = "inference.sdk.InstantiateRecipe";
+const OPEN_INSTANTIATION: &str = "inference.sdk.OpenInstantiation";
+const INSTANTIATION_OPENED: &str = "inference.sdk.InstantiationOpened";
+const CONCURRENCY_UNCLAIMED: &str = "inference.sdk.ConcurrencyUnclaimed";
 const RECIPE_REGISTERED: &str = "inference.sdk.RecipeRegistered";
 const RECIPE_INSTANTIATED: &str = "inference.sdk.RecipeInstantiated";
 const RECIPE_NAME_TAKEN: &str = "inference.sdk.RecipeNameTaken";
@@ -112,19 +123,28 @@ pub struct Registered {
     roles: Vec<Role>,
 }
 
-/// A recipe this module instantiated over a stack.
+/// A recipe this module instantiated over a stack, the instantiation, and the stack when the
+/// module made it for the instantiation rather than resolving it for the scenario.
 pub struct Instantiated {
     instantiation_id: String,
     recipe: String,
     stack_id: String,
     pipeline_id: PipelineId,
+    instantiation: Instantiation,
+    owned: Option<Stack>,
+}
+
+/// An instantiation this module opened a session over.
+pub struct Opened {
+    instantiation_id: String,
 }
 
 /// One event of `inference.sdk`, in the order the module recorded them.
 pub enum Recorded {
     Resolved(Box<Resolved>),
     Registered(Registered),
-    Instantiated(Instantiated),
+    Instantiated(Box<Instantiated>),
+    Opened(Opened),
 }
 
 /// The `inference.sdk` state of one scenario: what it resolved, registered and instantiated,
@@ -164,6 +184,7 @@ pub fn execute_command(
         RESOLVE_STACK => resolve_stack(&mut stores.sdk, forced.as_ref(), request)?,
         REGISTER_RECIPE => register_recipe(&mut stores.sdk, forced.as_ref(), request)?,
         INSTANTIATE_RECIPE => instantiate_recipe(&mut stores.sdk, forced.as_ref(), request)?,
+        OPEN_INSTANTIATION => open_instantiation(&mut stores.sdk, forced.as_ref(), request)?,
         _ => return Err(unsupported(&name)),
     };
     stores.publish();
@@ -182,7 +203,14 @@ pub fn observe_events(
     request: &EventObservationRequest,
 ) -> Result<Vec<ObservedEvent>, TargetError> {
     let wanted = request.event.to_string();
-    if ![STACK_RESOLVED, RECIPE_REGISTERED, RECIPE_INSTANTIATED].contains(&wanted.as_str()) {
+    if ![
+        STACK_RESOLVED,
+        RECIPE_REGISTERED,
+        RECIPE_INSTANTIATED,
+        INSTANTIATION_OPENED,
+    ]
+    .contains(&wanted.as_str())
+    {
         return Err(unsupported(&wanted));
     }
     stores.publish();
@@ -195,6 +223,9 @@ pub fn observe_events(
             }
             Recorded::Instantiated(instantiated) if wanted == RECIPE_INSTANTIATED => {
                 recipe_instantiated(instantiated)?
+            }
+            Recorded::Opened(opened) if wanted == INSTANTIATION_OPENED => {
+                instantiation_opened(opened)
             }
             _ => continue,
         };
@@ -214,6 +245,7 @@ pub fn configure_external_outcome(
         RESOLVE_STACK => &EXTERNAL,
         REGISTER_RECIPE => &["name-taken"],
         INSTANTIATE_RECIPE => &["role-unbound", "profile-denies"],
+        OPEN_INSTANTIATION => &["concurrency-unclaimed"],
         _ => return Err(unsupported(&request.force.to_string())),
     };
     if !external
@@ -308,7 +340,7 @@ fn register(name: &str) -> Result<(), TargetError> {
             })
             .role(Role::Llm, |_| {
                 Ok(Binding::llm(MockGenerator::new(
-                    llm::MockConfiguration::StreamingOnly,
+                    llm::MockConfiguration::StreamingAndConcurrentInput,
                     ModelId::generate(),
                     ["resolved"],
                 ))
@@ -726,10 +758,14 @@ fn instantiate_recipe(
                 recipe: recipe_name,
                 stack_id,
                 pipeline_id: instantiation.pipeline_id(),
+                instantiation,
+                owned,
             };
             let event =
                 recipe_instantiated(&instantiated)?.in_activity(request.correlation.clone());
-            state.recorded.push(Recorded::Instantiated(instantiated));
+            state
+                .recorded
+                .push(Recorded::Instantiated(Box::new(instantiated)));
             Ok(
                 SemanticCommandResult::took(recipe_outcome(INSTANTIATE_RECIPE, "instantiated"))
                     .emitting(event),
@@ -768,6 +804,124 @@ fn instantiate_recipe(
                 Err(error) => error.to_string(),
             },
         )),
+    }
+}
+
+/// Opens a session over the instantiation the module holds under the sent identity, or, with
+/// `concurrency-unclaimed` forced, over `chat` instantiated over a stack binding `llm` to a
+/// generator that claims only output streaming. Each answer is what `Instantiation::open`
+/// returned.
+fn open_instantiation(
+    state: &mut State,
+    forced: Option<&OutcomeRef>,
+    request: &SemanticCommandRequest,
+) -> Result<SemanticCommandResult, TargetError> {
+    let mut input = Input::of(request);
+    let instantiation_id = input.text("instantiation_id")?;
+    input.finish()?;
+    let sessions = LiveSessions::new();
+
+    if forced.is_some_and(|forced| {
+        *forced == recipe_outcome(OPEN_INSTANTIATION, "concurrency-unclaimed")
+    }) {
+        let stack = Stack::new()
+            .bind(Binding::llm(MockGenerator::new(
+                llm::MockConfiguration::StreamingOnly,
+                ModelId::generate(),
+                ["never sent"],
+            )))
+            .resolve_with(&Env::new())
+            .map_err(|error| unreadable("resolving the open's stack", error.to_string()))?;
+        let mut instantiation = Recipe::chat()
+            .instantiate(&stack)
+            .map_err(|error| unreadable("instantiating `chat`", error.to_string()))?;
+        return match block_on(instantiation.open(&stack, &sessions)) {
+            Err(Error::ConcurrencyUnclaimed { role, adapter }) => Ok(SemanticCommandResult::took(
+                recipe_outcome(OPEN_INSTANTIATION, "concurrency-unclaimed"),
+            )
+            .with_error(
+                DeclaredErrorValue::new(parse::<ErrorRef>(CONCURRENCY_UNCLAIMED))
+                    .with("role", text_node(&role))
+                    .with("adapter", text_node(&adapter)),
+            )),
+            other => Err(unreadable(
+                "opening `chat` over a generator without concurrent input",
+                match other {
+                    Ok(_) => "the session opened".to_owned(),
+                    Err(error) => error.to_string(),
+                },
+            )),
+        };
+    }
+
+    let Some(index) = state.recorded.iter().position(|event| {
+        matches!(event, Recorded::Instantiated(held) if held.instantiation_id == instantiation_id)
+    }) else {
+        return Err(unreadable(
+            format!("opening the instantiation `{instantiation_id}`"),
+            "the module holds no instantiation under it",
+        ));
+    };
+    let (mut instantiation, stack_id, owned) = match state.recorded.get_mut(index) {
+        Some(Recorded::Instantiated(held)) => (
+            held.instantiation.clone(),
+            held.stack_id.clone(),
+            held.owned.take(),
+        ),
+        _ => return Err(unreadable("finding the instantiation", "none is held")),
+    };
+    let opened = match owned.as_ref().or_else(|| state.stack(&stack_id)) {
+        Some(stack) => block_on(instantiation.open(stack, &sessions)),
+        None => {
+            return Err(unreadable(
+                "finding the instantiation's stack",
+                "none is held",
+            ));
+        }
+    };
+    if let Some(Recorded::Instantiated(held)) = state.recorded.get_mut(index) {
+        held.owned = owned;
+    }
+    match opened {
+        Ok(_session) => {
+            let opened = Opened { instantiation_id };
+            let event = instantiation_opened(&opened).in_activity(request.correlation.clone());
+            state.recorded.push(Recorded::Opened(opened));
+            Ok(
+                SemanticCommandResult::took(recipe_outcome(OPEN_INSTANTIATION, "opened"))
+                    .emitting(event),
+            )
+        }
+        Err(error) => Err(unreadable(
+            format!("opening the instantiation `{instantiation_id}`"),
+            error.to_string(),
+        )),
+    }
+}
+
+fn instantiation_opened(opened: &Opened) -> ObservedEvent {
+    ObservedEvent::new(parse::<EventRef>(INSTANTIATION_OPENED))
+        .with("instantiation_id", text_node(&opened.instantiation_id))
+}
+
+/// Polls `future` on this thread until it completes: the facade commits to no executor.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(output) = future
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+        {
+            return output;
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(10));
     }
 }
 

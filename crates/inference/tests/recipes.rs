@@ -851,3 +851,36 @@ fn an_instantiated_chat_opens_a_run_that_carries_a_turn() {
         .collect();
     assert_eq!(reply, "Hello from the mock", "{received:#?}");
 }
+
+#[test]
+fn a_chat_over_a_generator_without_concurrent_input_refuses_to_open() {
+    use inference::Error;
+    use inference::facade::live::LiveSessions;
+
+    let stack = Stack::new()
+        .bind(Binding::llm(MockGenerator::new(
+            llm::MockConfiguration::StreamingOnly,
+            ModelId::generate(),
+            ["never sent"],
+        )))
+        .resolve_with(&Env::new())
+        .expect("resolves");
+    let mut instantiation = Recipe::chat().instantiate(&stack).expect("chat plans");
+    let sessions = LiveSessions::new();
+    let Err(error) = block_on(instantiation.open(&stack, &sessions)) else {
+        panic!("opening refuses a generator that takes no input while it is Active");
+    };
+    assert_eq!(error.kind(), ErrorKind::ConcurrencyUnclaimed, "{error}");
+    let Error::ConcurrencyUnclaimed { role, .. } = &error else {
+        unreachable!("the kind is ConcurrencyUnclaimed");
+    };
+    assert_eq!(role, "llm");
+    let shown = error.to_string();
+    assert!(shown.contains("concurrent_input_output"), "{shown}");
+    assert!(shown.contains("bind the role llm"), "{shown}");
+    assert!(
+        sessions.sessions_view().is_empty(),
+        "no session is left open: {:?}",
+        sessions.sessions_view()
+    );
+}

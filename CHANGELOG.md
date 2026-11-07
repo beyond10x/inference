@@ -18,6 +18,14 @@
   `Error::Layer` and no session is left open. `Instantiation::sink()` (feature `audio-host`) is
   the handle of the opened `voice_cascade` run's speaker sink. The `mock` registration's
   generator now claims `concurrent_input_output`, which the opened run's model node needs.
+- `inference`: `Error::ConcurrencyUnclaimed { role, adapter }` and
+  `ErrorKind::ConcurrencyUnclaimed`. `Instantiation::open` returns it before anything opens when
+  the run would keep one generation over an `llm` binding whose adapter does not claim
+  `concurrent_input_output` (every recipe with an `llm` role but `voice_cascade`), such as
+  `llama-server`, which claims only output streaming; its message names the fix.
+- `ess`: `inference.sdk.OpenInstantiation` with its outcomes `opened` and the external
+  `concurrency-unclaimed`, the error `ConcurrencyUnclaimed`, the event `InstantiationOpened` and the `open` transition of
+  `Instantiation`; the testkit's conformance target answers them through `Instantiation::open`.
 - `inference-pipeline`: the fan-out node, `nodes::FanOut`, in every build; it moved from the
   testkit, where `inference_testkit::stt::FanOut` re-exports it.
 
