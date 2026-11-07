@@ -1413,6 +1413,11 @@ impl Stack {
     pub const fn session_config(&self) -> Option<&SessionConfig> {
         self.session_config.as_ref()
     }
+
+    /// Replaces the session the `speech` binding opens with: an agent's merged config.
+    pub(crate) fn set_session_config(&mut self, config: Option<SessionConfig>) {
+        self.session_config = config;
+    }
 }
 
 impl Catalog for Stack {
