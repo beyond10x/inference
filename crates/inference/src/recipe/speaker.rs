@@ -199,6 +199,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
+    use inference_audio_device::acknowledging::AcknowledgingHandle;
     use inference_audio_device::acknowledging::{ACKNOWLEDGE_PLAYBACK, Playable, PlaybackPayload};
     use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
     use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
@@ -207,14 +208,16 @@ mod tests {
     use inference_core::model::{
         Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
     };
-    use inference_facade::live::LiveSessions;
+    use inference_facade::live::{LiveSession, LiveSessions};
     use inference_pipeline::{NodeEndpoints, NodeImplementation, NodeInput, NodeOutput};
-    use inference_runtime::run::RunState;
+    use inference_runtime::RunError;
+    use inference_runtime::run::{Run, RunState};
+    use inference_testkit::stt::synthetic_audio::{FIXTURE, Stretch, synthesize};
     use inference_text::{OutputSegment, SegmentId, TurnId};
     use inference_tts::{CONTRACT_REVISION, PlaybackReceipt, SynthesisEvent, SynthesisOutput};
 
     use super::{AudioRoute, sink};
-    use crate::{Binding, Env, ErrorKind, Recipe, Role, Stack};
+    use crate::{Binding, Env, ErrorKind, Payload, Recipe, Role, Stack};
 
     const FRAME: u32 = 320;
 
@@ -299,11 +302,15 @@ mod tests {
         );
     }
 
-    /// A route of the test: records each frame routed, counts its cuts and interruptions, drops
-    /// the frames not yet handed out at a cut; the test sets `played()`.
+    /// A route of the test: records each frame routed with its ordinal, the count of frames
+    /// routed before it, counts its cuts and interruptions, drops the frames not yet handed out
+    /// at a cut and keeps the ordinal the last cut came at; the test sets `played()`.
     #[derive(Default)]
     struct Route {
         frames: Mutex<Vec<AudioFrame>>,
+        ordinals: Mutex<Vec<usize>>,
+        next: AtomicUsize,
+        cut_at: AtomicUsize,
         played: AtomicU64,
         cuts: AtomicUsize,
         interruptions: AtomicUsize,
@@ -316,14 +323,23 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner)
                 .len()
         }
+
+        /// The ordinals of the frames handed out: the first `played()` of those routed.
+        fn handed_out(&self) -> Vec<usize> {
+            let ordinals = self.ordinals.lock().unwrap_or_else(PoisonError::into_inner);
+            let played = usize::try_from(self.played()).unwrap_or(usize::MAX);
+            ordinals[..played.min(ordinals.len())].to_vec()
+        }
     }
 
     impl AudioRoute for Route {
         fn route(&self, frame: AudioFrame) {
-            self.frames
+            let mut frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
+            frames.push(frame);
+            self.ordinals
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push(frame);
+                .push(self.next.fetch_add(1, Ordering::SeqCst));
         }
 
         fn played(&self) -> u64 {
@@ -331,9 +347,13 @@ mod tests {
         }
 
         fn cut(&self) {
+            let mut frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
             self.cuts.fetch_add(1, Ordering::SeqCst);
+            self.cut_at
+                .store(self.next.load(Ordering::SeqCst), Ordering::SeqCst);
             let handed = usize::try_from(self.played()).unwrap_or(usize::MAX);
-            self.frames
+            frames.truncate(handed);
+            self.ordinals
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .truncate(handed);
@@ -737,5 +757,150 @@ mod tests {
         route.played.store(3, Ordering::SeqCst);
         assert!(eventually(|| run.receipts.receipts() == [segment]));
         run.end();
+    }
+
+    /// The microphone frames of `stretches`, their positions moved on by `from` samples, as the
+    /// envelopes of the cascade's `audio` ingress.
+    fn microphone(stretches: &[Stretch], from: u64) -> (Vec<EventEnvelope<Payload>>, u64) {
+        let mut next = from;
+        let envelopes = synthesize(stretches)
+            .into_iter()
+            .map(|mut frame| {
+                let position = from + frame.position.get();
+                frame.position = SampleClockPosition::new(position).expect("a position");
+                next = position + u64::from(frame.sample_count);
+                EventEnvelope {
+                    schema_version: 1,
+                    event_id: EventId::generate(),
+                    run_id: RunId::generate(),
+                    session_id: None,
+                    stream_id: StreamId::generate(),
+                    sequence: 1,
+                    producer: NodeId::generate(),
+                    port: "audio".to_owned(),
+                    kind: "inference.audio.AudioChunk".to_owned(),
+                    generation_id: None,
+                    timestamp: i64::try_from(position).expect("within i64"),
+                    timebase: Timebase::AudioFrameTime,
+                    causation_id: None,
+                    payload: Payload::Audio(frame),
+                }
+            })
+            .collect();
+        (envelopes, next)
+    }
+
+    /// The opened cascade of a barge-in: its route, its speaker's handle, the frames the route
+    /// had recorded when the second tone began, and the session to close.
+    struct Barged {
+        route: Arc<Route>,
+        sink: AcknowledgingHandle,
+        before: usize,
+        session: LiveSession<Payload>,
+        ended: std::sync::mpsc::Receiver<Result<Run, RunError>>,
+    }
+
+    /// `voice_cascade` instantiated through the crate's entry over the mocks and a test route,
+    /// opened, with `played()` held at 0: the frames of one turn, then, once the route recorded a
+    /// frame of reply 0, the second tone, which opens turn 2 while that reply is unplayed.
+    fn cascade_barge_in(auto_interrupt: bool) -> Barged {
+        let stack = [Role::Stt, Role::Llm, Role::Tts]
+            .into_iter()
+            .fold(Stack::new(), |stack, role| {
+                stack.bind(Binding::named(role, "mock", BTreeMap::new()))
+            })
+            .resolve_with(&Env::new())
+            .expect("the stack resolves");
+        let route = Arc::new(Route::default());
+        let routed: Arc<dyn AudioRoute> = Arc::clone(&route) as Arc<dyn AudioRoute>;
+        let mut instantiation =
+            super::instantiate(&Recipe::voice_cascade(), &stack, routed, auto_interrupt)
+                .expect("the cascade plans over the mocks");
+        let sessions = LiveSessions::new();
+        let (session, driver) =
+            block_on(instantiation.open(&stack, &sessions)).expect("the cascade's run opens");
+        let sink = instantiation
+            .sink()
+            .cloned()
+            .expect("the open run's speaker answers");
+        let (done, ended) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = done.send(block_on(driver.drive()));
+        });
+        let (first, next) = microphone(&FIXTURE[..2], 0);
+        for envelope in first {
+            block_on(session.send(envelope)).expect("the ingress takes every frame");
+        }
+        assert!(
+            eventually(|| route.routed() > 0),
+            "reply 0 reaches the route"
+        );
+        let before = route.routed();
+        let (second, _) = microphone(&FIXTURE[2..3], next);
+        for envelope in second {
+            block_on(session.send(envelope)).expect("the ingress takes every frame");
+        }
+        Barged {
+            route,
+            sink,
+            before,
+            session,
+            ended,
+        }
+    }
+
+    impl Barged {
+        /// Hands out every frame routed from now on, so the speaker drains, then closes the
+        /// session and waits for the run to complete.
+        fn end(mut self) {
+            self.route.played.store(u64::MAX >> 1, Ordering::SeqCst);
+            block_on(self.session.close()).expect("the session drains");
+            while block_on(self.session.receive()).is_some() {}
+            let run = self
+                .ended
+                .recv_timeout(Duration::from_secs(20))
+                .expect("the run ends within 20 s")
+                .expect("the run ends");
+            assert_eq!(run.state(), RunState::Completed);
+        }
+    }
+
+    #[test]
+    fn a_second_turn_cuts_the_cascades_unplayed_reply() {
+        let barged = cascade_barge_in(true);
+        let route = &barged.route;
+        assert!(
+            eventually(|| route.cuts.load(Ordering::SeqCst) > 0),
+            "turn 2 cuts the route"
+        );
+        assert!(eventually(|| barged.sink.interruptions().len() == 1));
+        let cut_at = route.cut_at.load(Ordering::SeqCst);
+        assert!(
+            cut_at >= barged.before,
+            "the cut came after reply 0 was routed"
+        );
+        route.played.store(route.routed() as u64, Ordering::SeqCst);
+        assert!(
+            route.handed_out().iter().all(|ordinal| *ordinal >= cut_at),
+            "no frame routed before the cut is handed out: {:?}",
+            route.handed_out()
+        );
+        barged.end();
+    }
+
+    #[test]
+    fn a_cascade_without_auto_interrupt_keeps_its_unplayed_reply() {
+        let barged = cascade_barge_in(false);
+        let route = &barged.route;
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(route.cuts.load(Ordering::SeqCst), 0);
+        assert!(barged.sink.interruptions().is_empty());
+        route.played.store(route.routed() as u64, Ordering::SeqCst);
+        let handed = route.handed_out();
+        assert!(
+            (0..barged.before).all(|ordinal| handed.contains(&ordinal)),
+            "every frame routed before turn 2 is handed out: {handed:?}"
+        );
+        barged.end();
     }
 }
