@@ -13,13 +13,11 @@ use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
-use zeroize::Zeroizing;
 
 use crate::audio::encode_pcm16_24k;
 use crate::config::{Deadlines, Endpoint, FunctionTool, SessionConfig, ToolChoice, WireFormat};
-use crate::credential::{CredentialError, CredentialSource};
+use crate::credential::CredentialSource;
 use crate::error::{ConnectError, RealtimeError};
 use crate::event::ServerEvent;
 
@@ -771,14 +769,9 @@ pub(crate) async fn open_socket(
         .resolve(credential)
         .await
         .map_err(RealtimeError::Credential)?;
-    let mut authorization = Zeroizing::new(Vec::with_capacity(7 + resolved.expose().len()));
-    authorization.extend_from_slice(b"Bearer ");
-    authorization.extend_from_slice(resolved.expose());
-    drop(resolved);
-    let mut header = HeaderValue::from_bytes(&authorization)
-        .map_err(|_| RealtimeError::Credential(CredentialError::Invalid))?;
-    drop(authorization);
-    header.set_sensitive(true);
+    let header = resolved
+        .into_header(b"Bearer ")
+        .map_err(RealtimeError::Credential)?;
 
     let mut request = url
         .into_client_request()

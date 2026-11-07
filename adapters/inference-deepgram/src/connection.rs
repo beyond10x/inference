@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
@@ -50,13 +49,9 @@ pub(crate) async fn open_with_scheme(
     if resolved.expose().iter().all(u8::is_ascii_whitespace) {
         return Err(DeepgramError::Credential(CredentialError::Invalid));
     }
-    let mut value = format!("{scheme} ").into_bytes();
-    value.extend_from_slice(resolved.expose());
-    drop(resolved);
-    let value = zeroize::Zeroizing::new(value);
-    let mut header = HeaderValue::from_bytes(&value)
-        .map_err(|_| DeepgramError::Credential(CredentialError::Invalid))?;
-    header.set_sensitive(true);
+    let header = resolved
+        .into_header(format!("{scheme} ").as_bytes())
+        .map_err(DeepgramError::Credential)?;
 
     let mut request = url.into_client_request().map_err(|error| {
         DeepgramError::Connect(ConnectError {

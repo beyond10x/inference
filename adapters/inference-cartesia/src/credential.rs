@@ -11,6 +11,8 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
+use bytes::Bytes;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use zeroize::Zeroizing;
 
 /// The secret name the Cartesia key is stored under: `secretsctl put cartesia-api-key`.
@@ -45,6 +47,34 @@ impl Credential {
     pub fn expose(&self) -> &[u8] {
         &self.0
     }
+
+    /// `prefix` followed by the key, as a header value marked sensitive; the credential is
+    /// consumed. Without a prefix the value's bytes are the credential's own buffer; with one they
+    /// are a single new buffer holding the prefix and the key, and the credential is zeroized at
+    /// once. Either way the value owns its buffer rather than a copy of it, and the buffer is
+    /// zeroized when the value and every clone of it drop.
+    ///
+    /// # Errors
+    /// [`CredentialError::Invalid`] when the result cannot be a header value.
+    pub(crate) fn into_header(self, prefix: &[u8]) -> Result<HeaderValue, CredentialError> {
+        if prefix.is_empty() {
+            return sensitive_header(self.0);
+        }
+        let mut value = Zeroizing::new(Vec::with_capacity(prefix.len() + self.0.len()));
+        value.extend_from_slice(prefix);
+        value.extend_from_slice(&self.0);
+        drop(self);
+        sensitive_header(value)
+    }
+}
+
+/// `value` as a header value marked sensitive, over `value`'s own buffer: the header copies
+/// nothing, and the buffer is zeroized when its last holder drops.
+fn sensitive_header(value: Zeroizing<Vec<u8>>) -> Result<HeaderValue, CredentialError> {
+    let mut header = HeaderValue::from_maybe_shared(Bytes::from_owner(value))
+        .map_err(|_| CredentialError::Invalid)?;
+    header.set_sensitive(true);
+    Ok(header)
 }
 
 impl fmt::Debug for Credential {
@@ -219,5 +249,54 @@ mod keychain {
         fn a_name_the_secrets_grammar_refuses_is_invalid() {
             assert_eq!(address("Cartesia").err(), Some(CredentialError::Invalid));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unprefixed_header_value_is_the_credential_buffer_itself() {
+        let credential = Credential::new(b"key-0123".to_vec());
+        let buffer = credential.expose().as_ptr();
+        let header = credential.into_header(b"").unwrap();
+        assert_eq!(
+            header.as_bytes().as_ptr(),
+            buffer,
+            "the header value holds a copy of the key"
+        );
+        assert_eq!(header.as_bytes(), b"key-0123");
+        assert!(header.is_sensitive());
+    }
+
+    #[test]
+    fn a_header_value_holds_its_zeroizing_buffer_and_no_copy() {
+        let value = Zeroizing::new(b"Bearer key-0123".to_vec());
+        let buffer = value.as_ptr();
+        let header = sensitive_header(value).unwrap();
+        assert_eq!(
+            header.as_bytes().as_ptr(),
+            buffer,
+            "the header value holds a copy of the key"
+        );
+        assert!(header.is_sensitive());
+    }
+
+    #[test]
+    fn a_prefixed_header_value_is_the_prefix_then_the_key() {
+        let header = Credential::new(b"key-0123".to_vec())
+            .into_header(b"Bearer ")
+            .unwrap();
+        assert_eq!(header.as_bytes(), b"Bearer key-0123");
+        assert!(header.is_sensitive());
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_a_header_value_is_invalid() {
+        assert_eq!(
+            Credential::new(b"key\n".to_vec()).into_header(b"").err(),
+            Some(CredentialError::Invalid)
+        );
     }
 }

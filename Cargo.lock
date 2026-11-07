@@ -2195,6 +2195,7 @@ name = "inference-cartesia"
 version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "futures-util",
  "inference-testkit",
  "inference-tts",
@@ -2224,6 +2225,7 @@ dependencies = [
 name = "inference-deepgram"
 version = "0.24.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "inference-duplex",
  "inference-stt",
@@ -2244,6 +2246,7 @@ dependencies = [
 name = "inference-deepslate"
 version = "0.24.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "inference-duplex",
  "keyring-core",
@@ -2285,6 +2288,7 @@ name = "inference-elevenlabs"
 version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "futures-util",
  "inference-duplex",
  "inference-testkit",
@@ -2364,6 +2368,7 @@ name = "inference-openai"
 version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "futures-util",
  "inference-audio",
  "inference-core",
@@ -2389,6 +2394,7 @@ name = "inference-phonic"
 version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "futures-util",
  "inference-duplex",
  "keyring-core",

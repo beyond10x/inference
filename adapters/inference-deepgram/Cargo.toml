@@ -14,6 +14,7 @@ duplex = ["dep:inference-duplex", "dep:serde", "tokio/rt-multi-thread"]
 live = ["native-keychain"]
 
 [dependencies]
+bytes = "1.9"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 inference-duplex = { path = "../../crates/inference-duplex", optional = true }
 inference-stt = { path = "../../crates/inference-stt" }
