@@ -27,15 +27,11 @@
 mod dispatch;
 mod run;
 #[cfg(feature = "audio-host")]
-#[cfg_attr(
-    not(all(test, feature = "testing")),
-    expect(
-        dead_code,
-        reason = "the cascade's speaker is built when an agent opens the instantiation over its route"
-    )
-)]
 mod speaker;
 mod topology;
+
+#[cfg(feature = "audio-host")]
+pub(crate) use speaker::{AudioRoute, instantiate as instantiate_routed};
 
 use std::collections::BTreeMap;
 use std::fmt;

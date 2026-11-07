@@ -181,6 +181,10 @@ impl std::fmt::Debug for Speaker {
 
 impl Instantiation {
     /// The route and barge-in the cascade was instantiated with, through [`instantiate`].
+    #[cfg_attr(
+        not(all(test, feature = "testing")),
+        expect(dead_code, reason = "only the recipe's tests read the speaker back")
+    )]
     pub(crate) const fn speaker(&self) -> Option<&Speaker> {
         self.speaker.as_ref()
     }
