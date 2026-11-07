@@ -153,7 +153,7 @@ fn chunk() -> SessionEvent {
         format,
         position: SampleClockPosition::new(0).expect("in range"),
         sample_count: 1,
-        data: vec![0, 1].into(),
+        data: vec![0, 1],
     })
 }
 
