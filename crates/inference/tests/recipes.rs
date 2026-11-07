@@ -1463,6 +1463,109 @@ fn adversary_exposing_an_exposed_port_under_its_port_name_keeps_one_reply() {
     assert_eq!(reply, "Hello from the mock", "{received}");
 }
 
+/// Adversary: the story carries the sdk-stack review's finding that no SDK code refuses a denied
+/// locality at the binding accessors (R213 "covers those accessors too, not only planning").
+/// Under the default `offline_strict` profile, a hosted generator is refused by planning, and
+/// `StackBinding::generator()` still hands it out.
+mod adversary_locality {
+    use std::sync::Arc;
+
+    use inference::core::model::{
+        Adapter, AdapterDescriptor as ModelDescriptor, DeclareAdapter, ExecutionForm, Locality,
+        ModelId,
+    };
+    use inference::llm::Generator;
+    use inference::llm::llm_core::{
+        BoxFuture, Cancel, Capabilities, Id, Item, Model, Protocol, Provenance, StopReason,
+        StreamSink, TurnObservation, TurnOutcome, TurnRequest,
+    };
+    use inference::{Binding, Env, ErrorKind, Recipe, Role, Stack};
+
+    struct HostedModel {
+        provenance: Provenance,
+        capabilities: Capabilities,
+    }
+
+    impl Model for HostedModel {
+        fn provenance(&self) -> &Provenance {
+            &self.provenance
+        }
+
+        fn capabilities(&self) -> &Capabilities {
+            &self.capabilities
+        }
+
+        fn turn<'a>(
+            &'a self,
+            _request: &'a TurnRequest,
+            _sink: &'a mut dyn StreamSink,
+            _cancel: &'a Cancel,
+        ) -> BoxFuture<'a, Result<TurnOutcome, inference::llm::llm_core::Error>> {
+            Box::pin(async move {
+                Ok(TurnOutcome {
+                    stop_reason: StopReason::EndTurn,
+                    items: vec![Item::assistant("hosted".to_owned())],
+                    observation: TurnObservation::new(self.provenance.clone()),
+                })
+            })
+        }
+    }
+
+    fn hosted_generator() -> Generator {
+        let id = |value: &str| Id::new(value).expect("a printable identifier");
+        let model = HostedModel {
+            provenance: Provenance {
+                protocol: Protocol::Responses,
+                provider: id("adversary"),
+                account: id("hosted"),
+                endpoint: id("remote"),
+                model: id("hosted"),
+                binding_revision: id("1"),
+            },
+            capabilities: Capabilities::text(1 << 12, 1 << 10),
+        };
+        let (adapter, _) = Adapter::declare(DeclareAdapter {
+            model_id: ModelId::generate(),
+            backend: "adversary hosted generator".to_owned(),
+            contract_revision: "1".to_owned(),
+            execution_form: ExecutionForm::HostedService,
+            locality: Locality::ExternalProvider,
+            capabilities: Vec::new(),
+            max_concurrency: 1,
+            descriptor: ModelDescriptor::default(),
+        })
+        .expect("a concurrency of one is positive");
+        Generator::new(adapter, Arc::new(model))
+            .expect("the adapter claims nothing the model does not declare")
+    }
+
+    #[test]
+    fn adversary_an_offline_strict_stack_does_not_hand_out_a_hosted_generator() {
+        let resolved = Stack::new()
+            .bind(Binding::llm(hosted_generator()))
+            .resolve_with(&Env::new());
+        let stack = match resolved {
+            Err(error) => {
+                assert_eq!(error.kind(), ErrorKind::ProfileDenies, "{error}");
+                return;
+            }
+            Ok(stack) => stack,
+        };
+        let Err(error) = Recipe::chat().instantiate(&stack) else {
+            panic!("planning admits a hosted generator under offline_strict");
+        };
+        assert_eq!(error.kind(), ErrorKind::ProfileDenies, "{error}");
+        assert!(
+            stack
+                .adapter(Role::Llm)
+                .and_then(inference::StackBinding::generator)
+                .is_none(),
+            "planning refuses the hosted generator as ProfileDenies, and the stack's llm binding \
+             still hands it out under offline_strict"
+        );
+    }
+}
+
 /// A node implementation that records, in the log it shares, that it started, and at its drain
 /// takes its inputs to their stop and sends nothing.
 struct Replacement(

@@ -701,6 +701,9 @@ pub struct StackBinding {
     source: BindingSource,
     model: Option<String>,
     value: Value,
+    /// Whether the stack's profile admits the adapter's locality; an instance it does not
+    /// admit is handed out by no accessor.
+    admitted: bool,
 }
 
 impl fmt::Debug for StackBinding {
@@ -747,38 +750,39 @@ impl StackBinding {
         self.model.as_deref()
     }
 
-    /// The generator of an `llm` binding; none for another role.
+    /// The generator of an `llm` binding; none for another role, and none when the stack's
+    /// profile does not admit the adapter's locality, as planning refuses it.
     #[must_use]
     pub fn generator(&self) -> Option<&Generator> {
         match &self.value {
-            Value::Llm(generator) => Some(generator.as_ref()),
+            Value::Llm(generator) if self.admitted => Some(generator.as_ref()),
             _ => None,
         }
     }
 
     /// The recogniser of an `stt` binding, which builds each run's STT node; none for another
-    /// role.
+    /// role, or when the profile does not admit the adapter's locality.
     pub(crate) fn recogniser(&self) -> Option<&dyn BoundRecogniser> {
         match &self.value {
-            Value::Stt(recogniser) => Some(recogniser.as_ref()),
+            Value::Stt(recogniser) if self.admitted => Some(recogniser.as_ref()),
             _ => None,
         }
     }
 
     /// The synthesiser of a `tts` binding, which builds each run's synthesiser node; none for
-    /// another role.
+    /// another role, or when the profile does not admit the adapter's locality.
     pub(crate) fn synthesiser(&self) -> Option<&dyn BoundSynthesiser> {
         match &self.value {
-            Value::Tts(synthesiser) => Some(synthesiser.as_ref()),
+            Value::Tts(synthesiser) if self.admitted => Some(synthesiser.as_ref()),
             _ => None,
         }
     }
 
     /// The model of a `speech` binding, which builds each run's duplex node; none for another
-    /// role.
+    /// role, or when the profile does not admit the adapter's locality.
     pub(crate) fn speech_model(&self) -> Option<&dyn BoundSpeechModel> {
         match &self.value {
-            Value::Speech(model) => Some(model.as_ref()),
+            Value::Speech(model) if self.admitted => Some(model.as_ref()),
             _ => None,
         }
     }
@@ -1065,7 +1069,16 @@ impl Stack {
     pub fn profile(mut self, kind: ProfileKind) -> Self {
         self.profile = declare_profile(kind);
         self.profile_source = Some(BindingSource::Builder);
+        self.admit();
         self
+    }
+
+    /// Records on each binding whether the profile admits its adapter's locality.
+    fn admit(&mut self) {
+        let admitted = self.profile.admitted().to_vec();
+        for binding in self.bindings.iter_mut().flatten() {
+            binding.admitted = admitted.contains(&binding.adapter().locality());
+        }
     }
 
     /// [`Stack::resolve_with`] over the process's [`Env::process`].
@@ -1117,6 +1130,7 @@ impl Stack {
                         source: BindingSource::Builder,
                         model: binding.model,
                         value,
+                        admitted: true,
                     },
                     (role == Role::Speech).then(default_session_config),
                 ),
@@ -1188,6 +1202,7 @@ impl Stack {
                 }
             }
         }
+        self.admit();
         Ok(self)
     }
 
@@ -1344,6 +1359,7 @@ impl Stack {
             source: origin.source(),
             model: keys.get("model").cloned().or(built.model),
             value,
+            admitted: true,
         };
         Ok((binding, session))
     }
