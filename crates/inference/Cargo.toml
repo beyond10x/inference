@@ -42,7 +42,7 @@ inference-llama-server = { path = "../../adapters/inference-llama-server", optio
 inference-llm = { path = "../inference-llm", features = ["tools"] }
 inference-macros = { path = "../inference-macros" }
 inference-openai = { path = "../../adapters/inference-openai", optional = true }
-inference-pipeline = { path = "../inference-pipeline" }
+inference-pipeline = { path = "../inference-pipeline", features = ["duplex", "llm", "stt", "tts"] }
 inference-runtime = { path = "../inference-runtime" }
 inference-sherpa-onnx = { path = "../../adapters/inference-sherpa-onnx", optional = true }
 inference-stt = { path = "../inference-stt" }

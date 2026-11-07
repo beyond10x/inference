@@ -7,15 +7,21 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+stt = ["dep:inference-stt"]
+llm = ["dep:inference-llm", "inference-llm/tools"]
+tts = ["dep:inference-tts"]
+duplex = ["dep:inference-duplex"]
+
 [dependencies]
 inference-audio = { path = "../inference-audio" }
 inference-core = { path = "../inference-core" }
-inference-duplex = { path = "../inference-duplex" }
-inference-llm = { path = "../inference-llm", features = ["tools"] }
-inference-stt = { path = "../inference-stt" }
+inference-duplex = { path = "../inference-duplex", optional = true }
+inference-llm = { path = "../inference-llm", optional = true }
+inference-stt = { path = "../inference-stt", optional = true }
 inference-text = { path = "../inference-text" }
 inference-tools = { path = "../inference-tools" }
-inference-tts = { path = "../inference-tts" }
+inference-tts = { path = "../inference-tts", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
