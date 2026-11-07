@@ -1457,8 +1457,8 @@ dependencies = [
 
 [[package]]
 name = "ess-compiler"
-version = "0.88.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.88.0#bd6ecb330d7747a98418b35fc13c80771303484f"
+version = "0.89.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.89.0#ec2cb77cad2f0def5800e8934e8540f01b48f8c2"
 dependencies = [
  "ess-domain",
  "ess-primitives",
@@ -1469,8 +1469,8 @@ dependencies = [
 
 [[package]]
 name = "ess-conformance"
-version = "0.88.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.88.0#bd6ecb330d7747a98418b35fc13c80771303484f"
+version = "0.89.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.89.0#ec2cb77cad2f0def5800e8934e8540f01b48f8c2"
 dependencies = [
  "ess-compiler",
  "ess-domain",
@@ -1484,12 +1484,12 @@ dependencies = [
 
 [[package]]
 name = "ess-domain"
-version = "0.88.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.88.0#bd6ecb330d7747a98418b35fc13c80771303484f"
+version = "0.89.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.89.0#ec2cb77cad2f0def5800e8934e8540f01b48f8c2"
 dependencies = [
  "ess-primitives",
  "ess-yaml",
- "schemars",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1497,8 +1497,8 @@ dependencies = [
 
 [[package]]
 name = "ess-gen"
-version = "0.88.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.88.0#bd6ecb330d7747a98418b35fc13c80771303484f"
+version = "0.89.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.89.0#ec2cb77cad2f0def5800e8934e8540f01b48f8c2"
 dependencies = [
  "ess-compiler",
  "ess-domain",
@@ -1514,8 +1514,8 @@ dependencies = [
 
 [[package]]
 name = "ess-http"
-version = "0.88.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.88.0#bd6ecb330d7747a98418b35fc13c80771303484f"
+version = "0.89.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.89.0#ec2cb77cad2f0def5800e8934e8540f01b48f8c2"
 dependencies = [
  "ess-compiler",
  "ess-domain",
@@ -1528,11 +1528,11 @@ dependencies = [
 
 [[package]]
 name = "ess-primitives"
-version = "0.88.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.88.0#bd6ecb330d7747a98418b35fc13c80771303484f"
+version = "0.89.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.89.0#ec2cb77cad2f0def5800e8934e8540f01b48f8c2"
 dependencies = [
  "ess-yaml",
- "schemars",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1540,8 +1540,8 @@ dependencies = [
 
 [[package]]
 name = "ess-transport"
-version = "0.88.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.88.0#bd6ecb330d7747a98418b35fc13c80771303484f"
+version = "0.89.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.89.0#ec2cb77cad2f0def5800e8934e8540f01b48f8c2"
 dependencies = [
  "ess-compiler",
  "ess-domain",
@@ -1552,8 +1552,8 @@ dependencies = [
 
 [[package]]
 name = "ess-yaml"
-version = "0.88.0"
-source = "git+https://github.com/beyond10x/ess?tag=0.88.0#bd6ecb330d7747a98418b35fc13c80771303484f"
+version = "0.89.0"
+source = "git+https://github.com/beyond10x/ess?tag=0.89.0#ec2cb77cad2f0def5800e8934e8540f01b48f8c2"
 dependencies = [
  "serde",
  "serde_norway",
@@ -1845,6 +1845,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2114,8 +2120,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference"
+version = "0.24.0"
+dependencies = [
+ "futures-core",
+ "futures-util",
+ "hound",
+ "inference-audio",
+ "inference-audio-device",
+ "inference-aws",
+ "inference-core",
+ "inference-duplex",
+ "inference-facade",
+ "inference-llama-server",
+ "inference-llm",
+ "inference-macros",
+ "inference-openai",
+ "inference-pipeline",
+ "inference-runtime",
+ "inference-sherpa-onnx",
+ "inference-stt",
+ "inference-testkit",
+ "inference-text",
+ "inference-tools",
+ "inference-tts",
+ "inference-whispercpp",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "trybuild",
+]
+
+[[package]]
 name = "inference-audio"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -2124,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "inference-audio-device"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "cpal",
  "inference-audio",
@@ -2135,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "inference-aws"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "aws-config",
  "aws-sdk-bedrockruntime",
@@ -2150,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "inference-cartesia"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -2170,7 +2212,7 @@ dependencies = [
 
 [[package]]
 name = "inference-core"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-audio",
  "serde",
@@ -2180,7 +2222,7 @@ dependencies = [
 
 [[package]]
 name = "inference-deepgram"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "futures-util",
  "inference-duplex",
@@ -2200,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "inference-deepslate"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "futures-util",
  "inference-duplex",
@@ -2218,7 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "inference-docs"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "clap",
  "inference-core",
@@ -2229,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "inference-duplex"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2240,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "inference-elevenlabs"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -2261,10 +2303,11 @@ dependencies = [
 
 [[package]]
 name = "inference-facade"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-audio",
  "inference-core",
+ "inference-duplex",
  "inference-llm",
  "inference-pipeline",
  "inference-runtime",
@@ -2279,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "inference-llama-server"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-core",
  "inference-llm",
@@ -2298,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "inference-llm"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-core",
  "inference-text",
@@ -2308,8 +2351,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-macros"
+version = "0.24.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "inference-openai"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -2334,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "inference-phonic"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -2352,12 +2404,16 @@ dependencies = [
 
 [[package]]
 name = "inference-pipeline"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-audio",
  "inference-core",
+ "inference-duplex",
+ "inference-llm",
+ "inference-stt",
  "inference-text",
  "inference-tools",
+ "inference-tts",
  "proptest",
  "serde",
  "serde_json",
@@ -2366,7 +2422,7 @@ dependencies = [
 
 [[package]]
 name = "inference-runtime"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-core",
  "inference-llm",
@@ -2380,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "inference-sherpa-onnx"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -2390,7 +2446,7 @@ dependencies = [
 
 [[package]]
 name = "inference-stt"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2399,10 +2455,11 @@ dependencies = [
 
 [[package]]
 name = "inference-testkit"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "ess-conformance",
  "ess-primitives",
+ "inference",
  "inference-core",
  "inference-duplex",
  "inference-facade",
@@ -2415,12 +2472,13 @@ dependencies = [
  "inference-tts",
  "serde",
  "serde_json",
+ "tempfile",
  "uuid",
 ]
 
 [[package]]
 name = "inference-text"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-core",
  "serde",
@@ -2429,7 +2487,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tools"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-core",
  "inference-text",
@@ -2439,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tts"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-audio",
  "inference-core",
@@ -2448,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "inference-whispercpp"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -2760,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "local-voice-cascade"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "clap",
  "inference-audio",
@@ -3532,7 +3590,7 @@ dependencies = [
 
 [[package]]
 name = "realtime-voice"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "chrono",
  "clap",
@@ -3560,6 +3618,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "ref-cast"
+version = "1.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e440fb4e4b4147295338efb76001ab9e4efc0e5839df2c47fc5ac2381d365c3"
+dependencies = [
+ "ref-cast-impl",
+]
+
+[[package]]
+name = "ref-cast-impl"
+version = "1.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -3599,7 +3677,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "repo-podcast"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "clap",
  "inference-audio-device",
@@ -3781,7 +3859,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
 dependencies = [
  "dyn-clone",
- "schemars_derive",
+ "schemars_derive 0.8.22",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
+dependencies = [
+ "dyn-clone",
+ "ref-cast",
+ "schemars_derive 1.2.3",
  "serde",
  "serde_json",
 ]
@@ -3794,8 +3885,20 @@ checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
 dependencies = [
  "proc-macro2",
  "quote",
- "serde_derive_internals",
+ "serde_derive_internals 0.29.1",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1c3a92094fa7d61aa124645844facb6b554dfc797136d0f5fd1f890e2bffc69"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals 0.30.0",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -3920,6 +4023,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -4164,7 +4278,7 @@ dependencies = [
 
 [[package]]
 name = "stt-only"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "inference-stt",
  "inference-testkit",
@@ -4172,7 +4286,7 @@ dependencies = [
 
 [[package]]
 name = "stt-sherpa-onnx"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "clap",
  "inference-sherpa-onnx",
@@ -4239,6 +4353,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "target-tuple"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876fef147edbcbddc8ac5cbbba92c7b86519e314e86638596c09673b2ed01e7f"
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4249,6 +4369,15 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
 ]
 
 [[package]]
@@ -4385,6 +4514,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4424,10 +4554,12 @@ version = "1.1.8+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20489e00e4d8741d6be680764cc12e270655e375a20d1011e844a9c3379e678d"
 dependencies = [
+ "indexmap",
  "serde_core",
  "serde_spanned",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -4460,6 +4592,12 @@ checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.2.0+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 
 [[package]]
 name = "tower"
@@ -4542,6 +4680,21 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "trybuild"
+version = "1.0.122"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62db9c92d704393fbf2132041720cc80b689f2d3f28521015c2ac866223c11b8"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-tuple",
+ "termcolor",
+ "toml",
+]
 
 [[package]]
 name = "tungstenite"

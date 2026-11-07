@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-crate
 kind: story
-status: draft
+status: implemented
 title: The inference crate re-exports the workspace by feature and has one Error that names its fix
 relations:
 - decomposes: epic:sdk
@@ -72,7 +72,11 @@ scope:
   path: crates/inference/tests/testing.rs
 - confidence: inferred
   path: crates/inference/tests/usage_cost.rs
-revision: 19
+revision: 22
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-06T22:09:34Z", actor: "human:operator", revision: 20, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-06T22:09:34Z", actor: "human:operator", revision: 21, decided_on: {"recorded":{"approval":1}}}
+- {from: "active", to: "implemented", at: "2026-11-07T04:23:03Z", actor: "human:operator", revision: 22, decided_on: {"recorded":{"test_result":1,"approval":1,"review_outcome":1}}}
 ---
 ## Context
 

@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-06T22:09:34Z",
+  "actor": "human:operator",
+  "artifact": "story:sdk-crate",
+  "kind": "story",
+  "revision": 19,
+  "change": {
+    "change": "evidence",
+    "kind": "approval",
+    "source": "wave approval relayed by the orchestrator session for the operator, 2026-11-06: the SDK stories plus api-key-copies-in-handshakes, cut at 4 units in plan order"
+  }
+}

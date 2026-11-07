@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-07T04:23:03Z",
+  "actor": "human:operator",
+  "artifact": "story:sdk-crate",
+  "kind": "story",
+  "revision": 21,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate-0.24.0: fmt, ess validate, aep validate, docs check, clippy --all-features -D warnings, cargo test --all-features over every crate, EXIT=0 at 61c8e30 (3611 passed, 0 failed); after the ess 0.89.0 pin, testkit conform, testkit --all-features tests and clippy green"
+  }
+}

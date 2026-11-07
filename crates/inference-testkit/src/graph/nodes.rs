@@ -1,6 +1,5 @@
-//! The mock source and sink nodes of a text-only pipeline, and what they share with the mock
-//! model node of [`crate::llm`]: the payload the pipeline's edges carry, the run's event log, and
-//! an exchange task per node. The source and the sink are generic over the payload, with the text
+//! The mock source and sink nodes of a text-only pipeline: the payload the pipeline's edges
+//! carry, the run's event log, `inference-pipeline`'s [`RunLog`], and an exchange task per node. The source and the sink are generic over the payload, with the text
 //! pipeline's [`PipelinePayload`] as the default, so that a pipeline of other payloads, such as
 //! the Structured tool calls of `inference-pipeline`'s tool nodes, is driven by the same mocks.
 //!
@@ -13,7 +12,7 @@
 //! the log took it; a control event is told from user content by its envelope's `kind` alone and
 //! is not recorded, as the log records `inference.stream` events only.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::{self, Future};
 use std::pin::pin;
@@ -26,10 +25,11 @@ use inference_core::endpoint::{InputEndpoint, OutputEndpoint, SendError};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::usage::UsageRecorded;
+pub use inference_pipeline::nodes::RunLog;
 use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
-use inference_text::{SegmentId, SpanId, TranscriptCommitted};
+use inference_text::{SpanId, TranscriptCommitted};
 
-use crate::stream::{EnvelopeRefusal, EventLog, StreamEvent};
+use crate::stream::StreamEvent;
 
 /// What the edges of the text pipeline carry: an `inference.stream` event, the usage record of a
 /// model call, or a control event, which carries no payload of its own and whose envelope's
@@ -48,39 +48,6 @@ pub enum PipelinePayload {
 impl From<ControlKind> for PipelinePayload {
     fn from(kind: ControlKind) -> Self {
         Self::Control(kind)
-    }
-}
-
-/// The event log of one run, shared by its nodes and the test: every `inference.stream` event a
-/// node emits, in its envelope, in the order the nodes recorded them. A clone reads and records
-/// into the same log.
-#[derive(Debug, Clone, Default)]
-pub struct RunLog(Arc<Mutex<EventLog>>);
-
-impl RunLog {
-    /// An empty log.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn log(&self) -> MutexGuard<'_, EventLog> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Records `envelope` as [`EventLog::record`] does.
-    ///
-    /// # Errors
-    ///
-    /// The [`EnvelopeRefusal`] of [`EventLog::record`]; nothing is recorded.
-    pub fn record(&self, envelope: EventEnvelope<StreamEvent>) -> Result<(), EnvelopeRefusal> {
-        self.log().record(envelope)
-    }
-
-    /// Every recorded envelope, in the order it was recorded.
-    #[must_use]
-    pub fn envelopes(&self) -> Vec<EventEnvelope<StreamEvent>> {
-        self.log().envelopes().to_vec()
     }
 }
 
@@ -181,6 +148,7 @@ pub(crate) async fn recv_unless<P, S>(
 /// Sends `envelope` along `output`, unless `stop` holds of `watched` first or while the send
 /// waits for room: the send is then abandoned, the envelope not sent, and the answer is `Ok`, as
 /// a node cancelled sends nothing more. Otherwise what the edge answered, a refusal described.
+#[cfg(feature = "stt")]
 pub(crate) async fn send_unless<P, S>(
     output: &dyn OutputEndpoint<P>,
     watched: &Watched<S>,
@@ -302,50 +270,25 @@ impl fmt::Debug for Exchange {
     }
 }
 
-/// Wraps what one node emits on one output port in envelopes: one stream of its own, numbered
-/// from 1. An envelope names the generation its event names; an event naming only its segment,
-/// such as `TextSegmentCommitted`, is enveloped under the generation of the deltas this emitter
-/// sent of that segment, and under none when it sent none.
+/// Wraps what a [`TextSource`] emits on its output port in envelopes: one stream of its own,
+/// numbered from 1.
 pub(crate) struct Emitter {
     run_id: RunId,
     producer: NodeId,
     port: String,
     stream_id: StreamId,
     sequence: i64,
-    log: RunLog,
-    /// The generation of each segment a delta this emitter sent named.
-    segments: HashMap<SegmentId, GenerationId>,
 }
 
 impl Emitter {
-    pub(crate) fn new(run_id: RunId, producer: NodeId, port: String, log: RunLog) -> Self {
+    pub(crate) fn new(run_id: RunId, producer: NodeId, port: String) -> Self {
         Self {
             run_id,
             producer,
             port,
             stream_id: StreamId::generate(),
             sequence: 0,
-            log,
-            segments: HashMap::new(),
         }
-    }
-
-    /// The generation the envelope of `event` names: the one the event names, or the one of the
-    /// deltas sent of the segment the event names.
-    fn generation(&mut self, event: &StreamEvent) -> Option<GenerationId> {
-        let segment_id = match event {
-            StreamEvent::TextDelta(delta) => {
-                self.segments.insert(delta.segment_id, delta.generation_id);
-                return Some(delta.generation_id);
-            }
-            StreamEvent::TextSegmentCommitted(event) => event.segment_id,
-            StreamEvent::SegmentQueued(event) => event.segment_id,
-            StreamEvent::SynthesisCompleted(event) => event.segment_id,
-            StreamEvent::AudioPlayed(event) => event.segment_id,
-            StreamEvent::SegmentDiscarded(event) => event.segment_id,
-            event => return event.generation_id(),
-        };
-        self.segments.get(&segment_id).copied()
     }
 
     fn envelope<Q>(&mut self, kind: String, payload: Q) -> EventEnvelope<Q> {
@@ -373,53 +316,6 @@ impl Emitter {
         }
     }
 
-    /// The envelope of `event`, recorded in the run's log.
-    ///
-    /// # Errors
-    ///
-    /// The log's [`EnvelopeRefusal`]; the event is then neither recorded nor to be sent.
-    pub(crate) fn stream(
-        &mut self,
-        event: StreamEvent,
-    ) -> Result<EventEnvelope<PipelinePayload>, EnvelopeRefusal> {
-        let generation_id = self.generation(&event);
-        let mut envelope = self.envelope(event.name().to_owned(), event);
-        envelope.generation_id = generation_id;
-        self.log.record(envelope.clone())?;
-        let EventEnvelope {
-            schema_version,
-            event_id,
-            run_id,
-            session_id,
-            stream_id,
-            sequence,
-            producer,
-            port,
-            kind,
-            generation_id,
-            timestamp,
-            timebase,
-            causation_id,
-            payload,
-        } = envelope;
-        Ok(EventEnvelope {
-            schema_version,
-            event_id,
-            run_id,
-            session_id,
-            stream_id,
-            sequence,
-            producer,
-            port,
-            kind,
-            generation_id,
-            timestamp,
-            timebase,
-            causation_id,
-            payload: PipelinePayload::Stream(payload),
-        })
-    }
-
     /// The envelope of `held`, naming its generation, on the same stream.
     fn held<P>(&mut self, held: Held<P>) -> EventEnvelope<P> {
         let mut envelope = self.envelope(held.kind, held.payload);
@@ -431,25 +327,6 @@ impl Emitter {
     pub(crate) fn control<P: From<ControlKind>>(&mut self, kind: ControlKind) -> EventEnvelope<P> {
         self.envelope(kind.as_str().to_owned(), P::from(kind))
     }
-}
-
-/// Sends `event` along `output` in its envelope, once the run's log recorded it.
-///
-/// # Errors
-///
-/// The log's refusal or the edge's, described.
-pub(crate) async fn emit(
-    output: &dyn OutputEndpoint<PipelinePayload>,
-    emitter: &mut Emitter,
-    event: StreamEvent,
-) -> Result<(), String> {
-    let envelope = emitter
-        .stream(event)
-        .map_err(|refusal| refusal.to_string())?;
-    output
-        .send(envelope)
-        .await
-        .map_err(|refused| refused.to_string())
 }
 
 /// Nothing, when `endpoints` holds `inputs` input edges and `outputs` output edges; otherwise
@@ -817,12 +694,7 @@ impl<P: From<ControlKind> + Send + 'static> NodeImplementation<P> for TextSource
     fn start(&mut self, mut endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
         let started = started(self.node_id, &endpoints, 0, 1).map(|node_id| {
             let output = endpoints.outputs.remove(0);
-            let emitter = Emitter::new(
-                self.run_id,
-                node_id,
-                output.port_id.to_string(),
-                self.log.clone(),
-            );
+            let emitter = Emitter::new(self.run_id, node_id, output.port_id.to_string());
             let state = Arc::clone(&self.state);
             let (log, record) = (self.log.clone(), self.record);
             self.exchange.spawn(move || {

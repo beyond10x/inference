@@ -1,0 +1,19 @@
+[package]
+name = "inference-macros"
+description = "The attribute macros of the inference SDK: #[inference::tool] turns an async function into a tool and its executor, #[inference::main] turns an async main into the program."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[lints]
+workspace = true

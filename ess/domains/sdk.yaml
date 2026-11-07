@@ -2,12 +2,11 @@
 # deployment profile, and a recipe is a named topology that, instantiated over a stack, declares and
 # plans one pipeline. Everything else the SDK offers (agents, chats, events, tools) is a view over
 # the session, graph, stream and tools domains and declares nothing here.
-# UNMAPPED: the commands that resolve a stack and instantiate a recipe, with their refusals
-# (a role the recipe needs that the stack does not bind; an adapter whose feature is not
-# compiled in), are the stories' to declare: story:sdk-stack and story:sdk-recipes.
-# InstantiateRecipe's outcomes are instantiated, role-unbound and profile-denies, the last a
-# bound adapter whose locality the stack's profile does not admit (inference.graph.PlanPipeline
-# locality-denied, carried as the SDK's ProfileDenies). RegisterRecipe, also story:sdk-recipes',
+# UNMAPPED: the command that instantiates a recipe, with its refusals (a role the recipe needs
+# that the stack does not bind), is story:sdk-recipes' to declare. InstantiateRecipe's outcomes
+# are instantiated, role-unbound and profile-denies, the last a bound adapter whose locality the
+# stack's profile does not admit (inference.graph.PlanPipeline locality-denied, carried as the
+# SDK's ProfileDenies). RegisterRecipe, also story:sdk-recipes',
 # has the outcomes registered and name-taken (a name a built-in or an earlier registration holds).
 # read from: docs/design/sdk.md §3.3, §4
 domain: inference.sdk
@@ -52,6 +51,19 @@ types:
     kind: enum
     variants: [builder, environment, stack_file, working_directory_file, user_config_file]
 
+  # One role named to one adapter by the name it is registered under, and the source that named
+  # it: what a stack reads before it resolves.
+  # read from: docs/design/sdk.md §4.1-4.2
+  - name: inference.sdk.RoleBinding
+    kind: struct
+    fields:
+      - name: role
+        type: inference.sdk.Role
+      - name: adapter
+        type: String
+      - name: source
+        type: inference.sdk.BindingSource
+
 entities:
   # read from: docs/design/sdk.md §4.1
   # read from: docs/design/sdk.md §4.3
@@ -80,8 +92,8 @@ entities:
       states: [Resolved]
       terminal: [Resolved]
 
-  # At most one binding per role and stack: the constraint is the resolve command's, not yet
-  # declared (UNMAPPED above).
+  # At most one binding per role and stack: inference.sdk.ResolveStack refuses a role the builder
+  # binds twice; a builder binding replaces one another source gave.
   # read from: docs/design/sdk.md §4.1-4.2
   - name: inference.sdk.StackBinding
     naming:
@@ -162,3 +174,108 @@ entities:
       initial: Planned
       states: [Planned]
       terminal: [Planned]
+
+errors:
+  # read from: docs/design/sdk.md §4.1
+  - name: inference.sdk.RoleBoundTwice
+    summary: The builder binds a role twice; nothing was resolved. A builder binding replaces one another source gave.
+    fields:
+      - name: role
+        type: inference.sdk.Role
+
+  # read from: docs/design/sdk.md §4.4
+  - name: inference.sdk.AdapterNotRegistered
+    summary: A binding names an adapter no registration of this build holds; nothing was resolved.
+    fields:
+      - name: adapter
+        type: String
+
+  # read from: docs/design/sdk.md §4.3
+  - name: inference.sdk.LocalityDenied
+    summary: A bound adapter runs at a locality the stack's deployment profile does not admit.
+    fields:
+      - name: role
+        type: inference.sdk.Role
+      - name: adapter_id
+        type: inference.model.AdapterId
+      - name: locality
+        type: inference.model.Locality
+      - name: profile_id
+        type: inference.policy.ProfileId
+
+commands:
+  # The bindings are the first found per role across the sources, in the order of
+  # inference.sdk.BindingSource; a role no source names stays unbound. The stack declares its
+  # profile through inference.policy.DeclareProfile with the egress and the localities the
+  # profile table gives the kind, and each bound adapter through inference.model.DeclareAdapter.
+  # Resolving reads no credential and opens no connection.
+  # read from: docs/design/sdk.md §4.1-4.4
+  - name: inference.sdk.ResolveStack
+    input:
+      - name: profile
+        type: inference.policy.ProfileKind
+      - name: bindings
+        type: List<inference.sdk.RoleBinding>
+    outcomes:
+      # A role two bindings of one source name; the comparison of list members with each other is
+      # the resolver's, as no guard compares them.
+      # read from: docs/design/sdk.md §4.1
+      - name: role-bound-twice
+        external: two builder bindings name the same role
+        error: inference.sdk.RoleBoundTwice
+        payload:
+          inference.sdk.RoleBoundTwice:
+            role: {generated: true}
+        summary: Resolving fails naming the role, and no stack exists.
+
+      # A name is a built-in whose feature is off (the SDK's AdapterNotCompiled, naming the
+      # feature) or no registration's at all; the registry is the process's, not a row.
+      # read from: docs/design/sdk.md §4.4
+      - name: unknown-adapter
+        external: a binding names an adapter no registration of this build holds
+        error: inference.sdk.AdapterNotRegistered
+        payload:
+          inference.sdk.AdapterNotRegistered:
+            adapter: {generated: true}
+        summary: Resolving fails naming the adapter, and no stack exists.
+
+      # The stack's profile does not admit a bound adapter's locality. The SDK resolves such a
+      # stack and refuses it when a recipe plans over it (inference.graph.PlanPipeline
+      # locality-denied, carried as the SDK's ProfileDenies); a stack binding a hosted adapter
+      # names hybrid_opt_in.
+      # read from: docs/design/sdk.md §4.3
+      - name: locality-denied
+        external: a bound adapter runs at a locality the profile the stack declares through inference.policy does not admit
+        error: inference.sdk.LocalityDenied
+        payload:
+          inference.sdk.LocalityDenied:
+            role: {generated: true}
+            adapter_id: {generated: true}
+            locality: {generated: true}
+            profile_id: {generated: true}
+        summary: Using the stack fails naming the role, its adapter, the locality and the profile.
+
+      - name: resolved
+        creates: inference.sdk.Stack
+        instance: stack_id
+        sets:
+          profile_id: {generated: true}
+        emits:
+          - inference.sdk.StackResolved
+        payload:
+          inference.sdk.StackResolved:
+            stack_id: {generated: true}
+            profile_id: {generated: true}
+            bindings: input.bindings
+        summary: The stack binds each named role to its first-found adapter under its profile.
+
+events:
+  # read from: docs/design/sdk.md §4.2
+  - name: inference.sdk.StackResolved
+    fields:
+      - name: stack_id
+        type: inference.sdk.StackId
+      - name: profile_id
+        type: inference.policy.ProfileId
+      - name: bindings
+        type: List<inference.sdk.RoleBinding>

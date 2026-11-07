@@ -10,10 +10,10 @@ publish = false
 
 [features]
 run = ["dep:inference-runtime", "dep:inference-facade"]
-stt = ["dep:inference-stt"]
-llm = ["dep:inference-llm", "inference-llm/tools"]
-tts = ["dep:inference-tts"]
-duplex = []
+stt = ["dep:inference-stt", "inference-pipeline/stt"]
+llm = ["dep:inference-llm", "inference-llm/tools", "inference-pipeline/llm"]
+tts = ["dep:inference-tts", "inference-pipeline/tts"]
+duplex = ["inference-pipeline/duplex"]
 
 [dependencies]
 inference-core = { path = "../inference-core" }
@@ -30,9 +30,11 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-ess-conformance = { git = "https://github.com/beyond10x/ess", tag = "0.88.0" }
-ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.88.0" }
+ess-conformance = { git = "https://github.com/beyond10x/ess", tag = "0.89.0" }
+ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.89.0" }
+inference = { path = "../inference", features = ["testing"] }
 serde.workspace = true
+tempfile = "3"
 
 [[test]]
 name = "conform"

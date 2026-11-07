@@ -76,14 +76,15 @@ use inference_stt::inference_core::envelope::EventEnvelope;
 use inference_stt::inference_core::model::{
     Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
-use inference_stt::inference_core::usage::UsageRecorded;
 use inference_stt::inference_text::{ReviseSpan, SpanId};
 use inference_stt::{
     CONTRACT_REVISION, CommitRefused, ConcurrencyLimitReached, InputEnded, Recogniser,
     RecognitionHandle, RecognitionRequest, RevisionRefused, TranscriptEvent, TranscriptOutput,
 };
 
-use crate::stream::StreamEvent;
+/// Carries an event of a recogniser into the stream domain's log; see
+/// [`inference_pipeline::nodes::stt::stream_envelope`].
+pub use inference_pipeline::nodes::stt::stream_envelope;
 
 /// The STT contract the mock implements, re-exported with the vocabulary crates it re-exports, so
 /// that a test reaches `inference-audio`'s frames through the testkit alone.
@@ -205,62 +206,6 @@ pub fn frames(count: usize) -> Vec<AudioFrame> {
             data: vec![0; FRAME_SAMPLES as usize * 2],
         })
         .collect()
-}
-
-/// The envelope of an event of the mock with its payload as a [`StreamEvent`], for the
-/// [`EventLog`](crate::stream::EventLog); none for the usage record of a recognition, which is
-/// an `inference.usage` event, not an `inference.stream` one.
-#[must_use]
-pub fn stream_envelope(
-    envelope: EventEnvelope<TranscriptEvent>,
-) -> Option<EventEnvelope<StreamEvent>> {
-    let EventEnvelope {
-        schema_version,
-        event_id,
-        run_id,
-        session_id,
-        stream_id,
-        sequence,
-        producer,
-        port,
-        kind,
-        generation_id,
-        timestamp,
-        timebase,
-        causation_id,
-        payload,
-    } = envelope;
-    Some(EventEnvelope {
-        schema_version,
-        event_id,
-        run_id,
-        session_id,
-        stream_id,
-        sequence,
-        producer,
-        port,
-        kind,
-        generation_id,
-        timestamp,
-        timebase,
-        causation_id,
-        payload: payload.try_into().ok()?,
-    })
-}
-
-/// A transcript event as an `inference.stream` event; the usage record of a recognition is
-/// none, and is handed back.
-impl TryFrom<TranscriptEvent> for StreamEvent {
-    type Error = UsageRecorded;
-
-    fn try_from(event: TranscriptEvent) -> Result<Self, UsageRecorded> {
-        match event {
-            TranscriptEvent::Hypothesis(event) => Ok(Self::TranscriptHypothesis(event)),
-            TranscriptEvent::Revision(event) => Ok(Self::TranscriptRevision(event)),
-            TranscriptEvent::Committed(event) => Ok(Self::TranscriptCommitted(event)),
-            TranscriptEvent::Usage(recorded) => Err(recorded),
-        }
-    }
 }
 
 /// The recognitions of one recogniser that run, shared by its clones, which are the same adapter.
