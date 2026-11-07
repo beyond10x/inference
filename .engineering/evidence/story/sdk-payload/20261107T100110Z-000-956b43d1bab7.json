@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-07T10:01:10Z",
+  "actor": "human:operator",
+  "artifact": "story:sdk-payload",
+  "kind": "story",
+  "revision": 17,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-w25-sdk-payload-pass-1",
+    "reference": "cedf7b1",
+    "review": "review-result:adversary-w25-sdk-payload-pass-1",
+    "outcome": "fixed"
+  }
+}
