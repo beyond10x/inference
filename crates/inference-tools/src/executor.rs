@@ -44,6 +44,26 @@ pub trait ToolExecutor: Send + Sync {
     ) -> ExecutionFuture<'a>;
 }
 
+/// What converts into a [`Tool`](crate::Tool) and its executor: the pair itself, and a function
+/// returning it, which is what `#[inference::tool]` emits, so a caller taking `impl IntoTool`
+/// accepts both `weather` and `weather()`.
+pub trait IntoTool {
+    /// The tool and its executor.
+    fn into_tool(self) -> (crate::Tool, Box<dyn ToolExecutor>);
+}
+
+impl IntoTool for (crate::Tool, Box<dyn ToolExecutor>) {
+    fn into_tool(self) -> (crate::Tool, Box<dyn ToolExecutor>) {
+        self
+    }
+}
+
+impl<F: FnOnce() -> (crate::Tool, Box<dyn ToolExecutor>)> IntoTool for F {
+    fn into_tool(self) -> (crate::Tool, Box<dyn ToolExecutor>) {
+        self()
+    }
+}
+
 /// How often the caller of a [`ToolExecutor`] attempts one started call, by the side-effect class
 /// the call carries (`docs/design/inference.md` 851, 1007).
 ///

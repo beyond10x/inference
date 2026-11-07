@@ -38,7 +38,7 @@ scope:
   path: crates/inference/tests/agent.rs
 - confidence: cited
   path: crates/inference/tests/compile_fail
-revision: 33
+revision: 34
 ---
 ## Context
 
@@ -138,8 +138,10 @@ events.
       `Agent::llm(Binding::tts(..))` and `Agent::llm(Binding::named(Role::Llm, ..))` do not
       compile.
     - Each method binds through `Stack::bind`.
-    - `tool` takes `impl Into<(inference_tools::Tool, Box<dyn ToolExecutor>)>`, the pair
-      story:sdk-tool-macro's struct converts into, so no edge to that story is needed. The pairs
+    - `tool` takes `impl inference_tools::IntoTool`, implemented for the
+      `(inference_tools::Tool, Box<dyn ToolExecutor>)` pair and for any `FnOnce()` returning it,
+      so `.tool(local_time)` takes the function story:sdk-tool-macro's attribute emits and
+      `.tool(pair)` a hand-built pair; no edge to that story is needed. The pairs
       reach the recipe through story:sdk-recipes' `Recipe::tools`, and the speech
       `SessionConfig`'s `tools` through the merge below.
   - The shared state (R125). `pub struct Agent { inner: Arc<Inner>, pump: Option<JoinHandle<()>> }`,

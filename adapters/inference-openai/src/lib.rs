@@ -36,6 +36,27 @@
 //! trace, for example with the filter `tungstenite=debug` (`RUST_LOG` for `env_logger`, or an
 //! `EnvFilter` directive for `tracing-subscriber` with its `log` bridge).
 //!
+//! The key is copied only where the handshake needs it, and no field of the client holds it past
+//! the handshake. Every copy:
+//!
+//! - the [`Credential`] the source returns, zeroized on drop;
+//! - for each handshake, one zeroizing buffer holding `Bearer <key>`, built from the credential,
+//!   which is dropped at once. The `Authorization` header value is that buffer itself, not a copy
+//!   of it, and the buffer is zeroized when tungstenite has turned the request into bytes, or
+//!   when the handshake fails or times out first;
+//! - those bytes: tungstenite writes the request, header included, into a buffer of its own that
+//!   it frees without zeroizing once the request is sent, and the smaller buffers that one
+//!   outgrew while being written may hold part of it too. The client cannot reach them short of a
+//!   WebSocket client of its own. They are freed memory of this process until the allocator
+//!   reuses it, which matters only to someone who can already read this process's memory or a
+//!   core dump of it, and the client accepts that;
+//! - for `wss://`, the TLS record rustls copies the request into and encrypts in place, so what it
+//!   keeps is ciphertext;
+//! - the trace-level log record named above, when a logger lets it through.
+//!
+//! The speech module, behind feature `speech`, sends the key over HTTP, not a WebSocket, and names
+//! its own copies.
+//!
 //! Audio goes in either as PCM16 at 24 kHz, resampled from `inference-audio` frames where needed
 //! ([`encode_pcm16_24k`]), or as G.711 mu-law or A-law at 8 kHz, passed through
 //! ([`RealtimeClient::append_encoded`]).

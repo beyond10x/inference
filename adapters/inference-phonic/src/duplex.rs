@@ -97,11 +97,9 @@ use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Bytes, Message};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
-use zeroize::Zeroizing;
 
 use crate::credential::{CredentialError, CredentialSource};
 use crate::protocol::{
@@ -430,12 +428,9 @@ async fn handshake(
     if resolved.expose().iter().all(u8::is_ascii_whitespace) {
         return Err(PhonicError::Credential(CredentialError::Invalid));
     }
-    let mut value = Zeroizing::new(b"Bearer ".to_vec());
-    value.extend_from_slice(resolved.expose());
-    drop(resolved);
-    let mut header = HeaderValue::from_bytes(&value)
-        .map_err(|_| PhonicError::Credential(CredentialError::Invalid))?;
-    header.set_sensitive(true);
+    let header = resolved
+        .into_header(b"Bearer ")
+        .map_err(PhonicError::Credential)?;
     let mut request = url
         .into_client_request()
         .map_err(|error| PhonicError::Connect {

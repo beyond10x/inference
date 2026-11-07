@@ -17,6 +17,7 @@ speech = ["dep:inference-tts", "dep:reqwest", "tokio/rt"]
 
 [dependencies]
 base64.workspace = true
+bytes = "1.9"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 inference-audio = { path = "../../crates/inference-audio" }
 inference-core = { path = "../../crates/inference-core", optional = true }

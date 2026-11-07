@@ -9,10 +9,9 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
-use crate::credential::{CredentialError, CredentialSource};
+use crate::credential::CredentialSource;
 use crate::error::{ConnectError, ElevenLabsError};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -41,10 +40,9 @@ impl Connection {
             .resolve(credential)
             .await
             .map_err(ElevenLabsError::Credential)?;
-        let mut header = HeaderValue::from_bytes(resolved.expose())
-            .map_err(|_| ElevenLabsError::Credential(CredentialError::Invalid))?;
-        drop(resolved);
-        header.set_sensitive(true);
+        let header = resolved
+            .into_header(b"")
+            .map_err(ElevenLabsError::Credential)?;
 
         let mut request = url.into_client_request().map_err(|error| {
             ElevenLabsError::Connect(ConnectError {

@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
@@ -40,13 +39,9 @@ pub(crate) async fn open(
     if resolved.expose().iter().all(u8::is_ascii_whitespace) {
         return Err(DeepslateError::Credential(CredentialError::Invalid));
     }
-    let mut value = b"Bearer ".to_vec();
-    value.extend_from_slice(resolved.expose());
-    drop(resolved);
-    let value = zeroize::Zeroizing::new(value);
-    let mut header = HeaderValue::from_bytes(&value)
-        .map_err(|_| DeepslateError::Credential(CredentialError::Invalid))?;
-    header.set_sensitive(true);
+    let header = resolved
+        .into_header(b"Bearer ")
+        .map_err(DeepslateError::Credential)?;
 
     let mut request = url.into_client_request().map_err(|error| {
         DeepslateError::Connect(ConnectError {

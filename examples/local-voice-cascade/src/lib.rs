@@ -57,10 +57,11 @@
 //! node, and [`TEXT_EGRESS`], the LLM's output, its committed assistant text among it. Every edge
 //! and exposure is bounded and pauses on overload.
 //!
-//! The run's payload is [`VoicePayload`]. A frame of a segment and the receipt of its playback
-//! are not `Clone`, and the payload is, since a fan-out copies what it hands on: each travels in a
-//! [`Handoff`], which its first reader takes and every copy then holds empty, so the frames a
-//! receipt is made of exist once. The speech edge and the receipt edge carry no fan-out.
+//! The run's payload is [`VoicePayload`], the SDK's `inference::Payload`. A frame of a segment
+//! and the receipt of its playback are not `Clone`, and the payload is, since a fan-out copies
+//! what it hands on: each travels in an `inference::Handoff`, which its first reader takes and
+//! every copy then holds empty, so the frames a receipt is made of exist once. The speech edge
+//! and the receipt edge carry no fan-out.
 //!
 //! [`LocalCascade::nodes`] makes the implementations of one run's nodes, generic over the audio
 //! host the speaker is opened on, and the handles a caller reads them through. Through them the
@@ -79,35 +80,21 @@ pub mod local;
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use inference_audio::AudioFrame;
-use inference_audio_device::acknowledging::{
-    AcknowledgingHandle, AcknowledgingSink, FirstFrame, Playable, PlaybackPayload,
-};
+use inference_audio_device::acknowledging::{AcknowledgingHandle, AcknowledgingSink, FirstFrame};
 use inference_audio_device::{AudioHost, DeviceError, DeviceSelector, PlayoutConfig, Speaker};
-use inference_core::envelope::ControlKind;
 use inference_core::id::{NodeId, RunId};
 use inference_core::model::{Adapter, AdapterId, Capability, Locality};
 use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_llm::Generator;
 use inference_pipeline::nodes::agent::{AgentHandle, AgentNode};
-use inference_pipeline::nodes::commit_gate::{
-    CommitGate, CommitGateHandle, GateLane, GatePayload, Gated, PassedTurn,
-};
-use inference_pipeline::nodes::llm::{Carried, ModelPayload};
-use inference_pipeline::nodes::log::{RunLog, StreamEvent};
-use inference_pipeline::nodes::speech::{
-    Said, SpeechHandle, SpeechNode, SpeechPayload, SpeechPorts,
-};
-use inference_pipeline::nodes::stt::{Heard, SttHandle, SttNode, SttPayload, SttPorts};
-use inference_pipeline::nodes::turn_policy::{
-    TurnEvent, TurnPayload, TurnPolicy, TurnPolicyHandle,
-};
-use inference_pipeline::nodes::vad::{
-    AudioPayload, SpeechActivity, VadConfig, VoiceActivityDetector,
-};
+use inference_pipeline::nodes::commit_gate::{CommitGate, CommitGateHandle, GateLane, PassedTurn};
+use inference_pipeline::nodes::log::RunLog;
+use inference_pipeline::nodes::speech::{SpeechHandle, SpeechNode, SpeechPorts};
+use inference_pipeline::nodes::stt::{SttHandle, SttNode, SttPorts};
+use inference_pipeline::nodes::turn_policy::{TurnPolicy, TurnPolicyHandle};
+use inference_pipeline::nodes::vad::{VadConfig, VoiceActivityDetector};
 use inference_pipeline::{
     Catalog, Declaration, Delivery, Essentiality, InteractionMode, NodeImplementation, NodeRole,
     OverloadPolicy, PipelineId, PipelineSpec, PlannedPipeline, PortId, PortTraits, modality,
@@ -117,7 +104,7 @@ use inference_testkit::stt::FanOut;
 use inference_testkit::stt::inference_stt::Recogniser;
 use inference_testkit::tts::MockSynthesiser;
 use inference_text::{SegmentId, TurnId};
-use inference_tts::{PlaybackReceipt, SegmentAudio, Synthesiser};
+use inference_tts::Synthesiser;
 
 /// The name of the ingress the utterance's frames enter by.
 pub const AUDIO_INGRESS: &str = "audio";
@@ -136,237 +123,9 @@ pub const VAD: VadConfig = VadConfig {
     hold: Duration::from_millis(200),
 };
 
-/// A value handed along one edge and taken once: the first reader takes it, and every copy of
-/// the handoff, a fan-out's among them, then holds nothing.
-pub struct Handoff<T>(Arc<Mutex<Option<T>>>);
-
-impl<T> Handoff<T> {
-    /// A handoff holding `value`.
-    #[must_use]
-    pub fn new(value: T) -> Self {
-        Self(Arc::new(Mutex::new(Some(value))))
-    }
-
-    /// The value, if no reader took it before.
-    #[must_use]
-    pub fn take(&self) -> Option<T> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
-    }
-
-    /// Whether a reader took the value.
-    #[must_use]
-    pub fn taken(&self) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_none()
-    }
-}
-
-impl<T> Clone for Handoff<T> {
-    fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
-    }
-}
-
-impl<T> fmt::Debug for Handoff<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Handoff")
-            .field("taken", &self.taken())
-            .finish()
-    }
-}
-
-/// What the edges and exposures of the cascade carry.
-#[derive(Debug, Clone)]
-pub enum VoicePayload {
-    /// A frame of audio; its envelope's `kind` is `inference.audio.AudioChunk`.
-    Audio(AudioFrame),
-    /// An `inference.stream` event; its envelope's `kind` is the event's declared name.
-    Stream(StreamEvent),
-    /// A frame of a segment as the synthesis emitted it, taken once by the sink.
-    Speech(Handoff<SegmentAudio>),
-    /// The sink's receipt of the playback of a segment, taken once by the TTS node.
-    Receipt(Handoff<(SegmentId, PlaybackReceipt)>),
-    /// A control event; its envelope's `kind` is [`ControlKind::as_str`].
-    Control(ControlKind),
-}
-
-impl From<ControlKind> for VoicePayload {
-    fn from(kind: ControlKind) -> Self {
-        Self::Control(kind)
-    }
-}
-
-impl AudioPayload for VoicePayload {
-    fn into_audio(self) -> Result<AudioFrame, Self> {
-        match self {
-            Self::Audio(frame) => Ok(frame),
-            other => Err(other),
-        }
-    }
-
-    fn from_activity(activity: SpeechActivity) -> Self {
-        Self::Stream(match activity {
-            SpeechActivity::Started(started) => StreamEvent::SpeechStarted(started),
-            SpeechActivity::Ended(ended) => StreamEvent::SpeechEnded(ended),
-        })
-    }
-
-    fn control(kind: ControlKind) -> Self {
-        Self::Control(kind)
-    }
-}
-
-impl TurnPayload for VoicePayload {
-    fn into_activity(self) -> Result<SpeechActivity, Self> {
-        match self {
-            Self::Stream(StreamEvent::SpeechStarted(started)) => {
-                Ok(SpeechActivity::Started(started))
-            }
-            Self::Stream(StreamEvent::SpeechEnded(ended)) => Ok(SpeechActivity::Ended(ended)),
-            other => Err(other),
-        }
-    }
-
-    fn from_turn(event: TurnEvent) -> Self {
-        Self::Stream(match event {
-            TurnEvent::Opened(opened) => StreamEvent::TurnOpened(opened),
-            TurnEvent::Completed(completed) => StreamEvent::TurnCompleted(completed),
-        })
-    }
-
-    fn control(kind: ControlKind) -> Self {
-        Self::Control(kind)
-    }
-}
-
-impl SttPayload for VoicePayload {
-    fn stream(event: StreamEvent) -> Self {
-        Self::Stream(event)
-    }
-
-    fn heard(self) -> Heard {
-        match self {
-            Self::Audio(frame) => Heard::Audio(frame),
-            Self::Stream(event) => Heard::Stream(event),
-            Self::Control(kind) => Heard::Control(kind),
-            Self::Speech(_) | Self::Receipt(_) => Heard::Other,
-        }
-    }
-}
-
-impl ModelPayload for VoicePayload {
-    fn stream(event: StreamEvent) -> Self {
-        Self::Stream(event)
-    }
-
-    fn carried(self) -> Carried {
-        match self {
-            Self::Stream(event) => Carried::Stream(event),
-            Self::Control(kind) => Carried::Control(kind),
-            Self::Audio(_) | Self::Speech(_) | Self::Receipt(_) => {
-                Carried::Control(ControlKind::Error)
-            }
-        }
-    }
-}
-
-impl GatePayload for VoicePayload {
-    fn gated(&self) -> Gated {
-        let Self::Stream(event) = self else {
-            return Gated::Other;
-        };
-        match event {
-            StreamEvent::TranscriptHypothesis(event) => Gated::Hypothesis {
-                span_id: event.span_id,
-            },
-            StreamEvent::TranscriptRevision(event) => Gated::Revision {
-                span_id: event.span_id,
-            },
-            StreamEvent::TranscriptCommitted(event) => Gated::SpanCommitted {
-                span_id: event.span_id,
-            },
-            StreamEvent::TurnOpened(opened) => Gated::Turn(TurnEvent::Opened(*opened)),
-            StreamEvent::TurnCompleted(completed) => Gated::Turn(TurnEvent::Completed(*completed)),
-            StreamEvent::TextDelta(delta) => Gated::Delta {
-                segment_id: delta.segment_id,
-                generation_id: delta.generation_id,
-            },
-            StreamEvent::TextSegmentCommitted(committed) => Gated::SegmentCommitted {
-                segment_id: committed.segment_id,
-            },
-            StreamEvent::SegmentDiscarded(discarded) => Gated::SegmentDiscarded {
-                segment_id: discarded.segment_id,
-            },
-            StreamEvent::GenerationCompleted(ended) => Gated::GenerationEnded {
-                generation_id: ended.generation_id,
-            },
-            StreamEvent::GenerationCancelled(ended) => Gated::GenerationEnded {
-                generation_id: ended.generation_id,
-            },
-            StreamEvent::GenerationSuperseded(ended) => Gated::GenerationEnded {
-                generation_id: ended.generation_id,
-            },
-            _ => Gated::Other,
-        }
-    }
-}
-
-impl SpeechPayload for VoicePayload {
-    fn stream(event: StreamEvent) -> Self {
-        Self::Stream(event)
-    }
-
-    fn speech(audio: SegmentAudio) -> Self {
-        Self::Speech(Handoff::new(audio))
-    }
-
-    fn said(self) -> Said {
-        match self {
-            Self::Stream(event) => Said::Stream(event),
-            Self::Receipt(receipt) => match receipt.take() {
-                Some((segment_id, receipt)) => Said::Receipt {
-                    segment_id,
-                    receipt,
-                },
-                None => Said::Other,
-            },
-            Self::Control(kind) => Said::Control(kind),
-            Self::Audio(_) | Self::Speech(_) => Said::Other,
-        }
-    }
-}
-
-impl PlaybackPayload for VoicePayload {
-    fn playable(self) -> Playable {
-        match self {
-            Self::Speech(audio) => audio.take().map_or(Playable::Other, Playable::Audio),
-            Self::Stream(StreamEvent::SynthesisCompleted(completed)) => {
-                Playable::Completed(completed.segment_id)
-            }
-            Self::Stream(StreamEvent::TurnOpened(opened)) => Playable::TurnOpened(opened.turn_id),
-            Self::Stream(StreamEvent::GenerationSuperseded(superseded)) => {
-                Playable::Superseded(superseded.generation_id)
-            }
-            Self::Stream(StreamEvent::GenerationStarted(started)) => Playable::Started {
-                generation_id: started.generation_id,
-                epoch: started.epoch,
-            },
-            Self::Audio(_) | Self::Stream(_) | Self::Receipt(_) | Self::Control(_) => {
-                Playable::Other
-            }
-        }
-    }
-
-    fn receipt(segment_id: SegmentId, receipt: PlaybackReceipt) -> Self {
-        Self::Receipt(Handoff::new((segment_id, receipt)))
-    }
-
-    fn control(kind: ControlKind) -> Self {
-        Self::Control(kind)
-    }
-}
+/// What the edges and exposures of the cascade carry: the SDK's one payload, which implements
+/// every payload trait the cascade's nodes need.
+pub type VoicePayload = inference::Payload;
 
 /// The nodes of the cascade and the ports its run's implementations are given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -946,7 +705,7 @@ mod tests {
     use inference_testkit::stream::StreamEvent;
     use inference_text::{SegmentDiscarded, SegmentId, TurnId};
 
-    use super::{Handoff, TurnMeasure, VoicePayload, first_audio};
+    use super::{TurnMeasure, VoicePayload, first_audio};
 
     #[test]
     fn a_discarded_segment_reaches_the_gate_as_discarded() {
@@ -1021,16 +780,5 @@ mod tests {
             Some(Duration::from_millis(90)),
             "the earliest of the turn's frames counts, in whatever order the sink recorded them"
         );
-    }
-
-    #[test]
-    fn a_handoff_and_every_copy_of_it_give_the_value_once() {
-        let handoff = Handoff::new(String::from("frame"));
-        let copy = handoff.clone();
-        assert!(!copy.taken());
-        assert_eq!(copy.take().as_deref(), Some("frame"));
-        assert!(handoff.taken());
-        assert_eq!(handoff.take(), None, "a copy holds nothing once taken");
-        assert_eq!(copy.take(), None);
     }
 }
