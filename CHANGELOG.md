@@ -10,6 +10,11 @@
 - `inference`: `StackBinding::generator()` answers `None` when the stack's profile does not admit
   the adapter's locality, such as a hosted generator under `offline_strict`, as planning refuses
   it; it handed the generator out. A run's role nodes are built from no such binding either.
+- `inference-facade`: `LiveSession::interrupt` records `SessionInterrupted` once the `cancel` is
+  in every ingress, not before it sends, and also when an ingress refused the `cancel`; a reader
+  that received it knows the `cancel` precedes any input sent after it. `LiveSession::receive`
+  and `LiveSession::close` take `&self`, so one task receives while another sends or closes
+  through a shared session; `LiveSession` is `Sync`.
 
 ### Added
 
