@@ -2,19 +2,24 @@
 //! role (feature `whispercpp`).
 //!
 //! The key `path` names the pinned checkpoint file. Resolving declares the model and the adapter
-//! and reads nothing; the checkpoint is checked and opened when a session starts the recogniser
-//! ([`BoundRecogniser::open`]), under the adapter resolving declared. The binding has a model
-//! name only when the key `model` gives one.
+//! and reads nothing; the checkpoint is checked and opened when the first run's STT node is built
+//! over the recogniser ([`BoundRecogniser::node`]), under the adapter resolving declared. The
+//! binding has a model name only when the key `model` gives one.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
+use inference_core::id::RunId;
 use inference_core::model::{Adapter, Locality, Model};
+use inference_pipeline::nodes::log::RunLog;
+use inference_pipeline::nodes::stt::{SttNode, SttPorts};
 use inference_whispercpp::stt::{
     DEFAULT_MAX_CONCURRENCY, WhisperCppRecogniser, declare_adapter, declare_model,
 };
 
 use super::AdapterDescriptor;
 use crate::error::Error;
+use crate::graph::Implementation;
 use crate::stack::{Binding, BoundRecogniser, Role};
 
 const NAME: &str = "whispercpp";
@@ -24,17 +29,15 @@ struct Deferred {
     path: PathBuf,
     model: Model,
     adapter: Adapter,
-    opened: Option<WhisperCppRecogniser>,
+    opened: Mutex<Option<WhisperCppRecogniser>>,
 }
 
-impl BoundRecogniser for Deferred {
-    fn adapter(&self) -> &Adapter {
-        &self.adapter
-    }
-
-    fn open(&mut self) -> Result<(), Error> {
-        if self.opened.is_some() {
-            return Ok(());
+impl Deferred {
+    /// The recogniser, opened at the first call; every call after answers a clone of it.
+    fn opened(&self) -> Result<WhisperCppRecogniser, Error> {
+        let mut opened = self.opened.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(recogniser) = opened.as_ref() {
+            return Ok(recogniser.clone());
         }
         let recogniser = WhisperCppRecogniser::open_declared(
             &self.path,
@@ -49,8 +52,22 @@ impl BoundRecogniser for Deferred {
             ),
             source: Some(Box::new(error)),
         })?;
-        self.opened = Some(recogniser);
-        Ok(())
+        *opened = Some(recogniser.clone());
+        Ok(recogniser)
+    }
+}
+
+impl BoundRecogniser for Deferred {
+    fn adapter(&self) -> &Adapter {
+        &self.adapter
+    }
+
+    fn open(&mut self) -> Result<(), Error> {
+        self.opened().map(drop)
+    }
+
+    fn node(&self, run_id: RunId, ports: SttPorts, log: RunLog) -> Result<Implementation, Error> {
+        Ok(Box::new(SttNode::new(run_id, self.opened()?, ports, log)))
     }
 }
 
@@ -77,7 +94,7 @@ pub(super) fn descriptor() -> AdapterDescriptor {
                 path: PathBuf::from(path),
                 model,
                 adapter,
-                opened: None,
+                opened: Mutex::new(None),
             })
             .into())
         })

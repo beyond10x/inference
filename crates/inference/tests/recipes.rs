@@ -761,3 +761,92 @@ fn a_custom_recipe_instantiates_over_its_one_role() {
         .expect("the custom recipe plans");
     assert_eq!(instantiation.declaration().bindings().count(), 1);
 }
+
+struct Unpark(std::thread::Thread);
+
+impl std::task::Wake for Unpark {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+/// Polls `future` on this thread until it completes: the facade commits to no executor.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(output) = future
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+        {
+            return output;
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn an_instantiated_chat_opens_a_run_that_carries_a_turn() {
+    use inference::Payload;
+    use inference::core::envelope::{EventEnvelope, EventId, Timebase};
+    use inference::core::id::{NodeId, StreamId};
+    use inference::facade::events::SessionEvent;
+    use inference::facade::live::LiveSessions;
+    use inference::pipeline::nodes::log::StreamEvent;
+    use inference::runtime::run::RunState;
+    use inference::text::{SpanId, TranscriptCommitted};
+
+    let stack = Stack::new()
+        .bind(Binding::named(Role::Llm, "mock", BTreeMap::new()))
+        .resolve_with(&Env::new())
+        .expect("resolves");
+    let mut instantiation = Recipe::chat().instantiate(&stack).expect("chat plans");
+    let sessions = LiveSessions::new();
+    let (mut session, driver) =
+        block_on(instantiation.open(&stack, &sessions)).expect("the run opens");
+    let run_id = session.run_id();
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(block_on(driver.drive()));
+    });
+    let event = StreamEvent::TranscriptCommitted(TranscriptCommitted {
+        span_id: SpanId::generate(),
+        text: "hello".to_owned(),
+    });
+    let envelope = EventEnvelope {
+        schema_version: 1,
+        event_id: EventId::generate(),
+        run_id,
+        session_id: None,
+        stream_id: StreamId::generate(),
+        sequence: 1,
+        producer: NodeId::generate(),
+        port: "user_input".to_owned(),
+        kind: event.name().to_owned(),
+        generation_id: None,
+        timestamp: 0,
+        timebase: Timebase::WallTime,
+        causation_id: None,
+        payload: Payload::Stream(event),
+    };
+    block_on(session.send(envelope)).expect("sent");
+    block_on(session.commit_input()).expect("committed");
+    block_on(session.close()).expect("a Ready session drains");
+    let mut received = Vec::new();
+    while let Some(event) = block_on(session.receive()) {
+        received.push(event);
+    }
+    let run = ended
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the run ends within 20 s")
+        .expect("the run ends");
+    assert_eq!(run.state(), RunState::Completed, "{received:#?}");
+    let reply: String = received
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::TextDelta(delta) => Some(delta.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reply, "Hello from the mock", "{received:#?}");
+}
