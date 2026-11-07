@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-recipes
 kind: story
-status: draft
+status: implemented
 title: Five named recipes declare, validate and plan a pipeline over a stack
 relations:
 - decomposes: epic:sdk
@@ -31,7 +31,11 @@ scope:
   path: crates/inference/tests/recipes.rs
 - confidence: inferred
   path: ess/domains/sdk.yaml
-revision: 23
+revision: 27
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-07T10:22:06Z", actor: "human:timo", revision: 24, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-07T10:22:06Z", actor: "human:timo", revision: 25, decided_on: {"recorded":{"approval":1}}}
+- {from: "active", to: "implemented", at: "2026-11-07T17:22:07Z", actor: "human:timo", revision: 27, decided_on: {"recorded":{"test_result":1,"approval":1,"review_outcome":1}}}
 ---
 ## Context
 
@@ -440,3 +444,13 @@ review-result:adversary-w24-sdk-stack-pass-1 found that no SDK code refuses a de
 `StackBinding::generator()` (`crates/inference/src/stack.rs`) hands out a hosted generator under the
 default `offline_strict` profile, and `AdapterDescriptor`'s locality is compared with nothing. The
 refusal this story plans (R213, `profile-denies`) covers those accessors too, not only planning.
+
+## Building nodes per run (found during implementation)
+
+The stack's bound recogniser, synthesiser and speech model (`crates/inference/src/stack.rs`) expose
+only `adapter()`, so a recipe cannot build its STT, TTS, speech or duplex node for a run from them.
+Each bound trait gains a factory that builds that role's node implementation for one run (the
+binding stays the owner of the model; the LLM binding's `Generator` is already `Clone`). The run is
+opened with `LiveSessions::open` (`crates/inference-facade/src/live.rs`). The fan-out node the
+cascade uses moves from `inference-testkit` (`stt/fan_out.rs`) into `inference-pipeline`, which the
+testkit re-exports, so a build without `testing` has it.

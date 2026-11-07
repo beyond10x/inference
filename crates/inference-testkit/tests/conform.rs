@@ -569,10 +569,17 @@ const USAGE_SCENARIOS: [&str; 5] = [
     "inference.usage.RecordUsage/outcome/unknown-model",
 ];
 
-/// The four `inference.sdk` scenarios this target answers by resolving an `inference` stack: a
-/// stack resolved, and the refusals of a role bound twice, an adapter no registration holds and a
-/// bound adapter the stack's profile does not admit.
-const SDK_SCENARIOS: [&str; 4] = [
+/// The nine `inference.sdk` scenarios this target answers through the `inference` crate: a
+/// recipe instantiated over a stack, and the refusals of a role the stack does not bind and of a
+/// bound adapter the stack's profile does not admit; an application recipe registered, and the
+/// refusal of a name already held; a stack resolved, and the refusals of a role bound twice, an
+/// adapter no registration holds and a bound adapter the stack's profile does not admit.
+const SDK_SCENARIOS: [&str; 9] = [
+    "inference.sdk.InstantiateRecipe/outcome/instantiated",
+    "inference.sdk.InstantiateRecipe/outcome/profile-denies",
+    "inference.sdk.InstantiateRecipe/outcome/role-unbound",
+    "inference.sdk.RegisterRecipe/outcome/name-taken",
+    "inference.sdk.RegisterRecipe/outcome/registered",
     "inference.sdk.ResolveStack/outcome/locality-denied",
     "inference.sdk.ResolveStack/outcome/resolved",
     "inference.sdk.ResolveStack/outcome/role-bound-twice",

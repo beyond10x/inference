@@ -49,9 +49,11 @@
 //! On the end of input, a control event of kind `stop`, the node waits for the host to answer
 //! every call it holds, then passes the end of input on, on each of its output edges, and ends;
 //! once its input edge is closed, it waits the same way and ends without passing anything on, as
-//! no end of input arrived to pass. Cancelled, it abandons the calls it holds and sends nothing
-//! more: the check and each poll of a send are made under the lock the cancel is taken under, so
-//! a send is either complete before the cancel or not made.
+//! no end of input arrived to pass. Its hook closed ([`AuthorityHandle::close`]), as the run that
+//! holds it closes, it rejects every call it holds `denied`, and every call it would hold from
+//! then on, so that a drain no host answers still ends. Cancelled, it abandons the calls it holds
+//! and sends nothing more: the check and each poll of a send are made under the lock the cancel
+//! is taken under, so a send is either complete before the cancel or not made.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -253,6 +255,8 @@ struct AuthorityState {
     /// The hook's answers not yet acted on: the call, and whether it was confirmed.
     answers: VecDeque<(ToolCallId, bool)>,
     decisions: Vec<Decision>,
+    /// The hook was closed: every call held is denied, now and from then on.
+    closed: bool,
     cancelled: bool,
     ended: bool,
     failure: Option<String>,
@@ -272,7 +276,8 @@ enum Signal {
 }
 
 impl AuthorityState {
-    /// A cancel first, then an answered call, then, once the input ended, that nothing is held.
+    /// A cancel first, then an answered call, then, once the hook was closed, the first call
+    /// held, denied, then, once the input ended, that nothing is held.
     /// An answer naming a call no longer held, one an interruption withdrew after the hook
     /// answered it, is dropped, and the answers queued behind it are examined at the same poll,
     /// so that none waits for a wake that will not come.
@@ -288,6 +293,9 @@ impl AuthorityState {
             {
                 return Some(Signal::Answer(self.held.remove(index), confirmed));
             }
+        }
+        if self.closed && !self.held.is_empty() {
+            return Some(Signal::Answer(self.held.remove(0), false));
         }
         (input_ended && self.held.is_empty()).then_some(Signal::Settled)
     }
@@ -449,7 +457,7 @@ impl AuthorityHandle {
 
     /// Confirms the held call `call_id`: the authority authorizes it with `confirmed` true. False,
     /// confirming nothing, when no call of that identity is held, when it was answered already,
-    /// or once the authority was cancelled or ended.
+    /// or once the hook was closed or the authority was cancelled or ended.
     #[must_use]
     pub fn confirm(&self, call_id: ToolCallId) -> bool {
         self.answer(call_id, true)
@@ -462,6 +470,14 @@ impl AuthorityHandle {
         self.answer(call_id, false)
     }
 
+    /// Closes the hook, as the run that holds the authority closes: every call held for
+    /// confirmation, and every call held from then on, is rejected `denied`, as the hook denies
+    /// it, so that the proposer has its answer and the authority can end. An answer the hook gave
+    /// before is acted on first. Confirm and deny answer false from then on.
+    pub fn close(&self) {
+        self.state.update(|state| state.closed = true);
+    }
+
     fn answer(&self, call_id: ToolCallId, confirmed: bool) -> bool {
         self.state.update(|state| {
             let held = state.held.iter().any(|held| held.call.call_id() == call_id);
@@ -469,7 +485,7 @@ impl AuthorityHandle {
                 .answers
                 .iter()
                 .any(|(answered, _)| *answered == call_id);
-            if state.cancelled || state.ended || !held || answered {
+            if state.closed || state.cancelled || state.ended || !held || answered {
                 return false;
             }
             state.answers.push_back((call_id, confirmed));

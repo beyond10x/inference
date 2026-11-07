@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use inference_core::envelope::ControlKind;
 use inference_core::id::NodeId;
-use inference_pipeline::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
 
-use crate::graph::nodes::{Exchange, Watched, block_on, recv_unless, send_unless};
+use super::tool_authority::send_unless;
+use super::{Exchange, Next, Watched, block_on, next};
+use crate::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation};
 
 /// What the fan-out was asked, and what failed it.
 #[derive(Debug, Default)]
@@ -111,17 +112,17 @@ impl<P: Clone + Send + 'static> NodeImplementation<P> for FanOut {
             self.exchange.spawn(move || {
                 let failure = block_on(async {
                     loop {
-                        let Some(Some(envelope)) =
-                            recv_unless(input.as_mut(), &state, |state| state.cancel).await
+                        let Next::Envelope(envelope) =
+                            next(input.as_mut(), &state, |state| state.cancel.then_some(())).await
                         else {
                             return None;
                         };
                         let stop = ControlKind::of(&envelope.kind) == Some(ControlKind::Stop);
                         for output in &outputs {
                             let sent = send_unless(
-                                output.as_ref(),
                                 &state,
-                                |state| state.cancel,
+                                |state: &State| state.cancel,
+                                output.as_ref(),
                                 envelope.clone(),
                             );
                             if let Err(refused) = sent.await {
