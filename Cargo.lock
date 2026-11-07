@@ -2457,6 +2457,7 @@ version = "0.23.0"
 dependencies = [
  "ess-conformance",
  "ess-primitives",
+ "inference",
  "inference-core",
  "inference-duplex",
  "inference-facade",
@@ -2469,6 +2470,7 @@ dependencies = [
  "inference-tts",
  "serde",
  "serde_json",
+ "tempfile",
  "uuid",
 ]
 

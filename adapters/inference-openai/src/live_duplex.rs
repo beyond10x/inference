@@ -174,6 +174,31 @@ fn formats() -> Vec<AudioFormat> {
     ]
 }
 
+/// The session GPT-Live opens with unless told otherwise: voice `marin`, PCM16 at 24 kHz both
+/// ways (one format for both), the model's own turn-taking (`semantic_vad`, no tuning),
+/// responses and barge-in by the model (`auto_response` and `auto_interrupt` on), an idle limit
+/// of 30 s, no instructions and no tools. [`capabilities`] admits it.
+#[must_use]
+pub fn default_session_config() -> SpeechConfig {
+    let pcm16 = AudioFormat {
+        encoding: AudioEncoding::PcmS16le,
+        sample_rate: std::num::NonZeroU32::new(24_000).unwrap_or(std::num::NonZeroU32::MIN),
+        channels: std::num::NonZeroU16::MIN,
+    };
+    SpeechConfig {
+        voice: "marin".to_owned(),
+        instructions: String::new(),
+        input_format: pcm16,
+        output_format: pcm16,
+        turn_detection: TurnDetection::SemanticVad,
+        turn_tuning: inference_duplex::TurnTuning::default(),
+        auto_response: true,
+        auto_interrupt: true,
+        tools: Vec::new(),
+        idle_limit: Duration::from_secs(30),
+    }
+}
+
 /// What GPT-Live takes, as the duplex contract states it: its four formats (one per session,
 /// both ways), its own turn-taking as `semantic_vad` without tuning, responses and interruption
 /// by the model alone, no cancellation or truncation by the caller, and tools.

@@ -2,7 +2,8 @@
 //!
 //! Each [`SemanticCommandRequest`], [`SemanticViewRequest`] and [`EventObservationRequest`] goes to
 //! the module of the domain its name starts with, one module per domain of `ess/system.yaml`. A
-//! module answers from the stores of `inference-testkit` and never from bookkeeping of its own; a
+//! module answers from the stores of `inference-testkit` and never from bookkeeping of its own
+//! (`inference.sdk` keeps the stacks the `inference` crate resolved, as the SDK keeps no store); a
 //! name it does not answer yet is [`TargetError::Unsupported`], never faked. Every scenario gets
 //! fresh [`Stores`].
 //!
@@ -13,7 +14,8 @@
 //! An observed event's position is the target's too: [`Stores::publish`] places every event a
 //! store recorded in the target's one publication order, and [`Stores::model_position`],
 //! [`Stores::policy_position`], [`Stores::graph_position`], [`Stores::stream_position`],
-//! [`Stores::tools_position`], [`Stores::session_position`], [`Stores::duplex_position`] and
+//! [`Stores::tools_position`], [`Stores::session_position`], [`Stores::duplex_position`],
+//! [`Stores::sdk_position`] and
 //! [`Stores::usage_position`] read its place there. Each store orders its own events only, as an envelope's `sequence`
 //! orders one stream only, so the merge order across domains is the target's, the recorder's,
 //! and the one thing a module reads that no store holds.
@@ -21,7 +23,8 @@
 //! Identities are the stores' too, and no two stores issue the same one: each counts in its own
 //! space of the first eight hex digits, `inference.stream` in 0, `inference.model` in 1,
 //! `inference.policy` in 2, `inference.graph` in 3, `inference.tools` in 4,
-//! `inference.session` in 5, `inference.duplex` in 6 and `inference.usage` in 7, so an identity
+//! `inference.session` in 5, `inference.duplex` in 6, `inference.usage` in 7 and `inference.sdk`
+//! in 8, so an identity
 //! of one domain sent where
 //! another's belongs names no row.
 //!
@@ -38,6 +41,7 @@ mod duplex;
 mod graph;
 mod model;
 mod policy;
+mod sdk;
 mod session;
 mod stream;
 mod tools;
@@ -73,6 +77,7 @@ pub struct Stores {
     pub session: session::State,
     pub duplex: duplex::State,
     pub usage: usage::State,
+    pub sdk: sdk::State,
     publication: Publication,
     forced: Option<OutcomeRef>,
 }
@@ -89,6 +94,7 @@ struct Publication {
     session: Vec<u64>,
     duplex: Vec<u64>,
     usage: Vec<u64>,
+    sdk: Vec<u64>,
 }
 
 impl Stores {
@@ -109,7 +115,8 @@ impl Stores {
             + self.publication.tools.len()
             + self.publication.session.len()
             + self.publication.duplex.len()
-            + self.publication.usage.len();
+            + self.publication.usage.len()
+            + self.publication.sdk.len();
         let model = self.model.events().len();
         let policy = self.policy.events().len();
         let graph = self.graph.events().len();
@@ -118,6 +125,7 @@ impl Stores {
         let session = self.session.events().len();
         let duplex = self.duplex.events().len();
         let usage = self.usage.events().len();
+        let sdk = self.sdk.events().len();
         for (positions, recorded) in [
             (&mut self.publication.model, model),
             (&mut self.publication.policy, policy),
@@ -127,6 +135,7 @@ impl Stores {
             (&mut self.publication.session, session),
             (&mut self.publication.duplex, duplex),
             (&mut self.publication.usage, usage),
+            (&mut self.publication.sdk, sdk),
         ] {
             while positions.len() < recorded {
                 placed += 1;
@@ -195,6 +204,12 @@ impl Stores {
         Self::placed(&self.publication.usage, "inference.usage", index)
     }
 
+    /// The position, from 1, of the `index`th stack (from 0) the `inference.sdk` module resolved,
+    /// in the target's one publication order.
+    pub fn sdk_position(&self, index: usize) -> Result<u64, TargetError> {
+        Self::placed(&self.publication.sdk, "inference.sdk", index)
+    }
+
     /// The position [`Stores::publish`] gave the `index`th event of `domain`; an event it has not
     /// placed is an error, never a guessed position.
     fn placed(positions: &[u64], domain: &str, index: usize) -> Result<u64, TargetError> {
@@ -221,7 +236,8 @@ impl Stores {
             + self.tools.events().len()
             + self.session.events().len()
             + self.duplex.events().len()
-            + self.usage.events().len();
+            + self.usage.events().len()
+            + self.sdk.events().len();
         u64::try_from(events).unwrap_or(u64::MAX)
     }
 
@@ -304,6 +320,7 @@ impl ConformanceTarget for Target {
             session::DOMAIN => session::execute_command(stores, &request),
             duplex::DOMAIN => duplex::execute_command(stores, &request),
             usage::DOMAIN => usage::execute_command(stores, &request),
+            sdk::DOMAIN => sdk::execute_command(stores, &request),
             _ => Err(unsupported(&name)),
         }
     }
@@ -320,6 +337,7 @@ impl ConformanceTarget for Target {
             session::DOMAIN => session::query_view(stores, &request),
             duplex::DOMAIN => duplex::query_view(stores, &request),
             usage::DOMAIN => usage::query_view(stores, &request),
+            sdk::DOMAIN => sdk::query_view(stores, &request),
             _ => Err(unsupported(&name)),
         }
     }
@@ -339,6 +357,7 @@ impl ConformanceTarget for Target {
             session::DOMAIN => session::observe_events(stores, &request),
             duplex::DOMAIN => duplex::observe_events(stores, &request),
             usage::DOMAIN => usage::observe_events(stores, &request),
+            sdk::DOMAIN => sdk::observe_events(stores, &request),
             _ => Err(unsupported(&name)),
         }
     }
@@ -352,6 +371,7 @@ impl ConformanceTarget for Target {
         match domain(&name) {
             graph::DOMAIN => graph::configure_external_outcome(stores, &request),
             session::DOMAIN => session::configure_external_outcome(stores, &request),
+            sdk::DOMAIN => sdk::configure_external_outcome(stores, &request),
             _ => Err(TargetError::unsupported(
                 format!("forcing `{}`", request.force),
                 "no answered outcome of this domain is declared external",
