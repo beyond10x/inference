@@ -56,6 +56,17 @@
 //! tool executor, are in [`nodes`]. The crate depends on `inference-core` and, for those nodes,
 //! `inference-tools`, and carries no concrete model, backend or provider. Serialized names are
 //! the ESS names.
+//!
+//! The model nodes in [`nodes`] are behind one feature per contract, each pulling only its
+//! contract crate:
+//!
+//! - `stt`: `inference-stt`; `nodes::stt`.
+//! - `llm`: `inference-llm` with its `tools` feature; `nodes::llm` and `nodes::agent`.
+//! - `tts`: `inference-tts`; `nodes::tts` and `nodes::speech`.
+//! - `duplex`: `inference-duplex`; `nodes::duplex`.
+//!
+//! The default build has none of them, so a crate that uses one contract depends on that
+//! contract alone.
 
 use std::error::Error;
 use std::fmt;

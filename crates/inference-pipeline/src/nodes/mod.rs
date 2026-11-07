@@ -9,12 +9,20 @@
 //! ([`commit_gate::CommitGate`]), a policy node that passes committed content and holds back what
 //! is not committed, between STT and LLM and between LLM and TTS (§11.3, 624-628).
 //!
-//! The model nodes, each over the contract of its model: the STT node ([`SttNode`]) over an
-//! `inference-stt` recogniser, the model node ([`ModelNode`]) and the interruptible agent node
-//! ([`AgentNode`]) over an `inference-llm` generator, and the TTS nodes ([`TtsNode`],
-//! [`SpeechNode`]) over an `inference-tts` synthesiser. Each records every `inference.stream` event
-//! it emits ([`StreamEvent`]) in its envelope in the run's [`RunLog`], and reads and writes the
-//! payload of its run through a payload trait of its own, such as [`SttPayload`].
+//! The model nodes, each over the contract of its model and behind the feature of that contract:
+//! the STT node (`SttNode`) over an `inference-stt` recogniser, the model node (`ModelNode`) and
+//! the interruptible agent node (`AgentNode`) over an `inference-llm` generator, and the TTS nodes
+//! (`TtsNode`, `SpeechNode`) over an `inference-tts` synthesiser. Each records every
+//! `inference.stream` event it emits ([`StreamEvent`]) in its envelope in the run's [`RunLog`], and
+//! reads and writes the payload of its run through a payload trait of its own, such as
+//! `SttPayload`. The features:
+//!
+//! - `stt`: `stt`, the STT node.
+//! - `llm`: `llm` and `agent`, the model node and the agent node.
+//! - `tts`: `tts` and `speech`, the TTS node and the speech node.
+//! - `duplex`: `duplex`, the duplex node over an `inference-duplex` native speech model.
+//!
+//! The nodes that carry no model and the modules `log` and `descriptors` need none of them.
 //!
 //! A tool call travels along the edges as a [`ToolCallUpdate`], a Structured payload: the call as
 //! the last command left it and the event that command emitted. A run carries one payload type on
