@@ -10,6 +10,11 @@
 
 ### Added
 
+- `inference`: `Recipe::with_node(name, impl Fn(RunId, &Node) -> Implementation)` replaces the
+  implementation of the node `name` in each run, the node keeping its role and its binding, and
+  `Recipe::expose(name)` exposes the one port of that name as an exposed end of the same name at
+  the recipe's exposure capacity under `OverloadPolicy::Pause`, an end already exposed under the
+  name not twice.
 - `inference`: `Instantiation::open(&mut self, &Stack, &LiveSessions)`, which opens a live
   session over the planned pipeline in the recipe's interaction mode, each role-bound node built
   for that run over its role's binding and every other node by the recipe, and returns the

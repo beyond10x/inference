@@ -1219,3 +1219,288 @@ mod native {
         assert!(said < closed, "{:#?}", live.seen);
     }
 }
+
+/// A node implementation that records, in the log it shares, that it started, and at its drain
+/// takes its inputs to their stop and sends nothing.
+struct Replacement(
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    Option<inference::pipeline::NodeEndpoints<inference::Payload>>,
+);
+
+impl std::fmt::Debug for Replacement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Replacement").field(&self.0).finish()
+    }
+}
+
+impl Replacement {
+    fn note(&self, what: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(what.to_owned());
+    }
+}
+
+impl inference::pipeline::NodeImplementation<inference::Payload> for Replacement {
+    fn describe(&mut self, _: &inference::graph::Node) -> inference::pipeline::NodeFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn prepare(
+        &mut self,
+    ) -> inference::pipeline::NodeFuture<'_, Result<(), inference::graph::NodeError>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn start(
+        &mut self,
+        endpoints: inference::pipeline::NodeEndpoints<inference::Payload>,
+    ) -> inference::pipeline::NodeFuture<'_, Result<(), inference::graph::NodeError>> {
+        self.note("started");
+        self.1 = Some(endpoints);
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn drain(
+        &mut self,
+    ) -> inference::pipeline::NodeFuture<'_, Result<(), inference::graph::NodeError>> {
+        let endpoints = self.1.take();
+        Box::pin(async move {
+            for mut input in endpoints
+                .map(|endpoints| endpoints.inputs)
+                .unwrap_or_default()
+            {
+                while let Some(envelope) = input.endpoint.recv().await {
+                    if matches!(
+                        envelope.payload,
+                        inference::Payload::Control(inference::graph::ControlKind::Stop)
+                    ) {
+                        break;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn cancel(&mut self) -> inference::pipeline::NodeFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn stop(&mut self) -> inference::pipeline::NodeFuture<'_, ()> {
+        Box::pin(std::future::ready(()))
+    }
+}
+
+/// The log a [`replacement`] factory and its nodes write.
+type Log = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+fn logged(log: &Log) -> Vec<String> {
+    log.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// A factory of [`Replacement`]s recording, in `log`, the name of each node it builds.
+fn replacement(
+    log: &Log,
+) -> impl Fn(inference::core::id::RunId, &inference::graph::Node) -> inference::graph::Implementation
++ Send
++ Sync
++ 'static {
+    let log = log.clone();
+    move |_, node| {
+        let replaced = Replacement(log.clone(), None);
+        replaced.note(node.name());
+        Box::new(replaced)
+    }
+}
+
+/// The names of the nodes `declaration` binds, in binding order.
+fn bound_names(declaration: &Declaration) -> Vec<String> {
+    declaration
+        .bindings()
+        .filter_map(|binding| declaration.node(binding.node_id()))
+        .map(|node| node.name().to_owned())
+        .collect()
+}
+
+#[test]
+fn with_node_replaces_the_implementation_of_that_node_and_no_other() {
+    use inference::facade::live::LiveSessions;
+
+    let stack = mock_stack();
+    let log = Log::default();
+    let replaced = Recipe::voice_cascade().with_node("tts", replacement(&log));
+    assert_eq!(replaced.roles(), Recipe::voice_cascade().roles());
+    let mut instantiation = replaced.instantiate(&stack).expect("the cascade plans");
+    let unchanged = Recipe::voice_cascade()
+        .instantiate(&stack)
+        .expect("the cascade plans");
+    assert_eq!(
+        counts(instantiation.declaration()),
+        counts(unchanged.declaration())
+    );
+    assert_eq!(
+        bound_names(instantiation.declaration()),
+        bound_names(unchanged.declaration()),
+        "the replaced node keeps its role and its binding"
+    );
+    let sessions = LiveSessions::new();
+    let Err(error) = block_on(instantiation.open(&stack, &sessions)) else {
+        panic!("the cascade's speaker needs an agent's audio route");
+    };
+    assert!(error.to_string().contains("audio route"), "{error}");
+    assert_eq!(
+        logged(&log),
+        ["tts"],
+        "the factory builds the node `tts` and no other"
+    );
+
+    let log = Log::default();
+    let mut instantiation = Recipe::speak()
+        .with_node("tts", replacement(&log))
+        .instantiate(&stack)
+        .expect("speak plans");
+    let (mut session, driver) =
+        block_on(instantiation.open(&stack, &sessions)).expect("the run opens");
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(block_on(driver.drive()));
+    });
+    block_on(session.close()).expect("the session closes");
+    let _ = ended
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the run ends within 20 s");
+    assert_eq!(
+        logged(&log),
+        ["tts", "started"],
+        "the run starts the replacement in place of the stack's synthesiser"
+    );
+
+    let added = Recipe::chat().with_node("extra", replacement(&log));
+    assert_eq!(
+        added.roles(),
+        [Role::Llm],
+        "a node added by name has no role"
+    );
+
+    let unclaimed = Stack::new()
+        .bind(Binding::llm(MockGenerator::new(
+            llm::MockConfiguration::StreamingOnly,
+            ModelId::generate(),
+            ["never sent"],
+        )))
+        .resolve_with(&Env::new())
+        .expect("resolves");
+    let mut instantiation = Recipe::chat()
+        .with_node("agent", replacement(&log))
+        .instantiate(&unclaimed)
+        .expect("chat plans");
+    let (mut session, driver) = block_on(instantiation.open(&unclaimed, &sessions)).expect(
+        "a replaced model node asks the binding for no concurrent_input_output, and the run opens",
+    );
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(block_on(driver.drive()));
+    });
+    block_on(session.close()).expect("the session closes");
+    let _ = ended
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the run ends within 20 s");
+}
+
+#[test]
+fn expose_refuses_a_name_no_port_carries() {
+    let Err(error) = Recipe::chat().expose("absent").instantiate(&mock_stack()) else {
+        panic!("no port of chat is named `absent`");
+    };
+    assert_eq!(error.kind(), ErrorKind::Layer, "{error}");
+    let shown = error.to_string();
+    assert!(
+        shown.contains("`absent`") && shown.contains("0 of its ports"),
+        "{shown}"
+    );
+}
+
+/// [`ask`] with its model's output port named `assistant_text`, optional and not exposed.
+fn ask_unexposed(pipeline: &mut Builder<'_, '_>) -> inference::Result<()> {
+    let text = PortTraits {
+        essentiality: Essentiality::Essential,
+        delivery: Delivery::Reliable,
+        incremental: true,
+        end_marker_required: true,
+        provisional_allowed: false,
+    };
+    let agent = pipeline.node("agent", NodeRole::Model, vec![Capability::OutputStreaming]);
+    let input = pipeline.input::<modality::Text>(&agent, "user_input", text);
+    let optional = PortTraits {
+        essentiality: Essentiality::Optional,
+        ..text
+    };
+    pipeline.output::<modality::Text>(&agent, "assistant_text", optional);
+    pipeline.expose(
+        &input,
+        "user_input",
+        EXPOSURE_CAPACITY,
+        OverloadPolicy::Pause,
+    );
+    Ok(())
+}
+
+/// Each exposure of `declaration`: its name, its port's name, capacity and overload policy.
+fn exposures(declaration: &Declaration) -> Vec<(String, String, usize, OverloadPolicy)> {
+    declaration
+        .exposures()
+        .map(|exposure| {
+            let port = declaration
+                .ports()
+                .find(|port| port.port_id() == exposure.port_id())
+                .map_or_else(String::new, |port| port.name().to_owned());
+            (
+                exposure.name().to_owned(),
+                port,
+                exposure.capacity().get(),
+                exposure.overload(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn expose_adds_that_exposed_end_to_the_planned_pipeline_and_nothing_else() {
+    let stack = mock_stack();
+    let base = Recipe::custom("ask-expose", InteractionMode::TurnBased, ask_unexposed)
+        .role("agent", Role::Llm);
+    let before = base.instantiate(&stack).expect("the recipe plans");
+    let after = base
+        .clone()
+        .expose("assistant_text")
+        .instantiate(&stack)
+        .expect("the recipe plans with the exposed end");
+    let mut expected = exposures(before.declaration());
+    expected.push((
+        "assistant_text".to_owned(),
+        "assistant_text".to_owned(),
+        64,
+        OverloadPolicy::Pause,
+    ));
+    assert_eq!(exposures(after.declaration()), expected);
+    assert_eq!(counts(after.declaration()), counts(before.declaration()));
+    assert_eq!(
+        after.declaration().edges().count(),
+        before.declaration().edges().count()
+    );
+    assert_eq!(
+        bound_names(after.declaration()),
+        bound_names(before.declaration())
+    );
+
+    let chat = Recipe::chat().expose("assistant_text").declaration();
+    assert_eq!(
+        exposures(&chat),
+        exposures(&Recipe::chat().declaration()),
+        "an end the recipe already exposes is not exposed twice"
+    );
+}
