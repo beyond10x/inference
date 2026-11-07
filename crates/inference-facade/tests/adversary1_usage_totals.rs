@@ -75,7 +75,7 @@ fn an_interrupt_never_cuts_the_usage_record_of_the_generation_it_cut() {
     let generator = generator(Vec::<String>::new());
     let (declaration, planned, usage) = planned_with_usage(&generator);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,
@@ -126,7 +126,7 @@ fn a_cancelled_session_delivers_no_usage_record_but_counts_every_one_it_reads() 
     let wrapping = recorder.clone();
     let mut nodes = with_usage(&generator, usage);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,

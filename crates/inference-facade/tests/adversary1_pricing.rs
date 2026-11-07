@@ -545,7 +545,7 @@ fn a_session_with_a_record_it_could_not_price_has_no_complete_total() {
     let adapter = generator.adapter().adapter_id();
     let (declaration, planned, usage_port) = planned_with_usage(&generator);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,

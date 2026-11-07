@@ -133,6 +133,11 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The data of `mutex` through an exclusive borrow, taking the data a panicking holder left.
+pub(crate) fn get_mut<T>(mutex: &mut Mutex<T>) -> &mut T {
+    mutex.get_mut().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// The events of one session not yet received, and how far its run and its close have come.
 #[derive(Default)]
 struct Inbox {
@@ -770,8 +775,8 @@ impl LiveSessions {
         let session = LiveSession {
             shared: Arc::clone(&shared),
             run_id,
-            ingresses,
-            egresses,
+            ingresses: Mutex::new(ingresses),
+            receiving: Mutex::new(Receiving { egresses }),
             producer: NodeId::generate(),
             stream_id: StreamId::generate(),
             sequence: AtomicI64::new(0),
@@ -879,8 +884,15 @@ pub(crate) struct Outlet<P> {
     pub(crate) delivers: bool,
 }
 
-/// The ingresses of `ends` and the ends the session reads: its egresses, then its usage sinks.
-pub(crate) fn outlets<P>(ends: ExposedEnds<P>) -> (Vec<Ingress<P>>, Vec<Outlet<P>>) {
+/// What only receiving touches: the ends the session reads, taken under its lock by
+/// [`LiveSession::receive`] for one poll and never held across an await.
+pub(crate) struct Receiving<P> {
+    pub(crate) egresses: Vec<Outlet<P>>,
+}
+
+/// The ingresses of `ends`, each shared so that a send holds no lock while it awaits, and the
+/// ends the session reads: its egresses, then its usage sinks.
+pub(crate) fn outlets<P>(ends: ExposedEnds<P>) -> (Vec<Arc<Ingress<P>>>, Vec<Outlet<P>>) {
     let egresses = ends.egresses.into_iter().map(|egress| Outlet {
         endpoint: egress.endpoint,
         delivers: true,
@@ -889,16 +901,24 @@ pub(crate) fn outlets<P>(ends: ExposedEnds<P>) -> (Vec<Ingress<P>>, Vec<Outlet<P
         endpoint: sink.endpoint,
         delivers: false,
     });
-    (ends.ingresses, egresses.chain(sinks).collect())
+    (
+        ends.ingresses.into_iter().map(Arc::new).collect(),
+        egresses.chain(sinks).collect(),
+    )
 }
 
 /// The application's handle on a live session: what it sends, commits and receives, and how it
 /// closes.
+///
+/// Every method but [`LiveSession::record_inputs`] and [`LiveSession::switch`] takes `&self`,
+/// so one task can receive while another sends or closes through the same shared handle. The
+/// receive side keeps its own state behind a lock that only a poll of `receive` takes, never
+/// across an await; a send takes the ingresses out of their lock and awaits with no lock held.
 pub struct LiveSession<P> {
     pub(crate) shared: Arc<Shared>,
     pub(crate) run_id: RunId,
-    pub(crate) ingresses: Vec<Ingress<P>>,
-    pub(crate) egresses: Vec<Outlet<P>>,
+    pub(crate) ingresses: Mutex<Vec<Arc<Ingress<P>>>>,
+    pub(crate) receiving: Mutex<Receiving<P>>,
     pub(crate) producer: NodeId,
     pub(crate) stream_id: StreamId,
     pub(crate) sequence: AtomicI64,
@@ -979,10 +999,10 @@ impl<P: SessionPayload> LiveSession<P> {
     /// [`InputError::Refused`] as well when the session was cancelled while the ingress took the
     /// envelope, which the cancelled run then discards; no event is recorded.
     pub async fn send(&self, mut envelope: EventEnvelope<P>) -> Result<(), InputError<P>> {
-        let ingress = self
-            .ingresses
+        let ingress = lock(&self.ingresses)
             .iter()
-            .find(|ingress| ingress.name == envelope.port);
+            .find(|ingress| ingress.name == envelope.port)
+            .map(Arc::clone);
         lock(&self.shared.sessions)
             .admits_input(self.shared.session_id)
             .map_err(InputError::Refused)?;
@@ -1023,7 +1043,7 @@ impl<P: SessionPayload> LiveSession<P> {
             .map_err(InputError::Refused)?;
         self.shared.record(SessionEvent::InputCommitted(committed));
         self.end_turn(true);
-        for ingress in &self.ingresses {
+        for ingress in self.shared_ingresses() {
             ingress
                 .endpoint
                 .send(self.control(&ingress.name, ControlKind::Commit))
@@ -1045,20 +1065,20 @@ impl<P: SessionPayload> LiveSession<P> {
     /// [`CloseError::Refused`] when the session is neither Opened nor Ready; nothing moves.
     /// [`CloseError::Forward`] when an ingress refused the end of input; the session is Draining
     /// and the ingresses are let go all the same.
-    pub async fn close(&mut self) -> Result<(), CloseError<P>> {
+    pub async fn close(&self) -> Result<(), CloseError<P>> {
         let draining = lock(&self.shared.sessions)
             .close_session(self.shared.session_id)
             .map_err(CloseError::Refused)?;
         self.shared.record(SessionEvent::SessionDraining(draining));
         self.end_turn(false);
+        let ingresses = std::mem::take(&mut *lock(&self.ingresses));
         let mut refused = None;
-        for ingress in &self.ingresses {
+        for ingress in ingresses {
             let stop = self.control(&ingress.name, ControlKind::Stop);
             if let Err(error) = ingress.endpoint.send(stop).await {
                 refused.get_or_insert(error);
             }
         }
-        self.ingresses.clear();
         self.shared.closing();
         refused.map_or(Ok(()), |error| Err(CloseError::Forward(Box::new(error))))
     }
@@ -1077,25 +1097,38 @@ impl<P: SessionPayload> LiveSession<P> {
     /// supersede, is not delivered. A late event of a cut generation older than those is
     /// delivered; that is the one exception to the cut.
     ///
+    /// `SessionInterrupted` is recorded once the `cancel` was sent into every ingress, so a
+    /// reader that received it knows every ingress holds the `cancel` ahead of any input sent
+    /// after it. It is recorded when an ingress refused the `cancel` too.
+    ///
     /// # Errors
     ///
     /// [`InputError::Refused`] when the session is not Ready; nothing is cut or sent and no event
-    /// recorded. [`InputError::Forward`] when an ingress refused the `cancel`; the cut holds.
+    /// recorded. [`InputError::Forward`] when an ingress refused the `cancel`; the cut holds and
+    /// `SessionInterrupted` is recorded.
     pub async fn interrupt(&self) -> Result<(), InputError<P>> {
         let interrupted = lock(&self.shared.sessions)
             .interrupt(self.shared.session_id)
             .map_err(InputError::Refused)?;
-        self.shared
-            .record(SessionEvent::SessionInterrupted(interrupted));
         lock(&self.generations).interrupt();
-        for ingress in &self.ingresses {
-            ingress
+        let mut refused = None;
+        for ingress in self.shared_ingresses() {
+            if let Err(error) = ingress
                 .endpoint
                 .send(self.control(&ingress.name, ControlKind::Cancel))
                 .await
-                .map_err(|error| InputError::Forward(Box::new(error)))?;
+            {
+                refused.get_or_insert(error);
+            }
         }
-        Ok(())
+        self.shared
+            .record(SessionEvent::SessionInterrupted(interrupted));
+        refused.map_or(Ok(()), |error| Err(InputError::Forward(Box::new(error))))
+    }
+
+    /// The current ingresses, cloned out of their lock so a send awaits with no lock held.
+    fn shared_ingresses(&self) -> Vec<Arc<Ingress<P>>> {
+        lock(&self.ingresses).clone()
     }
 
     /// `close` by cancelling: asks the run loop to cancel the session's run
@@ -1135,20 +1168,25 @@ impl<P: SessionPayload> LiveSession<P> {
     /// order the session recorded them; then what the run sends on its egresses, each payload
     /// converted by [`SessionPayload::session_event`] and skipped when it converts to none.
     /// None once every egress has ended, the run has ended and every event was received.
-    pub async fn receive(&mut self) -> Option<SessionEvent> {
+    ///
+    /// The session's inbox has one waker slot: of several tasks receiving at once, only the last
+    /// to poll is woken by the session's own events. Receive from one task.
+    pub async fn receive(&self) -> Option<SessionEvent> {
         future::poll_fn(|cx| self.poll_receive(cx)).await
     }
 
-    fn poll_receive(&mut self, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
+    fn poll_receive(&self, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
+        let mut receiving = lock(&self.receiving);
+        let egresses = &mut receiving.egresses;
         loop {
             if let Some(event) = self.shared.next(cx) {
                 return Poll::Ready(Some(event));
             }
             let mut progressed = false;
             let mut index = 0;
-            while index < self.egresses.len() {
-                let delivers = self.egresses[index].delivers;
-                let polled = self.egresses[index].endpoint.recv().as_mut().poll(cx);
+            while index < egresses.len() {
+                let delivers = egresses[index].delivers;
+                let polled = egresses[index].endpoint.recv().as_mut().poll(cx);
                 match polled {
                     Poll::Ready(Some(envelope)) => {
                         progressed = true;
@@ -1158,12 +1196,12 @@ impl<P: SessionPayload> LiveSession<P> {
                     }
                     Poll::Ready(None) => {
                         progressed = true;
-                        drop(self.egresses.remove(index));
+                        drop(egresses.remove(index));
                     }
                     Poll::Pending => index += 1,
                 }
             }
-            if self.egresses.is_empty() {
+            if egresses.is_empty() {
                 return self.shared.after_egress();
             }
             if !progressed {
@@ -1294,7 +1332,9 @@ impl<P: SessionPayload + Clone + fmt::Debug> LiveSession<P> {
             });
         }
         self.recorded = Some(self.run_id);
-        for ingress in &mut self.ingresses {
+        for shared in get_mut(&mut self.ingresses) {
+            let ingress = Arc::get_mut(shared)
+                .expect("no send holds an ingress while the session is borrowed exclusively");
             let endpoint = std::mem::replace(&mut ingress.endpoint, Box::new(Detached));
             ingress.endpoint = recorder.ingress(ingress.name.clone(), endpoint);
         }
@@ -1368,13 +1408,12 @@ impl<P> fmt::Debug for LiveSession<P> {
             .field("run_id", &self.run_id)
             .field(
                 "ingresses",
-                &self
-                    .ingresses
+                &lock(&self.ingresses)
                     .iter()
-                    .map(|ingress| ingress.name.as_str())
+                    .map(|ingress| ingress.name.clone())
                     .collect::<Vec<_>>(),
             )
-            .field("egresses", &self.egresses.len())
+            .field("egresses", &lock(&self.receiving).egresses.len())
             .finish_non_exhaustive()
     }
 }

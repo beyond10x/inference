@@ -103,11 +103,11 @@ impl<P: SessionPayload> LiveSession<P> {
         self.end_turn(false);
         self.shared.leave();
         self.shared.record(SessionEvent::PipelineSwitched(switched));
-        for ingress in &self.ingresses {
+        let ingresses = std::mem::take(crate::live::get_mut(&mut self.ingresses));
+        for ingress in ingresses {
             let stop = self.control(&ingress.name, ControlKind::Stop);
             let _ = ingress.endpoint.send(stop).await;
         }
-        self.ingresses.clear();
         let left = future::poll_fn(|cx| self.poll_drained(cx)).await;
         if left != RunState::Completed {
             return Err(SwitchError::Drained(left));
@@ -118,8 +118,8 @@ impl<P: SessionPayload> LiveSession<P> {
             .map_err(SwitchError::Start)?;
         let (ingresses, egresses) = crate::live::outlets(controller.exposed());
         self.run_id = run_id;
-        self.ingresses = ingresses;
-        self.egresses = egresses;
+        *crate::live::get_mut(&mut self.ingresses) = ingresses;
+        crate::live::get_mut(&mut self.receiving).egresses = egresses;
         self.requests = controller.requests();
         self.queues = controller.queues();
         self.exposure_queues = controller.exposure_queues();
@@ -132,12 +132,14 @@ impl<P: SessionPayload> LiveSession<P> {
     /// Receives what the old run's egresses still hold, queueing each event among the session's
     /// own, until every egress has ended; then how the old run ended, once it has.
     fn poll_drained(&mut self, cx: &mut Context<'_>) -> Poll<RunState> {
+        let mut receiving = crate::live::lock(&self.receiving);
+        let egresses = &mut receiving.egresses;
         loop {
             let mut progressed = false;
             let mut index = 0;
-            while index < self.egresses.len() {
-                let delivers = self.egresses[index].delivers;
-                let polled = self.egresses[index].endpoint.recv().as_mut().poll(cx);
+            while index < egresses.len() {
+                let delivers = egresses[index].delivers;
+                let polled = egresses[index].endpoint.recv().as_mut().poll(cx);
                 match polled {
                     Poll::Ready(Some(envelope)) => {
                         progressed = true;
@@ -147,12 +149,12 @@ impl<P: SessionPayload> LiveSession<P> {
                     }
                     Poll::Ready(None) => {
                         progressed = true;
-                        drop(self.egresses.remove(index));
+                        drop(egresses.remove(index));
                     }
                     Poll::Pending => index += 1,
                 }
             }
-            if self.egresses.is_empty() {
+            if egresses.is_empty() {
                 return self.shared.poll_left(cx);
             }
             if !progressed {
