@@ -5,15 +5,17 @@
 
 use std::fmt;
 use std::future;
+use std::sync::Arc;
 #[cfg(feature = "audio-host")]
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use inference_core::id::RunId;
-use inference_pipeline::nodes::FanOut;
 #[cfg(feature = "audio-host")]
 use inference_pipeline::nodes::agent::AgentNode;
 #[cfg(feature = "audio-host")]
 use inference_pipeline::nodes::commit_gate::{CommitGate, GateLane};
+use inference_pipeline::nodes::duplex::CallIds;
 use inference_pipeline::nodes::duplex::DuplexPorts;
 use inference_pipeline::nodes::llm::ModelNode;
 use inference_pipeline::nodes::log::RunLog;
@@ -23,17 +25,22 @@ use inference_pipeline::nodes::stt::SttPorts;
 use inference_pipeline::nodes::turn_policy::{CompleteTurnRefused, TurnCommands, TurnPolicy};
 #[cfg(feature = "audio-host")]
 use inference_pipeline::nodes::vad::VoiceActivityDetector;
+use inference_pipeline::nodes::{AuthorityHandle, FanOut, ToolAuthority, ToolExecutorNode};
 use inference_pipeline::{
     Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeRole,
-    PipelineId, PortId,
+    PipelineId, PlannedPipeline, PortId,
 };
 #[cfg(feature = "audio-host")]
 use inference_text::{OpenTurn, Turn, TurnCompleted, TurnId, TurnNotFound, TurnOpened};
+use inference_tools::Tool;
 
 use super::{Recipe, Topology};
 use crate::graph::Implementation;
 use crate::stack::{Synthesis, default_session_config};
 use crate::{Error, Payload, Role, Stack};
+
+/// How long `native_voice`'s executor gives each tool call from its start.
+const TOOL_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The user item a model node is asked: the input text as it came.
 fn reply(text: &str) -> String {
@@ -45,8 +52,14 @@ pub(super) struct Run<'i> {
     recipe: &'i Recipe,
     stack: &'i Stack,
     declaration: &'i Declaration,
+    planned: &'i PlannedPipeline,
     pipeline_id: PipelineId,
     log: RunLog,
+    /// `native_voice`'s authority, built by whichever of its two tool nodes is built first, until
+    /// its own node takes it.
+    authority: Option<ToolAuthority>,
+    handle: Option<AuthorityHandle>,
+    call_ids: Option<CallIds>,
     #[cfg(feature = "audio-host")]
     speaker: Option<&'i super::speaker::Speaker>,
     #[cfg(feature = "audio-host")]
@@ -61,8 +74,12 @@ impl<'i> Run<'i> {
             recipe: &instantiation.recipe,
             stack,
             declaration: &instantiation.declaration,
+            planned: &instantiation.planned,
             pipeline_id: instantiation.pipeline_id,
             log: RunLog::new(),
+            authority: None,
+            handle: None,
+            call_ids: None,
             #[cfg(feature = "audio-host")]
             speaker: instantiation.speaker.as_ref(),
             #[cfg(feature = "audio-host")]
@@ -70,6 +87,15 @@ impl<'i> Run<'i> {
             #[cfg(feature = "audio-host")]
             sink: None,
         }
+    }
+
+    /// The tool handles of a `native_voice` run, once its duplex node and its authority were
+    /// built.
+    pub(super) fn take_tools(&mut self) -> Option<super::Tools> {
+        Some(super::Tools {
+            authority: self.handle.take()?,
+            call_ids: self.call_ids.take()?,
+        })
     }
 
     /// The handle of the run's speaker sink, once it was built.
@@ -172,15 +198,34 @@ impl<'i> Run<'i> {
                     tool_call: self.port(node, "tool_call").ok(),
                     tool_result: self.port(node, "tool_result").ok(),
                 };
-                let config = self
+                let mut config = self
                     .stack
                     .session_config()
                     .cloned()
                     .unwrap_or_else(default_session_config);
-                Ok(binding
+                let native = matches!(self.recipe.topology, Topology::NativeVoice);
+                let tools: Vec<Tool> = if native {
+                    self.recipe.tools.tools().cloned().collect()
+                } else {
+                    Vec::new()
+                };
+                for tool in &tools {
+                    if !config
+                        .tools
+                        .iter()
+                        .any(|offered| offered.name() == tool.name())
+                    {
+                        config.tools.push(tool.clone());
+                    }
+                }
+                let (implementation, call_ids) = binding
                     .speech_model()
                     .ok_or_else(missing)?
-                    .node(run_id, config, ports, log))
+                    .node(run_id, config, ports, tools, log);
+                if native {
+                    self.call_ids = Some(call_ids);
+                }
+                Ok(implementation)
             }
         }
     }
@@ -232,6 +277,35 @@ impl<'i> Run<'i> {
         if node.role() == NodeRole::FanOut {
             return Ok(Box::new(FanOut::new()));
         }
+        if matches!(self.recipe.topology, Topology::NativeVoice) {
+            match node.name() {
+                "authority" => {
+                    self.authority(run_id)?;
+                    let authority = self.authority.take().ok_or_else(|| Error::Layer {
+                        message: format!(
+                            "the recipe `{}` builds its node `authority` once per run",
+                            self.recipe.name
+                        ),
+                        source: None,
+                    })?;
+                    return Ok(Box::new(authority));
+                }
+                "executor" => {
+                    let handle = self.authority(run_id)?;
+                    let tools = &self.recipe.tools;
+                    return Ok(Box::new(
+                        ToolExecutorNode::new(
+                            run_id,
+                            Arc::new(tools.clone()),
+                            tools.tool_ids(),
+                            TOOL_DEADLINE,
+                        )
+                        .answering_to(&handle),
+                    ));
+                }
+                _ => {}
+            }
+        }
         #[cfg(feature = "audio-host")]
         if matches!(self.recipe.topology, Topology::VoiceCascade) {
             match node.name() {
@@ -268,6 +342,41 @@ impl<'i> Run<'i> {
             ),
             source: None,
         })
+    }
+
+    /// The handle of `native_voice`'s authority in the run `run_id`, building the authority
+    /// first if no node of the run built it yet: deciding calls of the recipe's tools, bounded
+    /// by the feedback loop into its node, and sending every rejection on its port `rejected`.
+    fn authority(&mut self, run_id: RunId) -> Result<AuthorityHandle, Error> {
+        if let Some(handle) = &self.handle {
+            return Ok(handle.clone());
+        }
+        let node = self
+            .declaration
+            .nodes()
+            .find(|node| node.pipeline_id() == self.pipeline_id && node.name() == "authority")
+            .ok_or_else(|| Error::Layer {
+                message: format!(
+                    "the recipe `{}` declares no node `authority`",
+                    self.recipe.name
+                ),
+                source: None,
+            })?;
+        let rejected = self.port(node, "rejected")?;
+        let authority = ToolAuthority::new(run_id, self.recipe.tools.tools().cloned())
+            .bounded_by(self.declaration, self.planned, node.node_id())
+            .map_err(|error| Error::Layer {
+                message: format!(
+                    "the recipe `{}` bounds no tool loop into its authority",
+                    self.recipe.name
+                ),
+                source: Some(Box::new(error)),
+            })?
+            .rejecting_on(rejected);
+        let handle = authority.handle();
+        self.authority = Some(authority);
+        self.handle = Some(handle.clone());
+        Ok(handle)
     }
 
     /// The cascade's speaker: the reference cascade's sink over the route the cascade was
