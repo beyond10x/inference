@@ -33,11 +33,13 @@ pub enum Error {
         profile: ProfileKind,
         source: LocalityDenied,
     },
-    /// The stack file `path` has a wrong or missing value at `key`.
+    /// The stack file `path` has a wrong or missing value at `key`; `source`, when present, is the
+    /// typed refusal behind it, such as an unregistered adapter.
     StackFile {
         path: PathBuf,
         key: String,
         message: String,
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
     /// The audio device `selector` could not be opened; `devices` are the names the host reports.
     Device {
@@ -143,7 +145,9 @@ impl fmt::Display for Error {
                 locality_name(*locality),
                 profile_name(*profile)
             ),
-            Self::StackFile { path, key, message } => {
+            Self::StackFile {
+                path, key, message, ..
+            } => {
                 write!(f, "the stack file {}, key {key}: {message}", path.display())
             }
             Self::Device {
@@ -184,7 +188,9 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::ProfileDenies { source, .. } => Some(source),
-            Self::Provider { source, .. } | Self::Layer { source, .. } => source
+            Self::Provider { source, .. }
+            | Self::StackFile { source, .. }
+            | Self::Layer { source, .. } => source
                 .as_deref()
                 .map(|source| source as &(dyn std::error::Error + 'static)),
             _ => None,
@@ -284,6 +290,7 @@ mod tests {
                     path: "inference.toml".into(),
                     key: "stt.adapter".to_owned(),
                     message: "expected a string".to_owned(),
+                    source: None,
                 },
                 ErrorKind::StackFile,
             ),
@@ -375,6 +382,7 @@ mod tests {
             path: "config/stack.toml".into(),
             key: "speech.voice".to_owned(),
             message: "expected a string".to_owned(),
+            source: None,
         }
         .to_string();
         assert!(shown.contains("config/stack.toml"), "{shown}");

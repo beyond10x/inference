@@ -569,6 +569,16 @@ const USAGE_SCENARIOS: [&str; 5] = [
     "inference.usage.RecordUsage/outcome/unknown-model",
 ];
 
+/// The four `inference.sdk` scenarios this target answers by resolving an `inference` stack: a
+/// stack resolved, and the refusals of a role bound twice, an adapter no registration holds and a
+/// bound adapter the stack's profile does not admit.
+const SDK_SCENARIOS: [&str; 4] = [
+    "inference.sdk.ResolveStack/outcome/locality-denied",
+    "inference.sdk.ResolveStack/outcome/resolved",
+    "inference.sdk.ResolveStack/outcome/role-bound-twice",
+    "inference.sdk.ResolveStack/outcome/unknown-adapter",
+];
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -757,6 +767,7 @@ fn the_suite_runs_against_the_testkit_target() {
         .chain(SESSION_SCENARIOS)
         .chain(DUPLEX_SCENARIOS)
         .chain(USAGE_SCENARIOS)
+        .chain(SDK_SCENARIOS)
     {
         assert!(
             passed.contains(id),
