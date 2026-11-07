@@ -11,7 +11,7 @@
 //! | model event | what leaves on `events` |
 //! |---|---|
 //! | `SpeechStarted` | [`DuplexPayload::speech_started`] |
-//! | `InputTranscribed` | `TranscriptCommitted` of a span of the open turn, committed at once |
+//! | `InputTranscribed` | `TranscriptCommitted` of a span of the turn it belongs to, committed at once |
 //! | `UsageRecorded` | [`DuplexPayload::usage`], placed on the run and the node |
 //! | `ResponseCreated` | `GenerationStarted` of the response's generation |
 //! | `OutputTranscriptDelta` | `TextDelta`, then `TextSegmentCommitted` of a segment holding that text |
@@ -31,10 +31,15 @@
 //! Each response is one generation of the node, started at its `ResponseCreated` with the epoch
 //! counting the session's responses from 1, completed at its `ResponseCompleted` and cancelled at
 //! its `ResponseCancelled` or `ResponseFailed`. A user turn is opened at the session's first
-//! frame and at the first frame after each `InputCommitted`; a transcript is a span of the open
-//! turn, committed at once, and is the basis of the calls proposed after it. An `InputCommitted`
-//! with no transcript yet commits an empty span as the basis, so a call proposed on an
-//! untranscribed turn still rests on committed input.
+//! frame and at the first frame after each `InputCommitted`. Each `InputCommitted` makes its own
+//! turn the basis of the calls proposed after it: an `InputCommitted` with no transcript of its
+//! turn yet commits an empty span of that turn as the basis, so a call proposed on an
+//! untranscribed turn still rests on committed input, and never on an earlier turn's words. A
+//! transcript is a span committed at once and becomes the basis. It belongs to the last
+//! committed turn while that turn has none, even when it arrives after the next turn's first
+//! frame; otherwise it belongs to the open turn, as a transcript arriving before its
+//! `InputCommitted` does. A transcript carries no turn of its own, so one that arrives only after
+//! a later turn was committed is taken as that later turn's.
 //!
 //! Tool calls: a proposal of a tool the node was given ([`DuplexNode::with_tools`]) becomes a
 //! [`ToolCall`] of the response's generation resting on the basis, under a fresh
@@ -395,12 +400,12 @@ struct Exchanging<P, S> {
     turn: Option<Turn>,
     /// The last turn was committed; the next frame opens another.
     committed: bool,
-    /// A transcript arrived since the last `InputCommitted`.
+    /// A transcript of the open turn arrived before its `InputCommitted`.
     transcribed: bool,
+    /// The last committed turn, while no transcript of it has arrived.
+    awaiting: Option<Turn>,
     /// The committed span the next proposal rests on.
     basis: Option<Span>,
-    /// The response a `cancel` was taken for.
-    cancelled: Option<ResponseId>,
     /// A tool result was answered and the model is to be asked for a response.
     respond: bool,
 }
@@ -597,9 +602,11 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
             .0,
         );
         self.committed = false;
+        self.transcribed = false;
     }
 
-    /// Cancels the response in progress, once per response.
+    /// Cancels the response in progress. The ledger clears the response in progress when it
+    /// takes the cancel, so a second cancel finds none and a response is cancelled at most once.
     fn cancel_response(&mut self) {
         if !self.admits() {
             return;
@@ -607,10 +614,6 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
         let Some(response_id) = self.session.ledger().in_progress() else {
             return;
         };
-        if self.cancelled == Some(response_id) {
-            return;
-        }
-        self.cancelled = Some(response_id);
         let _ = self.session.cancel_response(response_id);
     }
 
@@ -661,15 +664,22 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
         }
     }
 
-    /// A committed span of the open turn holding `text`.
-    fn committed_span(
-        &mut self,
-        text: String,
-    ) -> Result<(Span, inference_text::TranscriptCommitted), String> {
+    /// The open turn, opened first when none is.
+    fn open(&mut self) -> Result<Turn, String> {
         if self.turn.is_none() {
             self.open_turn();
         }
-        let turn = self.turn.as_ref().ok_or("no turn is open")?;
+        self.turn
+            .clone()
+            .ok_or_else(|| "no turn is open".to_owned())
+    }
+
+    /// A committed span of `turn` holding `text`.
+    fn committed_span(
+        &self,
+        turn: &Turn,
+        text: String,
+    ) -> Result<(Span, inference_text::TranscriptCommitted), String> {
         let (span, _) = Span::emit(
             turn,
             self.run_id,
@@ -792,17 +802,26 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
                 P::speech_started(started),
             ),
             SessionEvent::InputCommitted(_) => {
-                if !self.transcribed {
-                    self.basis = Some(self.committed_span(String::new())?.0);
+                let turn = self.open()?;
+                if self.transcribed {
+                    self.awaiting = None;
+                } else {
+                    self.basis = Some(self.committed_span(&turn, String::new())?.0);
+                    self.awaiting = Some(turn);
                 }
-                self.transcribed = false;
                 self.committed = true;
                 Ok(())
             }
             SessionEvent::InputTranscribed(transcribed) => {
-                let (span, committed) = self.committed_span(transcribed.text)?;
+                let turn = match self.awaiting.take() {
+                    Some(turn) => turn,
+                    None => {
+                        self.transcribed = true;
+                        self.open()?
+                    }
+                };
+                let (span, committed) = self.committed_span(&turn, transcribed.text)?;
                 self.basis = Some(span);
-                self.transcribed = true;
                 self.stream(StreamEvent::TranscriptCommitted(committed), None)
             }
             SessionEvent::UsageRecorded(mut recorded) => {
@@ -991,8 +1010,8 @@ impl<M: NativeSpeechModel> DuplexNode<M> {
             turn: None,
             committed: false,
             transcribed: false,
+            awaiting: None,
             basis: None,
-            cancelled: None,
             respond: false,
         })
     }
