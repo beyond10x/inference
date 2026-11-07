@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-11-07
+
 ### Breaking
 
 - `inference`: `Binding::stt`, `Binding::tts` and `Binding::speech` also need the model's handle
