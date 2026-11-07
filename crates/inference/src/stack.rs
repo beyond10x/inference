@@ -30,13 +30,14 @@ use inference_duplex::{
     NativeSpeechModel, OpenError, SessionConfig, SpeechCapabilities, TurnDetection, TurnTuning,
 };
 use inference_llm::Generator;
-use inference_pipeline::nodes::duplex::{DuplexNode, DuplexPorts};
+use inference_pipeline::nodes::duplex::{CallIds, DuplexNode, DuplexPorts};
 use inference_pipeline::nodes::log::RunLog;
 use inference_pipeline::nodes::speech::{SpeechNode, SpeechPorts};
 use inference_pipeline::nodes::stt::{SttNode, SttPorts};
 use inference_pipeline::nodes::tts::TtsNode;
 use inference_pipeline::{Catalog, PortId};
 use inference_stt::{ConcurrencyLimitReached, Recogniser, RecognitionRequest};
+use inference_tools::Tool;
 use inference_tts::Synthesiser;
 
 use crate::error::Error;
@@ -309,14 +310,16 @@ pub(crate) trait BoundSpeechModel: Send {
     fn adapter(&self) -> &Adapter;
 
     /// The duplex node of the run `run_id` over the bound model, opening its session from
-    /// `config`, wired through `ports`, recording what it emits in `log`.
+    /// `config`, wired through `ports`, proposing calls of `tools` only, recording what it emits
+    /// in `log`; and the read handle on the calls it proposes.
     fn node(
         &self,
         run_id: RunId,
         config: SessionConfig,
         ports: DuplexPorts,
+        tools: Vec<Tool>,
         log: RunLog,
-    ) -> Implementation;
+    ) -> (Implementation, CallIds);
 }
 
 impl<T> BoundSpeechModel for T
@@ -333,9 +336,12 @@ where
         run_id: RunId,
         config: SessionConfig,
         ports: DuplexPorts,
+        tools: Vec<Tool>,
         log: RunLog,
-    ) -> Implementation {
-        Box::new(DuplexNode::new(run_id, self.clone(), config, ports, log))
+    ) -> (Implementation, CallIds) {
+        let node = DuplexNode::new(run_id, self.clone(), config, ports, log).with_tools(tools);
+        let call_ids = node.call_ids();
+        (Box::new(node), call_ids)
     }
 }
 

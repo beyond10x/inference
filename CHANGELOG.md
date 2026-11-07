@@ -13,11 +13,19 @@
 - `inference`: `Instantiation::open(&mut self, &Stack, &LiveSessions)`, which opens a live
   session over the planned pipeline in the recipe's interaction mode, each role-bound node built
   for that run over its role's binding and every other node by the recipe, and returns the
-  session and its driver; a node the recipe cannot build (`transcribe`, `native_voice`'s tool
-  nodes, an application recipe's nodes no role binds other than fan-outs) is refused with
+  session and its driver; a node the recipe cannot build (`transcribe`, an application recipe's
+  nodes no role binds other than fan-outs) is refused with
   `Error::Layer` and no session is left open. `Instantiation::sink()` (feature `audio-host`) is
   the handle of the opened `voice_cascade` run's speaker sink. The `mock` registration's
   generator now claims `concurrent_input_output`, which the opened run's model node needs.
+- `inference`: `Recipe::tools(impl IntoIterator<Item = (Tool, Box<dyn ToolExecutor>)>)` gives
+  `native_voice` its tools. An opened `native_voice` run offers them to the model's session,
+  its duplex node proposes calls of them only, its tool authority is bounded by the recipe's
+  tool loop (`MAX_TOOL_ITERATIONS`) and its executor runs each authorized call on the executor
+  given for the call's tool, each within 30 s; every rejected or failed call is answered to the
+  model under its own call id. `Instantiation::authority()` is the run's confirmation hook
+  (`AuthorityHandle`: `held`, `confirm`, `deny`) and `Instantiation::call_ids()` the model's call
+  id of each proposed call (`CallIds`).
 - `inference`: `Error::ConcurrencyUnclaimed { role, adapter }` and
   `ErrorKind::ConcurrencyUnclaimed`. `Instantiation::open` returns it before anything opens when
   the run would keep one generation over an `llm` binding whose adapter does not claim

@@ -888,3 +888,334 @@ fn a_chat_over_a_generator_without_concurrent_input_refuses_to_open() {
         sessions.sessions_view()
     );
 }
+
+/// `native_voice` over the duplex mock, opened as a live session: a "lookup" tool whose executor
+/// answers "Berlin" and counts its runs, and the mock proposing one call of it.
+mod native {
+    use std::collections::BTreeMap;
+    use std::future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use inference::Payload;
+    use inference::core::envelope::{EventEnvelope, EventId, Timebase};
+    use inference::core::id::{NodeId, StreamId};
+    use inference::core::model::Locality;
+    use inference::duplex::SpeechCallId;
+    use inference::facade::events::SessionEvent;
+    use inference::facade::live::{LiveSession, LiveSessions};
+    use inference::runtime::run::RunState;
+    use inference::tools::{
+        CancellationSignal, DeclareTool, ExecutionFuture, SideEffectClass, Tool, ToolCall,
+        ToolCallId, ToolExecutor,
+    };
+    use inference::{
+        AdapterDescriptor, Binding, Env, Instantiation, Recipe, Registry, Role, Stack,
+    };
+    use inference_testkit::duplex::mock::{MockSpeechModel, Reply, ScriptedTurn, pcm, utterance};
+    use serde_json::json;
+
+    use super::block_on;
+
+    /// Answers every call with "Berlin" and counts its runs.
+    struct Berlin(Arc<AtomicUsize>);
+
+    impl ToolExecutor for Berlin {
+        fn execute<'a>(
+            &'a self,
+            _: &'a ToolCall,
+            _: Instant,
+            _: &'a CancellationSignal,
+        ) -> ExecutionFuture<'a> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(future::ready(Ok(json!("Berlin"))))
+        }
+    }
+
+    fn lookup(requires_confirmation: bool) -> Tool {
+        Tool::declare(DeclareTool {
+            name: "lookup".to_owned(),
+            description: "looks a city up".to_owned(),
+            schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+            schema_revision: "1".to_owned(),
+            side_effect: SideEffectClass::ReadOnly,
+            requires_confirmation,
+        })
+        .0
+    }
+
+    fn model() -> MockSpeechModel {
+        MockSpeechModel::native(vec![ScriptedTurn {
+            heard: "where is it".to_owned(),
+            reply: Reply::Call {
+                tool: "lookup".to_owned(),
+                arguments: json!({"city": "Berlin"}),
+                then: "It is {result}".to_owned(),
+            },
+        }])
+    }
+
+    /// A stack binding `speech` to the mock.
+    fn stack() -> Stack {
+        stack_over(model())
+    }
+
+    /// A stack binding `speech` to `model`.
+    fn stack_over(model: MockSpeechModel) -> Stack {
+        Stack::new()
+            .bind(Binding::speech(model))
+            .resolve_with(&Env::new())
+            .expect("resolves")
+    }
+
+    /// `native_voice` given "lookup" and its executor, and the executor's run count.
+    fn with_lookup(requires_confirmation: bool) -> (Recipe, Arc<AtomicUsize>) {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let executor: Box<dyn ToolExecutor> = Box::new(Berlin(Arc::clone(&runs)));
+        let recipe = Recipe::native_voice().tools([(lookup(requires_confirmation), executor)]);
+        (recipe, runs)
+    }
+
+    type Ended = Result<inference::runtime::Run, inference::runtime::RunError>;
+
+    struct Live {
+        session: LiveSession<Payload>,
+        ended: mpsc::Receiver<Ended>,
+        stream_id: StreamId,
+        sequence: i64,
+        seen: Vec<SessionEvent>,
+    }
+
+    impl Live {
+        fn open(instantiation: &mut Instantiation, stack: &Stack) -> Self {
+            let sessions = LiveSessions::new();
+            let (session, driver) =
+                block_on(instantiation.open(stack, &sessions)).expect("the run opens");
+            let (done, ended) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done.send(block_on(driver.drive()));
+            });
+            Self {
+                session,
+                ended,
+                stream_id: StreamId::generate(),
+                sequence: 0,
+                seen: Vec::new(),
+            }
+        }
+
+        /// Feeds one utterance: its speech and the silence after it.
+        fn speak(&mut self) {
+            for frame in utterance(pcm(24_000), 0).frames() {
+                self.sequence += 1;
+                let envelope = EventEnvelope {
+                    schema_version: 1,
+                    event_id: EventId::generate(),
+                    run_id: self.session.run_id(),
+                    session_id: None,
+                    stream_id: self.stream_id,
+                    sequence: self.sequence,
+                    producer: NodeId::generate(),
+                    port: "audio".to_owned(),
+                    kind: "inference.audio.AudioFrame".to_owned(),
+                    generation_id: None,
+                    timestamp: 0,
+                    timebase: Timebase::WallTime,
+                    causation_id: None,
+                    payload: Payload::Audio(frame),
+                };
+                block_on(self.session.send(envelope)).expect("sent");
+            }
+        }
+
+        /// Reads the session's events up to the first `stop` answers.
+        fn until(&mut self, stop: impl Fn(&SessionEvent) -> bool) {
+            loop {
+                let event = block_on(self.session.receive())
+                    .unwrap_or_else(|| panic!("the session ended first: {:#?}", self.seen));
+                let done = stop(&event);
+                self.seen.push(event);
+                if done {
+                    return;
+                }
+            }
+        }
+
+        /// Closes the session and reads it to its end; how long the close took.
+        fn close(&mut self) -> Duration {
+            let started = Instant::now();
+            block_on(self.session.close()).expect("the session closes");
+            let took = started.elapsed();
+            while let Some(event) = block_on(self.session.receive()) {
+                self.seen.push(event);
+            }
+            let run = self
+                .ended
+                .recv_timeout(Duration::from_secs(20))
+                .expect("the run ends within 20 s")
+                .expect("the run ends");
+            assert_eq!(run.state(), RunState::Completed, "{:#?}", self.seen);
+            took
+        }
+
+        /// The response transcript the session delivered.
+        fn said(&self) -> String {
+            self.seen
+                .iter()
+                .filter_map(|event| match event {
+                    SessionEvent::TextDelta(delta) => Some(delta.text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn position(&self, find: impl Fn(&SessionEvent) -> bool) -> Option<usize> {
+            self.seen.iter().position(find)
+        }
+    }
+
+    fn says(text: &'static str) -> impl Fn(&SessionEvent) -> bool {
+        move |event| matches!(event, SessionEvent::TextDelta(delta) if delta.text.contains(text))
+    }
+
+    #[test]
+    fn a_tool_call_is_answered_under_the_providers_call_id() {
+        let stack = stack();
+        let (recipe, runs) = with_lookup(false);
+        let mut instantiation = recipe.instantiate(&stack).expect("native voice plans");
+        let mut live = Live::open(&mut instantiation, &stack);
+        live.speak();
+        live.until(says("Berlin"));
+        assert_eq!(live.said(), "It is \"Berlin\"", "{:#?}", live.seen);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        let proposed = live
+            .position(|event| matches!(event, SessionEvent::ToolCallProposed(_)))
+            .unwrap_or_else(|| panic!("the call reaches the session: {:#?}", live.seen));
+        let said = live.position(says("Berlin")).expect("said");
+        assert!(proposed < said, "{:#?}", live.seen);
+        let SessionEvent::ToolCallProposed(call) = &live.seen[proposed] else {
+            unreachable!("found as a proposal");
+        };
+        let call_ids = instantiation.call_ids().expect("the run's call ids");
+        assert_eq!(
+            call_ids.speech_call_id(call.call_id),
+            Some(SpeechCallId::new("call_1"))
+        );
+        live.close();
+    }
+
+    #[test]
+    fn with_no_tools_the_call_is_answered_by_a_rejection() {
+        let mut offered = inference::default_session_config();
+        offered.tools = vec![lookup(false)];
+        Registry::register(
+            AdapterDescriptor::new("recipes-lookup-offered", Locality::SameProcess)
+                .role(Role::Speech, |_| Ok(Binding::speech(model()).into()))
+                .session_config(offered),
+        )
+        .expect("registers");
+        let stack = Stack::new()
+            .bind(Binding::named(
+                Role::Speech,
+                "recipes-lookup-offered",
+                BTreeMap::new(),
+            ))
+            .resolve_with(&Env::new())
+            .expect("resolves");
+        let mut instantiation = Recipe::native_voice()
+            .instantiate(&stack)
+            .expect("native voice plans");
+        let mut live = Live::open(&mut instantiation, &stack);
+        live.speak();
+        live.until(says("denied"));
+        live.close();
+        let said = live.said();
+        assert!(said.starts_with("It is "), "{said}");
+        assert!(
+            live.position(|event| matches!(
+                event,
+                SessionEvent::ToolCallProposed(_) | SessionEvent::ToolCallStarted(_)
+            ))
+            .is_none(),
+            "the call never leaves the node, so no executor runs: {:#?}",
+            live.seen
+        );
+    }
+
+    /// Opens `native_voice` whose "lookup" requires confirmation and waits until its call is
+    /// held: the authority holds it and the executor has not run.
+    fn held() -> (Instantiation, Live, Arc<AtomicUsize>, ToolCallId) {
+        let stack = stack();
+        let (recipe, runs) = with_lookup(true);
+        let mut instantiation = recipe.instantiate(&stack).expect("native voice plans");
+        let mut live = Live::open(&mut instantiation, &stack);
+        live.speak();
+        live.until(|event| matches!(event, SessionEvent::ToolCallProposed(_)));
+        let authority = instantiation.authority().expect("the run's authority");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let held = loop {
+            let held = authority.held();
+            if !held.is_empty() || Instant::now() > deadline {
+                break held;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(held.len(), 1, "{:#?}", live.seen);
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "a held call does not run");
+        let call_id = held[0].call_id();
+        (instantiation, live, runs, call_id)
+    }
+
+    #[test]
+    fn a_denied_confirmation_answers_the_model_with_a_rejection() {
+        let (instantiation, mut live, runs, call_id) = held();
+        assert!(instantiation.authority().expect("held").deny(call_id));
+        live.until(says("rejected"));
+        assert!(live.said().starts_with("It is "), "{}", live.said());
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        live.close();
+    }
+
+    #[test]
+    fn a_confirmed_call_runs_the_executor() {
+        let (instantiation, mut live, runs, call_id) = held();
+        assert!(instantiation.authority().expect("held").confirm(call_id));
+        live.until(says("Berlin"));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        live.close();
+    }
+
+    #[test]
+    fn closing_after_denying_every_held_call_ends_within_five_seconds() {
+        let (instantiation, mut live, _, _) = held();
+        let authority = instantiation.authority().expect("held");
+        for call in authority.held() {
+            assert!(authority.deny(call.call_id()));
+        }
+        let took = live.close();
+        assert!(took <= Duration::from_secs(5), "the close took {took:?}");
+    }
+
+    #[test]
+    fn the_models_close_reaches_the_session_once_after_the_reply() {
+        let stack = stack_over(model().closes());
+        let (recipe, _) = with_lookup(false);
+        let mut instantiation = recipe.instantiate(&stack).expect("native voice plans");
+        let mut live = Live::open(&mut instantiation, &stack);
+        live.speak();
+        live.until(|event| matches!(event, SessionEvent::SpeechSessionClosed(_)));
+        live.close();
+        let closed = |event: &SessionEvent| matches!(event, SessionEvent::SpeechSessionClosed(_));
+        assert_eq!(
+            live.seen.iter().filter(|event| closed(event)).count(),
+            1,
+            "{:#?}",
+            live.seen
+        );
+        let said = live.position(says("Berlin")).expect("the reply is said");
+        let closed = live.position(closed).expect("closed");
+        assert!(said < closed, "{:#?}", live.seen);
+    }
+}

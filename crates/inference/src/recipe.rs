@@ -16,9 +16,13 @@
 //! [`Instantiation::open`] opens a live session over the planned pipeline, each node of its run
 //! built for that run: a role-bound node over its role's binding, which owns the model and shares
 //! it across runs, and every other node, a fan-out and the cascade's detector, turn policy, commit
-//! gates and speaker, by the recipe. The cascade speaker's handle is
-//! `Instantiation::sink` (feature `audio-host`) until the next open.
+//! gates and speaker, and `native_voice`'s tool authority and executor, by the recipe. The
+//! cascade speaker's handle is `Instantiation::sink` (feature `audio-host`) until the next open;
+//! `native_voice`'s confirmation hook is [`Instantiation::authority`] and the model's call ids
+//! [`Instantiation::call_ids`]. [`Recipe::tools`] gives `native_voice` its tools: its executor
+//! node runs each authorized call on the executor given for the call's tool.
 
+mod dispatch;
 mod run;
 #[cfg(feature = "audio-host")]
 #[cfg_attr(
@@ -42,12 +46,16 @@ use inference_core::policy::{
     DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind, ProfileNotFound,
 };
 use inference_facade::live::{LiveSession, LiveSessions, SessionDriver};
+use inference_pipeline::nodes::AuthorityHandle;
+use inference_pipeline::nodes::duplex::CallIds;
 use inference_pipeline::nodes::vad::VadConfig;
 use inference_pipeline::{
     AdapterNotFound, BindNode, Catalog, Declaration, InteractionMode, LocalityDenied, PipelineId,
     PipelineSpec, PlanPipelineError, PlannedPipeline,
 };
+use inference_tools::ToolExecutor;
 
+use self::dispatch::Dispatch;
 use crate::graph::Builder;
 use crate::{Error, Payload, Role, Stack};
 
@@ -100,6 +108,7 @@ pub struct Recipe {
     roles: Vec<(String, Role)>,
     capacity: NonZeroUsize,
     vad: VadConfig,
+    tools: Dispatch,
 }
 
 impl fmt::Debug for Recipe {
@@ -110,6 +119,7 @@ impl fmt::Debug for Recipe {
             .field("roles", &self.roles)
             .field("capacity", &self.capacity)
             .field("vad", &self.vad)
+            .field("tools", &self.tools)
             .finish_non_exhaustive()
     }
 }
@@ -131,6 +141,7 @@ impl Recipe {
                 .collect(),
             capacity: EXPOSURE_CAPACITY,
             vad: VAD,
+            tools: Dispatch::default(),
         }
     }
 
@@ -209,6 +220,7 @@ impl Recipe {
             roles: Vec::new(),
             capacity: EXPOSURE_CAPACITY,
             vad: VAD,
+            tools: Dispatch::default(),
         }
     }
 
@@ -239,6 +251,22 @@ impl Recipe {
     #[must_use]
     pub const fn vad(mut self, config: VadConfig) -> Self {
         self.vad = config;
+        self
+    }
+
+    /// Gives `native_voice` the tools its model may call, each with the executor that runs it.
+    /// Each run offers them to the model's session beside the stack's own, its duplex node
+    /// proposes calls of them only, and its tool executor node runs each authorized call on the
+    /// executor given for its tool. A tool of a name given earlier is replaced. Without tools,
+    /// every call the model proposes is answered as denied. Every other recipe keeps them unused.
+    #[must_use]
+    pub fn tools(
+        mut self,
+        tools: impl IntoIterator<Item = (inference_tools::Tool, Box<dyn ToolExecutor>)>,
+    ) -> Self {
+        for (tool, executor) in tools {
+            self.tools.add(tool, executor);
+        }
         self
     }
 
@@ -446,6 +474,7 @@ impl Recipe {
             speaker: None,
             #[cfg(feature = "audio-host")]
             sink: None,
+            tools: None,
         })
     }
 
@@ -512,6 +541,14 @@ pub struct Instantiation {
     speaker: Option<speaker::Speaker>,
     #[cfg(feature = "audio-host")]
     sink: Option<inference_audio_device::acknowledging::AcknowledgingHandle>,
+    tools: Option<Tools>,
+}
+
+/// The tool handles of the run [`Instantiation::open`] opened last.
+#[derive(Debug, Clone)]
+struct Tools {
+    authority: AuthorityHandle,
+    call_ids: CallIds,
 }
 
 impl Instantiation {
@@ -554,8 +591,7 @@ impl Instantiation {
     /// [`Error::Layer`] when a role-bound node's binding in `stack` is not the adapter the recipe
     /// was planned with, when the recipe builds no implementation for one of its nodes (an
     /// application recipe's nodes no role binds, `transcribe`, whose topology has no turn ports,
-    /// the tool nodes of `native_voice`, and `voice_cascade` instantiated without an audio
-    /// route), or when the session does not open (its source the facade's `OpenError`); the
+    /// and `voice_cascade` instantiated without an audio route), or when the session does not open (its source the facade's `OpenError`); the
     /// refusal of a binding that builds no node, such as a deferred recogniser whose checkpoint
     /// did not open. No session is left open.
     pub async fn open(
@@ -567,6 +603,7 @@ impl Instantiation {
         {
             self.sink = None;
         }
+        self.tools = None;
         self.claims_concurrency(stack)?;
         let mut refused: Option<Error> = None;
         let mut nodes = run::Run::new(self, stack);
@@ -585,6 +622,7 @@ impl Instantiation {
                 },
             )
             .await;
+        let tools = nodes.take_tools();
         #[cfg(feature = "audio-host")]
         let sink = nodes.into_sink();
         #[cfg(not(feature = "audio-host"))]
@@ -603,6 +641,7 @@ impl Instantiation {
         {
             self.sink = sink;
         }
+        self.tools = tools;
         Ok(opened)
     }
 
@@ -644,6 +683,21 @@ impl Instantiation {
         &self,
     ) -> Option<&inference_audio_device::acknowledging::AcknowledgingHandle> {
         self.sink.as_ref()
+    }
+
+    /// The confirmation hook of the tool authority of the run [`Instantiation::open`] opened
+    /// last: a call of a tool that requires confirmation is held until it confirms or denies
+    /// it. None before a run opened and for every recipe but `native_voice`.
+    #[must_use]
+    pub fn authority(&self) -> Option<&AuthorityHandle> {
+        self.tools.as_ref().map(|tools| &tools.authority)
+    }
+
+    /// The model's own call id of each call the duplex node of the run [`Instantiation::open`]
+    /// opened last proposed. None before a run opened and for every recipe but `native_voice`.
+    #[must_use]
+    pub fn call_ids(&self) -> Option<&CallIds> {
+        self.tools.as_ref().map(|tools| &tools.call_ids)
     }
 }
 
