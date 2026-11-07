@@ -30,6 +30,10 @@
 //! Time is the mock's own: it starts when the session opens, and a `next_event` with nothing to
 //! deliver advances it by `wait`, so the liveness bound is reached by waiting, deterministically.
 //! [`Faults`] stop the provider after a number of events (a stall) or close its transport.
+//! [`MockSpeechModel::closes`] ends a session once its script is spent and nothing is pending,
+//! and [`MockSpeechModel::fails_responses`] fails each response where it would complete.
+//! [`utterance`] is the one utterance the SDK's tests feed: speech, then the silence that ends
+//! the turn under server turn detection.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -123,6 +127,8 @@ pub struct MockSpeechModel {
     faults: Faults,
     restarts: bool,
     late_usage: bool,
+    closes: bool,
+    fails_responses: bool,
     speech: SpeechReports,
 }
 
@@ -157,6 +163,62 @@ pub fn saying(format: AudioFormat, position: u64, text: &str) -> AudioFrame {
         *slot = byte;
     }
     spoken
+}
+
+/// The byte every speech frame of an [`Utterance`] holds: not silence, and not an ASCII graphic,
+/// so the mock's recogniser reads no words and hears the script's `heard`.
+const SPOKEN: u8 = 0x01;
+
+/// One utterance as an application feeds it: two 20 ms frames of speech from its first sample,
+/// then one frame of silence, which ends the turn under server turn detection with no commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Utterance {
+    format: AudioFormat,
+    at: u64,
+}
+
+/// The utterance of `format` starting at sample `at`.
+#[must_use]
+pub const fn utterance(format: AudioFormat, at: u64) -> Utterance {
+    Utterance { format, at }
+}
+
+impl Utterance {
+    fn samples(&self) -> u64 {
+        u64::from(self.format.sample_rate.get() / 50)
+    }
+
+    /// The two frames of speech.
+    #[must_use]
+    pub fn speech(&self) -> Vec<AudioFrame> {
+        (0..2)
+            .map(|index| frame(self.format, self.at + index * self.samples(), SPOKEN))
+            .collect()
+    }
+
+    /// The frame of silence after the speech.
+    #[must_use]
+    pub fn silence(&self) -> AudioFrame {
+        frame(
+            self.format,
+            self.at + 2 * self.samples(),
+            self.format.encoding.silence(),
+        )
+    }
+
+    /// The speech, then the silence.
+    #[must_use]
+    pub fn frames(&self) -> Vec<AudioFrame> {
+        let mut frames = self.speech();
+        frames.push(self.silence());
+        frames
+    }
+
+    /// The sample after the utterance's last frame, where the next utterance starts.
+    #[must_use]
+    pub fn next(&self) -> u64 {
+        self.at + 3 * self.samples()
+    }
 }
 
 impl MockSpeechModel {
@@ -267,6 +329,24 @@ impl MockSpeechModel {
         self
     }
 
+    /// The same model closing each session it opens once the script is spent and nothing is
+    /// pending: no turn left, no step of a response left, no response in progress, no reply
+    /// waiting, no tool result awaited and the user not speaking. The close is the ledger's
+    /// own, so the session yields `SpeechSessionClosed` and nothing after it.
+    #[must_use]
+    pub const fn closes(mut self) -> Self {
+        self.closes = true;
+        self
+    }
+
+    /// The same model failing each response where it would complete it, as a provider error
+    /// (`mock failure`), so the response yields `ResponseFailed` and never `ResponseCompleted`.
+    #[must_use]
+    pub const fn fails_responses(mut self) -> Self {
+        self.fails_responses = true;
+        self
+    }
+
     fn adapter_claiming(claims: Vec<Capability>) -> Adapter {
         let (adapter, _) = Adapter::declare(DeclareAdapter {
             model_id: ModelId::generate(),
@@ -295,6 +375,8 @@ impl MockSpeechModel {
             faults: Faults::default(),
             restarts: false,
             late_usage: false,
+            closes: false,
+            fails_responses: false,
             speech: SpeechReports::Heard,
         }
     }
@@ -326,6 +408,8 @@ impl NativeSpeechModel for MockSpeechModel {
             faults: self.faults,
             restarts: self.restarts,
             late_usage: self.late_usage,
+            closes: self.closes,
+            fails_responses: self.fails_responses,
             now,
             speaking: false,
             spoken: Vec::new(),
@@ -360,6 +444,8 @@ pub struct MockSpeechSession {
     faults: Faults,
     restarts: bool,
     late_usage: bool,
+    closes: bool,
+    fails_responses: bool,
     now: Instant,
     speaking: bool,
     spoken: Vec<u8>,
@@ -387,6 +473,19 @@ impl MockSpeechSession {
         self.reported = true;
         self.sent += 1;
         Ok(())
+    }
+
+    /// Whether a session of a model built with [`MockSpeechModel::closes`] is done: its script
+    /// spent, no step of a response left, no response in progress, no reply waiting, no tool
+    /// result awaited and the user not speaking.
+    fn spent(&self) -> bool {
+        self.closes
+            && self.script.is_empty()
+            && self.plan.is_empty()
+            && self.ledger.in_progress().is_none()
+            && self.pending.is_none()
+            && self.after_result.is_none()
+            && !self.speaking
     }
 
     /// Whether the model creates every response, and so answers a tool result by itself.
@@ -541,6 +640,16 @@ impl MockSpeechSession {
                     .tool_call(call_id, response_id, &tool, arguments, now)?;
             }
             Step::Usage => self.report_usage(response_id),
+            Step::Complete if self.fails_responses => {
+                self.ledger.response_failed(
+                    response_id,
+                    SessionFailure {
+                        kind: SessionFailureKind::ProviderError,
+                        detail: "mock failure".to_owned(),
+                    },
+                    now,
+                )?;
+            }
             Step::Complete => {
                 self.ledger.response_completed(response_id, now)?;
                 if self.late_usage {
@@ -658,6 +767,10 @@ impl SpeechSessionHandle for MockSpeechSession {
         if self.ledger.session().require_open().is_err() {
             return None;
         }
+        if self.spent() {
+            let _ = self.ledger.close();
+            return self.ledger.next_event();
+        }
         if self
             .faults
             .close_after
@@ -696,7 +809,7 @@ mod tests {
     use inference_duplex::conformance::{
         NativeDuplexProbe, NoNativeDuplex, native_duplex_evidence,
     };
-    use inference_duplex::inference_audio::SampleClockPosition;
+    use inference_duplex::inference_audio::{AudioFrame, SampleClockPosition};
     use inference_duplex::{
         NativeSpeechModel, OpenError, ResponseId, ResponseState, ResponseStateConflict,
         SessionConfig, SessionError, SessionEvent, SessionFailureKind, SpeechSessionHandle,
@@ -705,7 +818,7 @@ mod tests {
     use inference_tools::{DeclareTool, SideEffectClass, Tool};
     use serde_json::json;
 
-    use super::{Faults, MockSpeechModel, Reply, ScriptedTurn, frame, pcm, saying};
+    use super::{Faults, MockSpeechModel, Reply, ScriptedTurn, frame, pcm, saying, utterance};
 
     const WAIT: Duration = Duration::from_millis(100);
 
@@ -1438,6 +1551,212 @@ mod tests {
             session.ledger().session().state(),
             SpeechSessionState::Open,
             "not stalled"
+        );
+    }
+
+    /// The server-detected configuration the SDK runs the mock in: a turn ends at the silence
+    /// after speech and is answered at once, and detected speech interrupts the reply.
+    fn served() -> SessionConfig {
+        config(TurnDetection::ServerVad, true)
+    }
+
+    /// Feeds `frames` to the session.
+    fn feed(session: &mut impl SpeechSessionHandle, frames: Vec<AudioFrame>) {
+        for frame in frames {
+            session
+                .append_audio(frame)
+                .expect("input in the session's format");
+        }
+    }
+
+    fn closed(events: &[SessionEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::SpeechSessionClosed(_)))
+            .count()
+    }
+
+    /// The one utterance every SDK test feeds: two 20 ms frames of speech from its sample, one of
+    /// silence after them, and the next utterance's first sample after that.
+    #[test]
+    fn an_utterance_is_two_frames_of_speech_then_one_of_silence() {
+        let format = pcm(16_000);
+        let spoken = utterance(format, 640);
+        let speech = spoken.speech();
+        assert_eq!(speech.len(), 2);
+        assert_eq!(speech[0], frame(format, 640, 0x01));
+        assert_eq!(speech[1], frame(format, 960, 0x01));
+        assert_eq!(spoken.silence(), frame(format, 1_280, 0));
+        assert_eq!(
+            spoken.frames(),
+            vec![speech[0].clone(), speech[1].clone(), spoken.silence()]
+        );
+        assert_eq!(spoken.next(), 1_600);
+    }
+
+    /// `story:sdk-duplex-node`: a model built with `closes` closes its session once the script
+    /// is spent and nothing is pending; every later poll answers none.
+    #[test]
+    fn a_closing_mock_closes_once_its_script_is_spent() {
+        let mut model = MockSpeechModel::native(vec![turn("hello", "Hello there")]).closes();
+        let mut session = model
+            .open(served())
+            .expect("the model takes the configuration");
+        feed(&mut session, utterance(pcm(16_000), 0).frames());
+        let events = drain(&mut session);
+
+        assert_eq!(closed(&events), 1, "{events:#?}");
+        assert!(
+            matches!(events.last(), Some(SessionEvent::SpeechSessionClosed(_))),
+            "{events:#?}"
+        );
+        let completed = events
+            .iter()
+            .position(|event| matches!(event, SessionEvent::ResponseCompleted(_)))
+            .unwrap_or_else(|| panic!("the turn is answered first: {events:#?}"));
+        assert!(completed < events.len() - 1);
+        for _ in 0..3 {
+            assert_eq!(session.next_event(WAIT), None);
+        }
+        assert_eq!(
+            session.ledger().session().state(),
+            SpeechSessionState::Closed
+        );
+    }
+
+    /// `story:sdk-duplex-node`: without `closes` the spent script leaves the session open.
+    #[test]
+    fn a_mock_built_without_closes_stays_open_past_its_script() {
+        let mut model = MockSpeechModel::native(vec![turn("hello", "Hello there")]);
+        let mut session = model
+            .open(served())
+            .expect("the model takes the configuration");
+        feed(&mut session, utterance(pcm(16_000), 0).frames());
+        let mut events = drain(&mut session);
+        for _ in 0..5 {
+            events.extend(session.next_event(WAIT));
+        }
+        assert_eq!(closed(&events), 0, "{events:#?}");
+        assert_eq!(session.ledger().session().state(), SpeechSessionState::Open);
+    }
+
+    /// `story:sdk-duplex-node`: a call awaiting its result keeps a closing mock open; the reply
+    /// to the result streams and completes before the close.
+    #[test]
+    fn a_closing_mock_waits_for_the_result_of_its_last_call_and_its_reply() {
+        let mut model = MockSpeechModel::native(vec![ScriptedTurn {
+            heard: "how warm is it in Berlin".to_owned(),
+            reply: Reply::Call {
+                tool: "weather".to_owned(),
+                arguments: json!({"city": "Berlin"}),
+                then: "It is {result} degrees".to_owned(),
+            },
+        }])
+        .closes();
+        let mut session = model
+            .open(served())
+            .expect("the model takes the configuration");
+        feed(&mut session, utterance(pcm(16_000), 0).frames());
+        let mut events = drain(&mut session);
+        for _ in 0..5 {
+            events.extend(session.next_event(WAIT));
+        }
+        assert_eq!(closed(&events), 0, "{events:#?}");
+        assert_eq!(session.ledger().session().state(), SpeechSessionState::Open);
+        let call_id = events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::SpeechToolCallProposed(proposed) => Some(proposed.call_id.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the call is proposed: {events:#?}"));
+
+        session
+            .submit_tool_result(&call_id, json!(21))
+            .expect("the call awaits its result");
+        session
+            .create_response()
+            .expect("the call's response completed");
+        let answer = drain(&mut session);
+        let reply = created(&answer)[0];
+        assert_eq!(transcript(&answer, reply), "It is 21 degrees");
+        let completed = answer
+            .iter()
+            .position(|event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id == reply))
+            .unwrap_or_else(|| panic!("the reply completes: {answer:#?}"));
+        let close = answer
+            .iter()
+            .position(|event| matches!(event, SessionEvent::SpeechSessionClosed(_)))
+            .unwrap_or_else(|| panic!("the session closes after the reply: {answer:#?}"));
+        assert!(completed < close, "{answer:#?}");
+        assert_eq!(
+            session.ledger().session().state(),
+            SpeechSessionState::Closed
+        );
+    }
+
+    /// `story:sdk-duplex-node`: a barge-in at the last turn cancels the reply, and a closing mock
+    /// stays open while the user speaks.
+    #[test]
+    fn a_closing_mock_stays_open_while_the_user_barges_in_at_the_last_turn() {
+        let mut model =
+            MockSpeechModel::native(vec![turn("tell me a story", "Once upon a time")]).closes();
+        let mut session = model
+            .open(served())
+            .expect("the model takes the configuration");
+        let first = utterance(pcm(16_000), 0);
+        feed(&mut session, first.frames());
+        let mut events = Vec::new();
+        while !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::OutputTranscriptDelta(_)))
+        {
+            events.push(session.next_event(WAIT).expect("the reply plays"));
+        }
+        let reply = created(&events)[0];
+
+        feed(&mut session, utterance(pcm(16_000), first.next()).speech());
+        let mut rest = drain(&mut session);
+        for _ in 0..5 {
+            rest.extend(session.next_event(WAIT));
+        }
+        assert!(
+            rest.iter().any(|event| matches!(
+                event,
+                SessionEvent::ResponseCancelled(cancelled) if cancelled.response_id == reply
+            )),
+            "{rest:#?}"
+        );
+        assert_eq!(closed(&rest), 0, "{rest:#?}");
+        assert_eq!(session.ledger().session().state(), SpeechSessionState::Open);
+    }
+
+    /// `story:sdk-duplex-node`: a model built with `fails_responses` fails each response where
+    /// it would complete it.
+    #[test]
+    fn a_mock_that_fails_responses_fails_each_in_place_of_its_completion() {
+        let mut model =
+            MockSpeechModel::native(vec![turn("hello", "Hello there")]).fails_responses();
+        let mut session = model
+            .open(served())
+            .expect("the model takes the configuration");
+        feed(&mut session, utterance(pcm(16_000), 0).frames());
+        let events = drain(&mut session);
+        let response = created(&events)[0];
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SessionEvent::ResponseFailed(failed)
+                    if failed.response_id == response
+                        && failed.failure.kind == SessionFailureKind::ProviderError
+            )),
+            "{events:#?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::ResponseCompleted(_))),
+            "{events:#?}"
         );
     }
 
