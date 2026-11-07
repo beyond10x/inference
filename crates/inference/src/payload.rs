@@ -21,7 +21,7 @@
 //! `ToolCall…` event and a native speech model's event its `Speech…` event; a control event, a
 //! speech, turn, queued or discarded segment event, a segment's frame and a receipt have none.
 //!
-//! `Payload` is `#[non_exhaustive]`: the variant [`Payload::Receipt`] exists only with the
+//! `Payload` is `#[non_exhaustive]`: the variant `Payload::Receipt` exists only with the
 //! feature `audio-host`, and a match outside this crate ends in a wildcard arm whatever the
 //! features.
 

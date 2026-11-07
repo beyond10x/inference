@@ -1,4 +1,4 @@
-//! `inference::graph`: the pipeline's typed builder with [`Payload`](crate::Payload) fixed
+//! `inference::graph`: the pipeline's typed builder with [`Payload`] fixed
 //! (`docs/design/sdk.md` §3.4).
 //!
 //! A graph is declared with `inference-pipeline`'s typed builder, [`Builder`], into a
