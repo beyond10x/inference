@@ -45,7 +45,9 @@
 //! - the [`Credential`](crate::Credential) the source returns, zeroized on drop;
 //! - one zeroizing buffer holding `Bearer <key>`, built from the credential, which is dropped at
 //!   once. The header value is that buffer itself, not a copy of it, and the buffer is zeroized
-//!   when the HTTP client drops the request, once its head is written or the request fails;
+//!   when its last holder drops. `reqwest`'s pending request keeps a clone of the headers, which
+//!   shares that buffer, until the response head arrives, so the buffer lives that long, or until
+//!   the request fails;
 //! - the request head hyper, the HTTP client below `reqwest`, writes the header into: a buffer of
 //!   the connection that is not zeroized and is reused, so the key stays in it until the next
 //!   request on that connection overwrites it or the idle connection is closed, after 90 seconds
