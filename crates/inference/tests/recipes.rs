@@ -534,6 +534,68 @@ fn a_refused_declare_into_leaves_the_declaration_as_it_was() {
     assert_eq!(counts(&declaration), before);
 }
 
+/// A declaration holding `chat`'s pipeline, bound to the fixture's generator, and the catalog,
+/// profile and pairs to declare more into it.
+fn holding_chat() -> (Declaration, Fixture, ProfileId, Vec<(Role, AdapterId)>) {
+    let (catalog, ids) = fixture(false);
+    let profile_id = catalog.profile.profile_id();
+    let pairs = vec![(Role::Llm, ids[1])];
+    let mut declaration = Declaration::new();
+    Recipe::chat()
+        .declare_into(&mut declaration, &catalog, profile_id, &pairs, &[])
+        .expect("chat declares");
+    (declaration, catalog, profile_id, pairs)
+}
+
+#[test]
+fn a_declare_into_refused_for_an_end_or_a_role_bound_node_leaves_the_declaration_as_it_was() {
+    let (mut declaration, catalog, profile_id, pairs) = holding_chat();
+    let before = declaration.clone();
+
+    let error = Recipe::chat()
+        .expose("no such port")
+        .declare_into(&mut declaration, &catalog, profile_id, &pairs, &[])
+        .expect_err("no port carries the name");
+    assert_eq!(error.kind(), ErrorKind::Layer);
+    assert!(error.to_string().contains("no such port"), "{error}");
+    assert_eq!(declaration, before, "an end no port carries");
+
+    let error = Recipe::custom("ask-absent", InteractionMode::TurnBased, ask)
+        .role("absent", Role::Llm)
+        .declare_into(&mut declaration, &catalog, profile_id, &pairs, &[])
+        .expect_err("the declare function adds no node `absent`");
+    assert_eq!(error.kind(), ErrorKind::Layer);
+    assert!(error.to_string().contains("absent"), "{error}");
+    assert_eq!(
+        declaration, before,
+        "a role-bound node the recipe did not add"
+    );
+}
+
+#[test]
+fn a_node_given_by_a_name_the_recipe_has_no_node_for_is_refused_before_anything_is_declared() {
+    let (mut declaration, catalog, profile_id, pairs) = holding_chat();
+    let before = declaration.clone();
+    let recipe = Recipe::chat().with_node("no such node", replacement(&Log::default()));
+
+    let error = recipe
+        .declare_into(&mut declaration, &catalog, profile_id, &pairs, &[])
+        .expect_err("chat has no node of that name");
+    assert_eq!(error.kind(), ErrorKind::Layer);
+    assert!(error.to_string().contains("no such node"), "{error}");
+    assert_eq!(declaration, before);
+
+    let stack = Stack::new()
+        .bind(Binding::named(Role::Llm, "mock", BTreeMap::new()))
+        .resolve_with(&Env::new())
+        .expect("resolves");
+    let error = recipe
+        .instantiate(&stack)
+        .expect_err("instantiating refuses it too");
+    assert_eq!(error.kind(), ErrorKind::Layer);
+    assert!(error.to_string().contains("no such node"), "{error}");
+}
+
 #[test]
 fn an_extra_role_is_ignored() {
     let (catalog, ids) = fixture(false);
@@ -1218,6 +1280,187 @@ mod native {
         let closed = live.position(closed).expect("closed");
         assert!(said < closed, "{:#?}", live.seen);
     }
+
+    /// Adversary: `Instantiation::authority` is documented as the confirmation hook of every
+    /// opened `native_voice` run. Replacing the `speech` node with `with_node` leaves the run's
+    /// authority in place, yet `take_tools` hands the hook out only when the duplex node's call
+    /// ids were taken too, so a call held for confirmation can never be answered.
+    #[test]
+    fn adversary_native_voice_with_its_speech_node_replaced_keeps_its_confirmation_hook() {
+        let stack = stack();
+        let log = super::Log::default();
+        let (recipe, _) = with_lookup(true);
+        let mut instantiation = recipe
+            .with_node("speech", super::replacement(&log))
+            .instantiate(&stack)
+            .expect("native voice plans with its speech node replaced");
+        let sessions = LiveSessions::new();
+        let opened = block_on(instantiation.open(&stack, &sessions));
+        assert!(opened.is_ok(), "the run opens: {:?}", opened.as_ref().err());
+        assert_eq!(super::logged(&log), ["speech", "started"]);
+        assert!(
+            instantiation.authority().is_some(),
+            "the opened native_voice run's authority has no hook, though its authority node runs"
+        );
+    }
+
+    /// Adversary: closing a live `native_voice` session while a call is still held for
+    /// confirmation. Nothing answers the held call, so the authority waits for it, the duplex
+    /// node waits for `tool_result` to end, and the close never returns.
+    #[test]
+    fn adversary_closing_with_a_held_call_unanswered_ends() {
+        let (instantiation, mut live, runs, _) = held();
+        let (done, closed) = mpsc::channel();
+        std::thread::spawn(move || {
+            let took = live.close();
+            let _ = done.send(took);
+        });
+        match closed.recv_timeout(Duration::from_secs(15)) {
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "closing a native_voice session with a call held unanswered does not end within 15 s"
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the close panicked; see the thread's output")
+            }
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "a held call does not run");
+        drop(instantiation);
+    }
+
+    #[test]
+    fn closing_with_a_held_call_unanswered_rejects_it_denied() {
+        use inference::pipeline::nodes::AuthorityOutcome;
+        use inference::tools::RejectionReason;
+
+        let (instantiation, mut live, runs, call_id) = held();
+        let (done, closed) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(live.close());
+        });
+        let took = closed
+            .recv_timeout(Duration::from_secs(15))
+            .expect("the close ends within 15 s");
+        assert!(took <= Duration::from_secs(5), "the close took {took:?}");
+        let authority = instantiation.authority().expect("the run's authority");
+        assert!(authority.held().is_empty(), "{:#?}", authority.held());
+        let rejected: Vec<RejectionReason> = authority
+            .decisions()
+            .into_iter()
+            .filter(|decision| decision.call.call_id() == call_id)
+            .filter_map(|decision| match decision.outcome {
+                AuthorityOutcome::Rejected(rejected) => Some(rejected.reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rejected, [RejectionReason::Denied]);
+        assert!(
+            !authority.confirm(call_id),
+            "a call the close denied is not confirmed"
+        );
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "a call the close denied does not run"
+        );
+    }
+
+    /// With its `authority` node replaced, `native_voice` builds no authority of its own: the
+    /// executor answers to none and the run has no confirmation hook.
+    #[test]
+    fn native_voice_with_its_authority_replaced_has_no_confirmation_hook() {
+        let stack = stack();
+        let log = super::Log::default();
+        let (recipe, _) = with_lookup(true);
+        let mut instantiation = recipe
+            .with_node("authority", super::replacement(&log))
+            .instantiate(&stack)
+            .expect("native voice plans with its authority replaced");
+        let sessions = LiveSessions::new();
+        let opened = block_on(instantiation.open(&stack, &sessions));
+        assert!(opened.is_ok(), "the run opens: {:?}", opened.as_ref().err());
+        assert!(instantiation.authority().is_none());
+        assert!(instantiation.call_ids().is_some());
+    }
+}
+
+/// Adversary: `Recipe::chat().expose("committed_text")` exposes the agent's output port a second
+/// time, beside its own `assistant_text` exposure of that port. `expose` promises "that exposed
+/// end and nothing else": the reply still arrives once and the run completes.
+#[test]
+fn adversary_exposing_an_exposed_port_under_its_port_name_keeps_one_reply() {
+    use inference::Payload;
+    use inference::core::envelope::{EventEnvelope, EventId, Timebase};
+    use inference::core::id::{NodeId, StreamId};
+    use inference::facade::events::SessionEvent;
+    use inference::facade::live::LiveSessions;
+    use inference::pipeline::nodes::log::StreamEvent;
+    use inference::runtime::run::RunState;
+    use inference::text::{SpanId, TranscriptCommitted};
+
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let stack = Stack::new()
+            .bind(Binding::named(Role::Llm, "mock", BTreeMap::new()))
+            .resolve_with(&Env::new())
+            .expect("resolves");
+        let mut instantiation = Recipe::chat()
+            .expose("committed_text")
+            .instantiate(&stack)
+            .expect("chat plans with the port exposed under its own name too");
+        let sessions = LiveSessions::new();
+        let (mut session, driver) =
+            block_on(instantiation.open(&stack, &sessions)).expect("the run opens");
+        let run_id = session.run_id();
+        let (ran, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = ran.send(block_on(driver.drive()));
+        });
+        let event = StreamEvent::TranscriptCommitted(TranscriptCommitted {
+            span_id: SpanId::generate(),
+            text: "hello".to_owned(),
+        });
+        let envelope = EventEnvelope {
+            schema_version: 1,
+            event_id: EventId::generate(),
+            run_id,
+            session_id: None,
+            stream_id: StreamId::generate(),
+            sequence: 1,
+            producer: NodeId::generate(),
+            port: "user_input".to_owned(),
+            kind: event.name().to_owned(),
+            generation_id: None,
+            timestamp: 0,
+            timebase: Timebase::WallTime,
+            causation_id: None,
+            payload: Payload::Stream(event),
+        };
+        block_on(session.send(envelope)).expect("sent");
+        block_on(session.commit_input()).expect("committed");
+        block_on(session.close()).expect("a Ready session drains");
+        let mut received = Vec::new();
+        while let Some(event) = block_on(session.receive()) {
+            received.push(event);
+        }
+        let run = ended
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the run ends within 20 s")
+            .expect("the run ends");
+        let reply: String = received
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::TextDelta(delta) => Some(delta.text.clone()),
+                _ => None,
+            })
+            .collect();
+        let _ = done.send((run.state(), reply, format!("{received:#?}")));
+    });
+    let (state, reply, received) = finished
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the case finishes within 30 s without panicking");
+    assert_eq!(state, RunState::Completed, "{received}");
+    assert_eq!(reply, "Hello from the mock", "{received}");
 }
 
 /// A node implementation that records, in the log it shares, that it started, and at its drain

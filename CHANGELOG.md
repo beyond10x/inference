@@ -13,8 +13,10 @@
 - `inference`: `Recipe::with_node(name, impl Fn(RunId, &Node) -> Implementation)` replaces the
   implementation of the node `name` in each run, the node keeping its role and its binding, and
   `Recipe::expose(name)` exposes the one port of that name as an exposed end of the same name at
-  the recipe's exposure capacity under `OverloadPolicy::Pause`, an end already exposed under the
-  name not twice.
+  the recipe's exposure capacity under `OverloadPolicy::Pause`, a port already exposed, under
+  that name or another, not twice. `Recipe::declare_into` refuses a `with_node` name the
+  pipeline has no node of with `Error::Layer` naming it, and every refusal of `declare_into`
+  leaves the caller's declaration as it was.
 - `inference`: `Instantiation::open(&mut self, &Stack, &LiveSessions)`, which opens a live
   session over the planned pipeline in the recipe's interaction mode, each role-bound node built
   for that run over its role's binding and every other node by the recipe, and returns the
@@ -29,8 +31,10 @@
   tool loop (`MAX_TOOL_ITERATIONS`) and its executor runs each authorized call on the executor
   given for the call's tool, each within 30 s; every rejected or failed call is answered to the
   model under its own call id. `Instantiation::authority()` is the run's confirmation hook
-  (`AuthorityHandle`: `held`, `confirm`, `deny`) and `Instantiation::call_ids()` the model's call
-  id of each proposed call (`CallIds`).
+  (`AuthorityHandle`: `held`, `confirm`, `deny`), none when `with_node` replaced the node
+  `authority`, and `Instantiation::call_ids()` the model's call id of each proposed call
+  (`CallIds`), none when `with_node` replaced the node `speech`. Closing the run rejects every
+  call still held for confirmation `denied`, so the close ends.
 - `inference-pipeline`: `AuthorityHandle::close()`, which rejects every call the tool authority
   holds for confirmation, and every one it would hold from then on, `denied`, so that its drain
   ends with no host answer; `confirm` and `deny` answer false from then on.

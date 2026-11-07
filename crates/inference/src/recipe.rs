@@ -244,7 +244,7 @@ impl Recipe {
     /// recipe's topology is unchanged, and a role-bound node keeps its role and its binding, so
     /// instantiating still needs that role bound. A name the recipe has no role for, such as a
     /// node an application recipe's declare function adds, has no role. A name given earlier is
-    /// replaced.
+    /// replaced. Declaring refuses a name the recipe's pipeline has no node of.
     #[must_use]
     pub fn with_node(
         mut self,
@@ -260,9 +260,9 @@ impl Recipe {
     }
 
     /// Exposes the port `name` as an exposed end of the same name, at the recipe's exposure
-    /// capacity under `OverloadPolicy::Pause`, beside the recipe's own exposures. An end the
-    /// recipe already exposes under that name is not exposed twice. Declaring refuses a name no
-    /// port of the recipe's pipeline carries, or more than one does.
+    /// capacity under `OverloadPolicy::Pause`, beside the recipe's own exposures. A port the
+    /// recipe already exposes, under that name or another, is not exposed twice. Declaring
+    /// refuses a name no port of the recipe's pipeline carries, or more than one does.
     #[must_use]
     pub fn expose(mut self, name: &str) -> Self {
         if !self.exposed.iter().any(|given| given == name) {
@@ -397,10 +397,10 @@ impl Recipe {
     /// [`Error::Layer`], with `declaration` unchanged: when `catalog` holds no profile
     /// `profile_id` (its source [`ProfileNotFound`]), when a role the recipe needs has no pair
     /// (the first in role order, no source), or when `catalog` holds no adapter a needed pair
-    /// names (its source [`AdapterNotFound`]). [`Error::Layer`] too when an application recipe's
-    /// declare function fails or names a role-bound node it did not add, and when a name given
-    /// to [`Recipe::expose`] is carried by no port of the pipeline or by more than one, which
-    /// leaves what it declared.
+    /// names (its source [`AdapterNotFound`]); when an application recipe's declare function
+    /// fails or adds no node a role binds; when a name given to [`Recipe::expose`] is carried by
+    /// no port of the pipeline or by more than one; and when a name given to
+    /// [`Recipe::with_node`] is no node of the pipeline, naming it.
     pub fn declare_into(
         &self,
         declaration: &mut Declaration,
@@ -440,9 +440,24 @@ impl Recipe {
             }
             bound.push((node.as_str(), *adapter_id));
         }
-        let pipeline_id = self.declare(declaration, catalog, profile_id, requires)?;
+        let mut declaring = declaration.clone();
+        let pipeline_id = self.declare(&mut declaring, catalog, profile_id, requires)?;
+        if let Some((name, _)) = self.nodes.iter().find(|(name, _)| {
+            !declaring
+                .nodes()
+                .any(|declared| declared.pipeline_id() == pipeline_id && declared.name() == name)
+        }) {
+            return Err(Error::Layer {
+                message: format!(
+                    "the recipe `{}` is given an implementation for the node `{name}`, and it has \
+                     no node of that name: give it for one of its nodes",
+                    self.name
+                ),
+                source: None,
+            });
+        }
         for (node, adapter_id) in bound {
-            let node_id = declaration
+            let node_id = declaring
                 .nodes()
                 .find(|declared| declared.pipeline_id() == pipeline_id && declared.name() == node)
                 .map(inference_pipeline::Node::node_id)
@@ -453,7 +468,7 @@ impl Recipe {
                     ),
                     source: None,
                 })?;
-            declaration
+            declaring
                 .bind_node(
                     BindNode {
                         pipeline_id,
@@ -464,6 +479,7 @@ impl Recipe {
                 )
                 .map_err(|error| layer(&error.to_string(), error))?;
         }
+        *declaration = declaring;
         Ok(pipeline_id)
     }
 
@@ -581,7 +597,7 @@ impl Recipe {
     }
 
     /// Exposes the one port named `name` of `pipeline_id` under that name, unless the pipeline
-    /// already has an exposure of that name.
+    /// already has an exposure of that name or of that port, under any name.
     fn expose_into(
         &self,
         declaration: &mut Declaration,
@@ -611,6 +627,12 @@ impl Recipe {
                 source: None,
             });
         };
+        if declaration
+            .exposures()
+            .any(|exposure| pipeline(exposure.pipeline_id()) && exposure.port_id() == port_id)
+        {
+            return Ok(());
+        }
         declaration
             .expose_port(ExposePort {
                 pipeline_id,
@@ -649,8 +671,8 @@ pub struct Instantiation {
 /// The tool handles of the run [`Instantiation::open`] opened last.
 #[derive(Debug, Clone)]
 struct Tools {
-    authority: AuthorityHandle,
-    call_ids: CallIds,
+    authority: Option<AuthorityHandle>,
+    call_ids: Option<CallIds>,
 }
 
 impl Instantiation {
@@ -793,17 +815,23 @@ impl Instantiation {
 
     /// The confirmation hook of the tool authority of the run [`Instantiation::open`] opened
     /// last: a call of a tool that requires confirmation is held until it confirms or denies
-    /// it. None before a run opened and for every recipe but `native_voice`.
+    /// it. None before a run opened, for every recipe but `native_voice`, and when
+    /// [`Recipe::with_node`] replaced its node `authority`.
     #[must_use]
     pub fn authority(&self) -> Option<&AuthorityHandle> {
-        self.tools.as_ref().map(|tools| &tools.authority)
+        self.tools
+            .as_ref()
+            .and_then(|tools| tools.authority.as_ref())
     }
 
     /// The model's own call id of each call the duplex node of the run [`Instantiation::open`]
-    /// opened last proposed. None before a run opened and for every recipe but `native_voice`.
+    /// opened last proposed. None before a run opened, for every recipe but `native_voice`, and
+    /// when [`Recipe::with_node`] replaced its node `speech`.
     #[must_use]
     pub fn call_ids(&self) -> Option<&CallIds> {
-        self.tools.as_ref().map(|tools| &tools.call_ids)
+        self.tools
+            .as_ref()
+            .and_then(|tools| tools.call_ids.as_ref())
     }
 }
 
