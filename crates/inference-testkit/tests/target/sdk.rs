@@ -122,7 +122,7 @@ pub struct Instantiated {
 
 /// One event of `inference.sdk`, in the order the module recorded them.
 pub enum Recorded {
-    Resolved(Resolved),
+    Resolved(Box<Resolved>),
     Registered(Registered),
     Instantiated(Instantiated),
 }
@@ -522,7 +522,7 @@ fn resolve_stack(
                 bindings,
             };
             let event = stack_resolved(&resolved)?.in_activity(request.correlation.clone());
-            state.recorded.push(Recorded::Resolved(resolved));
+            state.recorded.push(Recorded::Resolved(Box::new(resolved)));
             Ok(SemanticCommandResult::took(outcome("resolved")).emitting(event))
         }
         (Some("locality-denied"), Ok(stack)) => {
