@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-agent
 kind: story
-status: draft
+status: active
 title: Agent runs a recipe as one session with one Event stream, devices wiring and escape methods
 relations:
 - decomposes: epic:sdk
@@ -38,7 +38,10 @@ scope:
   path: crates/inference/tests/agent.rs
 - confidence: cited
   path: crates/inference/tests/compile_fail
-revision: 34
+revision: 36
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-07T17:59:56Z", actor: "human:timo", revision: 35, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-07T17:59:56Z", actor: "human:timo", revision: 36, decided_on: {"recorded":{"approval":1}}}
 ---
 ## Context
 
