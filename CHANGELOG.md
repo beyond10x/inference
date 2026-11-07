@@ -18,6 +18,11 @@
 
 ### Added
 
+- `inference`: `Recipe::instructions(text)` gives every request of the recipe's generator those
+  instructions, `chat`'s and `voice_cascade`'s; `AgentBuilder::instructions` now reaches them
+  too, besides the speech session's config. `inference-pipeline`: `ModelNode::with_instructions`
+  and `AgentNode::with_instructions`. `inference-testkit`: `MockGenerator::instructions()` reads
+  the instructions each model request carried.
 - `inference`: `Recipe::with_node(name, impl Fn(RunId, &Node) -> Implementation)` replaces the
   implementation of the node `name` in each run, the node keeping its role and its binding, and
   `Recipe::expose(name)` exposes the one port of that name as an exposed end of the same name at

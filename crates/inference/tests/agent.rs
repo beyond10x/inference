@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+use inference::core::model::ModelId;
 use inference::duplex::SpeechCallId;
 use inference::facade::events::SessionEvent;
 use inference::facade::live::LiveSession;
@@ -19,6 +20,7 @@ use inference::{Agent, Binding, BindingSource, Description, Event, Payload, Role
 use inference_testkit::duplex::mock::{
     MockHistory, MockSpeechModel, Reply, ScriptedTurn, pcm, utterance,
 };
+use inference_testkit::llm::{MockConfiguration, MockGenerator};
 use serde_json::json;
 
 const LIMIT: Duration = Duration::from_secs(5);
@@ -313,6 +315,65 @@ async fn a_text_agent_says_the_generators_text() {
     agent.commit().await.expect("committed");
     let seen = read_until(&mut events, "Said").await;
     assert!(names(&seen).contains(&"Said"), "{seen:#?}");
+    agent.close().await.expect("closes");
+}
+
+fn instructed_generator() -> MockGenerator {
+    MockGenerator::new(
+        MockConfiguration::StreamingAndConcurrentInput,
+        ModelId::generate(),
+        ["fine"],
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_builders_instructions_reach_the_chat_generators_request() {
+    let generator = instructed_generator();
+    let stack = Stack::new().bind(Binding::llm(generator.clone()));
+    let agent = Agent::text()
+        .stack(stack)
+        .instructions("answer briefly")
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    agent.send_text("hello").await.expect("sent");
+    agent.commit().await.expect("committed");
+    let seen = read_until(&mut events, "Said").await;
+    let instructions = generator.instructions();
+    assert!(!instructions.is_empty(), "{seen:#?}");
+    assert!(
+        instructions.iter().all(|given| given == "answer briefly"),
+        "{instructions:?}"
+    );
+    agent.close().await.expect("closes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_builders_instructions_reach_the_cascade_generators_request() {
+    let generator = instructed_generator();
+    let stack = Stack::new()
+        .bind(Binding::named(Role::Stt, "mock", BTreeMap::new()))
+        .bind(Binding::llm(generator.clone()))
+        .bind(Binding::named(Role::Tts, "mock", BTreeMap::new()));
+    let agent = Agent::voice()
+        .stack(stack)
+        .instructions("answer briefly")
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    for frame in inference_testkit::stt::synthetic_audio::tone_silence_tone_silence() {
+        agent.send_audio(frame).await.expect("sent");
+    }
+    agent.commit().await.expect("committed");
+    let seen = read_until(&mut events, "Said").await;
+    let instructions = generator.instructions();
+    assert!(!instructions.is_empty(), "{seen:#?}");
+    assert!(
+        instructions.iter().all(|given| given == "answer briefly"),
+        "{instructions:?}"
+    );
     agent.close().await.expect("closes");
 }
 

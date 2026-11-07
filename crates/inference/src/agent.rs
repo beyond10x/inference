@@ -714,7 +714,7 @@ impl ToolExecutor for SharedExecutor {
 enum Choice {
     Voice,
     Text,
-    Recipe(Recipe),
+    Recipe(Box<Recipe>),
 }
 
 /// The stack of a builder: as given or bound, resolved once.
@@ -825,7 +825,7 @@ impl AgentBuilder {
         self
     }
 
-    /// The instructions of the speech session.
+    /// The instructions of the speech session and of every request of the generator.
     #[must_use]
     pub fn instructions(mut self, instructions: impl Into<String>) -> Self {
         self.instructions = Some(instructions.into());
@@ -889,7 +889,7 @@ impl AgentBuilder {
             Choice::Voice if stack.adapter(Role::Speech).is_some() => Recipe::native_voice(),
             Choice::Voice => Recipe::voice_cascade(),
             Choice::Text => Recipe::chat(),
-            Choice::Recipe(recipe) => recipe.clone(),
+            Choice::Recipe(recipe) => (**recipe).clone(),
         };
         let recipe = if self.tools.is_empty() {
             recipe
@@ -899,6 +899,10 @@ impl AgentBuilder {
                     Box::new(SharedExecutor(Arc::clone(executor)));
                 (tool.clone(), executor)
             }))
+        };
+        let recipe = match &self.instructions {
+            Some(instructions) => recipe.instructions(instructions.clone()),
+            None => recipe,
         };
         let config = stack.adapter(Role::Speech).is_some().then(|| {
             let mut config = self.session_config.clone().unwrap_or_else(|| {
@@ -1094,7 +1098,7 @@ impl Agent {
     /// An agent over `recipe`.
     #[must_use]
     pub fn from_recipe(recipe: Recipe) -> AgentBuilder {
-        AgentBuilder::new(Choice::Recipe(recipe))
+        AgentBuilder::new(Choice::Recipe(Box::new(recipe)))
     }
 
     /// The event stream. The first call takes the receiver made when the session opened, so it
