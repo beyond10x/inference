@@ -8,13 +8,16 @@
   (`nodes::{stt, llm, agent, tts, speech}`) and the `inference.stream` events and run log they
   record into (`nodes::log`: `StreamEvent`, `EventLog`, `EnvelopeRefusal`, `RunLog`);
   `inference-testkit` re-exports them under their old paths. `ModelNode::new` is generic over the
-  payload. `inference-pipeline` depends on `inference-stt`, `inference-llm` (feature `tools`) and
-  `inference-tts`.
+  payload. Each node family is behind an `inference-pipeline` feature: `stt` (`nodes::stt`), `llm`
+  (`nodes::llm`, `nodes::agent`), `tts` (`nodes::tts`, `nodes::speech`) and `duplex`
+  (`nodes::duplex`); a direct dependent turns on the ones it uses. `inference-testkit`'s features
+  of the same names and the `inference` crate turn them on.
 - `inference-pipeline`: `TtsNode` takes a second type parameter, the host's `PlaybackSink`
   (`NoPlayback` by default); `TtsNode::playing_through(sink)` plays through a sink the host
   supplies. The testkit's `TtsNode` plays through its `MockSink`.
 - `inference-facade`: `SessionEvent` gains `SpeechStarted`, `SpeechResponseFailed`,
   `SpeechSessionClosed` and `SpeechSessionFailed`.
+- `inference`: `Error::StackFile` carries a `source`, the typed refusal behind it.
 
 ### Added
 
@@ -26,7 +29,7 @@
   names, `./inference.toml`, `$XDG_CONFIG_HOME/inference/inference.toml`), in that order, under a
   deployment profile that defaults to `offline_strict`; applications register their own adapters
   with `Registry::register`, and resolving opens no connection, credential or checkpoint.
-- `inference-pipeline`: `DuplexNode` runs a native speech model as a graph node; each committed
+- `inference-pipeline` (feature `duplex`): `DuplexNode` runs a native speech model as a graph node; each committed
   turn is its own tool calls' basis.
 - `inference-sherpa-onnx`, `inference-whispercpp`: `open_declared` opens a recogniser under a
   model and adapter declared earlier.
