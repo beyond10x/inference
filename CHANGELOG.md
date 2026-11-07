@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.25.0] — 2026-11-07
+
+### Breaking
+
+- `inference-pipeline`: the tool authority admits `format` as an annotation and validates
+  `minimum` and `maximum`, refusing a number outside the bound as `schema_invalid`; an annotation
+  in a form other than JSON Schema's fails preparation (`title`, `description`, `format`,
+  `$schema`, `$id` and `$comment` must be strings, `examples` an array).
+- `inference-pipeline`: `PortTraits::of(Modality)` gives each modality's default traits, and
+  `PipelineBuilder::input_port` and `output_port` use them; `input` and `output` keep explicit
+  traits.
+- The hosted adapters (Cartesia, Deepgram, Deepslate, ElevenLabs, OpenAI, Phonic) refuse an empty
+  or blank API key as `Credential(Invalid)` before any connection.
+
+### Added
+
+- `inference::Payload`: one shared payload over every modality the workspace's nodes speak,
+  including the duplex session events and usage, so an application declares no payload enum of
+  its own; `inference::graph` re-exports the typed builder with `Payload` fixed.
+- `#[inference::tool]` expands: it replaces an `async fn` by a function of the same name that
+  returns the `(Tool, Box<dyn ToolExecutor>)` pair, named after the function (without `r#`),
+  described by its doc comment, with the JSON schema of its arguments. `effect = "…"` sets the
+  side-effect class and `confirm` requires confirmation. `#[inference::main]` expands.
+- `inference-tools`: `IntoTool`, implemented for the tool pair and for any `FnOnce()` returning it.
+
+### Security
+
+- The hosted adapters build the auth header over the zeroizing key buffer, so the header holds no
+  other copy of the key, and each crate's documentation names every remaining copy.
+
+### Changed
+
+- The CI and the testkit's `ess-conformance` and `ess-primitives` move to `ess` 0.90.0.
+
 ## [0.24.0] — 2026-11-07
 
 ### Breaking

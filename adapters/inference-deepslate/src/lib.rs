@@ -25,6 +25,24 @@
 //! trace level under targets beginning with `tungstenite`; an embedder that installs a logger
 //! keeps those targets below trace. `ws://` is taken only to a loopback host.
 //!
+//! The key is copied only where the handshake needs it, and no field of the binding holds it past
+//! the handshake. Every copy:
+//!
+//! - the [`Credential`] the source returns, zeroized on drop;
+//! - for each handshake, one zeroizing buffer holding `Bearer <key>`, built from the credential,
+//!   which is dropped at once. The `Authorization` header value is that buffer itself, not a copy
+//!   of it, and the buffer is zeroized when tungstenite has turned the request into bytes, or
+//!   when the handshake fails first;
+//! - those bytes: tungstenite, the WebSocket library, writes the request, header included, into a
+//!   buffer of its own that it frees without zeroizing once the request is sent, and the smaller
+//!   buffers that one outgrew while being written may hold part of it too. The binding cannot
+//!   reach them short of a WebSocket client of its own. They are freed memory of this process
+//!   until the allocator reuses it, which matters only to someone who can already read this
+//!   process's memory or a core dump of it, and the binding accepts that;
+//! - for `wss://`, the TLS record rustls copies the request into and encrypts in place, so what it
+//!   keeps is ciphertext;
+//! - the trace-level log record named above, when a logger lets it through.
+//!
 //! The live check is `tests/live.rs`, behind feature `live` and ignored: with a key in
 //! `DEEPSLATE_API_KEY` (or the keychain), the vendor and organization in `DEEPSLATE_VENDOR_ID`
 //! and `DEEPSLATE_ORGANIZATION_ID` and a hosted voice in `DEEPSLATE_VOICE_ID`,

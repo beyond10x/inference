@@ -2,13 +2,43 @@
 format: aep.planning-md/3
 id: story:api-key-copies-in-handshakes
 kind: story
-status: draft
+status: implemented
 title: Hosted WebSocket adapters limit and document the copies of the API key
 tags:
 - from-finding
 relations:
 - informed_by: review-result:security-deepgram-stt-pass-1
-revision: 1
+- serves: vision:inference
+scope:
+- confidence: inferred
+  path: adapters/inference-cartesia/src/connection.rs
+- confidence: inferred
+  path: adapters/inference-cartesia/src/lib.rs
+- confidence: inferred
+  path: adapters/inference-deepgram/src/connection.rs
+- confidence: inferred
+  path: adapters/inference-deepgram/src/lib.rs
+- confidence: inferred
+  path: adapters/inference-deepslate/src/connection.rs
+- confidence: inferred
+  path: adapters/inference-deepslate/src/lib.rs
+- confidence: inferred
+  path: adapters/inference-elevenlabs/src/connection.rs
+- confidence: inferred
+  path: adapters/inference-elevenlabs/src/lib.rs
+- confidence: inferred
+  path: adapters/inference-openai/src/client.rs
+- confidence: inferred
+  path: adapters/inference-openai/src/lib.rs
+- confidence: inferred
+  path: adapters/inference-phonic/src/duplex.rs
+- confidence: inferred
+  path: adapters/inference-phonic/src/lib.rs
+revision: 16
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-07T09:15:07Z", actor: "human:timo", revision: 14, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-07T09:15:07Z", actor: "human:timo", revision: 15, decided_on: {"recorded":{"approval":1}}}
+- {from: "active", to: "implemented", at: "2026-11-07T10:41:18Z", actor: "human:timo", revision: 16, decided_on: {"recorded":{"test_result":1,"approval":1,"review_outcome":1}}}
 ---
 ## Context
 

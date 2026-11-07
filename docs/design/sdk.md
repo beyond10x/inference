@@ -117,6 +117,8 @@ async fn main(host: impl AudioHost, stack: Stack) {
 That is T1: fifteen counted lines, the non-blank, non-comment lines of the text above in rustfmt's
 layout (the `use` line, four of the tool, ten of `main` with its attribute). Without the tool, and
 with the agent built in one line (`Agent::voice_with(stack).start().await?`), seven.
+`.tool(local_time)` passes the function `#[inference::tool]` emits; `Agent::tool` takes `impl
+IntoTool` (§5), which that function implements, as does the pair it returns.
 
 `#[inference::main]` turns that function into the program. The body declares no return type; the
 macro makes it return `inference::Result<()>` and appends `Ok(())` (under
@@ -386,8 +388,12 @@ credentials and no network.
 `#[inference::tool]` on an `async fn` whose arguments are `Deserialize` and whose return is
 `Serialize` (or `Result<_, E: Display>`) produces an `inference_tools::Tool` (name from the function,
 description from its doc comment, JSON schema from the arguments) and a `ToolExecutor`. The
-proc-macro lives in `inference-macros`; it replaces the function by a unit struct of the same name
-that converts into the `(Tool, Box<dyn ToolExecutor>)` pair `Agent::tool` takes. Tool authority
+proc-macro lives in `inference-macros`; it replaces the function by a function of the same name
+that takes nothing and returns the `(Tool, Box<dyn ToolExecutor>)` pair. `Agent::tool` takes
+`impl inference::tools::IntoTool`, which the pair and every `FnOnce() -> (Tool, Box<dyn
+ToolExecutor>)` implement, so `.tool(local_time)` and `.tool(local_time())` are the same tool.
+The schema inlines every non-recursive subschema; a recursive argument keeps `$defs` and `$ref`,
+which the tool authority refuses when it prepares. Tool authority
 and effects stay as the workspace enforces them (O3 of `vision:inference`): a macro tool is
 `read_only` unless it says `#[inference::tool(effect = "idempotent_write")]` or
 `"non_idempotent_write"`, the classes of `SideEffectClass` (`crates/inference-tools/src/lib.rs:67`),
@@ -421,6 +427,7 @@ async fn answers_the_time() {
 ```
 
 The tool is defined in the test and returns a fixed string, so the test needs no clock crate.
+`.tool(time_of_day)` passes the function the macro emits, an `IntoTool` (§5).
 `assert_events!` awaits: it reads the next events from the stream it is given, one per pattern, so it
 is used inside an `async` test and the `.await` is in its expansion, not at the call site. It
 checks each event's variant and compares each named field with `==`, so a `String` field such as

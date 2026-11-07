@@ -53,6 +53,25 @@
 //! trace level under targets beginning with `tungstenite`; an embedder that installs a logger
 //! keeps those targets below trace.
 //!
+//! The key is copied only where the handshake needs it, and no field of the binding holds it past
+//! the handshake. Every copy:
+//!
+//! - the [`Credential`] the source returns, zeroized on drop. The `xi-api-key` header value is the
+//!   credential's own buffer, not a copy of it, and the buffer is zeroized when tungstenite has
+//!   turned the request into bytes, or when the handshake fails or times out first;
+//! - those bytes: tungstenite, the WebSocket library, writes the request, header included, into a
+//!   buffer of its own that it frees without zeroizing once the request is sent, and the smaller
+//!   buffers that one outgrew while being written may hold part of it too. The binding cannot
+//!   reach them short of a WebSocket client of its own. They are freed memory of this process
+//!   until the allocator reuses it, which matters only to someone who can already read this
+//!   process's memory or a core dump of it, and the binding accepts that;
+//! - for `wss://`, the TLS record rustls copies the request into and encrypts in place, so what it
+//!   keeps is ciphertext;
+//! - the trace-level log record named above, when a logger lets it through.
+//!
+//! The Agents Platform binding takes no key: a private agent's signed URL carries a token of its
+//! own, held as `agent::SignedUrl` (feature `duplex`) describes.
+//!
 //! The live check is an example, never a test: with a key with text-to-speech access in
 //! `ELEVENLABS_API_KEY` (or the keychain) and a voice in `ELEVENLABS_VOICE_ID`,
 //! `cargo run -p inference-elevenlabs --features live --example live` speaks one short utterance

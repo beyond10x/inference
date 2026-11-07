@@ -39,6 +39,24 @@
 //! feature `keychain`, `KeychainSource` reads the OS keychain). It is resolved for every request,
 //! sent in its `Authorization` header, marked sensitive, and never kept, printed, logged or put
 //! in an error.
+//!
+//! No field of the binding holds the key. Every copy, for each request:
+//!
+//! - the [`Credential`](crate::Credential) the source returns, zeroized on drop;
+//! - one zeroizing buffer holding `Bearer <key>`, built from the credential, which is dropped at
+//!   once. The header value is that buffer itself, not a copy of it, and the buffer is zeroized
+//!   when its last holder drops. `reqwest`'s pending request keeps a clone of the headers, which
+//!   shares that buffer, until the response head arrives, so the buffer lives that long, or until
+//!   the request fails;
+//! - the request head hyper, the HTTP client below `reqwest`, writes the header into: a buffer of
+//!   the connection that is not zeroized and is reused, so the key stays in it until the next
+//!   request on that connection overwrites it or the idle connection is closed, after 90 seconds
+//!   by default, and the smaller buffers it outgrew may hold part of it too. The binding cannot
+//!   reach that buffer short of an HTTP client of its own; it is memory of this process, which
+//!   matters only to someone who can already read this process's memory or a core dump of it,
+//!   and the binding accepts that;
+//! - for `https://`, the TLS record rustls copies the head into and encrypts in place, so what it
+//!   keeps is ciphertext.
 
 mod config;
 pub mod protocol;
@@ -61,7 +79,6 @@ use inference_tts::{
     PlaybackRefused, SynthesisEvent, SynthesisHandle, SynthesisOutput, Synthesiser, UtteranceEnded,
 };
 use reqwest::header::{AUTHORIZATION, HeaderValue};
-use zeroize::Zeroizing;
 
 pub use config::{
     DEFAULT_MODEL, DEFAULT_URL, MAX_SPEED, MIN_SPEED, SpeechConfig, SpeechConfigError,
@@ -69,7 +86,7 @@ pub use config::{
 };
 pub use protocol::MAX_INPUT_CHARACTERS;
 
-use crate::credential::{CredentialError, CredentialSource, EnvironmentSource, OPENAI_KEY_NAME};
+use crate::credential::{CredentialSource, EnvironmentSource, OPENAI_KEY_NAME};
 use transcode::Transcoder;
 
 /// The backend name of the adapter record.
@@ -472,14 +489,9 @@ async fn authorization(
         .resolve(name)
         .await
         .map_err(SpeechError::Credential)?;
-    let mut bearer = Zeroizing::new(Vec::with_capacity(7 + resolved.expose().len()));
-    bearer.extend_from_slice(b"Bearer ");
-    bearer.extend_from_slice(resolved.expose());
-    drop(resolved);
-    let mut header = HeaderValue::from_bytes(&bearer)
-        .map_err(|_| SpeechError::Credential(CredentialError::Invalid))?;
-    header.set_sensitive(true);
-    Ok(header)
+    resolved
+        .into_header(b"Bearer ")
+        .map_err(SpeechError::Credential)
 }
 
 /// `future`'s output, or `None` when `bound` passes first. A bound too large for an `Instant` is

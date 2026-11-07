@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-payload
 kind: story
-status: draft
+status: implemented
 title: One shared Payload type and defaulted port traits replace per-application payload enums
 relations:
 - decomposes: epic:sdk
@@ -23,7 +23,11 @@ scope:
   path: examples/local-voice-cascade/Cargo.toml
 - confidence: inferred
   path: examples/local-voice-cascade/src/lib.rs
-revision: 15
+revision: 18
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-07T09:14:54Z", actor: "human:timo", revision: 16, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-07T09:14:54Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"approval":1}}}
+- {from: "active", to: "implemented", at: "2026-11-07T10:41:17Z", actor: "human:timo", revision: 18, decided_on: {"recorded":{"test_result":1,"approval":1,"review_outcome":1}}}
 ---
 ## Context
 
