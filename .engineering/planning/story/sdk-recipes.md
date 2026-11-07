@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-recipes
 kind: story
-status: draft
+status: active
 title: Five named recipes declare, validate and plan a pipeline over a stack
 relations:
 - decomposes: epic:sdk
@@ -31,7 +31,10 @@ scope:
   path: crates/inference/tests/recipes.rs
 - confidence: inferred
   path: ess/domains/sdk.yaml
-revision: 23
+revision: 25
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-07T10:22:06Z", actor: "human:operator", revision: 24, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-07T10:22:06Z", actor: "human:operator", revision: 25, decided_on: {"recorded":{"approval":1}}}
 ---
 ## Context
 
