@@ -90,13 +90,15 @@ impl<'i> Run<'i> {
         }
     }
 
-    /// The tool handles of a `native_voice` run, once its duplex node and its authority were
-    /// built.
+    /// The tool handles of a `native_voice` run: its authority's hook, once the run built its
+    /// authority, and its duplex node's call ids, once the run built its duplex node, each
+    /// without the other; none when it built neither.
     pub(super) fn take_tools(&mut self) -> Option<super::Tools> {
-        Some(super::Tools {
-            authority: self.handle.take()?,
-            call_ids: self.call_ids.take()?,
-        })
+        let tools = super::Tools {
+            authority: self.handle.take(),
+            call_ids: self.call_ids.take(),
+        };
+        (tools.authority.is_some() || tools.call_ids.is_some()).then_some(tools)
     }
 
     /// The handle of the run's speaker sink, once it was built.
@@ -116,6 +118,23 @@ impl<'i> Run<'i> {
     /// not declared, or when the recipe builds no implementation for the node; the refusal of a
     /// binding's factory, such as a deferred recogniser that did not open.
     pub(super) fn node(&mut self, run_id: RunId, node: &Node) -> Result<Implementation, Error> {
+        let implementation = self.built(run_id, node)?;
+        if matches!(self.recipe.topology, Topology::NativeVoice)
+            && node.name() == "speech"
+            && self.recipe.factory("authority").is_none()
+        {
+            let authority = self.authority(run_id)?;
+            return Ok(Box::new(Closing {
+                inner: implementation,
+                authority,
+            }));
+        }
+        Ok(implementation)
+    }
+
+    /// The implementation of `node` as given or bound, before `native_voice`'s speech node is
+    /// made to close its authority's hook.
+    fn built(&mut self, run_id: RunId, node: &Node) -> Result<Implementation, Error> {
         if let Some(factory) = self.recipe.factory(node.name()) {
             return Ok(factory(run_id, node));
         }
@@ -295,17 +314,18 @@ impl<'i> Run<'i> {
                     return Ok(Box::new(authority));
                 }
                 "executor" => {
-                    let handle = self.authority(run_id)?;
                     let tools = &self.recipe.tools;
-                    return Ok(Box::new(
-                        ToolExecutorNode::new(
-                            run_id,
-                            Arc::new(tools.clone()),
-                            tools.tool_ids(),
-                            TOOL_DEADLINE,
-                        )
-                        .answering_to(&handle),
-                    ));
+                    let executor = ToolExecutorNode::new(
+                        run_id,
+                        Arc::new(tools.clone()),
+                        tools.tool_ids(),
+                        TOOL_DEADLINE,
+                    );
+                    if self.recipe.factory("authority").is_some() {
+                        return Ok(Box::new(executor));
+                    }
+                    let handle = self.authority(run_id)?;
+                    return Ok(Box::new(executor.answering_to(&handle)));
                 }
                 _ => {}
             }
@@ -461,6 +481,49 @@ impl TurnCommands for Turns {
         let (moved, completed) = slot.complete().map_err(CompleteTurnRefused::Conflict)?;
         *slot = moved;
         Ok(completed)
+    }
+}
+
+/// `native_voice`'s speech node, which closes its authority's hook as the run drains it, so
+/// that a call held for confirmation is denied and the session ends with no host answering it.
+struct Closing {
+    inner: Implementation,
+    authority: AuthorityHandle,
+}
+
+impl fmt::Debug for Closing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Closing").finish_non_exhaustive()
+    }
+}
+
+impl NodeImplementation<Payload> for Closing {
+    fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
+        self.inner.describe(node)
+    }
+
+    fn prepare(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        self.inner.prepare()
+    }
+
+    fn start(
+        &mut self,
+        endpoints: NodeEndpoints<Payload>,
+    ) -> NodeFuture<'_, Result<(), NodeError>> {
+        self.inner.start(endpoints)
+    }
+
+    fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        self.authority.close();
+        self.inner.drain()
+    }
+
+    fn cancel(&mut self) -> NodeFuture<'_, ()> {
+        self.inner.cancel()
+    }
+
+    fn stop(&mut self) -> NodeFuture<'_, ()> {
+        self.inner.stop()
     }
 }
 
