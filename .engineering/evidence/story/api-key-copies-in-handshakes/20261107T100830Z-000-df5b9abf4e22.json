@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-07T10:08:30Z",
+  "actor": "human:timo",
+  "artifact": "story:api-key-copies-in-handshakes",
+  "kind": "story",
+  "revision": 15,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:security-w25-api-key-copies-pass-1",
+    "reference": "b12c543",
+    "review": "review-result:security-w25-api-key-copies-pass-1",
+    "outcome": "fixed"
+  }
+}
