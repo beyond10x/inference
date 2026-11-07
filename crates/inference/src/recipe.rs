@@ -5,7 +5,8 @@
 //! role-bound nodes. The five built-ins are [`Recipe::chat`], [`Recipe::transcribe`],
 //! [`Recipe::speak`], [`Recipe::voice_cascade`] and [`Recipe::native_voice`]; an application
 //! writes its own with [`Recipe::custom`] and [`Recipe::role`], and registers it by name with
-//! [`Recipe::register`] for [`Recipe::named`] to find.
+//! [`Recipe::register`] for [`Recipe::named`] to find. [`Recipe::with_node`] replaces one node's
+//! implementation and [`Recipe::expose`] exposes one more port of the recipe's pipeline.
 //!
 //! [`Recipe::declare_into`] declares a recipe into a caller's [`Declaration`] over the caller's
 //! [`Catalog`] and profile, which the caller then validates and plans; [`Recipe::declaration`] is
@@ -14,7 +15,8 @@
 //! adapter whose locality the stack's profile does not admit with [`Error::ProfileDenies`].
 //!
 //! [`Instantiation::open`] opens a live session over the planned pipeline, each node of its run
-//! built for that run: a role-bound node over its role's binding, which owns the model and shares
+//! built for that run: a node given to [`Recipe::with_node`] by its implementation there, any
+//! other role-bound node over its role's binding, which owns the model and shares
 //! it across runs, and every other node, a fan-out and the cascade's detector, turn policy, commit
 //! gates and speaker, and `native_voice`'s tool authority and executor, by the recipe. The
 //! cascade speaker's handle is `Instantiation::sink` (feature `audio-host`) until the next open;
@@ -41,6 +43,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
+use inference_core::id::RunId;
 use inference_core::model::{AdapterId, Capability, Locality};
 use inference_core::policy::{
     DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind, ProfileNotFound,
@@ -50,13 +53,13 @@ use inference_pipeline::nodes::AuthorityHandle;
 use inference_pipeline::nodes::duplex::CallIds;
 use inference_pipeline::nodes::vad::VadConfig;
 use inference_pipeline::{
-    AdapterNotFound, BindNode, Catalog, Declaration, InteractionMode, LocalityDenied, PipelineId,
-    PipelineSpec, PlanPipelineError, PlannedPipeline,
+    AdapterNotFound, BindNode, Catalog, Declaration, ExposePort, InteractionMode, LocalityDenied,
+    Node, OverloadPolicy, PipelineId, PipelineSpec, PlanPipelineError, PlannedPipeline,
 };
 use inference_tools::ToolExecutor;
 
 use self::dispatch::Dispatch;
-use crate::graph::Builder;
+use crate::graph::{Builder, Implementation};
 use crate::{Error, Payload, Role, Stack};
 
 /// What every exposure of the five recipes buffers, ingress and egress, under
@@ -88,6 +91,9 @@ const BUILT_IN: [&str; 5] = [
 /// An application's declare function, over the graph builder.
 type Declare = dyn Fn(&mut Builder<'_, '_>) -> Result<(), Error> + Send + Sync;
 
+/// An application's implementation of one node, built once per run.
+type NodeFactory = dyn Fn(RunId, &Node) -> Implementation + Send + Sync;
+
 #[derive(Clone)]
 enum Topology {
     Chat,
@@ -109,10 +115,13 @@ pub struct Recipe {
     capacity: NonZeroUsize,
     vad: VadConfig,
     tools: Dispatch,
+    nodes: Vec<(String, Arc<NodeFactory>)>,
+    exposed: Vec<String>,
 }
 
 impl fmt::Debug for Recipe {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let nodes: Vec<&str> = self.nodes.iter().map(|(name, _)| name.as_str()).collect();
         f.debug_struct("Recipe")
             .field("name", &self.name)
             .field("mode", &self.mode)
@@ -120,6 +129,8 @@ impl fmt::Debug for Recipe {
             .field("capacity", &self.capacity)
             .field("vad", &self.vad)
             .field("tools", &self.tools)
+            .field("nodes", &nodes)
+            .field("exposed", &self.exposed)
             .finish_non_exhaustive()
     }
 }
@@ -142,6 +153,8 @@ impl Recipe {
             capacity: EXPOSURE_CAPACITY,
             vad: VAD,
             tools: Dispatch::default(),
+            nodes: Vec::new(),
+            exposed: Vec::new(),
         }
     }
 
@@ -221,7 +234,41 @@ impl Recipe {
             capacity: EXPOSURE_CAPACITY,
             vad: VAD,
             tools: Dispatch::default(),
+            nodes: Vec::new(),
+            exposed: Vec::new(),
         }
+    }
+
+    /// Replaces the implementation of the node `name`: each run builds that node with `node`,
+    /// given the run and the node as declared, and builds every other node as before. The
+    /// recipe's topology is unchanged, and a role-bound node keeps its role and its binding, so
+    /// instantiating still needs that role bound. A name the recipe has no role for, such as a
+    /// node an application recipe's declare function adds, has no role. A name given earlier is
+    /// replaced.
+    #[must_use]
+    pub fn with_node(
+        mut self,
+        name: &str,
+        node: impl Fn(RunId, &Node) -> Implementation + Send + Sync + 'static,
+    ) -> Self {
+        let node: Arc<NodeFactory> = Arc::new(node);
+        match self.nodes.iter_mut().find(|(given, _)| given == name) {
+            Some(entry) => entry.1 = node,
+            None => self.nodes.push((name.to_owned(), node)),
+        }
+        self
+    }
+
+    /// Exposes the port `name` as an exposed end of the same name, at the recipe's exposure
+    /// capacity under `OverloadPolicy::Pause`, beside the recipe's own exposures. An end the
+    /// recipe already exposes under that name is not exposed twice. Declaring refuses a name no
+    /// port of the recipe's pipeline carries, or more than one does.
+    #[must_use]
+    pub fn expose(mut self, name: &str) -> Self {
+        if !self.exposed.iter().any(|given| given == name) {
+            self.exposed.push(name.to_owned());
+        }
+        self
     }
 
     /// Makes the node `node_name` role-bound to `role`: declaring binds it to that role's
@@ -351,8 +398,9 @@ impl Recipe {
     /// `profile_id` (its source [`ProfileNotFound`]), when a role the recipe needs has no pair
     /// (the first in role order, no source), or when `catalog` holds no adapter a needed pair
     /// names (its source [`AdapterNotFound`]). [`Error::Layer`] too when an application recipe's
-    /// declare function fails or names a role-bound node it did not add, which leaves what it
-    /// declared.
+    /// declare function fails or names a role-bound node it did not add, and when a name given
+    /// to [`Recipe::expose`] is carried by no port of the pipeline or by more than one, which
+    /// leaves what it declared.
     pub fn declare_into(
         &self,
         declaration: &mut Declaration,
@@ -526,7 +574,61 @@ impl Recipe {
             })
             .map_err(|error| layer(&error.to_string(), error))?;
         declared?;
+        for name in &self.exposed {
+            self.expose_into(declaration, pipeline_id, name)?;
+        }
         Ok(pipeline_id)
+    }
+
+    /// Exposes the one port named `name` of `pipeline_id` under that name, unless the pipeline
+    /// already has an exposure of that name.
+    fn expose_into(
+        &self,
+        declaration: &mut Declaration,
+        pipeline_id: PipelineId,
+        name: &str,
+    ) -> Result<(), Error> {
+        let pipeline = |port_or_exposure: PipelineId| port_or_exposure == pipeline_id;
+        if declaration
+            .exposures()
+            .any(|exposure| pipeline(exposure.pipeline_id()) && exposure.name() == name)
+        {
+            return Ok(());
+        }
+        let ports: Vec<_> = declaration
+            .ports()
+            .filter(|port| pipeline(port.pipeline_id()) && port.name() == name)
+            .map(inference_pipeline::Port::port_id)
+            .collect();
+        let [port_id] = ports[..] else {
+            return Err(Error::Layer {
+                message: format!(
+                    "the recipe `{}` is given the end `{name}` to expose, and {} of its ports \
+                     carry that name: expose the name of exactly one port",
+                    self.name,
+                    ports.len()
+                ),
+                source: None,
+            });
+        };
+        declaration
+            .expose_port(ExposePort {
+                pipeline_id,
+                port_id,
+                name: name.to_owned(),
+                capacity: i64::try_from(self.capacity.get()).unwrap_or(i64::MAX),
+                overload: OverloadPolicy::Pause,
+            })
+            .map_err(|error| layer(&error.to_string(), error))?;
+        Ok(())
+    }
+
+    /// The implementation [`Recipe::with_node`] gave for the node `name`.
+    fn factory(&self, name: &str) -> Option<&Arc<NodeFactory>> {
+        self.nodes
+            .iter()
+            .find(|(given, _)| given == name)
+            .map(|(_, factory)| factory)
     }
 }
 
@@ -577,7 +679,8 @@ impl Instantiation {
     }
 
     /// Opens a live session of `sessions` over the planned pipeline in the recipe's interaction
-    /// mode, its run's nodes built for that run: each role-bound node over its role's binding in
+    /// mode, its run's nodes built for that run: each node given to [`Recipe::with_node`] by its
+    /// implementation there, each other role-bound node over its role's binding in
     /// `stack`, the stack the recipe was instantiated over, and every other node by the recipe.
     /// The handles of the run's nodes, such as [`Instantiation::sink`], are the opened run's
     /// until the next open.
@@ -587,10 +690,12 @@ impl Instantiation {
     /// [`Error::ConcurrencyUnclaimed`] before anything opens when the run would build a model
     /// node, which keeps one generation for the whole run and offers it every input, over an
     /// `llm` binding whose adapter does not claim `concurrent_input_output`: every recipe with
-    /// an `llm` role but `voice_cascade`, whose agent node starts a generation per turn.
+    /// an `llm` role but `voice_cascade`, whose agent node starts a generation per turn, unless
+    /// [`Recipe::with_node`] replaced that node.
     /// [`Error::Layer`] when a role-bound node's binding in `stack` is not the adapter the recipe
     /// was planned with, when the recipe builds no implementation for one of its nodes (an
-    /// application recipe's nodes no role binds, `transcribe`, whose topology has no turn ports,
+    /// application recipe's nodes no role binds and `with_node` did not give, `transcribe`, whose
+    /// topology has no turn ports,
     /// and `voice_cascade` instantiated without an audio route), or when the session does not open (its source the facade's `OpenError`); the
     /// refusal of a binding that builds no node, such as a deferred recogniser whose checkpoint
     /// did not open. No session is left open.
@@ -651,8 +756,9 @@ impl Instantiation {
         if matches!(self.recipe.topology, Topology::VoiceCascade) {
             return Ok(());
         }
-        for role in self.recipe.roles() {
-            if role != Role::Llm {
+        for (node, role) in &self.recipe.roles {
+            let role = *role;
+            if role != Role::Llm || self.recipe.factory(node).is_some() {
                 continue;
             }
             let Some(binding) = stack.adapter(role) else {

@@ -1,4 +1,5 @@
-//! The nodes of one run of an instantiated recipe: each role-bound node built over its role's
+//! The nodes of one run of an instantiated recipe: each node given to `Recipe::with_node` built
+//! by its implementation there, each other role-bound node built over its role's
 //! binding in the stack, which owns the model, and every other node built by the recipe's
 //! topology. [`Run::node`] is what [`Instantiation::open`](super::Instantiation::open) hands
 //! `LiveSessions::open` for each node of the run.
@@ -115,6 +116,9 @@ impl<'i> Run<'i> {
     /// not declared, or when the recipe builds no implementation for the node; the refusal of a
     /// binding's factory, such as a deferred recogniser that did not open.
     pub(super) fn node(&mut self, run_id: RunId, node: &Node) -> Result<Implementation, Error> {
+        if let Some(factory) = self.recipe.factory(node.name()) {
+            return Ok(factory(run_id, node));
+        }
         let role = self
             .recipe
             .roles
