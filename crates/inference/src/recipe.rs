@@ -536,6 +536,10 @@ impl Instantiation {
     ///
     /// # Errors
     ///
+    /// [`Error::ConcurrencyUnclaimed`] before anything opens when the run would build a model
+    /// node, which keeps one generation for the whole run and offers it every input, over an
+    /// `llm` binding whose adapter does not claim `concurrent_input_output`: every recipe with
+    /// an `llm` role but `voice_cascade`, whose agent node starts a generation per turn.
     /// [`Error::Layer`] when a role-bound node's binding in `stack` is not the adapter the recipe
     /// was planned with, when the recipe builds no implementation for one of its nodes (an
     /// application recipe's nodes no role binds, `transcribe`, whose topology has no turn ports,
@@ -552,6 +556,7 @@ impl Instantiation {
         {
             self.sink = None;
         }
+        self.claims_concurrency(stack)?;
         let mut refused: Option<Error> = None;
         let mut nodes = run::Run::new(self, stack);
         let opened = sessions
@@ -588,6 +593,35 @@ impl Instantiation {
             self.sink = sink;
         }
         Ok(opened)
+    }
+
+    /// Refuses an `llm` binding of `stack` whose adapter does not claim
+    /// `concurrent_input_output` when the run would build a model node over it.
+    fn claims_concurrency(&self, stack: &Stack) -> Result<(), Error> {
+        if matches!(self.recipe.topology, Topology::VoiceCascade) {
+            return Ok(());
+        }
+        for role in self.recipe.roles() {
+            if role != Role::Llm {
+                continue;
+            }
+            let Some(binding) = stack.adapter(role) else {
+                continue;
+            };
+            let adapter = binding.adapter();
+            if !adapter
+                .capabilities()
+                .contains(&Capability::ConcurrentInputOutput)
+            {
+                return Err(Error::ConcurrencyUnclaimed {
+                    role: role.as_str().to_owned(),
+                    adapter: binding
+                        .name()
+                        .map_or_else(|| adapter.adapter_id().to_string(), str::to_owned),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// The handle of the speaker sink of the run [`Instantiation::open`] opened last: the
