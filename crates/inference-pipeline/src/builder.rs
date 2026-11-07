@@ -70,6 +70,32 @@ impl Default for PortTraits {
     }
 }
 
+impl PortTraits {
+    /// The traits a port of `modality` takes when its declaration names none
+    /// ([`PipelineBuilder::input_port`], [`PipelineBuilder::output_port`]): essential, reliable,
+    /// ending with an end marker and admitting committed data only; incremental for a modality
+    /// that streams (text, audio, video), whole for the rest (structured, image, control).
+    #[must_use]
+    pub const fn of(modality: Modality) -> Self {
+        Self {
+            essentiality: Essentiality::Essential,
+            delivery: Delivery::Reliable,
+            incremental: matches!(modality, Modality::Text | Modality::Audio | Modality::Video),
+            end_marker_required: true,
+            provisional_allowed: false,
+        }
+    }
+
+    /// The same traits, admitting provisional data.
+    #[must_use]
+    pub const fn provisional(self) -> Self {
+        Self {
+            provisional_allowed: true,
+            ..self
+        }
+    }
+}
+
 /// A port direction as a type: [`direction::Input`] or [`direction::Output`].
 pub trait PortDirectionType {
     /// The direction the type stands for.
@@ -81,6 +107,9 @@ pub trait PortDirectionType {
 pub trait PortModality {
     /// The modality the type stands for.
     const MODALITY: Modality;
+
+    /// The traits a port of the modality takes by default: [`PortTraits::of`] it.
+    const TRAITS: PortTraits = PortTraits::of(Self::MODALITY);
 }
 
 /// The port directions as types.
@@ -298,6 +327,26 @@ impl<'b> PipelineBuilder<'_, 'b> {
         traits: PortTraits,
     ) -> PortHandle<'b, direction::Output, M> {
         self.port(node, name.into(), traits)
+    }
+
+    /// Adds an input port of modality `M` to `node` with the modality's default traits
+    /// ([`PortModality::TRAITS`]), as `inference.graph.AddPort`.
+    pub fn input_port<M: PortModality>(
+        &mut self,
+        node: &NodeHandle<'b>,
+        name: impl Into<String>,
+    ) -> PortHandle<'b, direction::Input, M> {
+        self.port(node, name.into(), M::TRAITS)
+    }
+
+    /// Adds an output port of modality `M` to `node` with the modality's default traits
+    /// ([`PortModality::TRAITS`]), as `inference.graph.AddPort`.
+    pub fn output_port<M: PortModality>(
+        &mut self,
+        node: &NodeHandle<'b>,
+        name: impl Into<String>,
+    ) -> PortHandle<'b, direction::Output, M> {
+        self.port(node, name.into(), M::TRAITS)
     }
 
     fn port<D: PortDirectionType, M: PortModality>(
