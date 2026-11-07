@@ -1,0 +1,5 @@
+error: #[inference::main] takes `async fn main(host: impl AudioHost, stack: Stack)`, with no return type
+ --> tests/ui/main_without_stack.rs:4:15
+  |
+4 | async fn main(host: impl inference::audio_device::AudioHost) {
+  |               ^^^^

@@ -492,7 +492,7 @@ fn adversary1_preparation_refuses_a_keyword_outside_the_subset_at_any_depth() {
     for schema in [
         json!({"type": "string", "pattern": "^a"}),
         json!({"type": "object", "additionalProperties": {"type": "string", "pattern": "^a"}}),
-        json!({"type": "array", "items": {"type": "object", "properties": {"n": {"minimum": 1}}}}),
+        json!({"type": "array", "items": {"type": "object", "properties": {"n": {"exclusiveMinimum": 1}}}}),
     ] {
         let tool = read_only("t", schema.clone());
         let mut authority = ToolAuthority::new(RunId::generate(), [tool]);
