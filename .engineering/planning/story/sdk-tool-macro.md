@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-tool-macro
 kind: story
-status: draft
+status: active
 title: The inference::tool attribute turns an async fn into a tool definition and executor
 relations:
 - decomposes: epic:sdk
@@ -18,7 +18,10 @@ scope:
   path: crates/inference/tests/tool_macro.rs
 - confidence: inferred
   path: crates/inference/tests/ui
-revision: 11
+revision: 13
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-07T09:14:54Z", actor: "human:operator", revision: 12, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-07T09:14:54Z", actor: "human:operator", revision: 13, decided_on: {"recorded":{"approval":1}}}
 ---
 ## Context
 

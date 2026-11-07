@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-07T09:14:54Z",
+  "actor": "human:operator",
+  "artifact": "story:sdk-tool-macro",
+  "kind": "story",
+  "revision": 11,
+  "change": {
+    "change": "evidence",
+    "kind": "approval",
+    "source": "wave approval relayed by the orchestrator session for the operator, 2026-11-06: the SDK stories plus api-key-copies-in-handshakes, cut at 4 units in plan order; second wave"
+  }
+}

@@ -8,7 +8,32 @@ tags:
 - from-finding
 relations:
 - informed_by: review-result:security-deepgram-stt-pass-1
-revision: 1
+scope:
+- confidence: inferred
+  path: adapters/inference-cartesia/src/connection.rs
+- confidence: inferred
+  path: adapters/inference-cartesia/src/lib.rs
+- confidence: inferred
+  path: adapters/inference-deepgram/src/connection.rs
+- confidence: inferred
+  path: adapters/inference-deepgram/src/lib.rs
+- confidence: inferred
+  path: adapters/inference-deepslate/src/connection.rs
+- confidence: inferred
+  path: adapters/inference-deepslate/src/lib.rs
+- confidence: inferred
+  path: adapters/inference-elevenlabs/src/connection.rs
+- confidence: inferred
+  path: adapters/inference-elevenlabs/src/lib.rs
+- confidence: inferred
+  path: adapters/inference-openai/src/client.rs
+- confidence: inferred
+  path: adapters/inference-openai/src/lib.rs
+- confidence: inferred
+  path: adapters/inference-phonic/src/duplex.rs
+- confidence: inferred
+  path: adapters/inference-phonic/src/lib.rs
+revision: 13
 ---
 ## Context
 
