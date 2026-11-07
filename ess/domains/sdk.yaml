@@ -248,6 +248,8 @@ commands:
   # An application recipe joins the process-wide table under its name. The table is
   # append-only and holds the five built-ins (chat, transcribe, speak, voice_cascade,
   # native_voice) from the start; the comparison of the name with them is the table's.
+  # Registering returns nothing but the refusal, and the library has no event bus: the event of
+  # registered is the fact the table now holds, its name the name sent.
   # read from: docs/design/sdk.md §3.3
   - name: inference.sdk.RegisterRecipe
     input:
@@ -276,7 +278,7 @@ commands:
           - inference.sdk.RecipeRegistered
         payload:
           inference.sdk.RecipeRegistered:
-            name: {generated: true}
+            name: input.name
             mode: input.mode
             roles: input.roles
         summary: The recipe is found by its name from then on.
