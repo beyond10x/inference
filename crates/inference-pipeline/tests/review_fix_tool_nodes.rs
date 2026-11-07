@@ -1,9 +1,10 @@
 //! Review fixes of the tool authority and the tool executor node
 //! (`story:pipeline-tool-and-node-cancel-findings`): a confirmed call queued behind the answer of
 //! a withdrawn one is authorized on the next poll (W5), the executor's read-ahead while a call
-//! runs is bounded so its input edge applies backpressure (N16), and a cancel racing a delivered
-//! call neither starts it nor polls its executor (N17). Each node is driven through its
-//! `NodeImplementation`, as the run controller drives it, over endpoints of the test's own.
+//! runs is bounded so its input edge applies backpressure (N16), a cancel racing a delivered call
+//! neither starts it nor polls its executor (N17), and a closed confirmation hook denies every
+//! call the authority holds, so its drain ends with no host answer. Each node is driven through
+//! its `NodeImplementation`, as the run controller drives it, over endpoints of the test's own.
 
 use std::collections::VecDeque;
 use std::future::{self, Future};
@@ -32,8 +33,9 @@ use inference_pipeline::{
 };
 use inference_text::{OpenTurn, Span, Turn};
 use inference_tools::{
-    AuthorizeToolCall, CancellationSignal, DeclareTool, ExecutionFuture, SideEffectClass, Tool,
-    ToolCall, ToolCallAuthorized, ToolCallId, ToolCallProposed, ToolCallState, ToolExecutor,
+    AuthorizeToolCall, CancellationSignal, DeclareTool, ExecutionFuture, RejectionReason,
+    SideEffectClass, Tool, ToolCall, ToolCallAuthorized, ToolCallId, ToolCallProposed,
+    ToolCallState, ToolExecutor,
 };
 use serde_json::json;
 
@@ -644,5 +646,66 @@ fn a_cancel_racing_a_delivered_call_starts_nothing_and_executes_nothing() {
     assert!(
         lock(&taken.0).is_empty(),
         "nothing is sent after the cancel"
+    );
+}
+
+/// The hook closed: the call held for confirmation when it closes, and one held after it, are
+/// rejected `denied`, the hook answers false from then on, and the drain on the end of input
+/// ends, though no host ever answered either call.
+#[test]
+fn a_closed_hook_denies_every_call_it_holds_and_the_drain_ends() {
+    let confirming = tool(true);
+    let (a, b) = (
+        proposed(&confirming, &generation()),
+        proposed(&confirming, &generation()),
+    );
+    let (declaration, node_id) = declared(NodeRole::Policy);
+    let mut authority = ToolAuthority::new(RunId::generate(), [confirming]);
+    let hook = authority.handle();
+    let script = Script::default();
+    script.push(Step::Envelope(proposal(&a)));
+    block_on(NodeImplementation::<Payload>::describe(
+        &mut authority,
+        declaration.node(node_id).expect("declared"),
+    ));
+    block_on(NodeImplementation::<Payload>::prepare(&mut authority)).expect("prepares");
+    block_on(NodeImplementation::<Payload>::start(
+        &mut authority,
+        endpoints(script.clone(), Taken::default()),
+    ))
+    .expect("starts");
+    let held_a = || hook.held().iter().any(|call| call.call_id() == a.call_id());
+    assert!(
+        eventually(Duration::from_secs(3), held_a),
+        "the first call is held for confirmation"
+    );
+
+    hook.close();
+    script.push(Step::Envelope(proposal(&b)));
+    script.push(Step::Envelope(stop()));
+    let drained = ends_within(Duration::from_secs(5), move || {
+        block_on(NodeImplementation::<Payload>::drain(&mut authority))
+    });
+
+    assert_eq!(drained, Some(Ok(())), "the drain ends");
+    let denied = |call_id: ToolCallId| {
+        hook.decisions().iter().any(|decision| {
+            decision.call.call_id() == call_id
+                && matches!(
+                    &decision.outcome,
+                    AuthorityOutcome::Rejected(rejected)
+                        if rejected.reason == RejectionReason::Denied
+                )
+        })
+    };
+    assert!(denied(a.call_id()), "the call held at the close is denied");
+    assert!(
+        denied(b.call_id()),
+        "the call held after the close is denied"
+    );
+    assert!(hook.held().is_empty(), "nothing is held");
+    assert!(
+        !hook.confirm(a.call_id()) && !hook.deny(b.call_id()),
+        "the closed hook answers nothing"
     );
 }
