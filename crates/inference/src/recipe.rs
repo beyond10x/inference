@@ -13,6 +13,15 @@
 //! [`Stack`], refusing a role the stack does not bind with [`Error::RoleUnbound`] and a bound
 //! adapter whose locality the stack's profile does not admit with [`Error::ProfileDenies`].
 
+#[cfg(feature = "audio-host")]
+#[cfg_attr(
+    not(all(test, feature = "testing")),
+    expect(
+        dead_code,
+        reason = "the cascade's speaker is built when an agent opens the instantiation over its route"
+    )
+)]
+mod speaker;
 mod topology;
 
 use std::collections::BTreeMap;
@@ -414,6 +423,8 @@ impl Recipe {
             pipeline_id,
             declaration,
             planned,
+            #[cfg(feature = "audio-host")]
+            speaker: None,
         })
     }
 
@@ -476,6 +487,8 @@ pub struct Instantiation {
     pipeline_id: PipelineId,
     declaration: Declaration,
     planned: PlannedPipeline,
+    #[cfg(feature = "audio-host")]
+    speaker: Option<speaker::Speaker>,
 }
 
 impl Instantiation {

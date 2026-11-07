@@ -13,6 +13,11 @@
 - `ess/domains/sdk.yaml`: `inference.sdk.RegisterRecipe` (`registered`, `name-taken`) and
   `inference.sdk.InstantiateRecipe` (`instantiated`, `role-unbound`, `profile-denies`), answered
   by the testkit conformance target.
+- `inference-audio-device`: the `acknowledging::Playout` trait, the `Speaker` methods the
+  acknowledging sink calls, implemented by `Speaker`; `AcknowledgingSink::over` builds the sink
+  over any playout, `AcknowledgingSink::cutting(false)` makes it take each `TurnOpened` and act on
+  none, and `AcknowledgingSink::on_interruption` is called with each interruption it records.
+  `AcknowledgingSink::new` and `with_turns` are unchanged.
 
 ## [0.25.0] — 2026-11-07
 
