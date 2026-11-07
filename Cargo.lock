@@ -2821,6 +2821,7 @@ name = "local-voice-cascade"
 version = "0.24.0"
 dependencies = [
  "clap",
+ "inference",
  "inference-audio",
  "inference-audio-device",
  "inference-core",
