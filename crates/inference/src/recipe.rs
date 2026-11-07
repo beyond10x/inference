@@ -113,6 +113,7 @@ pub struct Recipe {
     tools: Dispatch,
     nodes: Vec<(String, Arc<NodeFactory>)>,
     exposed: Vec<String>,
+    instructions: Option<String>,
 }
 
 impl fmt::Debug for Recipe {
@@ -127,6 +128,7 @@ impl fmt::Debug for Recipe {
             .field("tools", &self.tools)
             .field("nodes", &nodes)
             .field("exposed", &self.exposed)
+            .field("instructions", &self.instructions)
             .finish_non_exhaustive()
     }
 }
@@ -151,6 +153,7 @@ impl Recipe {
             tools: Dispatch::default(),
             nodes: Vec::new(),
             exposed: Vec::new(),
+            instructions: None,
         }
     }
 
@@ -232,6 +235,7 @@ impl Recipe {
             tools: Dispatch::default(),
             nodes: Vec::new(),
             exposed: Vec::new(),
+            instructions: None,
         }
     }
 
@@ -310,6 +314,15 @@ impl Recipe {
         for (tool, executor) in tools {
             self.tools.add(tool, executor);
         }
+        self
+    }
+
+    /// Gives every request of the recipe's generator `instructions`: `chat`'s model node's and
+    /// `voice_cascade`'s agent node's. `native_voice`'s model takes its instructions from its
+    /// session config instead.
+    #[must_use]
+    pub fn instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into());
         self
     }
 
