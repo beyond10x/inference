@@ -8,6 +8,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, quote_spanned};
+use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Expr, ExprLit, FnArg, ItemFn, Lit, LitStr, Meta, Pat, PathArguments, ReturnType,
@@ -16,10 +17,14 @@ use syn::{
 
 /// `#[inference::tool]`: an `async fn` becomes an `inference::tools::Tool` and its executor.
 ///
-/// The function is replaced by a unit struct of the same name that converts into the pair
-/// `(::inference::tools::Tool, Box<dyn ::inference::tools::ToolExecutor>)`. The tool's name is
-/// the function's, its description the doc comment, its schema the JSON schema of the arguments
-/// (an object, with `properties` even when there are none),
+/// The function is replaced by a function of the same name and visibility that takes no
+/// parameters and returns the pair
+/// `(::inference::tools::Tool, Box<dyn ::inference::tools::ToolExecutor>)`, so `weather()` is the
+/// tool `weather` and its executor, and a local binding or an argument named like a tool shadows
+/// it as it shadows any function. The arguments and the executor are types without a name outside
+/// that function. The tool's name is the function's, without the `r#` of a raw identifier, its
+/// description the doc comment, its schema the JSON schema of the arguments (an object, with
+/// `properties` even when there are none, and every subschema inlined, so no `$defs` or `$ref`),
 /// each of which is `Deserialize`. The executor reads the call's arguments into them, runs the
 /// body and answers its value, which is `Serialize`; a body returning `Result` answers `Ok`'s
 /// value and fails with `ExecutionError` on `Err`, whose `Display` is the failure's detail, as
@@ -203,7 +208,7 @@ fn expand_tool(options: &ToolOptions, function: ItemFn) -> syn::Result<TokenStre
     }
     let arguments = arguments(&function)?;
     let name = &signature.ident;
-    let tool_name = LitStr::new(&name.to_string(), name.span());
+    let tool_name = LitStr::new(&name.unraw().to_string(), name.span());
     let description = LitStr::new(&description(&function.attrs), Span::call_site());
     let visibility = &function.vis;
     let docs: Vec<&Attribute> = function
@@ -246,11 +251,10 @@ fn expand_tool(options: &ToolOptions, function: ItemFn) -> syn::Result<TokenStre
 
     Ok(quote! {
         #(#docs)*
-        #[allow(non_camel_case_types)]
-        #[derive(Clone, Copy, Debug, Default)]
-        #visibility struct #name;
-
-        const _: () = {
+        #visibility fn #name() -> (
+            ::inference::tools::Tool,
+            ::std::boxed::Box<dyn ::inference::tools::ToolExecutor>,
+        ) {
             #[derive(::inference::__private::serde::Deserialize, ::inference::__private::schemars::JsonSchema)]
             #[serde(crate = "::inference::__private::serde")]
             #[schemars(crate = "::inference::__private::schemars")]
@@ -308,38 +312,32 @@ fn expand_tool(options: &ToolOptions, function: ItemFn) -> syn::Result<TokenStre
                 }
             }
 
-            impl ::core::convert::From<#name>
-                for (
-                    ::inference::tools::Tool,
-                    ::std::boxed::Box<dyn ::inference::tools::ToolExecutor>,
-                )
-            {
-                fn from(_: #name) -> Self {
-                    let mut schema = ::inference::__private::schemars::generate::SchemaSettings::draft2020_12()
-                        .with(|settings| settings.meta_schema = ::core::option::Option::None)
-                        .into_generator()
-                        .into_root_schema_for::<__InferenceToolArguments>();
-                    schema.remove("title");
-                    let mut schema = schema.to_value();
-                    if let ::core::option::Option::Some(keywords) = schema.as_object_mut() {
-                        keywords
-                            .entry("properties")
-                            .or_insert_with(|| ::inference::__private::serde_json::Value::Object(
-                                ::inference::__private::serde_json::Map::new(),
-                            ));
-                    }
-                    let (tool, _) = ::inference::tools::Tool::declare(::inference::tools::DeclareTool {
-                        name: ::std::string::String::from(#tool_name),
-                        description: ::std::string::String::from(#description),
-                        schema,
-                        schema_revision: ::std::string::String::from("1"),
-                        side_effect: ::inference::tools::SideEffectClass::#effect,
-                        requires_confirmation: #confirm,
-                    });
-                    (tool, ::std::boxed::Box::new(__InferenceToolExecutor))
-                }
+            let mut schema = ::inference::__private::schemars::generate::SchemaSettings::draft2020_12()
+                .with(|settings| {
+                    settings.meta_schema = ::core::option::Option::None;
+                    settings.inline_subschemas = true;
+                })
+                .into_generator()
+                .into_root_schema_for::<__InferenceToolArguments>();
+            schema.remove("title");
+            let mut schema = schema.to_value();
+            if let ::core::option::Option::Some(keywords) = schema.as_object_mut() {
+                keywords
+                    .entry("properties")
+                    .or_insert_with(|| ::inference::__private::serde_json::Value::Object(
+                        ::inference::__private::serde_json::Map::new(),
+                    ));
             }
-        };
+            let (tool, _) = ::inference::tools::Tool::declare(::inference::tools::DeclareTool {
+                name: ::std::string::String::from(#tool_name),
+                description: ::std::string::String::from(#description),
+                schema,
+                schema_revision: ::std::string::String::from("1"),
+                side_effect: ::inference::tools::SideEffectClass::#effect,
+                requires_confirmation: #confirm,
+            });
+            (tool, ::std::boxed::Box::new(__InferenceToolExecutor))
+        }
     })
 }
 

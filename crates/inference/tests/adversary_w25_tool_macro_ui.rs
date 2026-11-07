@@ -3,7 +3,8 @@
 
 #[test]
 fn an_argument_named_like_its_own_tool_compiles() {
-    trybuild::TestCases::new().pass("tests/ui/adversary_w25_tool_macro_argument_named_like_tool.rs");
+    trybuild::TestCases::new()
+        .pass("tests/ui/adversary_w25_tool_macro_argument_named_like_tool.rs");
 }
 
 #[test]

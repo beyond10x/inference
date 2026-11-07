@@ -132,8 +132,8 @@ fn by_hand(name: &str, description: &str, schema: Json, side_effect: SideEffectC
     .0
 }
 
-fn pair(tool: impl Into<(Tool, Box<dyn ToolExecutor>)>) -> (Tool, Box<dyn ToolExecutor>) {
-    tool.into()
+fn pair(tool: impl FnOnce() -> (Tool, Box<dyn ToolExecutor>)) -> (Tool, Box<dyn ToolExecutor>) {
+    tool()
 }
 
 #[test]
@@ -585,6 +585,67 @@ fn a_tool_marked_confirm_is_held_by_the_authority_until_the_handle_confirms_it_t
         TRANSFERS.load(Ordering::SeqCst),
         1,
         "run once, after the confirmation"
+    );
+}
+
+/// A unit of length.
+#[derive(inference::__private::serde::Deserialize, inference::__private::schemars::JsonSchema)]
+#[serde(crate = "inference::__private::serde")]
+#[schemars(crate = "inference::__private::schemars")]
+enum Unit {
+    Metre,
+    Foot,
+}
+
+/// A length and its unit.
+#[derive(inference::__private::serde::Deserialize, inference::__private::schemars::JsonSchema)]
+#[serde(crate = "inference::__private::serde")]
+#[schemars(crate = "inference::__private::schemars")]
+struct Length {
+    value: f32,
+    unit: Unit,
+}
+
+/// Takes one argument of each kind an application commonly writes.
+#[inference::tool]
+#[allow(clippy::too_many_arguments)]
+async fn every_kind(
+    flag: bool,
+    small: i8,
+    count: u16,
+    big: u64,
+    size: usize,
+    ratio: f32,
+    name: Option<String>,
+    tags: Vec<String>,
+    scores: HashMap<String, i32>,
+    length: Length,
+    lengths: Vec<Length>,
+) -> String {
+    let _ = (flag, small, count, big, size, ratio, name, tags, scores);
+    let _ = (length.value, length.unit, lengths);
+    String::new()
+}
+
+#[test]
+fn a_tool_with_arguments_of_every_common_kind_prepares_under_the_authority_and_bounds_its_numbers()
+{
+    let (tool, _) = pair(every_kind);
+    let schema = tool.schema().to_string();
+    assert!(
+        !schema.contains("$ref") && !schema.contains("$defs"),
+        "{schema}"
+    );
+    let mut authority = ToolAuthority::new(RunId::generate(), [tool.clone()]);
+    assert_eq!(
+        block_on(NodeImplementation::<Payload>::prepare(&mut authority)).map_err(|e| e.to_string()),
+        Ok(()),
+        "{schema}"
+    );
+    assert_eq!(
+        tool.schema()["properties"]["count"]["maximum"],
+        json!(65535),
+        "{schema}"
     );
 }
 
