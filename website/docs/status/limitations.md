@@ -29,10 +29,10 @@ The three native speech adapters are hosted services. A self-hosted native speec
   back into its microphone, and the model interrupts itself.
 - The device adapter resamples linearly, with no anti-aliasing filter: downsampling folds content
   above the new Nyquist frequency back into the band. For speech from a headset or laptop
-  microphone that content is small. The band-limited `Resampler` of `inference-audio` (on main,
-  in the next release) does not fold, but the device adapter does not use it yet.
+  microphone that content is small. The band-limited `Resampler` of `inference-audio` (since 0.16.0)
+  does not fold, but the device adapter does not use it yet.
 - `inference-audio` resamples only between 8, 16, 24 and 48 kHz, 16-bit mono, and converts only
-  between `pcm_s16le`, `pcm_mulaw` and `pcm_alaw` (on main, in the next release).
+  between `pcm_s16le`, `pcm_mulaw` and `pcm_alaw` (since 0.16.0).
 
 ## Hosted adapters
 
