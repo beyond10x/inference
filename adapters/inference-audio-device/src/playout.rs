@@ -22,7 +22,7 @@ use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -200,6 +200,17 @@ impl Queue {
     }
 }
 
+/// A test host's view of what is written to a [`PlayoutBuffer`], set by the fake host and never
+/// by the cpal host.
+pub(crate) trait PushTap: Send + Sync + fmt::Debug {
+    /// A frame is written: answers whether it goes on to the queue. It may wait; a write that
+    /// waited through a stop answers false and is discarded.
+    fn write(&self, frame: &AudioFrame) -> bool;
+
+    /// Playback was stopped and cleared.
+    fn cleared(&self);
+}
+
 /// The queue between a [`Speaker`] and its output device's callback.
 #[derive(Debug)]
 pub struct PlayoutBuffer {
@@ -214,6 +225,9 @@ pub struct PlayoutBuffer {
     underruns: AtomicU64,
     errors: AtomicU64,
     last_error: Mutex<Option<String>>,
+    /// What a test host sees of each write and stop, and whether the queue has no bound; set
+    /// once, by the fake host only.
+    tap: OnceLock<(Arc<dyn PushTap>, bool)>,
 }
 
 impl PlayoutBuffer {
@@ -241,7 +255,14 @@ impl PlayoutBuffer {
             underruns: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             last_error: Mutex::new(None),
+            tap: OnceLock::new(),
         }
+    }
+
+    /// Hands every write and stop to `tap` and, when `unbounded`, lifts the queue's bound, so a
+    /// write is never refused as full: the fake host's sink.
+    pub(crate) fn tapped(&self, tap: Arc<dyn PushTap>, unbounded: bool) {
+        let _ = self.tap.set((tap, unbounded));
     }
 
     fn lock(&self) -> MutexGuard<'_, Queue> {
@@ -314,6 +335,12 @@ impl PlayoutBuffer {
     /// count is read under the queue's lock, which [`PlayoutBuffer::stop`] holds while it
     /// clears the queue, so a stop is never missed between the check and the queuing.
     fn push(&self, frame: &AudioFrame, since: Option<u64>) -> Result<(), PushError> {
+        if let Some((tap, _)) = self.tap.get()
+            && !tap.write(frame)
+        {
+            return Err(PushError::Stopped);
+        }
+        let unbounded = self.tap.get().is_some_and(|(_, unbounded)| *unbounded);
         let mut samples = decode(frame).map_err(PushError::Malformed)?;
         for sample in &mut samples {
             *sample = playable(*sample);
@@ -338,6 +365,7 @@ impl PlayoutBuffer {
                 });
             }
             Some(_) => queue.capacity,
+            None if unbounded => usize::MAX,
             None => usize::try_from(samples_in(self.buffer, rate.get()))
                 .unwrap_or(usize::MAX)
                 .max(1),
@@ -368,8 +396,10 @@ impl PlayoutBuffer {
         if queue.rate.is_none() {
             queue.rate = Some(rate);
             queue.capacity = capacity;
-            let spare = capacity.saturating_add(2);
-            queue.samples.reserve(spare);
+            if !unbounded {
+                let spare = capacity.saturating_add(2);
+                queue.samples.reserve(spare);
+            }
         }
         queue.samples.extend(samples.iter().copied());
         queue.end += samples.len() as u64;
@@ -398,6 +428,10 @@ impl PlayoutBuffer {
         self.publish(&queue);
         self.stops.fetch_add(1, Ordering::Relaxed);
         self.due.store(false, Ordering::Relaxed);
+        drop(queue);
+        if let Some((tap, _)) = self.tap.get() {
+            tap.cleared();
+        }
         reached
     }
 

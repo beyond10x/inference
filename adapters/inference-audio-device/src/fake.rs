@@ -5,16 +5,25 @@
 //!
 //! It runs at most one input and one output stream at a time; opening a second of a direction
 //! while one runs answers [`DeviceError::Busy`]. Dropping a stream's guard closes it.
+//!
+//! It records what is played: [`FakeHost::played`] is every frame written to its output sink, as
+//! written, before any resampling to the device, and every stop of playback, in order. With
+//! [`FakeHost::unbounded`] its sink takes a write with no [`FakeHost::pull`] and is never full.
+//! [`FakeHost::hold_sink`] keeps every write waiting, recording nothing, until the hold is
+//! dropped; a write that waited through a stop is discarded, as a stop discards what is queued.
 
+use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroU32};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+
+use inference_audio::AudioFrame;
 
 use crate::capture::CaptureBuffer;
 use crate::host::{
     AudioHost, DeviceConfig, DeviceError, DeviceInfo, DeviceSelector, Direction, MakeCapture,
     MakePlayout, OpenStream, ResolvedDevice, StreamGuard, select,
 };
-use crate::playout::PlayoutBuffer;
+use crate::playout::{PlayoutBuffer, PushTap};
 
 /// One device of a [`FakeHost`]: what it lists and the config its streams run at.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -109,11 +118,111 @@ fn lock(streams: &Mutex<Streams>) -> MutexGuard<'_, Streams> {
     streams.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// One entry of what a [`FakeHost`] played.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Played {
+    /// A frame written to the output sink, as written.
+    Frame(AudioFrame),
+    /// Playback was stopped and cleared ([`crate::Speaker::stop`]).
+    Cleared,
+}
+
+/// What the output sink's tap holds: the played log, whether writes are held, the writes waiting
+/// in the hold, in order, and the stops so far.
+#[derive(Debug, Default)]
+struct TapState {
+    played: Vec<Played>,
+    held: bool,
+    waiting: VecDeque<(u64, AudioFrame)>,
+    tickets: u64,
+    stops: u64,
+}
+
+/// The tap a [`FakeHost`] sets on every output sink it opens, shared by its clones.
+#[derive(Debug, Default)]
+struct Tap {
+    state: Mutex<TapState>,
+    changed: Condvar,
+}
+
+impl Tap {
+    fn lock(&self) -> MutexGuard<'_, TapState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl PushTap for Tap {
+    fn write(&self, frame: &AudioFrame) -> bool {
+        let mut state = self.lock();
+        if !state.held && state.waiting.is_empty() {
+            state.played.push(Played::Frame(frame.clone()));
+            return true;
+        }
+        state.tickets += 1;
+        let ticket = state.tickets;
+        let stops = state.stops;
+        state.waiting.push_back((ticket, frame.clone()));
+        loop {
+            if state.stops != stops {
+                return false;
+            }
+            let first = state.waiting.front().map(|(first, _)| *first) == Some(ticket);
+            if !state.held && first {
+                state.waiting.pop_front();
+                state.played.push(Played::Frame(frame.clone()));
+                self.changed.notify_all();
+                return true;
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    fn cleared(&self) {
+        let mut state = self.lock();
+        state.stops += 1;
+        state.waiting.clear();
+        state.played.push(Played::Cleared);
+        self.changed.notify_all();
+    }
+}
+
+/// A hold on a [`FakeHost`]'s output sink ([`FakeHost::hold_sink`]): while it lives, every write
+/// to the sink waits and nothing is recorded; dropping it releases the waiting writes in order.
+#[derive(Debug)]
+pub struct SinkHold {
+    tap: Arc<Tap>,
+}
+
+impl SinkHold {
+    /// The writes waiting in the hold, in order.
+    #[must_use]
+    pub fn waiting(&self) -> Vec<AudioFrame> {
+        self.tap
+            .lock()
+            .waiting
+            .iter()
+            .map(|(_, frame)| frame.clone())
+            .collect()
+    }
+}
+
+impl Drop for SinkHold {
+    fn drop(&mut self) {
+        self.tap.lock().held = false;
+        self.tap.changed.notify_all();
+    }
+}
+
 /// A fake audio host; see the module documentation. A clone drives the same streams.
 #[derive(Debug, Clone)]
 pub struct FakeHost {
     devices: Vec<FakeDevice>,
     streams: Arc<Mutex<Streams>>,
+    tap: Arc<Tap>,
+    unbounded: bool,
 }
 
 impl FakeHost {
@@ -123,6 +232,48 @@ impl FakeHost {
         Self {
             devices,
             streams: Arc::default(),
+            tap: Arc::default(),
+            unbounded: false,
+        }
+    }
+
+    /// What was played on the host's output sinks, in order: every frame written, as written,
+    /// and every stop of playback.
+    #[must_use]
+    pub fn played(&self) -> Vec<Played> {
+        self.tap.lock().played.clone()
+    }
+
+    /// The frames of [`FakeHost::played`], in order.
+    #[must_use]
+    pub fn played_frames(&self) -> Vec<AudioFrame> {
+        self.tap
+            .lock()
+            .played
+            .iter()
+            .filter_map(|played| match played {
+                Played::Frame(frame) => Some(frame.clone()),
+                Played::Cleared => None,
+            })
+            .collect()
+    }
+
+    /// The same host, its output sinks without a capacity bound, so a write is never refused as
+    /// full and no test needs to pull; a host's sink keeps its playout buffer's capacity
+    /// otherwise.
+    #[must_use]
+    pub const fn unbounded(mut self) -> Self {
+        self.unbounded = true;
+        self
+    }
+
+    /// Holds the output sink: until the returned guard is dropped, every write to it waits and
+    /// nothing is recorded.
+    #[must_use]
+    pub fn hold_sink(&self) -> SinkHold {
+        self.tap.lock().held = true;
+        SinkHold {
+            tap: Arc::clone(&self.tap),
         }
     }
 
@@ -255,6 +406,7 @@ impl AudioHost for FakeHost {
             return Err(DeviceError::Busy(Direction::Output));
         }
         let buffer = make(&device);
+        buffer.tapped(Arc::clone(&self.tap) as Arc<dyn PushTap>, self.unbounded);
         streams.opened += 1;
         let id = streams.opened;
         streams.output = Some((id, device.config.channels, Arc::clone(&buffer)));
