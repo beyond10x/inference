@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-07T17:22:07Z",
+  "actor": "human:operator",
+  "artifact": "story:sdk-recipes",
+  "kind": "story",
+  "revision": 26,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0: 546 test binaries, 3753 passed, 0 failed, 60 ignored (f2baecb)",
+    "reference": "f2baecb"
+  }
+}

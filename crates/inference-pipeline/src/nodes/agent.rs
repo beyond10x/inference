@@ -31,7 +31,9 @@
 //!   Played on its playback port ([`AgentNode::with_playback`]), an input edge carrying the
 //!   `AudioPlayed` of each segment from the node that acknowledges playback, which it takes ahead
 //!   of the turn events; a node given no playback port learns nothing played, and supersedes its
-//!   generation at every `TurnOpened`;
+//!   generation at every `TurnOpened`. A node keeping its replies
+//!   ([`AgentNode::keeping_replies`]) supersedes nothing: at every `TurnOpened` it completes the
+//!   generation, as it does once every segment was Played;
 //! * a span may arrive before the `TurnOpened` of its turn, which reaches the node on another
 //!   edge: every span of a turn is taken at the turn's completion, so a span held when a turn
 //!   opens is the new turn's and is kept for it. Spans still held at the end of input belong to a
@@ -119,6 +121,7 @@ pub struct AgentNode {
     reply: fn(&str) -> String,
     turns: PortId,
     playback: Option<PortId>,
+    keeping: bool,
     log: RunLog,
     node_id: Option<NodeId>,
     state: Arc<Watched<State>>,
@@ -159,6 +162,7 @@ impl AgentNode {
             reply,
             turns,
             playback: None,
+            keeping: false,
             log,
             node_id: None,
             state: Arc::new(Watched::new(State::default())),
@@ -171,6 +175,15 @@ impl AgentNode {
     #[must_use]
     pub const fn with_playback(mut self, playback: PortId) -> Self {
         self.playback = Some(playback);
+        self
+    }
+
+    /// The same node keeping its replies: at a turn's opening it completes the generation of the
+    /// turn before and emits its `GenerationCompleted`, as it does once every segment of it was
+    /// Played, and never supersedes it, so nothing downstream drops what it holds of the reply.
+    #[must_use]
+    pub const fn keeping_replies(mut self) -> Self {
+        self.keeping = true;
         self
     }
 
@@ -273,6 +286,8 @@ struct Exchanging<P> {
     played: HashSet<SegmentId>,
     /// Whether the node was given a playback port.
     watches_playback: bool,
+    /// Whether a turn opening completes the current generation instead of superseding it.
+    keeping: bool,
 }
 
 impl<P: ModelPayload> Exchanging<P> {
@@ -492,12 +507,12 @@ impl<P: ModelPayload> Exchanging<P> {
     }
 
     /// The opening of `turn_id`: the interruption of the current generation while output of it is
-    /// not all Played, and otherwise its completion. The spans held are the new turn's: every span
-    /// of the turn before was taken at its completion.
+    /// not all Played, and otherwise, or for a node keeping its replies, its completion. The spans
+    /// held are the new turn's: every span of the turn before was taken at its completion.
     async fn turn_opened(&mut self, turn_id: TurnId) -> Result<(), String> {
         self.opened += 1;
         self.open = Some((turn_id, self.opened));
-        if self.all_played() {
+        if self.keeping || self.all_played() {
             self.complete().await?;
             self.current = None;
             return Ok(());
@@ -691,6 +706,7 @@ impl<P: ModelPayload> NodeImplementation<P> for AgentNode {
                 input_ended: false,
                 turns_ended: false,
                 watches_playback: playback.is_some(),
+                keeping: self.keeping,
                 playback,
                 played: HashSet::new(),
             };

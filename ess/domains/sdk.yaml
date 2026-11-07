@@ -2,12 +2,6 @@
 # deployment profile, and a recipe is a named topology that, instantiated over a stack, declares and
 # plans one pipeline. Everything else the SDK offers (agents, chats, events, tools) is a view over
 # the session, graph, stream and tools domains and declares nothing here.
-# UNMAPPED: the command that instantiates a recipe, with its refusals (a role the recipe needs
-# that the stack does not bind), is story:sdk-recipes' to declare. InstantiateRecipe's outcomes
-# are instantiated, role-unbound and profile-denies, the last a bound adapter whose locality the
-# stack's profile does not admit (inference.graph.PlanPipeline locality-denied, carried as the
-# SDK's ProfileDenies). RegisterRecipe, also story:sdk-recipes',
-# has the outcomes registered and name-taken (a name a built-in or an earlier registration holds).
 # read from: docs/design/sdk.md §3.3, §4
 domain: inference.sdk
 
@@ -174,6 +168,13 @@ entities:
       initial: Planned
       states: [Planned]
       terminal: [Planned]
+      transitions:
+        # Opening a run moves nothing: each open is one more live session over the same planned
+        # pipeline, so the instantiation stays Planned.
+        # read from: docs/design/sdk.md §3.3
+        - name: open
+          from: [Planned]
+          to: Planned
 
 errors:
   # read from: docs/design/sdk.md §4.1
@@ -203,7 +204,164 @@ errors:
       - name: profile_id
         type: inference.policy.ProfileId
 
+  # read from: docs/design/sdk.md §3.3, §9
+  - name: inference.sdk.RoleUnbound
+    summary: A recipe needs a role the stack does not bind; nothing was declared.
+    fields:
+      - name: role
+        type: inference.sdk.Role
+
+  # Planning's refusal of a denied locality, carried in the SDK's terms: the role of the denied
+  # node, the bound adapter's registered name, its locality and the stack's profile kind.
+  # read from: docs/design/sdk.md §3.3, §4.3, §9
+  - name: inference.sdk.ProfileDenies
+    summary: A bound adapter runs at a locality the stack's profile does not admit; nothing was planned.
+    fields:
+      - name: role
+        type: inference.sdk.Role
+      - name: adapter
+        type: String
+      - name: locality
+        type: inference.model.Locality
+      - name: profile
+        type: inference.policy.ProfileKind
+
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.RecipeNameTaken
+    summary: A built-in recipe or an earlier registration holds the name; nothing was registered.
+    fields:
+      - name: name
+        type: inference.sdk.RecipeName
+
+  # The model node of a run keeps one generation for the whole run and offers it every input, so
+  # the adapter bound to the role must take input while it produces output.
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.ConcurrencyUnclaimed
+    summary: The adapter bound to a role the run keeps one generation of does not claim concurrent_input_output; no session was opened.
+    fields:
+      - name: role
+        type: inference.sdk.Role
+      - name: adapter
+        type: String
+
 commands:
+  # An application recipe joins the process-wide table under its name. The table is
+  # append-only and holds the five built-ins (chat, transcribe, speak, voice_cascade,
+  # native_voice) from the start; the comparison of the name with them is the table's.
+  # Registering returns nothing but the refusal, and the library has no event bus: the event of
+  # registered is the fact the table now holds, its name the name sent.
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.RegisterRecipe
+    input:
+      - name: name
+        type: inference.sdk.RecipeName
+      - name: mode
+        type: inference.graph.InteractionMode
+      - name: roles
+        type: List<inference.sdk.Role>
+    outcomes:
+      - name: name-taken
+        external: a built-in recipe or an earlier registration of this process holds the name
+        error: inference.sdk.RecipeNameTaken
+        payload:
+          inference.sdk.RecipeNameTaken:
+            name: input.name
+        summary: Registering fails naming the name, and the table is unchanged.
+
+      - name: registered
+        creates: inference.sdk.Recipe
+        instance: name
+        sets:
+          mode: input.mode
+          roles: input.roles
+        emits:
+          - inference.sdk.RecipeRegistered
+        payload:
+          inference.sdk.RecipeRegistered:
+            name: input.name
+            mode: input.mode
+            roles: input.roles
+        summary: The recipe is found by its name from then on.
+
+  # A recipe declared, validated and planned over a stack into one pipeline. The roles are
+  # checked against the stack's bindings in the recipe's role order before anything is declared;
+  # the localities are checked by planning (inference.graph.PlanPipeline locality-denied).
+  # read from: docs/design/sdk.md §3.3, §4.3, §9
+  - name: inference.sdk.InstantiateRecipe
+    input:
+      - name: recipe
+        type: inference.sdk.RecipeName
+      - name: stack_id
+        type: inference.sdk.StackId
+    outcomes:
+      - name: role-unbound
+        external: the recipe needs a role the stack binds no adapter to
+        error: inference.sdk.RoleUnbound
+        payload:
+          inference.sdk.RoleUnbound:
+            role: {generated: true}
+        summary: Instantiating fails naming the first unbound role, and no pipeline is declared.
+
+      - name: profile-denies
+        external: planning refuses a bound adapter whose locality the stack's profile does not admit
+        error: inference.sdk.ProfileDenies
+        payload:
+          inference.sdk.ProfileDenies:
+            role: {generated: true}
+            adapter: {generated: true}
+            locality: {generated: true}
+            profile: {generated: true}
+        summary: Instantiating fails naming the role, its adapter, the locality and the profile.
+
+      - name: instantiated
+        creates: inference.sdk.Instantiation
+        instance: instantiation_id
+        sets:
+          recipe: input.recipe
+          stack_id: input.stack_id
+          pipeline_id: {generated: true}
+        emits:
+          - inference.sdk.RecipeInstantiated
+        payload:
+          inference.sdk.RecipeInstantiated:
+            instantiation_id: {generated: true}
+            recipe: input.recipe
+            stack_id: input.stack_id
+            pipeline_id: {generated: true}
+        summary: The recipe's pipeline is declared, validated and planned over the stack.
+
+  # A live session opened over an instantiation's planned pipeline in the recipe's mode
+  # (inference.session.OpenSession), its run's nodes built for that run over the stack's
+  # bindings. A model node keeps one generation for the whole run and offers it every input, so
+  # opening refuses up front a binding of such a node's role whose adapter does not claim
+  # concurrent_input_output; the claim is the adapter's, read from its binding, not a row.
+  # UNMAPPED: an identity no instantiation carries. The SDK's instantiation is a value the
+  # application holds and opens, so it has no lookup by identity that could miss.
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.OpenInstantiation
+    input:
+      - name: instantiation_id
+        type: inference.sdk.InstantiationId
+    outcomes:
+      - name: concurrency-unclaimed
+        external: the adapter bound to the role of a node that keeps one generation per run does not claim concurrent_input_output
+        error: inference.sdk.ConcurrencyUnclaimed
+        payload:
+          inference.sdk.ConcurrencyUnclaimed:
+            role: {generated: true}
+            adapter: {generated: true}
+        summary: Opening fails naming the role and its adapter, and no session is opened.
+
+      - name: opened
+        moves: inference.sdk.Instantiation.open
+        instance: instantiation_id
+        emits:
+          - inference.sdk.InstantiationOpened
+        payload:
+          inference.sdk.InstantiationOpened:
+            instantiation_id: input.instantiation_id
+        summary: A live session runs over the instantiation's pipeline, each node built for its run.
+
   # The bindings are the first found per role across the sources, in the order of
   # inference.sdk.BindingSource; a role no source names stays unbound. The stack declares its
   # profile through inference.policy.DeclareProfile with the egress and the localities the
@@ -279,3 +437,31 @@ events:
         type: inference.policy.ProfileId
       - name: bindings
         type: List<inference.sdk.RoleBinding>
+
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.RecipeRegistered
+    fields:
+      - name: name
+        type: inference.sdk.RecipeName
+      - name: mode
+        type: inference.graph.InteractionMode
+      - name: roles
+        type: List<inference.sdk.Role>
+
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.RecipeInstantiated
+    fields:
+      - name: instantiation_id
+        type: inference.sdk.InstantiationId
+      - name: recipe
+        type: inference.sdk.RecipeName
+      - name: stack_id
+        type: inference.sdk.StackId
+      - name: pipeline_id
+        type: inference.graph.PipelineId
+
+  # read from: docs/design/sdk.md §3.3
+  - name: inference.sdk.InstantiationOpened
+    fields:
+      - name: instantiation_id
+        type: inference.sdk.InstantiationId

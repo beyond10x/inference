@@ -1,5 +1,85 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking
+
+- `inference`: `Binding::stt`, `Binding::tts` and `Binding::speech` also need the model's handle
+  or session to be `Send + 'static` (`R::Handle`, `S::Handle`, `M::Session`), as the binding now
+  owns the model and builds its role's node for each run from it.
+- `inference`: `StackBinding::generator()` answers `None` when the stack's profile does not admit
+  the adapter's locality, such as a hosted generator under `offline_strict`, as planning refuses
+  it; it handed the generator out. A run's role nodes are built from no such binding either.
+
+### Added
+
+- `inference`: `Recipe::with_node(name, impl Fn(RunId, &Node) -> Implementation)` replaces the
+  implementation of the node `name` in each run, the node keeping its role and its binding, and
+  `Recipe::expose(name)` exposes the one port of that name as an exposed end of the same name at
+  the recipe's exposure capacity under `OverloadPolicy::Pause`, a port already exposed, under
+  that name or another, not twice. `Recipe::declare_into` refuses a `with_node` name the
+  pipeline has no node of with `Error::Layer` naming it, and every refusal of `declare_into`
+  leaves the caller's declaration as it was.
+- `inference`: `Instantiation::open(&mut self, &Stack, &LiveSessions)`, which opens a live
+  session over the planned pipeline in the recipe's interaction mode, each role-bound node built
+  for that run over its role's binding and every other node by the recipe, and returns the
+  session and its driver; a node the recipe cannot build (`transcribe`, an application recipe's
+  nodes no role binds other than fan-outs) is refused with
+  `Error::Layer` and no session is left open. `Instantiation::sink()` (feature `audio-host`) is
+  the handle of the opened `voice_cascade` run's speaker sink. The `mock` registration's
+  generator now claims `concurrent_input_output`, which the opened run's model node needs.
+- `inference`: `Recipe::tools(impl IntoIterator<Item = (Tool, Box<dyn ToolExecutor>)>)` gives
+  `native_voice` its tools. An opened `native_voice` run offers them to the model's session,
+  its duplex node proposes calls of them only, its tool authority is bounded by the recipe's
+  tool loop (`MAX_TOOL_ITERATIONS`) and its executor runs each authorized call on the executor
+  given for the call's tool, each within 30 s; every rejected or failed call is answered to the
+  model under its own call id. `Instantiation::authority()` is the run's confirmation hook
+  (`AuthorityHandle`: `held`, `confirm`, `deny`), none when `with_node` replaced the node
+  `authority`, and `Instantiation::call_ids()` the model's call id of each proposed call
+  (`CallIds`), none when `with_node` replaced the node `speech`. Closing the run rejects every
+  call still held for confirmation `denied`, so the close ends.
+- `inference-pipeline`: `AuthorityHandle::close()`, which rejects every call the tool authority
+  holds for confirmation, and every one it would hold from then on, `denied`, so that its drain
+  ends with no host answer; `confirm` and `deny` answer false from then on.
+- `inference`: `Error::ConcurrencyUnclaimed { role, adapter }` and
+  `ErrorKind::ConcurrencyUnclaimed`. `Instantiation::open` returns it before anything opens when
+  the run would keep one generation over an `llm` binding whose adapter does not claim
+  `concurrent_input_output` (every recipe with an `llm` role but `voice_cascade`), such as
+  `llama-server`, which claims only output streaming; its message names the fix.
+- `ess`: `inference.sdk.OpenInstantiation` with its outcomes `opened` and the external
+  `concurrency-unclaimed`, the error `ConcurrencyUnclaimed`, the event `InstantiationOpened` and the `open` transition of
+  `Instantiation`; the testkit's conformance target answers them through `Instantiation::open`.
+- `inference-pipeline`: the fan-out node, `nodes::FanOut`, in every build; it moved from the
+  testkit, where `inference_testkit::stt::FanOut` re-exports it.
+
+- `inference`: `Recipe` with the five built-ins `chat`, `transcribe`, `speak`, `voice_cascade` and
+  `native_voice`; `Recipe::declaration`, `Recipe::declare_into` over a caller's declaration,
+  catalog and profile, and `Recipe::instantiate` over a stack, which refuses an unbound role with
+  `Error::RoleUnbound` and a denied locality with `Error::ProfileDenies`; application recipes
+  through `Recipe::custom`, `Recipe::role`, `Recipe::register`, which refuses a taken name with
+  `Error::RecipeNameTaken` (`ErrorKind::RecipeNameTaken`), and `Recipe::named`;
+  `Recipe::exposure_capacity`, `EXPOSURE_CAPACITY` (64) and `MAX_TOOL_ITERATIONS` (4);
+  `Recipe::vad(VadConfig)`, the voice activity detector of `voice_cascade`, by default the
+  reference cascade's (a threshold of 0.05 of full scale, 30 ms of attack, 200 ms of hold).
+- `ess/domains/sdk.yaml`: `inference.sdk.RegisterRecipe` (`registered`, its `RecipeRegistered`
+  carrying the name sent, and `name-taken`) and
+  `inference.sdk.InstantiateRecipe` (`instantiated`, `role-unbound`, `profile-denies`), answered
+  by the testkit conformance target.
+- `inference-audio-device`: the `acknowledging::Playout` trait, the `Speaker` methods the
+  acknowledging sink calls, implemented by `Speaker`; `AcknowledgingSink::over` builds the sink
+  over any playout, `AcknowledgingSink::cutting(false)` makes it take each `TurnOpened` and act on
+  none, and `AcknowledgingSink::on_interruption` is called with each interruption it records.
+  `AcknowledgingSink::new` and `with_turns` are unchanged.
+- `inference-pipeline`: `AgentNode::keeping_replies`, a node that completes its generation at
+  every `TurnOpened` and never supersedes it, so a reply left unplayed by a new turn is kept.
+
+### Fixed
+
+- `inference-pipeline`: under the run's drain, `DuplexNode` ends only once every edge into
+  `tool_result` has ended, as `ModelNode` does. It let go of its inputs as soon as it ended its
+  outputs, so a tool authority or executor sending its end of input back to it failed the run
+  with a closed edge.
+
 ## [0.25.0] — 2026-11-07
 
 ### Breaking

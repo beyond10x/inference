@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-07T17:28:21Z",
+  "actor": "human:operator",
+  "artifact": "story:sdk-recipes",
+  "kind": "story",
+  "revision": 27,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check exit 0: 546 test binaries, 3753 passed, 0 failed, 60 ignored (run on f2baecb; 5e66c9f carries the same tree after the branch was rebuilt)",
+    "reference": "5e66c9f"
+  }
+}
