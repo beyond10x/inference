@@ -61,7 +61,8 @@
   `Recipe::exposure_capacity`, `EXPOSURE_CAPACITY` (64) and `MAX_TOOL_ITERATIONS` (4);
   `Recipe::vad(VadConfig)`, the voice activity detector of `voice_cascade`, by default the
   reference cascade's (a threshold of 0.05 of full scale, 30 ms of attack, 200 ms of hold).
-- `ess/domains/sdk.yaml`: `inference.sdk.RegisterRecipe` (`registered`, `name-taken`) and
+- `ess/domains/sdk.yaml`: `inference.sdk.RegisterRecipe` (`registered`, its `RecipeRegistered`
+  carrying the name sent, and `name-taken`) and
   `inference.sdk.InstantiateRecipe` (`instantiated`, `role-unbound`, `profile-denies`), answered
   by the testkit conformance target.
 - `inference-audio-device`: the `acknowledging::Playout` trait, the `Speaker` methods the
