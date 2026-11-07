@@ -651,6 +651,12 @@ fn an_adapter_no_registration_holds_is_refused_naming_it() {
         assert_eq!(error.kind(), ErrorKind::StackFile);
         assert!(error.to_string().contains("llm.adapter"), "{error}");
         assert!(error.to_string().contains("stack-nowhere"), "{error}");
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<AdapterNotRegistered>());
+        assert_eq!(
+            source.map(|refusal| refusal.adapter.as_str()),
+            Some("stack-nowhere")
+        );
     });
 }
 
@@ -826,6 +832,49 @@ mod testing {
             let binding = stack.adapter(Role::Llm).expect("llm is bound");
             assert_eq!(binding.source(), BindingSource::Environment);
             assert_eq!(binding.name(), Some("mock"));
+        });
+    }
+
+    #[test]
+    fn a_broken_lower_file_is_not_read_once_every_role_and_the_profile_are_settled() {
+        within(|| {
+            let dirs = Dirs::new();
+            write(&dirs.user_file(), "[llm\nadapter = ");
+            let mock = |role| Binding::named(role, "mock", BTreeMap::new());
+            let stack = Role::ALL
+                .into_iter()
+                .fold(
+                    Stack::new().profile(ProfileKind::OfflineStrict),
+                    |stack, role| stack.bind(mock(role)),
+                )
+                .resolve_with(&dirs.env())
+                .unwrap_or_else(|error| panic!("the builder settles everything: {error}"));
+            assert_eq!(stack.adapter_ids().len(), 4);
+
+            let env = dirs
+                .env()
+                .var("INFERENCE_PROFILE", "offline_strict")
+                .var("INFERENCE_STT_ADAPTER", "mock")
+                .var("INFERENCE_TTS_ADAPTER", "mock")
+                .var("INFERENCE_SPEECH_ADAPTER", "mock");
+            let stack = Stack::new()
+                .bind(mock(Role::Llm))
+                .resolve_with(&env)
+                .unwrap_or_else(|error| {
+                    panic!("the builder and the environment settle everything: {error}")
+                });
+            assert_eq!(
+                stack.adapter(Role::Stt).map(|binding| binding.source()),
+                Some(BindingSource::Environment)
+            );
+
+            let error = Stack::new()
+                .profile(ProfileKind::OfflineStrict)
+                .bind(mock(Role::Llm))
+                .resolve_with(&dirs.env())
+                .expect_err("stt is still unsettled, so the broken user config is read");
+            assert_eq!(error.kind(), ErrorKind::StackFile);
+            assert!(error.to_string().contains("inference.toml"), "{error}");
         });
     }
 

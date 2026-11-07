@@ -92,7 +92,8 @@ entities:
       states: [Resolved]
       terminal: [Resolved]
 
-  # At most one binding per role and stack: inference.sdk.ResolveStack refuses a role bound twice.
+  # At most one binding per role and stack: inference.sdk.ResolveStack refuses a role the builder
+  # binds twice; a builder binding replaces one another source gave.
   # read from: docs/design/sdk.md §4.1-4.2
   - name: inference.sdk.StackBinding
     naming:
@@ -177,7 +178,7 @@ entities:
 errors:
   # read from: docs/design/sdk.md §4.1
   - name: inference.sdk.RoleBoundTwice
-    summary: One source binds a role twice; nothing was resolved.
+    summary: The builder binds a role twice; nothing was resolved. A builder binding replaces one another source gave.
     fields:
       - name: role
         type: inference.sdk.Role
@@ -220,7 +221,7 @@ commands:
       # the resolver's, as no guard compares them.
       # read from: docs/design/sdk.md §4.1
       - name: role-bound-twice
-        external: two bindings of one source name the same role
+        external: two builder bindings name the same role
         error: inference.sdk.RoleBoundTwice
         payload:
           inference.sdk.RoleBoundTwice:
