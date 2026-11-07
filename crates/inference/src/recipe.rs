@@ -12,6 +12,12 @@
 //! the recipe's unbound topology; [`Recipe::instantiate`] declares, validates and plans it over a
 //! [`Stack`], refusing a role the stack does not bind with [`Error::RoleUnbound`] and a bound
 //! adapter whose locality the stack's profile does not admit with [`Error::ProfileDenies`].
+//!
+//! [`Instantiation::open`] opens a live session over the planned pipeline, each node of its run
+//! built for that run: a role-bound node over its role's binding, which owns the model and shares
+//! it across runs, and every other node, a fan-out and the cascade's detector, turn policy, commit
+//! gates and speaker, by the recipe. The cascade speaker's handle is
+//! `Instantiation::sink` (feature `audio-host`) until the next open.
 
 mod run;
 #[cfg(feature = "audio-host")]

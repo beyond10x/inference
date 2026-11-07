@@ -2,7 +2,24 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- `inference`: `Binding::stt`, `Binding::tts` and `Binding::speech` also need the model's handle
+  or session to be `Send + 'static` (`R::Handle`, `S::Handle`, `M::Session`), as the binding now
+  owns the model and builds its role's node for each run from it.
+
 ### Added
+
+- `inference`: `Instantiation::open(&mut self, &Stack, &LiveSessions)`, which opens a live
+  session over the planned pipeline in the recipe's interaction mode, each role-bound node built
+  for that run over its role's binding and every other node by the recipe, and returns the
+  session and its driver; a node the recipe cannot build (`transcribe`, `native_voice`'s tool
+  nodes, an application recipe's nodes no role binds other than fan-outs) is refused with
+  `Error::Layer` and no session is left open. `Instantiation::sink()` (feature `audio-host`) is
+  the handle of the opened `voice_cascade` run's speaker sink. The `mock` registration's
+  generator now claims `concurrent_input_output`, which the opened run's model node needs.
+- `inference-pipeline`: the fan-out node, `nodes::FanOut`, in every build; it moved from the
+  testkit, where `inference_testkit::stt::FanOut` re-exports it.
 
 - `inference`: `Recipe` with the five built-ins `chat`, `transcribe`, `speak`, `voice_cascade` and
   `native_voice`; `Recipe::declaration`, `Recipe::declare_into` over a caller's declaration,

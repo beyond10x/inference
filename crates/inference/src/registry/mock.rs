@@ -1,9 +1,10 @@
 //! The `mock` registration: the testkit mocks for every role (feature `testing`).
 //!
 //! Bound by name, each role runs the testkit default here: the recogniser replays the testkit's
-//! script, the generator answers [`MOCK_REPLY`] piece by piece, the synthesiser speaks PCM16 at
-//! 24 kHz and the native speech model has no scripted turn. A mock bound as a value
-//! (`Binding::llm(MockGenerator::new(..))`) runs its own script instead.
+//! script, the generator answers [`MOCK_REPLY`] piece by piece and takes input while it is
+//! Active (`concurrent_input_output`, which the model node of a recipe run needs), the
+//! synthesiser speaks PCM16 at 24 kHz and the native speech model has no scripted turn. A mock
+//! bound as a value (`Binding::llm(MockGenerator::new(..))`) runs its own script instead.
 
 use inference_audio::{AudioEncoding, AudioFormat};
 use inference_core::model::{Locality, ModelId};
@@ -36,7 +37,7 @@ pub(super) fn descriptor() -> AdapterDescriptor {
         })
         .role(Role::Llm, |_| {
             Ok(Binding::llm(MockGenerator::new(
-                llm::MockConfiguration::StreamingOnly,
+                llm::MockConfiguration::StreamingAndConcurrentInput,
                 ModelId::generate(),
                 MOCK_REPLY,
             ))

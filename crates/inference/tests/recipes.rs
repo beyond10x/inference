@@ -1,5 +1,6 @@
 //! The recipes of `docs/design/sdk.md` §3.3: their topologies, `declaration()`, `declare_into`
-//! over a caller's catalog, application recipes and their registration, over the testkit mocks.
+//! over a caller's catalog, application recipes and their registration, over the testkit mocks;
+//! and an instantiated chat opened as a live session, which carries a turn to the mock's reply.
 
 #[path = "fixtures/reference_cascade.rs"]
 mod reference_cascade;
