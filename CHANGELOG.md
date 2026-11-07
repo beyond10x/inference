@@ -31,6 +31,9 @@
   model under its own call id. `Instantiation::authority()` is the run's confirmation hook
   (`AuthorityHandle`: `held`, `confirm`, `deny`) and `Instantiation::call_ids()` the model's call
   id of each proposed call (`CallIds`).
+- `inference-pipeline`: `AuthorityHandle::close()`, which rejects every call the tool authority
+  holds for confirmation, and every one it would hold from then on, `denied`, so that its drain
+  ends with no host answer; `confirm` and `deny` answer false from then on.
 - `inference`: `Error::ConcurrencyUnclaimed { role, adapter }` and
   `ErrorKind::ConcurrencyUnclaimed`. `Instantiation::open` returns it before anything opens when
   the run would keep one generation over an `llm` binding whose adapter does not claim
