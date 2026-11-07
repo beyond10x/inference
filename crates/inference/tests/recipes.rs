@@ -869,8 +869,7 @@ fn an_instantiated_chat_opens_a_run_that_carries_a_turn() {
         .expect("resolves");
     let mut instantiation = Recipe::chat().instantiate(&stack).expect("chat plans");
     let sessions = LiveSessions::new();
-    let (session, driver) =
-        block_on(instantiation.open(&stack, &sessions)).expect("the run opens");
+    let (session, driver) = block_on(instantiation.open(&stack, &sessions)).expect("the run opens");
     let run_id = session.run_id();
     let (done, ended) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -1709,8 +1708,7 @@ fn with_node_replaces_the_implementation_of_that_node_and_no_other() {
         .with_node("tts", replacement(&log))
         .instantiate(&stack)
         .expect("speak plans");
-    let (session, driver) =
-        block_on(instantiation.open(&stack, &sessions)).expect("the run opens");
+    let (session, driver) = block_on(instantiation.open(&stack, &sessions)).expect("the run opens");
     let (done, ended) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = done.send(block_on(driver.drive()));
