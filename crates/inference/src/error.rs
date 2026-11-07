@@ -57,6 +57,9 @@ pub enum Error {
     /// which the run's model node needs: it keeps one generation for the whole run and offers it
     /// every input.
     ConcurrencyUnclaimed { role: String, adapter: String },
+    /// `inference.sdk.RecipeNameTaken`: a built-in recipe or an earlier registration of this
+    /// process holds the recipe name `name`; nothing was registered.
+    RecipeNameTaken { name: String },
     /// A cost was asked for and no price document is named.
     NoPrices,
     /// The handle or session is closed.
@@ -79,6 +82,7 @@ pub enum ErrorKind {
     Device,
     Provider,
     ConcurrencyUnclaimed,
+    RecipeNameTaken,
     NoPrices,
     Closed,
     Layer,
@@ -96,6 +100,7 @@ impl Error {
             Self::Device { .. } => ErrorKind::Device,
             Self::Provider { .. } => ErrorKind::Provider,
             Self::ConcurrencyUnclaimed { .. } => ErrorKind::ConcurrencyUnclaimed,
+            Self::RecipeNameTaken { .. } => ErrorKind::RecipeNameTaken,
             Self::NoPrices => ErrorKind::NoPrices,
             Self::Closed { .. } => ErrorKind::Closed,
             Self::Layer { .. } => ErrorKind::Layer,
@@ -186,6 +191,11 @@ impl fmt::Display for Error {
                  concurrent_input_output, and the run's model node keeps one generation for the \
                  whole run and offers it every input; bind the role {role} to an adapter whose \
                  capabilities include concurrent_input_output"
+            ),
+            Self::RecipeNameTaken { name } => write!(
+                f,
+                "the recipe name `{name}` is held by a built-in recipe or an earlier registration \
+                 of this process; register the recipe under another name"
             ),
             Self::NoPrices => f.write_str(
                 "no price document is named; set the top-level key prices = \"<path to a price \
@@ -323,6 +333,12 @@ mod tests {
                 },
                 ErrorKind::ConcurrencyUnclaimed,
             ),
+            (
+                Error::RecipeNameTaken {
+                    name: "chat".to_owned(),
+                },
+                ErrorKind::RecipeNameTaken,
+            ),
             (Error::NoPrices, ErrorKind::NoPrices),
             (
                 Error::Closed {
@@ -354,6 +370,7 @@ mod tests {
             r#"the audio device "USB Mic": no device of that name; the host reports these devices: "Built-in Microphone", "Headset""#,
             r#"the provider of the adapter "openai" failed: the connection was reset"#,
             r#"the role llm is bound to the adapter "llama-server", which does not claim concurrent_input_output, and the run's model node keeps one generation for the whole run and offers it every input; bind the role llm to an adapter whose capabilities include concurrent_input_output"#,
+            "the recipe name `chat` is held by a built-in recipe or an earlier registration of this process; register the recipe under another name",
             r#"no price document is named; set the top-level key prices = "<path to a price document>" in the stack file, or call Stack::prices on the stack"#,
             "closed: the agent was closed before the call",
             "the pipeline refused the declaration",
@@ -375,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn seven_variants_name_their_fix() {
+    fn eight_variants_name_their_fix() {
         let shown = not_compiled().to_string();
         assert!(shown.contains(r#"features = ["whispercpp"]"#), "{shown}");
 
@@ -424,6 +441,16 @@ mod tests {
         }
         assert!(shown.contains("bind the role llm to an adapter"), "{shown}");
 
+        let shown = Error::RecipeNameTaken {
+            name: "ask".to_owned(),
+        }
+        .to_string();
+        assert!(shown.contains("`ask`"), "{shown}");
+        assert!(
+            shown.contains("register the recipe under another name"),
+            "{shown}"
+        );
+
         let shown = Error::NoPrices.to_string();
         assert!(shown.contains("prices"), "{shown}");
     }
@@ -431,7 +458,7 @@ mod tests {
     #[test]
     fn every_variant_has_the_kind_of_its_name() {
         let pairs = every_variant();
-        assert_eq!(pairs.len(), 10);
+        assert_eq!(pairs.len(), 11);
         for (error, kind) in pairs {
             assert_eq!(error.kind(), kind, "{error:?}");
             let variant = format!("{error:?}");

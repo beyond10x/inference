@@ -19,7 +19,7 @@ use inference::pipeline::{AdapterNotFound, Catalog, Declaration, PipelineId, Pla
 use inference::stt::Recogniser as _;
 use inference::tts::Synthesiser as _;
 use inference::{
-    Binding, EXPOSURE_CAPACITY, Env, ErrorKind, MAX_TOOL_ITERATIONS, Recipe, Role, Stack,
+    Binding, EXPOSURE_CAPACITY, Env, Error, ErrorKind, MAX_TOOL_ITERATIONS, Recipe, Role, Stack,
 };
 use inference_testkit::duplex::mock::MockSpeechModel;
 use inference_testkit::llm::{self, MockGenerator};
@@ -678,7 +678,11 @@ fn an_application_recipe_is_registered_and_found_by_name() {
         let error = Recipe::custom(taken, InteractionMode::TurnBased, ask)
             .register()
             .expect_err("the name is taken");
-        assert_eq!(error.kind(), ErrorKind::Layer);
+        assert!(
+            matches!(&error, Error::RecipeNameTaken { name } if name == taken),
+            "{error:?}"
+        );
+        assert_eq!(error.kind(), ErrorKind::RecipeNameTaken);
         assert!(error.to_string().contains(taken), "{error}");
     }
     assert_eq!(Recipe::named("chat").expect("built in").name(), "chat");

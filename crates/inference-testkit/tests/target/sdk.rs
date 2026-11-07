@@ -66,8 +66,8 @@ use inference::tts::{
     SynthesisEvent, SynthesisHandle, SynthesisOutput, Synthesiser, UtteranceEnded,
 };
 use inference::{
-    AdapterDescriptor, Binding, BindingSource, Env, Error, ErrorKind, Instantiation, Recipe,
-    Registry, Role, RoleBoundTwice, Stack,
+    AdapterDescriptor, Binding, BindingSource, Env, Error, Instantiation, Recipe, Registry, Role,
+    RoleBoundTwice, Stack,
 };
 use inference_testkit::duplex::mock::MockSpeechModel;
 use inference_testkit::llm::{self, MockGenerator};
@@ -667,9 +667,7 @@ fn register_recipe(
                     .emitting(event),
             )
         }
-        (true, Err(error))
-            if error.kind() == ErrorKind::Layer && error.to_string().contains(&scoped) =>
-        {
+        (true, Err(error)) if matches!(&error, Error::RecipeNameTaken { name } if *name == scoped) => {
             Ok(
                 SemanticCommandResult::took(recipe_outcome(REGISTER_RECIPE, "name-taken"))
                     .with_error(
