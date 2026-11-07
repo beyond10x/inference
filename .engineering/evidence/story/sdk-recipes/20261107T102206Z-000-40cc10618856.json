@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-07T10:22:06Z",
+  "actor": "human:timo",
+  "artifact": "story:sdk-recipes",
+  "kind": "story",
+  "revision": 23,
+  "change": {
+    "change": "evidence",
+    "kind": "approval",
+    "source": "wave approval relayed by the orchestrator session for the operator, 2026-11-06: the SDK stories plus api-key-copies-in-handshakes, cut at 4 units in plan order; third wave"
+  }
+}
