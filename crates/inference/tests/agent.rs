@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use inference::core::model::{
     Adapter, AdapterDescriptor as ModelDescriptor, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
@@ -186,6 +186,64 @@ async fn closing_is_idempotent_application_first() {
     assert_eq!(names(&before).last(), Some(&"Said"));
     assert_eq!(names(&after).iter().filter(|n| **n == "Closed").count(), 1);
     assert_eq!(names(&after).last(), Some(&"Closed"));
+}
+
+/// Reads what `events` already holds, without waiting: every item must be ready, through the end.
+fn read_ready(events: &mut inference::Events) -> Vec<Event> {
+    let mut seen = Vec::new();
+    loop {
+        match events.next().now_or_never() {
+            Some(Some(event)) => seen.push(event.expect("no terminal error")),
+            Some(None) => return seen,
+            None => panic!("the stream is not at its end: {seen:#?}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_closes_each_return_once_closed_is_on_the_stream() {
+    let model = MockSpeechModel::native(vec![turn("hi")]);
+    let agent = Agent::voice_with(speech(model))
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    speak(&agent).await;
+    let mut seen = read_until(&mut events, "Said").await;
+    let close = || async {
+        agent.close().await.expect("closes");
+        agent.closed().now_or_never().is_some()
+    };
+    let (first, second) = tokio::time::timeout(LIMIT, async { tokio::join!(close(), close()) })
+        .await
+        .expect("both closes return within 5 s");
+    assert!(first, "the first close returned before the pump ended");
+    assert!(second, "the second close returned before the pump ended");
+    seen.extend(read_ready(&mut events));
+    let names = names(&seen);
+    assert_eq!(names.iter().filter(|n| **n == "Closed").count(), 1);
+    assert_eq!(names.last(), Some(&"Closed"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn close_after_the_models_close_returns_at_once() {
+    let model = MockSpeechModel::native(vec![turn("hi")]).closes();
+    let agent = Agent::voice_with(speech(model))
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    speak(&agent).await;
+    let seen = read_all(&mut events).await;
+    tokio::time::timeout(LIMIT, agent.closed())
+        .await
+        .expect("the pump ends within 5 s");
+    assert!(
+        matches!(agent.close().now_or_never(), Some(Ok(()))),
+        "close after the model's close waits"
+    );
+    assert_eq!(names(&seen).iter().filter(|n| **n == "Closed").count(), 1);
+    assert_eq!(names(&seen).last(), Some(&"Closed"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
