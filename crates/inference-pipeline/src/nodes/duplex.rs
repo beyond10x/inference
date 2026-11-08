@@ -500,8 +500,8 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
         Ok(())
     }
 
-    /// Drains the node: answers every call it minted and has not answered as rejected, as no
-    /// tool result is admitted from then on, then closes an open session, whose events up to its
+    /// Drains the node: answers every call it minted and has not answered, held or running,
+    /// with the session's close, as no tool result is admitted from then on, then closes an open session, whose events up to its
     /// close are then forwarded, or ends the outputs at once when the session is no longer open.
     fn drain(&mut self) -> Result<(), String> {
         if self.draining {
@@ -511,7 +511,7 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
             for speech_call_id in self.call_ids.unanswered() {
                 self.submit(
                     &speech_call_id,
-                    json!({"error": "rejected: the session is closing"}),
+                    json!({"error": "the session closed before the call's result"}),
                 );
             }
         }

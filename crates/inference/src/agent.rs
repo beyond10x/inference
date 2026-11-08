@@ -108,7 +108,7 @@ fn exclusive<T>(mutex: &mut Mutex<T>) -> &mut T {
 /// A device run's playback, attached to an agent's sink slot while it runs.
 pub(crate) trait Playback: Send + Sync {
     /// Plays `frame` after every frame before it, and adds one to `handed`, when given, once
-    /// the frame is handed out; never for a frame a cut dropped.
+    /// the playback is done with the frame: handed out, or dropped by a cut.
     fn play(&self, frame: AudioFrame, handed: Option<Arc<AtomicU64>>);
     /// Whether reply audio is not yet played.
     fn pending(&self) -> bool;

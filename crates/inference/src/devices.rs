@@ -87,20 +87,23 @@ impl Sink {
 }
 
 impl Playback for Sink {
-    /// Counts the frame in `handed` once it is pushed to the speaker: a frame a cut discarded
-    /// was never handed out, as the cascade's playout counts it dropped.
+    /// Counts the frame in `handed` once the playout thread is done with it: pushed to the
+    /// speaker, or discarded by a cut or a closed thread.
     fn play(&self, frame: AudioFrame, handed: Option<Arc<AtomicU64>>) {
         let interruption = self.interruptions.load(Ordering::Acquire);
         self.counts.sent.fetch_add(1, Ordering::AcqRel);
-        if self
-            .sender
-            .send(Out::Frame {
-                frame,
-                interruption,
-                handed,
-            })
-            .is_err()
-        {
+        if let Err(mpsc::SendError(out)) = self.sender.send(Out::Frame {
+            frame,
+            interruption,
+            handed,
+        }) {
+            if let Out::Frame {
+                handed: Some(handed),
+                ..
+            } = out
+            {
+                handed.fetch_add(1, Ordering::AcqRel);
+            }
             self.counts.handed.fetch_add(1, Ordering::AcqRel);
         }
     }
@@ -142,9 +145,9 @@ fn playout(
                     counts
                         .rate
                         .store(frame.format.sample_rate.get(), Ordering::Release);
-                    if let Some(handed) = handed {
-                        handed.fetch_add(1, Ordering::AcqRel);
-                    }
+                }
+                if let Some(handed) = handed {
+                    handed.fetch_add(1, Ordering::AcqRel);
                 }
                 counts.handed.fetch_add(1, Ordering::AcqRel);
             }
@@ -237,7 +240,9 @@ impl Agent {
     /// Runs the agent on `host`'s default microphone and speaker until the session ends or
     /// Ctrl-C. While it runs the agent's audio goes to the speaker only, never onto the event
     /// stream, and a barge-in or [`Agent::interrupt`] cuts what the speaker has not played. It
-    /// returns once the last reply was handed to the speaker and played.
+    /// returns once the last reply was handed to the speaker and played. Its future dropped, as
+    /// by a `select!` or a `timeout`, it cuts what the speaker holds, lets go of the microphone
+    /// and the speaker, and the agent's audio goes onto the event stream again.
     ///
     /// # Errors
     ///
@@ -280,16 +285,19 @@ impl Agent {
             .sink_slot()
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&sink) as Arc<dyn Playback>);
+        let mut attached = Attached {
+            agent: self,
+            sink: Arc::clone(&sink),
+            ended: false,
+        };
         let outcome = self.feed_until(&host, stop).await;
         if outcome.is_ok() {
             sink.end();
             let _ = drained.await;
             wait_played(speaker, &counts).await;
         }
-        self.sink_slot()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        attached.ended = true;
+        drop(attached);
         outcome
     }
 
@@ -300,10 +308,10 @@ impl Agent {
         let microphone = Microphone::open(host, &DeviceSelector::Default, config)
             .map_err(|error| device(host, Direction::Input, &error))?;
         let (frames, mut captured) = tokio_mpsc::unbounded_channel();
-        let listening = Arc::new(AtomicBool::new(true));
+        let listening = Listening(Arc::new(AtomicBool::new(true)));
         let (gone, left) = oneshot::channel::<()>();
         {
-            let listening = Arc::clone(&listening);
+            let listening = Arc::clone(&listening.0);
             thread::spawn(move || {
                 capture(microphone, &frames, &listening);
                 drop(gone);
@@ -334,9 +342,50 @@ impl Agent {
                 _ = &mut stop => break self.close().await,
             }
         };
-        listening.store(false, Ordering::Release);
+        drop(listening);
         let _ = left.await;
         outcome
+    }
+}
+
+/// A device run's sink in the agent's slot. Dropped, it takes the sink out of the slot, so the
+/// agent's audio goes onto the event stream again; dropped before the run ended, as when the
+/// run's future is, it also cuts what the sink holds and ends the playout thread, which lets go
+/// of the speaker.
+struct Attached<'a> {
+    agent: &'a Agent,
+    sink: Arc<Sink>,
+    ended: bool,
+}
+
+impl Drop for Attached<'_> {
+    fn drop(&mut self) {
+        let mut slot = self
+            .agent
+            .sink_slot()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if slot
+            .as_ref()
+            .is_some_and(|held| std::ptr::addr_eq(Arc::as_ptr(held), Arc::as_ptr(&self.sink)))
+        {
+            slot.take();
+        }
+        drop(slot);
+        if !self.ended {
+            self.sink.cut();
+            self.sink.end();
+        }
+    }
+}
+
+/// The microphone thread's go-ahead: cleared once dropped, at the run's end or when the run's
+/// future is dropped, so the thread stops and lets go of the microphone.
+struct Listening(Arc<AtomicBool>);
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
