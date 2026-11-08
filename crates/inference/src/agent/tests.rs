@@ -6,15 +6,21 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
+use inference_core::endpoint::SendError;
+use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{GenerationCancelled, GenerationStarted};
-use inference_core::id::{GenerationId, ResponseId, RunId, SessionId, SpeechSessionId};
+use inference_core::id::{
+    GenerationId, NodeId, ResponseId, RunId, SessionId, SpeechSessionId, StreamId,
+};
 use inference_duplex::{
     ResponseFailed, SessionFailure, SessionFailureKind, SpeechSessionClosed, SpeechSessionFailed,
     SpeechStarted,
 };
 use inference_facade::events::SessionEvent;
+use inference_facade::live::InputError;
 use inference_facade::session::{
-    PipelineSwitched, SessionClosed, SessionInterrupted, SessionReady,
+    PipelineSwitched, SessionClosed, SessionInterrupted, SessionMoveError, SessionReady,
+    SessionState, SessionStateConflict,
 };
 use inference_pipeline::PipelineId;
 use inference_runtime::RunError;
@@ -23,11 +29,11 @@ use inference_text::{SegmentId, TextSegmentCommitted};
 use tokio::sync::broadcast;
 
 use super::{
-    Act, CLOSED, CLOSING, Close, Core, OPEN, Playback, Route, SWITCHING, Step, SystemClock,
-    barge_in,
+    Act, CLOSED, CLOSING, Close, Core, Interrupter, OPEN, Playback, Route, SWITCHING, Step,
+    SystemClock, barge_in,
 };
-use crate::Error;
 use crate::event::{Event, Item};
+use crate::{Error, Payload};
 
 /// A sink whose `pending()` is set by the test, counting cuts and frames played.
 #[derive(Default)]
@@ -481,4 +487,77 @@ fn the_first_ready_is_started() {
     step.on_event(&fixture.core, ready());
     assert_eq!(fixture.drain().0, ["Started"]);
     assert!(!barge_in(&fixture.core));
+}
+
+/// A refused `cancel` envelope, as the session's `interrupt` answers when an ingress refused it.
+fn forward_refused() -> InputError<Payload> {
+    InputError::Forward(Box::new(SendError::Closed(EventEnvelope {
+        schema_version: 1,
+        event_id: EventId::generate(),
+        run_id: RunId::generate(),
+        session_id: None,
+        stream_id: StreamId::generate(),
+        sequence: 1,
+        producer: NodeId::generate(),
+        port: "in".to_owned(),
+        kind: ControlKind::Cancel.as_str().to_owned(),
+        generation_id: None,
+        timestamp: 0,
+        timebase: Timebase::WallTime,
+        causation_id: None,
+        payload: Payload::Control(ControlKind::Cancel),
+    })))
+}
+
+fn not_ready() -> InputError<Payload> {
+    InputError::Refused(SessionMoveError::WrongState(SessionStateConflict {
+        current: SessionState::Closed,
+    }))
+}
+
+/// A barge-in's interrupt whose `cancel` an ingress refused still records `SessionInterrupted`
+/// (the session's `interrupt` documents it), so that event is the barge-in's: one `Interrupted`.
+#[test]
+fn a_barge_ins_interrupt_whose_cancel_was_refused_still_yields_its_interrupted() {
+    let mut fixture = fixture(true);
+    let mut step = Step::new(None);
+    let events = vec![started(fixture.generation), speech()];
+    assert_eq!(interrupts(&mut step, &fixture.core, events), 1);
+    fixture
+        .core
+        .settle(Interrupter::Pump, &Err(forward_refused()));
+    step.on_event(&fixture.core, interrupted());
+    assert_eq!(fixture.drain().0, ["Interrupted"]);
+}
+
+/// A barge-in's interrupt the session refused records no `SessionInterrupted`: a later one, not
+/// the pump's or the application's, yields nothing.
+#[test]
+fn a_barge_ins_refused_interrupt_is_given_back() {
+    let mut fixture = fixture(true);
+    let mut step = Step::new(None);
+    let events = vec![started(fixture.generation), speech()];
+    assert_eq!(interrupts(&mut step, &fixture.core, events), 1);
+    fixture.core.settle(Interrupter::Pump, &Err(not_ready()));
+    step.on_event(&fixture.core, interrupted());
+    assert_eq!(fixture.drain().0, Vec::<&str>::new());
+}
+
+/// The application's interrupt settles by the same rule: a refused `cancel` keeps its count, a
+/// refused interrupt gives it back.
+#[test]
+fn the_applications_interrupt_settles_by_the_same_rule() {
+    let fixture = fixture(true);
+    let requested = || fixture.core.reply.lock().expect("unpoisoned").requested;
+    fixture.core.reply.lock().expect("unpoisoned").requested = 2;
+    fixture
+        .core
+        .settle(Interrupter::Application, &Err(forward_refused()));
+    assert_eq!(requested(), 2);
+    fixture.core.settle(Interrupter::Application, &Ok(()));
+    assert_eq!(requested(), 2);
+    fixture
+        .core
+        .settle(Interrupter::Application, &Err(not_ready()));
+    assert_eq!(requested(), 1);
 }

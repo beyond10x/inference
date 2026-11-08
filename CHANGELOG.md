@@ -91,16 +91,17 @@
   `reject`, drains with `close` (idempotent), and reads with `events()`, an `Events` stream of
   `Event` over a broadcast channel of 1024 that one pump task fills; `closed()` resolves once
   every stream holds all it will. `Event` has twelve variants and `raw()`. Dropping an unclosed
-  agent cancels its session. Also `inference::sessions()`, `inference::Clock` and
+  agent cancels its session and ends every stream with `Event::Closed`. Also `inference::sessions()`, `inference::Clock` and
   `inference::Description`.
 - `inference-testkit`: `mark::encode` and `mark::decode` mark the mocks' reply audio, never
   silent, with the mock, the reply and the frame index; the duplex mock and `MockSynthesis` emit
   marked frames. `MockSpeechModel::history()` returns a `MockHistory` whose `completed()` counts
   the responses the mock completed.
 - `inference-audio-device`: `FakeHost::played()` and `played_frames()` return what its output
-  sink was written, `Played::Cleared` at each stop; `FakeHost::hold_sink()` holds the writes
-  until the returned `SinkHold` drops, `SinkHold::waiting()` showing them; and
-  `FakeHost::unbounded()` lifts the sink's capacity bound.
+  sink took, in the order it took it, a refused write not among it, and `Played::Cleared` at
+  each stop; `FakeHost::hold_sink()` holds the writes until every `SinkHold` taken drops,
+  `SinkHold::waiting()` showing them; and `FakeHost::unbounded()` lifts the sink's capacity
+  bound, so its sink never answers `Full`.
 
 ### Fixed
 

@@ -150,9 +150,12 @@ impl Route {
             .map(broadcast::Sender::subscribe)
     }
 
-    /// Drops the sender, so every reader ends after what it holds.
-    fn hang_up(&self) {
-        lock(&self.sender).take();
+    /// Sends `Closed` with `raw` and drops the sender, taken under one lock, so every reader
+    /// ends after it and `Closed` is sent once: nothing once the sender is gone.
+    fn hang_up(&self, raw: Option<SessionEvent>) {
+        if let Some(sender) = lock(&self.sender).take() {
+            let _ = sender.send(Ok(Event::Closed { raw }));
+        }
     }
 
     fn audio(&self, frame: AudioFrame) {
@@ -212,6 +215,13 @@ struct Tracking {
     requested: usize,
 }
 
+/// Who asked for an interrupt: the pump at a barge-in, or the application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interrupter {
+    Pump,
+    Application,
+}
+
 /// The calls already announced, and those whose `ToolCalled` was yielded.
 #[derive(Debug, Default)]
 struct Confirmations {
@@ -247,6 +257,21 @@ impl Core {
             names: Vec::new(),
             confirmations: Mutex::default(),
         }
+    }
+
+    /// Settles the count of an interrupt `by` awaits the `SessionInterrupted` of, once the
+    /// session's `interrupt` answered `interrupted`: a refused interrupt records none, so its
+    /// count is given back; any other answer, a refused `cancel` among them, records one.
+    fn settle(&self, by: Interrupter, interrupted: &std::result::Result<(), InputError<Payload>>) {
+        if !matches!(interrupted, Err(InputError::Refused(_))) {
+            return;
+        }
+        let mut reply = lock(&self.reply);
+        let count = match by {
+            Interrupter::Pump => &mut reply.spawned,
+            Interrupter::Application => &mut reply.requested,
+        };
+        *count = count.saturating_sub(1);
     }
 
     /// Moves `Open` to `to`; whether this call moved it.
@@ -514,10 +539,7 @@ impl Step {
             );
         }
         core.state.store(CLOSED, Ordering::Release);
-        core.route.send(Event::Closed {
-            raw: self.closed.take(),
-        });
-        core.route.hang_up();
+        core.route.hang_up(self.closed.take());
     }
 }
 
@@ -640,10 +662,8 @@ fn act(inner: &Arc<Inner>, act: &Act) {
     if act.interrupt {
         let task = Arc::clone(inner);
         let handle = tokio::spawn(async move {
-            if task.session.interrupt().await.is_err() {
-                let mut reply = lock(&task.core.reply);
-                reply.spawned = reply.spawned.saturating_sub(1);
-            }
+            let interrupted = task.session.interrupt().await;
+            task.core.settle(Interrupter::Pump, &interrupted);
         });
         *lock(&inner.interrupting) = Some(handle);
     }
@@ -1181,10 +1201,9 @@ impl Agent {
             reply.requested += 1;
         }
         let interrupted = self.inner.session.interrupt().await;
-        if let Err(InputError::Refused(_)) = &interrupted {
-            let mut reply = lock(&self.inner.core.reply);
-            reply.requested = reply.requested.saturating_sub(1);
-        }
+        self.inner
+            .core
+            .settle(Interrupter::Application, &interrupted);
         interrupted.map_err(input_error)
     }
 
@@ -1254,6 +1273,7 @@ impl Drop for Agent {
         if let Some(interrupting) = lock(&self.inner.interrupting).take() {
             interrupting.abort();
         }
+        self.inner.core.route.hang_up(None);
     }
 }
 
