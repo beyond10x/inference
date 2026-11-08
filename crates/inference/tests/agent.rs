@@ -1958,3 +1958,199 @@ async fn a_second_turn_without_auto_interrupt_cuts_nothing() {
     assert!(!played[..last].contains(&Played::Cleared), "{played:#?}");
     assert_eq!(count(&seen, "Interrupted"), 0, "{seen:#?}");
 }
+
+/// A native agent over `model`, its session config's `auto_interrupt` set to `auto_interrupt`.
+async fn native_agent(model: MockSpeechModel, auto_interrupt: bool) -> Arc<Agent> {
+    let mut config = Agent::voice_with(speech(MockSpeechModel::native(vec![turn("hi")])))
+        .describe()
+        .expect("plans")
+        .session_config
+        .expect("a speech config");
+    config.auto_interrupt = auto_interrupt;
+    let agent = Agent::voice_with(speech(model))
+        .session_config(config)
+        .start()
+        .await
+        .expect("starts");
+    Arc::new(agent)
+}
+
+/// What `host` played, a duplex mock frame as its reply and frame index, a stop as `None`.
+fn speech_played(host: &FakeHost) -> Vec<Option<(u32, u32)>> {
+    host.played()
+        .iter()
+        .filter_map(|entry| match entry {
+            Played::Frame(frame) => mark::decode(frame)
+                .filter(|marked| marked.mock == MockId::Speech)
+                .map(|marked| Some((marked.reply, marked.frame))),
+            Played::Cleared => Some(None),
+        })
+        .collect()
+}
+
+/// Waits until `host` played both frames of reply 0.
+async fn played_reply_0(host: &FakeHost) {
+    let started = Instant::now();
+    while played_of(host, MockId::Speech, 0) != [0, 1] {
+        assert!(started.elapsed() < LIMIT, "{:#?}", host.played());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_barge_in_cuts_the_reply_held_at_the_sink() {
+    let model = MockSpeechModel::native(vec![turn("one"), turn("two")]).closes();
+    let history = model.history();
+    let agent = native_agent(model, true).await;
+    let mut events = agent.events();
+    let host = native_host();
+    let hold = host.hold_sink();
+    let mut run = spawn_run(&agent, &host);
+    let first = utterance(pcm(24_000), 0);
+    feed(&host, &first.frames()).await;
+    completed(&history, 1).await;
+    waiting_for(&hold, MockId::Speech, 0).await;
+    let barge_in = utterance(pcm(24_000), first.next());
+    feed(&host, &barge_in.speech()).await;
+    let gate = read_until(&mut events, "Interrupted").await;
+    feed(&host, &[barge_in.silence()]).await;
+    drop(hold);
+    returns_ok(&mut run).await;
+    let all = [gate, read_all(&mut events).await].concat();
+    assert_eq!(names(&all).last(), Some(&"Closed"), "{all:#?}");
+    assert_eq!(count(&all, "Interrupted"), 1, "{all:#?}");
+    let after = cleared(&host);
+    assert!(
+        after.iter().all(|marked| marked.reply != 0),
+        "no frame of reply 0 after the cut: {:#?}",
+        host.played()
+    );
+    let reply_1: Vec<u32> = after
+        .iter()
+        .filter(|marked| marked.reply == 1)
+        .map(|marked| marked.frame)
+        .collect();
+    assert_eq!(reply_1, [0, 1], "{:#?}", host.played());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_barge_in_cuts_a_reply_that_reached_the_speaker() {
+    let model = MockSpeechModel::native(vec![turn("one"), turn("two")]).closes();
+    let history = model.history();
+    let agent = native_agent(model, true).await;
+    let mut events = agent.events();
+    let host = native_host();
+    let mut run = spawn_run(&agent, &host);
+    let first = utterance(pcm(24_000), 0);
+    feed(&host, &first.frames()).await;
+    completed(&history, 1).await;
+    played_reply_0(&host).await;
+    let barge_in = utterance(pcm(24_000), first.next());
+    feed(&host, &barge_in.speech()).await;
+    read_until(&mut events, "Interrupted").await;
+    feed(&host, &[barge_in.silence()]).await;
+    returns_ok(&mut run).await;
+    assert_eq!(
+        speech_played(&host),
+        [Some((0, 0)), Some((0, 1)), None, Some((1, 0)), Some((1, 1))],
+        "{:#?}",
+        host.played()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_barge_in_cuts_with_auto_interrupt_off() {
+    let model = MockSpeechModel::native(vec![turn("one"), turn("two")]).closes();
+    let history = model.history();
+    let agent = native_agent(model, false).await;
+    let mut events = agent.events();
+    let host = native_host();
+    let mut run = spawn_run(&agent, &host);
+    let first = utterance(pcm(24_000), 0);
+    feed(&host, &first.frames()).await;
+    completed(&history, 1).await;
+    played_reply_0(&host).await;
+    feed(&host, &utterance(pcm(24_000), first.next()).frames()).await;
+    returns_ok(&mut run).await;
+    assert_eq!(
+        speech_played(&host),
+        [Some((0, 0)), Some((0, 1)), Some((1, 0)), Some((1, 1))],
+        "{:#?}",
+        host.played()
+    );
+    let seen = read_all(&mut events).await;
+    assert_eq!(names(&seen).last(), Some(&"Closed"), "{seen:#?}");
+    assert_eq!(count(&seen, "Interrupted"), 0, "{seen:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_application_interrupt_cuts_the_reply_mid_play() {
+    let model = MockSpeechModel::native(vec![turn("one"), turn("two")]).closes();
+    let agent = Arc::new(
+        Agent::voice_with(speech(model))
+            .start()
+            .await
+            .expect("starts"),
+    );
+    let mut events = agent.events();
+    let host = native_host();
+    let hold = host.hold_sink();
+    let mut run = spawn_run(&agent, &host);
+    let first = utterance(pcm(24_000), 0);
+    feed(&host, &first.frames()).await;
+    waiting_for(&hold, MockId::Speech, 0).await;
+    agent.interrupt().await.expect("interrupts");
+    read_until(&mut events, "Interrupted").await;
+    drop(hold);
+    feed(&host, &utterance(pcm(24_000), first.next()).frames()).await;
+    returns_ok(&mut run).await;
+    let after = cleared(&host);
+    assert!(
+        after.iter().all(|marked| marked.reply != 0),
+        "no frame of reply 0 after the cut: {:#?}",
+        host.played()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_close_during_input_ends_the_run_after_the_drain() {
+    let model = MockSpeechModel::native(vec![turn("hi")]).closes();
+    let agent = Arc::new(
+        Agent::voice_with(speech(model))
+            .start()
+            .await
+            .expect("starts"),
+    );
+    let session_id = agent.session().session_id();
+    let host = native_host();
+    let hold = host.hold_sink();
+    let mut run = spawn_run(&agent, &host);
+    let first = utterance(pcm(24_000), 0);
+    feed(&host, &first.frames()).await;
+    let started = Instant::now();
+    loop {
+        let row = inference::sessions()
+            .sessions_view()
+            .into_iter()
+            .find(|row| row.session_id == session_id)
+            .expect("the session's row");
+        if row.state != SessionState::Ready {
+            break;
+        }
+        assert!(started.elapsed() < LIMIT, "{row:?}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let format = pcm(24_000);
+    for index in 0..10_u64 {
+        let silent = frame(
+            format,
+            first.next() + index * 480,
+            format.encoding.silence(),
+        );
+        // The run stops listening once the session closed, which may come first.
+        let _ = host.feed(&decode(&silent).expect("a well-formed frame"));
+    }
+    still_runs(&mut run).await;
+    drop(hold);
+    returns_ok(&mut run).await;
+}
