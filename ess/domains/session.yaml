@@ -559,7 +559,11 @@ commands:
   # interrupt cancels or supersedes the active generation: below the session the facade sends a
   # control event of kind cancel into the run's ingresses and from then on delivers nothing of a
   # generation it had delivered, the session being the application's irreversible boundary.
-  # Refused unless Ready, as send is.
+  # Refused unless Ready, as send is. The command runs, and SessionInterrupted is emitted, when
+  # the interrupt is admitted; the facade delivers that event to the application once the cancel
+  # went into every ingress. A close that finished meanwhile delivered SessionClosed last, so
+  # the facade then delivers nothing more: the interrupt was admitted, its event is not delivered,
+  # and no outcome of this command differs, since the delivery is the facade's, not the model's.
   # read from: docs/design/inference.md:717
   # read from: docs/design/inference.md:637
   # read from: docs/design/inference.md:339
