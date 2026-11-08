@@ -800,6 +800,55 @@ async fn a_turn_is_yielded_in_emission_order() {
     agent.close().await.expect("closes");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn reading_and_sending_run_at_once() {
+    let model = MockSpeechModel::native(vec![turn("reply 0"), turn("reply 1")]);
+    let history = model.history();
+    let agent = Arc::new(
+        Agent::voice_with(speech(model))
+            .start()
+            .await
+            .expect("starts"),
+    );
+    let mut first = agent.events();
+    let reader = tokio::spawn(async move {
+        let mut seen = read_until(&mut first, "Said").await;
+        seen.extend(read_until(&mut first, "Usage").await);
+        seen
+    });
+    let (next, go) = tokio::sync::oneshot::channel::<()>();
+    let sender = tokio::spawn({
+        let agent = Arc::clone(&agent);
+        async move {
+            let at = say(&agent, 0).await;
+            go.await.expect("told to send utterance 1");
+            say(&agent, at).await;
+        }
+    });
+    let seen = reader.await.expect("the reader ends");
+    assert_eq!(
+        names(&seen),
+        [
+            "Started", "Heard", "Usage", "Said", "Audio", "Audio", "Usage"
+        ],
+        "{seen:#?}"
+    );
+    assert_eq!(said(&seen), ["reply 0"]);
+    let mut second = agent.events();
+    completed(&history, 1).await;
+    next.send(()).expect("the sender waits");
+    let mut seen = read_until(&mut second, "Said").await;
+    seen.extend(read_until(&mut second, "Usage").await);
+    assert_eq!(
+        names(&seen),
+        ["Heard", "Usage", "Said", "Audio", "Audio", "Usage"],
+        "{seen:#?}"
+    );
+    assert_eq!(said(&seen), ["reply 1"]);
+    sender.await.expect("the sender ends");
+    agent.close().await.expect("closes");
+}
+
 /// A clock that always answers the instant it was made with.
 #[derive(Clone, Copy)]
 struct Fixed(Instant);
