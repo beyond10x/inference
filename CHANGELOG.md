@@ -117,6 +117,8 @@
 
 ### Fixed
 
+- `inference`: the texts `Agent::send_text` takes before `Agent::commit` reach the generator as
+  one user turn, joined by a space; each was its own turn, answered as it arrived.
 - `inference`: the futures of `AgentBuilder::start` and `Agent::switch`, and of
   `Instantiation::open`, are `Send`, so an application starts or switches an agent inside
   `tokio::spawn`; `Stack` is `Sync`. They held a `&Stack` across an await while the stack's

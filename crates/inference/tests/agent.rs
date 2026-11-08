@@ -53,6 +53,16 @@ fn cascade() -> Stack {
         .bind(Binding::named(Role::Tts, "mock", BTreeMap::new()))
 }
 
+/// The cascade's roles but `role`, each bound by name to the mock.
+fn cascade_without(role: Role) -> Stack {
+    [Role::Stt, Role::Llm, Role::Tts]
+        .into_iter()
+        .filter(|bound| *bound != role)
+        .fold(Stack::new(), |stack, bound| {
+            stack.bind(Binding::named(bound, "mock", BTreeMap::new()))
+        })
+}
+
 fn name(event: &Event) -> &'static str {
     match event {
         Event::Started { .. } => "Started",
@@ -324,8 +334,9 @@ async fn a_text_agent_says_the_generators_text() {
     agent.send_text("hello").await.expect("sent");
     agent.commit().await.expect("committed");
     let seen = read_until(&mut events, "Said").await;
-    assert!(names(&seen).contains(&"Said"), "{seen:#?}");
     agent.close().await.expect("closes");
+    let seen = [seen, read_all(&mut events).await].concat();
+    assert_eq!(said(&seen).concat(), "Hello from the mock", "{seen:#?}");
 }
 
 fn instructed_generator() -> MockGenerator {
@@ -445,6 +456,79 @@ fn typed_binders_bind_their_roles_from_the_builder() {
             .bindings
             .iter()
             .any(|(role, _, source)| *role == Role::Speech && *source == BindingSource::Builder)
+    );
+}
+
+/// `role` of `described` as bound by a value, not by name, recorded as from the builder.
+fn bound_by_the_builder(described: &Description, role: Role) -> bool {
+    described.bindings.iter().any(|(bound, name, source)| {
+        *bound == role && name.is_none() && *source == BindingSource::Builder
+    })
+}
+
+#[test]
+fn the_builders_llm_binds_the_llm_role() {
+    let described = Agent::voice()
+        .stack(cascade_without(Role::Llm))
+        .llm(Binding::llm(instructed_generator()))
+        .describe()
+        .expect("plans");
+    assert!(
+        bound_by_the_builder(&described, Role::Llm),
+        "{described:#?}"
+    );
+}
+
+#[test]
+fn the_builders_stt_binds_the_stt_role() {
+    let recogniser = inference_testkit::stt::MockRecogniser::new(
+        inference_testkit::stt::MockConfiguration::Incremental,
+        ModelId::generate(),
+        inference_testkit::stt::script(),
+    );
+    let described = Agent::voice()
+        .stack(cascade_without(Role::Stt))
+        .stt(Binding::stt(recogniser))
+        .describe()
+        .expect("plans");
+    assert!(
+        bound_by_the_builder(&described, Role::Stt),
+        "{described:#?}"
+    );
+}
+
+#[test]
+fn the_builders_tts_binds_the_tts_role() {
+    let synthesiser = inference_testkit::tts::MockSynthesiser::new(
+        inference_testkit::tts::MockConfiguration::IncrementalStreaming,
+        ModelId::generate(),
+        pcm(24_000),
+    );
+    let described = Agent::voice()
+        .stack(cascade_without(Role::Tts))
+        .tts(Binding::tts(synthesiser))
+        .describe()
+        .expect("plans");
+    assert!(
+        bound_by_the_builder(&described, Role::Tts),
+        "{described:#?}"
+    );
+}
+
+/// The stack given after the builder resolved its own replaces the resolved one.
+#[test]
+fn the_builders_stack_replaces_the_resolved_stack() {
+    let model = MockSpeechModel::native(vec![turn("hi")]);
+    let builder = Agent::voice_with(speech(model));
+    assert_eq!(builder.describe().expect("plans").recipe, "native_voice");
+    let described = builder.stack(cascade()).describe().expect("plans");
+    assert_eq!(described.recipe, "voice_cascade");
+    assert!(
+        described
+            .bindings
+            .iter()
+            .all(|(role, _, _)| *role != Role::Speech),
+        "{described:#?}"
     );
 }
 
@@ -1395,4 +1479,103 @@ fn an_aws_bound_stack_describes_nova_sonics_default_without_credentials() {
         .session_config
         .expect("a speech config");
     assert_eq!(config, inference_aws::duplex::default_session_config());
+}
+
+/// Reads `events` until `done` answers what was read, within the limit. A cascade's events come
+/// from several nodes on several egresses, so no order between them is promised (R161).
+async fn read_until_done(
+    events: &mut inference::Events,
+    done: impl Fn(&[Event]) -> bool,
+) -> Vec<Event> {
+    let deadline = tokio::time::Instant::now() + LIMIT;
+    let mut seen = Vec::new();
+    while !done(&seen) {
+        match tokio::time::timeout_at(deadline, events.next()).await {
+            Ok(Some(event)) => seen.push(event.expect("no terminal error")),
+            Ok(None) => panic!("the stream ended first: {seen:#?}"),
+            Err(_) => panic!("not all within 5 s: {seen:#?}"),
+        }
+    }
+    seen
+}
+
+/// The texts the cascade heard, hypotheses and committed alike.
+fn heard(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Heard { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sent_audio_is_heard_as_the_recognisers_script_and_answered() {
+    let agent = Agent::voice_with(cascade()).start().await.expect("starts");
+    let mut events = agent.events();
+    for frame in inference_testkit::stt::synthetic_audio::tone_silence_tone_silence() {
+        agent.send_audio(frame).await.expect("sent");
+    }
+    agent.commit().await.expect("committed");
+    let seen = read_until_done(&mut events, |seen| {
+        heard(seen).iter().any(|text| text == "hello there") && names(seen).contains(&"Said")
+    })
+    .await;
+    assert!(!names(&seen).contains(&"Error"), "{seen:#?}");
+    agent.close().await.expect("closes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn texts_sent_before_a_commit_reach_the_generator_as_one_turn() {
+    let echo = MockGenerator::new(
+        MockConfiguration::StreamingAndConcurrentInput,
+        ModelId::generate(),
+        Vec::<String>::new(),
+    );
+    let stack = Stack::new().bind(Binding::llm(echo));
+    let agent = Agent::text().stack(stack).start().await.expect("starts");
+    let mut events = agent.events();
+    agent.send_text("a").await.expect("sent");
+    agent.send_text("b").await.expect("sent");
+    agent.commit().await.expect("committed");
+    let seen = read_until(&mut events, "Said").await;
+    agent.close().await.expect("closes");
+    let seen = [seen, read_all(&mut events).await].concat();
+    assert_eq!(said(&seen).concat(), "a b", "{seen:#?}");
+}
+
+/// The utterance is the cascade fixture's tone, then a commit: the cascade's voice activity
+/// detector hears no speech in the duplex mock's `utterance`, whose samples are near silence.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voice_cascade_recipe_agent_hears_says_and_yields_the_synthesisers_audio() {
+    let builder = Agent::from_recipe(inference::Recipe::voice_cascade()).stack(cascade());
+    assert_eq!(builder.describe().expect("plans").recipe, "voice_cascade");
+    let agent = builder.start().await.expect("starts");
+    let mut events = agent.events();
+    for frame in inference_testkit::stt::synthetic_audio::tone_silence_tone_silence() {
+        agent.send_audio(frame).await.expect("sent");
+    }
+    agent.commit().await.expect("committed");
+    let seen = read_until_done(&mut events, |seen| {
+        ["Heard", "Said", "Audio"]
+            .iter()
+            .all(|name| names(seen).contains(name))
+    })
+    .await;
+    let frames: Vec<_> = seen
+        .iter()
+        .filter_map(|event| match event {
+            Event::Audio(frame) => Some(frame),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        frames.iter().all(|frame| {
+            inference_testkit::mark::decode(frame)
+                .is_some_and(|mark| mark.mock == inference_testkit::mark::MockId::Synthesiser)
+        }),
+        "{frames:#?}"
+    );
+    agent.close().await.expect("closes");
 }

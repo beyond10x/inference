@@ -674,6 +674,8 @@ struct Inner {
     first: Mutex<Option<broadcast::Receiver<Item>>>,
     stream_id: StreamId,
     sequence: AtomicI64,
+    /// The texts of the user's turn [`Agent::send_text`] took since the last commit.
+    typed: Mutex<Vec<String>>,
 }
 
 impl Inner {
@@ -1042,6 +1044,7 @@ impl AgentBuilder {
             first: Mutex::new(Some(first)),
             stream_id: StreamId::generate(),
             sequence: AtomicI64::new(0),
+            typed: Mutex::new(Vec::new()),
         });
         let pump = tokio::spawn(pump(Arc::clone(&inner), Step::new(None)));
         Ok(Agent {
@@ -1253,21 +1256,23 @@ impl Agent {
         }
     }
 
-    /// Sends a text turn's text on the recipe's `user_input`.
+    /// Adds `text` to the user's text turn, which [`Agent::commit`] sends on the recipe's
+    /// `user_input` as one text, the turn's texts joined by a space.
     ///
     /// # Errors
     ///
-    /// [`Error::Closed`] once the session admits no input; [`Error::Layer`] otherwise.
+    /// [`Error::Closed`] once the session admits no input.
     pub async fn send_text(&self, text: impl Into<String>) -> Result<()> {
-        let event = StreamEvent::TranscriptCommitted(inference_text::TranscriptCommitted {
-            span_id: SpanId::generate(),
-            text: text.into(),
-        });
-        let kind = event.name().to_owned();
-        let envelope = self
-            .inner
-            .envelope("user_input", &kind, Payload::Stream(event));
-        self.inner.session.send(envelope).await.map_err(input_error)
+        let ready = sessions()
+            .session(self.inner.session.session_id())
+            .is_some_and(|session| session.state() == SessionState::Ready);
+        if !ready {
+            return Err(Error::Closed {
+                message: "the session admits no input: it is not ready".to_owned(),
+            });
+        }
+        lock(&self.inner.typed).push(text.into());
+        Ok(())
     }
 
     /// Sends a frame of the user's audio on the recipe's `audio`.
@@ -1282,12 +1287,29 @@ impl Agent {
         self.inner.session.send(envelope).await.map_err(input_error)
     }
 
-    /// Commits the user's turn.
+    /// Commits the user's turn: its texts, if [`Agent::send_text`] gave any, reach the recipe's
+    /// `user_input` as one text, joined by a space, and then the commit.
     ///
     /// # Errors
     ///
     /// [`Error::Closed`] once the session admits no input; [`Error::Layer`] otherwise.
     pub async fn commit(&self) -> Result<()> {
+        let texts = std::mem::take(&mut *lock(&self.inner.typed));
+        if !texts.is_empty() {
+            let event = StreamEvent::TranscriptCommitted(inference_text::TranscriptCommitted {
+                span_id: SpanId::generate(),
+                text: texts.join(" "),
+            });
+            let kind = event.name().to_owned();
+            let envelope = self
+                .inner
+                .envelope("user_input", &kind, Payload::Stream(event));
+            self.inner
+                .session
+                .send(envelope)
+                .await
+                .map_err(input_error)?;
+        }
         self.inner.session.commit_input().await.map_err(input_error)
     }
 
