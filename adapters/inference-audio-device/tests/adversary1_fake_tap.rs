@@ -45,11 +45,11 @@ fn small(host: &FakeHost) -> Speaker {
 
 /// The story: "Its sink accepts writes without a pull. `open_output` sets two crate-private hooks
 /// on the `PlayoutBuffer` it makes: a tap ... and no capacity bound, so `Speaker::push` never
-/// answers `Full`." `FakeHost::new(..)` is what every device acceptance names; the bound is lifted
-/// only by an opt-in `unbounded()` the story does not have.
+/// answers `Full`." By decision the bound stays the default and `unbounded()` opts out of it, as
+/// the story now says, so the sink that takes every write is `FakeHost::new(..).unbounded()`.
 #[test]
 fn adversary1_the_fake_hosts_sink_is_never_full_without_a_pull() {
-    let host = FakeHost::new(vec![device()]);
+    let host = FakeHost::new(vec![device()]).unbounded();
     let speaker = small(&host);
     speaker
         .try_push(&frame(16_000, 0, 1))
@@ -136,7 +136,10 @@ fn adversary1_a_write_waits_while_any_hold_lives() {
     let played = host.played();
     let waiting = second.waiting();
     drop(second);
-    writer.join().expect("no panic").expect("taken once released");
+    writer
+        .join()
+        .expect("no panic")
+        .expect("taken once released");
     assert!(
         played.is_empty(),
         "a write was recorded while a hold lived: {played:?}, waiting {waiting:?}"
