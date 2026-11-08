@@ -15,11 +15,11 @@ use inference_pipeline::PortId;
 use super::{Instantiation, Recipe};
 use crate::{Error, Stack};
 
-/// Where the cascade's synthesised audio goes: the frames routed, each counted once handed out,
-/// a cut of what was not, and the application told of a barge-in.
+/// Where the cascade's synthesised audio goes: the frames routed, each counted once the route is
+/// done with it, a cut of what was not handed out, and the application told of a barge-in.
 pub(crate) trait AudioRoute: Send + Sync {
-    /// Routes `frame`, after every frame routed before it, and adds one to `handed` once it is
-    /// handed out; never for a frame a cut dropped.
+    /// Routes `frame`, after every frame routed before it, and adds one to `handed` once the
+    /// route is done with it: handed out, or dropped by a cut, whoever asked for the cut.
     fn route(&self, frame: AudioFrame, handed: &Arc<AtomicU64>);
     /// Stops the audio routed and not yet handed out.
     fn cut(&self);
@@ -40,8 +40,6 @@ struct Routed {
 struct Routing {
     /// The ordinal of the next frame routed: how many this playout routed.
     routed: u64,
-    /// How many routed frames a cut dropped, which the route never hands out.
-    dropped: u64,
     /// The frames routed since the last stop and not yet seen handed out, in order.
     unplayed: VecDeque<Routed>,
     /// The played position: the end of the last frame seen handed out, or the start of the first
@@ -53,9 +51,10 @@ struct Routing {
 /// `Full`; the played position and the queue are read off the count of its frames handed out.
 pub(crate) struct RoutedPlayout {
     route: Arc<dyn AudioRoute>,
-    /// How many of this playout's frames the route handed out. The route outlives the run, and
-    /// after a switch it may still hold frames of the run before, so it counts each run's
-    /// frames apart.
+    /// How many of this playout's frames the route is done with, handed out or dropped by a
+    /// cut. The route outlives the run, and after a switch it may still hold frames of the run
+    /// before, so it counts each run's frames apart. It counts them in the order routed, so the
+    /// frames a stop forgot are counted before any frame routed after it.
     handed: Arc<AtomicU64>,
     routing: Mutex<Routing>,
 }
@@ -73,10 +72,7 @@ impl RoutedPlayout {
     /// The routing, with every frame the route has handed out since forgotten.
     fn routing(&self) -> std::sync::MutexGuard<'_, Routing> {
         let mut routing = self.routing.lock().unwrap_or_else(PoisonError::into_inner);
-        let handed = self
-            .handed
-            .load(Ordering::Acquire)
-            .saturating_add(routing.dropped);
+        let handed = self.handed.load(Ordering::Acquire);
         while let Some(front) = routing.unplayed.front().copied() {
             if front.ordinal >= handed {
                 break;
@@ -118,7 +114,6 @@ impl Playout for RoutedPlayout {
         let mut routing = self.routing();
         self.route.cut();
         let position = routing.played;
-        routing.dropped += u64::try_from(routing.unplayed.len()).unwrap_or(u64::MAX);
         routing.unplayed.clear();
         routing.played = None;
         position
@@ -313,7 +308,7 @@ mod tests {
 
     /// A route of the test: records each frame routed with its ordinal, the count of frames
     /// routed before it, counts its cuts and interruptions, drops the frames not yet handed out
-    /// at a cut and keeps the ordinal the last cut came at; the test hands out the first
+    /// at a cut, counting each in its run's count, and keeps the ordinal the last cut came at; the test hands out the first
     /// `played()` of the frames it holds with [`Route::hand`].
     #[derive(Default)]
     struct Route {
@@ -393,10 +388,13 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .truncate(handed);
-            self.lanes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .truncate(handed);
+            let mut lanes = self.lanes.lock().unwrap_or_else(PoisonError::into_inner);
+            for (lane, counted) in lanes.iter().skip(handed) {
+                if !*counted {
+                    lane.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            lanes.truncate(handed);
         }
 
         fn interrupted(&self) {

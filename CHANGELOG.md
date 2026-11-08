@@ -121,7 +121,9 @@
   afterwards. While it runs, the agent's audio, native or a cascade's, goes to the speaker only,
   never onto the event stream; a barge-in with `auto_interrupt` on, or `Agent::interrupt`, cuts
   what the speaker has not played; it returns once every frame of the last reply was handed to
-  the speaker and played.
+  the speaker and played. Its future dropped, as by a `select!` or a `timeout`, it cuts what the
+  speaker holds, lets go of the microphone and the speaker, and the agent's audio goes onto the
+  event stream again.
 
 ### Fixed
 
@@ -141,9 +143,10 @@
   outputs, so a tool authority or executor sending its end of input back to it failed the run
   with a closed edge.
 - `inference-pipeline`: a draining `DuplexNode` answers every call it proposed that has no answer
-  yet as rejected before it closes the model's session, so the model has an answer under every
-  call it made. A draining node takes no tool result, so a rejection sent at a close, such as an
-  `Agent`'s `close()` with a confirmation still held, never reached the model.
+  yet, held or running, with `{"error": "the session closed before the call's result"}` before
+  it closes the model's session, so the model has an answer under every call it made. A draining
+  node takes no tool result, so a rejection sent at a close, such as an `Agent`'s `close()` with
+  a confirmation still held, never reached the model.
 - `inference`: `Recipe::native_voice` needs `concurrent_input_output` of its speech model, as a
   node that keeps one generation per run does, and no longer `native_duplex`, so it plans over
   Nova Sonic and OpenAI Realtime as over GPT-Live; it refused every speech adapter but GPT-Live.
