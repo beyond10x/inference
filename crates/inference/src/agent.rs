@@ -140,7 +140,7 @@ impl Route {
     /// Sends `event` to every reader; nothing once the sender is gone or no reader is left.
     fn send(&self, event: Event) {
         if let Some(sender) = lock(&self.sender).as_ref() {
-            let _ = sender.send(Ok(event));
+            let _ = sender.send(event);
         }
     }
 
@@ -154,7 +154,7 @@ impl Route {
     /// ends after it and `Closed` is sent once: nothing once the sender is gone.
     fn hang_up(&self, raw: Option<SessionEvent>) {
         if let Some(sender) = lock(&self.sender).take() {
-            let _ = sender.send(Ok(Event::Closed { raw }));
+            let _ = sender.send(Event::Closed { raw });
         }
     }
 

@@ -102,8 +102,7 @@ impl Fixture {
         let mut names = Vec::new();
         loop {
             match self.receiver.try_recv() {
-                Ok(Ok(event)) => names.push(name(&event)),
-                Ok(Err(_)) => names.push("Err"),
+                Ok(event) => names.push(name(&event)),
                 Err(broadcast::error::TryRecvError::Closed) => return (names, true),
                 Err(_) => return (names, false),
             }
