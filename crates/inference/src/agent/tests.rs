@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
 use inference_core::endpoint::SendError;
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
-use inference_core::generation::{GenerationCancelled, GenerationStarted};
+use inference_core::generation::{
+    Generation, GenerationCancelled, GenerationStarted, StartGeneration,
+};
 use inference_core::id::{
     GenerationId, NodeId, ResponseId, RunId, SessionId, SpeechSessionId, StreamId,
 };
@@ -23,9 +25,12 @@ use inference_facade::session::{
     SessionState, SessionStateConflict,
 };
 use inference_pipeline::PipelineId;
+use inference_pipeline::nodes::AuthorityHandle;
 use inference_runtime::RunError;
 use inference_runtime::run::{FailureReason, RunCompleted, RunFailed};
-use inference_text::{SegmentId, TextSegmentCommitted};
+use inference_text::{OpenTurn, SegmentId, Span, TextSegmentCommitted, Turn};
+use inference_tools::{DeclareTool, SideEffectClass, Tool, ToolCall, ToolCallId};
+use serde_json::json;
 use tokio::sync::broadcast;
 
 use super::{
@@ -560,4 +565,95 @@ fn the_applications_interrupt_settles_by_the_same_rule() {
         .core
         .settle(Interrupter::Application, &Err(not_ready()));
     assert_eq!(requested(), 1);
+}
+
+/// A call proposed of a tool requiring confirmation, as the authority holds it.
+fn held_call() -> ToolCall {
+    let (tool, _) = Tool::declare(DeclareTool {
+        name: "lookup".to_owned(),
+        description: String::new(),
+        schema: json!({"type": "object"}),
+        schema_revision: "1".to_owned(),
+        side_effect: SideEffectClass::ReadOnly,
+        requires_confirmation: true,
+    });
+    let (generation, _) = Generation::start(StartGeneration {
+        run_id: RunId::generate(),
+        node_id: NodeId::generate(),
+        epoch: 1,
+    });
+    let (turn, _) = Turn::open(OpenTurn {
+        run_id: RunId::generate(),
+    });
+    let (span, _) = Span::emit(
+        &turn,
+        turn.run_id(),
+        StreamId::generate(),
+        1,
+        "a request".to_owned(),
+    )
+    .expect("an Open turn admits a span");
+    let (span, _) = span.commit().expect("a Hypothesis commits");
+    ToolCall::propose(&tool, &generation, &span, json!({}))
+        .expect("an Active generation proposes on a committed span")
+        .0
+}
+
+/// A fixture in `state` whose authority holds one call whose `ToolCalled` was yielded.
+fn holding(state: u8) -> (Fixture, AuthorityHandle, ToolCallId) {
+    let mut fixture = fixture(true);
+    let call = held_call();
+    let call_id = call.call_id();
+    let authority = AuthorityHandle::holding([call]);
+    fixture.core.authority = Some(authority.clone());
+    fixture.core.state.store(state, Ordering::SeqCst);
+    fixture
+        .core
+        .confirmations
+        .lock()
+        .expect("unpoisoned")
+        .called
+        .insert(call_id);
+    (fixture, authority, call_id)
+}
+
+/// R116: closing, one `held()` check denies the held call, announces nothing and sends no
+/// `ConfirmationRequested`.
+#[test]
+fn closing_the_held_check_denies_a_held_call_unannounced() {
+    let (mut fixture, authority, call_id) = holding(CLOSING);
+    fixture.core.check_held();
+    assert!(
+        !authority.deny(call_id),
+        "the check answered the call already"
+    );
+    assert!(
+        fixture
+            .core
+            .confirmations
+            .lock()
+            .expect("unpoisoned")
+            .announced
+            .is_empty()
+    );
+    assert_eq!(fixture.drain(), (Vec::new(), false));
+}
+
+/// R116: open, the same check announces the held call with one `ConfirmationRequested` and
+/// answers nothing.
+#[test]
+fn open_the_held_check_announces_a_held_call_once() {
+    let (mut fixture, authority, call_id) = holding(OPEN);
+    fixture.core.check_held();
+    assert!(
+        fixture
+            .core
+            .confirmations
+            .lock()
+            .expect("unpoisoned")
+            .announced
+            .contains(&call_id)
+    );
+    assert_eq!(fixture.drain(), (vec!["ConfirmationRequested"], false));
+    assert!(authority.deny(call_id), "the check answered nothing");
 }

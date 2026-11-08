@@ -511,6 +511,28 @@ impl AuthorityHandle {
     pub(crate) fn record(&self) -> CallRecord {
         self.calls.clone()
     }
+
+    /// A handle holding `calls` for confirmation with no authority behind it, so a host's tests
+    /// can read what it holds and answer it: an answer is queued, and nothing acts on it.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn holding(calls: impl IntoIterator<Item = ToolCall>) -> Self {
+        let held = calls
+            .into_iter()
+            .map(|call| Held {
+                call,
+                cause: EventId::generate(),
+            })
+            .collect();
+        Self {
+            state: Arc::new(Watched::new(AuthorityState {
+                held,
+                ..AuthorityState::default()
+            })),
+            calls: CallRecord::default(),
+        }
+    }
 }
 
 /// One started exchange of a [`ToolAuthority`].
