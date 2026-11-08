@@ -1,12 +1,15 @@
 //! The `Agent` over the testkit mocks: its builder, its event stream, its close and its end.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{FutureExt, StreamExt};
+use inference::audio::AudioFrame;
+use inference::audio_device::convert::decode;
+use inference::audio_device::fake::{FakeDevice, FakeHost, Played, SinkHold};
 use inference::core::model::{
     Adapter, AdapterDescriptor as ModelDescriptor, DeclareAdapter, ExecutionForm, Locality, ModelId,
 };
@@ -28,10 +31,13 @@ use inference::{
     Payload, Registry, Role, Stack,
 };
 use inference_testkit::duplex::mock::{
-    MockHistory, MockSpeechModel, MockSpeechSession, Reply, ScriptedTurn, pcm, utterance,
+    MockHistory, MockSpeechModel, MockSpeechSession, Reply, ScriptedTurn, frame, pcm, utterance,
 };
 use inference_testkit::llm::{MockConfiguration, MockGenerator};
+use inference_testkit::mark::{self, Mark, MockId};
+use inference_testkit::stt::synthetic_audio::{FIXTURE, synthesize};
 use serde_json::json;
+use tokio::task::JoinHandle;
 
 const LIMIT: Duration = Duration::from_secs(5);
 
@@ -1373,13 +1379,35 @@ async fn a_switch_whose_resolve_fails_leaves_a_working_agent() {
         .expect_err("no stt is bound");
     assert_eq!(refused.kind(), inference::ErrorKind::RoleUnbound);
     assert!(refused.to_string().contains("stt"), "{refused}");
+    let host = native_host();
+    let hold = host.hold_sink();
+    let agent = Arc::new(agent);
+    let mut run = spawn_run(&agent, &host);
     completed(&history, 1).await;
-    say(&agent, at).await;
+    let spoken = utterance(pcm(24_000), at);
+    feed(&host, &spoken.frames()).await;
     let seen = read_until(&mut events, "Heard").await;
     let seen = [seen, read_until(&mut events, "Said").await].concat();
     assert!(!names(&seen).contains(&"Closed"), "{seen:#?}");
     assert_eq!(said(&seen).last().map(String::as_str), Some("two"));
-    agent.close().await.expect("closes");
+    completed(&history, 2).await;
+    waiting_for(&hold, MockId::Speech, 1).await;
+    let barge_in = utterance(pcm(24_000), spoken.next());
+    feed(&host, &barge_in.speech()).await;
+    let gate = read_until(&mut events, "Interrupted").await;
+    feed(&host, &[barge_in.silence()]).await;
+    drop(hold);
+    returns_ok(&mut run).await;
+    let rest = read_all(&mut events).await;
+    assert_eq!(names(&rest).last(), Some(&"Closed"), "{rest:#?}");
+    let all = [seen, gate, rest].concat();
+    assert_eq!(count(&all, "Interrupted"), 1, "{all:#?}");
+    let after = cleared(&host);
+    assert!(
+        after.iter().all(|mark| mark.reply != 1),
+        "no frame of reply 1 after the cut: {:#?}",
+        host.played()
+    );
 }
 
 /// The commit goes into the cascade's audio ingress, so the fan-out hands it to the STT node's
@@ -1641,4 +1669,292 @@ async fn a_voice_cascade_recipe_agent_hears_says_and_yields_the_synthesisers_aud
 #[test]
 fn the_builders_role_methods_refuse_a_binding_of_another_type() {
     trybuild::TestCases::new().compile_fail("tests/compile_fail/*.rs");
+}
+
+/// A fake host of a mono microphone at `input` hertz and a mono speaker at 24 kHz.
+fn fake_host(input: u32) -> FakeHost {
+    let rate = |hertz| NonZeroU32::new(hertz).expect("a rate");
+    FakeHost::new(vec![
+        FakeDevice::input("test microphone", rate(input), NonZeroU16::MIN, true),
+        FakeDevice::output("test speaker", rate(24_000), NonZeroU16::MIN, true),
+    ])
+}
+
+/// A fake host at the duplex mock's 24 kHz.
+fn native_host() -> FakeHost {
+    fake_host(24_000)
+}
+
+/// A fake host whose microphone runs at the cascade fixture's 16 kHz.
+fn cascade_host() -> FakeHost {
+    fake_host(16_000)
+}
+
+/// Spawns `agent.run_on_devices_with(host)`.
+fn spawn_run(agent: &Arc<Agent>, host: &FakeHost) -> JoinHandle<inference::Result<()>> {
+    let (agent, host) = (Arc::clone(agent), host.clone());
+    tokio::spawn(async move { agent.run_on_devices_with(host).await })
+}
+
+/// Awaits the run, which returns `Ok(())` within the limit.
+async fn returns_ok(run: &mut JoinHandle<inference::Result<()>>) {
+    let ran = tokio::time::timeout(LIMIT, run)
+        .await
+        .expect("the run returns within 5 s")
+        .expect("the run's task ends");
+    assert!(ran.is_ok(), "{ran:?}");
+}
+
+/// Asserts the run is still pending a second later.
+async fn still_runs(run: &mut JoinHandle<inference::Result<()>>) {
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), run)
+            .await
+            .is_err(),
+        "the run waits for the held sink"
+    );
+}
+
+/// Feeds `frames` to the host's microphone, once the run has opened it.
+async fn feed(host: &FakeHost, frames: &[AudioFrame]) {
+    let started = Instant::now();
+    while !host.input_open() {
+        assert!(started.elapsed() < LIMIT, "the run opens the microphone");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for frame in frames {
+        assert!(host.feed(&decode(frame).expect("a well-formed frame")));
+    }
+}
+
+/// Waits until a write held at the sink decodes to reply `reply` of `mock`.
+async fn waiting_for(hold: &SinkHold, mock: MockId, reply: u32) {
+    let started = Instant::now();
+    while !hold
+        .waiting()
+        .iter()
+        .filter_map(mark::decode)
+        .any(|marked| marked.mock == mock && marked.reply == reply)
+    {
+        assert!(started.elapsed() < LIMIT, "reply {reply} reaches the sink");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn count(events: &[Event], event: &str) -> usize {
+    names(events).iter().filter(|name| **name == event).count()
+}
+
+/// The marks of the played frames after the first `Cleared`, which `played()` must hold.
+fn cleared(host: &FakeHost) -> Vec<Mark> {
+    let played = host.played();
+    let at = played
+        .iter()
+        .position(|entry| *entry == Played::Cleared)
+        .unwrap_or_else(|| panic!("the playback was cut: {played:#?}"));
+    played[at..]
+        .iter()
+        .filter_map(|entry| match entry {
+            Played::Frame(frame) => mark::decode(frame),
+            Played::Cleared => None,
+        })
+        .collect()
+}
+
+/// The frame indices of the played frames of reply `reply` of `mock`, in order.
+fn played_of(host: &FakeHost, mock: MockId, reply: u32) -> Vec<u32> {
+    host.played_frames()
+        .iter()
+        .filter_map(mark::decode)
+        .filter(|marked| marked.mock == mock && marked.reply == reply)
+        .map(|marked| marked.frame)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_run_plays_the_reply_and_consumes_no_event() {
+    let model = MockSpeechModel::native(vec![turn("hi")]).closes();
+    let agent = Arc::new(
+        Agent::voice_with(speech(model))
+            .start()
+            .await
+            .expect("starts"),
+    );
+    let host = native_host();
+    let mut run = spawn_run(&agent, &host);
+    feed(&host, &utterance(pcm(24_000), 0).frames()).await;
+    returns_ok(&mut run).await;
+    assert_eq!(played_of(&host, MockId::Speech, 0), [0, 1]);
+    let mut events = agent.events();
+    let seen = read_all(&mut events).await;
+    assert!(!names(&seen).contains(&"Audio"), "{seen:#?}");
+    assert!(names(&seen).contains(&"Said"), "{seen:#?}");
+    assert_eq!(count(&seen, "Closed"), 1, "{seen:#?}");
+    assert_eq!(names(&seen).last(), Some(&"Closed"), "{seen:#?}");
+    assert_eq!(agent.describe().recipe, "native_voice");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_task_sends_and_closes_while_the_devices_run() {
+    let model = MockSpeechModel::native(vec![turn("hi")]);
+    let agent = Arc::new(
+        Agent::voice_with(speech(model))
+            .start()
+            .await
+            .expect("starts"),
+    );
+    let mut events = agent.events();
+    let host = native_host();
+    let mut run = spawn_run(&agent, &host);
+    let sender = Arc::clone(&agent);
+    let sending = tokio::spawn(async move {
+        let format = pcm(24_000);
+        for index in 0..200_u64 {
+            let silent = frame(format, index * 480, format.encoding.silence());
+            sender.send_audio(silent).await.expect("sent");
+        }
+        sender.close().await.expect("closes");
+    });
+    returns_ok(&mut run).await;
+    sending.await.expect("the sender ends");
+    let seen = read_all(&mut events).await;
+    assert_eq!(names(&seen).last(), Some(&"Closed"), "{seen:#?}");
+}
+
+/// The last reply's frames, all of them, reach the sink before the run returns; the drain wait
+/// awaits, so it holds on the current-thread runtime too.
+async fn the_last_reply_is_drained() {
+    let model = MockSpeechModel::native(vec![turn("one"), turn("two")]).closes();
+    let history = model.history();
+    let agent = Arc::new(
+        Agent::voice_with(speech(model))
+            .start()
+            .await
+            .expect("starts"),
+    );
+    let mut events = agent.events();
+    let host = native_host();
+    let hold = host.hold_sink();
+    let mut run = spawn_run(&agent, &host);
+    let first = utterance(pcm(24_000), 0);
+    feed(&host, &first.frames()).await;
+    completed(&history, 1).await;
+    feed(&host, &utterance(pcm(24_000), first.next()).frames()).await;
+    read_until(&mut events, "Closed").await;
+    still_runs(&mut run).await;
+    drop(hold);
+    returns_ok(&mut run).await;
+    assert_eq!(played_of(&host, MockId::Speech, 1), [0, 1]);
+}
+
+#[tokio::test]
+async fn the_last_reply_is_drained_on_the_current_thread() {
+    the_last_reply_is_drained().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_reply_is_drained_on_many_threads() {
+    the_last_reply_is_drained().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cascade_reply_plays_through_the_sink() {
+    let agent = Arc::new(
+        Agent::from_recipe(inference::Recipe::voice_cascade())
+            .stack(cascade())
+            .start()
+            .await
+            .expect("starts"),
+    );
+    let mut events = agent.events();
+    let host = cascade_host();
+    let hold = host.hold_sink();
+    let mut run = spawn_run(&agent, &host);
+    feed(&host, &synthesize(&FIXTURE[..2])).await;
+    waiting_for(&hold, MockId::Synthesiser, 0).await;
+    let closer = Arc::clone(&agent);
+    let closing = tokio::spawn(async move { closer.close().await });
+    still_runs(&mut run).await;
+    drop(hold);
+    returns_ok(&mut run).await;
+    let closed = tokio::time::timeout(LIMIT, closing)
+        .await
+        .expect("the close returns within 5 s")
+        .expect("the close's task ends");
+    assert!(closed.is_ok(), "{closed:?}");
+    let frames = played_of(&host, MockId::Synthesiser, 0);
+    let every: Vec<u32> = (0..u32::try_from(frames.len()).expect("few")).collect();
+    assert!(!frames.is_empty());
+    assert_eq!(frames, every, "{:#?}", host.played());
+    let seen = read_all(&mut events).await;
+    assert!(!names(&seen).contains(&"Audio"), "{seen:#?}");
+}
+
+/// The cascade over a generator whose first reply is four words, one synthesised frame each,
+/// with the session config's `auto_interrupt` given when `Some`.
+async fn a_second_turn_over_the_cascade(auto_interrupt: Option<bool>) -> (FakeHost, Vec<Event>) {
+    let generator = MockGenerator::new(
+        MockConfiguration::StreamingAndConcurrentInput,
+        ModelId::generate(),
+        ["one two three four"],
+    );
+    let mut builder = Agent::from_recipe(inference::Recipe::voice_cascade())
+        .stack(cascade_without(Role::Llm))
+        .llm(Binding::llm(generator));
+    if let Some(auto_interrupt) = auto_interrupt {
+        let mut config = Agent::voice_with(speech(MockSpeechModel::native(vec![turn("hi")])))
+            .describe()
+            .expect("plans")
+            .session_config
+            .expect("a speech config");
+        config.auto_interrupt = auto_interrupt;
+        builder = builder.session_config(config);
+    }
+    let agent = Arc::new(builder.start().await.expect("starts"));
+    let mut events = agent.events();
+    let host = cascade_host();
+    let hold = host.hold_sink();
+    let mut run = spawn_run(&agent, &host);
+    feed(&host, &synthesize(&FIXTURE[..2])).await;
+    waiting_for(&hold, MockId::Synthesiser, 0).await;
+    feed(&host, &synthesize(&FIXTURE[2..3])).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(hold);
+    agent.close().await.expect("closes");
+    returns_ok(&mut run).await;
+    let seen = read_all(&mut events).await;
+    (host, seen)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_turn_cuts_a_cascade_reply() {
+    let (host, seen) = a_second_turn_over_the_cascade(None).await;
+    assert!(
+        host.played().contains(&Played::Cleared),
+        "{:#?}",
+        host.played()
+    );
+    assert!(played_of(&host, MockId::Synthesiser, 0).len() < 4);
+    assert_eq!(count(&seen, "Interrupted"), 1, "{seen:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_turn_without_auto_interrupt_cuts_nothing() {
+    let (host, seen) = a_second_turn_over_the_cascade(Some(false)).await;
+    assert_eq!(
+        played_of(&host, MockId::Synthesiser, 0),
+        [0, 1, 2, 3],
+        "{:#?}",
+        host.played()
+    );
+    let played = host.played();
+    let last = played
+        .iter()
+        .rposition(|entry| {
+            matches!(entry, Played::Frame(frame) if mark::decode(frame)
+                .is_some_and(|marked| marked.mock == MockId::Synthesiser && marked.reply == 0))
+        })
+        .expect("reply 0 played");
+    assert!(!played[..last].contains(&Played::Cleared), "{played:#?}");
+    assert_eq!(count(&seen, "Interrupted"), 0, "{seen:#?}");
 }

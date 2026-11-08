@@ -115,6 +115,8 @@ pub(crate) trait Playback: Send + Sync {
     fn cut(&self);
     /// How many frames were handed out.
     fn played(&self) -> u64;
+    /// Marks the end of the session's audio: every frame played before it is the last.
+    fn end(&self) {}
 }
 
 /// The one route an agent's audio takes: to the attached sink, or onto the event channel.
@@ -418,6 +420,9 @@ impl Step {
             }
             SessionEvent::SessionClosed(_) => {
                 core.leave_open(CLOSING);
+                if let Some(sink) = route.sink() {
+                    sink.end();
+                }
                 self.closed = Some(event);
                 act.end = true;
             }
@@ -1431,6 +1436,20 @@ impl Agent {
     /// Starts the pump again from `step`.
     fn resume(&mut self, step: Step) {
         self.pump = Some(tokio::spawn(pump(Arc::clone(&self.inner), step)));
+    }
+
+    /// The slot a device run attaches its playback to.
+    #[cfg(feature = "audio-host")]
+    pub(crate) fn sink_slot(&self) -> &Mutex<Option<Arc<dyn Playback>>> {
+        &self.inner.core.route.sink
+    }
+
+    /// The input format of the speech session, when the recipe has one.
+    #[cfg(feature = "audio-host")]
+    pub(crate) fn input_format(&self) -> Option<inference_audio::AudioFormat> {
+        lock(&self.inner.config)
+            .as_ref()
+            .map(|config| config.input_format)
     }
 
     /// The live session, shared with the agent's pump.
