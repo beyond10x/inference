@@ -2,7 +2,7 @@
 //! Agent's end, with no session and no timing.
 
 use std::num::{NonZeroU16, NonZeroU32};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
@@ -49,7 +49,7 @@ struct Sink {
 }
 
 impl Playback for Sink {
-    fn play(&self, frame: AudioFrame) {
+    fn play(&self, frame: AudioFrame, _handed: Option<Arc<AtomicU64>>) {
         self.played.lock().expect("unpoisoned").push(frame);
     }
     fn pending(&self) -> bool {
@@ -57,9 +57,6 @@ impl Playback for Sink {
     }
     fn cut(&self) {
         self.cuts.fetch_add(1, Ordering::SeqCst);
-    }
-    fn played(&self) -> u64 {
-        0
     }
 }
 
