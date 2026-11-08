@@ -804,3 +804,199 @@ async fn a_reader_behind_by_four_is_told_lagged_four() {
         assert_eq!(*text, format!("reply {}", i + 1));
     }
 }
+
+/// Sends the utterance starting at `at`; where it ends.
+async fn say(agent: &Agent, at: u64) -> u64 {
+    let spoken = utterance(pcm(24_000), at);
+    for frame in spoken.frames() {
+        agent.send_audio(frame).await.expect("sent");
+    }
+    spoken.next()
+}
+
+/// The state of the agent's session row.
+fn row_state(agent: &Agent) -> SessionState {
+    inference::sessions()
+        .sessions_view()
+        .into_iter()
+        .find(|row| row.session_id == agent.session().session_id())
+        .expect("the session's row")
+        .state
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_native_switch_keeps_the_stream_and_merges_the_config() {
+    let model = MockSpeechModel::native(vec![turn("one"), turn("two")]);
+    let history = model.history();
+    let mut agent = Agent::voice_with(speech(model))
+        .voice("verse")
+        .start()
+        .await
+        .expect("starts");
+    let opened = agent.describe().session_config.expect("a native config");
+    let mut events = agent.events();
+    let at = say(&agent, 0).await;
+    let before = read_until(&mut events, "Said").await;
+    completed(&history, 1).await;
+    let old_run = agent.session().run_id();
+    let old_pipeline = agent.pipeline().pipeline_id();
+    agent
+        .switch(inference::Recipe::native_voice())
+        .await
+        .expect("switches");
+    assert_ne!(agent.session().run_id(), old_run);
+    assert_ne!(agent.pipeline().pipeline_id(), old_pipeline);
+    say(&agent, at).await;
+    let after = read_until(&mut events, "Heard").await;
+    let after = [after, read_until(&mut events, "Said").await].concat();
+    assert!(!names(&before).contains(&"Closed"), "{before:#?}");
+    assert!(!names(&after).contains(&"Closed"), "{after:#?}");
+    let config = agent.describe().session_config.expect("a native config");
+    assert_eq!(config.voice, "verse");
+    assert_eq!(config.auto_interrupt, opened.auto_interrupt);
+    let session_id = agent.session().session_id();
+    agent.close().await.expect("closes");
+    let entries = inference::sessions().history(session_id);
+    let first_new = entries
+        .iter()
+        .position(|entry| entry.run_id() != old_run)
+        .unwrap_or_else(|| panic!("an entry of the new run: {entries:#?}"));
+    assert!(first_new > 0, "{entries:#?}");
+    assert!(
+        entries[first_new..]
+            .iter()
+            .all(|entry| entry.run_id() != old_run),
+        "{entries:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switch_keeps_the_confirmations_and_refuses_after_close() {
+    let (mut agent, mut events, _, _, call_id) = held().await;
+    agent
+        .switch(inference::Recipe::native_voice())
+        .await
+        .expect("switches with a call held");
+    agent.close().await.expect("closes");
+    let rest = read_all(&mut events).await;
+    assert!(
+        !rest.iter().any(|event| matches!(
+            event,
+            Event::ConfirmationRequested { call_id: id, .. } if *id == call_id
+        )),
+        "{rest:#?}"
+    );
+    assert_eq!(names(&rest).last(), Some(&"Closed"), "{rest:#?}");
+    let refused = agent.switch(inference::Recipe::native_voice()).await;
+    assert!(
+        matches!(refused, Err(inference::Error::Closed { .. })),
+        "{refused:?}"
+    );
+    assert!(events.next().await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switch_right_after_the_models_close_is_refused() {
+    let model = MockSpeechModel::native(vec![turn("hi")]).closes();
+    let mut agent = Agent::voice_with(speech(model))
+        .start()
+        .await
+        .expect("starts");
+    let pipeline = agent.pipeline().pipeline_id();
+    let mut events = agent.events();
+    speak(&agent).await;
+    let started = Instant::now();
+    while row_state(&agent) == SessionState::Ready {
+        assert!(started.elapsed() < LIMIT, "the session stays Ready");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let refused = agent.switch(inference::Recipe::native_voice()).await;
+    assert!(
+        matches!(refused, Err(inference::Error::Closed { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(agent.pipeline().pipeline_id(), pipeline);
+    let seen = read_all(&mut events).await;
+    assert_eq!(
+        names(&seen)
+            .iter()
+            .filter(|name| **name == "Closed")
+            .count(),
+        1,
+        "{seen:#?}"
+    );
+    assert_eq!(names(&seen).last(), Some(&"Closed"), "{seen:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_switch_whose_resolve_fails_leaves_a_working_agent() {
+    let model = MockSpeechModel::native(vec![turn("one"), turn("two"), turn("three")]).closes();
+    let history = model.history();
+    let mut config = Agent::voice_with(speech(MockSpeechModel::native(vec![turn("hi")])))
+        .describe()
+        .expect("plans")
+        .session_config
+        .expect("a speech config");
+    config.auto_interrupt = true;
+    let mut agent = Agent::voice_with(speech(model))
+        .session_config(config)
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    let at = say(&agent, 0).await;
+    read_until(&mut events, "Said").await;
+    let refused = agent
+        .switch(inference::Recipe::voice_cascade())
+        .await
+        .expect_err("no stt is bound");
+    assert_eq!(refused.kind(), inference::ErrorKind::RoleUnbound);
+    assert!(refused.to_string().contains("stt"), "{refused}");
+    completed(&history, 1).await;
+    say(&agent, at).await;
+    let seen = read_until(&mut events, "Heard").await;
+    let seen = [seen, read_until(&mut events, "Said").await].concat();
+    assert!(!names(&seen).contains(&"Closed"), "{seen:#?}");
+    assert_eq!(said(&seen).last().map(String::as_str), Some("two"));
+    agent.close().await.expect("closes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cascade_switch_keeps_the_session_and_answers_the_next_utterance() {
+    let mut agent = Agent::from_recipe(inference::Recipe::voice_cascade())
+        .stack(cascade())
+        .start()
+        .await
+        .expect("starts");
+    let session_id = agent.session().session_id();
+    let old_pipeline = agent.pipeline().pipeline_id();
+    let mut events = agent.events();
+    agent
+        .switch(inference::Recipe::voice_cascade())
+        .await
+        .expect("switches");
+    let pipeline_id = agent.pipeline().pipeline_id();
+    assert_ne!(pipeline_id, old_pipeline);
+    let row = inference::sessions()
+        .sessions_view()
+        .into_iter()
+        .find(|row| row.session_id == session_id)
+        .expect("the session's row stays");
+    assert_eq!(row.pipeline_id, pipeline_id);
+    for frame in inference_testkit::stt::synthetic_audio::tone_silence_tone_silence() {
+        agent.send_audio(frame).await.expect("sent");
+    }
+    agent.commit().await.expect("committed");
+    let seen = tokio::time::timeout(LIMIT, async {
+        let mut seen = Vec::new();
+        while !(names(&seen).contains(&"Heard") && names(&seen).contains(&"Said")) {
+            let event = events.next().await.expect("open").expect("no error");
+            seen.push(event);
+        }
+        seen
+    })
+    .await
+    .expect("a Heard and a Said within 5 s");
+    assert!(!names(&seen).contains(&"Closed"), "{seen:#?}");
+    agent.close().await.expect("closes");
+}
