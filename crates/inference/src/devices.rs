@@ -29,23 +29,23 @@ const CAPTURE_BUFFER: Duration = Duration::from_secs(2);
 /// How long the microphone thread waits for a frame before it looks for the run's end again.
 const READ: Duration = Duration::from_millis(20);
 
-/// What goes down the playout channel: a frame with the interruption count at its sending, or
-/// the end of the session's audio.
+/// What goes down the playout channel: a frame with the interruption count at its sending and
+/// the count of its run's frames handed out, or the end of the session's audio.
 enum Out {
     Frame {
         frame: AudioFrame,
         interruption: u64,
+        handed: Option<Arc<AtomicU64>>,
     },
     End,
 }
 
-/// The frames sent by the pump, those the playout thread handed out (pushed or discarded), those
-/// it pushed, and the rate of the last frame pushed.
+/// The frames sent by the pump, those the playout thread handed out (pushed or discarded), and
+/// the rate of the last frame pushed.
 #[derive(Default)]
 struct Counts {
     sent: AtomicU64,
     handed: AtomicU64,
-    pushed: AtomicU64,
     rate: AtomicU32,
 }
 
@@ -59,8 +59,37 @@ struct Sink {
     ended: AtomicBool,
 }
 
+impl Sink {
+    /// The sink over `speaker`, its playout thread started; the receiver fires once the thread
+    /// handed out the last frame after [`Playback::end`].
+    fn start(speaker: Arc<Speaker>) -> (Arc<Self>, oneshot::Receiver<()>) {
+        let (sender, receiver) = mpsc::channel();
+        let (drain, drained) = oneshot::channel();
+        let interruptions = Arc::new(AtomicU64::new(0));
+        let counts = Arc::new(Counts::default());
+        {
+            let (speaker, interruptions, counts) = (
+                Arc::clone(&speaker),
+                Arc::clone(&interruptions),
+                Arc::clone(&counts),
+            );
+            thread::spawn(move || playout(&receiver, &speaker, &interruptions, &counts, drain));
+        }
+        let sink = Arc::new(Self {
+            sender,
+            speaker,
+            interruptions,
+            counts,
+            ended: AtomicBool::new(false),
+        });
+        (sink, drained)
+    }
+}
+
 impl Playback for Sink {
-    fn play(&self, frame: AudioFrame) {
+    /// Counts the frame in `handed` once it is pushed to the speaker: a frame a cut discarded
+    /// was never handed out, as the cascade's playout counts it dropped.
+    fn play(&self, frame: AudioFrame, handed: Option<Arc<AtomicU64>>) {
         let interruption = self.interruptions.load(Ordering::Acquire);
         self.counts.sent.fetch_add(1, Ordering::AcqRel);
         if self
@@ -68,6 +97,7 @@ impl Playback for Sink {
             .send(Out::Frame {
                 frame,
                 interruption,
+                handed,
             })
             .is_err()
         {
@@ -83,12 +113,6 @@ impl Playback for Sink {
     fn cut(&self) {
         self.interruptions.fetch_add(1, Ordering::AcqRel);
         let _ = self.speaker.stop();
-    }
-
-    /// The frames pushed to the speaker: a frame a cut discarded was never handed out, as the
-    /// cascade's playout counts it dropped.
-    fn played(&self) -> u64 {
-        self.counts.pushed.load(Ordering::Acquire)
     }
 
     fn end(&self) {
@@ -112,12 +136,15 @@ fn playout(
             Out::Frame {
                 frame,
                 interruption,
+                handed,
             } => {
                 if push(speaker, &frame, interruptions, interruption) {
                     counts
                         .rate
                         .store(frame.format.sample_rate.get(), Ordering::Release);
-                    counts.pushed.fetch_add(1, Ordering::AcqRel);
+                    if let Some(handed) = handed {
+                        handed.fetch_add(1, Ordering::AcqRel);
+                    }
                 }
                 counts.handed.fetch_add(1, Ordering::AcqRel);
             }
@@ -247,25 +274,8 @@ impl Agent {
         let speaker = Speaker::open(&host, &DeviceSelector::Default, PlayoutConfig::default())
             .map_err(|error| device(&host, Direction::Output, &error))?;
         let speaker = Arc::new(speaker);
-        let (sender, receiver) = mpsc::channel();
-        let (drain, drained) = oneshot::channel();
-        let interruptions = Arc::new(AtomicU64::new(0));
-        let counts = Arc::new(Counts::default());
-        {
-            let (speaker, interruptions, counts) = (
-                Arc::clone(&speaker),
-                Arc::clone(&interruptions),
-                Arc::clone(&counts),
-            );
-            thread::spawn(move || playout(&receiver, &speaker, &interruptions, &counts, drain));
-        }
-        let sink = Arc::new(Sink {
-            sender,
-            speaker: Arc::clone(&speaker),
-            interruptions,
-            counts: Arc::clone(&counts),
-            ended: AtomicBool::new(false),
-        });
+        let (sink, drained) = Sink::start(Arc::clone(&speaker));
+        let counts = Arc::clone(&sink.counts);
         *self
             .sink_slot()
             .lock()
@@ -333,19 +343,24 @@ impl Agent {
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use std::num::{NonZeroU16, NonZeroU32};
-    use std::sync::Arc;
+    use std::sync::{Arc, PoisonError};
     use std::time::{Duration, Instant};
 
     use futures_util::StreamExt;
-    use inference_audio::AudioFrame;
-    use inference_audio_device::convert::decode;
+    use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
+    use inference_audio_device::acknowledging::Playout;
+    use inference_audio_device::convert::{decode, encode};
     use inference_audio_device::fake::{FakeDevice, FakeHost};
+    use inference_audio_device::{DeviceSelector, PlayoutConfig, Speaker};
     use inference_testkit::duplex::mock::{
         MockHistory, MockSpeechModel, Reply, ScriptedTurn, pcm, utterance,
     };
     use inference_testkit::mark::{self, MockId};
     use tokio::sync::oneshot;
 
+    use super::Sink;
+    use crate::agent::Playback;
+    use crate::recipe::RoutedPlayout;
     use crate::{Agent, Binding, Event, Stack};
 
     const LIMIT: Duration = Duration::from_secs(5);
@@ -486,5 +501,99 @@ mod tests {
             "{names:?}"
         );
         assert_eq!(names.last(), Some(&"Closed"), "{names:?}");
+    }
+
+    /// A 20 ms frame at 24 kHz starting at sample `position`.
+    fn tone(position: u64) -> AudioFrame {
+        AudioFrame {
+            format: AudioFormat {
+                encoding: AudioEncoding::PcmS16le,
+                sample_rate: NonZeroU32::new(24_000).expect("24 kHz"),
+                channels: NonZeroU16::MIN,
+            },
+            position: SampleClockPosition::new(position).expect("a position"),
+            sample_count: 480,
+            data: encode(&[0.25; 480], AudioEncoding::PcmS16le),
+        }
+    }
+
+    async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+        let started = Instant::now();
+        while !done() {
+            assert!(started.elapsed() < LIMIT, "{what}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// A switch while the device sink still holds a frame of the old run: the new run's speaker
+    /// counts that frame, once pushed, as the old run's, not as its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_switch_while_the_sink_holds_the_old_runs_frame_counts_only_the_new_runs_own() {
+        let agent = agent(MockSpeechModel::native(Vec::new())).await;
+        let host = host();
+        let config = PlayoutConfig {
+            buffer: Duration::from_millis(20),
+        };
+        let speaker = Speaker::open(&host, &DeviceSelector::Default, config).expect("opens");
+        let (sink, _drained) = Sink::start(Arc::new(speaker));
+        *agent
+            .sink_slot()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(sink as Arc<dyn Playback>);
+        let route = agent.audio_route();
+        let old = RoutedPlayout::new(Arc::clone(&route));
+        old.try_push(&tone(0)).expect("routed");
+        old.try_push(&tone(480)).expect("routed");
+        eventually("the speaker takes the old run's first frame", || {
+            old.queued() == 480
+        })
+        .await;
+
+        let new = RoutedPlayout::new(Arc::clone(&route));
+        new.try_push(&tone(960)).expect("routed");
+        assert!(host.pull(480).is_some(), "the speaker plays a frame");
+        eventually("the speaker takes the old run's second frame", || {
+            old.queued() == 0
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            new.queued(),
+            480,
+            "the new run's frame waits behind the old run's"
+        );
+        assert!(host.pull(480).is_some(), "the speaker plays a frame");
+        eventually("the speaker takes the new run's frame", || {
+            new.queued() == 0
+        })
+        .await;
+    }
+
+    /// A device sink attached while a cascade's run plays onto the event stream: the run's
+    /// frames go on being counted from where they were.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sink_attached_mid_run_counts_the_runs_next_frame_once_pushed() {
+        let agent = agent(MockSpeechModel::native(Vec::new())).await;
+        let route = agent.audio_route();
+        let playout = RoutedPlayout::new(Arc::clone(&route));
+        playout.try_push(&tone(0)).expect("routed");
+        assert_eq!(
+            playout.queued(),
+            0,
+            "the event stream hands a frame out at once"
+        );
+        let host = host();
+        let speaker = Speaker::open(&host, &DeviceSelector::Default, PlayoutConfig::default())
+            .expect("opens");
+        let (sink, _drained) = Sink::start(Arc::new(speaker));
+        *agent
+            .sink_slot()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(sink as Arc<dyn Playback>);
+        playout.try_push(&tone(480)).expect("routed");
+        eventually("the speaker takes the run's next frame", || {
+            playout.queued() == 0
+        })
+        .await;
     }
 }
