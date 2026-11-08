@@ -107,7 +107,8 @@
 - `inference-testkit`: `mark::encode` and `mark::decode` mark the mocks' reply audio, never
   silent, with the mock, the reply and the frame index; the duplex mock and `MockSynthesis` emit
   marked frames. `MockSpeechModel::history()` returns a `MockHistory` whose `completed()` counts
-  the responses the mock completed.
+  the responses the mock completed, and whose `answered()` lists the tool results its sessions
+  took, each under its call id.
 - `inference-audio-device`: `FakeHost::played()` and `played_frames()` return what its output
   sink took, in the order it took it, a refused write not among it, and `Played::Cleared` at
   each stop; `FakeHost::hold_sink()` holds the writes until every `SinkHold` taken drops,
@@ -129,6 +130,10 @@
   `tool_result` has ended, as `ModelNode` does. It let go of its inputs as soon as it ended its
   outputs, so a tool authority or executor sending its end of input back to it failed the run
   with a closed edge.
+- `inference-pipeline`: a draining `DuplexNode` answers every call it proposed that has no answer
+  yet as rejected before it closes the model's session, so the model has an answer under every
+  call it made. A draining node takes no tool result, so a rejection sent at a close, such as an
+  `Agent`'s `close()` with a confirmation still held, never reached the model.
 
 ## [0.25.0] — 2026-11-07
 
