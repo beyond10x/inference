@@ -961,6 +961,41 @@ async fn a_switch_whose_resolve_fails_leaves_a_working_agent() {
     agent.close().await.expect("closes");
 }
 
+/// The commit goes into the cascade's audio ingress, so the fan-out hands it to the STT node's
+/// audio port ahead of the close's end of input: the run takes it and drains, and no error is
+/// yielded however the commit and the turns interleave.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_committed_cascade_turn_drains_without_an_error() {
+    let agent = Agent::voice_with(cascade()).start().await.expect("starts");
+    let mut events = agent.events();
+    for frame in inference_testkit::stt::synthetic_audio::tone_silence_tone_silence() {
+        agent.send_audio(frame).await.expect("sent");
+    }
+    agent.commit().await.expect("committed");
+    let seen = read_until(&mut events, "Said").await;
+    agent.close().await.expect("closes");
+    let seen = [seen, read_all(&mut events).await].concat();
+    assert!(!names(&seen).contains(&"Error"), "{seen:#?}");
+    assert_eq!(names(&seen).last(), Some(&"Closed"), "{seen:#?}");
+}
+
+/// The interrupt's `cancel` takes the same way into the cascade as a commit: the run takes it
+/// and drains, and no error is yielded.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_cascade_turn_drains_without_an_error() {
+    let agent = Agent::voice_with(cascade()).start().await.expect("starts");
+    let mut events = agent.events();
+    for frame in inference_testkit::stt::synthetic_audio::tone_silence_tone_silence() {
+        agent.send_audio(frame).await.expect("sent");
+    }
+    let seen = read_until(&mut events, "Said").await;
+    agent.interrupt().await.expect("interrupts");
+    agent.close().await.expect("closes");
+    let seen = [seen, read_all(&mut events).await].concat();
+    assert!(!names(&seen).contains(&"Error"), "{seen:#?}");
+    assert_eq!(names(&seen).last(), Some(&"Closed"), "{seen:#?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cascade_switch_keeps_the_session_and_answers_the_next_utterance() {
     let mut agent = Agent::from_recipe(inference::Recipe::voice_cascade())

@@ -116,6 +116,11 @@
 
 ### Fixed
 
+- `inference-pipeline`: `SttNode` takes and ignores a control event other than `stop` on its
+  `audio` port, as the voice activity detector does. A session sends its `commit` and `cancel`
+  into every ingress, and the cascade's fan-out hands them to the STT node, so every
+  `voice_cascade` run that was committed or interrupted failed; an `Agent` saw the error only
+  when it arrived before the reply.
 - `inference-pipeline`: under the run's drain, `DuplexNode` ends only once every edge into
   `tool_result` has ended, as `ModelNode` does. It let go of its inputs as soon as it ended its
   outputs, so a tool authority or executor sending its end of input back to it failed the run
