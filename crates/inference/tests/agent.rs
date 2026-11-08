@@ -1372,3 +1372,27 @@ async fn a_model_close_while_the_egress_is_full_completes() {
         "{entries:#?}"
     );
 }
+
+#[cfg(feature = "aws")]
+#[test]
+fn an_aws_bound_stack_describes_nova_sonics_default_without_credentials() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let file = root.path().join("stack.toml");
+    std::fs::write(
+        &file,
+        "profile = \"hybrid_opt_in\"\n\n[speech]\nadapter = \"aws\"\n",
+    )
+    .expect("the stack file is written");
+    let env = Env::new()
+        .working_dir(root.path().join("work"))
+        .config_home(root.path().join("config"))
+        .var("INFERENCE_STACK", file.to_str().expect("a UTF-8 path"));
+    let stack = Stack::new().resolve_with(&env).expect("resolves");
+    let config = Agent::voice()
+        .stack(stack)
+        .describe()
+        .expect("plans with no AWS configuration")
+        .session_config
+        .expect("a speech config");
+    assert_eq!(config, inference_aws::duplex::default_session_config());
+}
