@@ -996,6 +996,27 @@ async fn an_interrupted_cascade_turn_drains_without_an_error() {
     assert_eq!(names(&seen).last(), Some(&"Closed"), "{seen:#?}");
 }
 
+/// An application starts and switches an agent inside spawned tasks: both futures are `Send`, or
+/// this case does not compile.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_starts_and_switches_inside_spawned_tasks() {
+    let agent = tokio::spawn(Agent::voice_with(cascade()).start())
+        .await
+        .expect("joins")
+        .expect("starts");
+    let agent = tokio::spawn(async move {
+        let mut agent = agent;
+        agent
+            .switch(inference::Recipe::voice_cascade())
+            .await
+            .map(|()| agent)
+    })
+    .await
+    .expect("joins")
+    .expect("switches");
+    agent.close().await.expect("closes");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cascade_switch_keeps_the_session_and_answers_the_next_utterance() {
     let mut agent = Agent::from_recipe(inference::Recipe::voice_cascade())
