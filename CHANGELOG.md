@@ -114,6 +114,14 @@
   each stop; `FakeHost::hold_sink()` holds the writes until every `SinkHold` taken drops,
   `SinkHold::waiting()` showing them; and `FakeHost::unbounded()` lifts the sink's capacity
   bound, so its sink never answers `Full`.
+- `inference`: `Agent::run_on_devices_with(host)` (feature `audio-host`) and
+  `Agent::run_on_devices()` on `CpalHost` (feature `audio-device`) run an agent on the host's
+  default microphone and speaker until the session ends or Ctrl-C, when it closes the session.
+  Both take `&self`, so another task can send or close meanwhile and the agent stays readable
+  afterwards. While it runs, the agent's audio, native or a cascade's, goes to the speaker only,
+  never onto the event stream; a barge-in with `auto_interrupt` on, or `Agent::interrupt`, cuts
+  what the speaker has not played; it returns once every frame of the last reply was handed to
+  the speaker and played.
 
 ### Fixed
 
