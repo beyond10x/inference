@@ -225,7 +225,7 @@ pub mod role {
 
 /// A recogniser bound to the `stt` role. The binding owns the recogniser; each run's STT node is
 /// built over it by [`BoundRecogniser::node`].
-pub(crate) trait BoundRecogniser: Send {
+pub(crate) trait BoundRecogniser: Send + Sync {
     fn adapter(&self) -> &Adapter;
 
     /// Opens what the recogniser reads before its first recognition: a local checkpoint a
@@ -250,7 +250,7 @@ pub(crate) trait BoundRecogniser: Send {
 
 impl<T> BoundRecogniser for T
 where
-    T: Recogniser + Clone + Send + 'static,
+    T: Recogniser + Clone + Send + Sync + 'static,
     T::Handle: Send + 'static,
 {
     fn adapter(&self) -> &Adapter {
@@ -277,7 +277,7 @@ pub(crate) enum Synthesis {
 
 /// A synthesiser bound to the `tts` role. The binding owns the synthesiser; each run's node is
 /// built over it by [`BoundSynthesiser::node`].
-pub(crate) trait BoundSynthesiser: Send {
+pub(crate) trait BoundSynthesiser: Send + Sync {
     fn adapter(&self) -> &Adapter;
 
     /// The node of the run `run_id` over the bound synthesiser, built as `synthesis`, recording
@@ -287,7 +287,7 @@ pub(crate) trait BoundSynthesiser: Send {
 
 impl<T> BoundSynthesiser for T
 where
-    T: Synthesiser + Clone + Send + 'static,
+    T: Synthesiser + Clone + Send + Sync + 'static,
     T::Handle: Send + 'static,
 {
     fn adapter(&self) -> &Adapter {
@@ -306,7 +306,7 @@ where
 
 /// A native speech model bound to the `speech` role. The binding owns the model; each run's
 /// duplex node is built over it by [`BoundSpeechModel::node`].
-pub(crate) trait BoundSpeechModel: Send {
+pub(crate) trait BoundSpeechModel: Send + Sync {
     fn adapter(&self) -> &Adapter;
 
     /// The duplex node of the run `run_id` over the bound model, opening its session from
@@ -324,7 +324,7 @@ pub(crate) trait BoundSpeechModel: Send {
 
 impl<T> BoundSpeechModel for T
 where
-    T: NativeSpeechModel + Clone + Send + 'static,
+    T: NativeSpeechModel + Clone + Send + Sync + 'static,
     T::Session: Send + 'static,
 {
     fn adapter(&self) -> &Adapter {

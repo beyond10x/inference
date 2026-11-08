@@ -116,6 +116,10 @@
 
 ### Fixed
 
+- `inference`: the futures of `AgentBuilder::start` and `Agent::switch`, and of
+  `Instantiation::open`, are `Send`, so an application starts or switches an agent inside
+  `tokio::spawn`; `Stack` is `Sync`. They held a `&Stack` across an await while the stack's
+  bound recogniser, synthesiser and speech model were only `Send`.
 - `inference-pipeline`: `SttNode` takes and ignores a control event other than `stop` on its
   `audio` port, as the voice activity detector does. A session sends its `commit` and `cancel`
   into every ingress, and the cascade's fan-out hands them to the STT node, so every
