@@ -33,7 +33,7 @@ fn what_the_run_produced_before_the_close_is_delivered_before_session_closed() {
     let generator = generator(Vec::<String>::new());
     let (declaration, planned, usage) = planned_with_usage(&generator);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,

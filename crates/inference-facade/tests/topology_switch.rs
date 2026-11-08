@@ -566,7 +566,7 @@ fn switched_without_a_run() -> (
 /// close; with no run left in flight, `close` completes at once.
 #[test]
 fn a_session_whose_switch_did_not_drain_is_closed_at_once_by_close_after_the_left_runs_end() {
-    let (sessions, mut session, drive) = switched_without_a_run();
+    let (sessions, session, drive) = switched_without_a_run();
     let session_id = session.session_id();
     let _ = drive.join().expect("no panic");
     block_on(session.close()).expect("an Opened session drains");

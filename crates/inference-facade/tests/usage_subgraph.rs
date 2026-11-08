@@ -188,7 +188,7 @@ fn an_llm_inside_a_subgraph_node_is_counted_once_in_the_parent_run_and_session_t
         }
     };
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &planned.declaration,
         &planned.parent,
         InteractionMode::TurnBased,

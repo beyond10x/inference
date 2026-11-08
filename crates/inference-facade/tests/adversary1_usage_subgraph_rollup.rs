@@ -309,7 +309,7 @@ fn holding() -> MockGenerator {
 /// Sends one text to the open `session`, waits until the held turn streams, cancels the session
 /// and receives until it ends; answers the usage records it counted.
 fn cancelled_mid_turn(
-    mut session: LiveSession<PipelinePayload>,
+    session: LiveSession<PipelinePayload>,
     drive: thread::JoinHandle<Result<inference_runtime::run::Run, inference_runtime::RunError>>,
 ) -> u64 {
     let mut application = Application::new(session.run_id());

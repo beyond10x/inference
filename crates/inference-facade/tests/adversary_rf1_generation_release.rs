@@ -138,7 +138,7 @@ fn after_interrupt(later: usize) -> Vec<SessionEvent> {
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = echo_planned(&generator);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,

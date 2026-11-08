@@ -31,7 +31,7 @@ fn two_committed_exchanges_leave_user_assistant_user_assistant_after_the_run_and
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,
@@ -100,7 +100,7 @@ fn several_inputs_before_one_commit_are_one_user_turn() {
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,
@@ -126,7 +126,7 @@ fn several_inputs_before_one_commit_are_one_user_turn() {
     );
 
     let (declaration, planned) = text::planned(&generator, &[Capability::OutputStreaming]);
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,
@@ -262,7 +262,7 @@ fn a_delivered_tool_result_and_a_delivered_committed_transcript_join_the_history
     let (declaration, planned) = echo_planned(&generator);
     let sessions = LiveSessions::new();
     let mut echo = Some(Echo::default());
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,

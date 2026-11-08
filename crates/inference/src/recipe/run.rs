@@ -277,7 +277,8 @@ impl<'i> Run<'i> {
                 self.port(node, "turns")?,
                 self.log.clone(),
             )
-            .with_playback(self.port(node, "played")?);
+            .with_playback(self.port(node, "played")?)
+            .with_instructions(self.recipe.instructions.clone().unwrap_or_default());
             let cutting = self.speaker.is_some_and(|speaker| speaker.auto_interrupt);
             return Ok(if cutting {
                 Box::new(agent)
@@ -286,12 +287,10 @@ impl<'i> Run<'i> {
             });
         }
         let _ = node;
-        Ok(Box::new(ModelNode::<Payload>::carrying(
-            run_id,
-            generator,
-            reply,
-            self.log.clone(),
-        )))
+        Ok(Box::new(
+            ModelNode::<Payload>::carrying(run_id, generator, reply, self.log.clone())
+                .with_instructions(self.recipe.instructions.clone().unwrap_or_default()),
+        ))
     }
 
     /// A node no role binds: a fan-out by its role, the cascade's policy nodes and speaker by

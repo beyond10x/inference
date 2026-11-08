@@ -22,7 +22,7 @@ use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -37,7 +37,7 @@ use crate::host::{
 /// How often a waiting producer looks at the queue again.
 const POLL: Duration = Duration::from_millis(2);
 
-/// The most segments the queue tracks at once.
+/// The most segments the queue tracks at once; a queue without a bound tracks any number.
 const SEGMENTS: usize = 256;
 
 /// How much a [`Speaker`] queues: at most `buffer` of audio at the frames' own rate.
@@ -200,6 +200,25 @@ impl Queue {
     }
 }
 
+/// A test host's view of what is written to a [`PlayoutBuffer`], set by the fake host and never
+/// by the cpal host.
+pub(crate) trait PushTap: Send + Sync + fmt::Debug {
+    /// A frame is about to be written: answers the write's ticket once it may go on to the
+    /// queue, or none when it waited through a stop and is discarded. It may wait, and it is
+    /// called with the queue's lock free. Every ticket answered is passed on to exactly one of
+    /// [`PushTap::played`] and [`PushTap::refused`].
+    fn admit(&self, frame: &AudioFrame) -> Option<u64>;
+
+    /// The write `ticket` was queued as `frame`; called under the queue's lock.
+    fn played(&self, ticket: u64, frame: &AudioFrame);
+
+    /// The write `ticket` was refused and nothing of it queued.
+    fn refused(&self, ticket: u64);
+
+    /// Playback was stopped and cleared; called under the queue's lock.
+    fn cleared(&self);
+}
+
 /// The queue between a [`Speaker`] and its output device's callback.
 #[derive(Debug)]
 pub struct PlayoutBuffer {
@@ -214,6 +233,9 @@ pub struct PlayoutBuffer {
     underruns: AtomicU64,
     errors: AtomicU64,
     last_error: Mutex<Option<String>>,
+    /// What a test host sees of each write and stop, and whether the queue has no bound; set
+    /// once, by the fake host only.
+    tap: OnceLock<(Arc<dyn PushTap>, bool)>,
 }
 
 impl PlayoutBuffer {
@@ -241,7 +263,14 @@ impl PlayoutBuffer {
             underruns: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             last_error: Mutex::new(None),
+            tap: OnceLock::new(),
         }
+    }
+
+    /// Hands every write and stop to `tap` and, when `unbounded`, lifts the queue's bound, so a
+    /// write is never refused as full: the fake host's sink.
+    pub(crate) fn tapped(&self, tap: Arc<dyn PushTap>, unbounded: bool) {
+        let _ = self.tap.set((tap, unbounded));
     }
 
     fn lock(&self) -> MutexGuard<'_, Queue> {
@@ -313,7 +342,31 @@ impl PlayoutBuffer {
     /// Queues `frame`; with `since`, only if no stop happened after the stop count `since`. The
     /// count is read under the queue's lock, which [`PlayoutBuffer::stop`] holds while it
     /// clears the queue, so a stop is never missed between the check and the queuing.
+    ///
+    /// With a tap, the write waits for the tap's admission before anything else, and the tap
+    /// sees it as played only once it is queued, under the queue's lock, so that a refused write
+    /// is never seen as played and a stop is seen in its place among the writes.
     fn push(&self, frame: &AudioFrame, since: Option<u64>) -> Result<(), PushError> {
+        let Some((tap, unbounded)) = self.tap.get() else {
+            return self.queue_frame(frame, since, None);
+        };
+        let ticket = tap.admit(frame).ok_or(PushError::Stopped)?;
+        let pushed = self.queue_frame(frame, since, Some((tap.as_ref(), ticket, *unbounded)));
+        if pushed.is_err() {
+            tap.refused(ticket);
+        }
+        pushed
+    }
+
+    /// Queues `frame` as [`PlayoutBuffer::push`] does, telling `tapped`'s tap, under the queue's
+    /// lock, that its write `ticket` was played; its flag lifts the queue's bound.
+    fn queue_frame(
+        &self,
+        frame: &AudioFrame,
+        since: Option<u64>,
+        tapped: Option<(&dyn PushTap, u64, bool)>,
+    ) -> Result<(), PushError> {
+        let unbounded = tapped.is_some_and(|(_, _, unbounded)| unbounded);
         let mut samples = decode(frame).map_err(PushError::Malformed)?;
         for sample in &mut samples {
             *sample = playable(*sample);
@@ -338,6 +391,7 @@ impl PlayoutBuffer {
                 });
             }
             Some(_) => queue.capacity,
+            None if unbounded => usize::MAX,
             None => usize::try_from(samples_in(self.buffer, rate.get()))
                 .unwrap_or(usize::MAX)
                 .max(1),
@@ -359,7 +413,7 @@ impl PlayoutBuffer {
             .back()
             .is_some_and(|last| last.position + (queue.end - last.start) == position);
         if !continues {
-            if queue.segments.len() >= SEGMENTS {
+            if queue.segments.len() >= SEGMENTS && !unbounded {
                 return Err(PushError::Full);
             }
             let start = queue.end;
@@ -368,14 +422,19 @@ impl PlayoutBuffer {
         if queue.rate.is_none() {
             queue.rate = Some(rate);
             queue.capacity = capacity;
-            let spare = capacity.saturating_add(2);
-            queue.samples.reserve(spare);
+            if !unbounded {
+                let spare = capacity.saturating_add(2);
+                queue.samples.reserve(spare);
+            }
         }
         queue.samples.extend(samples.iter().copied());
         queue.end += samples.len() as u64;
         queue.finished = false;
         self.publish(&queue);
         self.due.store(true, Ordering::Relaxed);
+        if let Some((tap, ticket, _)) = tapped {
+            tap.played(ticket, frame);
+        }
         Ok(())
     }
 
@@ -398,6 +457,10 @@ impl PlayoutBuffer {
         self.publish(&queue);
         self.stops.fetch_add(1, Ordering::Relaxed);
         self.due.store(false, Ordering::Relaxed);
+        if let Some((tap, _)) = self.tap.get() {
+            tap.cleared();
+        }
+        drop(queue);
         reached
     }
 
@@ -560,5 +623,99 @@ impl Speaker {
             stream_errors,
             last_error,
         }
+    }
+}
+
+#[cfg(test)]
+mod tap {
+    use std::num::{NonZeroU16, NonZeroU32};
+    use std::sync::{Arc, Mutex, OnceLock, TryLockError, Weak};
+    use std::time::Duration;
+
+    use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
+
+    use super::{PlayoutBuffer, PushTap};
+    use crate::host::DeviceConfig;
+
+    /// A tap that notes, at each call, whether the buffer's queue lock was held.
+    #[derive(Debug, Default)]
+    struct Witness {
+        buffer: OnceLock<Weak<PlayoutBuffer>>,
+        seen: Mutex<Vec<(&'static str, bool)>>,
+    }
+
+    impl Witness {
+        fn note(&self, call: &'static str) {
+            let buffer = self
+                .buffer
+                .get()
+                .and_then(Weak::upgrade)
+                .expect("the buffer lives");
+            let locked = matches!(buffer.queue.try_lock(), Err(TryLockError::WouldBlock));
+            self.seen.lock().expect("unpoisoned").push((call, locked));
+        }
+    }
+
+    impl PushTap for Witness {
+        fn admit(&self, _: &AudioFrame) -> Option<u64> {
+            self.note("admit");
+            Some(1)
+        }
+        fn played(&self, _: u64, _: &AudioFrame) {
+            self.note("played");
+        }
+        fn refused(&self, _: u64) {
+            self.note("refused");
+        }
+        fn cleared(&self) {
+            self.note("cleared");
+        }
+    }
+
+    fn frame() -> AudioFrame {
+        AudioFrame {
+            format: AudioFormat {
+                encoding: AudioEncoding::PcmS16le,
+                sample_rate: NonZeroU32::new(16_000).expect("not zero"),
+                channels: NonZeroU16::MIN,
+            },
+            position: SampleClockPosition::new(0).expect("a position"),
+            sample_count: 320,
+            data: vec![1; 640],
+        }
+    }
+
+    /// A frame is played and a stop cleared under the queue's lock, so the tap's log is in the
+    /// queue's order: no frame queued after a stop is logged before it. Admission waits with the
+    /// lock free, and a refusal is logged after the lock was let go.
+    #[test]
+    fn the_tap_sees_a_queued_frame_and_a_stop_under_the_queue_lock() {
+        let buffer = Arc::new(PlayoutBuffer::new(
+            DeviceConfig {
+                sample_rate: NonZeroU32::new(48_000).expect("not zero"),
+                channels: NonZeroU16::MIN,
+            },
+            Duration::from_millis(20),
+        ));
+        let witness = Arc::new(Witness::default());
+        witness
+            .buffer
+            .set(Arc::downgrade(&buffer))
+            .expect("set once");
+        buffer.tapped(Arc::clone(&witness) as Arc<dyn PushTap>, false);
+        buffer.push(&frame(), None).expect("fits");
+        let refused = buffer.push(&frame(), None);
+        assert!(refused.is_err(), "the queue holds one frame: {refused:?}");
+        buffer.stop();
+        assert_eq!(
+            *witness.seen.lock().expect("unpoisoned"),
+            [
+                ("admit", false),
+                ("played", true),
+                ("admit", false),
+                ("refused", false),
+                ("cleared", true),
+            ]
+        );
     }
 }

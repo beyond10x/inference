@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [features]
-run = ["dep:inference-runtime", "dep:inference-facade"]
+run = ["dep:inference-runtime", "dep:inference-facade", "inference-pipeline/testing"]
 stt = ["dep:inference-stt", "inference-pipeline/stt"]
 llm = ["dep:inference-llm", "inference-llm/tools", "inference-pipeline/llm"]
 tts = ["dep:inference-tts", "inference-pipeline/tts"]
