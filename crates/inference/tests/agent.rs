@@ -695,6 +695,88 @@ async fn closing_with_a_confirmation_held_ends_with_closed() {
     assert_eq!(runs.load(Ordering::SeqCst), 0);
 }
 
+/// The call id of `event` when it is the `ToolCalled` of the model's call `speech`.
+fn called(event: &Event, speech: &str) -> Option<ToolCallId> {
+    match event {
+        Event::ToolCalled {
+            call_id,
+            speech_call_id: Some(id),
+            ..
+        } if *id == SpeechCallId::new(speech) => Some(*call_id),
+        _ => None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_rejects_a_held_call_and_one_called_after_it() {
+    let model = MockSpeechModel::native(vec![call_turn(), call_turn()]);
+    let history = model.history();
+    let (pair, runs) = lookup(true);
+    let agent = Agent::voice_with(speech(model))
+        .tool(pair)
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    let at = say(&agent, 0).await;
+    let seen = read_until(&mut events, "ConfirmationRequested").await;
+    let first = seen
+        .iter()
+        .find_map(|event| called(event, "call_1"))
+        .unwrap_or_else(|| panic!("ToolCalled for call_1: {seen:#?}"));
+    assert!(
+        matches!(seen.last(), Some(Event::ConfirmationRequested { call_id, .. }) if *call_id == first),
+        "{seen:#?}"
+    );
+    completed(&history, 1).await;
+    say(&agent, at).await;
+    let seen = tokio::time::timeout(LIMIT, async {
+        let mut seen = Vec::new();
+        while !seen.iter().any(|event| called(event, "call_2").is_some()) {
+            let event = events.next().await.expect("open").expect("no error");
+            seen.push(event);
+        }
+        seen
+    })
+    .await
+    .expect("ToolCalled for call_2 within 5 s");
+    let second = seen
+        .iter()
+        .find_map(|event| called(event, "call_2"))
+        .expect("call_2");
+    agent.close().await.expect("closes");
+    let seen = [seen, read_all(&mut events).await].concat();
+    assert!(
+        seen.iter()
+            .filter(|event| matches!(
+                event,
+                Event::ConfirmationRequested { call_id, .. } if *call_id == second
+            ))
+            .count()
+            <= 1,
+        "{seen:#?}"
+    );
+    assert_eq!(names(&seen).last(), Some(&"Closed"), "{seen:#?}");
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        0,
+        "a rejected call does not run"
+    );
+    let answered = history.answered();
+    for speech in ["call_1", "call_2"] {
+        let answer = answered
+            .iter()
+            .find(|(id, _)| *id == SpeechCallId::new(speech))
+            .unwrap_or_else(|| panic!("no answer under {speech}: {answered:?}"));
+        assert!(
+            answer.1["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("rejected")),
+            "{answered:?}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_turn_is_yielded_in_emission_order() {
     let model = MockSpeechModel::native(vec![turn("hi there")]);

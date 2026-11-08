@@ -36,8 +36,8 @@
 //! the turn under server turn detection.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use inference_core::model::{
@@ -138,17 +138,36 @@ pub struct MockSpeechModel {
 /// What the sessions of one [`MockSpeechModel`] did, shared by the model, its clones and every
 /// session they open: kept by a test before it binds the model, read while the model runs.
 #[derive(Debug, Clone, Default)]
-pub struct MockHistory(Arc<AtomicUsize>);
+pub struct MockHistory {
+    completed: Arc<AtomicUsize>,
+    answered: Arc<Mutex<Vec<(SpeechCallId, Json)>>>,
+}
 
 impl MockHistory {
     /// The responses the mock completed, over every session.
     #[must_use]
     pub fn completed(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.completed.load(Ordering::Acquire)
+    }
+
+    /// The tool results the mock's ledger took, each under its call id, in the order taken.
+    #[must_use]
+    pub fn answered(&self) -> Vec<(SpeechCallId, Json)> {
+        self.answers().clone()
     }
 
     fn complete(&self) {
-        self.0.fetch_add(1, Ordering::AcqRel);
+        self.completed.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn answer(&self, call_id: &SpeechCallId, result: &Json) {
+        self.answers().push((call_id.clone(), result.clone()));
+    }
+
+    fn answers(&self) -> std::sync::MutexGuard<'_, Vec<(SpeechCallId, Json)>> {
+        self.answered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -795,7 +814,8 @@ impl SpeechSessionHandle for MockSpeechSession {
         result: Json,
     ) -> Result<(), SessionError> {
         let rendered = result.to_string();
-        self.ledger.answer(call_id, result)?;
+        self.ledger.answer(call_id, result.clone())?;
+        self.history.answer(call_id, &result);
         if let Some(then) = self.after_result.take() {
             self.pending = Some(Reply::Say(then.replace("{result}", &rendered)));
             if self.creates_responses() && self.ledger.in_progress().is_none() {
