@@ -30,6 +30,8 @@ mod run;
 mod speaker;
 mod topology;
 
+#[cfg(all(test, feature = "audio-host", feature = "testing"))]
+pub(crate) use speaker::RoutedPlayout;
 #[cfg(feature = "audio-host")]
 pub(crate) use speaker::{AudioRoute, instantiate as instantiate_routed};
 

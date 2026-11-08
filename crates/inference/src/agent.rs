@@ -107,14 +107,13 @@ fn exclusive<T>(mutex: &mut Mutex<T>) -> &mut T {
 
 /// A device run's playback, attached to an agent's sink slot while it runs.
 pub(crate) trait Playback: Send + Sync {
-    /// Plays `frame` after every frame before it.
-    fn play(&self, frame: AudioFrame);
+    /// Plays `frame` after every frame before it, and adds one to `handed`, when given, once
+    /// the frame is handed out; never for a frame a cut dropped.
+    fn play(&self, frame: AudioFrame, handed: Option<Arc<AtomicU64>>);
     /// Whether reply audio is not yet played.
     fn pending(&self) -> bool;
     /// Stops the playback at once, dropping what is queued and in flight.
     fn cut(&self);
-    /// How many frames were handed out.
-    fn played(&self) -> u64;
     /// Marks the end of the session's audio: every frame played before it is the last.
     fn end(&self) {}
 }
@@ -123,7 +122,6 @@ pub(crate) trait Playback: Send + Sync {
 pub(crate) struct Route {
     pub(crate) sink: Mutex<Option<Arc<dyn Playback>>>,
     sender: Mutex<Option<broadcast::Sender<Item>>>,
-    routed: AtomicU64,
 }
 
 impl Route {
@@ -131,7 +129,6 @@ impl Route {
         Self {
             sink: Mutex::new(None),
             sender: Mutex::new(Some(sender)),
-            routed: AtomicU64::new(0),
         }
     }
 
@@ -160,11 +157,15 @@ impl Route {
         }
     }
 
-    fn audio(&self, frame: AudioFrame) {
+    /// Plays `frame` on the attached sink, or sends it on the event channel, which hands it
+    /// out at once; `handed`, when given, counts it handed out.
+    fn audio(&self, frame: AudioFrame, handed: Option<&Arc<AtomicU64>>) {
         if let Some(sink) = self.sink() {
-            sink.play(frame);
+            sink.play(frame, handed.map(Arc::clone));
         } else {
-            self.routed.fetch_add(1, Ordering::AcqRel);
+            if let Some(handed) = handed {
+                handed.fetch_add(1, Ordering::AcqRel);
+            }
             self.send(Event::Audio(frame));
         }
     }
@@ -184,13 +185,8 @@ impl Route {
 
 #[cfg(feature = "audio-host")]
 impl crate::recipe::AudioRoute for Route {
-    fn route(&self, frame: AudioFrame) {
-        self.audio(frame);
-    }
-
-    fn played(&self) -> u64 {
-        self.sink()
-            .map_or_else(|| self.routed.load(Ordering::Acquire), |sink| sink.played())
+    fn route(&self, frame: AudioFrame, handed: &Arc<AtomicU64>) {
+        self.audio(frame, Some(handed));
     }
 
     fn cut(&self) {
@@ -479,7 +475,7 @@ impl Step {
                         .is_some_and(|generation| reply.cut.contains(&generation))
                 };
                 if !cut {
-                    route.audio(frame.clone());
+                    route.audio(frame.clone(), None);
                 }
             }
             SessionEvent::ToolCallProposed(proposed) => {
@@ -1442,6 +1438,12 @@ impl Agent {
     #[cfg(feature = "audio-host")]
     pub(crate) fn sink_slot(&self) -> &Mutex<Option<Arc<dyn Playback>>> {
         &self.inner.core.route.sink
+    }
+
+    /// The route a cascade's audio takes.
+    #[cfg(all(test, feature = "audio-host", feature = "testing"))]
+    pub(crate) fn audio_route(&self) -> Arc<dyn crate::recipe::AudioRoute> {
+        Arc::clone(&self.inner.core.route) as Arc<dyn crate::recipe::AudioRoute>
     }
 
     /// The input format of the speech session, when the recipe has one.
