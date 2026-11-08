@@ -1631,15 +1631,17 @@ async fn texts_sent_before_a_commit_reach_the_generator_as_one_turn() {
     assert_eq!(said(&seen).concat(), "a b", "{seen:#?}");
 }
 
-/// The utterance is the cascade fixture's tone, then a commit: the cascade's voice activity
-/// detector hears no speech in the duplex mock's `utterance`, whose samples are near silence.
+/// The utterance is the cascade fixture's first tone and pause, then a commit: the cascade's
+/// voice activity detector hears no speech in the duplex mock's `utterance`, whose samples are
+/// near silence. One turn only: a second turn sent at once can open before the first is answered
+/// and supersede its reply.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_voice_cascade_recipe_agent_hears_says_and_yields_the_synthesisers_audio() {
     let builder = Agent::from_recipe(inference::Recipe::voice_cascade()).stack(cascade());
     assert_eq!(builder.describe().expect("plans").recipe, "voice_cascade");
     let agent = builder.start().await.expect("starts");
     let mut events = agent.events();
-    for frame in inference_testkit::stt::synthetic_audio::tone_silence_tone_silence() {
+    for frame in synthesize(&FIXTURE[..2]) {
         agent.send_audio(frame).await.expect("sent");
     }
     agent.commit().await.expect("committed");
