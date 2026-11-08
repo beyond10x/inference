@@ -7,8 +7,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use inference::core::model::ModelId;
-use inference::duplex::SpeechCallId;
+use inference::core::model::{
+    Adapter, AdapterDescriptor as ModelDescriptor, DeclareAdapter, ExecutionForm, Locality, ModelId,
+};
+use inference::core::policy::ProfileKind;
+use inference::duplex::{
+    NativeSpeechModel, OpenError, SessionConfig, SpeechCallId, SpeechCapabilities,
+};
 use inference::facade::events::SessionEvent;
 use inference::facade::history::HistoryKind;
 use inference::facade::live::LiveSession;
@@ -18,9 +23,12 @@ use inference::tools::{
     CancellationSignal, DeclareTool, ExecutionFuture, SideEffectClass, Tool, ToolCall, ToolCallId,
     ToolExecutor,
 };
-use inference::{Agent, Binding, BindingSource, Description, Event, Payload, Role, Stack};
+use inference::{
+    AdapterDescriptor as RegisteredAdapter, Agent, Binding, BindingSource, Description, Env, Event,
+    Payload, Registry, Role, Stack,
+};
 use inference_testkit::duplex::mock::{
-    MockHistory, MockSpeechModel, Reply, ScriptedTurn, pcm, utterance,
+    MockHistory, MockSpeechModel, MockSpeechSession, Reply, ScriptedTurn, pcm, utterance,
 };
 use inference_testkit::llm::{MockConfiguration, MockGenerator};
 use serde_json::json;
@@ -452,6 +460,122 @@ fn a_voice_agent_short_of_tts_is_told() {
     assert!(error.to_string().contains("tts"), "{error}");
 }
 
+/// A speech model at `locality` whose `open` counts itself, then panics: a test over it asserts
+/// that nothing opens it.
+struct Unopened {
+    adapter: Adapter,
+    capabilities: SpeechCapabilities,
+    opens: Arc<AtomicUsize>,
+}
+
+impl NativeSpeechModel for Unopened {
+    type Session = MockSpeechSession;
+
+    fn adapter(&self) -> &Adapter {
+        &self.adapter
+    }
+
+    fn capabilities(&self) -> &SpeechCapabilities {
+        &self.capabilities
+    }
+
+    fn open(&mut self, _: SessionConfig) -> Result<MockSpeechSession, OpenError> {
+        self.opens.fetch_add(1, Ordering::SeqCst);
+        panic!("the speech adapter is opened");
+    }
+}
+
+/// Registers `name` at `locality` serving `speech` with an [`Unopened`] model; returns its opens.
+fn register_unopened(name: &str, locality: Locality) -> Arc<AtomicUsize> {
+    let opens = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&opens);
+    Registry::register(
+        RegisteredAdapter::new(name, locality).role(Role::Speech, move |_| {
+            let mock = MockSpeechModel::native(Vec::new());
+            let (adapter, _) = Adapter::declare(DeclareAdapter {
+                model_id: ModelId::generate(),
+                backend: "agent-test unopened speech".to_owned(),
+                contract_revision: "1".to_owned(),
+                execution_form: if locality == Locality::SameProcess {
+                    ExecutionForm::InProcess
+                } else {
+                    ExecutionForm::HostedService
+                },
+                locality,
+                capabilities: mock.adapter().capabilities().to_vec(),
+                max_concurrency: 1,
+                descriptor: ModelDescriptor::default(),
+            })
+            .expect("a concurrency of one is positive");
+            let capabilities = mock.capabilities().clone();
+            Ok(Binding::speech(Unopened {
+                adapter,
+                capabilities,
+                opens: Arc::clone(&counted),
+            })
+            .into())
+        }),
+    )
+    .unwrap_or_else(|error| panic!("{name} registers: {error}"));
+    opens
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_switch_to_the_cascade_across_a_profile_boundary() {
+    let opens = register_unopened("agent-hosted-switch", Locality::ExternalProvider);
+    let stack = || {
+        cascade()
+            .bind(Binding::named(
+                Role::Speech,
+                "agent-hosted-switch",
+                BTreeMap::new(),
+            ))
+            .profile(ProfileKind::OfflineStrict)
+    };
+    let described = Agent::voice().stack(stack()).describe();
+    let error = described.expect_err("the profile denies the hosted speech adapter");
+    assert_eq!(error.kind(), inference::ErrorKind::ProfileDenies, "{error}");
+    assert!(
+        matches!(error, inference::Error::ProfileDenies { ref role, .. } if role == "speech"),
+        "{error}"
+    );
+    let Err(error) = Agent::voice().stack(stack()).start().await else {
+        panic!("a voice_cascade was started in place of the denied native_voice");
+    };
+    assert_eq!(error.kind(), inference::ErrorKind::ProfileDenies, "{error}");
+    assert_eq!(opens.load(Ordering::SeqCst), 0, "the speech adapter opened");
+}
+
+#[test]
+fn a_first_hosted_stack_is_told_the_fix() {
+    let opens = register_unopened("agent-hosted-first", Locality::ExternalProvider);
+    let stack = Stack::new()
+        .bind(Binding::named(
+            Role::Speech,
+            "agent-hosted-first",
+            BTreeMap::new(),
+        ))
+        .resolve_with(&Env::new())
+        .expect("resolves");
+    let error = Agent::voice()
+        .stack(stack)
+        .describe()
+        .expect_err("the default profile denies a hosted adapter");
+    assert_eq!(error.kind(), inference::ErrorKind::ProfileDenies, "{error}");
+    let text = error.to_string();
+    let fix = text
+        .find("profile = \"hybrid_opt_in\"")
+        .unwrap_or_else(|| panic!("names the stack-file fix: {text}"));
+    assert!(text.contains("INFERENCE_PROFILE"), "{text}");
+    for named in ["speech", "agent-hosted-first", "external_provider"] {
+        let at = text
+            .find(named)
+            .unwrap_or_else(|| panic!("names {named}: {text}"));
+        assert!(at < fix, "{named} comes after the fix: {text}");
+    }
+    assert_eq!(opens.load(Ordering::SeqCst), 0, "the speech adapter opened");
+}
+
 #[test]
 fn the_merged_session_config_takes_each_later_step() {
     let model = || MockSpeechModel::native(vec![turn("hi")]);
@@ -503,6 +627,28 @@ async fn the_started_agent_describes_the_config_the_builder_did() {
     let agent = builder.start().await.expect("starts");
     assert_eq!(agent.describe().session_config, planned);
     agent.close().await.expect("closes");
+}
+
+#[test]
+fn the_builders_describe_opens_nothing() {
+    let opens = register_unopened("agent-describe-no-open", Locality::SameProcess);
+    let stack = Stack::new().bind(Binding::named(
+        Role::Speech,
+        "agent-describe-no-open",
+        BTreeMap::new(),
+    ));
+    let described = Agent::voice()
+        .stack(stack)
+        .instructions("Answer briefly.")
+        .describe()
+        .expect("plans");
+    let config = described.session_config.expect("a speech config");
+    assert_eq!(config.instructions, "Answer briefly.");
+    assert_eq!(
+        opens.load(Ordering::SeqCst),
+        0,
+        "describe opened the speech adapter"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
