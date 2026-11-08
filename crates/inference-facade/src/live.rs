@@ -439,9 +439,14 @@ impl Shared {
         });
     }
 
-    /// Queues `event` for the application and wakes a waiting receive.
+    /// Queues `event` for the application and wakes a waiting receive. A session that
+    /// `CompleteSessionClose` or `CancelSession` closed queued `SessionClosed` last, so it
+    /// queues nothing more: an interrupt whose sends finished after a close records no event.
     pub(crate) fn record(&self, event: SessionEvent) {
         let mut inbox = lock(&self.inbox);
+        if inbox.finished {
+            return;
+        }
         inbox.events.push_back(event);
         if let Some(waker) = inbox.waker.take() {
             waker.wake();
