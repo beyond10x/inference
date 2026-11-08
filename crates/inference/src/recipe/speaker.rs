@@ -38,7 +38,8 @@ struct Routed {
 
 #[derive(Debug, Default)]
 struct Routing {
-    /// How many frames were routed.
+    /// The ordinal of the next frame routed: the route's handed-out count when the playout was
+    /// built, plus the frames this playout routed since.
     routed: u64,
     /// How many routed frames a cut dropped, which the route never hands out.
     dropped: u64,
@@ -57,10 +58,17 @@ pub(crate) struct RoutedPlayout {
 }
 
 impl RoutedPlayout {
+    /// The playout of one run over `route`. The route outlives the run: after a switch it already
+    /// handed out the frames of the runs before, so this run's frames are numbered from the count
+    /// handed out when the run's speaker is built, once the run before has ended.
     pub(crate) fn new(route: Arc<dyn AudioRoute>) -> Self {
+        let routing = Routing {
+            routed: route.played(),
+            ..Routing::default()
+        };
         Self {
             route,
-            routing: Mutex::default(),
+            routing: Mutex::new(routing),
         }
     }
 
@@ -181,10 +189,6 @@ impl std::fmt::Debug for Speaker {
 
 impl Instantiation {
     /// The route and barge-in the cascade was instantiated with, through [`instantiate`].
-    #[cfg_attr(
-        not(all(test, feature = "testing")),
-        expect(dead_code, reason = "only the recipe's tests read the speaker back")
-    )]
     pub(crate) const fn speaker(&self) -> Option<&Speaker> {
         self.speaker.as_ref()
     }
@@ -703,6 +707,51 @@ mod tests {
         route.played.store(2, Ordering::SeqCst);
         assert!(eventually(|| run.receipts.receipts() == [segment]));
         run.end();
+    }
+
+    /// Sends one segment of two frames and its completion; the segment.
+    fn say_segment(run: &mut Started) -> SegmentId {
+        let segment = run.synthesis.segment();
+        let first = run.synthesis.frame(segment);
+        run.send(first);
+        let second = run.synthesis.frame(segment);
+        run.send(second);
+        let completed = run.synthesis.complete(segment);
+        run.send(completed);
+        segment
+    }
+
+    #[test]
+    fn after_a_switch_the_new_runs_speaker_counts_only_its_own_frames_as_played() {
+        let route = Arc::new(Route::default());
+        let mut old = Started::new(&route, true);
+        let said = say_segment(&mut old);
+        assert!(eventually(|| route.routed() == 2), "both frames are routed");
+        route.played.store(2, Ordering::SeqCst);
+        assert!(eventually(|| old.receipts.receipts() == [said]));
+        old.end();
+
+        let mut new = Started::new(&route, true);
+        let segment = say_segment(&mut new);
+        assert!(
+            eventually(|| route.routed() == 4),
+            "both new frames are routed"
+        );
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            new.receipts.receipts().is_empty(),
+            "the new run's frames are not handed out: {:?}",
+            new.receipts.receipts()
+        );
+        route.played.store(3, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            new.receipts.receipts().is_empty(),
+            "one new frame is unplayed"
+        );
+        route.played.store(4, Ordering::SeqCst);
+        assert!(eventually(|| new.receipts.receipts() == [segment]));
+        new.end();
     }
 
     /// Two frames of one segment, `played()` held at 0, a turn opened, then a third frame.

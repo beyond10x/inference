@@ -19,6 +19,7 @@ use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_duplex::SessionConfig;
 use inference_facade::events::SessionEvent;
 use inference_facade::live::{InputError, LiveSession, LiveSessions, SessionDriver};
+use inference_facade::session::SessionState;
 use inference_pipeline::PlannedPipeline;
 use inference_pipeline::nodes::AuthorityHandle;
 use inference_pipeline::nodes::duplex::CallIds;
@@ -32,6 +33,7 @@ use tokio::sync::{Notify, broadcast, watch};
 use tokio::task::JoinHandle;
 
 use crate::event::{Event, Events, Item};
+use crate::recipe::SwitchFailed;
 use crate::stack::{Bound, default_session_config, role};
 use crate::{BindingSource, Env, Error, Instantiation, Payload, Recipe, Result, Role, Stack};
 
@@ -43,13 +45,6 @@ const CAPACITY: usize = 1024;
 const TICK: Duration = Duration::from_millis(20);
 
 const OPEN: u8 = 0;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`switch` moves the state to it; it is not implemented yet"
-    )
-)]
 const SWITCHING: u8 = 1;
 const CLOSING: u8 = 2;
 const CLOSED: u8 = 3;
@@ -103,6 +98,11 @@ pub struct Description {
 /// A held lock, poison or not.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The value of a mutex borrowed exclusively, poison or not.
+fn exclusive<T>(mutex: &mut Mutex<T>) -> &mut T {
+    mutex.get_mut().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A device run's playback, attached to an agent's sink slot while it runs.
@@ -351,11 +351,13 @@ struct Act {
 }
 
 /// The pump's own state: the run whose events still come before the current run's, whether the
-/// run's failure was reported, and the `SessionClosed` received.
+/// run's failure was reported, whether the run's driver was seen to end, and the `SessionClosed`
+/// received. A pump paused for a switch hands it back.
 #[derive(Debug, Default)]
 struct Step {
     left: Option<RunId>,
     reported: bool,
+    driven: bool,
     closed: Option<SessionEvent>,
 }
 
@@ -585,10 +587,75 @@ impl DriverWatch {
     }
 }
 
-/// What an agent's builder was given, kept for a switch.
+/// What an agent's builder was given beyond its recipe and stack: what every plan merges, at the
+/// start and at each switch.
+#[derive(Default)]
+struct Given {
+    instructions: Option<String>,
+    voice: Option<String>,
+    session_config: Option<SessionConfig>,
+    tools: Vec<(Tool, Arc<dyn ToolExecutor>)>,
+}
+
+impl Given {
+    /// `recipe` with the tools and instructions given, and the config and `auto_interrupt`
+    /// merged over `stack`.
+    fn plan(&self, recipe: Recipe, stack: &Stack) -> Plan {
+        let recipe = if self.tools.is_empty() {
+            recipe
+        } else {
+            recipe.tools(self.tools.iter().map(|(tool, executor)| {
+                let executor: Box<dyn ToolExecutor> =
+                    Box::new(SharedExecutor(Arc::clone(executor)));
+                (tool.clone(), executor)
+            }))
+        };
+        let recipe = match &self.instructions {
+            Some(instructions) => recipe.instructions(instructions.clone()),
+            None => recipe,
+        };
+        let config = stack.adapter(Role::Speech).is_some().then(|| {
+            let mut config = self.session_config.clone().unwrap_or_else(|| {
+                stack
+                    .session_config()
+                    .cloned()
+                    .unwrap_or_else(default_session_config)
+            });
+            if let Some(voice) = &self.voice {
+                config.voice.clone_from(voice);
+            }
+            if let Some(instructions) = &self.instructions {
+                config.instructions.clone_from(instructions);
+            }
+            for (tool, _) in &self.tools {
+                if !config.tools.iter().any(|given| given.name() == tool.name()) {
+                    config.tools.push(tool.clone());
+                }
+            }
+            config
+        });
+        let auto_interrupt = config.as_ref().map_or_else(
+            || {
+                self.session_config
+                    .as_ref()
+                    .is_none_or(|config| config.auto_interrupt)
+            },
+            |config| config.auto_interrupt,
+        );
+        Plan {
+            recipe,
+            config,
+            auto_interrupt,
+        }
+    }
+}
+
+/// What an agent's builder was given, kept for a switch: the resolved stack, the name of the
+/// current recipe and what every plan merges.
 struct Settings {
     stack: Mutex<Stack>,
     recipe: String,
+    given: Given,
 }
 
 /// The state the agent, its pump, a close it spawns and `Drop` share.
@@ -601,6 +668,8 @@ struct Inner {
     interrupting: Mutex<Option<JoinHandle<()>>>,
     driver: Mutex<Option<JoinHandle<()>>>,
     failure: Arc<DriverWatch>,
+    /// Asks the pump to stop where it is and hand back its [`Step`], for a switch.
+    pausing: Notify,
     ended: watch::Sender<bool>,
     first: Mutex<Option<broadcast::Receiver<Item>>>,
     stream_id: StreamId,
@@ -681,18 +750,21 @@ fn act(inner: &Arc<Inner>, act: &Act) {
     }
 }
 
-/// The pump: the session's one receiver, until the Agent's end.
-async fn pump(inner: Arc<Inner>, mut step: Step) {
+/// The pump: the session's one receiver, until the Agent's end, when it answers `None`, or until a
+/// switch pauses it, when it answers its step.
+async fn pump(inner: Arc<Inner>, mut step: Step) -> Option<Step> {
     let watch = Arc::clone(&inner.failure);
-    let mut driven = false;
     loop {
-        if !driven && let Some(result) = watch.get() {
-            driven = true;
+        if !step.driven
+            && let Some(result) = watch.get()
+        {
+            step.driven = true;
             let requests = step.on_driver(&inner.core, &result);
             act(&inner, &requests);
         }
         tokio::select! {
             biased;
+            () = inner.pausing.notified() => return Some(step),
             event = inner.session.receive() => {
                 let Some(event) = event else { break };
                 let requests = step.on_event(&inner.core, event);
@@ -701,7 +773,7 @@ async fn pump(inner: Arc<Inner>, mut step: Step) {
                 }
                 act(&inner, &requests);
             }
-            () = watch.notify.notified(), if !driven => {}
+            () = watch.notify.notified(), if !step.driven => {}
             () = tokio::time::sleep(TICK) => {}
         }
         inner.core.check_held();
@@ -713,6 +785,7 @@ async fn pump(inner: Arc<Inner>, mut step: Step) {
     let result = watch.get();
     step.on_end(&inner.core, result.as_ref());
     inner.ended.send_replace(true);
+    None
 }
 
 /// Wraps a shared executor so one tool can be given to every plan of the builder.
@@ -756,19 +829,16 @@ struct Plan {
 pub struct AgentBuilder {
     choice: Choice,
     stack: Mutex<Staged>,
-    instructions: Option<String>,
-    voice: Option<String>,
-    session_config: Option<SessionConfig>,
-    tools: Vec<(Tool, Arc<dyn ToolExecutor>)>,
+    given: Given,
     clock: Arc<dyn Clock>,
 }
 
 impl fmt::Debug for AgentBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgentBuilder")
-            .field("instructions", &self.instructions)
-            .field("voice", &self.voice)
-            .field("session_config", &self.session_config)
+            .field("instructions", &self.given.instructions)
+            .field("voice", &self.given.voice)
+            .field("session_config", &self.given.session_config)
             .finish_non_exhaustive()
     }
 }
@@ -781,10 +851,7 @@ impl AgentBuilder {
                 stack: Stack::new(),
                 given: false,
             }),
-            instructions: None,
-            voice: None,
-            session_config: None,
-            tools: Vec::new(),
+            given: Given::default(),
             clock: Arc::new(SystemClock),
         }
     }
@@ -841,21 +908,21 @@ impl AgentBuilder {
     #[must_use]
     pub fn tool(mut self, tool: impl IntoTool) -> Self {
         let (tool, executor) = tool.into_tool();
-        self.tools.push((tool, Arc::from(executor)));
+        self.given.tools.push((tool, Arc::from(executor)));
         self
     }
 
     /// The instructions of the speech session and of every request of the generator.
     #[must_use]
     pub fn instructions(mut self, instructions: impl Into<String>) -> Self {
-        self.instructions = Some(instructions.into());
+        self.given.instructions = Some(instructions.into());
         self
     }
 
     /// The voice of the speech session; wins over every other source.
     #[must_use]
     pub fn voice(mut self, voice: impl Into<String>) -> Self {
-        self.voice = Some(voice.into());
+        self.given.voice = Some(voice.into());
         self
     }
 
@@ -864,7 +931,7 @@ impl AgentBuilder {
     /// agent's.
     #[must_use]
     pub fn session_config(mut self, config: SessionConfig) -> Self {
-        self.session_config = Some(config);
+        self.given.session_config = Some(config);
         self
     }
 
@@ -911,52 +978,7 @@ impl AgentBuilder {
             Choice::Text => Recipe::chat(),
             Choice::Recipe(recipe) => (**recipe).clone(),
         };
-        let recipe = if self.tools.is_empty() {
-            recipe
-        } else {
-            recipe.tools(self.tools.iter().map(|(tool, executor)| {
-                let executor: Box<dyn ToolExecutor> =
-                    Box::new(SharedExecutor(Arc::clone(executor)));
-                (tool.clone(), executor)
-            }))
-        };
-        let recipe = match &self.instructions {
-            Some(instructions) => recipe.instructions(instructions.clone()),
-            None => recipe,
-        };
-        let config = stack.adapter(Role::Speech).is_some().then(|| {
-            let mut config = self.session_config.clone().unwrap_or_else(|| {
-                stack
-                    .session_config()
-                    .cloned()
-                    .unwrap_or_else(default_session_config)
-            });
-            if let Some(voice) = &self.voice {
-                config.voice.clone_from(voice);
-            }
-            if let Some(instructions) = &self.instructions {
-                config.instructions.clone_from(instructions);
-            }
-            for (tool, _) in &self.tools {
-                if !config.tools.iter().any(|given| given.name() == tool.name()) {
-                    config.tools.push(tool.clone());
-                }
-            }
-            config
-        });
-        let auto_interrupt = config.as_ref().map_or_else(
-            || {
-                self.session_config
-                    .as_ref()
-                    .is_none_or(|config| config.auto_interrupt)
-            },
-            |config| config.auto_interrupt,
-        );
-        Plan {
-            recipe,
-            config,
-            auto_interrupt,
-        }
+        self.given.plan(recipe, stack)
     }
 
     /// What the agent would run: the stack resolved and the recipe planned; no session is opened.
@@ -994,6 +1016,7 @@ impl AgentBuilder {
         core.authority = instantiation.authority().cloned();
         core.call_ids = instantiation.call_ids().cloned();
         core.names = self
+            .given
             .tools
             .iter()
             .map(|(tool, _)| (tool.tool_id(), tool.name().to_owned()))
@@ -1007,12 +1030,14 @@ impl AgentBuilder {
             settings: Settings {
                 stack: Mutex::new(stack),
                 recipe: plan.recipe.name().to_owned(),
+                given: self.given,
             },
             instantiation,
             config: Mutex::new(plan.config),
             interrupting: Mutex::new(None),
             driver: Mutex::new(Some(handle)),
             failure,
+            pausing: Notify::new(),
             ended,
             first: Mutex::new(Some(first)),
             stream_id: StreamId::generate(),
@@ -1080,10 +1105,90 @@ fn input_error(error: InputError<Payload>) -> Error {
     }
 }
 
+/// The refusal of a switch once the agent is closing or closed.
+fn not_open() -> Error {
+    Error::Closed {
+        message: "the agent is closing or closed: it does not switch".to_owned(),
+    }
+}
+
+/// How [`switch`] ended.
+enum Switched {
+    /// The new run drives the session; the old run, whose events still come first.
+    Done(RunId),
+    /// Nothing moved: the old run goes on.
+    Refused(Error),
+    /// The old run ended and the session is cancelled; the agent is `Closing`.
+    Ended(Error),
+}
+
+/// Switches the paused agent's session to `recipe`: plans it as the builder planned the first,
+/// sets the stack's speech config to the merged one, and switches the session. On success the
+/// new run, its driver, its tool handles and its config are the agent's.
+async fn switch(inner: &mut Inner, recipe: Recipe) -> Switched {
+    let stack = exclusive(&mut inner.settings.stack);
+    let plan = inner.settings.given.plan(recipe, stack);
+    let kept = stack.session_config().cloned();
+    if plan.config.is_some() {
+        stack.set_session_config(plan.config.clone());
+    }
+    let mut successor = match inner.instantiation.successor(&plan.recipe, stack) {
+        Ok(successor) => successor,
+        Err(error) => {
+            stack.set_session_config(kept);
+            return Switched::Refused(error);
+        }
+    };
+    let old_run = inner.session.run_id();
+    let switched = successor.switch(stack, &mut inner.session).await;
+    match switched {
+        Ok(driver) => {
+            if let Some(old) = exclusive(&mut inner.driver).take() {
+                let _ = old.await;
+            }
+            inner.failure = Arc::new(DriverWatch::default());
+            *exclusive(&mut inner.driver) = Some(spawn_driver(driver, Arc::clone(&inner.failure)));
+            inner.core.authority = successor.authority().cloned();
+            inner.core.call_ids = successor.call_ids().cloned();
+            successor.recipe().clone_into(&mut inner.settings.recipe);
+            inner.instantiation = successor;
+            *exclusive(&mut inner.config) = plan.config;
+            Switched::Done(old_run)
+        }
+        Err(SwitchFailed::Refused(error)) => {
+            stack.set_session_config(kept);
+            let ready = sessions()
+                .session(inner.session.session_id())
+                .is_some_and(|session| session.state() == SessionState::Ready);
+            if ready {
+                Switched::Refused(error)
+            } else {
+                Switched::Refused(Error::Closed {
+                    message: format!("the session is not ready: {error}"),
+                })
+            }
+        }
+        Err(SwitchFailed::Ended(error, driver)) => {
+            stack.set_session_config(kept);
+            inner.core.state.store(CLOSING, Ordering::Release);
+            if let Some(old) = exclusive(&mut inner.driver).take() {
+                let _ = old.await;
+            }
+            inner.failure = Arc::new(DriverWatch::default());
+            if let Some(driver) = driver {
+                *exclusive(&mut inner.driver) =
+                    Some(spawn_driver(*driver, Arc::clone(&inner.failure)));
+            }
+            let _ = inner.session.cancel();
+            Switched::Ended(error)
+        }
+    }
+}
+
 /// A session over a recipe: send text or audio, read [`Event`]s, interrupt, switch, close.
 pub struct Agent {
     inner: Arc<Inner>,
-    pump: Option<JoinHandle<()>>,
+    pump: Option<JoinHandle<Option<Step>>>,
 }
 
 impl fmt::Debug for Agent {
@@ -1239,6 +1344,71 @@ impl Agent {
         }
         closed.await;
         Ok(())
+    }
+
+    /// Switches the session to `recipe`, planned over the agent's stack as the builder planned the
+    /// first: the tools, instructions, voice and session config given to the builder are merged
+    /// again, and the agent's `auto_interrupt` is kept. The old run drains: what it still held
+    /// comes on the same event stream, then the new run's events. A call the old run holds for
+    /// confirmation is rejected, since its run ends. The session, its history and the event
+    /// stream carry over.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Closed`] once the agent is closing or closed, or the session is not ready;
+    /// those of [`Recipe::instantiate`] and [`Error::Layer`] when the session refuses the switch,
+    /// each with nothing moved; [`Error::Layer`] when the old run did not complete or the new
+    /// run did not start, after which the agent closes.
+    pub async fn switch(&mut self, recipe: Recipe) -> Result<()> {
+        let Some(step) = self.pause().await else {
+            return Err(not_open());
+        };
+        if !self.inner.core.leave_open(SWITCHING) {
+            self.resume(step);
+            return Err(not_open());
+        }
+        let interrupting = lock(&self.inner.interrupting).take();
+        if let Some(interrupting) = interrupting {
+            let _ = interrupting.await;
+        }
+        let Some(inner) = Arc::get_mut(&mut self.inner) else {
+            self.inner.core.state.store(OPEN, Ordering::Release);
+            self.resume(step);
+            return Err(Error::Layer {
+                message: "the agent's session is still in use by one of its own tasks: it did \
+                          not switch"
+                    .to_owned(),
+                source: None,
+            });
+        };
+        match switch(inner, recipe).await {
+            Switched::Done(old_run) => {
+                self.inner.core.state.store(OPEN, Ordering::Release);
+                self.resume(Step::new(Some(old_run)));
+                Ok(())
+            }
+            Switched::Refused(error) => {
+                self.inner.core.state.store(OPEN, Ordering::Release);
+                self.resume(step);
+                Err(error)
+            }
+            Switched::Ended(error) => {
+                self.resume(Step::new(None));
+                Err(error)
+            }
+        }
+    }
+
+    /// Stops the pump where it is; its step, or `None` once the pump has ended.
+    async fn pause(&mut self) -> Option<Step> {
+        let pump = self.pump.take()?;
+        self.inner.pausing.notify_one();
+        pump.await.ok().flatten()
+    }
+
+    /// Starts the pump again from `step`.
+    fn resume(&mut self, step: Step) {
+        self.pump = Some(tokio::spawn(pump(Arc::clone(&self.inner), step)));
     }
 
     /// The live session, shared with the agent's pump.

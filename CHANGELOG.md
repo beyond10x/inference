@@ -94,6 +94,16 @@
   every stream holds all it will. `Event` has twelve variants and `raw()`. Dropping an unclosed
   agent cancels its session and ends every stream with `Event::Closed`. Also `inference::sessions()`, `inference::Clock` and
   `inference::Description`.
+- `inference`: `Agent::switch(&mut self, recipe)` switches the agent's session to another recipe
+  over the same stack, through `LiveSession::switch`. The builder's tools, instructions, voice and
+  session config are merged into the new recipe's plan as at the start, and the agent's
+  `auto_interrupt` is kept. The old run drains: the events it still held come first on the same
+  stream, then the new run's. A call it held for confirmation is rejected `denied` as it drains.
+  The session, its history and every `Events` stream carry over, and `pipeline()` and
+  `describe()` answer the new recipe. A plan that fails, or a switch the session refuses, moves
+  nothing and the agent goes on; a closing or closed agent, or a session that is not ready, is
+  refused with `Error::Closed`; an old run that did not complete, or a new run that did not
+  start, closes the agent.
 - `inference-testkit`: `mark::encode` and `mark::decode` mark the mocks' reply audio, never
   silent, with the mock, the reply and the frame index; the duplex mock and `MockSynthesis` emit
   marked frames. `MockSpeechModel::history()` returns a `MockHistory` whose `completed()` counts
