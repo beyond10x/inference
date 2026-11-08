@@ -134,6 +134,9 @@
   yet as rejected before it closes the model's session, so the model has an answer under every
   call it made. A draining node takes no tool result, so a rejection sent at a close, such as an
   `Agent`'s `close()` with a confirmation still held, never reached the model.
+- `inference`: `Recipe::native_voice` needs `concurrent_input_output` of its speech model, as a
+  node that keeps one generation per run does, and no longer `native_duplex`, so it plans over
+  Nova Sonic and OpenAI Realtime as over GPT-Live; it refused every speech adapter but GPT-Live.
 
 ## [0.25.0] — 2026-11-07
 

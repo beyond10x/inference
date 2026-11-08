@@ -188,7 +188,7 @@ pub(super) fn native_voice(
     let speech = pipeline.node(
         "speech",
         NodeRole::Model,
-        requirement(Role::Speech, &[Capability::NativeDuplex]),
+        requirement(Role::Speech, &[Capability::ConcurrentInputOutput]),
     );
     let authority = pipeline.node("authority", NodeRole::Policy, Vec::new());
     let executor = pipeline.node("executor", NodeRole::Tool, Vec::new());
