@@ -38,8 +38,12 @@
 //! the end of input on, on every output port, `usage` first, so that a consumer that has the end
 //! of any other port has the end of `usage` too. Cancelled, it sends nothing more but the usage
 //! record of a recognition it already holds, which a cancel never loses: a cancel taken while a
-//! send waits for room ends the wait, a send on `usage` excepted. Content other than a frame on
-//! `audio` fails the node; on `turns` every event but the two turn events is taken and ignored.
+//! send waits for room ends the wait, a send on `usage` excepted. On `audio` a control event other
+//! than `stop` is taken and ignored, as the voice activity detector beside it ignores it: a
+//! session sends its `commit` and `cancel` into every ingress (`ess/domains/session.yaml`,
+//! `CommitInput` and `Interrupt`), and a cascade's microphone ingress reaches this port through
+//! its fan-out. Any other content on `audio` fails the node; on `turns` every event but the two
+//! turn events is taken and ignored.
 //! The spans each recognition emitted are read from its handle ([`SttHandle::spans`]).
 
 use std::collections::VecDeque;
@@ -492,6 +496,7 @@ impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
                 self.audio_ended = true;
                 Ok(())
             }
+            Heard::Control(_) => Ok(()),
             other => Err(format!(
                 "the node takes audio frames on its audio port and was handed {other:?}"
             )),

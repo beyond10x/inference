@@ -130,7 +130,7 @@ fn after_cancel_nothing_the_egress_still_holds_is_delivered() {
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = echo_planned(&generator);
     let sessions = LiveSessions::new();
-    let (mut session, driver) =
+    let (session, driver) =
         block_on(sessions.open(&declaration, &planned, InteractionMode::TurnBased, burst()))
             .expect("opens");
     session.cancel().expect("a Ready session is cancelled");
@@ -154,7 +154,7 @@ fn an_interrupt_cuts_a_generation_only_its_events_name() {
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = echo_planned(&generator);
     let sessions = LiveSessions::new();
-    let (mut session, driver) =
+    let (session, driver) =
         block_on(sessions.open(&declaration, &planned, InteractionMode::TurnBased, burst()))
             .expect("opens");
     let drive = thread::spawn(move || block_on(driver.drive()));

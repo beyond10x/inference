@@ -53,7 +53,7 @@ fn the_user_turn_precedes_the_reply_that_answers_it_when_the_reply_is_received_b
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,

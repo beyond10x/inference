@@ -10,9 +10,20 @@
 - `inference`: `StackBinding::generator()` answers `None` when the stack's profile does not admit
   the adapter's locality, such as a hosted generator under `offline_strict`, as planning refuses
   it; it handed the generator out. A run's role nodes are built from no such binding either.
+- `inference-facade`: `LiveSession::interrupt` records `SessionInterrupted` once the `cancel` is
+  in every ingress, not before it sends, and also when an ingress refused the `cancel`; a reader
+  that received it knows the `cancel` precedes any input sent after it. A session that closed
+  meanwhile records nothing more, so `SessionClosed` stays the last event received. `LiveSession::receive`
+  and `LiveSession::close` take `&self`, so one task receives while another sends or closes
+  through a shared session; `LiveSession` is `Sync`.
 
 ### Added
 
+- `inference`: `Recipe::instructions(text)` gives every request of the recipe's generator those
+  instructions, `chat`'s and `voice_cascade`'s; `AgentBuilder::instructions` now reaches them
+  too, besides the speech session's config. `inference-pipeline`: `ModelNode::with_instructions`
+  and `AgentNode::with_instructions`. `inference-testkit`: `MockGenerator::instructions()` reads
+  the instructions each model request carried.
 - `inference`: `Recipe::with_node(name, impl Fn(RunId, &Node) -> Implementation)` replaces the
   implementation of the node `name` in each run, the node keeping its role and its binding, and
   `Recipe::expose(name)` exposes the one port of that name as an exposed end of the same name at
@@ -72,13 +83,73 @@
   `AcknowledgingSink::new` and `with_turns` are unchanged.
 - `inference-pipeline`: `AgentNode::keeping_replies`, a node that completes its generation at
   every `TurnOpened` and never supersedes it, so a reply left unplayed by a new turn is kept.
+- `inference`: `Agent`, a session over a recipe, built with `Agent::voice()` (`native_voice`
+  when the stack binds `speech`, otherwise `voice_cascade`), `Agent::voice_with(stack)`,
+  `Agent::text()` (`chat`) or `Agent::from_recipe(recipe)`, and the builder's `stack`, typed
+  `llm`, `stt`, `tts` and `speech` binders, `tool` (any `IntoTool`), `instructions`, `voice`,
+  `session_config`, `clock`, `describe` and `start`. The agent sends with `send_text`,
+  `send_audio` and `commit`, cuts with `interrupt`, answers held tool calls with `confirm` and
+  `reject`, drains with `close` (idempotent), and reads with `events()`, an `Events` stream of
+  `Event` over a broadcast channel of 1024 that one pump task fills; `closed()` resolves once
+  every stream holds all it will. `Event` has twelve variants and `raw()`. Dropping an unclosed
+  agent cancels its session and ends every stream with `Event::Closed`. Also `inference::sessions()`, `inference::Clock` and
+  `inference::Description`.
+- `inference`: `Agent::switch(&mut self, recipe)` switches the agent's session to another recipe
+  over the same stack, through `LiveSession::switch`. The builder's tools, instructions, voice and
+  session config are merged into the new recipe's plan as at the start, and the agent's
+  `auto_interrupt` is kept. The old run drains: the events it still held come first on the same
+  stream, then the new run's. A call it held for confirmation is rejected `denied` as it drains.
+  The session, its history and every `Events` stream carry over, and `pipeline()` and
+  `describe()` answer the new recipe. A plan that fails, or a switch the session refuses, moves
+  nothing and the agent goes on; a closing or closed agent, or a session that is not ready, is
+  refused with `Error::Closed`; an old run that did not complete, or a new run that did not
+  start, closes the agent.
+- `inference-testkit`: `mark::encode` and `mark::decode` mark the mocks' reply audio, never
+  silent, with the mock, the reply and the frame index; the duplex mock and `MockSynthesis` emit
+  marked frames. `MockSpeechModel::history()` returns a `MockHistory` whose `completed()` counts
+  the responses the mock completed, and whose `answered()` lists the tool results its sessions
+  took, each under its call id.
+- `inference-audio-device`: `FakeHost::played()` and `played_frames()` return what its output
+  sink took, in the order it took it, a refused write not among it, and `Played::Cleared` at
+  each stop; `FakeHost::hold_sink()` holds the writes until every `SinkHold` taken drops,
+  `SinkHold::waiting()` showing them; and `FakeHost::unbounded()` lifts the sink's capacity
+  bound, so its sink never answers `Full`.
+- `inference`: `Agent::run_on_devices_with(host)` (feature `audio-host`) and
+  `Agent::run_on_devices()` on `CpalHost` (feature `audio-device`) run an agent on the host's
+  default microphone and speaker until the session ends or Ctrl-C, when it closes the session.
+  Both take `&self`, so another task can send or close meanwhile and the agent stays readable
+  afterwards. While it runs, the agent's audio, native or a cascade's, goes to the speaker only,
+  never onto the event stream; a barge-in with `auto_interrupt` on, or `Agent::interrupt`, cuts
+  what the speaker has not played; it returns once every frame of the last reply was handed to
+  the speaker and played. Its future dropped, as by a `select!` or a `timeout`, it cuts what the
+  speaker holds, lets go of the microphone and the speaker, and the agent's audio goes onto the
+  event stream again.
 
 ### Fixed
 
+- `inference`: the texts `Agent::send_text` takes before `Agent::commit` reach the generator as
+  one user turn, joined by a space; each was its own turn, answered as it arrived.
+- `inference`: the futures of `AgentBuilder::start` and `Agent::switch`, and of
+  `Instantiation::open`, are `Send`, so an application starts or switches an agent inside
+  `tokio::spawn`; `Stack` is `Sync`. They held a `&Stack` across an await while the stack's
+  bound recogniser, synthesiser and speech model were only `Send`.
+- `inference-pipeline`: `SttNode` takes and ignores a control event other than `stop` on its
+  `audio` port, as the voice activity detector does. A session sends its `commit` and `cancel`
+  into every ingress, and the cascade's fan-out hands them to the STT node, so every
+  `voice_cascade` run that was committed or interrupted failed; an `Agent` saw the error only
+  when it arrived before the reply.
 - `inference-pipeline`: under the run's drain, `DuplexNode` ends only once every edge into
   `tool_result` has ended, as `ModelNode` does. It let go of its inputs as soon as it ended its
   outputs, so a tool authority or executor sending its end of input back to it failed the run
   with a closed edge.
+- `inference-pipeline`: a draining `DuplexNode` answers every call it proposed that has no answer
+  yet, held or running, with `{"error": "the session closed before the call's result"}` before
+  it closes the model's session, so the model has an answer under every call it made. A draining
+  node takes no tool result, so a rejection sent at a close, such as an `Agent`'s `close()` with
+  a confirmation still held, never reached the model.
+- `inference`: `Recipe::native_voice` needs `concurrent_input_output` of its speech model, as a
+  node that keeps one generation per run does, and no longer `native_duplex`, so it plans over
+  Nova Sonic and OpenAI Realtime as over GPT-Live; it refused every speech adapter but GPT-Live.
 
 ## [0.25.0] — 2026-11-07
 

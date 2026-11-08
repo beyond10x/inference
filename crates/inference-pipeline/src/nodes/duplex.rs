@@ -59,7 +59,8 @@
 //! behind a frame acts before the model's next step.
 //!
 //! Draining, on a `stop` or the run's drain, the node admits no new audio and no tool result,
-//! closes the model's session and forwards every event the session still yields up to its
+//! answers each call it minted and has not answered as rejected, so the model has an answer
+//! under every call it made, closes the model's session and forwards every event the session still yields up to its
 //! `SpeechSessionClosed`, which is the application's own close and is not emitted; then it ends
 //! `events` and `tool_call`. It keeps reading its inputs until each has ended, so a `stop` sent
 //! after the first is still taken; under the run's drain it lets go of `audio` and `control` and
@@ -199,6 +200,21 @@ impl CallIds {
         }
         minted.answered = true;
         Some(minted.speech_call_id.clone())
+    }
+
+    /// Marks every call not yet answered answered and answers the model's call ids, in order.
+    fn unanswered(&self) -> Vec<SpeechCallId> {
+        let mut calls = self.lock();
+        let mut ids: Vec<SpeechCallId> = calls
+            .values_mut()
+            .filter(|minted| !minted.answered)
+            .map(|minted| {
+                minted.answered = true;
+                minted.speech_call_id.clone()
+            })
+            .collect();
+        ids.sort();
+        ids
     }
 }
 
@@ -484,11 +500,20 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
         Ok(())
     }
 
-    /// Drains the node: closes an open session, whose events up to its close are then
-    /// forwarded, or ends the outputs at once when the session is no longer open.
+    /// Drains the node: answers every call it minted and has not answered, held or running,
+    /// with the session's close, as no tool result is admitted from then on, then closes an open session, whose events up to its
+    /// close are then forwarded, or ends the outputs at once when the session is no longer open.
     fn drain(&mut self) -> Result<(), String> {
         if self.draining {
             return Ok(());
+        }
+        if self.phase == Phase::Open {
+            for speech_call_id in self.call_ids.unanswered() {
+                self.submit(
+                    &speech_call_id,
+                    json!({"error": "the session closed before the call's result"}),
+                );
+            }
         }
         self.draining = true;
         match self.phase {

@@ -2,7 +2,7 @@
 //!
 //! [`MockSynthesiser`] is an `inference.model.Adapter` of one model, declared in one of the four
 //! [`MockConfiguration`]s of `incremental_input` and `output_streaming`, and speaks each segment
-//! it takes as one frame of [`FRAME_SAMPLES`] samples of silence per word, at least one, in the
+//! it takes as one frame of [`FRAME_SAMPLES`] samples per word, at least one, in the
 //! format it was declared with, placed one after another on the synthesis's sample clock from
 //! sample 0. It yields its events to the caller through the [`MockSynthesis`] handle, one per
 //! call, and records nothing in any store of this crate. It asks the contract for input and for
@@ -238,6 +238,7 @@ impl Synthesiser for MockSynthesiser {
             output: SynthesisOutput::start(&self.adapter),
             format: self.format,
             next_sample: 0,
+            segments: 0,
             pending: VecDeque::new(),
             delivered: VecDeque::new(),
             _slot: slot,
@@ -250,6 +251,10 @@ impl Synthesiser for MockSynthesiser {
 struct Job {
     segment_id: SegmentId,
     frames_left: usize,
+    /// The segment's index in the synthesis, the reply its frames are marked with, and the
+    /// frames it has.
+    reply: u32,
+    frames: usize,
 }
 
 /// One synthesis of a [`MockSynthesiser`]; it runs until it is dropped.
@@ -258,6 +263,8 @@ pub struct MockSynthesis {
     output: SynthesisOutput,
     format: AudioFormat,
     next_sample: u64,
+    /// The segments the synthesis took.
+    segments: u32,
     pending: VecDeque<Job>,
     delivered: VecDeque<SynthesisEvent>,
     _slot: Slot,
@@ -272,16 +279,25 @@ impl Iterator for MockSynthesis {
                 return Some(event);
             }
             if let Ok(taken) = self.output.take_input() {
-                self.pending.extend(taken.iter().map(|segment| Job {
-                    segment_id: segment.segment_id(),
-                    frames_left: segment.text().split_whitespace().count().max(1),
-                }));
+                for segment in &taken {
+                    let frames = segment.text().split_whitespace().count().max(1);
+                    self.pending.push_back(Job {
+                        segment_id: segment.segment_id(),
+                        frames_left: frames,
+                        reply: self.segments,
+                        frames,
+                    });
+                    self.segments += 1;
+                }
             }
-            let Some((segment_id, frames_left)) = self
-                .pending
-                .front()
-                .map(|job| (job.segment_id, job.frames_left))
-            else {
+            let Some((segment_id, frames_left, reply, done)) = self.pending.front().map(|job| {
+                (
+                    job.segment_id,
+                    job.frames_left,
+                    job.reply,
+                    job.frames - job.frames_left,
+                )
+            }) else {
                 return self.output.usage().ok();
             };
             let state = self
@@ -294,7 +310,7 @@ impl Iterator for MockSynthesis {
                 continue;
             }
             if frames_left > 0 {
-                match self.output.audio(segment_id, self.silence(0)) {
+                match self.output.audio(segment_id, self.marked(0, reply, done)) {
                     Ok(event) => {
                         self.next_sample += u64::from(FRAME_SAMPLES);
                         if let Some(job) = self.pending.front_mut() {
@@ -307,7 +323,7 @@ impl Iterator for MockSynthesis {
                 }
             }
             let frames = (0..frames_left as u64)
-                .map(|index| self.silence(index))
+                .map(|index| self.marked(index, reply, done + index as usize))
                 .collect();
             let events = self
                 .output
@@ -321,6 +337,17 @@ impl Iterator for MockSynthesis {
 }
 
 impl MockSynthesis {
+    /// Frame `frame` of reply `reply`, `offset` frames past the next sample, marked
+    /// ([`crate::mark`]).
+    fn marked(&self, offset: u64, reply: u32, frame: usize) -> AudioFrame {
+        crate::mark::encode(
+            crate::mark::MockId::Synthesiser,
+            reply,
+            u32::try_from(frame).unwrap_or(u32::MAX),
+            self.silence(offset),
+        )
+    }
+
     /// A frame of [`FRAME_SAMPLES`] samples of silence, `offset` frames past the next sample.
     fn silence(&self, offset: u64) -> AudioFrame {
         let sample = self.next_sample + offset * u64::from(FRAME_SAMPLES);

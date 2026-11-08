@@ -177,7 +177,7 @@ fn open(declared_by: &inference_testkit::llm::MockGenerator, answering: Generato
 /// Receives on another thread until `wanted` holds of what was received or the session ends;
 /// the session and what it received, or none when that took longer than [`PATIENCE`].
 fn receive_until(
-    mut session: LiveSession<PipelinePayload>,
+    session: LiveSession<PipelinePayload>,
     mut received: Vec<SessionEvent>,
     wanted: fn(&[SessionEvent]) -> bool,
 ) -> Option<(LiveSession<PipelinePayload>, Vec<SessionEvent>)> {
