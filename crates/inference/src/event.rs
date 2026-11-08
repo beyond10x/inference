@@ -18,8 +18,9 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::Error;
 
-/// What an agent's pump puts on its broadcast channel: an event, or its terminal error.
-pub(crate) type Item = Result<Event, Arc<Error>>;
+/// What an agent's pump puts on its broadcast channel: an event. A failure is an
+/// [`Event::Error`], so [`Events`] never yields an `Err`.
+pub(crate) type Item = Event;
 
 /// One event of an agent's session, in the SDK's vocabulary. Every stream ends after
 /// [`Event::Closed`].
@@ -130,7 +131,8 @@ impl Event {
     }
 }
 
-/// The event stream of an agent, from [`Agent::events`](crate::Agent::events).
+/// The event stream of an agent, from [`Agent::events`](crate::Agent::events). Every item is
+/// `Ok`: a failure, the session's last one included, is an [`Event::Error`].
 pub struct Events {
     inner: Option<BroadcastStream<Item>>,
     closed: bool,
@@ -172,18 +174,11 @@ impl Stream for Events {
             Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(n)))) => {
                 Poll::Ready(Some(Ok(Event::Lagged(n))))
             }
-            Poll::Ready(Some(Ok(Ok(event)))) => {
+            Poll::Ready(Some(Ok(event))) => {
                 if matches!(event, Event::Closed { .. }) {
                     self.closed = true;
                 }
                 Poll::Ready(Some(Ok(event)))
-            }
-            Poll::Ready(Some(Ok(Err(error)))) => {
-                self.closed = true;
-                Poll::Ready(Some(Err(Error::Layer {
-                    message: error.to_string(),
-                    source: None,
-                })))
             }
         }
     }
@@ -213,5 +208,26 @@ mod tests {
         };
         assert_eq!(name, "Lagged");
         assert!(Event::Lagged(1).raw().is_none());
+    }
+
+    /// The channel carries bare events: `Events` yields each as `Ok` and ends after `Closed`.
+    #[tokio::test]
+    async fn the_channel_carries_events_and_the_stream_ends_after_closed() {
+        use futures_util::StreamExt as _;
+
+        let (sender, receiver) = tokio::sync::broadcast::channel(4);
+        sender.send(Event::Lagged(2)).expect("a receiver");
+        sender
+            .send(Event::Closed { raw: None })
+            .expect("a receiver");
+        sender.send(Event::Lagged(3)).expect("a receiver");
+        let mut events = super::Events::over(Some(receiver));
+
+        assert!(matches!(events.next().await, Some(Ok(Event::Lagged(2)))));
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(Event::Closed { raw: None }))
+        ));
+        assert!(events.next().await.is_none());
     }
 }
