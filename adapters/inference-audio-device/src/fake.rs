@@ -6,11 +6,12 @@
 //! It runs at most one input and one output stream at a time; opening a second of a direction
 //! while one runs answers [`DeviceError::Busy`]. Dropping a stream's guard closes it.
 //!
-//! It records what is played: [`FakeHost::played`] is every frame written to its output sink, as
-//! written, before any resampling to the device, and every stop of playback, in order. With
-//! [`FakeHost::unbounded`] its sink takes a write with no [`FakeHost::pull`] and is never full.
-//! [`FakeHost::hold_sink`] keeps every write waiting, recording nothing, until the hold is
-//! dropped; a write that waited through a stop is discarded, as a stop discards what is queued.
+//! It records what is played: [`FakeHost::played`] is every frame its output sink took, as
+//! written, before any resampling to the device, and every stop of playback, in the order the
+//! sink took them; a write the sink refused is not recorded. With [`FakeHost::unbounded`] its
+//! sink takes a write with no [`FakeHost::pull`] and is never full. [`FakeHost::hold_sink`] keeps
+//! every write waiting, recording nothing, until every hold is dropped; a write that waited
+//! through a stop is discarded, as a stop discards what is queued.
 
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroU32};
@@ -121,21 +122,37 @@ fn lock(streams: &Mutex<Streams>) -> MutexGuard<'_, Streams> {
 /// One entry of what a [`FakeHost`] played.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Played {
-    /// A frame written to the output sink, as written.
+    /// A frame the output sink took, as written.
     Frame(AudioFrame),
     /// Playback was stopped and cleared ([`crate::Speaker::stop`]).
     Cleared,
 }
 
-/// What the output sink's tap holds: the played log, whether writes are held, the writes waiting
-/// in the hold, in order, and the stops so far.
+/// One write the tap saw and has not settled: its ticket, its frame, and whether it was admitted
+/// and is on its way to the queue.
+#[derive(Debug)]
+struct Write {
+    ticket: u64,
+    frame: AudioFrame,
+    admitted: bool,
+}
+
+/// What the output sink's tap holds: the played log, how many holds live, the writes not yet
+/// settled, in order, and the stops so far.
 #[derive(Debug, Default)]
 struct TapState {
     played: Vec<Played>,
-    held: bool,
-    waiting: VecDeque<(u64, AudioFrame)>,
+    holds: usize,
+    writes: VecDeque<Write>,
     tickets: u64,
     stops: u64,
+}
+
+impl TapState {
+    /// Settles the write `ticket`: it leaves the writes, and the next may go on.
+    fn settle(&mut self, ticket: u64) {
+        self.writes.retain(|write| write.ticket != ticket);
+    }
 }
 
 /// The tap a [`FakeHost`] sets on every output sink it opens, shared by its clones.
@@ -152,26 +169,28 @@ impl Tap {
 }
 
 impl PushTap for Tap {
-    fn write(&self, frame: &AudioFrame) -> bool {
+    /// Admits writes one at a time, in the order they came, and none while a hold lives: a write
+    /// goes on once no hold lives and every write before it was settled.
+    fn admit(&self, frame: &AudioFrame) -> Option<u64> {
         let mut state = self.lock();
-        if !state.held && state.waiting.is_empty() {
-            state.played.push(Played::Frame(frame.clone()));
-            return true;
-        }
         state.tickets += 1;
         let ticket = state.tickets;
         let stops = state.stops;
-        state.waiting.push_back((ticket, frame.clone()));
+        state.writes.push_back(Write {
+            ticket,
+            frame: frame.clone(),
+            admitted: false,
+        });
         loop {
             if state.stops != stops {
-                return false;
+                return None;
             }
-            let first = state.waiting.front().map(|(first, _)| *first) == Some(ticket);
-            if !state.held && first {
-                state.waiting.pop_front();
-                state.played.push(Played::Frame(frame.clone()));
-                self.changed.notify_all();
-                return true;
+            if state.holds == 0
+                && let Some(first) = state.writes.front_mut()
+                && first.ticket == ticket
+            {
+                first.admitted = true;
+                return Some(ticket);
             }
             state = self
                 .changed
@@ -180,10 +199,24 @@ impl PushTap for Tap {
         }
     }
 
+    fn played(&self, ticket: u64, frame: &AudioFrame) {
+        let mut state = self.lock();
+        state.settle(ticket);
+        state.played.push(Played::Frame(frame.clone()));
+        self.changed.notify_all();
+    }
+
+    fn refused(&self, ticket: u64) {
+        self.lock().settle(ticket);
+        self.changed.notify_all();
+    }
+
+    /// Discards every write not yet admitted; an admitted one is on its way to the queue and
+    /// settles there.
     fn cleared(&self) {
         let mut state = self.lock();
         state.stops += 1;
-        state.waiting.clear();
+        state.writes.retain(|write| write.admitted);
         state.played.push(Played::Cleared);
         self.changed.notify_all();
     }
@@ -197,21 +230,25 @@ pub struct SinkHold {
 }
 
 impl SinkHold {
-    /// The writes waiting in the hold, in order.
+    /// The writes waiting to be admitted to the sink, in order.
     #[must_use]
     pub fn waiting(&self) -> Vec<AudioFrame> {
         self.tap
             .lock()
-            .waiting
+            .writes
             .iter()
-            .map(|(_, frame)| frame.clone())
+            .filter(|write| !write.admitted)
+            .map(|write| write.frame.clone())
             .collect()
     }
 }
 
 impl Drop for SinkHold {
+    /// Releases this hold; the waiting writes go on once no other hold lives.
     fn drop(&mut self) {
-        self.tap.lock().held = false;
+        let mut state = self.tap.lock();
+        state.holds = state.holds.saturating_sub(1);
+        drop(state);
         self.tap.changed.notify_all();
     }
 }
@@ -237,8 +274,8 @@ impl FakeHost {
         }
     }
 
-    /// What was played on the host's output sinks, in order: every frame written, as written,
-    /// and every stop of playback.
+    /// What was played on the host's output sinks, in order: every frame the sink took, as
+    /// written, and every stop of playback.
     #[must_use]
     pub fn played(&self) -> Vec<Played> {
         self.tap.lock().played.clone()
@@ -267,11 +304,11 @@ impl FakeHost {
         self
     }
 
-    /// Holds the output sink: until the returned guard is dropped, every write to it waits and
-    /// nothing is recorded.
+    /// Holds the output sink: while the returned guard, or any other hold, lives, every write to
+    /// it waits and nothing is recorded.
     #[must_use]
     pub fn hold_sink(&self) -> SinkHold {
-        self.tap.lock().held = true;
+        self.tap.lock().holds += 1;
         SinkHold {
             tap: Arc::clone(&self.tap),
         }
