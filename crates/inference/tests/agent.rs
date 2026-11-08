@@ -1,6 +1,7 @@
 //! The `Agent` over the testkit mocks: its builder, its event stream, its close and its end.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -9,6 +10,7 @@ use futures_util::StreamExt;
 use inference::core::model::ModelId;
 use inference::duplex::SpeechCallId;
 use inference::facade::events::SessionEvent;
+use inference::facade::history::HistoryKind;
 use inference::facade::live::LiveSession;
 use inference::facade::session::SessionState;
 use inference::pipeline::PlannedPipeline;
@@ -1186,4 +1188,41 @@ async fn a_cascade_switch_keeps_the_session_and_answers_the_next_utterance() {
     .expect("a Heard and a Said within 5 s");
     assert!(!names(&seen).contains(&"Closed"), "{seen:#?}");
     agent.close().await.expect("closes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_close_while_the_egress_is_full_completes() {
+    let model = MockSpeechModel::native(vec![turn("hi")]).closes();
+    let agent =
+        Agent::from_recipe(inference::Recipe::native_voice().exposure_capacity(NonZeroUsize::MIN))
+            .stack(speech(model))
+            .start()
+            .await
+            .expect("starts");
+    let mut events = agent.events();
+    speak(&agent).await;
+    tokio::time::timeout(LIMIT, agent.closed())
+        .await
+        .expect("the close completes within 5 s");
+    let seen = read_all(&mut events).await;
+    assert_eq!(
+        names(&seen),
+        [
+            "Started", "Heard", "Usage", "Said", "Audio", "Audio", "Usage", "Closed"
+        ],
+        "{seen:#?}"
+    );
+    let entries = inference::sessions().history(agent.session().session_id());
+    let facts: Vec<_> = entries
+        .iter()
+        .map(|entry| (entry.kind(), entry.text()))
+        .collect();
+    assert_eq!(
+        facts,
+        [
+            (HistoryKind::UserTurn, "hello"),
+            (HistoryKind::AssistantSegment, "hi")
+        ],
+        "{entries:#?}"
+    );
 }
