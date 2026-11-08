@@ -12,6 +12,7 @@ stt = ["dep:inference-stt"]
 llm = ["dep:inference-llm", "inference-llm/tools"]
 tts = ["dep:inference-tts"]
 duplex = ["dep:inference-duplex"]
+testing = []
 
 [dependencies]
 inference-audio = { path = "../inference-audio" }
