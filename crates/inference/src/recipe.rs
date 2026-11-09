@@ -27,15 +27,13 @@
 mod dispatch;
 mod run;
 #[cfg(feature = "audio-host")]
-#[cfg_attr(
-    not(all(test, feature = "testing")),
-    expect(
-        dead_code,
-        reason = "the cascade's speaker is built when an agent opens the instantiation over its route"
-    )
-)]
 mod speaker;
 mod topology;
+
+#[cfg(all(test, feature = "audio-host", feature = "testing"))]
+pub(crate) use speaker::RoutedPlayout;
+#[cfg(feature = "audio-host")]
+pub(crate) use speaker::{AudioRoute, instantiate as instantiate_routed};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -49,6 +47,7 @@ use inference_core::policy::{
     DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind, ProfileNotFound,
 };
 use inference_facade::live::{LiveSession, LiveSessions, SessionDriver};
+use inference_facade::switch::SwitchError;
 use inference_pipeline::nodes::AuthorityHandle;
 use inference_pipeline::nodes::duplex::CallIds;
 use inference_pipeline::nodes::vad::VadConfig;
@@ -117,6 +116,7 @@ pub struct Recipe {
     tools: Dispatch,
     nodes: Vec<(String, Arc<NodeFactory>)>,
     exposed: Vec<String>,
+    instructions: Option<String>,
 }
 
 impl fmt::Debug for Recipe {
@@ -131,6 +131,7 @@ impl fmt::Debug for Recipe {
             .field("tools", &self.tools)
             .field("nodes", &nodes)
             .field("exposed", &self.exposed)
+            .field("instructions", &self.instructions)
             .finish_non_exhaustive()
     }
 }
@@ -155,6 +156,7 @@ impl Recipe {
             tools: Dispatch::default(),
             nodes: Vec::new(),
             exposed: Vec::new(),
+            instructions: None,
         }
     }
 
@@ -236,6 +238,7 @@ impl Recipe {
             tools: Dispatch::default(),
             nodes: Vec::new(),
             exposed: Vec::new(),
+            instructions: None,
         }
     }
 
@@ -314,6 +317,15 @@ impl Recipe {
         for (tool, executor) in tools {
             self.tools.add(tool, executor);
         }
+        self
+    }
+
+    /// Gives every request of the recipe's generator `instructions`: `chat`'s model node's and
+    /// `voice_cascade`'s agent node's. `native_voice`'s model takes its instructions from its
+    /// session config instead.
+    #[must_use]
+    pub fn instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into());
         self
     }
 
@@ -833,6 +845,96 @@ impl Instantiation {
             .as_ref()
             .and_then(|tools| tools.call_ids.as_ref())
     }
+
+    /// `recipe` instantiated over `stack` as this instantiation was: a cascade's audio over the
+    /// same route, its barge-in following the same `auto_interrupt`.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Recipe::instantiate`].
+    pub(crate) fn successor(&self, recipe: &Recipe, stack: &Stack) -> Result<Self, Error> {
+        #[cfg(feature = "audio-host")]
+        {
+            if let Some(speaker) = self.speaker() {
+                return speaker::instantiate(
+                    recipe,
+                    stack,
+                    Arc::clone(&speaker.route),
+                    speaker.auto_interrupt,
+                );
+            }
+        }
+        recipe.instantiate(stack)
+    }
+
+    /// Switches `session` to the planned pipeline, in the recipe's mode, its new run's nodes built
+    /// as [`Instantiation::open`] builds them. The handles of the run's nodes are the new run's.
+    pub(crate) async fn switch(
+        &mut self,
+        stack: &Stack,
+        session: &mut LiveSession<Payload>,
+    ) -> Result<SessionDriver<Payload>, SwitchFailed> {
+        self.claims_concurrency(stack)
+            .map_err(SwitchFailed::Refused)?;
+        #[cfg(feature = "audio-host")]
+        {
+            self.sink = None;
+        }
+        self.tools = None;
+        let mut refused: Option<Error> = None;
+        let mut nodes = run::Run::new(self, stack);
+        let switched = session
+            .switch(
+                &self.declaration,
+                &self.planned,
+                self.recipe.mode,
+                |run_id, node| match nodes.node(run_id, node) {
+                    Ok(implementation) => implementation,
+                    Err(error) => {
+                        let reason = error.to_string();
+                        refused.get_or_insert(error);
+                        Box::new(run::Refused(reason))
+                    }
+                },
+            )
+            .await;
+        let tools = nodes.take_tools();
+        #[cfg(feature = "audio-host")]
+        let sink = nodes.into_sink();
+        #[cfg(not(feature = "audio-host"))]
+        drop(nodes);
+        let what = || {
+            format!(
+                "the session did not switch to the recipe `{}`",
+                self.recipe.name
+            )
+        };
+        let driver = match (switched, refused) {
+            (Ok(driver), None) => driver,
+            (Ok(driver), Some(error)) => {
+                return Err(SwitchFailed::Ended(error, Some(Box::new(driver))));
+            }
+            (Err(SwitchError::Refused(error)), _) => {
+                return Err(SwitchFailed::Refused(layer(&what(), error)));
+            }
+            (Err(error), _) => return Err(SwitchFailed::Ended(layer(&what(), error), None)),
+        };
+        #[cfg(feature = "audio-host")]
+        {
+            self.sink = sink;
+        }
+        self.tools = tools;
+        Ok(driver)
+    }
+}
+
+/// Why [`Instantiation::switch`] answered no driver.
+pub(crate) enum SwitchFailed {
+    /// Nothing moved: the old run goes on.
+    Refused(Error),
+    /// The old run ended and no new run drives the session; the driver of a new run that
+    /// refused one of its nodes, when it started.
+    Ended(Error, Option<Box<SessionDriver<Payload>>>),
 }
 
 /// The process-wide table of application recipes, keyed by name.

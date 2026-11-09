@@ -270,6 +270,7 @@ impl<P> fmt::Debug for Tools<P> {
 pub struct ModelNode<P> {
     run_id: RunId,
     generator: Generator,
+    instructions: String,
     reply: fn(&str) -> String,
     late: Option<String>,
     tools: Option<Tools<P>>,
@@ -325,6 +326,7 @@ impl<P: ModelPayload> ModelNode<P> {
         Self {
             run_id,
             generator: generator.into(),
+            instructions: String::new(),
             reply,
             late: None,
             tools: None,
@@ -336,6 +338,13 @@ impl<P: ModelPayload> ModelNode<P> {
             record: Arc::new(Watched::new(Record::default())),
             exchange: Exchange::new(),
         }
+    }
+
+    /// The same node, whose every model request carries `instructions`.
+    #[must_use]
+    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = instructions.into();
+        self
     }
 
     /// The same node, which emits `text` into its generation once it was cancelled.
@@ -1531,6 +1540,7 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
                     self.generator.model().provenance().model.as_str(),
                     Vec::new(),
                 );
+                turn.instructions.clone_from(&self.instructions);
                 if let Some(tools) = &self.tools {
                     turn.tools = tools.offered.iter().map(tool_spec).collect();
                 }

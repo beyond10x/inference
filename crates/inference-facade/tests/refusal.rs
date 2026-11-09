@@ -51,7 +51,7 @@ fn a_refusal_is_delivered_as_one_session_event_naming_its_generation_and_no_text
         let generator = generator(Vec::<String>::new()).refusing(REFUSAL);
         let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
         let sessions = LiveSessions::new();
-        let (mut session, driver) = block_on(sessions.open(
+        let (session, driver) = block_on(sessions.open(
             &declaration,
             &planned,
             InteractionMode::TurnBased,
@@ -130,7 +130,7 @@ fn a_delivered_refusal_joins_the_history_after_the_turn_it_answers() {
         let generator = generator(Vec::<String>::new()).refusing(REFUSAL);
         let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
         let sessions = LiveSessions::new();
-        let (mut session, driver) = block_on(sessions.open(
+        let (session, driver) = block_on(sessions.open(
             &declaration,
             &planned,
             InteractionMode::TurnBased,

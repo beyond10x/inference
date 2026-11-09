@@ -118,6 +118,7 @@ impl fmt::Debug for Watched<State> {
 pub struct AgentNode {
     run_id: RunId,
     generator: Generator,
+    instructions: String,
     reply: fn(&str) -> String,
     turns: PortId,
     playback: Option<PortId>,
@@ -159,6 +160,7 @@ impl AgentNode {
         Self {
             run_id,
             generator: generator.into(),
+            instructions: String::new(),
             reply,
             turns,
             playback: None,
@@ -168,6 +170,13 @@ impl AgentNode {
             state: Arc::new(Watched::new(State::default())),
             exchange: Exchange::new(),
         }
+    }
+
+    /// The same node, whose every model request carries `instructions`.
+    #[must_use]
+    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = instructions.into();
+        self
     }
 
     /// The same node given a playback port, `playback`: an edge arriving there carries the
@@ -266,6 +275,7 @@ struct Exchanging<P> {
     run_id: RunId,
     node_id: NodeId,
     generator: Generator,
+    instructions: String,
     reply: fn(&str) -> String,
     input: Box<dyn InputEndpoint<P>>,
     turns: Box<dyn InputEndpoint<P>>,
@@ -544,11 +554,13 @@ impl<P: ModelPayload> Exchanging<P> {
                 .map(|text| Item::user((self.reply)(&text)))
                 .collect()
         };
+        let mut turn = TurnRequest::new(self.generator.model().provenance().model.as_str(), asked);
+        turn.instructions.clone_from(&self.instructions);
         let request = GenerationRequest {
             run_id: self.run_id,
             node_id: self.node_id,
             epoch,
-            turn: TurnRequest::new(self.generator.model().provenance().model.as_str(), asked),
+            turn,
         };
         let handle = self
             .generator
@@ -688,6 +700,7 @@ impl<P: ModelPayload> NodeImplementation<P> for AgentNode {
                 run_id: self.run_id,
                 node_id,
                 generator: self.generator.clone(),
+                instructions: self.instructions.clone(),
                 reply: self.reply,
                 input,
                 turns,

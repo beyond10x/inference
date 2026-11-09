@@ -160,7 +160,7 @@ fn a_refusal_after_the_end_of_an_interrupted_generation_is_not_delivered() {
         let (declaration, planned) = echo_planned(&generator);
         let sessions = LiveSessions::new();
         let generation_id = GenerationId::generate();
-        let (mut session, driver) = block_on(sessions.open(
+        let (session, driver) = block_on(sessions.open(
             &declaration,
             &planned,
             InteractionMode::TurnBased,
