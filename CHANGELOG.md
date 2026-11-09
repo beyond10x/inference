@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-11-09
+
 ### Breaking
 
 - `inference-facade`: `LiveSession::interrupt` records `SessionInterrupted` once the `cancel` is
