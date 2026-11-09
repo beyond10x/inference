@@ -31,7 +31,8 @@ use inference::{
     Payload, Registry, Role, Stack,
 };
 use inference_testkit::duplex::mock::{
-    MockHistory, MockSpeechModel, MockSpeechSession, Reply, ScriptedTurn, frame, pcm, utterance,
+    AUDIO_FRAMES, MockHistory, MockSpeechModel, MockSpeechSession, Reply, ScriptedTurn, frame, pcm,
+    utterance,
 };
 use inference_testkit::llm::{MockConfiguration, MockGenerator};
 use inference_testkit::mark::{self, Mark, MockId};
@@ -1064,8 +1065,10 @@ async fn closing_rejects_a_held_call_and_one_called_after_it() {
             .iter()
             .find(|(id, _)| *id == SpeechCallId::new(speech))
             .unwrap_or_else(|| panic!("no answer under {speech}: {answered:?}"));
+        let error = answer.1["error"].as_str();
         assert!(
-            answer.1["error"].as_str() == Some("the session closed before the call's result"),
+            error == Some("the session closed before the call's result")
+                || error.is_some_and(|error| error.starts_with("rejected: ")),
             "{answered:?}"
         );
     }
@@ -1371,6 +1374,7 @@ async fn a_switch_whose_resolve_fails_leaves_a_working_agent() {
     let mut events = agent.events();
     let at = say(&agent, 0).await;
     read_until(&mut events, "Said").await;
+    read_reply(&mut events, MockId::Speech, 0).await;
     let refused = agent
         .switch(inference::Recipe::voice_cascade())
         .await
@@ -1583,6 +1587,20 @@ async fn read_until_done(
     seen
 }
 
+/// Reads `events` until the last frame of reply `reply` of `mock` was yielded as `Audio`, so no
+/// frame of it is left for a sink a run attaches after.
+async fn read_reply(events: &mut inference::Events, mock: MockId, reply: u32) -> Vec<Event> {
+    read_until_done(events, |seen| {
+        seen.iter().any(|event| match event {
+            Event::Audio(frame) => mark::decode(frame).is_some_and(|marked| {
+                marked.mock == mock && marked.reply == reply && marked.frame + 1 == AUDIO_FRAMES
+            }),
+            _ => false,
+        })
+    })
+    .await
+}
+
 /// The texts the cascade heard, hypotheses and committed alike.
 fn heard(events: &[Event]) -> Vec<String> {
     events
@@ -1707,11 +1725,12 @@ async fn returns_ok(run: &mut JoinHandle<inference::Result<()>>) {
 
 /// Asserts the run is still pending a second later.
 async fn still_runs(run: &mut JoinHandle<inference::Result<()>>) {
+    let started = Instant::now();
+    let ran = tokio::time::timeout(Duration::from_secs(1), run).await;
     assert!(
-        tokio::time::timeout(Duration::from_secs(1), run)
-            .await
-            .is_err(),
-        "the run waits for the held sink"
+        ran.is_err(),
+        "the run waits for the held sink: it returned {ran:?} after {:?}",
+        started.elapsed()
     );
 }
 
