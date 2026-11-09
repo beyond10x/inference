@@ -365,7 +365,7 @@ fn a_model_nodes_usage_reaches_the_session() {
     let planned = declaration.plan(validated, &catalog).expect("planned");
 
     let sessions = LiveSessions::new();
-    let (mut session, driver): (LiveSession<Payload>, _) = block_on(sessions.open(
+    let (session, driver): (LiveSession<Payload>, _) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,

@@ -20,8 +20,8 @@
 //! response and answers in a new one, which fails it.
 //!
 //! A response streams one step per [`SpeechSessionHandle::next_event`]: its transcript, then
-//! [`AUDIO_FRAMES`] frames of 20 ms silence in the output format, then its usage and its
-//! completion. A [`Reply::Call`] proposes its tool call instead and completes; once the call is
+//! [`AUDIO_FRAMES`] frames of 20 ms in the output format, each marked as the frame of the
+//! session's reply it is ([`crate::mark`]), then its usage and its completion. A [`Reply::Call`] proposes its tool call instead and completes; once the call is
 //! answered, the next response says the reply's `then` with `{result}` replaced by the result;
 //! a model that creates every response starts it by itself. A step the session's ledger refuses,
 //! such as a [`Reply::Call`] of a tool the session does not offer, fails the session as a
@@ -36,6 +36,8 @@
 //! the turn under server turn detection.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use inference_core::model::{
@@ -130,6 +132,43 @@ pub struct MockSpeechModel {
     closes: bool,
     fails_responses: bool,
     speech: SpeechReports,
+    history: MockHistory,
+}
+
+/// What the sessions of one [`MockSpeechModel`] did, shared by the model, its clones and every
+/// session they open: kept by a test before it binds the model, read while the model runs.
+#[derive(Debug, Clone, Default)]
+pub struct MockHistory {
+    completed: Arc<AtomicUsize>,
+    answered: Arc<Mutex<Vec<(SpeechCallId, Json)>>>,
+}
+
+impl MockHistory {
+    /// The responses the mock completed, over every session.
+    #[must_use]
+    pub fn completed(&self) -> usize {
+        self.completed.load(Ordering::Acquire)
+    }
+
+    /// The tool results the mock's ledger took, each under its call id, in the order taken.
+    #[must_use]
+    pub fn answered(&self) -> Vec<(SpeechCallId, Json)> {
+        self.answers().clone()
+    }
+
+    fn complete(&self) {
+        self.completed.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn answer(&self, call_id: &SpeechCallId, result: &Json) {
+        self.answers().push((call_id.clone(), result.clone()));
+    }
+
+    fn answers(&self) -> std::sync::MutexGuard<'_, Vec<(SpeechCallId, Json)>> {
+        self.answered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// `pcm_s16le` mono at `sample_rate`.
@@ -378,7 +417,14 @@ impl MockSpeechModel {
             closes: false,
             fails_responses: false,
             speech: SpeechReports::Heard,
+            history: MockHistory::default(),
         }
+    }
+
+    /// The model's history, shared with its clones and the sessions they open.
+    #[must_use]
+    pub fn history(&self) -> MockHistory {
+        self.history.clone()
     }
 }
 
@@ -418,6 +464,10 @@ impl NativeSpeechModel for MockSpeechModel {
             plan: VecDeque::new(),
             sent: 0,
             emitted: 0,
+            spoken_reply: None,
+            replies: 0,
+            reply_frames: 0,
+            history: self.history.clone(),
             calls: 0,
             speech: self.speech,
             answered: false,
@@ -454,6 +504,12 @@ pub struct MockSpeechSession {
     plan: VecDeque<Step>,
     sent: usize,
     emitted: u64,
+    /// The response whose audio the session emits, the replies whose audio it began, and the
+    /// frames it emitted of the reply in progress: what each frame is marked with.
+    spoken_reply: Option<ResponseId>,
+    replies: u32,
+    reply_frames: u32,
+    history: MockHistory,
     calls: u32,
     speech: SpeechReports,
     /// A response was created since the user's last turn began.
@@ -628,7 +684,20 @@ impl MockSpeechSession {
             Step::Transcript(text) => self.ledger.output_transcript(response_id, text, now)?,
             Step::Audio => {
                 let format = *self.ledger.session().output_format();
-                let audio = frame(format, self.emitted, format.encoding.silence());
+                if self.spoken_reply != Some(response_id) {
+                    if self.spoken_reply.is_some() {
+                        self.replies += 1;
+                    }
+                    self.spoken_reply = Some(response_id);
+                    self.reply_frames = 0;
+                }
+                let audio = crate::mark::encode(
+                    crate::mark::MockId::Speech,
+                    self.replies,
+                    self.reply_frames,
+                    frame(format, self.emitted, format.encoding.silence()),
+                );
+                self.reply_frames += 1;
                 let samples = u64::from(audio.sample_count);
                 self.ledger.output_audio(response_id, audio, now)?;
                 self.emitted += samples;
@@ -652,6 +721,7 @@ impl MockSpeechSession {
             }
             Step::Complete => {
                 self.ledger.response_completed(response_id, now)?;
+                self.history.complete();
                 if self.late_usage {
                     self.report_usage(response_id);
                 }
@@ -744,7 +814,8 @@ impl SpeechSessionHandle for MockSpeechSession {
         result: Json,
     ) -> Result<(), SessionError> {
         let rendered = result.to_string();
-        self.ledger.answer(call_id, result)?;
+        self.ledger.answer(call_id, result.clone())?;
+        self.history.answer(call_id, &result);
         if let Some(then) = self.after_result.take() {
             self.pending = Some(Reply::Say(then.replace("{result}", &rendered)));
             if self.creates_responses() && self.ledger.in_progress().is_none() {
@@ -1799,6 +1870,52 @@ mod tests {
                 .filter(|event| matches!(event, SessionEvent::UsageRecorded(_)))
                 .count(),
             "every usage record is delivered: {events:#?}"
+        );
+    }
+
+    /// The output audio of `events`, decoded.
+    fn marks(events: &[SessionEvent]) -> Vec<Option<crate::mark::Mark>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::OutputAudio(audio) => Some(crate::mark::decode(&audio.frame)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Each reply's frames are marked: the duplex mock, the reply's index in the session, the
+    /// frame's index in the reply. The history counts each completed response, shared by the
+    /// model's clones.
+    #[test]
+    fn each_reply_frame_is_marked_and_the_history_counts_completed_responses() {
+        use crate::mark::{Mark, MockId};
+
+        let mut model = MockSpeechModel::native(vec![turn("one", "First"), turn("two", "Second")]);
+        let history = model.clone().history();
+        assert_eq!(history.completed(), 0);
+        let mut session = model
+            .open(config(TurnDetection::Disabled, false))
+            .expect("the model takes the configuration");
+        let mut events = Vec::new();
+        for (from, completed) in [(0, 1), (3200, 2)] {
+            speak(&mut session, from, 3);
+            session.commit_input().expect("a manual commit");
+            session.create_response().expect("no response in progress");
+            events.extend(drain(&mut session));
+            assert_eq!(history.completed(), completed, "{events:#?}");
+        }
+
+        let mark = |reply, frame| {
+            Some(Mark {
+                mock: MockId::Speech,
+                reply,
+                frame,
+            })
+        };
+        assert_eq!(
+            marks(&events),
+            [mark(0, 0), mark(0, 1), mark(1, 0), mark(1, 1)]
         );
     }
 }

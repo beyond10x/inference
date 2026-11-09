@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-agent
 kind: story
-status: draft
+status: implemented
 title: Agent runs a recipe as one session with one Event stream, devices wiring and escape methods
 relations:
 - decomposes: epic:sdk
@@ -38,7 +38,11 @@ scope:
   path: crates/inference/tests/agent.rs
 - confidence: cited
   path: crates/inference/tests/compile_fail
-revision: 34
+revision: 40
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-07T17:59:56Z", actor: "human:timo", revision: 35, decided_on: {"recorded":{"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-11-07T17:59:56Z", actor: "human:timo", revision: 36, decided_on: {"recorded":{"approval":1}}}
+- {from: "active", to: "implemented", at: "2026-11-08T23:03:42Z", actor: "human:timo", revision: 40, decided_on: {"recorded":{"test_result":1,"approval":1,"review_outcome":2}}}
 ---
 ## Context
 
@@ -114,7 +118,7 @@ events.
     returns the `Frame` entries only. `Played` is a `pub enum` in `fake.rs`.
   - Its sink accepts writes without a `pull`. `open_output` sets two crate-private hooks on the
     `PlayoutBuffer` it makes: a tap that keeps each pushed frame and records each stop as
-    `Cleared`, and no capacity bound, so `Speaker::push` never answers `Full`.
+    `Cleared`. The sink keeps its capacity bound by default, which existing playout and loopback tests rely on for `PushError::Full`; `FakeHost::unbounded()` lifts it, so `Speaker::push` never answers `Full`, and every Agent and device test builds its host with `FakeHost::new(..).unbounded()`.
   - `FakeHost::hold_sink() -> SinkHold`, a test gate: while the returned guard lives, a write to the
     output sink waits in the tap (a `Mutex<bool>` and `Condvar`) and nothing is recorded; dropping
     the guard releases the waiting writes in order. A write waiting in the hold when the speaker is
@@ -239,8 +243,9 @@ events.
       it answers.
     - `Events` wraps `tokio_stream::wrappers::BroadcastStream` (R112), which registers its waker
       and so loses no wakeup. Its lag error, `BroadcastStreamRecvError::Lagged(n)`, is yielded as
-      `Event::Lagged(n)`, with `n` the events skipped, never a silent drop. Its `Err` item is the
-      pump's terminal error, given once before the stream ends.
+      `Event::Lagged(n)`, with `n` the events skipped, never a silent drop. It yields no `Err`
+      item: the pump reports a terminal failure as `Event::Error`, and the channel carries
+      bare events.
     - When the session ends, the pump sends `Closed`, then takes the `Sender` out of `sender` and
       drops it (R126). Every `Events` then ends after `Closed`, whenever it was taken. A call to
       `events()` that finds `first` already taken and no `Sender` returns an empty stream. `Events`
@@ -1048,3 +1053,40 @@ Its diff lists none of `crates/inference/src/lib.rs`, `crates/inference/src/prel
 `Chat`, `Transcriber`, `Voice` and the one-call functions (story:sdk-one-call); `usage()` and
 `cost()` (story:sdk-usage-cost); `FakeClock` and the scripted stack (story:sdk-testing).
 `Chat`, `Transcriber` and `Voice` carry their own `Send` assertions (story:sdk-one-call).
+
+## Delivery notes
+
+Where the delivered story departs from the text above, and why:
+
+- The native switch case asserts history order through `HistoryEntry::run_id`, and the model close
+  over a capacity-1 egress checks that the drained reply joined the history after the user turn:
+  `sessions().history` records conversation facts only, so it never holds `RunCompleted` or
+  `SessionClosed`.
+- `Agent::from_recipe(Recipe::voice_cascade())` and the `send_audio` case feed the cascade fixture
+  and then `commit()`: the voice activity detector hears no speech in the duplex mock's
+  near-silent utterance. The cascade recipe case sends one utterance; two turns fed in a burst
+  hit a race in the pipeline's agent node that predates this story, filed as
+  story:cascade-turn-spans-in-a-burst.
+- `send_text` holds a turn's texts and `commit()` sends them as one text, so the generator answers
+  `a b` once. The §6 test example of `docs/design/sdk.md` calls `send_text` with no commit; that
+  example is story:sdk-testing's. Texts typed and not committed are kept across a `switch` and go
+  out at the next commit.
+- `native_voice` needs `concurrent_input_output` of its speech model, as `ess/domains/sdk.yaml`
+  requires of a node that keeps one generation per run, not `native_duplex`, which only GPT-Live
+  claims; without it no agent planned over Nova Sonic or OpenAI Realtime.
+- A draining duplex node answers every call it proposed and that has no answer with "the session
+  closed before the call's result", before it closes the model's session; a rejection sent at a
+  close never reached the model otherwise.
+- The device sink's `played()` counts frames pushed to the speaker. Each cascade run counts the
+  frames it handed out, pushed, cut or refused, so a switch or a sink attached mid-run never
+  counts another run's frames; a frame a cut dropped counts as done, as the cascade's own stop
+  counted it before.
+- `run_until` also ends when the pump ends without `SessionClosed`; the microphone buffers 2 s;
+  the microphone's format is the speech session's input format, else 16 kHz PCM16. A dropped
+  device run takes its sink out, cuts it if the run had not ended, and lets go of both devices.
+- The R146 case (a model close during input) holds the drain; the feeder's `Error::Closed` path is
+  held by `frames_fed_while_a_close_drains_do_not_fail_the_device_run` in
+  `tests/adversary2_agent.rs`.
+- The second compile-fail case has its own file, `compile_fail/agent_llm_takes_named.rs`.
+- Pass 2's finding F4 (a switch waiting on a pump-spawned interrupt blocked behind a full ingress)
+  was inferred from the code and not built; it stays open.

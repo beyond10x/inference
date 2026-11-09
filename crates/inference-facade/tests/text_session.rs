@@ -27,7 +27,7 @@ fn a_session_over_the_text_pipeline_opens_sends_commits_receives_and_closes_by_d
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         inference_pipeline::InteractionMode::TurnBased,
@@ -157,7 +157,7 @@ fn a_session_refuses_input_named_for_an_ingress_the_pipeline_does_not_expose() {
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         inference_pipeline::InteractionMode::TurnBased,
@@ -219,7 +219,7 @@ fn the_session_forwards_input_stamped_with_itself_and_its_run_then_its_commit_an
     let recorded = sink.handle();
     let mut sink = Some(sink);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         inference_pipeline::InteractionMode::TurnBased,
@@ -280,7 +280,7 @@ fn a_session_stays_draining_while_its_completed_run_has_output_in_flight_and_clo
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         inference_pipeline::InteractionMode::TurnBased,

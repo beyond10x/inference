@@ -166,23 +166,36 @@ struct MockModel {
     refusing: Option<String>,
 }
 
-/// The tool sets offered to the model of one generator, shared by its clones.
+/// What the model of one generator was given, shared by its clones: the tool sets offered and
+/// the instructions of every model request.
 #[derive(Debug, Clone, Default)]
-struct Offered(Arc<Mutex<Vec<Vec<ToolSpec>>>>);
+struct Offered(Arc<Mutex<Given>>);
+
+#[derive(Debug, Default)]
+struct Given {
+    tools: Vec<Vec<ToolSpec>>,
+    instructions: Vec<String>,
+}
 
 impl Offered {
+    fn given(&self) -> std::sync::MutexGuard<'_, Given> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn record(&self, tools: Vec<ToolSpec>) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(tools);
+        self.given().tools.push(tools);
+    }
+
+    fn instructed(&self, instructions: &str) {
+        self.given().instructions.push(instructions.to_owned());
     }
 
     fn read(&self) -> Vec<Vec<ToolSpec>> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.given().tools.clone()
+    }
+
+    fn instructions(&self) -> Vec<String> {
+        self.given().instructions.clone()
     }
 }
 
@@ -377,6 +390,13 @@ impl MockGenerator {
     pub fn offered(&self) -> Vec<Vec<ToolSpec>> {
         self.model.offered.read()
     }
+
+    /// The instructions every model request of the generator's model, or of a clone's, carried,
+    /// in the order those requests ran.
+    #[must_use]
+    pub fn instructions(&self) -> Vec<String> {
+        self.model.offered.instructions()
+    }
 }
 
 impl From<MockGenerator> for Generator {
@@ -398,6 +418,7 @@ impl MockModel {
             .items
             .iter()
             .rposition(|item| matches!(item, Item::AssistantText { .. } | Item::ToolCall(_)));
+        self.offered.instructed(&request.instructions);
         if last.is_none() && !request.tools.is_empty() {
             self.offered.record(request.tools.clone());
         }

@@ -3,6 +3,7 @@
 //! run. [`RoutedPlayout`] is the sink's [`Playout`] over that route.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use inference_audio::{AudioFrame, SampleClockPosition};
@@ -14,13 +15,12 @@ use inference_pipeline::PortId;
 use super::{Instantiation, Recipe};
 use crate::{Error, Stack};
 
-/// Where the cascade's synthesised audio goes: the frames routed, how many of them were handed
-/// out, a cut of what was not, and the application told of a barge-in.
+/// Where the cascade's synthesised audio goes: the frames routed, each counted once the route is
+/// done with it, a cut of what was not handed out, and the application told of a barge-in.
 pub(crate) trait AudioRoute: Send + Sync {
-    /// Routes `frame`, after every frame routed before it.
-    fn route(&self, frame: AudioFrame);
-    /// How many of the frames routed so far have been handed out.
-    fn played(&self) -> u64;
+    /// Routes `frame`, after every frame routed before it, and adds one to `handed` once the
+    /// route is done with it: handed out, or dropped by a cut, whoever asked for the cut.
+    fn route(&self, frame: AudioFrame, handed: &Arc<AtomicU64>);
     /// Stops the audio routed and not yet handed out.
     fn cut(&self);
     /// Tells the application of a barge-in.
@@ -38,10 +38,8 @@ struct Routed {
 
 #[derive(Debug, Default)]
 struct Routing {
-    /// How many frames were routed.
+    /// The ordinal of the next frame routed: how many this playout routed.
     routed: u64,
-    /// How many routed frames a cut dropped, which the route never hands out.
-    dropped: u64,
     /// The frames routed since the last stop and not yet seen handed out, in order.
     unplayed: VecDeque<Routed>,
     /// The played position: the end of the last frame seen handed out, or the start of the first
@@ -50,16 +48,23 @@ struct Routing {
 }
 
 /// The [`Playout`] over an [`AudioRoute`]: a frame pushed is routed at once and never answered
-/// `Full`; the played position and the queue are read off the route's `played()`.
+/// `Full`; the played position and the queue are read off the count of its frames handed out.
 pub(crate) struct RoutedPlayout {
     route: Arc<dyn AudioRoute>,
+    /// How many of this playout's frames the route is done with, handed out or dropped by a
+    /// cut. The route outlives the run, and after a switch it may still hold frames of the run
+    /// before, so it counts each run's frames apart. It counts them in the order routed, so the
+    /// frames a stop forgot are counted before any frame routed after it.
+    handed: Arc<AtomicU64>,
     routing: Mutex<Routing>,
 }
 
 impl RoutedPlayout {
+    /// The playout of one run over `route`.
     pub(crate) fn new(route: Arc<dyn AudioRoute>) -> Self {
         Self {
             route,
+            handed: Arc::default(),
             routing: Mutex::default(),
         }
     }
@@ -67,7 +72,7 @@ impl RoutedPlayout {
     /// The routing, with every frame the route has handed out since forgotten.
     fn routing(&self) -> std::sync::MutexGuard<'_, Routing> {
         let mut routing = self.routing.lock().unwrap_or_else(PoisonError::into_inner);
-        let handed = self.route.played().saturating_add(routing.dropped);
+        let handed = self.handed.load(Ordering::Acquire);
         while let Some(front) = routing.unplayed.front().copied() {
             if front.ordinal >= handed {
                 break;
@@ -98,7 +103,7 @@ impl Playout for RoutedPlayout {
             samples,
             end,
         });
-        self.route.route(frame.clone());
+        self.route.route(frame.clone(), &self.handed);
         drop(routing);
         Ok(())
     }
@@ -109,7 +114,6 @@ impl Playout for RoutedPlayout {
         let mut routing = self.routing();
         self.route.cut();
         let position = routing.played;
-        routing.dropped += u64::try_from(routing.unplayed.len()).unwrap_or(u64::MAX);
         routing.unplayed.clear();
         routing.played = None;
         position
@@ -276,7 +280,7 @@ mod tests {
             .expect("the cascade plans over the mocks");
         assert!(instantiation.sink().is_none(), "no run is open");
         let sessions = LiveSessions::new();
-        let (mut session, driver) =
+        let (session, driver) =
             block_on(instantiation.open(&stack, &sessions)).expect("the cascade's run opens");
         let sink = instantiation
             .sink()
@@ -304,11 +308,14 @@ mod tests {
 
     /// A route of the test: records each frame routed with its ordinal, the count of frames
     /// routed before it, counts its cuts and interruptions, drops the frames not yet handed out
-    /// at a cut and keeps the ordinal the last cut came at; the test sets `played()`.
+    /// at a cut, counting each in its run's count, and keeps the ordinal the last cut came at; the test hands out the first
+    /// `played()` of the frames it holds with [`Route::hand`].
     #[derive(Default)]
     struct Route {
         frames: Mutex<Vec<AudioFrame>>,
         ordinals: Mutex<Vec<usize>>,
+        /// Each frame's count of its run's frames handed out, and whether it was counted.
+        lanes: Mutex<Vec<(Arc<AtomicU64>, bool)>>,
         next: AtomicUsize,
         cut_at: AtomicUsize,
         played: AtomicU64,
@@ -324,6 +331,28 @@ mod tests {
                 .len()
         }
 
+        /// Sets `played()` to `count` and counts the frames it hands out.
+        fn hand(&self, count: u64) {
+            self.played.store(count, Ordering::SeqCst);
+            self.settle();
+        }
+
+        /// Counts each of the first `played()` frames held, once, in its run's count.
+        fn settle(&self) {
+            let played = usize::try_from(self.played()).unwrap_or(usize::MAX);
+            let mut lanes = self.lanes.lock().unwrap_or_else(PoisonError::into_inner);
+            for (lane, counted) in lanes.iter_mut().take(played) {
+                if !*counted {
+                    *counted = true;
+                    lane.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        fn played(&self) -> u64 {
+            self.played.load(Ordering::SeqCst)
+        }
+
         /// The ordinals of the frames handed out: the first `played()` of those routed.
         fn handed_out(&self) -> Vec<usize> {
             let ordinals = self.ordinals.lock().unwrap_or_else(PoisonError::into_inner);
@@ -333,17 +362,19 @@ mod tests {
     }
 
     impl AudioRoute for Route {
-        fn route(&self, frame: AudioFrame) {
+        fn route(&self, frame: AudioFrame, handed: &Arc<AtomicU64>) {
             let mut frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
             frames.push(frame);
             self.ordinals
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(self.next.fetch_add(1, Ordering::SeqCst));
-        }
-
-        fn played(&self) -> u64 {
-            self.played.load(Ordering::SeqCst)
+            self.lanes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((Arc::clone(handed), false));
+            drop(frames);
+            self.settle();
         }
 
         fn cut(&self) {
@@ -357,6 +388,13 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .truncate(handed);
+            let mut lanes = self.lanes.lock().unwrap_or_else(PoisonError::into_inner);
+            for (lane, counted) in lanes.iter().skip(handed) {
+                if !*counted {
+                    lane.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            lanes.truncate(handed);
         }
 
         fn interrupted(&self) {
@@ -692,13 +730,58 @@ mod tests {
             .collect();
         assert_eq!(positions, [0, u64::from(FRAME)], "in order");
 
-        route.played.store(1, Ordering::SeqCst);
+        route.hand(1);
         thread::sleep(Duration::from_millis(100));
         assert!(run.receipts.receipts().is_empty(), "one frame is unplayed");
 
-        route.played.store(2, Ordering::SeqCst);
+        route.hand(2);
         assert!(eventually(|| run.receipts.receipts() == [segment]));
         run.end();
+    }
+
+    /// Sends one segment of two frames and its completion; the segment.
+    fn say_segment(run: &mut Started) -> SegmentId {
+        let segment = run.synthesis.segment();
+        let first = run.synthesis.frame(segment);
+        run.send(first);
+        let second = run.synthesis.frame(segment);
+        run.send(second);
+        let completed = run.synthesis.complete(segment);
+        run.send(completed);
+        segment
+    }
+
+    #[test]
+    fn after_a_switch_the_new_runs_speaker_counts_only_its_own_frames_as_played() {
+        let route = Arc::new(Route::default());
+        let mut old = Started::new(&route, true);
+        let said = say_segment(&mut old);
+        assert!(eventually(|| route.routed() == 2), "both frames are routed");
+        route.hand(2);
+        assert!(eventually(|| old.receipts.receipts() == [said]));
+        old.end();
+
+        let mut new = Started::new(&route, true);
+        let segment = say_segment(&mut new);
+        assert!(
+            eventually(|| route.routed() == 4),
+            "both new frames are routed"
+        );
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            new.receipts.receipts().is_empty(),
+            "the new run's frames are not handed out: {:?}",
+            new.receipts.receipts()
+        );
+        route.hand(3);
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            new.receipts.receipts().is_empty(),
+            "one new frame is unplayed"
+        );
+        route.hand(4);
+        assert!(eventually(|| new.receipts.receipts() == [segment]));
+        new.end();
     }
 
     /// Two frames of one segment, `played()` held at 0, a turn opened, then a third frame.
@@ -734,7 +817,7 @@ mod tests {
             "the cut dropped both, and the third never came"
         );
         assert_eq!(handle.interruptions().len(), 1);
-        route.played.store(3, Ordering::SeqCst);
+        route.hand(3);
         thread::sleep(Duration::from_millis(100));
         assert!(
             run.receipts.receipts().is_empty(),
@@ -754,7 +837,7 @@ mod tests {
         assert_eq!(route.cuts.load(Ordering::SeqCst), 0);
         assert_eq!(route.interruptions.load(Ordering::SeqCst), 0);
         assert!(handle.interruptions().is_empty());
-        route.played.store(3, Ordering::SeqCst);
+        route.hand(3);
         assert!(eventually(|| run.receipts.receipts() == [segment]));
         run.end();
     }
@@ -852,8 +935,8 @@ mod tests {
     impl Barged {
         /// Hands out every frame routed from now on, so the speaker drains, then closes the
         /// session and waits for the run to complete.
-        fn end(mut self) {
-            self.route.played.store(u64::MAX >> 1, Ordering::SeqCst);
+        fn end(self) {
+            self.route.hand(u64::MAX >> 1);
             block_on(self.session.close()).expect("the session drains");
             while block_on(self.session.receive()).is_some() {}
             let run = self
@@ -879,7 +962,7 @@ mod tests {
             cut_at >= barged.before,
             "the cut came after reply 0 was routed"
         );
-        route.played.store(route.routed() as u64, Ordering::SeqCst);
+        route.hand(route.routed() as u64);
         assert!(
             route.handed_out().iter().all(|ordinal| *ordinal >= cut_at),
             "no frame routed before the cut is handed out: {:?}",
@@ -895,7 +978,7 @@ mod tests {
         thread::sleep(Duration::from_millis(500));
         assert_eq!(route.cuts.load(Ordering::SeqCst), 0);
         assert!(barged.sink.interruptions().is_empty());
-        route.played.store(route.routed() as u64, Ordering::SeqCst);
+        route.hand(route.routed() as u64);
         let handed = route.handed_out();
         assert!(
             (0..barged.before).all(|ordinal| handed.contains(&ordinal)),

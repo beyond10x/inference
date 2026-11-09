@@ -244,6 +244,15 @@ pub fn sink_planned(generator: &MockGenerator) -> (Declaration, PlannedPipeline)
 /// Structured, a turn-based pipeline declared, validated and planned: the node the test supplies
 /// passes on what it takes.
 pub fn echo_planned(generator: &MockGenerator) -> (Declaration, PlannedPipeline) {
+    echo_planned_with_ingress(generator, NonZeroUsize::new(8).expect("8"))
+}
+
+/// As [`echo_planned`], the ingress holding at most `ingress` envelopes, pausing its sender when
+/// full.
+pub fn echo_planned_with_ingress(
+    generator: &MockGenerator,
+    ingress: NonZeroUsize,
+) -> (Declaration, PlannedPipeline) {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
@@ -274,12 +283,7 @@ pub fn echo_planned(generator: &MockGenerator) -> (Declaration, PlannedPipeline)
             let echo = pipeline.node("echo", NodeRole::Transform, Vec::new());
             let input = pipeline.input::<modality::Structured>(&echo, "in", structured);
             let output = pipeline.output::<modality::Structured>(&echo, "out", structured);
-            pipeline.expose(
-                &input,
-                INGRESS,
-                NonZeroUsize::new(8).expect("8"),
-                OverloadPolicy::Pause,
-            );
+            pipeline.expose(&input, INGRESS, ingress, OverloadPolicy::Pause);
             pipeline.expose(
                 &output,
                 EGRESS,

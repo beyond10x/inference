@@ -23,7 +23,7 @@ fn after_an_interrupt_the_cut_generations_committed_segment_is_not_delivered_nor
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) = planned(&generator, &[Capability::OutputStreaming]);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,
