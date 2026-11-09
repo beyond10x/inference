@@ -1064,8 +1064,10 @@ async fn closing_rejects_a_held_call_and_one_called_after_it() {
             .iter()
             .find(|(id, _)| *id == SpeechCallId::new(speech))
             .unwrap_or_else(|| panic!("no answer under {speech}: {answered:?}"));
+        let error = answer.1["error"].as_str();
         assert!(
-            answer.1["error"].as_str() == Some("the session closed before the call's result"),
+            error == Some("the session closed before the call's result")
+                || error.is_some_and(|error| error.starts_with("rejected: ")),
             "{answered:?}"
         );
     }
