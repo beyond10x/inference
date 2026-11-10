@@ -1,7 +1,7 @@
 //! A send the ingress took is answered `Ok` when the session moved on to Draining while the
 //! ingress took it. A send overtaken by a cancel is not answered `Ok`: here the cancel closed the
-//! ingress first, so it answers `Forward` or `Refused`; the `Refused` answer for an envelope the
-//! ingress took is the adversary case `adversary_u3_send_after_drain.rs`.
+//! ingress first, so it answers `Forward` or `Cancelled`; the `Cancelled` answer for an envelope
+//! the ingress took is the adversary cases `adversary_u3_send_after_drain*.rs`.
 
 #![allow(dead_code)]
 
@@ -224,7 +224,7 @@ fn a_send_blocked_on_the_ingress_when_a_cancel_closes_it_is_not_answered_ok() {
     takes();
     let sent = sender.join().expect("the sender does not panic");
     assert!(
-        matches!(sent, Err(InputError::Refused(_) | InputError::Forward(_))),
+        matches!(sent, Err(InputError::Cancelled | InputError::Forward(_))),
         "a cancelled session never answers Ok for a send it overtook: {sent:?}"
     );
     assert_eq!(

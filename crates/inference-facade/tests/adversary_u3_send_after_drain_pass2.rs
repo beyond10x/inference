@@ -18,7 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use inference_facade::live::{InputError, LiveSession, LiveSessions};
-use inference_facade::session::{SessionMoveError, SessionState, SessionStateConflict};
+use inference_facade::session::SessionState;
 use inference_pipeline::{
     InteractionMode, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInput,
 };
@@ -178,8 +178,8 @@ fn a_send_started_after_the_cancel_that_answers_refused_forwards_nothing() {
         "the cancelled run is still winding down when the late send starts"
     );
     assert!(
-        matches!(late, Err(InputError::Refused(_))),
-        "a send started after the application cancelled answers Refused: {late:?}"
+        matches!(late, Err(InputError::Cancelled)),
+        "a send started after the application cancelled answers Cancelled: {late:?}"
     );
     assert_eq!(counted, 1, "the late send is not counted");
     assert!(
@@ -216,16 +216,9 @@ fn a_refused_send_the_cancel_overtook_names_the_state_the_session_holds() {
         Some(SessionState::Ready),
         "the cancelled run is still winding down when the send answers"
     );
-    let Err(InputError::Refused(refused)) = sent else {
-        panic!("a send the cancel overtook answers Refused: {sent:?}");
-    };
-    assert_eq!(
-        refused,
-        SessionMoveError::WrongState(SessionStateConflict {
-            current: SessionState::Ready
-        }),
-        "SessionStateConflict.current is the state the session holds (session.rs:300-301); the \
-         session held Ready when the send answered"
+    assert!(
+        matches!(sent, Err(InputError::Cancelled)),
+        "a send the cancel overtook answers Cancelled: {sent:?}"
     );
 }
 
@@ -266,16 +259,9 @@ fn a_send_taken_while_draining_that_a_cancel_overtook_answers_refused() {
         "the cancelled run is still winding down when the send answers"
     );
     assert!(
-        matches!(
-            sent,
-            Err(InputError::Refused(SessionMoveError::WrongState(
-                SessionStateConflict {
-                    current: SessionState::Draining
-                }
-            )))
-        ),
+        matches!(sent, Err(InputError::Cancelled)),
         "a draining session the application cancelled while the ingress took the send answers \
-         Refused, not the Ok of a drain: {sent:?}"
+         Cancelled, not the Ok of a drain: {sent:?}"
     );
     assert_eq!(counted, 1, "the send the cancel overtook is not counted");
 }
