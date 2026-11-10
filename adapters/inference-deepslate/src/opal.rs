@@ -151,10 +151,10 @@ pub const OUTBOUND_QUEUE: usize = 64;
 /// The most bytes of text kept for one response, and held for turns no response holds yet.
 pub const TEXT_LIMIT: usize = 64 * 1024;
 
-/// The most characters of a server error's message kept.
 /// The commits and the early transcription turns a session keeps for mapping `turn_id`s.
 const COMMITS_KEPT: usize = 64;
 
+/// The most characters of a server error's message kept.
 const MESSAGE_LIMIT: usize = 256;
 
 fn pcm16(rate: u32) -> AudioFormat {
