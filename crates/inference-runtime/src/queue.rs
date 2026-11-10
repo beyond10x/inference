@@ -36,7 +36,7 @@
 //! the receiver yields what is queued and then `None`. The receiver can also close the queue to
 //! its senders while it stays ([`InputEndpoint::close_to_senders`]): every send is then refused
 //! as closed with its envelope, one waiting for room at its next poll, and the receiver yields
-//! what is queued and then `None` without waiting. Waiting is a [`Future`](std::future::Future)
+//! what is queued and then `None` without waiting. Waiting is a [`Future`]
 //! woken through its [`Waker`], so the queue runs under any executor.
 
 use std::collections::{HashMap, VecDeque};

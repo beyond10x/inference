@@ -63,7 +63,7 @@
 //!   later proposal;
 //! * an outcome of an awaited call arriving on `tool_result`, a result, a failure or a rejection,
 //!   is integrated into the same generation as an `llm` tool result
-//!   ([`ToolOutcome`](inference_llm::tools::ToolOutcome)), and once the last call of the round is
+//!   ([`ToolOutcome`]), and once the last call of the round is
 //!   answered, the next turn runs on them (design 402, 721), so every segment after it carries
 //!   the generation's identity;
 //! * a rejection `exhausted` is the loop's termination rule: the node integrates nothing more and

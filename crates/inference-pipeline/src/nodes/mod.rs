@@ -56,38 +56,25 @@ use inference_tools::{
 
 use crate::{NodeEndpoints, NodeError, NodeInput, NodeOutput};
 
-/// The model node of a voice cascade that can be interrupted: one generation per turn,
-/// superseded at the opening of the next.
 #[cfg(feature = "llm")]
 pub mod agent;
-/// The commit gate: committed spans, segments and turn events through, the rest held back.
 pub mod commit_gate;
 pub mod descriptors;
-/// The duplex node: an `inference-duplex` native speech model's session run as one node.
 #[cfg(feature = "duplex")]
 pub mod duplex;
-/// The fan-out: every envelope of its one input edge handed to each of its output edges.
 pub mod fan_out;
-/// The model node: one generation of an `inference-llm` generator per run, with its tool loop.
 #[cfg(feature = "llm")]
 pub mod llm;
-/// The `inference.stream` events the model nodes emit and the run's log of them.
 pub mod log;
-/// The TTS node of a cascade whose playback a media sink acknowledges.
 #[cfg(feature = "tts")]
 pub mod speech;
-/// The STT node: each turn the turn policy opens recognised on one recognition.
 #[cfg(feature = "stt")]
 pub mod stt;
 mod tool_authority;
 mod tool_executor;
-/// The TTS node: committed segments synthesised, and played through the host's
-/// [`tts::PlaybackSink`].
 #[cfg(feature = "tts")]
 pub mod tts;
-/// The turn policy: speech activity in, the turn commands of `inference.stream` out.
 pub mod turn_policy;
-/// The voice activity detector: audio frames in, speech activity out, by an energy threshold.
 pub mod vad;
 
 #[cfg(feature = "llm")]

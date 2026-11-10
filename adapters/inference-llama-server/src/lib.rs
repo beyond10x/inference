@@ -191,7 +191,7 @@ impl Config {
 ///
 /// # Errors
 ///
-/// An [`ErrorCode::InvalidRequest`](llm_core::ErrorCode::InvalidRequest) whose message is the
+/// An [`ErrorCode::InvalidRequest`] whose message is the
 /// [`NotLoopback`] refusal when the base URL's host is not loopback, before anything else is
 /// read; otherwise the `llm` error refusing the base URL or the served model name, or the
 /// binding.

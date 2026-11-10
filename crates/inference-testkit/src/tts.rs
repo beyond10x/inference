@@ -95,14 +95,8 @@ use inference_tts::{
 /// that a test reaches `inference-tts`' types through the testkit alone.
 pub use inference_tts;
 
-/// The backend-neutral checks of the TTS adapter exit criteria, generic over any
-/// [`Synthesiser`], with [`MockSink`] as the sink, for an adapter crate to run against its own
-/// synthesiser.
 pub mod conformance;
 
-/// The TTS node of a voice pipeline, behind the `run` feature: a [`TtsNode`] synthesises the
-/// committed segments of an LLM node on one synthesis of its synthesiser, a [`MockSynthesiser`]
-/// by default.
 #[cfg(feature = "run")]
 mod node;
 
