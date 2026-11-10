@@ -1,5 +1,5 @@
 //! Adversary cases on `LiveSession::send` once the ingress took the envelope: a session the
-//! application cancelled while the ingress took it answers `Refused` and records no `InputSent`
+//! application cancelled while the ingress took it answers `Cancelled` and records no `InputSent`
 //! (the doc of `send` and the story's decision), also while the cancelled run is still winding
 //! down and the session is still Ready.
 
@@ -74,7 +74,7 @@ impl NodeImplementation<PipelinePayload> for TakesOnCancel {
 }
 
 #[test]
-fn a_send_the_ingress_took_while_the_cancelled_run_winds_down_answers_refused() {
+fn a_send_the_ingress_took_while_the_cancelled_run_winds_down_answers_cancelled() {
     let generator = generator(Vec::<String>::new());
     let (declaration, planned) =
         echo_planned_with_ingress(&generator, NonZeroUsize::new(1).expect("1"));

@@ -1,8 +1,8 @@
 //! Second adversary cases on `LiveSession::send` and a cancel: a send started after the cancel,
-//! while the cancelled run still winds down and the session is still Ready, answers `Refused`,
-//! which promises that nothing was forwarded; the `Refused` of a send the cancel overtook names
-//! the state the session holds; and a send taken while Draining that a cancel then overtook
-//! answers `Refused`, not the `Ok` of a drain.
+//! while the cancelled run still winds down and the session is still Ready, answers `Cancelled`
+//! and forwards nothing; a send the cancel overtook answers `Cancelled` while the session still
+//! holds Ready; and a send taken while Draining that a cancel then overtook answers `Cancelled`,
+//! not the `Ok` of a drain.
 
 #![allow(dead_code)]
 
@@ -153,7 +153,7 @@ fn finish(opened: Opened) {
 }
 
 #[test]
-fn a_send_started_after_the_cancel_that_answers_refused_forwards_nothing() {
+fn a_send_started_after_the_cancel_answers_cancelled_and_forwards_nothing() {
     let mut opened = open(1);
     block_on(opened.session.send(opened.application.text("first")))
         .expect("the ingress buffers one");
@@ -190,7 +190,7 @@ fn a_send_started_after_the_cancel_that_answers_refused_forwards_nothing() {
 }
 
 #[test]
-fn a_refused_send_the_cancel_overtook_names_the_state_the_session_holds() {
+fn a_send_the_cancel_overtook_answers_cancelled_while_the_session_holds_ready() {
     let mut opened = open(1);
     block_on(opened.session.send(opened.application.text("first")))
         .expect("the ingress buffers one");
@@ -223,7 +223,7 @@ fn a_refused_send_the_cancel_overtook_names_the_state_the_session_holds() {
 }
 
 #[test]
-fn a_send_taken_while_draining_that_a_cancel_overtook_answers_refused() {
+fn a_send_taken_while_draining_that_a_cancel_overtook_answers_cancelled() {
     let mut opened = open(3);
     block_on(opened.session.send(opened.application.text("first")))
         .expect("the ingress buffers one");
