@@ -132,7 +132,7 @@ fn a_send_the_ingress_took_while_the_cancelled_run_winds_down_answers_cancelled(
     );
     assert!(
         matches!(sent, Err(InputError::Cancelled)),
-        "a session cancelled while the ingress took the envelope answers Refused: {sent:?}"
+        "a session cancelled while the ingress took the envelope answers Cancelled: {sent:?}"
     );
     assert_eq!(
         input_sent, 1,
