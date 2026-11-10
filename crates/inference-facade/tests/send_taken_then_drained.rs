@@ -1,7 +1,7 @@
 //! A send the ingress took is answered `Ok` when the session moved on to Draining while the
-//! ingress took it. A send overtaken by a cancel is never answered `Ok`: the cancel closes the
-//! ingress, so the window in which the ingress took the envelope and `Refused` answers it cannot
-//! be held open from outside the facade.
+//! ingress took it. A send overtaken by a cancel is not answered `Ok`: here the cancel closed the
+//! ingress first, so it answers `Forward` or `Refused`; the `Refused` answer for an envelope the
+//! ingress took is the adversary case `adversary_u3_send_after_drain.rs`.
 
 #![allow(dead_code)]
 
@@ -206,7 +206,7 @@ fn a_send_the_ingress_took_after_close_moved_the_session_to_draining_answers_ok(
 }
 
 #[test]
-fn a_send_overtaken_by_a_cancel_is_never_answered_ok() {
+fn a_send_blocked_on_the_ingress_when_a_cancel_closes_it_is_not_answered_ok() {
     let opened = open();
     let sender = waiting_send(&opened);
     opened.session.cancel().expect("cancels");
