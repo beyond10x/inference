@@ -54,8 +54,10 @@
 //!
 //! The end of input on a lane, a control event of kind `stop`, drops the deltas the lane holds,
 //! passes the rest and then the `stop`, and ends the lane; a lane whose input edge is closed ends
-//! the same way without a `stop`. The node ends once every lane ended. Cancelled, it sends nothing
-//! more, and a send waiting for room on a full edge ends at the cancel.
+//! the same way without a `stop`. The `stop` of the first lane passes only once every other lane
+//! ended, and if another lane never ends it is held until it does. The node ends once every lane
+//! ended. Cancelled, it sends nothing more, and a send waiting for room on a full edge ends at the
+//! cancel.
 //!
 //! The gate reads its payload through [`GatePayload`], which the payload of the run implements,
 //! so that this crate depends on no contract crate.
@@ -503,8 +505,6 @@ struct Exchanging<P> {
     /// until every other lane ended, so that the turn events they carry still reach the first
     /// lane's output ahead of its end.
     end_pending: Option<Option<EventEnvelope<P>>>,
-    /// Whether the first lane's end was taken by the gate.
-    text_closed: bool,
 }
 
 impl<P: GatePayload> Exchanging<P> {
@@ -616,13 +616,11 @@ impl<P: GatePayload> Exchanging<P> {
                     .update(|state| gate.take(lane, envelope, &mut state.record));
                 if stop {
                     self.inputs[lane] = None;
-                    self.text_closed |= lane == 0;
                 }
                 passed
             }
             None => {
                 self.inputs[lane] = None;
-                self.text_closed |= lane == 0;
                 self.state
                     .update(|state| gate.close(lane, &mut state.record))
             }
@@ -631,11 +629,8 @@ impl<P: GatePayload> Exchanging<P> {
     }
 
     /// Passes a copy of the turn event `envelope`, taken on another lane, on the output of the
-    /// first lane, if that lane still goes.
+    /// first lane.
     async fn pass_copy(&mut self, envelope: EventEnvelope<P>) -> Result<(), String> {
-        if self.text_closed {
-            return Ok(());
-        }
         let passed = self.gate.copy(0, envelope);
         self.pass(0, passed, true).await
     }
@@ -737,7 +732,6 @@ impl CommitGate {
                 outputs,
                 state: Arc::clone(&self.state),
                 end_pending: None,
-                text_closed: false,
             }),
             _ => Err(NodeError::new(
                 "the gate was not handed one edge at each port of its lanes",
