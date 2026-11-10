@@ -9,7 +9,7 @@ use inference_core::usage::{Quantity, QuantityKind, RecordUsage, UsageRecord};
 use inference_tools::{Json, Tool};
 
 use crate::{
-    DeliverSessionEventError, InputAccepted, InputCommitted, InputTranscribed,
+    DeliverSessionEventError, InputAccepted, InputCommitted, InputItemId, InputTranscribed,
     NonPositiveIdleLimit, OpenError, OpenSpeechSession, OutputAudio, OutputTranscriptDelta,
     OutputTruncated, ProposeSpeechToolCall, ReceivedEventId, ReceivedEventKind,
     ReceivedSessionEvent, Response, ResponseId, ResponseIdReused, ResponseNotFound,
@@ -146,12 +146,14 @@ impl ProviderFrame<'_> {
         infallible {
             fn heard(&mut self, now: Instant);
             fn dropped(&mut self, refusal: SessionError);
+            fn assign_item(&mut self) -> InputItemId;
             fn hold_usage(&mut self, quantities: Vec<Quantity>);
             fn session_usage_at_end(&mut self, quantities: Vec<Quantity>, confirmed: bool);
             fn check_liveness(&mut self, now: Instant) -> bool;
         }
         fallible {
-            fn input_committed(&mut self, now: Instant) -> Result<(), SessionError>;
+            fn input_committed(&mut self, item: InputItemId, now: Instant)
+                -> Result<(), SessionError>;
             fn speech_started(
                 &mut self,
                 position: SampleClockPosition,
@@ -162,7 +164,12 @@ impl ProviderFrame<'_> {
                 position: SampleClockPosition,
                 now: Instant,
             ) -> Result<(), SessionError>;
-            fn input_transcribed(&mut self, text: String, now: Instant) -> Result<(), SessionError>;
+            fn input_transcribed(
+                &mut self,
+                item: InputItemId,
+                text: String,
+                now: Instant,
+            ) -> Result<(), SessionError>;
             fn transcription_usage(
                 &mut self,
                 usage: TranscriptionUsage,
@@ -382,6 +389,8 @@ pub struct SessionLedger {
     unreadable: (u64, Option<String>),
     /// Whether a frame the binding could not read arrived after the last readable frame.
     unread_since_readable: bool,
+    /// How many input item ids [`SessionLedger::assign_item`] has handed out.
+    items_assigned: u64,
     /// How many provider events and failures the ledger refused and the binding dropped
     /// ([`SessionLedger::dropped`]), and the most recent of them, at most
     /// [`SessionLedger::DROPPED_EVENTS_KEPT`], oldest first.
@@ -566,6 +575,7 @@ impl SessionLedger {
             frames: Vec::new(),
             unreadable: (0, None),
             unread_since_readable: false,
+            items_assigned: 0,
             dropped: (0, Vec::new()),
             opened: (now, wall),
             latest: now,
@@ -731,13 +741,13 @@ impl SessionLedger {
     ///
     /// [`SessionError::NotOpen`], then [`SessionError::Unsupported`] when the model takes no
     /// commit.
-    pub fn commit_input(&mut self, now: Instant) -> Result<(), SessionError> {
+    pub fn commit_input(&mut self, item: InputItemId, now: Instant) -> Result<(), SessionError> {
         self.require_open()?;
         if !self.capabilities.manual_commit {
             return Err(SessionError::Unsupported(Unsupported::ManualCommit));
         }
         self.tick(now);
-        self.record_commit(now);
+        self.record_commit(item, now);
         Ok(())
     }
 
@@ -1062,16 +1072,24 @@ impl SessionLedger {
         }
     }
 
-    /// The provider's turn detection committed the input. With `auto_response` on it owes a
+    /// The next item id of a provider that names no user turn: `turn-1`, then `turn-2`, and so on,
+    /// one counter per session. A binding calls it once per turn, for the commit, and gives the
+    /// same id to the turn's transcript.
+    pub fn assign_item(&mut self) -> InputItemId {
+        self.items_assigned += 1;
+        InputItemId::new(format!("turn-{}", self.items_assigned))
+    }
+
+    /// The provider's turn detection committed the input, naming the turn `item`. With `auto_response` on it owes a
     /// response from `now`.
     ///
     /// # Errors
     ///
     /// [`SessionError::NotOpen`].
-    pub fn input_committed(&mut self, now: Instant) -> Result<(), SessionError> {
+    pub fn input_committed(&mut self, item: InputItemId, now: Instant) -> Result<(), SessionError> {
         self.require_open()?;
         self.heard(now);
-        self.record_commit(now);
+        self.record_commit(item, now);
         Ok(())
     }
 
@@ -1120,13 +1138,22 @@ impl SessionLedger {
     /// # Errors
     ///
     /// [`SessionError::NotOpen`].
-    pub fn input_transcribed(&mut self, text: String, now: Instant) -> Result<(), SessionError> {
+    pub fn input_transcribed(
+        &mut self,
+        item: InputItemId,
+        text: String,
+        now: Instant,
+    ) -> Result<(), SessionError> {
         self.require_open()?;
         self.heard(now);
         let session_id = self.session.session_id();
         self.push_received(
             ReceivedEventKind::InputTranscript,
-            SessionEvent::InputTranscribed(InputTranscribed { session_id, text }),
+            SessionEvent::InputTranscribed(InputTranscribed {
+                session_id,
+                item,
+                text,
+            }),
         );
         Ok(())
     }
@@ -1700,12 +1727,15 @@ impl SessionLedger {
         self.requested = true;
     }
 
-    fn record_commit(&mut self, now: Instant) {
+    fn record_commit(&mut self, item: InputItemId, now: Instant) {
         if self.session.config().auto_response && self.in_progress().is_none() {
             self.await_response(now);
         }
         let session_id = self.session.session_id();
-        self.push(SessionEvent::InputCommitted(InputCommitted { session_id }));
+        self.push(SessionEvent::InputCommitted(InputCommitted {
+            session_id,
+            item,
+        }));
     }
 
     fn cancel_response(

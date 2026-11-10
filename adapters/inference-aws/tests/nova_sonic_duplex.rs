@@ -329,6 +329,15 @@ fn audio_in_gives_audio_and_transcript_out_on_one_response_id() {
     })
     .expect("a response");
     assert!(committed < heard && heard < began, "{events:#?}");
+    let (SessionEvent::InputCommitted(turn_start), SessionEvent::InputTranscribed(turn_heard)) =
+        (&events[committed], &events[heard])
+    else {
+        unreachable!("positions of those events")
+    };
+    assert_eq!(
+        turn_start.item, turn_heard.item,
+        "the commit and the transcript name the user text block's contentId"
+    );
     assert_eq!(
         speech_started(&events),
         vec![committed - 1],

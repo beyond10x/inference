@@ -46,7 +46,8 @@
 //!   tuning; `auto_response` and `auto_interrupt` must be on. Commit, response creation,
 //!   cancellation and truncation by the caller are refused as [`Unsupported`]: the protocol has
 //!   no message for them.
-//! * A `user_transcript` is the end of a user turn: `InputCommitted`, then `InputTranscribed`.
+//! * A `user_transcript` is the end of a user turn: `InputCommitted`, then `InputTranscribed`,
+//!   both naming the next `turn-N` of the ledger's per-session counter, as the event names no turn.
 //! * A response begins with the first `audio` while none is in progress, or with an
 //!   `agent_response` or a `client_tool_call` while none is. Its audio frames count samples from
 //!   its start; PCM ending in half a sample keeps that byte for the next chunk. An
@@ -1108,9 +1109,10 @@ impl ElevenLabsAgentSession {
             }
             ServerMessage::UserTranscript { text } => {
                 self.finish(now);
-                let committed = self.ledger.input_committed(now);
+                let item = self.ledger.assign_item();
+                let committed = self.ledger.input_committed(item.clone(), now);
                 self.or_drop(committed);
-                let heard = self.ledger.input_transcribed(text, now);
+                let heard = self.ledger.input_transcribed(item, text, now);
                 self.or_drop(heard);
             }
             ServerMessage::AgentResponse {
@@ -1251,7 +1253,8 @@ impl SpeechSessionHandle for ElevenLabsAgentSession {
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(Instant::now())
+        let item = self.ledger.assign_item();
+        self.ledger.commit_input(item, Instant::now())
     }
 
     fn create_response(&mut self) -> Result<(), SessionError> {

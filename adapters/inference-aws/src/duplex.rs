@@ -32,6 +32,8 @@
 //!   already completed and whose audio the caller may still be playing), an `INTERRUPTED` end, or
 //!   else the turn's first user transcript, just before its commit; no end of speech is recorded;
 //! - a tool use is a call under the provider's `toolUseId`;
+//! - a user turn is named by the `contentId` of its user TEXT block, which the turn's commit and
+//!   the transcript read from that block both carry;
 //! - usage deltas are summed per response: what is reported while a response is in progress counts
 //!   toward it; between responses, input counts toward the next and output toward the last. The
 //!   response's usage record holds those sums, text and speech tokens each way as reported once a
@@ -80,10 +82,10 @@ use inference_duplex::inference_core::model::{
 };
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
-    NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage, SessionConfig,
-    SessionError, SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
-    SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TokenCounts, TuningSupport,
-    TurnDetection, TurnSensitivity, UsageTotal,
+    InputItemId, NativeSpeechModel, OpenError, Quantity, QuantityKind, ResponseId, ResponseUsage,
+    SessionConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind, SessionLedger,
+    SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TokenCounts,
+    TuningSupport, TurnDetection, TurnSensitivity, UsageTotal,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::Semaphore;
@@ -680,6 +682,7 @@ struct Block {
     kind: ContentKind,
     stage: Option<GenerationStage>,
     response: Option<ResponseId>,
+    item: Option<InputItemId>,
 }
 
 impl Block {
@@ -989,6 +992,7 @@ impl NovaSonicSpeechSession {
             kind: start.kind,
             stage: start.stage,
             response: None,
+            item: None,
         };
         match (&block.role, &block.kind) {
             (Role::User, ContentKind::Text) if !block.speculative() => {
@@ -997,7 +1001,10 @@ impl NovaSonicSpeechSession {
                     let refused = self.ledger.response_completed(response, at);
                     self.or_drop(refused);
                 }
-                match self.ledger.input_committed(at) {
+                let item = InputItemId::from_provider(Some(&start.content_id))
+                    .unwrap_or_else(|| self.ledger.assign_item());
+                block.item = Some(item.clone());
+                match self.ledger.input_committed(item, at) {
                     Ok(()) => {
                         self.turns.open = true;
                         self.turns.speech_reported = false;
@@ -1040,9 +1047,11 @@ impl NovaSonicSpeechSession {
         if block.speculative() {
             return;
         }
+        let item = block.item.clone();
         match (&block.role, block.response) {
             (Role::User, _) => {
-                let refused = self.ledger.input_transcribed(text.content, at);
+                let item = item.unwrap_or_else(|| self.ledger.assign_item());
+                let refused = self.ledger.input_transcribed(item, text.content, at);
                 self.or_drop(refused);
             }
             (Role::Assistant, Some(response)) => {
@@ -1244,7 +1253,8 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
 
     /// Refused: Nova Sonic's turn detection commits the input.
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(Instant::now())
+        let item = self.ledger.assign_item();
+        self.ledger.commit_input(item, Instant::now())
     }
 
     /// Refused: Nova Sonic creates every response.

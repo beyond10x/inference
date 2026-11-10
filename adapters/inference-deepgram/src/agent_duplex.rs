@@ -50,7 +50,9 @@
 //!   cancellation and truncation by the caller are refused as unsupported: the protocol has no
 //!   message for them.
 //! * `ConversationText` of the user is the end of a user turn: `InputCommitted`, then
-//!   `InputTranscribed`.
+//!   `InputTranscribed`. The API names no turn, so the binding names each user turn by the next
+//!   `turn-N` of the ledger's per-session counter, taken at the commit and given to the
+//!   transcript.
 //! * A response begins at `AgentStartedSpeaking`, or at a binary frame or a client-side
 //!   `FunctionCallRequest` while none is in progress. Its audio frames count samples from its
 //!   start; `linear16` ending in half a sample keeps that byte for the next frame. It completes
@@ -1207,9 +1209,10 @@ impl DeepgramAgentSession {
                 content,
             } => {
                 self.finish_trailing(now);
-                let committed = self.ledger.input_committed(now);
+                let item = self.ledger.assign_item();
+                let committed = self.ledger.input_committed(item.clone(), now);
                 self.or_drop(committed);
-                let heard = self.ledger.input_transcribed(content, now);
+                let heard = self.ledger.input_transcribed(item, content, now);
                 self.or_drop(heard);
                 self.awaiting_reply = self.current.is_none();
             }
@@ -1350,7 +1353,8 @@ impl SpeechSessionHandle for DeepgramAgentSession {
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(Instant::now())
+        let item = self.ledger.assign_item();
+        self.ledger.commit_input(item, Instant::now())
     }
 
     fn create_response(&mut self) -> Result<(), SessionError> {

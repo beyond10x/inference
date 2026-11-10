@@ -545,10 +545,22 @@ fn audio_in_gives_audio_and_transcript_out_on_one_response_id() {
         commits, 1,
         "the server's acknowledgement of the caller's commit is not a second commit"
     );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        SessionEvent::InputTranscribed(heard) if heard.text == "what time is it"
-    )));
+    let turn = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::InputCommitted(committed) => Some(committed.item.as_str()),
+            _ => None,
+        })
+        .expect("the caller's commit is recorded");
+    assert_eq!(turn, "turn-1", "the binding names the caller's commit");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::InputTranscribed(heard)
+                if heard.text == "what time is it" && heard.item.as_str() == turn
+        )),
+        "the transcript naming the server's item finds the caller's turn: {events:#?}"
+    );
     assert_eq!(transcript(&events, response), "It is noon");
     let frames: Vec<&AudioFrame> = events
         .iter()
