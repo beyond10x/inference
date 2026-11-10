@@ -49,7 +49,6 @@ use crate::tools::ToolsDomain;
 
 pub use inference_duplex::DeliverSessionEventError;
 
-/// The scripted mock native speech model.
 #[cfg(feature = "duplex")]
 pub mod mock;
 
