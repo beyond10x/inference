@@ -15,7 +15,7 @@ relations:
 - decides: story:tool-authority-schema-keywords
 - decides: story:waiting-sends-land-in-the-order-they-started-waiting
 - decides: story:withdrawn-ingress-send-gives-back-its-sequence
-revision: 2
+revision: 4
 ---
 ## Decision
 
@@ -43,7 +43,9 @@ which the move to proposed requires.
 ## Wave plan
 
 Derived from `aep plan artifact waves --kind story --status active` (aep 0.79.0) on 2026-11-10,
-after every story was scoped by `aep:story-scoper` and its typed scope written:
+after every story was scoped by `aep:story-scoper` and its typed scope written (the last run, after
+story:waiting-sends-land-in-the-order-they-started-waiting was scoped; the run before it listed that
+story as unassessed):
 
 ```
 wave 1
@@ -54,6 +56,7 @@ wave 1
   story:ess-defect-fixes
   story:live-session-send-after-its-own-turn (inferred)
   story:tool-authority-schema-keywords (inferred)
+  story:waiting-sends-land-in-the-order-they-started-waiting (inferred)
   story:withdrawn-ingress-send-gives-back-its-sequence
 wave 2
   story:realtime-voice-demo (inferred)
@@ -62,7 +65,7 @@ collision: story:docs-build-without-warnings story:signed-url-token-copies adapt
 collision: story:duplex-turn-ids story:realtime-voice-demo examples/realtime-voice/tests/acceptance.rs
 collision: story:duplex-turn-ids story:signed-url-token-copies adapters/inference-elevenlabs/src/agent.rs (inferred)
 collision: story:duplex-turn-ids story:signed-url-token-copies adapters/inference-elevenlabs/src/agent_duplex.rs
-unassessed: story:waiting-sends-land-in-the-order-they-started-waiting
+2 wave(s), 4 collision(s), 0 unassessed
 ```
 
 This wave is wave 1 of that plan, less the stories that cannot run now. story:signed-url-token-copies
@@ -78,7 +81,7 @@ collides with two stories of wave 1 and waits for wave 2 with story:realtime-voi
 | U4 | story:tool-authority-schema-keywords | `crates/inference-pipeline/src/nodes/tool_authority.rs`, a new test in `crates/inference/tests` |
 | U5 | story:docs-build-without-warnings | `Taskfile.yml`, crate-root docs of `inference` and four adapters |
 | U6 | story:withdrawn-ingress-send-gives-back-its-sequence | `crates/inference-runtime/src/drive.rs`, two adversary cases from `f54cb70` |
-| U7 | story:waiting-sends-land-in-the-order-they-started-waiting | `crates/inference-runtime/src/queue.rs` (joins once scoped and disjoint) |
+| U7 | story:waiting-sends-land-in-the-order-they-started-waiting | `crates/inference-runtime/src/queue.rs`, a new test file |
 
 All scopes rest on `story-scoper` readings; which lines are cited and which inferred is in each
 story's `## Scope`. `CHANGELOG.md` is the coordinator's: no unit edits it; each reports its line
@@ -121,8 +124,8 @@ to `main` through the bot route, and its merge once CI is green. No release, no 
 ## Pre-flight
 
 Main checkout clean on `main` at `af93222a`; no managed tree of this repository before this wave;
-`/` 67 G free (floor 30 G); load 45. The host's default sccache server (port 4226) does not answer,
-so every build of this wave uses its own server (port 4321, `~/.cache/sccache/inference`).
+`/` 67 G free (floor 30 G); load 45. The shared compiler cache did not answer, so the wave's builds
+use a cache of their own.
 
 ## Integration
 
