@@ -305,7 +305,8 @@ impl SpeechSessionHandle for Session {
                     self.transcripts += 1;
                     let transcript = SessionEvent::InputTranscribed(InputTranscribed {
                         session_id: started.session_id,
-                        item: InputItemId::new(format!("turn-{}", self.transcripts)),
+                        item: InputItemId::new(format!("turn-{}", self.transcripts))
+                            .expect("a non-empty id"),
                         text,
                     });
                     if matches!(self.answering, Some((_, true))) {

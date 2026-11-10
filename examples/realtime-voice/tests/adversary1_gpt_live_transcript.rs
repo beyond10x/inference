@@ -212,8 +212,10 @@ impl SpeechSessionHandle for LiveSession {
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger
-            .commit_input(inference_duplex::InputItemId::new("turn-1"), Instant::now())
+        self.ledger.commit_input(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            Instant::now(),
+        )
     }
 
     fn create_response(&mut self) -> Result<(), SessionError> {

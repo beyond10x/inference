@@ -219,7 +219,10 @@ fn input_passes_as_it_is_in_the_session_format_and_any_other_format_is_refused()
         })
     );
     ledger
-        .commit_input(inference_duplex::InputItemId::new("turn-1"), now)
+        .commit_input(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            now,
+        )
         .expect("a manual commit");
     let events = drain(&mut ledger);
     assert_eq!(events.len(), 2, "{events:#?}");
@@ -332,7 +335,10 @@ fn a_model_without_manual_turns_refuses_the_operations_that_need_them() {
     server.auto_interrupt = true;
     let mut ledger = open(&server_turns(), server, now);
     assert_eq!(
-        ledger.commit_input(inference_duplex::InputItemId::new("turn-1"), now),
+        ledger.commit_input(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            now
+        ),
         Err(SessionError::Unsupported(Unsupported::ManualCommit))
     );
     assert_eq!(
@@ -623,7 +629,10 @@ fn a_closed_transport_fails_the_session_at_once_and_a_closed_session_takes_nothi
         }))
     );
     assert_eq!(
-        closing.commit_input(inference_duplex::InputItemId::new("turn-1"), now),
+        closing.commit_input(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            now
+        ),
         Err(SessionError::NotOpen(SpeechSessionStateConflict {
             current: SpeechSessionState::Closed
         }))
@@ -1151,7 +1160,7 @@ fn the_end_delivers_every_received_event_still_held_before_it() {
         let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
         ledger
             .input_transcribed(
-                inference_duplex::InputItemId::new("turn-1"),
+                inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
                 "hello".to_owned(),
                 now,
             )
@@ -1246,7 +1255,10 @@ fn usage_held_for_no_response_is_recorded_before_any_end_of_the_session() {
 
     let mut closed = open(&server_turns(), server_config(), start);
     closed
-        .input_committed(inference_duplex::InputItemId::new("turn-1"), start)
+        .input_committed(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            start,
+        )
         .expect("open");
     closed.hold_usage(held(20));
     closed.hold_usage(held(50));
@@ -1254,7 +1266,10 @@ fn usage_held_for_no_response_is_recorded_before_any_end_of_the_session() {
     closed.close().expect("open");
     let mut failed = open(&server_turns(), server_config(), start);
     failed
-        .input_committed(inference_duplex::InputItemId::new("turn-1"), start)
+        .input_committed(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            start,
+        )
         .expect("open");
     failed.hold_usage(held(50));
     let _ = drain(&mut failed);
@@ -1266,7 +1281,10 @@ fn usage_held_for_no_response_is_recorded_before_any_end_of_the_session() {
         .expect("open");
     let mut stalled = open(&server_turns(), server_config(), start);
     stalled
-        .input_committed(inference_duplex::InputItemId::new("turn-1"), start)
+        .input_committed(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            start,
+        )
         .expect("open");
     stalled.hold_usage(held(50));
     let _ = drain(&mut stalled);

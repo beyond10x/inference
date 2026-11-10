@@ -1077,7 +1077,7 @@ impl SessionLedger {
     /// same id to the turn's transcript.
     pub fn assign_item(&mut self) -> InputItemId {
         self.items_assigned += 1;
-        InputItemId::new(format!("turn-{}", self.items_assigned))
+        InputItemId(format!("turn-{}", self.items_assigned))
     }
 
     /// The provider's turn detection committed the input, naming the turn `item`. With `auto_response` on it owes a

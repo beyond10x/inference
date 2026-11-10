@@ -198,7 +198,10 @@ fn the_bound_runs_once_the_providers_turn_detection_ends_a_turn_with_auto_respon
     let mut ledger = open(config(TurnDetection::ServerVad, true), start);
     ledger.speech_stopped(at(16_000), start).expect("observed");
     ledger
-        .input_committed(inference_duplex::InputItemId::new("turn-1"), start)
+        .input_committed(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            start,
+        )
         .expect("committed");
     assert!(
         ledger.check_liveness(start + LIMIT * 3),
