@@ -404,8 +404,24 @@ pub(crate) struct GuardedSender<E> {
     pub(crate) consumer: Option<NodeId>,
     pub(crate) signals: Arc<Signals>,
     pub(crate) ended: AtomicBool,
-    /// The last sequence the queue took on each stream.
-    pub(crate) sequences: Mutex<HashMap<StreamId, i64>>,
+    /// What the queue took on each stream, and what is on its way into it.
+    pub(crate) sequences: Mutex<HashMap<StreamId, Sequences>>,
+}
+
+/// The sequences of one stream along one edge: the highest one the queue took, and those of the
+/// sends under way, which the queue may still take or which give theirs back. The stream's last
+/// is the highest of them all, so a send given up gives back exactly its own sequence, in
+/// whatever order sends are given up.
+#[derive(Debug, Default)]
+pub(crate) struct Sequences {
+    taken: Option<i64>,
+    under_way: Vec<i64>,
+}
+
+impl Sequences {
+    fn last(&self) -> Option<i64> {
+        self.under_way.iter().copied().chain(self.taken).max()
+    }
 }
 
 impl<P> GuardedSender<QueueSender<P>> {
@@ -435,34 +451,53 @@ impl<P> GuardedSender<QueueSender<P>> {
         }
     }
 
-    fn sequences(&self) -> MutexGuard<'_, HashMap<StreamId, i64>> {
+    fn sequences(&self) -> MutexGuard<'_, HashMap<StreamId, Sequences>> {
         self.sequences
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Takes `sequence` on `stream_id` as the edge's last and answers the one it replaced, or
-    /// refuses it when it is not greater than the last.
-    fn advance(&self, stream_id: StreamId, sequence: i64) -> Result<Option<i64>, i64> {
+    /// Puts `sequence` on `stream_id` under way, or refuses it with the stream's last when it is
+    /// not greater than that.
+    fn advance(&self, stream_id: StreamId, sequence: i64) -> Result<(), i64> {
         let mut sequences = self.sequences();
-        match sequences.get(&stream_id) {
-            Some(&last) if sequence <= last => Err(last),
-            previous => {
-                let previous = previous.copied();
-                sequences.insert(stream_id, sequence);
-                Ok(previous)
+        let stream = sequences.entry(stream_id).or_default();
+        match stream.last() {
+            Some(last) if sequence <= last => Err(last),
+            _ => {
+                stream.under_way.push(sequence);
+                Ok(())
             }
         }
     }
 
-    /// Gives `sequence` back after the edge refused its envelope, unless a later one was taken.
-    fn restore(&self, stream_id: StreamId, sequence: i64, previous: Option<i64>) {
+    /// The send of `sequence` on `stream_id` ended: the queue took its envelope when `taken`,
+    /// and otherwise the sequence is given back.
+    fn settle(&self, stream_id: StreamId, sequence: i64, taken: bool) {
         let mut sequences = self.sequences();
-        if sequences.get(&stream_id) == Some(&sequence) {
-            match previous {
-                Some(previous) => sequences.insert(stream_id, previous),
-                None => sequences.remove(&stream_id),
-            };
+        if let Some(stream) = sequences.get_mut(&stream_id) {
+            if let Some(at) = stream.under_way.iter().position(|&held| held == sequence) {
+                stream.under_way.swap_remove(at);
+            }
+            if taken {
+                stream.taken = stream.taken.max(Some(sequence));
+            }
+        }
+    }
+}
+
+/// A send of a [`GuardedSender`] under way, with the sequence it advanced. Dropped before it
+/// ended, it gives the sequence back: a send of the queue that has not answered has never pushed
+/// its envelope, so the queue took nothing and the same envelope sent again is taken.
+struct Underway<'a, P> {
+    sender: &'a GuardedSender<QueueSender<P>>,
+    checked: Option<(StreamId, i64)>,
+}
+
+impl<P> Drop for Underway<'_, P> {
+    fn drop(&mut self) {
+        if let Some((stream_id, sequence)) = self.checked.take() {
+            self.sender.settle(stream_id, sequence, false);
         }
     }
 }
@@ -477,10 +512,10 @@ impl<P: Send + 'static> OutputEndpoint<P> for GuardedSender<QueueSender<P>> {
             if guarded && !self.signals.admits_input() {
                 return Err(SendError::Closed(envelope));
             }
-            let mut taken = None;
+            let mut under_way = None;
             if let Some((stream_id, sequence, producer)) = checked {
                 match self.advance(stream_id, sequence) {
-                    Ok(previous) => taken = Some((stream_id, sequence, previous)),
+                    Ok(()) => under_way = Some((stream_id, sequence)),
                     Err(last) => {
                         self.signals.refused(SequenceNotIncreasing {
                             channel: self.channel,
@@ -493,10 +528,15 @@ impl<P: Send + 'static> OutputEndpoint<P> for GuardedSender<QueueSender<P>> {
                     }
                 }
             }
-            if let Err(refused) = self.inner.send(envelope).await {
-                if let Some((stream_id, sequence, previous)) = taken {
-                    self.restore(stream_id, sequence, previous);
-                }
+            let mut underway = Underway {
+                sender: self,
+                checked: under_way,
+            };
+            let sent = self.inner.send(envelope).await;
+            if let Some((stream_id, sequence)) = underway.checked.take() {
+                self.settle(stream_id, sequence, sent.is_ok());
+            }
+            if let Err(refused) = sent {
                 if let (SendError::Closed(_), Some(node_id)) = (&refused, self.consumer)
                     && !self.inner.is_closed_to_senders()
                 {
