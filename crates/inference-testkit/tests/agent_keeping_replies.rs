@@ -194,34 +194,22 @@ fn second_turn_opened(keeping: bool) -> (GenerationState, usize, usize) {
         .expect("the cascade has its model node")
         .clone();
     let run_id = RunId::generate();
-    let agent = AgentNode::new(
-        run_id,
-        mocks.generator,
-        reply,
-        cascade.ids.llm_turns,
-        RunLog::new(),
-    );
+    let agent = AgentNode::new(run_id, mocks.generator, reply, RunLog::new());
     let mut agent = if keeping {
         agent.keeping_replies()
     } else {
         agent
     };
     let handle = agent.handle();
-    let (input, turns, output) = (Edge::default(), Edge::default(), Edge::default());
+    let (input, output) = (Edge::default(), Edge::default());
     let implementation: &mut dyn NodeImplementation<CascadePayload> = &mut agent;
     block_on(implementation.describe(&node));
     block_on(implementation.prepare()).expect("the node prepares");
     block_on(implementation.start(NodeEndpoints {
-        inputs: vec![
-            NodeInput {
-                port_id: cascade.ids.llm_turns,
-                endpoint: Box::new(turns.clone()),
-            },
-            NodeInput {
-                port_id: cascade.ids.usage.llm,
-                endpoint: Box::new(input.clone()),
-            },
-        ],
+        inputs: vec![NodeInput {
+            port_id: cascade.ids.usage.llm,
+            endpoint: Box::new(input.clone()),
+        }],
         outputs: vec![NodeOutput {
             port_id: cascade.ids.usage.stt,
             endpoint: Box::new(output.clone()),
@@ -230,7 +218,7 @@ fn second_turn_opened(keeping: bool) -> (GenerationState, usize, usize) {
     .expect("the node starts");
 
     let first = TurnId::generate();
-    turns.put(
+    input.put(
         run_id,
         StreamEvent::TurnOpened(TurnOpened {
             turn_id: first,
@@ -244,7 +232,7 @@ fn second_turn_opened(keeping: bool) -> (GenerationState, usize, usize) {
             text: "hi".to_owned(),
         }),
     );
-    turns.put(
+    input.put(
         run_id,
         StreamEvent::TurnCompleted(TurnCompleted { turn_id: first }),
     );
@@ -256,7 +244,7 @@ fn second_turn_opened(keeping: bool) -> (GenerationState, usize, usize) {
         "the first turn is answered: {:?}",
         handle.generations()
     );
-    turns.put(
+    input.put(
         run_id,
         StreamEvent::TurnOpened(TurnOpened {
             turn_id: TurnId::generate(),
@@ -275,7 +263,6 @@ fn second_turn_opened(keeping: bool) -> (GenerationState, usize, usize) {
     let superseded = handle.superseded().len();
     let completed = output.completed();
     input.close();
-    turns.close();
     block_on(implementation.drain()).expect("the node drains");
     block_on(implementation.stop());
     (state, superseded, completed)

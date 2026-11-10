@@ -431,7 +431,7 @@ fn declare_into_adds_a_pipeline_beside_another() {
             .map(|node| node.name().to_owned())
             .collect::<BTreeSet<_>>()
     };
-    assert_eq!(names.len(), 11);
+    assert_eq!(names.len(), 10);
     assert_eq!(
         names,
         reference

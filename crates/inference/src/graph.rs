@@ -81,7 +81,6 @@
 //!     let policy = g.node("turn policy", NodeRole::Policy, Vec::new());
 //!     let stt = g.node("stt", NodeRole::Model, Vec::new());
 //!     let input_gate = g.node("input gate", NodeRole::Policy, Vec::new());
-//!     let turn_split = g.node("turn split", NodeRole::FanOut, Vec::new());
 //!     let llm = g.node("agent", NodeRole::Model, vec![Capability::OutputStreaming]);
 //!     let text_split = g.node("text split", NodeRole::FanOut, Vec::new());
 //!     let output_gate = g.node("output gate", NodeRole::Policy, Vec::new());
@@ -105,7 +104,6 @@
 //!     let gate_turns = g.input_port::<modality::Control>(&input_gate, "turns");
 //!     let gate_turns_out = g.output_port::<modality::Control>(&input_gate, "turns_out");
 //!     let user_input = g.input_port::<modality::Text>(&llm, "user_input");
-//!     let llm_turns = g.input_port::<modality::Control>(&llm, "turns");
 //!     let answer = g.output_port::<modality::Text>(&llm, "committed_text");
 //!     let answered = g.input_port::<modality::Text>(&text_split, "text");
 //!     let to_gate = g.output_port::<modality::Text>(&text_split, "gate");
@@ -117,9 +115,6 @@
 //!     let spoken = g.output_port::<modality::Audio>(&tts, "audio");
 //!     let playing = g.input_port::<modality::Audio>(&sink, "audio");
 //!     let receipts = g.output_port::<modality::Control>(&sink, "played");
-//!     let split_turns = g.input_port::<modality::Control>(&turn_split, "turns");
-//!     let turns_to_llm = g.output_port::<modality::Control>(&turn_split, "llm");
-//!     let turns_to_sink = g.output_port::<modality::Control>(&turn_split, "speaker");
 //!     let sink_turns = g.input_port::<modality::Control>(&sink, "turns");
 //!     let tts_playback = g.output_port::<modality::Control>(&tts, "playback");
 //!     let llm_played = g.input_port::<modality::Control>(&llm, "played");
@@ -131,9 +126,7 @@
 //!     g.connect(&transcript, &gate_in, capacity, pause);
 //!     g.connect(&turns_out, &gate_turns, capacity, pause);
 //!     g.connect(&gate_out, &user_input, capacity, pause);
-//!     g.connect(&gate_turns_out, &split_turns, capacity, pause);
-//!     g.connect(&turns_to_llm, &llm_turns, capacity, pause);
-//!     g.connect(&turns_to_sink, &sink_turns, capacity, pause);
+//!     g.connect(&gate_turns_out, &sink_turns, capacity, pause);
 //!     g.connect(&answer, &answered, capacity, pause);
 //!     g.connect(&to_gate, &held, capacity, pause);
 //!     g.connect(&passed, &speak, capacity, pause);
@@ -153,7 +146,7 @@
 //! let validated = declaration.validate(pipeline_id)?;
 //! let planned = declaration.plan(validated, &catalog)?;
 //! assert_eq!(planned.pipeline_id(), pipeline_id);
-//! assert_eq!(declaration.nodes().count(), 11);
+//! assert_eq!(declaration.nodes().count(), 10);
 //!
 //! // What the run's edges and the session carry: a control event among the rest.
 //! assert!(matches!(Payload::from(ControlKind::Commit), Payload::Control(ControlKind::Commit)));
