@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:waiting-sends-land-in-the-order-they-started-waiting
 kind: story
-status: active
+status: implemented
 title: Waiting sends on one queue land in the order they started waiting
 summary: Order the sends that wait for room under pause and drop_stale_epochs without making known_contents untruthful.
 tags:
@@ -16,10 +16,11 @@ scope:
   path: crates/inference-runtime/src/queue.rs
 - confidence: inferred
   path: crates/inference-runtime/tests/waiting_send_order.rs
-revision: 8
+revision: 9
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-10T00:16:58Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-10T00:16:59Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-10T02:46:22Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 

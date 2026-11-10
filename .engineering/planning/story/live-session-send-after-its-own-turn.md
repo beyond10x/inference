@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:live-session-send-after-its-own-turn
 kind: story
-status: active
+status: implemented
 title: A session's send of an input the run took is never refused by the close that input caused
 tags:
 - from-finding
@@ -16,10 +16,11 @@ scope:
   path: crates/inference-facade/tests/send_taken_then_drained.rs
 - confidence: cited
   path: crates/inference/tests/agent.rs
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-10T00:16:58Z", actor: "human:timo", revision: 6}
 - {from: "proposed", to: "active", at: "2026-11-10T00:16:58Z", actor: "human:timo", revision: 7}
+- {from: "active", to: "implemented", at: "2026-11-10T02:46:22Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 ## Context
 

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T02:46:10Z",
+  "actor": "human:timo",
+  "artifact": "story:live-session-send-after-its-own-turn",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test --workspace --all-features --no-fail-fast on wave/defects-2026-11-10 at 436d7c96: 3934 passed, 0 failed, 60 ignored, exit 0; send_taken_then_drained 2 passed",
+    "reference": "coordinator gate on wave/defects-2026-11-10 at 436d7c96, logs in the coordinator's session scratch gate/09-test.log, 07b-clippy.log, 08-doc.log"
+  }
+}

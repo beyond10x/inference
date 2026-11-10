@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:cascade-turn-spans-in-a-burst
 kind: story
-status: active
+status: implemented
 title: A cascade answers each of two turns that arrive in a burst with its own reply
 tags:
 - from-finding
@@ -32,10 +32,11 @@ scope:
   path: examples/local-voice-cascade/tests/adversary1_barge_in_timing.rs
 - confidence: inferred
   path: website/docs/examples/local-voice-cascade.md
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-10T00:16:57Z", actor: "human:timo", revision: 6}
 - {from: "proposed", to: "active", at: "2026-11-10T00:16:57Z", actor: "human:timo", revision: 7}
+- {from: "active", to: "implemented", at: "2026-11-10T02:46:21Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 ## Context
 
