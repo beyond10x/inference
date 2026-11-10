@@ -1003,6 +1003,11 @@ impl<P: SessionPayload> LiveSession<P> {
     /// [`InputError::Forward`] when the ingress refused the envelope; no event is recorded.
     /// [`InputError::Refused`] as well when the session was cancelled while the ingress took the
     /// envelope, which the cancelled run then discards; no event is recorded.
+    ///
+    /// `Ok` once the ingress took the envelope, also when the session moved to Draining, or on
+    /// to Closed by that drain, while the ingress took it: the run took the input. `InputSent`
+    /// is recorded only while the session is Ready, so an input taken after it left Ready is
+    /// answered `Ok` with no `InputSent` and is not counted.
     pub async fn send(&self, mut envelope: EventEnvelope<P>) -> Result<(), InputError<P>> {
         let ingress = lock(&self.ingresses)
             .iter()
@@ -1025,9 +1030,19 @@ impl<P: SessionPayload> LiveSession<P> {
             .send(envelope)
             .await
             .map_err(|error| InputError::Forward(Box::new(error)))?;
-        let sent = lock(&self.shared.sessions)
-            .send_input(self.shared.session_id)
-            .map_err(InputError::Refused)?;
+        let sent = lock(&self.shared.sessions).send_input(self.shared.session_id);
+        let sent = match sent {
+            Ok(sent) => sent,
+            Err(SessionMoveError::WrongState(conflict))
+                if matches!(
+                    conflict.current,
+                    SessionState::Draining | SessionState::Closed
+                ) && !self.cancelled.load(Ordering::Acquire) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(InputError::Refused(error)),
+        };
         self.shared.record(SessionEvent::InputSent(sent));
         if let Some(text) = input {
             lock(&self.turn).texts.push(text);
