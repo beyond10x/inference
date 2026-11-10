@@ -75,7 +75,7 @@ timeline:
     outcome: accepted
   - at: 2026-01-05T09:00:06Z
     command: inference.duplex.TranscribeInput
-    input: {session_id: {$instance: session}, text: Berlin}
+    input: {session_id: {$instance: session}, item: turn-1, text: Berlin}
     outcome: transcribed
   - at: 2026-01-05T09:00:07Z
     command: inference.duplex.EmitOutputTranscript

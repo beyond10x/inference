@@ -38,6 +38,13 @@
 //!   second commit; one the server's own turn detection makes is. A caller's commit the server
 //!   refuses (an `error` whose code begins `input_audio_buffer_commit`) is owed no
 //!   acknowledgement.
+//! * A user turn is named by the provider's item id: the `item_id` of the server's
+//!   `input_audio_buffer.committed` names the turn its own turn detection ends, and the
+//!   `item_id` of `conversation.item.input_audio_transcription.completed` names the turn it
+//!   transcribes. A caller's commit is named by an id the binding assigns at the commit
+//!   (`turn-1`, `turn-2`, ...), and the `item_id` of the `input_audio_buffer.committed` that
+//!   acknowledges it is mapped onto that id, so the transcript naming the item finds the caller's
+//!   turn.
 //! * The usage of `conversation.item.input_audio_transcription.completed` is a usage record: in
 //!   tokens, the input tokens as `input_audio_tokens` and the output tokens as
 //!   `output_text_tokens`, a count the server left out unknown; in seconds, as `input_audio_ms`.
@@ -102,10 +109,10 @@ use inference_core::model::{
 };
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ProviderFrame, Quantity, QuantityKind, ResponseId, ResponseUsage,
-    SessionConfig as SpeechConfig, SessionError, SessionEvent, SessionFailure, SessionFailureKind,
-    SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionHandle, SpeechSessionId,
-    TokenCounts, TranscriptionUsage, TuningOption, TuningSupport,
+    InputItemId, NativeSpeechModel, OpenError, ProviderFrame, Quantity, QuantityKind, ResponseId,
+    ResponseUsage, SessionConfig as SpeechConfig, SessionError, SessionEvent, SessionFailure,
+    SessionFailureKind, SessionLedger, SpeechCallId, SpeechCapabilities, SpeechSessionHandle,
+    SpeechSessionId, TokenCounts, TranscriptionUsage, TuningOption, TuningSupport,
     TurnDetection as SpeechTurnDetection, TurnSensitivity, Unsupported, UsageTotal, reported,
 };
 use inference_tools::Json;
@@ -463,7 +470,9 @@ impl NativeSpeechModel for OpenAiRealtime {
             responses: HashMap::new(),
             audio_items: HashMap::new(),
             emitted: HashMap::new(),
-            caller_commits: 0,
+            caller_commits: VecDeque::new(),
+            item_aliases: HashMap::new(),
+            last_item: None,
             awaiting_done: VecDeque::new(),
             undecodable: 0,
             server_errors: Vec::new(),
@@ -534,8 +543,13 @@ pub struct OpenAiRealtimeSession {
     audio_items: HashMap<ResponseId, (String, u32)>,
     /// The output samples each response emitted, the position of its next frame.
     emitted: HashMap<ResponseId, u64>,
-    /// Caller commits the server has not acknowledged yet.
-    caller_commits: usize,
+    /// The turns of the caller's commits the server has not acknowledged yet, oldest first.
+    caller_commits: VecDeque<InputItemId>,
+    /// The provider's item id of each acknowledged caller commit, to the turn the binding named at
+    /// the commit.
+    item_aliases: HashMap<String, InputItemId>,
+    /// The turn committed last, which a transcript naming no item belongs to.
+    last_item: Option<InputItemId>,
     /// The responses the server created and has not ended with `response.done`, oldest first:
     /// Realtime ends its responses in the order it created them, so a `response.done` without
     /// its id ends the oldest one it may end ([`Awaiting::by_id_only`]), and one with its id
@@ -799,6 +813,18 @@ impl OpenAiRealtimeSession {
         }
     }
 
+    /// The turn a provider item id names: the turn of the caller's commit it acknowledged, else
+    /// the provider's id itself; with none named, the turn committed last.
+    fn item_named(&mut self, named: Option<&str>) -> InputItemId {
+        match InputItemId::from_provider(named) {
+            Some(id) => self.item_aliases.get(id.as_str()).cloned().unwrap_or(id),
+            None => match self.last_item.clone() {
+                Some(item) => item,
+                None => self.ledger.assign_item(),
+            },
+        }
+    }
+
     /// The contract's id of a provider response, when the session created one under it.
     fn response(&self, provider: &str) -> Option<ResponseId> {
         self.responses.get(provider).copied()
@@ -892,17 +918,18 @@ impl OpenAiRealtimeSession {
                 }
             }
             ServerEvent::InputTranscript {
+                item_id,
                 transcript,
                 usage,
                 unreadable_usage,
-                ..
             } => {
+                let item = self.item_named(item_id.as_deref());
                 let mut frame = self.ledger.provider_frame();
                 frame.heard(now);
                 let mut unread = Vec::new();
                 match transcript {
                     Some(transcript) => {
-                        let recorded = frame.input_transcribed(transcript, now);
+                        let recorded = frame.input_transcribed(item, transcript, now);
                         drop_refusal(&mut frame, recorded);
                     }
                     None => unread.push(
@@ -956,11 +983,13 @@ impl OpenAiRealtimeSession {
                     self.or_drop(recorded);
                 }
             }
-            ServerEvent::AudioCommitted { .. } => {
-                if self.caller_commits > 0 {
-                    self.caller_commits -= 1;
+            ServerEvent::AudioCommitted { item_id, .. } => {
+                if let Some(turn) = self.caller_commits.pop_front() {
+                    self.item_aliases.insert(item_id, turn);
                 } else {
-                    let recorded = self.ledger.input_committed(now);
+                    let item = self.item_named(Some(&item_id));
+                    self.last_item = Some(item.clone());
+                    let recorded = self.ledger.input_committed(item, now);
                     self.or_drop(recorded);
                 }
             }
@@ -1088,8 +1117,8 @@ impl OpenAiRealtimeSession {
                     .code
                     .as_deref()
                     .is_some_and(|code| code.starts_with("input_audio_buffer_commit"));
-                if refused_commit && self.caller_commits > 0 {
-                    self.caller_commits -= 1;
+                if refused_commit {
+                    self.caller_commits.pop_front();
                 }
                 self.server_error_count = self.server_error_count.saturating_add(1);
                 kept_push(&mut self.server_errors, Self::SERVER_ERRORS_KEPT, error);
@@ -1181,8 +1210,10 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(Instant::now())?;
-        self.caller_commits += 1;
+        let item = self.ledger.assign_item();
+        self.ledger.commit_input(item.clone(), Instant::now())?;
+        self.last_item = Some(item.clone());
+        self.caller_commits.push_back(item);
         self.send(|client| Box::pin(client.commit_audio()))?;
         if self.ledger.session().config().auto_response {
             self.send(|client| Box::pin(client.create_response()))?;

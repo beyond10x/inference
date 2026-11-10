@@ -117,9 +117,13 @@ impl SpeechSessionHandle for Session {
         if self.spoke {
             self.answered = true;
             let now = Instant::now();
-            self.ledger.input_committed(now)?;
             self.ledger
-                .input_transcribed("What is the capital of France?".to_owned(), now)?;
+                .input_committed(inference_duplex::InputItemId::new("turn-1"), now)?;
+            self.ledger.input_transcribed(
+                inference_duplex::InputItemId::new("turn-1"),
+                "What is the capital of France?".to_owned(),
+                now,
+            )?;
             let response = ResponseId::generate();
             self.ledger.response_created(response, now)?;
             self.ledger.output_audio(response, frame_out(), now)?;
@@ -134,7 +138,8 @@ impl SpeechSessionHandle for Session {
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(Instant::now())
+        self.ledger
+            .commit_input(inference_duplex::InputItemId::new("turn-1"), Instant::now())
     }
 
     fn create_response(&mut self) -> Result<(), SessionError> {

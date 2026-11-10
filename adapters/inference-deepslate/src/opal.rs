@@ -58,6 +58,11 @@
 //!   A transition into `SPEECH` from `SILENCE` or `SPEECH_STARTING` is `SpeechStarted`; one
 //!   into `SILENCE` from `SPEECH` or `SPEECH_ENDING` is `SpeechStopped` and the end of the user
 //!   turn, `InputCommitted`. `UserTranscriptionResult` is `InputTranscribed`, whenever it comes.
+//!   A user turn is named by the `turn_id` of its transcription, which the commit cannot carry, as
+//!   a `VadStateEvent` names none: the binding names each commit with the next `turn-N` of the
+//!   ledger's per-session counter, and a transcription of a `turn_id` not seen before takes the
+//!   oldest commit no transcription has claimed, a later one of the same `turn_id` the same turn;
+//!   a transcription that comes before its commit leaves its turn to the next commit.
 //! * A response is one assistant turn, by its `turn_id`. It begins at `ResponseBegin`, or at
 //!   the first audio chunk or tool call of a turn no response holds; a turn that begins while
 //!   another's response is in progress completes that one first. Audio chunks without a turn
@@ -88,7 +93,7 @@
 //!   session ([`SessionLedger::unreadable_frames`]) and read past.
 //! * Usage: no message carries any, so each response's usage record carries every count unknown.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -103,9 +108,9 @@ use inference_duplex::inference_core::model::{
 };
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseId, SessionConfig, SessionError, SessionEvent,
-    SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId, SpeechCapabilities,
-    SpeechSessionHandle, SpeechSessionId, TuningSupport, TurnDetection,
+    InputItemId, NativeSpeechModel, OpenError, ResponseId, SessionConfig, SessionError,
+    SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
+    SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TuningSupport, TurnDetection,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, oneshot};
@@ -441,6 +446,9 @@ impl NativeSpeechModel for DeepslateOpal {
             write_timeout: self.endpoint.read_timeout,
             turns: HashMap::new(),
             last_turn: None,
+            unclaimed: VecDeque::new(),
+            user_turns: HashMap::new(),
+            ahead: VecDeque::new(),
             call_turns: HashMap::new(),
             answered: HashSet::new(),
             emitted: 0,
@@ -834,6 +842,12 @@ pub struct DeepslateOpalSession {
     turns: HashMap<u32, ResponseId>,
     /// The turn of the latest `ResponseBegin`.
     last_turn: Option<u32>,
+    /// The turns of the commits no transcription has claimed yet, oldest first.
+    unclaimed: VecDeque<InputItemId>,
+    /// The turn each `turn_id` of a user transcription names.
+    user_turns: HashMap<u32, InputItemId>,
+    /// The turns of transcriptions that came before their commit, oldest first.
+    ahead: VecDeque<InputItemId>,
     /// The turn of each call proposed and not yet answered.
     call_turns: HashMap<String, u32>,
     /// Turns whose response in progress proposed a call the caller answered.
@@ -1137,14 +1151,37 @@ impl DeepslateOpalSession {
                     (VadState::Speech | VadState::SpeechEnding, VadState::Silence) => {
                         let stopped = self.ledger.speech_stopped(position, now);
                         self.or_drop(stopped);
-                        let committed = self.ledger.input_committed(now);
+                        let item = match self.ahead.pop_front() {
+                            Some(item) => item,
+                            None => {
+                                let item = self.ledger.assign_item();
+                                self.unclaimed.push_back(item.clone());
+                                item
+                            }
+                        };
+                        let committed = self.ledger.input_committed(item, now);
                         self.or_drop(committed);
                     }
                     _ => {}
                 }
             }
-            ClientBound::UserTranscription { text, .. } => {
-                let heard = self.ledger.input_transcribed(text, now);
+            ClientBound::UserTranscription { text, turn_id, .. } => {
+                let item = match self.user_turns.get(&turn_id) {
+                    Some(item) => item.clone(),
+                    None => {
+                        let item = match self.unclaimed.pop_front() {
+                            Some(item) => item,
+                            None => {
+                                let item = self.ledger.assign_item();
+                                self.ahead.push_back(item.clone());
+                                item
+                            }
+                        };
+                        self.user_turns.insert(turn_id, item.clone());
+                        item
+                    }
+                };
+                let heard = self.ledger.input_transcribed(item, text, now);
                 self.or_drop(heard);
             }
             ClientBound::ToolCallRequest {
@@ -1257,7 +1294,8 @@ impl SpeechSessionHandle for DeepslateOpalSession {
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(Instant::now())
+        let item = self.ledger.assign_item();
+        self.ledger.commit_input(item, Instant::now())
     }
 
     fn create_response(&mut self) -> Result<(), SessionError> {
