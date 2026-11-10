@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T00:58:21Z",
+  "actor": "human:operator",
+  "artifact": "story:tool-authority-schema-keywords",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference --test tool_macro_schema_keywords (base ff0ba010: 1 passed, 6 failed, each 'uses the keyword ... which the tool authority does not validate'; unit 9ea2127d: 7 passed, with adversary lanes 4 and 6 passed)",
+    "reference": "implementor red run on ff0ba010 vs green run on 9ea2127d, unit scratch logs"
+  }
+}
