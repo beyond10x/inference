@@ -22,9 +22,9 @@ use inference_duplex::inference_audio::{AudioFrame, SampleClockPosition};
 use inference_duplex::inference_core::model::Adapter;
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
-    InputTranscribed, NativeSpeechModel, OpenError, ResponseCompleted, ResponseId, ResponseState,
-    SessionConfig, SessionError, SessionEvent, SessionLedger, SpeechCallId, SpeechCapabilities,
-    SpeechSessionHandle, SpeechToolCallState,
+    InputItemId, InputTranscribed, NativeSpeechModel, OpenError, ResponseCompleted, ResponseId,
+    ResponseState, SessionConfig, SessionError, SessionEvent, SessionLedger, SpeechCallId,
+    SpeechCapabilities, SpeechSessionHandle, SpeechToolCallState,
 };
 use inference_testkit::duplex::mock::{MockSpeechModel, Reply, ScriptedTurn};
 use realtime_voice::{
@@ -186,6 +186,7 @@ impl NativeSpeechModel for Provider {
             heard: script().into_iter().map(|turn| turn.heard).collect(),
             answering: None,
             pending: VecDeque::new(),
+            transcripts: 0,
         })
     }
 }
@@ -217,6 +218,8 @@ struct Session {
     answering: Option<(ResponseId, bool)>,
     /// Events [`Shape::GptLive`] delivers before the next of the mock's.
     pending: VecDeque<SessionEvent>,
+    /// The transcripts [`Shape::GptLive`] delivered so far, each named by the next `turn-N`.
+    transcripts: usize,
 }
 
 impl SpeechSessionHandle for Session {
@@ -299,8 +302,11 @@ impl SpeechSessionHandle for Session {
                     let Some(text) = self.heard.pop_front() else {
                         continue;
                     };
+                    self.transcripts += 1;
                     let transcript = SessionEvent::InputTranscribed(InputTranscribed {
                         session_id: started.session_id,
+                        item: InputItemId::new(format!("turn-{}", self.transcripts))
+                            .expect("a non-empty id"),
                         text,
                     });
                     if matches!(self.answering, Some((_, true))) {
