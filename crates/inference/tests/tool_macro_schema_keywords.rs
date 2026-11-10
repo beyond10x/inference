@@ -73,8 +73,8 @@ struct Place {
 #[inference::tool]
 async fn draw(shape: Shape) -> String {
     match shape {
-        Shape::Circle { .. } => "circle".to_owned(),
-        Shape::Square(_) => "square".to_owned(),
+        Shape::Circle { radius } => format!("circle of radius {radius}"),
+        Shape::Square(side) => format!("square of side {side}"),
         Shape::Empty => "empty".to_owned(),
     }
 }
