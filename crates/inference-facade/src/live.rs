@@ -633,6 +633,9 @@ pub enum InputError<P> {
     UnknownIngress(String),
     /// The ingress refused the envelope.
     Forward(Box<SendError<P>>),
+    /// The session was cancelled. Nothing was forwarded when the cancel came first; an envelope
+    /// the ingress took is discarded by the cancelled run. No event is recorded.
+    Cancelled,
 }
 
 impl<P> fmt::Display for InputError<P> {
@@ -641,6 +644,7 @@ impl<P> fmt::Display for InputError<P> {
             Self::Refused(error) => write!(f, "the session admits no input: {error}"),
             Self::UnknownIngress(name) => write!(f, "the pipeline exposes no ingress `{name}`"),
             Self::Forward(_) => f.write_str("the ingress refused the input"),
+            Self::Cancelled => f.write_str("the session was cancelled"),
         }
     }
 }
@@ -1001,11 +1005,12 @@ impl<P: SessionPayload> LiveSession<P> {
     /// [`InputError::Refused`] when the session is not Ready, [`InputError::UnknownIngress`] when
     /// the pipeline exposes no ingress under `port`; nothing is forwarded and no event recorded.
     /// [`InputError::Forward`] when the ingress refused the envelope; no event is recorded.
-    /// [`InputError::Refused`] as well when the session was cancelled while the ingress took the
-    /// envelope, which the cancelled run then discards; no event is recorded.
+    /// [`InputError::Cancelled`] when the session was cancelled: before the forward nothing is
+    /// forwarded; when the cancel came while the ingress took the envelope, the cancelled run
+    /// discards it. No event is recorded.
     ///
     /// Once the ingress took the envelope, a session the application cancelled answers
-    /// `Refused` in whatever state it is in, with no `InputSent` and no turn text. Otherwise
+    /// `Cancelled` in whatever state it is in, with no `InputSent` and no turn text. Otherwise
     /// `Ok`, also when the session moved to Draining, or on
     /// to Closed by that drain, while the ingress took it: the run took the input. `InputSent`
     /// is recorded only while the session is Ready, so an input taken after it left Ready is
@@ -1021,6 +1026,9 @@ impl<P: SessionPayload> LiveSession<P> {
         let Some(ingress) = ingress else {
             return Err(InputError::UnknownIngress(envelope.port));
         };
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(InputError::Cancelled);
+        }
         envelope.session_id = Some(self.shared.session_id);
         envelope.run_id = self.run_id;
         let input = match envelope.payload.session_event() {
@@ -1035,14 +1043,7 @@ impl<P: SessionPayload> LiveSession<P> {
         let sent = {
             let mut sessions = lock(&self.shared.sessions);
             if self.cancelled.load(Ordering::Acquire) {
-                return Err(InputError::Refused(
-                    sessions
-                        .admits_input(self.shared.session_id)
-                        .err()
-                        .unwrap_or(SessionMoveError::WrongState(SessionStateConflict {
-                            current: SessionState::Closed,
-                        })),
-                ));
+                return Err(InputError::Cancelled);
             }
             match sessions.send_input(self.shared.session_id) {
                 Ok(sent) => sent,
