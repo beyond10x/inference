@@ -994,12 +994,13 @@ fn supported(schema: &Json) -> Result<(), String> {
 }
 
 /// The non-negative integer `value` is, as JSON Schema 2020-12 reads one: a number with no
-/// fractional part, `1.0` as much as `1`.
+/// fractional part, `1.0` as much as `1`; one beyond `u64` saturates, a limit that large
+/// meaning the same.
 fn count(value: &Json) -> Option<u64> {
     value.as_u64().or_else(|| {
         value
             .as_f64()
-            .filter(|n| *n >= 0.0 && n.fract() == 0.0 && *n < 1.8e19)
+            .filter(|n| *n >= 0.0 && n.fract() == 0.0)
             .map(|n| n as u64)
     })
 }
