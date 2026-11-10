@@ -133,8 +133,6 @@ use llm_core::{
 };
 use serde_json::Value;
 
-/// Declared tools as `llm` tool specifications, and tool outcomes as `llm` tool results, behind
-/// the `tools` feature.
 #[cfg(feature = "tools")]
 pub mod tools;
 

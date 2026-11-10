@@ -79,12 +79,12 @@
 //! comes back and prints the time to first audio. It is billed.
 
 //!
-//! With feature `duplex`, [`ElevenLabsAgent`] is a conversation with an ElevenLabs agent as a
+//! With feature `duplex`, `ElevenLabsAgent` is a conversation with an ElevenLabs agent as a
 //! native speech model of the `inference-duplex` contract, over the agent WebSocket
-//! `/v1/convai/conversation`: [`agent`] is its wire protocol, with the documentation it was taken
+//! `/v1/convai/conversation`: `agent` is its wire protocol, with the documentation it was taken
 //! from and what that leaves open, and `agent_duplex` says how the conversation maps onto the
-//! contract. It reads messages and frames of at most [`agent::MAX_MESSAGE_BYTES`] (1 MiB). Its
-//! claims are [`agent_claims`], and `records/claims-agent.json` holds the same; `native_duplex`
+//! contract. It reads messages and frames of at most `agent::MAX_MESSAGE_BYTES` (1 MiB). Its
+//! claims are `agent_claims`, and `records/claims-agent.json` holds the same; `native_duplex`
 //! is not among them, since the agent answers speech over a response by interrupting it.
 
 #[cfg(feature = "duplex")]

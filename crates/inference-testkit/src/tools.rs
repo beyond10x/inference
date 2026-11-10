@@ -598,7 +598,6 @@ impl ToolsDomain {
     }
 }
 
-/// The scripted mock of the executor contract, with its log of invocations.
 mod mock_tool_executor;
 
 pub use mock_tool_executor::{Entry, Invocation, MockToolExecutor, Script};

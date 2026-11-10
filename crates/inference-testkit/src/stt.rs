@@ -90,16 +90,10 @@ pub use inference_pipeline::nodes::stt::stream_envelope;
 /// that a test reaches `inference-audio`'s frames through the testkit alone.
 pub use inference_stt;
 
-/// Synthetic audio: tone and silence, generated, never recorded.
 pub mod synthetic_audio;
 
-/// The backend-neutral checks of a streaming STT adapter, generic over any [`Recogniser`], for an
-/// adapter crate to run against its own recogniser.
 pub mod conformance;
 
-/// The STT node of a voice pipeline, behind the `run` feature: an [`SttNode`] recognises each
-/// turn the turn policy opens on one recognition of its recogniser, a [`MockRecogniser`] by
-/// default.
 #[cfg(feature = "run")]
 mod node;
 
