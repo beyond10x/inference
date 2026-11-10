@@ -15,7 +15,7 @@ relations:
 - decides: story:tool-authority-schema-keywords
 - decides: story:waiting-sends-land-in-the-order-they-started-waiting
 - decides: story:withdrawn-ingress-send-gives-back-its-sequence
-revision: 6
+revision: 8
 ---
 ## Decision
 
@@ -141,7 +141,7 @@ Branch `wave/defects-2026-11-10`, managed tree `inference-wave-defects`.
 | U4 | impl/tool-authority-schema-keywords | 9ea2127d | 2: pass 1 no-op, pass 2 fixed | 27c08621 |
 | U5 | impl/docs-build-without-warnings | 7b99b079 | none (doc text and one gate line; the gate step is the check) | 50f6ff35 |
 | U6 | impl/withdrawn-ingress-send-gives-back-its-sequence | fdfeacb1 | 1, fixed | bc841d7a |
-| U7 | impl/waiting-sends-land-in-the-order-they-started-waiting | ae789d7a | 1, no-op (four notes) | 436d7c96 |
+| U7 | impl/waiting-sends-land-in-the-order-they-started-waiting | ae789d7a | 1, no-op (four notes) | d673c3be (first made as 436d7c96) |
 
 Every unit tree was finished, archived and collected once its unit was merged.
 
@@ -180,3 +180,5 @@ before every planned wave is delivered.
 
 - story:tool-authority-more-schema-keywords, from review-result:adversary-u4-schema-keywords-pass-1
 - story:agent-turn-completed-names-its-turn, from review-result:adversary-u2-cascade-burst-pass-2
+
+The commits from the U7 store record on were made again. That record, as first committed, named a path of the coordinator's machine, which the PR's security check refused. The record now names the unit's scratch directory instead. The gate ran at 436d7c96. The tree of its replacement, d673c3be, differs from it only in that one line of the record. The clippy fix is now 99118a0f and the CHANGELOG commit bd2a63ca.
