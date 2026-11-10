@@ -969,13 +969,13 @@ fn supported(schema: &Json) -> Result<(), String> {
                 true
             }
             "prefixItems" | "oneOf" | "anyOf" => match value {
-                Json::Array(schemas) if keyword == "prefixItems" || !schemas.is_empty() => {
+                Json::Array(schemas) if !schemas.is_empty() => {
                     schemas.iter().try_for_each(supported)?;
                     true
                 }
                 _ => false,
             },
-            "minLength" | "maxLength" | "minItems" | "maxItems" => value.is_u64(),
+            "minLength" | "maxLength" | "minItems" | "maxItems" => count(value).is_some(),
             "enum" => value.is_array(),
             "const" => true,
             "minimum" | "maximum" => value.is_number(),
@@ -991,6 +991,17 @@ fn supported(schema: &Json) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The non-negative integer `value` is, as JSON Schema 2020-12 reads one: a number with no
+/// fractional part, `1.0` as much as `1`.
+fn count(value: &Json) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|n| *n >= 0.0 && n.fract() == 0.0 && *n < 1.8e19)
+            .map(|n| n as u64)
+    })
 }
 
 /// Whether `value` is of the JSON Schema type `name`.
@@ -1078,14 +1089,14 @@ fn admits(schema: &Json, value: &Json) -> bool {
         .is_none_or(|constant| equal(constant, value));
     let length_holds = |keyword: &str, within: fn(usize, u64) -> bool| match keywords.get(keyword) {
         None => true,
-        Some(limit) => limit.as_u64().is_some_and(|limit| match value {
+        Some(limit) => count(limit).is_some_and(|limit| match value {
             Json::String(text) => within(text.chars().count(), limit),
             _ => true,
         }),
     };
     let count_holds = |keyword: &str, within: fn(usize, u64) -> bool| match keywords.get(keyword) {
         None => true,
-        Some(limit) => limit.as_u64().is_some_and(|limit| match value {
+        Some(limit) => count(limit).is_some_and(|limit| match value {
             Json::Array(elements) => within(elements.len(), limit),
             _ => true,
         }),
@@ -1444,6 +1455,13 @@ mod tests {
         assert!(supported(&json!({"prefixItems": {"type": "integer"}})).is_err());
         assert!(supported(&json!({"prefixItems": [{"pattern": "a"}]})).is_err());
         assert!(supported(&json!({"minItems": 1.5})).is_err());
+        assert!(supported(&json!({"prefixItems": []})).is_err());
+        assert_eq!(
+            supported(&json!({"minItems": 2.0, "maxLength": 1.0})),
+            Ok(())
+        );
+        assert!(admits(&json!({"maxItems": 1.0}), &json!([1])));
+        assert!(!admits(&json!({"maxItems": 1.0}), &json!([1, 2])));
     }
 
     #[test]
