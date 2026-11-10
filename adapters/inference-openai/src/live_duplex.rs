@@ -34,7 +34,9 @@
 //!   response is what `conformance::native_duplex_evidence` measures on this segmentation; the
 //!   hosted model gave that evidence, so [`claims`] include `native_duplex`.
 //! * Input transcript fragments become one `InputTranscribed` each, in delivery order; the API
-//!   has no complete per-turn transcript. Speech stop and commits are never reported. Speech
+//!   has no complete per-turn transcript. The API names no input item, so each fragment is
+//!   named by the next `turn-N` of the ledger's per-session counter. Speech stop and commits are
+//!   never reported. Speech
 //!   start is reported only over a response: both transcripts are timed on the session
 //!   timeline, so an input fragment whose `start_ms` lies inside what the response in progress
 //!   has spoken (its first output fragment's `start_ms` to its latest fragment's `end_ms`) is
@@ -1083,7 +1085,8 @@ impl OpenAiLiveSession {
                 end_ms,
             } => {
                 self.speech_over(start_ms, end_ms, now);
-                let refused = self.ledger.input_transcribed(delta, now);
+                let item = self.ledger.assign_item();
+                let refused = self.ledger.input_transcribed(item, delta, now);
                 self.or_drop(refused);
             }
             LiveEvent::Backend { event, .. } => match event {
@@ -1165,7 +1168,8 @@ impl SpeechSessionHandle for OpenAiLiveSession {
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(Instant::now())
+        let item = self.ledger.assign_item();
+        self.ledger.commit_input(item, Instant::now())
     }
 
     fn create_response(&mut self) -> Result<(), SessionError> {

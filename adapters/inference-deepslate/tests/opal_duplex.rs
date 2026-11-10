@@ -570,6 +570,19 @@ fn the_end_of_speech_commits_the_turn_and_its_transcription_follows() {
             kinds,
             ["started", "stopped", "committed", "transcribed", "created"]
         );
+        let items: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::InputCommitted(committed) => Some(committed.item.as_str()),
+                SessionEvent::InputTranscribed(heard) => Some(heard.item.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            items,
+            ["turn-1", "turn-1"],
+            "the transcription of turn_id 0 names the commit it belongs to"
+        );
         session.close().unwrap();
     });
 }

@@ -41,6 +41,15 @@ types:
     kind: newtype
     of: String
 
+  # Names one user turn: the provider's own item id where it names one, otherwise a per-session
+  # counter the binding assigns. The commit and the transcript of a turn carry the same value, so a
+  # consumer pairs a transcript with its turn whenever the transcript arrives. Never empty.
+  # read from: docs/design/inference.md:715
+  # read from: docs/design/inference.md:403
+  - name: inference.duplex.InputItemId
+    kind: newtype
+    of: String
+
   # Who ends a user turn: the provider's voice activity detection, its semantic turn detection, or
   # nobody, in which case the caller commits the input and creates each response itself.
   # read from: docs/design/inference.md:398
@@ -579,6 +588,8 @@ commands:
     input:
       - name: session_id
         type: inference.duplex.SpeechSessionId
+      - name: item
+        type: inference.duplex.InputItemId
     outcomes:
       - name: unknown-session
         when_related: {via: input.session_id, exists: false}
@@ -599,6 +610,7 @@ commands:
         payload:
           inference.duplex.InputCommitted:
             session_id: input.session_id
+            item: input.item
         summary: The input accepted so far is one user turn.
 
   # The provider detected the start of speech at a sample of the input; during a response this is
@@ -672,6 +684,8 @@ commands:
     input:
       - name: session_id
         type: inference.duplex.SpeechSessionId
+      - name: item
+        type: inference.duplex.InputItemId
       - name: text
         type: String
     outcomes:
@@ -694,6 +708,7 @@ commands:
         payload:
           inference.duplex.InputTranscribed:
             session_id: input.session_id
+            item: input.item
             text: input.text
         summary: The input transcript is published.
 
@@ -1221,6 +1236,8 @@ events:
     fields:
       - name: session_id
         type: inference.duplex.SpeechSessionId
+      - name: item
+        type: inference.duplex.InputItemId
 
   # read from: docs/design/inference.md:334
   - name: inference.duplex.SpeechStarted
@@ -1242,6 +1259,8 @@ events:
     fields:
       - name: session_id
         type: inference.duplex.SpeechSessionId
+      - name: item
+        type: inference.duplex.InputItemId
       - name: text
         type: String
 
