@@ -499,6 +499,12 @@ struct Exchanging<P> {
     inputs: Vec<Option<Box<dyn InputEndpoint<P>>>>,
     outputs: Vec<Box<dyn OutputEndpoint<P>>>,
     state: Arc<Watched<GateState>>,
+    /// The end of the first lane, taken from its edge while another lane still goes: it is held
+    /// until every other lane ended, so that the turn events they carry still reach the first
+    /// lane's output ahead of its end.
+    end_pending: Option<Option<EventEnvelope<P>>>,
+    /// Whether the first lane's end was taken by the gate.
+    text_closed: bool,
 }
 
 impl<P: GatePayload> Exchanging<P> {
@@ -563,8 +569,40 @@ impl<P: GatePayload> Exchanging<P> {
         Ok(())
     }
 
-    /// Takes `received` on the lane `lane` and passes what it lets through.
+    /// Takes `received` on the lane `lane` and passes what it lets through; a turn event taken on
+    /// a lane other than the first is passed on the first lane's output too, and the first lane's
+    /// end waits for the other lanes' ends.
     async fn take(
+        &mut self,
+        lane: usize,
+        received: Option<EventEnvelope<P>>,
+    ) -> Result<(), String> {
+        let ends = received
+            .as_ref()
+            .is_none_or(|envelope| ControlKind::of(&envelope.kind) == Some(ControlKind::Stop));
+        if lane == 0 && ends && self.inputs[1..].iter().any(Option::is_some) {
+            self.inputs[0] = None;
+            self.end_pending = Some(received);
+            return Ok(());
+        }
+        let copy = received.clone().filter(|envelope| {
+            lane != 0
+                && ControlKind::of(&envelope.kind).is_none()
+                && matches!(envelope.payload.gated(), Gated::Turn(_))
+        });
+        self.take_now(lane, received).await?;
+        if let Some(copy) = copy {
+            self.pass_copy(copy).await?;
+        }
+        if self.inputs[1..].iter().all(Option::is_none)
+            && let Some(end) = self.end_pending.take()
+        {
+            self.take_now(0, end).await?;
+        }
+        Ok(())
+    }
+
+    async fn take_now(
         &mut self,
         lane: usize,
         received: Option<EventEnvelope<P>>,
@@ -578,11 +616,13 @@ impl<P: GatePayload> Exchanging<P> {
                     .update(|state| gate.take(lane, envelope, &mut state.record));
                 if stop {
                     self.inputs[lane] = None;
+                    self.text_closed |= lane == 0;
                 }
                 passed
             }
             None => {
                 self.inputs[lane] = None;
+                self.text_closed |= lane == 0;
                 self.state
                     .update(|state| gate.close(lane, &mut state.record))
             }
@@ -593,7 +633,7 @@ impl<P: GatePayload> Exchanging<P> {
     /// Passes a copy of the turn event `envelope`, taken on another lane, on the output of the
     /// first lane, if that lane still goes.
     async fn pass_copy(&mut self, envelope: EventEnvelope<P>) -> Result<(), String> {
-        if self.inputs[0].is_none() {
+        if self.text_closed {
             return Ok(());
         }
         let passed = self.gate.copy(0, envelope);
@@ -629,11 +669,7 @@ impl<P: GatePayload> Exchanging<P> {
                     if turn || ending {
                         self.take_held(lane).await?;
                     }
-                    let copy = received.clone().filter(|_| turn && lane != 0);
                     self.take(lane, received).await?;
-                    if let Some(copy) = copy {
-                        self.pass_copy(copy).await?;
-                    }
                 }
             }
         }
@@ -700,6 +736,8 @@ impl CommitGate {
                 inputs: by_lane_in,
                 outputs,
                 state: Arc::clone(&self.state),
+                end_pending: None,
+                text_closed: false,
             }),
             _ => Err(NodeError::new(
                 "the gate was not handed one edge at each port of its lanes",

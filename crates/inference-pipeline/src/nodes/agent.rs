@@ -40,6 +40,9 @@
 //!   generation, as it does once every segment was Played;
 //! * a span may arrive before the `TurnOpened` of its turn: every span of a turn is taken at the
 //!   turn's completion, so a span held when a turn opens is the new turn's and is kept for it.
+//!   When a `TurnOpened` arrives while the turn before it is open and was never completed, the
+//!   spans held that name the earlier `TurnOpened` are the new turn's: they are re-attributed to
+//!   it and answered by its generation, in arrival order, with the spans that name it.
 //!   Spans still held at the end of input belong to a turn that never completed: they are dropped
 //!   and recorded ([`AgentHandle::dropped_inputs`]).
 //!
@@ -511,6 +514,13 @@ impl<P: ModelPayload> Exchanging<P> {
     /// not all Played, and otherwise, or for a node keeping its replies, its completion. The spans
     /// held are the new turn's: every span of the turn before was taken at its completion.
     async fn turn_opened(&mut self, turn_id: TurnId, event_id: EventId) -> Result<(), String> {
+        if let Some((_, old, _)) = self.open {
+            for (cause, _) in &mut self.held {
+                if *cause == Some(old) {
+                    *cause = Some(event_id);
+                }
+            }
+        }
         self.opened += 1;
         self.open = Some((turn_id, event_id, self.opened));
         if self.keeping || self.all_played() {
