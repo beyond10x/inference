@@ -102,23 +102,51 @@ impl fmt::Display for SpeechCallId {
 /// [`InputTranscribed`] of a turn carry the same value, so a consumer pairs a transcript with its
 /// turn whenever the transcript arrives. Never empty.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct InputItemId(String);
 
+/// An empty string offered as an [`InputItemId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmptyInputItemId;
+
+impl fmt::Display for EmptyInputItemId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an input item id is never empty")
+    }
+}
+
+impl std::error::Error for EmptyInputItemId {}
+
+impl TryFrom<String> for InputItemId {
+    type Error = EmptyInputItemId;
+
+    fn try_from(id: String) -> Result<Self, EmptyInputItemId> {
+        if id.is_empty() {
+            Err(EmptyInputItemId)
+        } else {
+            Ok(Self(id))
+        }
+    }
+}
+
+impl From<InputItemId> for String {
+    fn from(id: InputItemId) -> Self {
+        id.0
+    }
+}
+
 impl InputItemId {
-    /// The item id `id`, which must not be empty.
+    /// The item id `id`, or `None` when `id` is empty.
     #[must_use]
-    pub fn new(id: impl Into<String>) -> Self {
-        let id = id.into();
-        debug_assert!(!id.is_empty(), "an input item id is never empty");
-        Self(id)
+    pub fn new(id: impl Into<String>) -> Option<Self> {
+        Self::try_from(id.into()).ok()
     }
 
     /// The id the provider named, or `None` when it named none or an empty one, in which case the
-    /// binding assigns one.
+    /// binding assigns one ([`SessionLedger::assign_item`]).
     #[must_use]
     pub fn from_provider(id: Option<&str>) -> Option<Self> {
-        id.filter(|id| !id.is_empty()).map(Self::new)
+        id.and_then(Self::new)
     }
 
     /// The string of the id.

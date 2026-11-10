@@ -60,9 +60,11 @@
 //!   turn, `InputCommitted`. `UserTranscriptionResult` is `InputTranscribed`, whenever it comes.
 //!   A user turn is named by the `turn_id` of its transcription, which the commit cannot carry, as
 //!   a `VadStateEvent` names none: the binding names each commit with the next `turn-N` of the
-//!   ledger's per-session counter, and a transcription of a `turn_id` not seen before takes the
-//!   oldest commit no transcription has claimed, a later one of the same `turn_id` the same turn;
-//!   a transcription that comes before its commit leaves its turn to the next commit.
+//!   ledger's per-session counter and maps a `turn_id` onto the newest commit not yet mapped at
+//!   the first event that names that `turn_id` (a `ResponseBegin`, text fragment, audio chunk,
+//!   tool call or transcription), on the assumption that the provider's turn begins after its
+//!   commit and no later commit; a `UserTranscription` takes the turn its `turn_id` maps to, and
+//!   one that comes before any commit leaves its turn to the next commit.
 //! * A response is one assistant turn, by its `turn_id`. It begins at `ResponseBegin`, or at
 //!   the first audio chunk or tool call of a turn no response holds; a turn that begins while
 //!   another's response is in progress completes that one first. Audio chunks without a turn
@@ -842,7 +844,7 @@ pub struct DeepslateOpalSession {
     turns: HashMap<u32, ResponseId>,
     /// The turn of the latest `ResponseBegin`.
     last_turn: Option<u32>,
-    /// The turns of the commits no transcription has claimed yet, oldest first.
+    /// The turns of the commits no `turn_id` is mapped onto yet, oldest first.
     unclaimed: VecDeque<InputItemId>,
     /// The turn each `turn_id` of a user transcription names.
     user_turns: HashMap<u32, InputItemId>,
@@ -1098,7 +1100,43 @@ impl DeepslateOpalSession {
         }
     }
 
+    /// The turn the provider's `turn_id` names, mapped at its first mention onto the newest commit
+    /// not yet mapped; a mention with no such commit maps nothing, unless `ahead` asks to keep a
+    /// turn for the commit still to come.
+    fn user_turn(&mut self, turn_id: u32, ahead: bool) -> Option<InputItemId> {
+        if let Some(item) = self.user_turns.get(&turn_id) {
+            return Some(item.clone());
+        }
+        let item = match self.unclaimed.pop_back() {
+            Some(item) => item,
+            None if ahead => {
+                let item = self.ledger.assign_item();
+                self.ahead.push_back(item.clone());
+                item
+            }
+            None => return None,
+        };
+        self.user_turns.insert(turn_id, item.clone());
+        Some(item)
+    }
+
     fn message(&mut self, message: ClientBound, now: Instant) {
+        match &message {
+            ClientBound::ResponseBegin { turn_id }
+            | ClientBound::ModelTextFragment { turn_id, .. }
+            | ClientBound::InferenceComplete { turn_id }
+            | ClientBound::ModelAudioChunk {
+                turn_id: Some(turn_id),
+                ..
+            }
+            | ClientBound::ToolCallRequest {
+                turn_id: Some(turn_id),
+                ..
+            } => {
+                self.user_turn(*turn_id, false);
+            }
+            _ => {}
+        }
         match message {
             ClientBound::ResponseBegin { turn_id } => {
                 if !matches!(self.target(Some(turn_id)), Target::Live(_)) {
@@ -1166,21 +1204,9 @@ impl DeepslateOpalSession {
                 }
             }
             ClientBound::UserTranscription { text, turn_id, .. } => {
-                let item = match self.user_turns.get(&turn_id) {
-                    Some(item) => item.clone(),
-                    None => {
-                        let item = match self.unclaimed.pop_front() {
-                            Some(item) => item,
-                            None => {
-                                let item = self.ledger.assign_item();
-                                self.ahead.push_back(item.clone());
-                                item
-                            }
-                        };
-                        self.user_turns.insert(turn_id, item.clone());
-                        item
-                    }
-                };
+                let item = self
+                    .user_turn(turn_id, true)
+                    .unwrap_or_else(|| self.ledger.assign_item());
                 let heard = self.ledger.input_transcribed(item, text, now);
                 self.or_drop(heard);
             }

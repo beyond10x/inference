@@ -338,7 +338,7 @@ impl SpeechSessionHandle for ScriptedSession {
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
         self.ledger.commit_input(
-            inference_duplex::InputItemId::new("turn-1"),
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
             self.clock.now(),
         )
     }

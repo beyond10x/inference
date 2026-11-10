@@ -1641,7 +1641,10 @@ fn a_transcript_pairs_with_its_own_turn_when_transcripts_arrive_out_of_order_or_
         .collect();
     assert_eq!(
         items,
-        [&InputItemId::new("turn-2"), &InputItemId::new("turn-1")],
+        [
+            &InputItemId::new("turn-2").expect("a non-empty id"),
+            &InputItemId::new("turn-1").expect("a non-empty id")
+        ],
         "the transcripts arrived out of order"
     );
 }

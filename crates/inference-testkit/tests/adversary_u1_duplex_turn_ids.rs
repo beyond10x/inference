@@ -247,11 +247,15 @@ impl ScriptedSession {
         match step {
             Step::Commit(item) => self
                 .ledger
-                .input_committed(InputItemId::new(item), now)
+                .input_committed(InputItemId::new(item).expect("a non-empty id"), now)
                 .expect("the commit is recorded"),
             Step::Transcribe(item, text) => self
                 .ledger
-                .input_transcribed(InputItemId::new(item), text.to_owned(), now)
+                .input_transcribed(
+                    InputItemId::new(item).expect("a non-empty id"),
+                    text.to_owned(),
+                    now,
+                )
                 .expect("the transcript is recorded"),
             Step::Create => {
                 let response = ResponseId::generate();
