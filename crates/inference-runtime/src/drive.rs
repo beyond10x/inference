@@ -488,7 +488,9 @@ impl<P> GuardedSender<QueueSender<P>> {
 
 /// A send of a [`GuardedSender`] under way, with the sequence it advanced. Dropped before it
 /// ended, it gives the sequence back: a send of the queue that has not answered has never pushed
-/// its envelope, so the queue took nothing and the same envelope sent again is taken.
+/// its envelope, so the queue took nothing and the same envelope sent again is taken. Dropped by
+/// an unwind it gives nothing back, since the queue may have pushed the envelope before a waker
+/// panicked, and the sequence stays taken as it did before the guard.
 struct Underway<'a, P> {
     sender: &'a GuardedSender<QueueSender<P>>,
     checked: Option<(StreamId, i64)>,
@@ -497,7 +499,8 @@ struct Underway<'a, P> {
 impl<P> Drop for Underway<'_, P> {
     fn drop(&mut self) {
         if let Some((stream_id, sequence)) = self.checked.take() {
-            self.sender.settle(stream_id, sequence, false);
+            self.sender
+                .settle(stream_id, sequence, std::thread::panicking());
         }
     }
 }
