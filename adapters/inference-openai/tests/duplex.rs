@@ -658,6 +658,42 @@ fn the_providers_interruption_cancels_the_response_and_the_next_has_a_new_id() {
 }
 
 #[test]
+fn a_commit_naming_no_item_is_a_turn_of_its_own() {
+    let server = Server::start(|mut socket| async move {
+        let _ = accept_session(&mut socket).await;
+        send(&mut socket, speech_started("item_1", 0)).await;
+        send(&mut socket, speech_stopped("item_1", 900)).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, speech_started("", 1_000)).await;
+        send(&mut socket, speech_stopped("", 1_500)).await;
+        send(&mut socket, committed("")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, response_done("resp_1", "completed")).await;
+        let _ = socket.next().await;
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, any_completed);
+    session.close().expect("open");
+    server.finish();
+
+    let turns: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::InputCommitted(committed) => Some(committed.item.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(turns.len(), 2, "{events:#?}");
+    assert_ne!(
+        turns[0], turns[1],
+        "a commit that names no item does not repeat the last turn: {events:#?}"
+    );
+}
+
+#[test]
 fn barge_in_decided_by_the_caller_cancels_and_truncates_at_the_heard_sample() {
     let server = Server::start(|mut socket| async move {
         let session = accept_session(&mut socket).await;

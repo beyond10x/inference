@@ -1649,6 +1649,60 @@ fn a_transcript_pairs_with_its_own_turn_when_transcripts_arrive_out_of_order_or_
     );
 }
 
+/// Past the 64 committed turns the node keeps, every call still rests on the span of its own
+/// turn's transcript: turns and responses ended before it leave nothing the call could take
+/// instead.
+#[test]
+fn calls_over_more_turns_than_the_node_keeps_rest_on_their_own_turns() {
+    start();
+    const TURNS: usize = 70;
+    let turn = |n: usize| ScriptedTurn {
+        heard: format!("words {n}"),
+        reply: Reply::Call {
+            tool: "weather".to_owned(),
+            arguments: json!({"city": "Berlin"}),
+            then: format!("done {n}"),
+        },
+    };
+    let model = Held::over(MockSpeechModel::native((0..TURNS).map(turn).collect()));
+    let mut run = run(&model, config(vec![weather()]), vec![weather()]);
+    let mut spoken = utterances(TURNS).into_iter();
+    let mut payloads = Vec::new();
+    let mut bases = Vec::new();
+    for n in 0..TURNS {
+        run.feed(spoken.next().expect("a turn"));
+        let call = proposal(&mut run);
+        bases.push(call.basis_span_id());
+        run.answer(answered(&call, json!(21)));
+        let done = format!("done {n}");
+        payloads.extend(run.events_until(|payload| {
+            matches!(payload, Voice::Stream(StreamEvent::TextSegmentCommitted(segment)) if segment.text == done)
+        }));
+        payloads.extend(run.events_until(completed_stream));
+    }
+    run.finish();
+
+    for (n, basis) in bases.iter().enumerate() {
+        let text = format!("words {n}");
+        let spans: Vec<_> = payloads
+            .iter()
+            .filter_map(|payload| match payload {
+                Voice::Stream(StreamEvent::TranscriptCommitted(committed))
+                    if committed.text == text =>
+                {
+                    Some(committed.span_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            [*basis],
+            "call {n} rests on its own turn's transcript"
+        );
+    }
+}
+
 /// A call of another proposal, which the node never minted.
 fn proposal_of_another_call() -> ToolCall {
     use inference_core::generation::{Generation, StartGeneration};
