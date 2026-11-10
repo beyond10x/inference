@@ -968,7 +968,16 @@ fn supported(schema: &Json) -> Result<(), String> {
                 supported(value)?;
                 true
             }
+            "prefixItems" | "oneOf" | "anyOf" => match value {
+                Json::Array(schemas) if keyword == "prefixItems" || !schemas.is_empty() => {
+                    schemas.iter().try_for_each(supported)?;
+                    true
+                }
+                _ => false,
+            },
+            "minLength" | "maxLength" | "minItems" | "maxItems" => value.is_u64(),
             "enum" => value.is_array(),
+            "const" => true,
             "minimum" | "maximum" => value.is_number(),
             "title" | "description" | "$schema" | "$id" | "$comment" | "format" => {
                 value.is_string()
@@ -1064,8 +1073,42 @@ fn admits(schema: &Json, value: &Json) -> bool {
         }
         Some(_) => false,
     };
+    let const_holds = keywords
+        .get("const")
+        .is_none_or(|constant| equal(constant, value));
+    let length_holds = |keyword: &str, within: fn(usize, u64) -> bool| match keywords.get(keyword) {
+        None => true,
+        Some(limit) => limit.as_u64().is_some_and(|limit| match value {
+            Json::String(text) => within(text.chars().count(), limit),
+            _ => true,
+        }),
+    };
+    let count_holds = |keyword: &str, within: fn(usize, u64) -> bool| match keywords.get(keyword) {
+        None => true,
+        Some(limit) => limit.as_u64().is_some_and(|limit| match value {
+            Json::Array(elements) => within(elements.len(), limit),
+            _ => true,
+        }),
+    };
+    let alternatives = |keyword: &str| keywords.get(keyword).and_then(Json::as_array);
+    let one_of_holds = alternatives("oneOf").is_none_or(|schemas| {
+        schemas
+            .iter()
+            .filter(|schema| admits(schema, value))
+            .count()
+            == 1
+    });
+    let any_of_holds = alternatives("anyOf")
+        .is_none_or(|schemas| schemas.iter().any(|schema| admits(schema, value)));
     if !type_holds
         || !enum_holds
+        || !const_holds
+        || !length_holds("minLength", |n, limit| n as u64 >= limit)
+        || !length_holds("maxLength", |n, limit| n as u64 <= limit)
+        || !count_holds("minItems", |n, limit| n as u64 >= limit)
+        || !count_holds("maxItems", |n, limit| n as u64 <= limit)
+        || !one_of_holds
+        || !any_of_holds
         || !bound_holds("minimum", Ordering::is_ge)
         || !bound_holds("maximum", Ordering::is_le)
     {
@@ -1094,8 +1137,24 @@ fn admits(schema: &Json, value: &Json) -> bool {
             return false;
         }
     }
-    if let (Json::Array(elements), Some(items)) = (value, keywords.get("items")) {
-        return elements.iter().all(|element| admits(items, element));
+    if let Json::Array(elements) = value {
+        let prefix = keywords
+            .get("prefixItems")
+            .and_then(Json::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        if !elements
+            .iter()
+            .zip(prefix)
+            .all(|(element, schema)| admits(schema, element))
+        {
+            return false;
+        }
+        if let Some(items) = keywords.get("items") {
+            return elements
+                .iter()
+                .skip(prefix.len())
+                .all(|element| admits(items, element));
+        }
     }
     true
 }
@@ -1260,8 +1319,12 @@ mod tests {
             Err("the keyword \"exclusiveMinimum\"".to_owned())
         );
         assert_eq!(
-            supported(&json!({"items": {"oneOf": []}})),
-            Err("the keyword \"oneOf\"".to_owned())
+            supported(&json!({"items": {"$ref": "#/$defs/a"}})),
+            Err("the keyword \"$ref\"".to_owned())
+        );
+        assert_eq!(
+            supported(&json!({"oneOf": [{"$defs": {}}]})),
+            Err("the keyword \"$defs\"".to_owned())
         );
         assert_eq!(supported(&json!(3)), Err("3 as a schema".to_owned()));
     }
@@ -1339,6 +1402,81 @@ mod tests {
         let schema = json!({"type": "string", "format": "email"});
         assert_eq!(supported(&schema), Ok(()));
         assert!(admits(&schema, &json!("not an address")));
+    }
+
+    #[test]
+    fn string_lengths_count_code_points() {
+        let schema = json!({"type": "string", "minLength": 1, "maxLength": 1});
+        assert_eq!(supported(&schema), Ok(()));
+        for admitted in [json!("a"), json!("\u{e9}"), json!("\u{1f600}")] {
+            assert!(admits(&schema, &admitted), "{admitted}");
+        }
+        for refused in [json!(""), json!("ab")] {
+            assert!(!admits(&schema, &refused), "{refused}");
+        }
+        for malformed in [json!({"minLength": -1}), json!({"maxLength": "1"})] {
+            assert!(supported(&malformed).is_err(), "{malformed}");
+        }
+    }
+
+    #[test]
+    fn item_counts_and_prefix_items_validate_arrays_beside_items() {
+        let tuple = json!({
+            "type": "array",
+            "prefixItems": [{"type": "integer"}, {"type": "string"}],
+            "minItems": 2,
+            "maxItems": 2
+        });
+        assert_eq!(supported(&tuple), Ok(()));
+        assert!(admits(&tuple, &json!([1, "a"])));
+        for refused in [json!([1]), json!([1, "a", "b"]), json!(["a", 1])] {
+            assert!(!admits(&tuple, &refused), "{refused}");
+        }
+        let rest = json!({"prefixItems": [{"type": "integer"}], "items": {"type": "string"}});
+        assert!(admits(&rest, &json!([1, "a", "b"])));
+        assert!(!admits(&rest, &json!([1, "a", 2])));
+        assert!(admits(
+            &json!({"prefixItems": [{"type": "integer"}]}),
+            &json!([1, "a"])
+        ));
+        assert!(admits(&json!({"maxItems": 0}), &json!([])));
+        assert!(!admits(&json!({"maxItems": 0}), &json!([1])));
+        assert!(supported(&json!({"prefixItems": {"type": "integer"}})).is_err());
+        assert!(supported(&json!({"prefixItems": [{"pattern": "a"}]})).is_err());
+        assert!(supported(&json!({"minItems": 1.5})).is_err());
+    }
+
+    #[test]
+    fn one_of_admits_exactly_one_subschema_and_any_of_at_least_one() {
+        let one = json!({"oneOf": [{"type": "integer"}, {"type": "number", "minimum": 0}]});
+        assert_eq!(supported(&one), Ok(()));
+        assert!(admits(&one, &json!(-1)));
+        assert!(admits(&one, &json!(0.5)));
+        assert!(!admits(&one, &json!(1)), "two subschemas admit it");
+        assert!(!admits(&one, &json!("a")), "none admits it");
+        let any = json!({"anyOf": [{"type": "integer"}, {"type": "number", "minimum": 0}]});
+        assert_eq!(supported(&any), Ok(()));
+        assert!(admits(&any, &json!(1)));
+        assert!(admits(&any, &json!(-1)));
+        assert!(!admits(&any, &json!(-0.5)));
+        for malformed in [
+            json!({"oneOf": []}),
+            json!({"anyOf": {"type": "null"}}),
+            json!({"anyOf": [3]}),
+            json!({"oneOf": [{"$ref": "#"}]}),
+        ] {
+            assert!(supported(&malformed).is_err(), "{malformed}");
+        }
+    }
+
+    #[test]
+    fn const_admits_only_an_equal_value() {
+        let schema = json!({"const": {"a": [1, 2.0]}});
+        assert_eq!(supported(&schema), Ok(()));
+        assert!(admits(&schema, &json!({"a": [1.0, 2]})));
+        assert!(!admits(&schema, &json!({"a": [1, 3]})));
+        assert!(admits(&json!({"const": null}), &json!(null)));
+        assert!(!admits(&json!({"const": null}), &json!(0)));
     }
 
     #[test]
