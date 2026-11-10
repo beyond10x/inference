@@ -545,10 +545,22 @@ fn audio_in_gives_audio_and_transcript_out_on_one_response_id() {
         commits, 1,
         "the server's acknowledgement of the caller's commit is not a second commit"
     );
-    assert!(events.iter().any(|event| matches!(
-        event,
-        SessionEvent::InputTranscribed(heard) if heard.text == "what time is it"
-    )));
+    let turn = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::InputCommitted(committed) => Some(committed.item.as_str()),
+            _ => None,
+        })
+        .expect("the caller's commit is recorded");
+    assert_eq!(turn, "turn-1", "the binding names the caller's commit");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::InputTranscribed(heard)
+                if heard.text == "what time is it" && heard.item.as_str() == turn
+        )),
+        "the transcript naming the server's item finds the caller's turn: {events:#?}"
+    );
     assert_eq!(transcript(&events, response), "It is noon");
     let frames: Vec<&AudioFrame> = events
         .iter()
@@ -643,6 +655,42 @@ fn the_providers_interruption_cancels_the_response_and_the_next_has_a_new_id() {
         .filter(|event| matches!(event, SessionEvent::InputCommitted(_)))
         .count();
     assert_eq!(commits, 2, "the provider's own commits");
+}
+
+#[test]
+fn a_commit_naming_no_item_is_a_turn_of_its_own() {
+    let server = Server::start(|mut socket| async move {
+        let _ = accept_session(&mut socket).await;
+        send(&mut socket, speech_started("item_1", 0)).await;
+        send(&mut socket, speech_stopped("item_1", 900)).await;
+        send(&mut socket, committed("item_1")).await;
+        send(&mut socket, speech_started("", 1_000)).await;
+        send(&mut socket, speech_stopped("", 1_500)).await;
+        send(&mut socket, committed("")).await;
+        send(&mut socket, response_created("resp_1")).await;
+        send(&mut socket, response_done("resp_1", "completed")).await;
+        let _ = socket.next().await;
+    });
+    let mut model = server.model();
+    let mut session = model
+        .open(config(TurnDetection::ServerVad, true))
+        .expect("the session opens");
+    let events = until(&mut session, any_completed);
+    session.close().expect("open");
+    server.finish();
+
+    let turns: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::InputCommitted(committed) => Some(committed.item.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(turns.len(), 2, "{events:#?}");
+    assert_ne!(
+        turns[0], turns[1],
+        "a commit that names no item does not repeat the last turn: {events:#?}"
+    );
 }
 
 #[test]

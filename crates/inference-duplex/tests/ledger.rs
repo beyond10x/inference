@@ -218,7 +218,12 @@ fn input_passes_as_it_is_in_the_session_format_and_any_other_format_is_refused()
             found: pcm(24_000),
         })
     );
-    ledger.commit_input(now).expect("a manual commit");
+    ledger
+        .commit_input(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            now,
+        )
+        .expect("a manual commit");
     let events = drain(&mut ledger);
     assert_eq!(events.len(), 2, "{events:#?}");
     assert!(
@@ -330,7 +335,10 @@ fn a_model_without_manual_turns_refuses_the_operations_that_need_them() {
     server.auto_interrupt = true;
     let mut ledger = open(&server_turns(), server, now);
     assert_eq!(
-        ledger.commit_input(now),
+        ledger.commit_input(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            now
+        ),
         Err(SessionError::Unsupported(Unsupported::ManualCommit))
     );
     assert_eq!(
@@ -621,7 +629,10 @@ fn a_closed_transport_fails_the_session_at_once_and_a_closed_session_takes_nothi
         }))
     );
     assert_eq!(
-        closing.commit_input(now),
+        closing.commit_input(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            now
+        ),
         Err(SessionError::NotOpen(SpeechSessionStateConflict {
             current: SpeechSessionState::Closed
         }))
@@ -1148,7 +1159,11 @@ fn the_end_delivers_every_received_event_still_held_before_it() {
         let now = Instant::now();
         let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
         ledger
-            .input_transcribed("hello".to_owned(), now)
+            .input_transcribed(
+                inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+                "hello".to_owned(),
+                now,
+            )
             .expect("open");
         assert_eq!(
             ledger.next_event().as_ref().map(kind),
@@ -1239,13 +1254,23 @@ fn usage_held_for_no_response_is_recorded_before_any_end_of_the_session() {
     let limit = Duration::from_secs(10);
 
     let mut closed = open(&server_turns(), server_config(), start);
-    closed.input_committed(start).expect("open");
+    closed
+        .input_committed(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            start,
+        )
+        .expect("open");
     closed.hold_usage(held(20));
     closed.hold_usage(held(50));
     let _ = drain(&mut closed);
     closed.close().expect("open");
     let mut failed = open(&server_turns(), server_config(), start);
-    failed.input_committed(start).expect("open");
+    failed
+        .input_committed(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            start,
+        )
+        .expect("open");
     failed.hold_usage(held(50));
     let _ = drain(&mut failed);
     failed
@@ -1255,7 +1280,12 @@ fn usage_held_for_no_response_is_recorded_before_any_end_of_the_session() {
         })
         .expect("open");
     let mut stalled = open(&server_turns(), server_config(), start);
-    stalled.input_committed(start).expect("open");
+    stalled
+        .input_committed(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            start,
+        )
+        .expect("open");
     stalled.hold_usage(held(50));
     let _ = drain(&mut stalled);
     assert!(stalled.check_liveness(start + limit));

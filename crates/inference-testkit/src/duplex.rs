@@ -29,15 +29,15 @@ use uuid::Uuid;
 use inference_core::model::AdapterId;
 use inference_duplex::inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
 use inference_duplex::{
-    AdapterNotFound, InputAccepted, InputCommitted, InputTranscribed, NonPositiveIdleLimit,
-    OpenSpeechSession, OutputAudio, OutputTranscriptDelta, OutputTruncated, ProposeSpeechToolCall,
-    ReceivedEventId, ReceivedEventKind, ReceivedSessionEventState, Response, ResponseCancelled,
-    ResponseCompleted, ResponseCreated, ResponseFailed, ResponseId, ResponseNotFound,
-    ResponseState, ResponseStateConflict, ResponseUsage, ResponseUsageRecorded, SessionEnd,
-    SessionError, SessionEvent, SessionEventDelivered, SessionEventReceived, SessionFailure,
-    SessionLedger, SpeechCallId, SpeechSession, SpeechSessionClosed, SpeechSessionFailed,
-    SpeechSessionId, SpeechSessionNotFound, SpeechSessionOpened, SpeechSessionState,
-    SpeechSessionStateConflict, SpeechStarted, SpeechStopped, SpeechToolCall,
+    AdapterNotFound, InputAccepted, InputCommitted, InputItemId, InputTranscribed,
+    NonPositiveIdleLimit, OpenSpeechSession, OutputAudio, OutputTranscriptDelta, OutputTruncated,
+    ProposeSpeechToolCall, ReceivedEventId, ReceivedEventKind, ReceivedSessionEventState, Response,
+    ResponseCancelled, ResponseCompleted, ResponseCreated, ResponseFailed, ResponseId,
+    ResponseNotFound, ResponseState, ResponseStateConflict, ResponseUsage, ResponseUsageRecorded,
+    SessionEnd, SessionError, SessionEvent, SessionEventDelivered, SessionEventReceived,
+    SessionFailure, SessionLedger, SpeechCallId, SpeechSession, SpeechSessionClosed,
+    SpeechSessionFailed, SpeechSessionId, SpeechSessionNotFound, SpeechSessionOpened,
+    SpeechSessionState, SpeechSessionStateConflict, SpeechStarted, SpeechStopped, SpeechToolCall,
     SpeechToolCallAnswered, SpeechToolCallProposed, SpeechToolCallState,
     SpeechToolCallStateConflict, TranscriptionUsage, TranscriptionUsageRecorded, TurnDetection,
 };
@@ -49,7 +49,6 @@ use crate::tools::ToolsDomain;
 
 pub use inference_duplex::DeliverSessionEventError;
 
-/// The scripted mock native speech model.
 #[cfg(feature = "duplex")]
 pub mod mock;
 
@@ -248,10 +247,11 @@ impl DuplexDomain {
     pub fn commit_input(
         &mut self,
         session_id: SpeechSessionId,
+        item: InputItemId,
     ) -> Result<InputCommitted, SessionCommandError> {
         self.open_session(session_id)?;
-        let event = InputCommitted { session_id };
-        self.record(DuplexEvent::InputCommitted(event));
+        let event = InputCommitted { session_id, item };
+        self.record(DuplexEvent::InputCommitted(event.clone()));
         Ok(event)
     }
 
@@ -301,10 +301,15 @@ impl DuplexDomain {
     pub fn transcribe_input(
         &mut self,
         session_id: SpeechSessionId,
+        item: InputItemId,
         text: String,
     ) -> Result<InputTranscribed, SessionCommandError> {
         self.open_session(session_id)?;
-        let event = InputTranscribed { session_id, text };
+        let event = InputTranscribed {
+            session_id,
+            item,
+            text,
+        };
         self.record(DuplexEvent::InputTranscribed(event.clone()));
         Ok(event)
     }

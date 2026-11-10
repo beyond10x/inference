@@ -448,7 +448,7 @@ fn a_turn_opened_before_the_first_frame_of_the_answer_lets_no_frame_of_that_answ
             && turns.with(|stream| stream.turns_view().len()) == 2),
         "the second turn opened and the first generation was superseded"
     );
-    // The turn split hands the `TurnOpened` to the LLM and the sink alike; the sink reads its
+    // The input gate hands the `TurnOpened` to the LLM and the sink alike; the sink reads its
     // turns edge every 2 ms.
     thread::sleep(Duration::from_millis(300));
     assert_eq!(handles.sink.pushed(), 0, "still no frame reached the sink");

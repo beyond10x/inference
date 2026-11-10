@@ -18,7 +18,7 @@
 //! recogniser never exercises; [`claims_observed`] does, reading the claims from the adapter
 //! record only.
 //!
-//! The audio the checks offer is an [`Input`]: [`synthetic_audio`](super::synthetic_audio)'s tone
+//! The audio the checks offer is an [`Input`]: [`synthetic_audio`]'s tone
 //! and silence unless the caller passes other frames. A hosted recogniser answers on its own
 //! time, so before the end of input an iteration that yields nothing means only that nothing has
 //! arrived yet: [`Input::patience`] is how long [`claims_observed`] keeps polling for streaming

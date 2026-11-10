@@ -29,7 +29,7 @@ use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileI
 use inference_core::usage::UsageRecorded;
 use inference_duplex::inference_audio::AudioFrame;
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseFailed, SessionConfig, SessionError,
+    InputItemId, NativeSpeechModel, OpenError, ResponseFailed, SessionConfig, SessionError,
     SessionEvent as ModelEvent, SessionFailureKind, SessionLedger, SpeechCallId,
     SpeechCapabilities, SpeechSessionClosed, SpeechSessionFailed, SpeechSessionHandle,
     SpeechStarted, TurnDetection, TurnTuning,
@@ -261,13 +261,16 @@ struct Seen {
 /// `ResponseCreated`, answers none after `wait` without calling the inner one until the case
 /// opens the gate, so the response stays in progress with no output while the case acts. Its
 /// sessions pass every operation through and record closes, tool results, their drop and every
-/// event they yielded; a model built `untranscribed` hides every `InputTranscribed`.
+/// event they yielded; a model built `untranscribed` hides every `InputTranscribed`; a model
+/// built `reordering` yields the first turn's transcript only after the third turn's commit and
+/// never yields the third turn's.
 #[derive(Debug, Clone)]
 struct Held {
     inner: MockSpeechModel,
     gate: Arc<AtomicBool>,
     holds: bool,
     untranscribed: bool,
+    reordering: bool,
     seen: Arc<Mutex<Seen>>,
 }
 
@@ -278,8 +281,14 @@ impl Held {
             gate: Arc::new(AtomicBool::new(true)),
             holds: false,
             untranscribed: false,
+            reordering: false,
             seen: Arc::default(),
         }
+    }
+
+    fn reordering(mut self) -> Self {
+        self.reordering = true;
+        self
     }
 
     fn holding(mut self) -> Self {
@@ -307,6 +316,11 @@ struct HeldSession {
     gate: Arc<AtomicBool>,
     holds: bool,
     untranscribed: bool,
+    reordering: bool,
+    commits: usize,
+    transcripts: usize,
+    late: Option<ModelEvent>,
+    due: Option<ModelEvent>,
     created: bool,
     seen: Arc<Mutex<Seen>>,
 }
@@ -334,6 +348,11 @@ impl NativeSpeechModel for Held {
             gate: Arc::clone(&self.gate),
             holds: self.holds,
             untranscribed: self.untranscribed,
+            reordering: self.reordering,
+            commits: 0,
+            transcripts: 0,
+            late: None,
+            due: None,
             created: false,
             seen: Arc::clone(&self.seen),
         })
@@ -389,12 +408,33 @@ impl SpeechSessionHandle for HeldSession {
     }
 
     fn next_event(&mut self, wait: Duration) -> Option<ModelEvent> {
+        if let Some(event) = self.due.take() {
+            lock(&self.seen).yielded.push(event.clone());
+            return Some(event);
+        }
         loop {
             if self.holds && self.created && !self.gate.load(Ordering::Acquire) {
                 thread::sleep(wait);
                 return None;
             }
             let event = self.inner.next_event(wait)?;
+            if self.reordering {
+                if matches!(event, ModelEvent::InputTranscribed(_)) {
+                    self.transcripts += 1;
+                    if self.transcripts == 1 {
+                        self.late = Some(event);
+                        continue;
+                    }
+                    if self.transcripts == 3 {
+                        continue;
+                    }
+                } else if matches!(event, ModelEvent::InputCommitted(_)) {
+                    self.commits += 1;
+                    if self.commits == 3 {
+                        self.due = self.late.take();
+                    }
+                }
+            }
             if matches!(event, ModelEvent::ResponseCreated(_)) {
                 self.created = true;
             }
@@ -1512,6 +1552,155 @@ fn a_proposed_call_leaves_on_tool_call_and_its_result_reaches_the_model_once() {
     assert_eq!(model.seen().submitted, [(speech_id, json!(21))]);
     let carried = run.finish();
     assert!(carried.is_empty(), "one proposal only: {carried:#?}");
+}
+
+/// A transcript belongs to the committed turn it names, whenever it arrives: of three turns, the
+/// first one's transcript arrives after the second's and only after the third turn's commit, and
+/// the third turn's never arrives. Each call rests on the span of its own turn: the first and the
+/// third on the empty span committed at their commit, the second on its transcript, and the first
+/// turn's late transcript is committed as its own span, neither the third turn's basis nor the
+/// second's.
+#[test]
+fn a_transcript_pairs_with_its_own_turn_when_transcripts_arrive_out_of_order_or_never() {
+    start();
+    let turn = |heard: &str, then: &str| ScriptedTurn {
+        heard: heard.to_owned(),
+        reply: Reply::Call {
+            tool: "weather".to_owned(),
+            arguments: json!({"city": "Berlin"}),
+            then: then.to_owned(),
+        },
+    };
+    let model = Held::over(MockSpeechModel::native(vec![
+        turn("first words", "done one"),
+        turn("second words", "done two"),
+        turn("third words", "done three"),
+    ]))
+    .reordering();
+    let mut run = run(&model, config(vec![weather()]), vec![weather()]);
+    let mut spoken = utterances(3).into_iter();
+    let mut payloads = Vec::new();
+    let mut bases = Vec::new();
+    for done in ["done one", "done two", "done three"] {
+        run.feed(spoken.next().expect("a turn"));
+        let call = proposal(&mut run);
+        bases.push(call.basis_span_id());
+        run.answer(answered(&call, json!(21)));
+        payloads.extend(run.events_until(|payload| {
+            matches!(payload, Voice::Stream(StreamEvent::TextSegmentCommitted(segment)) if segment.text == done)
+        }));
+        payloads.extend(run.events_until(completed_stream));
+    }
+    run.finish();
+
+    let span_of = |text: &str| {
+        let spans: Vec<_> = payloads
+            .iter()
+            .filter_map(|payload| match payload {
+                Voice::Stream(StreamEvent::TranscriptCommitted(committed))
+                    if committed.text == text =>
+                {
+                    Some(committed.span_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spans.len(), 1, "{text:?} is committed once: {payloads:#?}");
+        spans[0]
+    };
+    let first = span_of("first words");
+    let second = span_of("second words");
+    assert!(
+        !payloads.iter().any(|payload| matches!(
+            payload,
+            Voice::Stream(StreamEvent::TranscriptCommitted(committed)) if committed.text == "third words"
+        )),
+        "the third turn's transcript never arrived"
+    );
+    assert_eq!(
+        bases[1], second,
+        "the second call rests on its own transcript"
+    );
+    assert!(
+        bases[0] != first && bases[0] != second,
+        "the first call rests on its own turn's empty span"
+    );
+    assert!(
+        bases[2] != first && bases[2] != second,
+        "the third call rests on its own turn's empty span, not on another turn's transcript"
+    );
+    assert_ne!(bases[0], bases[2]);
+    let seen = model.seen();
+    let items: Vec<&InputItemId> = seen
+        .yielded
+        .iter()
+        .filter_map(|event| match event {
+            ModelEvent::InputTranscribed(transcribed) => Some(&transcribed.item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            &InputItemId::new("turn-2").expect("a non-empty id"),
+            &InputItemId::new("turn-1").expect("a non-empty id")
+        ],
+        "the transcripts arrived out of order"
+    );
+}
+
+/// Past the 64 committed turns the node keeps, every call still rests on the span of its own
+/// turn's transcript: turns and responses ended before it leave nothing the call could take
+/// instead.
+#[test]
+fn calls_over_more_turns_than_the_node_keeps_rest_on_their_own_turns() {
+    start();
+    const TURNS: usize = 70;
+    let turn = |n: usize| ScriptedTurn {
+        heard: format!("words {n}"),
+        reply: Reply::Call {
+            tool: "weather".to_owned(),
+            arguments: json!({"city": "Berlin"}),
+            then: format!("done {n}"),
+        },
+    };
+    let model = Held::over(MockSpeechModel::native((0..TURNS).map(turn).collect()));
+    let mut run = run(&model, config(vec![weather()]), vec![weather()]);
+    let mut spoken = utterances(TURNS).into_iter();
+    let mut payloads = Vec::new();
+    let mut bases = Vec::new();
+    for n in 0..TURNS {
+        run.feed(spoken.next().expect("a turn"));
+        let call = proposal(&mut run);
+        bases.push(call.basis_span_id());
+        run.answer(answered(&call, json!(21)));
+        let done = format!("done {n}");
+        payloads.extend(run.events_until(|payload| {
+            matches!(payload, Voice::Stream(StreamEvent::TextSegmentCommitted(segment)) if segment.text == done)
+        }));
+        payloads.extend(run.events_until(completed_stream));
+    }
+    run.finish();
+
+    for (n, basis) in bases.iter().enumerate() {
+        let text = format!("words {n}");
+        let spans: Vec<_> = payloads
+            .iter()
+            .filter_map(|payload| match payload {
+                Voice::Stream(StreamEvent::TranscriptCommitted(committed))
+                    if committed.text == text =>
+                {
+                    Some(committed.span_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            [*basis],
+            "call {n} rests on its own turn's transcript"
+        );
+    }
 }
 
 /// A call of another proposal, which the node never minted.

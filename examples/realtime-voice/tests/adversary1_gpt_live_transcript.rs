@@ -154,17 +154,20 @@ impl LiveSession {
     fn record(&mut self, event: Server) {
         let now = Instant::now();
         match event {
-            Server::Heard(text) => self
-                .ledger
-                .input_transcribed(text.to_owned(), now)
-                .expect("open"),
+            Server::Heard(text) => {
+                let item = self.ledger.assign_item();
+                self.ledger
+                    .input_transcribed(item, text.to_owned(), now)
+                    .expect("open");
+            }
             Server::HeardOver(text) => {
                 self.interrupted = self.current.is_some();
                 self.ledger
                     .speech_started(SampleClockPosition::new(0).unwrap(), now)
                     .expect("open");
+                let item = self.ledger.assign_item();
                 self.ledger
-                    .input_transcribed(text.to_owned(), now)
+                    .input_transcribed(item, text.to_owned(), now)
                     .expect("open");
             }
             Server::Said(text) => {
@@ -209,7 +212,10 @@ impl SpeechSessionHandle for LiveSession {
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(Instant::now())
+        self.ledger.commit_input(
+            inference_duplex::InputItemId::new("turn-1").expect("a non-empty id"),
+            Instant::now(),
+        )
     }
 
     fn create_response(&mut self) -> Result<(), SessionError> {

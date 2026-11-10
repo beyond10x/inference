@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T02:46:11Z",
+  "actor": "human:timo",
+  "artifact": "story:waiting-sends-land-in-the-order-they-started-waiting",
+  "kind": "story",
+  "revision": 8,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test --workspace --all-features --no-fail-fast on wave/defects-2026-11-10 at 436d7c96: 3934 passed, 0 failed, 60 ignored, exit 0; waiting_send_order 5 passed, adversary_u7_waiting_sends 8 passed",
+    "reference": "coordinator gate on wave/defects-2026-11-10 at 436d7c96, logs in the coordinator's session scratch gate/09-test.log, 07b-clippy.log, 08-doc.log"
+  }
+}

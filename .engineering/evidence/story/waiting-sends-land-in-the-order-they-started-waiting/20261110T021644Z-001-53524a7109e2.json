@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T02:16:44Z",
+  "actor": "human:timo",
+  "artifact": "story:waiting-sends-land-in-the-order-they-started-waiting",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --test waiting_send_order (base ff0ba010: 2 passed, 3 failed, exit 101; unit 93ab0ee3: 5 passed, cargo test -p inference-runtime 267 passed, 0 failed; with the adversary cases at ae789d7a 277 passed, 0 failed)",
+    "reference": "implementor red run red.log on ff0ba010 and green run green3.log on 93ab0ee3, adversary suite.log on ae789d7a, unit scratch logs"
+  }
+}

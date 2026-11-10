@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T01:36:42Z",
+  "actor": "human:timo",
+  "artifact": "story:live-session-send-after-its-own-turn",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-facade --test send_taken_then_drained (base ff0ba010: 0 passed, 2 failed at send_taken_then_drained.rs:160 and :188; unit 06419e6e: cargo test -p inference-facade --all-features 121 passed with both adversary_u3 files, cargo test -p inference --features testing 238 passed, agent 65 passed)",
+    "reference": "implementor red run red.log on ff0ba010 and green runs facade4.log, inf4.log on 06419e6e, unit scratch logs; coordinator read the 06419e6e diff"
+  }
+}

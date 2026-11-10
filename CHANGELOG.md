@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- `inference-duplex`: `InputCommitted` and `InputTranscribed` carry a required `item:
+  InputItemId` naming the user turn they belong to, and `InputCommitted` is no longer `Copy`.
+  `SessionLedger::commit_input`, `input_committed` and `input_transcribed`, and the
+  `ProviderFrame` forms of the last two, take the id; `SessionLedger::assign_item` hands out
+  per-session `turn-N` ids. `InputItemId::new` returns `Option` and an id is never empty, also
+  when read back from its serialized form.
+- `inference-pipeline`: `AgentNode::new` loses its `turns` port argument and takes the turn
+  events on its input edge; `GatePayload` requires `Clone`. `inference`: the `voice_cascade`
+  declaration drops the `turn split` node and the agent's `turns` port, the gate's `turns_out`
+  feeding the speaker. The `local-voice-cascade` example drops them too, and its `CascadeIds`
+  loses `turn_split` and `llm_turns`.
+- `inference-facade`: `InputError` gains the variant `Cancelled`, which `LiveSession::send`
+  answers when the session was cancelled: a send started after `cancel()`, or one a cancel
+  overtook while the ingress took it, no longer answers `Refused`, which promises that nothing
+  was forwarded. `inference`: an `Agent` maps it to `Error::Closed`.
+
+### Fixed
+
+- `inference-pipeline`: the tool authority validates `minLength`, `maxLength`, `prefixItems`,
+  `minItems`, `maxItems`, `oneOf`, `anyOf` and `const`, so macro tools taking a `char`, a tuple,
+  a fixed array or an enum with data prepare and have their calls checked instead of failing at
+  `prepare`.
+- `inference-facade`: `LiveSession::send` answers `Ok`, with no `InputSent`, for an input the run
+  took while the session moved to Draining, or on to Closed by that drain, instead of
+  `Refused`.
+- `inference-pipeline`: `DuplexNode` pairs each transcript with the committed turn its id names
+  and rests a tool call on the turn its response answers, so a call no longer rests on another
+  turn's words when transcripts arrive late, out of order or never; it keeps no per-response
+  state past the response's end and the spans of the latest 64 turns only. `inference-deepslate`:
+  transcriptions name the commit of their own turn on the provider's single turn counter.
+  `inference-openai`: a Realtime audio commit naming no item is a turn of its own.
+- `inference`: two turns arriving in a burst over `voice_cascade` are each answered by a
+  generation over their own text, also the turn a `close` completes. `inference-pipeline`: the
+  STT node marks each transcript event with its turn's opening, the input gate keeps turn events
+  behind their spans and holds the first lane's end until every other lane ended, and the agent
+  node answers at a turn's completion the spans naming its opening.
+- `inference-runtime`: a run ingress send that ends without the queue taking its envelope,
+  dropped while it waits for room or refused, gives back its sequence, so the same envelope sent
+  again is taken instead of refused `SequenceNotIncreasing`.
+- `inference-runtime`: sends that wait for room in an edge or exposure queue land in the order
+  they started waiting; the queue's `len` and `known_contents` count only landed envelopes, and a
+  drain no longer waits on a caller.
+
 ## [0.27.0] — 2026-11-09
 
 ### Breaking

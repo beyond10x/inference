@@ -46,7 +46,7 @@ Tools: Rust stable 1.98 or later, [go-task](https://taskfile.dev), `ess` and `ae
 for the site only.
 
 ```
-task check                      # the sherpa-onnx archive, specification and planning store validation, the documentation drift check, then format, lint and tests
+task check                      # the sherpa-onnx archive, specification and planning store validation, the documentation drift check, then format, lint, the docs build with warnings denied and tests
 task docs-generate              # rewrite the generated files of the site
 npm --prefix website ci --allow-git=root && npm --prefix website run build   # build the site into website/build
 ess specify validate --path ess

@@ -33,7 +33,7 @@
 //! A generator scripted for tools ([`MockGenerator::proposing`]) also claims `tool_calling`, and
 //! its model declares tools: each of its first `proposals` model requests ends with the
 //! same [`ToolProposal`], an `llm` tool call of the tool named as
-//! [`tool_name`](inference_llm::tools::tool_name) names it. Scripted with a round
+//! [`tool_name`] names it. Scripted with a round
 //! ([`MockGenerator::proposing_round`]), each of those turns ends with every proposal of the
 //! round, in the round's order. The text of a turn answering tool results contains each: the
 //! result's JSON, the failure's detail or the rejection's reason.
@@ -65,8 +65,6 @@ use inference_llm::{
 };
 use inference_tools::{Json, RejectionReason, ToolId};
 
-/// The mock model node of a text-only pipeline, behind the `run` feature: a [`ModelNode`] answers
-/// each input on one generation of a [`Generator`] per run.
 #[cfg(feature = "run")]
 mod node;
 
@@ -175,6 +173,7 @@ struct Offered(Arc<Mutex<Given>>);
 struct Given {
     tools: Vec<Vec<ToolSpec>>,
     instructions: Vec<String>,
+    asked: Vec<Vec<String>>,
 }
 
 impl Offered {
@@ -188,6 +187,14 @@ impl Offered {
 
     fn instructed(&self, instructions: &str) {
         self.given().instructions.push(instructions.to_owned());
+    }
+
+    fn ask(&self, texts: Vec<String>) {
+        self.given().asked.push(texts);
+    }
+
+    fn asked(&self) -> Vec<Vec<String>> {
+        self.given().asked.clone()
     }
 
     fn read(&self) -> Vec<Vec<ToolSpec>> {
@@ -397,6 +404,13 @@ impl MockGenerator {
     pub fn instructions(&self) -> Vec<String> {
         self.model.offered.instructions()
     }
+
+    /// The user texts each model request of the generator's model, or of a clone's, carried, one
+    /// list per request, in the order those requests ran.
+    #[must_use]
+    pub fn asked(&self) -> Vec<Vec<String>> {
+        self.model.offered.asked()
+    }
 }
 
 impl From<MockGenerator> for Generator {
@@ -419,6 +433,16 @@ impl MockModel {
             .iter()
             .rposition(|item| matches!(item, Item::AssistantText { .. } | Item::ToolCall(_)));
         self.offered.instructed(&request.instructions);
+        self.offered.ask(
+            request
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::UserText { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
         if last.is_none() && !request.tools.is_empty() {
             self.offered.record(request.tools.clone());
         }

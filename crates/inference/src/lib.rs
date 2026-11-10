@@ -1,6 +1,6 @@
 //! The inference SDK: one dependency and one import (`docs/design/sdk.md`).
 //!
-//! Five layers, each one method away from the next: one call ([`transcribe`]-style functions),
+//! Five layers, each one method away from the next: one call (`transcribe`-style functions),
 //! handles (`Agent`, `Chat`, `Transcriber`, `Voice`), recipes, the graph over one [`payload`],
 //! and the contract crates beneath, re-exported as modules ([`core`], [`text`], [`audio`],
 //! [`stt`], [`llm`], [`tts`], [`duplex`], [`tools`], [`pipeline`], [`runtime`], [`facade`]).

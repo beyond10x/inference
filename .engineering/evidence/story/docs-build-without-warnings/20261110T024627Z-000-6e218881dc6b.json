@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T02:46:27Z",
+  "actor": "human:timo",
+  "artifact": "story:docs-build-without-warnings",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps on wave/defects-2026-11-10 at 436d7c96: exit 0, generated the docs of the workspace's crates; on the base ff0ba010 the same command exited 101 in ten crates (implementor's red run)",
+    "reference": "coordinator gate log gate/08-doc.log in the coordinator's session scratch"
+  }
+}

@@ -31,8 +31,6 @@ use inference_core::model::{
     Model, ModelDeclared, ModelId, ModelNotFound, NonPositiveConcurrency, ResourceProfile,
 };
 
-/// The capability record of an adapter, loaded from its JSON file and checked against the
-/// adapter's claims.
 #[path = "capability.rs"]
 pub mod capability;
 

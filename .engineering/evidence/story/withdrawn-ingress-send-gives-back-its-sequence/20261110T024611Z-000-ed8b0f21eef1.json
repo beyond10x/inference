@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T02:46:11Z",
+  "actor": "human:timo",
+  "artifact": "story:withdrawn-ingress-send-gives-back-its-sequence",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test --workspace --all-features --no-fail-fast on wave/defects-2026-11-10 at 436d7c96: 3934 passed, 0 failed, 60 ignored, exit 0; adversary1_parked_send_run 2 passed, adversary2_parked_send_run 3 passed, adversary_u6_sequences 5 passed",
+    "reference": "coordinator gate on wave/defects-2026-11-10 at 436d7c96, logs in the coordinator's session scratch gate/09-test.log, 07b-clippy.log, 08-doc.log"
+  }
+}

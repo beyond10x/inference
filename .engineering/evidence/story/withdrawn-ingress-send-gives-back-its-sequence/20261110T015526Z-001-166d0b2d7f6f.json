@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T01:55:26Z",
+  "actor": "human:timo",
+  "artifact": "story:withdrawn-ingress-send-gives-back-its-sequence",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-runtime --test adversary1_parked_send_run --test adversary2_parked_send_run (base ff0ba010: adversary1 1 passed 1 failed, adversary2 1 passed 2 failed, SequenceNotIncreasing on a resent untaken envelope; unit fdfeacb1: cargo test -p inference-runtime --no-fail-fast 272 passed, 0 failed, with adversary_u6_sequences 5 passed)",
+    "reference": "implementor red run red.txt on ff0ba010 and green run full2.txt on fdfeacb1, unit scratch logs; coordinator read the fdfeacb1 diff"
+  }
+}

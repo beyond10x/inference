@@ -1102,6 +1102,9 @@ fn input_error(error: InputError<Payload>) -> Error {
         InputError::Refused(refused) => Error::Closed {
             message: format!("the session admits no input: {refused}"),
         },
+        InputError::Cancelled => Error::Closed {
+            message: "the session was cancelled".to_owned(),
+        },
         other => Error::Layer {
             message: other.to_string(),
             source: None,

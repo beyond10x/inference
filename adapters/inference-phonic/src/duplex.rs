@@ -37,7 +37,9 @@
 //! * Input frames go out as `audio_chunk` messages of at most [`crate::protocol::CHUNK_MS`].
 //! * `user_started_speaking` and `user_finished_speaking` are `SpeechStarted` and
 //!   `SpeechStopped` at the input sent so far; `input_text` is the end of a user turn:
-//!   `InputCommitted`, then `InputTranscribed`.
+//!   `InputCommitted`, then `InputTranscribed`. The API names no turn, so the binding names each
+//!   user turn by the next `turn-N` of the ledger's per-session counter, taken at the commit and
+//!   given to the transcript.
 //! * A response begins at `assistant_started_speaking` (completing one still in progress), or at
 //!   an `audio_chunk` or a `tool_call` while none is in progress. Its audio frames count samples
 //!   from its start; PCM ending in half a sample keeps that byte for the next chunk. The `text`
@@ -1034,9 +1036,10 @@ impl PhonicSession {
             }
             ServerMessage::InputText { text, .. } => {
                 self.dropping = false;
-                let committed = self.ledger.input_committed(now);
+                let item = self.ledger.assign_item();
+                let committed = self.ledger.input_committed(item.clone(), now);
                 self.or_drop(committed);
-                let heard = self.ledger.input_transcribed(text, now);
+                let heard = self.ledger.input_transcribed(item, text, now);
                 self.or_drop(heard);
             }
             ServerMessage::ToolCall {
@@ -1136,7 +1139,8 @@ impl SpeechSessionHandle for PhonicSession {
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(Instant::now())
+        let item = self.ledger.assign_item();
+        self.ledger.commit_input(item, Instant::now())
     }
 
     fn create_response(&mut self) -> Result<(), SessionError> {

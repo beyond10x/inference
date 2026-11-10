@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-10T02:16:44Z",
+  "actor": "human:timo",
+  "artifact": "story:waiting-sends-land-in-the-order-they-started-waiting",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-u7-waiting-sends-pass-1",
+    "review": "review-result:adversary-u7-waiting-sends-pass-1",
+    "outcome": "no-op"
+  }
+}

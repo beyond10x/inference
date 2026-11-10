@@ -13,7 +13,6 @@
 //! | `turn policy` | policy | `inference-pipeline`'s turn policy, answered by a [`TurnStore`] |
 //! | `stt` | model | `inference-pipeline`'s `SttNode` over the testkit's mock recogniser |
 //! | `input gate` | policy | a [`CommitGate`] of two lanes: the transcript, and the turn events |
-//! | `turn split` | fan_out | `FanOut`: the gate's turn events to the LLM and the speaker |
 //! | `agent` | model | `inference-pipeline`'s [`AgentNode`] over the testkit's mock generator: one generation per turn |
 //! | `text split` | fan_out | `FanOut`: the LLM's output to the output gate and the egress |
 //! | `output gate` | policy | a [`CommitGate`] of one lane: the LLM's output |
@@ -31,7 +30,8 @@
 //! local TTS adapter exists, the mock synthesiser at `tts`, under an `offline_strict` profile
 //! that also admits local workers.
 //!
-//! The input gate passes the committed spans and the turn events to the LLM and holds back the
+//! The input gate passes the committed spans and, behind the spans of each turn, its turn events
+//! to the LLM on one edge, and the turn events to the speaker on another, and holds back the
 //! hypotheses; it refuses a revision of a span it passed as Committed. The output gate passes a
 //! segment to the TTS node only with its commit, so the TTS node never queues a Tentative one. The
 //! TTS node sends the synthesis's own frames to the sink, and the sink sends the receipt of each
@@ -135,7 +135,6 @@ pub struct CascadeIds {
     pub policy: NodeId,
     pub stt: NodeId,
     pub input_gate: NodeId,
-    pub turn_split: NodeId,
     pub llm: NodeId,
     pub text_split: NodeId,
     pub output_gate: NodeId,
@@ -143,7 +142,6 @@ pub struct CascadeIds {
     pub sink: NodeId,
     pub stt_ports: SttPorts,
     pub input_lanes: [GateLane; 2],
-    pub llm_turns: PortId,
     pub output_lane: GateLane,
     pub speech_ports: SpeechPorts,
     pub sink_turns: PortId,
@@ -154,14 +152,13 @@ pub struct CascadeIds {
 impl CascadeIds {
     /// Every node, in the order of the module documentation's table.
     #[must_use]
-    pub const fn nodes(&self) -> [NodeId; 11] {
+    pub const fn nodes(&self) -> [NodeId; 10] {
         [
             self.split,
             self.vad,
             self.policy,
             self.stt,
             self.input_gate,
-            self.turn_split,
             self.llm,
             self.text_split,
             self.output_gate,
@@ -320,7 +317,6 @@ pub fn declare_requiring(
             let policy = pipeline.node("turn policy", NodeRole::Policy, Vec::new());
             let stt = pipeline.node("stt", NodeRole::Model, stt_requires.to_vec());
             let input_gate = pipeline.node("input gate", NodeRole::Policy, Vec::new());
-            let turn_split = pipeline.node("turn split", NodeRole::FanOut, Vec::new());
             let llm = pipeline.node("agent", NodeRole::Model, vec![Capability::OutputStreaming]);
             let text_split = pipeline.node("text split", NodeRole::FanOut, Vec::new());
             let output_gate = pipeline.node("output gate", NodeRole::Policy, Vec::new());
@@ -345,7 +341,6 @@ pub fn declare_requiring(
             let gate_turns_out =
                 pipeline.output::<modality::Control>(&input_gate, "turns_out", control);
             let user_input = pipeline.input::<modality::Text>(&llm, "user_input", text);
-            let llm_turns = pipeline.input::<modality::Control>(&llm, "turns", control);
             let answer = pipeline.output::<modality::Text>(&llm, "committed_text", text);
             let answered = pipeline.input::<modality::Text>(&text_split, "text", text);
             let to_gate = pipeline.output::<modality::Text>(&text_split, "gate", text);
@@ -357,10 +352,6 @@ pub fn declare_requiring(
             let spoken = pipeline.output::<modality::Audio>(&tts, "audio", audio);
             let playing = pipeline.input::<modality::Audio>(&sink, "audio", audio);
             let receipts = pipeline.output::<modality::Control>(&sink, "played", control);
-            let split_turns = pipeline.input::<modality::Control>(&turn_split, "turns", control);
-            let turns_to_llm = pipeline.output::<modality::Control>(&turn_split, "llm", control);
-            let turns_to_sink =
-                pipeline.output::<modality::Control>(&turn_split, "speaker", control);
             let sink_turns = pipeline.input::<modality::Control>(&sink, "turns", control);
             let tts_playback = pipeline.output::<modality::Control>(&tts, "playback", control);
             let llm_played = pipeline.input::<modality::Control>(&llm, "played", control);
@@ -372,9 +363,7 @@ pub fn declare_requiring(
             pipeline.connect(&transcript, &gate_in, capacity, pause);
             pipeline.connect(&turns_out, &gate_turns, capacity, pause);
             pipeline.connect(&gate_out, &user_input, capacity, pause);
-            pipeline.connect(&gate_turns_out, &split_turns, capacity, pause);
-            pipeline.connect(&turns_to_llm, &llm_turns, capacity, pause);
-            pipeline.connect(&turns_to_sink, &sink_turns, capacity, pause);
+            pipeline.connect(&gate_turns_out, &sink_turns, capacity, pause);
             pipeline.connect(&answer, &answered, capacity, pause);
             pipeline.connect(&to_gate, &held, capacity, pause);
             pipeline.connect(&passed, &speak, capacity, pause);
@@ -395,7 +384,6 @@ pub fn declare_requiring(
                 policy: policy.id(),
                 stt: stt.id(),
                 input_gate: input_gate.id(),
-                turn_split: turn_split.id(),
                 llm: llm.id(),
                 text_split: text_split.id(),
                 output_gate: output_gate.id(),
@@ -418,7 +406,6 @@ pub fn declare_requiring(
                         output: gate_turns_out.id(),
                     },
                 ],
-                llm_turns: llm_turns.id(),
                 sink_turns: sink_turns.id(),
                 llm_played: llm_played.id(),
                 tts_playback: tts_playback.id(),
@@ -650,14 +637,8 @@ impl LocalCascade {
         let policy = TurnPolicy::new(run_id, turns);
         let stt = SttNode::new(run_id, models.recogniser, ids.stt_ports, log.clone());
         let input_gate = CommitGate::new(ids.input_lanes);
-        let llm = AgentNode::new(
-            run_id,
-            models.generator,
-            models.reply,
-            ids.llm_turns,
-            log.clone(),
-        )
-        .with_playback(ids.llm_played);
+        let llm = AgentNode::new(run_id, models.generator, models.reply, log.clone())
+            .with_playback(ids.llm_played);
         let output_gate = CommitGate::new([ids.output_lane]);
         let tts = SpeechNode::new(run_id, models.synthesiser, ids.speech_ports, log.clone())
             .with_playback(ids.tts_playback);
@@ -681,7 +662,6 @@ impl LocalCascade {
                 (ids.policy, Box::new(policy)),
                 (ids.stt, Box::new(stt)),
                 (ids.input_gate, Box::new(input_gate)),
-                (ids.turn_split, Box::new(FanOut::new())),
                 (ids.llm, Box::new(llm)),
                 (ids.text_split, Box::new(FanOut::new())),
                 (ids.output_gate, Box::new(output_gate)),

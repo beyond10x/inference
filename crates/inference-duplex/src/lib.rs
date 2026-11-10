@@ -96,6 +96,72 @@ impl fmt::Display for SpeechCallId {
     }
 }
 
+/// `inference.duplex.InputItemId`: names one user turn. It is the provider's own item id where the
+/// provider names one, and otherwise a per-session counter the binding assigns
+/// ([`SessionLedger::assign_item`]: `turn-1`, `turn-2`, ...). The [`InputCommitted`] and the
+/// [`InputTranscribed`] of a turn carry the same value, so a consumer pairs a transcript with its
+/// turn whenever the transcript arrives. Never empty.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct InputItemId(String);
+
+/// An empty string offered as an [`InputItemId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmptyInputItemId;
+
+impl fmt::Display for EmptyInputItemId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an input item id is never empty")
+    }
+}
+
+impl std::error::Error for EmptyInputItemId {}
+
+impl TryFrom<String> for InputItemId {
+    type Error = EmptyInputItemId;
+
+    fn try_from(id: String) -> Result<Self, EmptyInputItemId> {
+        if id.is_empty() {
+            Err(EmptyInputItemId)
+        } else {
+            Ok(Self(id))
+        }
+    }
+}
+
+impl From<InputItemId> for String {
+    fn from(id: InputItemId) -> Self {
+        id.0
+    }
+}
+
+impl InputItemId {
+    /// The item id `id`, or `None` when `id` is empty.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Option<Self> {
+        Self::try_from(id.into()).ok()
+    }
+
+    /// The id the provider named, or `None` when it named none or an empty one, in which case the
+    /// binding assigns one ([`SessionLedger::assign_item`]).
+    #[must_use]
+    pub fn from_provider(id: Option<&str>) -> Option<Self> {
+        id.and_then(Self::new)
+    }
+
+    /// The string of the id.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for InputItemId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// `inference.duplex.TurnDetection`: who ends a user turn. Serialized as written in ESS
 /// (`server_vad`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -368,10 +434,11 @@ pub struct InputAccepted {
     pub frame: AudioFrame,
 }
 
-/// `inference.duplex.InputCommitted`: the input accepted so far is one user turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `inference.duplex.InputCommitted`: the input accepted so far is one user turn, named `item`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputCommitted {
     pub session_id: SpeechSessionId,
+    pub item: InputItemId,
 }
 
 /// `inference.duplex.SpeechStarted`: speech started at `position` of the input.
@@ -388,10 +455,11 @@ pub struct SpeechStopped {
     pub position: SampleClockPosition,
 }
 
-/// `inference.duplex.InputTranscribed`: the provider's transcript of the user's input.
+/// `inference.duplex.InputTranscribed`: the provider's transcript of the user turn named `item`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputTranscribed {
     pub session_id: SpeechSessionId,
+    pub item: InputItemId,
     pub text: String,
 }
 
