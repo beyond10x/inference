@@ -16,7 +16,7 @@ scope:
   path: crates/inference-runtime/src/queue.rs
 - confidence: inferred
   path: crates/inference-runtime/tests/waiting_send_order.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-10T00:16:58Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-10T00:16:59Z", actor: "human:timo", revision: 3}
@@ -79,23 +79,21 @@ test pins the residual as today's behaviour.
 
 ## Scope
 
-Derived 2026-11-10 by `story-scoper`. Every line is **cited** (read from the story or the tree) or **inferred** (a reading that could be wrong).
+Rewritten 2026-11-10 from the merged change, `git diff ff0ba010 ae789d7a`.
 
-- **Primary surface:** `crates/inference-runtime/src/queue.rs` — cited (Planned scope)
-- **Files:** `crates/inference-runtime/src/queue.rs:259-347` (`Shared::poll_send`, the raise at 278-306, the park at 316-320), `:351-364` (`poll_recv`), `:674-680` (`known_contents`), `:655-665` (`QueueReceiver::drop`), `:693-708` (`close_to_senders`), `:153-163` (`Room::poll_room`), `:619-626` (`QueueSender::send`) — cited (read on main af93222a)
-- **Symbols:** `Shared::poll_send`, `Shared::poll_recv`, `State::waiting_senders`, `QueueReceiver::known_contents`, `QueueReceiver::close_to_senders`, `Room::poll_room`; the ticket, place and send-future types of `f54cb70` (`Parked`, `Place`, `State::reserve`, `Sending`) lifted in a reduced form — cited
-- **Test (new):** `crates/inference-runtime/tests/waiting_send_order.rs` holds `two_reserved_sends_land_in_the_order_they_parked` and `a_send_arriving_after_a_parked_one_is_not_taken_before_it_once_a_raise_made_room`, copied from `f54cb70`, plus truthfulness cases: a granted place that has not landed reads `Empty`, a place the receiver reaches before its send polls is passed, and the receiver's drop refuses a granted, unlanded send as `Closed` with its envelope — inferred
-- **Red:** `cargo test -p inference-runtime --test waiting_send_order` (the two copied cases fail on main) — inferred, walked, not run
-- **Green:** that command, then `cargo test -p inference-runtime --test held_send_at_drain --test drain_known_contents --test adversary1_review_fixes --test adversary1_wakeups --test queue_close_to_senders --test adversary1_close_to_senders_queue --test bounded_edges`, then `cargo test -p inference-runtime` — inferred
-- **Adversary cases compile against main:** yes, by reading (`EdgeQueue`, `QueueSender`, `QueueReceiver`, `InputEndpoint`, `KnownContents`, `OutputEndpoint`, `SendError`, the declaration helpers) — inferred
-- **Not ported:** `f54cb70`'s `a_reserved_send_given_up_passes_its_room_on_and_leaks_none`, `a_reserved_send_a_raise_made_stale_gives_its_room_to_the_raising_send` and `reserved_and_waiting_sends_at_the_receiver_drop_are_each_accounted_once`; each asserts that an unlanded place is content, which contradicts this story's acceptance — cited
-- **drive.rs:** not needed (`GuardedSender::send` reaches the queue only through `self.inner.send(envelope).await`, `drive.rs:496`) — cited
-- **Documents:** the module documentation of `queue.rs:9-24`; a `CHANGELOG.md` line (coordinator) — inferred
-- **Confidence:** high for the surface; medium for the design, walked by hand against 9 cases and not built
-- **Would collide with:** any unit touching `crates/inference-runtime/src/queue.rs`; nothing in `drive.rs`
-- **Safety fact:** an envelope enters `items` only during a poll of its own send that answers `Ready(Ok)`, which keeps a dropped send undelivered (main `queue.rs:307-313`) — unproven
-
-Defect confirmation on main `af93222a` (by reading):
-1. A take wakes every waiting send (`queue.rs:354`); whichever polls first pushes (`:307-308`), a fresh send included, and nothing records who waited first.
-2. Walked on main, `two_reserved_sends_land_in_the_order_they_parked` receives `[4, 3]` and the `drop_stale_epochs` case `[3, 20, 10]`.
-3. Under the design both walk green as `[3, 4]` and `[10, 3, 20]`.
+- **Source:** `crates/inference-runtime/src/queue.rs`.
+  - Each waiting send gets a ticket, and room is granted in ticket order.
+  - A granted place lands only through its own send's poll. Given up, it passes to the next
+    ticket.
+  - `len` and `known_contents` count only envelopes that landed.
+  - A drain does not wait on a caller.
+  - `drive.rs` is untouched.
+- **Tests:**
+  - `crates/inference-runtime/tests/waiting_send_order.rs`: 3 of its 5 cases are red on the base.
+  - The adversary files `adversary_u7_waiting_sends.rs` and `adversary_u7_threads.rs`.
+- **Residual, accepted in the design:** a send whose place the receiver reached before the send
+  polled lands after younger envelopes.
+- **Kept after the review:** two cases stay as they are.
+  - A granted place whose send stays alive but unpolled holds the room.
+  - The stale branch of `poll_ticket` repeats a removal that the epoch raise already made.
+- **Reviews:** review-result:adversary-u7-waiting-sends-pass-1.
