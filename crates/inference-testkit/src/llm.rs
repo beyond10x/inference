@@ -175,6 +175,7 @@ struct Offered(Arc<Mutex<Given>>);
 struct Given {
     tools: Vec<Vec<ToolSpec>>,
     instructions: Vec<String>,
+    asked: Vec<Vec<String>>,
 }
 
 impl Offered {
@@ -188,6 +189,14 @@ impl Offered {
 
     fn instructed(&self, instructions: &str) {
         self.given().instructions.push(instructions.to_owned());
+    }
+
+    fn ask(&self, texts: Vec<String>) {
+        self.given().asked.push(texts);
+    }
+
+    fn asked(&self) -> Vec<Vec<String>> {
+        self.given().asked.clone()
     }
 
     fn read(&self) -> Vec<Vec<ToolSpec>> {
@@ -397,6 +406,13 @@ impl MockGenerator {
     pub fn instructions(&self) -> Vec<String> {
         self.model.offered.instructions()
     }
+
+    /// The user texts each model request of the generator's model, or of a clone's, carried, one
+    /// list per request, in the order those requests ran.
+    #[must_use]
+    pub fn asked(&self) -> Vec<Vec<String>> {
+        self.model.offered.asked()
+    }
 }
 
 impl From<MockGenerator> for Generator {
@@ -419,6 +435,16 @@ impl MockModel {
             .iter()
             .rposition(|item| matches!(item, Item::AssistantText { .. } | Item::ToolCall(_)));
         self.offered.instructed(&request.instructions);
+        self.offered.ask(
+            request
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::UserText { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
         if last.is_none() && !request.tools.is_empty() {
             self.offered.record(request.tools.clone());
         }
