@@ -253,6 +253,33 @@ async fn close_after_the_models_close_returns_at_once() {
     assert_eq!(names(&seen).last(), Some(&"Closed"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn every_send_of_an_input_the_model_closed_at_is_ok_in_1000_rounds_of_16_sessions() {
+    let sessions: Vec<JoinHandle<()>> = (0..16)
+        .map(|_| {
+            tokio::spawn(async {
+                for round in 0..1000 {
+                    let model = MockSpeechModel::native(vec![turn("hi")]).closes();
+                    let agent = Agent::voice_with(speech(model))
+                        .start()
+                        .await
+                        .expect("starts");
+                    for frame in utterance(pcm(24_000), 0).frames() {
+                        let sent = agent.send_audio(frame).await;
+                        assert!(sent.is_ok(), "round {round}: {sent:?}");
+                    }
+                    tokio::time::timeout(LIMIT, agent.closed())
+                        .await
+                        .expect("the pump ends within 5 s");
+                }
+            })
+        })
+        .collect();
+    for session in sessions {
+        session.await.expect("every round of the session sent Ok");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_interrupt_yields_one_interrupted_after_said() {
     let model = MockSpeechModel::native(vec![turn("hi")]);
