@@ -95,7 +95,7 @@ enum Traits {
 /// the fixture's three adapters, and validates and plans it.
 #[allow(
     clippy::too_many_lines,
-    reason = "the cascade's eleven nodes, thirty-five ports and nineteen edges, as the example declares them"
+    reason = "the cascade's ten nodes, thirty-one ports and seventeen edges, as the example declares them"
 )]
 fn reference_cascade(
     declaration: &mut Declaration,
@@ -162,7 +162,6 @@ fn reference_cascade(
                 let policy = pipeline.node("turn policy", NodeRole::Policy, Vec::new());
                 let stt = pipeline.node("stt", NodeRole::Model, Vec::new());
                 let input_gate = pipeline.node("input gate", NodeRole::Policy, Vec::new());
-                let turn_split = pipeline.node("turn split", NodeRole::FanOut, Vec::new());
                 let llm =
                     pipeline.node("agent", NodeRole::Model, vec![Capability::OutputStreaming]);
                 let text_split = pipeline.node("text split", NodeRole::FanOut, Vec::new());
@@ -189,7 +188,6 @@ fn reference_cascade(
                 let gate_turns = input!(Control, &input_gate, "turns", control);
                 let gate_turns_out = output!(Control, &input_gate, "turns_out", control);
                 let user_input = input!(Text, &llm, "user_input", text);
-                let llm_turns = input!(Control, &llm, "turns", control);
                 let answer = output!(Text, &llm, "committed_text", text);
                 let answered = input!(Text, &text_split, "text", text);
                 let to_gate = output!(Text, &text_split, "gate", text);
@@ -202,9 +200,6 @@ fn reference_cascade(
                 let spoken = output!(Audio, &tts, "audio", audio);
                 let playing = input!(Audio, &sink, "audio", audio);
                 let receipts = output!(Control, &sink, "played", control);
-                let split_turns = input!(Control, &turn_split, "turns", control);
-                let turns_to_llm = output!(Control, &turn_split, "llm", control);
-                let turns_to_sink = output!(Control, &turn_split, "speaker", control);
                 let sink_turns = input!(Control, &sink, "turns", control);
                 let tts_playback = output!(Control, &tts, "playback", control);
                 let llm_played = input!(Control, &llm, "played", control);
@@ -216,9 +211,7 @@ fn reference_cascade(
                 pipeline.connect(&transcript, &gate_in, capacity(), pause);
                 pipeline.connect(&turns_out, &gate_turns, capacity(), pause);
                 pipeline.connect(&gate_out, &user_input, capacity(), pause);
-                pipeline.connect(&gate_turns_out, &split_turns, capacity(), pause);
-                pipeline.connect(&turns_to_llm, &llm_turns, capacity(), pause);
-                pipeline.connect(&turns_to_sink, &sink_turns, capacity(), pause);
+                pipeline.connect(&gate_turns_out, &sink_turns, capacity(), pause);
                 pipeline.connect(&answer, &answered, capacity(), pause);
                 pipeline.connect(&to_gate, &held, capacity(), pause);
                 pipeline.connect(&passed, &speak, capacity(), pause);
@@ -265,9 +258,9 @@ fn the_defaulted_port_traits_plan_the_reference_cascade_as_the_explicit_ones_do(
     let mut defaulted = Declaration::counted();
     let defaulted_planned = reference_cascade(&mut defaulted, &catalog, Traits::Defaulted);
 
-    assert_eq!(explicit.nodes().count(), 11);
-    assert_eq!(explicit.ports().count(), 35);
-    assert_eq!(explicit.edges().count(), 16);
+    assert_eq!(explicit.nodes().count(), 10);
+    assert_eq!(explicit.ports().count(), 31);
+    assert_eq!(explicit.edges().count(), 14);
     assert_eq!(
         explicit
             .ports()

@@ -40,10 +40,17 @@
 //! would carry it. Content the gate does not read ([`Gated::Other`]), such as
 //! `GenerationStarted`, and every control event but the end of input pass as they are.
 //!
-//! When a turn event arrives, the gate first takes what its other lanes already hold, which their
-//! producer sent before it, so that a consumer of both outputs, such as the LLM node, has every
-//! committed span of a turn before the turn's completion, as the STT node sent them. The time at
-//! which each `TurnCompleted` was passed is recorded ([`CommitGateHandle::turns_passed`]).
+//! When a turn event, or the end of a lane, arrives, the gate first takes what its other lanes
+//! already hold, which their producer sent before it, so that a consumer of both outputs has every
+//! committed span of a turn before the turn's completion, as the STT node sent them. A gate of
+//! several lanes takes its first lane as the text lane: a turn event, other than the end of input,
+//! that arrives on another lane is passed on that lane's output and, once that first lane's spans
+//! were passed,
+//! on the first lane's output too, so that a consumer of the text lane alone, such as the agent
+//! node, reads each turn's spans and its turn events in one order. The copy is made after the
+//! gate took the event on its own lane, which is the only place the spans of the turns are
+//! counted. The time at which each `TurnCompleted` was passed on its own lane is recorded
+//! ([`CommitGateHandle::turns_passed`]).
 //!
 //! The end of input on a lane, a control event of kind `stop`, drops the deltas the lane holds,
 //! passes the rest and then the `stop`, and ends the lane; a lane whose input edge is closed ends
@@ -102,7 +109,7 @@ pub enum Gated {
 /// The payload of a run whose edges a [`CommitGate`] stands on: the gate reads what it carries
 /// and passes it on unchanged. A control event is told from content by its envelope's `kind`
 /// alone.
-pub trait GatePayload: Send + 'static {
+pub trait GatePayload: Clone + Send + 'static {
     /// What the payload carries.
     fn gated(&self) -> Gated;
 }
@@ -350,6 +357,17 @@ impl<P: GatePayload> Gate<P> {
         });
     }
 
+    /// Takes `envelope` onto the lane `lane` as it is, which counts nothing, and answers what the
+    /// lane passes now, in order.
+    fn copy(&mut self, lane: usize, envelope: EventEnvelope<P>) -> Vec<EventEnvelope<P>> {
+        let queue = &mut self.lanes[lane];
+        queue.push_back(Queued {
+            envelope,
+            waiting: None,
+        });
+        Self::release(queue)
+    }
+
     /// Takes from the front of `queue` every envelope no held delta stands before.
     fn release(queue: &mut VecDeque<Queued<P>>) -> Vec<EventEnvelope<P>> {
         let mut passed = Vec::new();
@@ -509,12 +527,18 @@ impl<P: GatePayload> Exchanging<P> {
         .await
     }
 
-    /// Sends what the lane `lane` passes, recording each `TurnCompleted` once it was passed.
-    async fn pass(&mut self, lane: usize, passed: Vec<EventEnvelope<P>>) -> Result<(), String> {
+    /// Sends what the lane `lane` passes, recording each `TurnCompleted` once it was passed, unless
+    /// what is passed is a copy of a turn event the gate took on another lane.
+    async fn pass(
+        &mut self,
+        lane: usize,
+        passed: Vec<EventEnvelope<P>>,
+        copied: bool,
+    ) -> Result<(), String> {
         for envelope in passed {
             let completed = match envelope.payload.gated() {
                 Gated::Turn(TurnEvent::Completed(completed))
-                    if ControlKind::of(&envelope.kind).is_none() =>
+                    if !copied && ControlKind::of(&envelope.kind).is_none() =>
                 {
                     Some(completed.turn_id)
                 }
@@ -563,7 +587,17 @@ impl<P: GatePayload> Exchanging<P> {
                     .update(|state| gate.close(lane, &mut state.record))
             }
         };
-        self.pass(lane, passed).await
+        self.pass(lane, passed, false).await
+    }
+
+    /// Passes a copy of the turn event `envelope`, taken on another lane, on the output of the
+    /// first lane, if that lane still goes.
+    async fn pass_copy(&mut self, envelope: EventEnvelope<P>) -> Result<(), String> {
+        if self.inputs[0].is_none() {
+            return Ok(());
+        }
+        let passed = self.gate.copy(0, envelope);
+        self.pass(0, passed, true).await
     }
 
     /// Takes what the lanes other than `lane` already hold, without waiting.
@@ -589,10 +623,17 @@ impl<P: GatePayload> Exchanging<P> {
                         ControlKind::of(&envelope.kind).is_none()
                             && matches!(envelope.payload.gated(), Gated::Turn(_))
                     });
-                    if turn {
+                    let ending = received.as_ref().is_none_or(|envelope| {
+                        ControlKind::of(&envelope.kind) == Some(ControlKind::Stop)
+                    });
+                    if turn || ending {
                         self.take_held(lane).await?;
                     }
+                    let copy = received.clone().filter(|_| turn && lane != 0);
                     self.take(lane, received).await?;
+                    if let Some(copy) = copy {
+                        self.pass_copy(copy).await?;
+                    }
                 }
             }
         }

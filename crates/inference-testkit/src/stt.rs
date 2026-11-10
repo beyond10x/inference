@@ -249,12 +249,27 @@ impl PartialEq for Slot {
 
 impl Eq for Slot {}
 
+/// How many recognitions one recogniser started, shared by its clones.
+#[derive(Debug, Clone, Default)]
+struct Started(Arc<AtomicUsize>);
+
+impl PartialEq for Started {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Started {}
+
 /// The scripted mock recogniser: an in-process adapter of one model with a maximum concurrency of
-/// one, which it holds to, replaying the same script for every request.
+/// one, which it holds to, replaying the same script for every request, or, given
+/// [`MockRecogniser::recognising`], one script after the other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockRecogniser {
     adapter: Adapter,
     script: Vec<Cue>,
+    each: Vec<Vec<Cue>>,
+    started: Started,
     running: Running,
 }
 
@@ -276,8 +291,19 @@ impl MockRecogniser {
         Self {
             adapter,
             script,
+            each: Vec::new(),
+            started: Started::default(),
             running: Running::default(),
         }
+    }
+
+    /// The same recogniser, whose n-th recognition, counted from 0 across its clones, replays the
+    /// n-th of `scripts`, and the last of them once there are more recognitions than scripts; the
+    /// declared script only when `scripts` is empty.
+    #[must_use]
+    pub fn recognising(mut self, scripts: Vec<Vec<Cue>>) -> Self {
+        self.each = scripts;
+        self
     }
 }
 
@@ -293,9 +319,15 @@ impl Recogniser for MockRecogniser {
         request: RecognitionRequest,
     ) -> Result<MockRecognition, ConcurrencyLimitReached> {
         let slot = self.running.admit(self.adapter.max_concurrency())?;
+        let nth = self.started.0.fetch_add(1, Ordering::AcqRel);
+        let script = self
+            .each
+            .get(nth)
+            .or_else(|| self.each.last())
+            .unwrap_or(&self.script);
         Ok(MockRecognition {
             output: TranscriptOutput::start(&self.adapter, request),
-            pending: self.script.iter().cloned().collect(),
+            pending: script.iter().cloned().collect(),
             emitted: Vec::new(),
             delivered: VecDeque::new(),
             _slot: slot,

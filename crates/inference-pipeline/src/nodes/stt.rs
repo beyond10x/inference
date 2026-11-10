@@ -18,7 +18,9 @@
 //! * every transcript event is recorded in the run's [`RunLog`] in its envelope and sent on
 //!   `transcript`, if that port is wired, and a `TranscriptCommitted` also on `committed_text`.
 //!   The `TurnOpened` is passed on as well, on `turns_out`, before the turn's first transcript
-//!   event.
+//!   event, and the envelope of each transcript event of the turn names the envelope of that
+//!   `TurnOpened` as its `causation_id`, so that a consumer that cannot tell by order which turn
+//!   a span belongs to, because the spans and the turn events reach it on different edges, can.
 //!
 //! Given a usage port ([`SttNode::with_usage`]), the output port its pipeline declares under the
 //! name `usage`, the node sends on the edge or exposure leaving it the usage record of each
@@ -251,12 +253,14 @@ impl<P: SttPayload> Out<P> {
     }
 
     /// Sends `event` in an envelope of the port's own stream, recorded in the run's log.
-    async fn emit(&mut self, event: StreamEvent) -> Result<(), String> {
+    async fn emit(&mut self, event: StreamEvent) -> Result<EventId, String> {
         let envelope = self
             .emitter
             .stream(event)
             .map_err(|refusal| refusal.to_string())?;
-        self.send(carry(envelope)).await
+        let event_id = envelope.event_id;
+        self.send(carry(envelope)).await?;
+        Ok(event_id)
     }
 
     async fn end(&mut self) -> Result<(), String> {
@@ -353,6 +357,8 @@ struct Exchanging<P, R: Recogniser> {
     /// The sample clock position just past the last frame that arrived.
     heard_until: i64,
     recognition: Option<R::Handle>,
+    /// The envelope of the `TurnOpened` the running recognition's turn opened with.
+    opened_by: Option<EventId>,
 }
 
 impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
@@ -389,9 +395,10 @@ impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
             return self.send_usage(recorded).await;
         }
         let committed = matches!(envelope.payload, TranscriptEvent::Committed(_));
-        let Some(envelope) = stream_envelope(envelope) else {
+        let Some(mut envelope) = stream_envelope(envelope) else {
             return Ok(());
         };
+        envelope.causation_id = self.opened_by.or(envelope.causation_id);
         self.log
             .record(envelope.clone())
             .map_err(|refusal| refusal.to_string())?;
@@ -558,7 +565,7 @@ impl<P: SttPayload, R: Recogniser> Exchanging<P, R> {
         match envelope.payload.heard() {
             Heard::Stream(StreamEvent::TurnOpened(opened)) => {
                 self.finish_recognition().await?;
-                self.turns_out.emit(StreamEvent::TurnOpened(opened)).await?;
+                self.opened_by = Some(self.turns_out.emit(StreamEvent::TurnOpened(opened)).await?);
                 self.start_recognition(opened.turn_id)?;
                 self.offer_heard().await?;
             }
@@ -717,6 +724,7 @@ impl<R: Recogniser + Clone> SttNode<R> {
             heard: VecDeque::new(),
             heard_until: 0,
             recognition: None,
+            opened_by: None,
         })
     }
 }
