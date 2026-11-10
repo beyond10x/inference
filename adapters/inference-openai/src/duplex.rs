@@ -987,7 +987,11 @@ impl OpenAiRealtimeSession {
                 if let Some(turn) = self.caller_commits.pop_front() {
                     self.item_aliases.insert(item_id, turn);
                 } else {
-                    let item = self.item_named(Some(&item_id));
+                    let item = if item_id.is_empty() {
+                        self.ledger.assign_item()
+                    } else {
+                        self.item_named(Some(&item_id))
+                    };
                     self.last_item = Some(item.clone());
                     let recorded = self.ledger.input_committed(item, now);
                     self.or_drop(recorded);

@@ -111,6 +111,9 @@ use crate::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, Port
 /// How many ids of transcripts that arrived before their commit the node keeps.
 const AHEAD_KEPT: usize = 64;
 
+/// How many committed turns the node keeps the transcript span of, the latest ones.
+const TURNS_KEPT: usize = 64;
+
 /// How long the node waits for the model's next event before it looks at its inputs again.
 const POLL: Duration = Duration::from_millis(10);
 
@@ -428,8 +431,10 @@ struct Exchanging<P, S> {
     /// The last turn was committed; the next frame opens another.
     committed: bool,
     /// The committed turns by the id their `InputCommitted` carried, which a transcript naming
-    /// the id is committed on, whenever it arrives.
+    /// the id is committed on, whenever it arrives; at most the latest `TURNS_KEPT` of them.
     turns: HashMap<InputItemId, Turn>,
+    /// The ids in `turns`, oldest first, to evict the oldest past `TURNS_KEPT`.
+    order: VecDeque<InputItemId>,
     /// The id of the last committed turn, the one whose transcript becomes the basis.
     latest: Option<InputItemId>,
     /// The ids of transcripts that arrived before their `InputCommitted`, oldest first, at most
@@ -437,9 +442,10 @@ struct Exchanging<P, S> {
     ahead: VecDeque<InputItemId>,
     /// The span of each turn named by an id: the empty span committed at its commit until its
     /// transcript arrives, then the transcript's span; a transcript that arrived before its
-    /// commit is kept here for it.
+    /// commit is kept here for it. Committed turns keep a span for the latest `TURNS_KEPT` only.
     spans: HashMap<InputItemId, Span>,
-    /// The turn each response answers: the last turn committed when the response started.
+    /// The turn each response answers: the last turn committed when the response started, until
+    /// the response ends.
     answers: HashMap<ResponseId, InputItemId>,
     /// The span of the last committed turn, which a call of a response that answers no committed
     /// turn rests on.
@@ -750,6 +756,7 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
         response_id: ResponseId,
         end: impl FnOnce(&Generation) -> Option<(Generation, StreamEvent)>,
     ) -> Result<(), String> {
+        self.answers.remove(&response_id);
         let Some(generation) = self.generations.get(&response_id) else {
             return Ok(());
         };
@@ -859,6 +866,13 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
                 }
                 self.basis = self.spans.get(&committed.item).cloned();
                 self.turns.insert(committed.item.clone(), turn);
+                self.order.push_back(committed.item.clone());
+                if self.order.len() > TURNS_KEPT
+                    && let Some(oldest) = self.order.pop_front()
+                {
+                    self.turns.remove(&oldest);
+                    self.spans.remove(&oldest);
+                }
                 self.latest = Some(committed.item);
                 self.committed = true;
                 Ok(())
@@ -1084,6 +1098,7 @@ impl<M: NativeSpeechModel> DuplexNode<M> {
             turn: None,
             committed: false,
             turns: HashMap::new(),
+            order: VecDeque::new(),
             latest: None,
             ahead: VecDeque::new(),
             spans: HashMap::new(),
