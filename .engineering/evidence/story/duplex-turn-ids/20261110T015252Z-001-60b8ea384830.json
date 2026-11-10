@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T01:52:52Z",
+  "actor": "human:operator",
+  "artifact": "story:duplex-turn-ids",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-testkit --features run,duplex --test duplex_node (red before the fix: a_transcript_pairs_with_its_own_turn_when_transcripts_arrive_out_of_order_or_never failed at duplex_node.rs:1622; unit 1011f06a: inference-deepslate 68 passed with 5 adversary_u1 cases, inference-pipeline --all-features 152 passed, inference-openai duplex 34 passed, testkit duplex lanes 27 passed)",
+    "reference": "implementor red run red.log and green runs ds.log, pl.log, oa.log on 1011f06a, unit scratch logs; 38164e7f moves one doc line; coordinator read the 1011f06a and 38164e7f diffs"
+  }
+}

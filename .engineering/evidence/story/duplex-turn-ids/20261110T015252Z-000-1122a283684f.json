@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-10T01:52:52Z",
+  "actor": "human:operator",
+  "artifact": "story:duplex-turn-ids",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-u1-duplex-turn-ids-pass-2",
+    "review": "review-result:adversary-u1-duplex-turn-ids-pass-2",
+    "outcome": "fixed"
+  }
+}
