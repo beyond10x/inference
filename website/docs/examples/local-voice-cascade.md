@@ -18,8 +18,7 @@ source: examples/local-voice-cascade (src/lib.rs, src/local.rs, tests/gates.rs, 
 | `split` | fan-out: every frame to the detector and the STT node |
 | `vad`, `turn policy` | voice activity and turn completion |
 | `stt` | speech recognition |
-| `input gate` | passes committed spans and turn events on; holds back hypotheses |
-| `turn split` | fan-out: the turn events to the LLM and the speaker |
+| `input gate` | passes committed spans on, each turn's events right behind its spans, and the turn events to the speaker; holds back hypotheses |
 | `agent` | the LLM: one generation per turn |
 | `text split` | fan-out: the LLM's output to the output gate and the egress |
 | `output gate` | passes a segment to TTS only with its commit |

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:withdrawn-ingress-send-gives-back-its-sequence
 kind: story
-status: draft
+status: implemented
 title: A run ingress send that ends untaken gives back its sequence
 summary: The sequence guard gives back exactly the sequence of a send whose envelope the queue never took.
 tags:
@@ -10,7 +10,19 @@ tags:
 relations:
 - decomposes: epic:session-facade
 - serves: vision:inference
-revision: 1
+- decomposes: epic:defects-2026-11-10
+scope:
+- confidence: cited
+  path: crates/inference-runtime/src/drive.rs
+- confidence: cited
+  path: crates/inference-runtime/tests/adversary1_parked_send_run.rs
+- confidence: cited
+  path: crates/inference-runtime/tests/adversary2_parked_send_run.rs
+revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-10T00:16:59Z", actor: "human:operator", revision: 4}
+- {from: "proposed", to: "active", at: "2026-11-10T00:16:59Z", actor: "human:operator", revision: 5}
+- {from: "active", to: "implemented", at: "2026-11-10T02:46:22Z", actor: "human:operator", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 
@@ -37,3 +49,11 @@ both cases.
 
 A send that ends without the queue taking its envelope gives back exactly its own sequence, in
 whatever order such sends end, so the same envelope sent again is taken.
+
+## Scope
+
+Rewritten 2026-11-10 from the merged change (`git diff ff0ba010 fdfeacb1`, 4 files).
+
+- **Source:** `crates/inference-runtime/src/drive.rs`: `GuardedSender` keeps `Sequences { taken, under_way }`; `advance` records a sequence under way; `settle` replaces `restore`; the `Underway` guard around the queue send gives back its own sequence when the send is dropped while it waits, and keeps it when the send unwinds; `queue.rs` untouched
+- **Tests:** `crates/inference-runtime/tests/adversary1_parked_send_run.rs` and `adversary2_parked_send_run.rs`, ported unchanged from `f54cb70` (3 red on the base), and the adversary file `adversary_u6_sequences.rs`
+- **Reviews:** review-result:adversary-u6-withdrawn-ingress-pass-1

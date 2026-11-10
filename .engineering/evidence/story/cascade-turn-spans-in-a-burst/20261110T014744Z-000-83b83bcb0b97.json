@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T01:47:44Z",
+  "actor": "human:operator",
+  "artifact": "story:cascade-turn-spans-in-a-burst",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference --features testing --test cascade_burst (base ff0ba010: 0 passed, 1 failed, 176 of 960 rounds asked one generation over both turns' text; unit e056c441: 1 passed, with adversary_u2_turn_at_close 1 passed, inference-pipeline --all-features all binaries ok, testkit turn lanes 7 passed)",
+    "reference": "implementor base run base_burst.log on ff0ba010 and green runs d1.log, d2.log, d3.log on e056c441, unit scratch logs; coordinator read the e056c441 diff"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-10T02:46:11Z",
+  "actor": "human:operator",
+  "artifact": "story:docs-build-without-warnings",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps on wave/defects-2026-11-10 at 436d7c96: exit 0 (the base failed in ten crates by the implementor's run); task check runs it",
+    "reference": "coordinator gate on wave/defects-2026-11-10 at 436d7c96, logs in the coordinator's session scratch gate/09-test.log, 07b-clippy.log, 08-doc.log"
+  }
+}

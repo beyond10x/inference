@@ -34,6 +34,9 @@
 //! and [`MockSpeechModel::fails_responses`] fails each response where it would complete.
 //! [`utterance`] is the one utterance the SDK's tests feed: speech, then the silence that ends
 //! the turn under server turn detection.
+//!
+//! The mock names no user turn, so its session assigns each turn the next `turn-N` of the
+//! ledger's per-session counter at the commit, and the turn's transcript carries it.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -47,8 +50,8 @@ use inference_duplex::inference_audio::{
     AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition,
 };
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseId, ResponseUsage, SessionConfig, SessionError,
-    SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
+    InputItemId, NativeSpeechModel, OpenError, ResponseId, ResponseUsage, SessionConfig,
+    SessionError, SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
     SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TokenCounts, TranscriptionUsage,
     TuningSupport, TurnDetection,
 };
@@ -595,14 +598,14 @@ impl MockSpeechSession {
     /// transcribed, and the reply is spoken or its call proposed on the response in progress,
     /// in a new one after a restart, or awaits the next response, which `auto_response` creates
     /// at once.
-    fn end_turn(&mut self) -> Result<(), SessionError> {
+    fn end_turn(&mut self, item: InputItemId) -> Result<(), SessionError> {
         let recognised = self.recognised();
         let Some(turn) = self.script.pop_front() else {
             return Ok(());
         };
         let heard = recognised.unwrap_or(turn.heard);
         let reply = turn.reply.heard(&heard);
-        self.ledger.input_transcribed(heard, self.now)?;
+        self.ledger.input_transcribed(item, heard, self.now)?;
         self.ledger.transcription_usage(
             TranscriptionUsage {
                 input_tokens: 10,
@@ -776,17 +779,19 @@ impl SpeechSessionHandle for MockSpeechSession {
                 if !heard {
                     self.report_speech(position)?;
                 }
-                self.ledger.input_committed(self.now)?;
+                let item = self.ledger.assign_item();
+                self.ledger.input_committed(item.clone(), self.now)?;
                 self.reported = false;
-                self.end_turn()?;
+                self.end_turn(item)?;
             }
         }
         Ok(())
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(self.now)?;
-        self.end_turn()
+        let item = self.ledger.assign_item();
+        self.ledger.commit_input(item.clone(), self.now)?;
+        self.end_turn(item)
     }
 
     fn create_response(&mut self) -> Result<(), SessionError> {

@@ -14,9 +14,9 @@
 //! match its child's exposures (`interface-mismatch`). `NestRun` makes a stored run the child run of a
 //! stored node instance, its parent; a run `NestRun` never named has none.
 //! `DeclareNodeDescriptor` publishes a descriptor once per kind into the store's
-//! [`NodeDescriptors`](inference_pipeline::NodeDescriptors), the view
+//! [`NodeDescriptors`], the view
 //! `inference.graph.NodeDescriptors` ([`GraphDomain::descriptors`]); the descriptors of the mock
-//! nodes of a text-only pipeline are in [`descriptors`](crate::graph::descriptors).
+//! nodes of a text-only pipeline are in [`descriptors`].
 //!
 //! A validation keeps the validated form of the pipeline ([`ValidatedPipeline`]) and a plan takes
 //! it and keeps the Planned form ([`PlannedPipeline`]), so that `CreateRun` builds a [`Run`] of
@@ -1149,8 +1149,6 @@ pub use recording::{FallibleStep, LifecycleStep, NodeCall, NodeCalls, RecordingN
 
 pub mod descriptors;
 
-/// The mock source and sink nodes of a text-only pipeline, behind the `run` feature, and what
-/// they share with the mock model node of [`crate::llm`].
 #[cfg(feature = "run")]
 pub(crate) mod nodes;
 

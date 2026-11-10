@@ -92,7 +92,6 @@ pub(super) fn voice_cascade(
     let policy = pipeline.node("turn policy", NodeRole::Policy, Vec::new());
     let stt = pipeline.node("stt", NodeRole::Model, requirement(Role::Stt, &[]));
     let input_gate = pipeline.node("input gate", NodeRole::Policy, Vec::new());
-    let turn_split = pipeline.node("turn split", NodeRole::FanOut, Vec::new());
     let llm = pipeline.node(
         "agent",
         NodeRole::Model,
@@ -127,7 +126,6 @@ pub(super) fn voice_cascade(
     let gate_turns = pipeline.input::<modality::Control>(&input_gate, "turns", control);
     let gate_turns_out = pipeline.output::<modality::Control>(&input_gate, "turns_out", control);
     let user_input = pipeline.input::<modality::Text>(&llm, "user_input", text);
-    let llm_turns = pipeline.input::<modality::Control>(&llm, "turns", control);
     let answer = pipeline.output::<modality::Text>(&llm, "committed_text", text);
     let answered = pipeline.input::<modality::Text>(&text_split, "text", text);
     let to_gate = pipeline.output::<modality::Text>(&text_split, "gate", text);
@@ -139,9 +137,6 @@ pub(super) fn voice_cascade(
     let spoken = pipeline.output::<modality::Audio>(&tts, "audio", audio);
     let playing = pipeline.input::<modality::Audio>(&sink, "audio", audio);
     let receipts = pipeline.output::<modality::Control>(&sink, "played", control);
-    let split_turns = pipeline.input::<modality::Control>(&turn_split, "turns", control);
-    let turns_to_llm = pipeline.output::<modality::Control>(&turn_split, "llm", control);
-    let turns_to_sink = pipeline.output::<modality::Control>(&turn_split, "speaker", control);
     let sink_turns = pipeline.input::<modality::Control>(&sink, "turns", control);
     let tts_playback = pipeline.output::<modality::Control>(&tts, "playback", control);
     let llm_played = pipeline.input::<modality::Control>(&llm, "played", control);
@@ -153,9 +148,7 @@ pub(super) fn voice_cascade(
     pipeline.connect(&transcript, &gate_in, edge, PAUSE);
     pipeline.connect(&turns_out, &gate_turns, edge, PAUSE);
     pipeline.connect(&gate_out, &user_input, edge, PAUSE);
-    pipeline.connect(&gate_turns_out, &split_turns, edge, PAUSE);
-    pipeline.connect(&turns_to_llm, &llm_turns, edge, PAUSE);
-    pipeline.connect(&turns_to_sink, &sink_turns, edge, PAUSE);
+    pipeline.connect(&gate_turns_out, &sink_turns, edge, PAUSE);
     pipeline.connect(&answer, &answered, edge, PAUSE);
     pipeline.connect(&to_gate, &held, edge, PAUSE);
     pipeline.connect(&passed, &speak, edge, PAUSE);

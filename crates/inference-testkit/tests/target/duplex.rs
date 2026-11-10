@@ -244,8 +244,9 @@ pub fn execute_command(
         }
         COMMIT_INPUT => {
             let session_id = input.named("session_id")?;
+            let item = input.named("item")?;
             input.finish()?;
-            let answer = stores.duplex.commit_input(session_id);
+            let answer = stores.duplex.commit_input(session_id, item);
             session_answer(
                 command,
                 "committed",
@@ -272,9 +273,10 @@ pub fn execute_command(
         }
         TRANSCRIBE_INPUT => {
             let session_id = input.named("session_id")?;
+            let item = input.named("item")?;
             let text = input.text("text")?;
             input.finish()?;
-            let answer = stores.duplex.transcribe_input(session_id, text);
+            let answer = stores.duplex.transcribe_input(session_id, item, text);
             session_answer(
                 command,
                 "transcribed",
@@ -987,9 +989,9 @@ fn duplex_event(event: &DuplexEvent) -> Result<ObservedEvent, TargetError> {
         DuplexEvent::InputAccepted(event) => new(INPUT_ACCEPTED)
             .with("session_id", named_node(&event.session_id)?)
             .with("frame", json_node(&event.frame)?),
-        DuplexEvent::InputCommitted(event) => {
-            new(INPUT_COMMITTED).with("session_id", named_node(&event.session_id)?)
-        }
+        DuplexEvent::InputCommitted(event) => new(INPUT_COMMITTED)
+            .with("session_id", named_node(&event.session_id)?)
+            .with("item", named_node(&event.item)?),
         DuplexEvent::SpeechStarted(event) => new(SPEECH_STARTED)
             .with("session_id", named_node(&event.session_id)?)
             .with("position", json_node(&event.position)?),
@@ -998,6 +1000,7 @@ fn duplex_event(event: &DuplexEvent) -> Result<ObservedEvent, TargetError> {
             .with("position", json_node(&event.position)?),
         DuplexEvent::InputTranscribed(event) => new(INPUT_TRANSCRIBED)
             .with("session_id", named_node(&event.session_id)?)
+            .with("item", named_node(&event.item)?)
             .with("text", text_node(&event.text)),
         DuplexEvent::TranscriptionUsageRecorded(event) => new(TRANSCRIPTION_USAGE_RECORDED)
             .with("session_id", named_node(&event.session_id)?)

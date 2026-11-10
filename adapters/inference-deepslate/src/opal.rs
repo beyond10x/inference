@@ -58,6 +58,15 @@
 //!   A transition into `SPEECH` from `SILENCE` or `SPEECH_STARTING` is `SpeechStarted`; one
 //!   into `SILENCE` from `SPEECH` or `SPEECH_ENDING` is `SpeechStopped` and the end of the user
 //!   turn, `InputCommitted`. `UserTranscriptionResult` is `InputTranscribed`, whenever it comes.
+//!   A user turn is named by the `turn_id` of its transcription, which the commit cannot carry, as
+//!   a `VadStateEvent` names none: the binding names each commit with the next `turn-N` of the
+//!   ledger's per-session counter and maps a `turn_id` onto a commit at the first message that
+//!   names it. The provider numbers user and assistant turns on one counter (user 0, reply 1,
+//!   user 2), so a message of assistant turn M maps user turn M-1, and a transcription of turn T
+//!   takes the newest commit newer than the commits of lower turns, older than those of higher
+//!   turns, and leaving room for the ceil(T/2) user turns below T; the residual is a skipped
+//!   untranscribed turn whose neighbour shares that room. A transcription that comes before any
+//!   fitting commit leaves its turn to the next commit.
 //! * A response is one assistant turn, by its `turn_id`. It begins at `ResponseBegin`, or at
 //!   the first audio chunk or tool call of a turn no response holds; a turn that begins while
 //!   another's response is in progress completes that one first. Audio chunks without a turn
@@ -88,7 +97,7 @@
 //!   session ([`SessionLedger::unreadable_frames`]) and read past.
 //! * Usage: no message carries any, so each response's usage record carries every count unknown.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -103,9 +112,9 @@ use inference_duplex::inference_core::model::{
 };
 use inference_duplex::inference_tools::Json;
 use inference_duplex::{
-    NativeSpeechModel, OpenError, ResponseId, SessionConfig, SessionError, SessionEvent,
-    SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId, SpeechCapabilities,
-    SpeechSessionHandle, SpeechSessionId, TuningSupport, TurnDetection,
+    InputItemId, NativeSpeechModel, OpenError, ResponseId, SessionConfig, SessionError,
+    SessionEvent, SessionFailure, SessionFailureKind, SessionLedger, SpeechCallId,
+    SpeechCapabilities, SpeechSessionHandle, SpeechSessionId, TuningSupport, TurnDetection,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, oneshot};
@@ -141,6 +150,9 @@ pub const OUTBOUND_QUEUE: usize = 64;
 
 /// The most bytes of text kept for one response, and held for turns no response holds yet.
 pub const TEXT_LIMIT: usize = 64 * 1024;
+
+/// The commits and the early transcription turns a session keeps for mapping `turn_id`s.
+const COMMITS_KEPT: usize = 64;
 
 /// The most characters of a server error's message kept.
 const MESSAGE_LIMIT: usize = 256;
@@ -441,6 +453,9 @@ impl NativeSpeechModel for DeepslateOpal {
             write_timeout: self.endpoint.read_timeout,
             turns: HashMap::new(),
             last_turn: None,
+            commits: VecDeque::new(),
+            user_turns: HashMap::new(),
+            ahead: VecDeque::new(),
             call_turns: HashMap::new(),
             answered: HashSet::new(),
             emitted: 0,
@@ -834,6 +849,13 @@ pub struct DeepslateOpalSession {
     turns: HashMap<u32, ResponseId>,
     /// The turn of the latest `ResponseBegin`.
     last_turn: Option<u32>,
+    /// The latest `COMMITS_KEPT` commits, oldest first, each with the `turn_id` mapped onto it.
+    commits: VecDeque<(InputItemId, Option<u32>)>,
+    /// The turn each `turn_id` of a user transcription names.
+    user_turns: HashMap<u32, InputItemId>,
+    /// The turns of transcriptions that came before their commit, oldest first, with their
+    /// `turn_id`.
+    ahead: VecDeque<(InputItemId, u32)>,
     /// The turn of each call proposed and not yet answered.
     call_turns: HashMap<String, u32>,
     /// Turns whose response in progress proposed a call the caller answered.
@@ -1084,7 +1106,72 @@ impl DeepslateOpalSession {
         }
     }
 
+    /// The turn the provider's `turn_id` names, mapped at its first mention onto a commit not yet
+    /// mapped: the newest one that leaves room, among the commits newer than every commit mapped
+    /// to a lower `turn_id` and older than every commit mapped to a higher one, for the user
+    /// turns below `turn_id` (one per two ids, the counter being shared with the assistant) still
+    /// unmapped. A mention with no such commit maps nothing, unless `ahead` asks to keep a turn
+    /// for the commit still to come.
+    fn user_turn(&mut self, turn_id: u32, ahead: bool) -> Option<InputItemId> {
+        if let Some(item) = self.user_turns.get(&turn_id) {
+            return Some(item.clone());
+        }
+        let lower = |turn: &Option<u32>| matches!(turn, Some(held) if *held < turn_id);
+        let higher = |turn: &Option<u32>| matches!(turn, Some(held) if *held > turn_id);
+        let start = self
+            .commits
+            .iter()
+            .rposition(|(_, turn)| lower(turn))
+            .map_or(0, |at| at + 1);
+        let end = self
+            .commits
+            .iter()
+            .position(|(_, turn)| higher(turn))
+            .unwrap_or(self.commits.len());
+        let mapped_below = self.commits.iter().filter(|(_, turn)| lower(turn)).count();
+        let room = (turn_id as usize).div_ceil(2).saturating_sub(mapped_below);
+        let free: Vec<usize> = (start..end.max(start))
+            .filter(|at| self.commits[*at].1.is_none())
+            .collect();
+        let item = match free.get(room).or(free.last()) {
+            Some(at) => {
+                let entry = &mut self.commits[*at];
+                entry.1 = Some(turn_id);
+                entry.0.clone()
+            }
+            None if ahead => {
+                let item = self.ledger.assign_item();
+                self.ahead.push_back((item.clone(), turn_id));
+                if self.ahead.len() > COMMITS_KEPT {
+                    self.ahead.pop_front();
+                }
+                item
+            }
+            None => return None,
+        };
+        self.user_turns.insert(turn_id, item.clone());
+        Some(item)
+    }
+
     fn message(&mut self, message: ClientBound, now: Instant) {
+        match &message {
+            ClientBound::ResponseBegin { turn_id }
+            | ClientBound::ModelTextFragment { turn_id, .. }
+            | ClientBound::InferenceComplete { turn_id }
+            | ClientBound::ModelAudioChunk {
+                turn_id: Some(turn_id),
+                ..
+            }
+            | ClientBound::ToolCallRequest {
+                turn_id: Some(turn_id),
+                ..
+            } => {
+                if let Some(user) = turn_id.checked_sub(1) {
+                    self.user_turn(user, false);
+                }
+            }
+            _ => {}
+        }
         match message {
             ClientBound::ResponseBegin { turn_id } => {
                 if !matches!(self.target(Some(turn_id)), Target::Live(_)) {
@@ -1137,14 +1224,28 @@ impl DeepslateOpalSession {
                     (VadState::Speech | VadState::SpeechEnding, VadState::Silence) => {
                         let stopped = self.ledger.speech_stopped(position, now);
                         self.or_drop(stopped);
-                        let committed = self.ledger.input_committed(now);
+                        let entry = match self.ahead.pop_front() {
+                            Some((item, turn)) => (item, Some(turn)),
+                            None => (self.ledger.assign_item(), None),
+                        };
+                        let item = entry.0.clone();
+                        self.commits.push_back(entry);
+                        if self.commits.len() > COMMITS_KEPT
+                            && let Some((_, Some(turn))) = self.commits.pop_front()
+                        {
+                            self.user_turns.remove(&turn);
+                        }
+                        let committed = self.ledger.input_committed(item, now);
                         self.or_drop(committed);
                     }
                     _ => {}
                 }
             }
-            ClientBound::UserTranscription { text, .. } => {
-                let heard = self.ledger.input_transcribed(text, now);
+            ClientBound::UserTranscription { text, turn_id, .. } => {
+                let item = self
+                    .user_turn(turn_id, true)
+                    .unwrap_or_else(|| self.ledger.assign_item());
+                let heard = self.ledger.input_transcribed(item, text, now);
                 self.or_drop(heard);
             }
             ClientBound::ToolCallRequest {
@@ -1257,7 +1358,8 @@ impl SpeechSessionHandle for DeepslateOpalSession {
     }
 
     fn commit_input(&mut self) -> Result<(), SessionError> {
-        self.ledger.commit_input(Instant::now())
+        let item = self.ledger.assign_item();
+        self.ledger.commit_input(item, Instant::now())
     }
 
     fn create_response(&mut self) -> Result<(), SessionError> {

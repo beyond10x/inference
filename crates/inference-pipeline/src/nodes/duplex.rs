@@ -34,12 +34,18 @@
 //! frame and at the first frame after each `InputCommitted`. Each `InputCommitted` makes its own
 //! turn the basis of the calls proposed after it: an `InputCommitted` with no transcript of its
 //! turn yet commits an empty span of that turn as the basis, so a call proposed on an
-//! untranscribed turn still rests on committed input, and never on an earlier turn's words. A
-//! transcript is a span committed at once and becomes the basis. It belongs to the last
-//! committed turn while that turn has none, even when it arrives after the next turn's first
-//! frame; otherwise it belongs to the open turn, as a transcript arriving before its
-//! `InputCommitted` does. A transcript carries no turn of its own, so one that arrives only after
-//! a later turn was committed is taken as that later turn's.
+//! untranscribed turn still rests on committed input, and never on an earlier turn's words. Each
+//! `InputCommitted` and `InputTranscribed` names its user turn by an `InputItemId`, so a
+//! transcript is a span committed at once, of the committed turn that carries its id, whenever it
+//! arrives: after the next turn's first frame or commit, or in any order among the turns. It
+//! becomes the basis only while its turn is the last one committed, so a late transcript of an
+//! earlier turn never becomes the basis of the next calls by itself. A call rests on the span of
+//! the turn its response answers, the last turn committed when the response started, updated
+//! when that turn's transcript arrives, whenever it does. A committed turn whose
+//! transcript never arrives keeps its empty span and takes no other turn's transcript. A
+//! transcript whose id no commit carries yet belongs to the open turn and becomes its basis, and
+//! the `InputCommitted` that names it later keeps that basis. A provider that sends no commit
+//! leaves every transcript in that state, so the node keeps the ids of the latest 64 of them.
 //!
 //! Tool calls: a proposal of a tool the node was given ([`DuplexNode::with_tools`]) becomes a
 //! [`ToolCall`] of the response's generation resting on the basis, under a fresh
@@ -72,7 +78,7 @@
 //! it is refused, ends its exchange and answers the run's drain with the failure. A run cancelled
 //! closes the session if no drain did, forwards nothing, and lets go of the session.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -87,9 +93,9 @@ use inference_core::generation::{Generation, StartGeneration};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::usage::UsageRecorded;
 use inference_duplex::{
-    NativeSpeechModel, OutputTranscriptDelta, ResponseFailed, ResponseId, SessionConfig,
-    SessionError, SessionEvent, SpeechCallId, SpeechSessionClosed, SpeechSessionFailed,
-    SpeechSessionHandle, SpeechStarted, SpeechToolCallProposed,
+    InputItemId, NativeSpeechModel, OutputTranscriptDelta, ResponseFailed, ResponseId,
+    SessionConfig, SessionError, SessionEvent, SpeechCallId, SpeechSessionClosed,
+    SpeechSessionFailed, SpeechSessionHandle, SpeechStarted, SpeechToolCallProposed,
 };
 use inference_text::{OpenTurn, OutputSegment, Span, Turn};
 use inference_tools::{Json, Tool, ToolCall, ToolCallId};
@@ -101,6 +107,12 @@ use super::{
     Exchange, ToolCallEvent, ToolCallUpdate, ToolPayload, Watched, block_on, unpark_waker,
 };
 use crate::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
+
+/// How many ids of transcripts that arrived before their commit the node keeps.
+const AHEAD_KEPT: usize = 64;
+
+/// How many committed turns the node keeps the transcript span of, the latest ones.
+const TURNS_KEPT: usize = 64;
 
 /// How long the node waits for the model's next event before it looks at its inputs again.
 const POLL: Duration = Duration::from_millis(10);
@@ -418,11 +430,25 @@ struct Exchanging<P, S> {
     turn: Option<Turn>,
     /// The last turn was committed; the next frame opens another.
     committed: bool,
-    /// A transcript of the open turn arrived before its `InputCommitted`.
-    transcribed: bool,
-    /// The last committed turn, while no transcript of it has arrived.
-    awaiting: Option<Turn>,
-    /// The committed span the next proposal rests on.
+    /// The committed turns by the id their `InputCommitted` carried, which a transcript naming
+    /// the id is committed on, whenever it arrives; at most the latest `TURNS_KEPT` of them.
+    turns: HashMap<InputItemId, Turn>,
+    /// The ids in `turns`, oldest first, to evict the oldest past `TURNS_KEPT`.
+    order: VecDeque<InputItemId>,
+    /// The id of the last committed turn, the one whose transcript becomes the basis.
+    latest: Option<InputItemId>,
+    /// The ids of transcripts that arrived before their `InputCommitted`, oldest first, at most
+    /// `AHEAD_KEPT`.
+    ahead: VecDeque<InputItemId>,
+    /// The span of each turn named by an id: the empty span committed at its commit until its
+    /// transcript arrives, then the transcript's span; a transcript that arrived before its
+    /// commit is kept here for it. Committed turns keep a span for the latest `TURNS_KEPT` only.
+    spans: HashMap<InputItemId, Span>,
+    /// The turn each response answers: the last turn committed when the response started, until
+    /// the response ends.
+    answers: HashMap<ResponseId, InputItemId>,
+    /// The span of the last committed turn, which a call of a response that answers no committed
+    /// turn rests on.
     basis: Option<Span>,
     /// A tool result was answered and the model is to be asked for a response.
     respond: bool,
@@ -629,7 +655,6 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
             .0,
         );
         self.committed = false;
-        self.transcribed = false;
     }
 
     /// Cancels the response in progress. The ledger clears the response in progress when it
@@ -731,6 +756,7 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
         response_id: ResponseId,
         end: impl FnOnce(&Generation) -> Option<(Generation, StreamEvent)>,
     ) -> Result<(), String> {
+        self.answers.remove(&response_id);
         let Some(generation) = self.generations.get(&response_id) else {
             return Ok(());
         };
@@ -782,10 +808,12 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
             );
             return Ok(());
         };
-        let call = match (
-            self.generations.get(&proposed.response_id),
-            self.basis.as_ref(),
-        ) {
+        let basis = self
+            .answers
+            .get(&proposed.response_id)
+            .and_then(|item| self.spans.get(item))
+            .or(self.basis.as_ref());
+        let call = match (self.generations.get(&proposed.response_id), basis) {
             (Some(generation), Some(basis)) => {
                 ToolCall::propose(&tool, generation, basis, proposed.arguments)
                     .map_err(|refused| refused.to_string())
@@ -828,27 +856,53 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
                 None,
                 P::speech_started(started),
             ),
-            SessionEvent::InputCommitted(_) => {
+            SessionEvent::InputCommitted(committed) => {
                 let turn = self.open()?;
-                if self.transcribed {
-                    self.awaiting = None;
+                if let Some(at) = self.ahead.iter().position(|item| *item == committed.item) {
+                    self.ahead.remove(at);
                 } else {
-                    self.basis = Some(self.committed_span(&turn, String::new())?.0);
-                    self.awaiting = Some(turn);
+                    let empty = self.committed_span(&turn, String::new())?.0;
+                    self.spans.insert(committed.item.clone(), empty);
                 }
+                self.basis = self.spans.get(&committed.item).cloned();
+                self.turns.insert(committed.item.clone(), turn);
+                self.order.push_back(committed.item.clone());
+                if self.order.len() > TURNS_KEPT
+                    && let Some(oldest) = self.order.pop_front()
+                {
+                    self.turns.remove(&oldest);
+                    self.spans.remove(&oldest);
+                }
+                self.latest = Some(committed.item);
                 self.committed = true;
                 Ok(())
             }
             SessionEvent::InputTranscribed(transcribed) => {
-                let turn = match self.awaiting.take() {
-                    Some(turn) => turn,
+                let (turn, last) = match self.turns.get(&transcribed.item) {
+                    Some(turn) => (
+                        turn.clone(),
+                        self.latest.as_ref() == Some(&transcribed.item),
+                    ),
                     None => {
-                        self.transcribed = true;
-                        self.open()?
+                        if self.committed {
+                            self.open_turn();
+                        }
+                        if !self.ahead.contains(&transcribed.item) {
+                            if self.ahead.len() == AHEAD_KEPT
+                                && let Some(evicted) = self.ahead.pop_front()
+                            {
+                                self.spans.remove(&evicted);
+                            }
+                            self.ahead.push_back(transcribed.item.clone());
+                        }
+                        (self.open()?, true)
                     }
                 };
                 let (span, committed) = self.committed_span(&turn, transcribed.text)?;
-                self.basis = Some(span);
+                self.spans.insert(transcribed.item, span.clone());
+                if last {
+                    self.basis = Some(span);
+                }
                 self.stream(StreamEvent::TranscriptCommitted(committed), None)
             }
             SessionEvent::UsageRecorded(mut recorded) => {
@@ -864,6 +918,9 @@ impl<P: DuplexPayload, S: SpeechSessionHandle> Exchanging<P, S> {
                     epoch: self.epoch,
                 });
                 self.generations.insert(created.response_id, generation);
+                if let Some(item) = self.latest.clone() {
+                    self.answers.insert(created.response_id, item);
+                }
                 self.stream(StreamEvent::GenerationStarted(started), None)
             }
             SessionEvent::OutputTranscriptDelta(delta) => self.text(delta),
@@ -1040,8 +1097,12 @@ impl<M: NativeSpeechModel> DuplexNode<M> {
             segment: 0,
             turn: None,
             committed: false,
-            transcribed: false,
-            awaiting: None,
+            turns: HashMap::new(),
+            order: VecDeque::new(),
+            latest: None,
+            ahead: VecDeque::new(),
+            spans: HashMap::new(),
+            answers: HashMap::new(),
             basis: None,
             respond: false,
         })

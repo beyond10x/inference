@@ -121,7 +121,7 @@ impl CaptureBuffer {
     }
 
     /// The device callback: down-mixes each whole frame of `interleaved` to one mono sample and
-    /// keeps it, made [finite](crate::convert::finite), or drops and counts it when the ring is
+    /// keeps it, made [finite], or drops and counts it when the ring is
     /// full. A finite sample is kept as it is, headroom included. Never blocks, never allocates and
     /// never waits for the reader. The ring has one writer: a call that overlaps another, which
     /// no device does, drops its frames and counts them instead of writing.

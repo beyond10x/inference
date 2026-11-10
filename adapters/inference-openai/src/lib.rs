@@ -64,8 +64,8 @@
 //! [`RealtimeClient::into_split`] splits a session into a [`RealtimeSender`] and a
 //! [`RealtimeReceiver`] that two tasks own, so server events are read while a write is pending.
 //!
-//! With feature `duplex` ([`duplex`]), the client is an `inference-duplex` native speech model:
-//! [`duplex::OpenAiRealtime`] opens sessions through the contract and records every server
+//! With feature `duplex` (`duplex`), the client is an `inference-duplex` native speech model:
+//! `duplex::OpenAiRealtime` opens sessions through the contract and records every server
 //! event through its `SessionLedger`.
 //!
 //! With feature `gpt-live`, `live` is a client for GPT-Live (`v1/live/sessions`, model

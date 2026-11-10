@@ -2,13 +2,41 @@
 format: aep.planning-md/3
 id: story:cascade-turn-spans-in-a-burst
 kind: story
-status: draft
+status: implemented
 title: A cascade answers each of two turns that arrive in a burst with its own reply
 tags:
 - from-finding
 relations:
 - serves: vision:inference
-revision: 1
+- decomposes: epic:defects-2026-11-10
+scope:
+- confidence: cited
+  path: crates/inference-pipeline/src/nodes/agent.rs
+- confidence: inferred
+  path: crates/inference-pipeline/src/nodes/commit_gate.rs
+- confidence: inferred
+  path: crates/inference-testkit/tests/agent_keeping_replies.rs
+- confidence: inferred
+  path: crates/inference-testkit/tests/agent_turn_order.rs
+- confidence: inferred
+  path: crates/inference/src/recipe/run.rs
+- confidence: cited
+  path: crates/inference/src/recipe/topology.rs
+- confidence: inferred
+  path: crates/inference/tests/cascade_burst.rs
+- confidence: inferred
+  path: crates/inference/tests/fixtures/reference_cascade.rs
+- confidence: inferred
+  path: examples/local-voice-cascade/src/lib.rs
+- confidence: inferred
+  path: examples/local-voice-cascade/tests/adversary1_barge_in_timing.rs
+- confidence: inferred
+  path: website/docs/examples/local-voice-cascade.md
+revision: 10
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-10T00:16:57Z", actor: "human:operator", revision: 6}
+- {from: "proposed", to: "active", at: "2026-11-10T00:16:57Z", actor: "human:operator", revision: 7}
+- {from: "active", to: "implemented", at: "2026-11-10T02:46:21Z", actor: "human:operator", revision: 10, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 ## Context
 
@@ -41,3 +69,56 @@ bites mainly on audio that arrives faster than real time.
   replies, each answering its own turn's text, in 960 of 960 rounds at 16 agents at once.
 - The fix chooses one of: committed spans carry their turn, or text and turn events travel on one
   ordered edge; the choice is stated in the story before code.
+
+## Decision
+
+Option (b) was chosen before code: text and turn events travel on one ordered edge. It was not
+enough on its own. Both turns' spans can be on the text lane before the gate reads any turn event,
+so the implementor added a turn mark, and the coordinator accepted it on 2026-11-10:
+
+- `SttNode` sets the `causation_id` of every transcript envelope to the event id of that turn's
+  `TurnOpened`.
+- At `TurnCompleted`, `AgentNode` answers only the spans naming that opening, or naming none
+  (typed text). When a turn opens over one that never completed, the agent moves the held spans
+  of the old opening to the new turn.
+- The input gate copies every turn event it takes on another lane onto the text lane, also in its
+  drain. It holds the text lane's end until every other lane has ended.
+- The turn split node is removed. `AgentNode` loses its `turns` port and `GatePayload` requires
+  `Clone`.
+
+Option (a), changing `TranscriptCommitted`, stayed rejected for the reasons the scoper gave.
+
+Two adversary passes reviewed the change: review-result:adversary-u2-cascade-burst-pass-1 and
+review-result:adversary-u2-cascade-burst-pass-2.
+
+## Scope
+
+Rewritten 2026-11-10 from the merged change (`git diff ff0ba010 e056c441`, 23 files).
+
+- **Source:**
+  - `crates/inference-pipeline/src/nodes/agent.rs`: turn events on the input edge, spans matched
+    to their opening, re-attribution at a reopening
+  - `crates/inference-pipeline/src/nodes/commit_gate.rs`: turn copies onto the text lane, the
+    text lane's end held until every other lane ended
+  - `crates/inference-pipeline/src/nodes/stt.rs`: `causation_id` set from `TurnOpened`
+- **Wiring:**
+  - `crates/inference/src/recipe/topology.rs` and `crates/inference/src/recipe/run.rs`: the turn
+    split is dropped, and so is the agent's `turns` port
+  - `crates/inference/src/graph.rs`: the doc example
+  - `examples/local-voice-cascade/src/lib.rs`: `CascadeIds` loses `turn_split` and `llm_turns`
+- **Testkit:** `crates/inference-testkit/src/llm.rs` and `crates/inference-testkit/src/stt.rs`,
+  for per-recognition scripts and recorded asks.
+- **Tests:**
+  - `crates/inference/tests/cascade_burst.rs`: 16 agents × 60 rounds. On the base 176 of 960
+    rounds went wrong; it is green on the unit.
+  - `crates/inference-testkit/tests/agent_turn_order.rs`
+  - the adversary files `adversary_u2_*.rs` in `inference-pipeline`, `inference-testkit` and
+    `inference`
+  - updates to `agent_keeping_replies.rs`, `crates/inference/tests/graph.rs`, `recipes.rs`,
+    `fixtures/reference_cascade.rs` and `examples/local-voice-cascade/tests/adversary1_barge_in_timing.rs`
+- **Documents:** `website/docs/examples/local-voice-cascade.md`, and the CHANGELOG Breaking and
+  Fixed lines.
+- **Not touched:** `crates/inference-text`, `ess/`, `crates/inference-duplex` and
+  `crates/inference-pipeline/src/nodes/duplex.rs`.
+- **Left out:** a late `TurnCompleted` naming an old opening, which is pre-existing, filed as
+  story:agent-turn-completed-names-its-turn.

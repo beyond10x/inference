@@ -9,7 +9,12 @@
 //! What a send does when the queue holds `capacity` envelopes is the edge's
 //! [`OverloadPolicy`]:
 //!
-//! - `pause`: the send waits until the consumer takes an envelope; nothing is lost.
+//! - `pause`: the send waits until the consumer takes an envelope; nothing is lost. Waiting sends
+//!   are served in the order they started waiting: room goes to the oldest as a place in queue
+//!   order, a new send takes room only when none waits, and a send lands in its place by its own
+//!   poll. The receiver sees only landed envelopes (`len` and `known_contents` count no place),
+//!   passes a place whose send has not landed, and never waits on a caller; that send then waits
+//!   again with its age and lands after the envelopes that landed before it.
 //! - `fail`: the send returns [`SendError::Full`] carrying the envelope; nothing is discarded
 //!   silently.
 //! - `drop`: the arriving envelope is discarded and the producer is not held.
@@ -36,14 +41,15 @@
 //! the receiver yields what is queued and then `None`. The receiver can also close the queue to
 //! its senders while it stays ([`InputEndpoint::close_to_senders`]): every send is then refused
 //! as closed with its envelope, one waiting for room at its next poll, and the receiver yields
-//! what is queued and then `None` without waiting. Waiting is a [`Future`](std::future::Future)
+//! what is queued and then `None` without waiting. Waiting is a [`Future`]
 //! woken through its [`Waker`], so the queue runs under any executor.
 
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
-use std::future;
+use std::future::Future;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context, Poll, Waker};
 
@@ -206,8 +212,31 @@ struct Queued<P> {
     epoch: Option<i64>,
 }
 
+/// One place of the queue, in queue order: an envelope that landed, or the room granted to the
+/// waiting send holding a ticket, whose envelope takes that place when the send's own poll lands
+/// it. The receiver sees only landed envelopes.
+enum Place<P> {
+    Landed(Queued<P>),
+    Granted(u64),
+}
+
+/// A send that found no room, in line: its age is its number, and its envelope stays with the
+/// send.
+struct Ticket {
+    id: u64,
+    producer: NodeId,
+    epoch: Option<i64>,
+    waker: Waker,
+    placed: bool,
+}
+
 struct State<P> {
-    items: VecDeque<Queued<P>>,
+    /// The queue's places, oldest first; at most `capacity` of them.
+    items: VecDeque<Place<P>>,
+    /// The sends waiting for room, oldest first. Room goes to the oldest that is not stale and
+    /// holds no place, and a new send takes room only when none such waits.
+    tickets: VecDeque<Ticket>,
+    next_ticket: u64,
     discarded: u64,
     newest_epochs: HashMap<NodeId, i64>,
     senders: usize,
@@ -219,6 +248,101 @@ struct State<P> {
     closes: bool,
     waiting_senders: Vec<Waker>,
     waiting_receiver: Option<Waker>,
+}
+
+impl<P> State<P> {
+    /// How many envelopes landed and are queued, the places no envelope landed in aside.
+    fn landed(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|place| matches!(place, Place::Landed(_)))
+            .count()
+    }
+
+    /// Whether `ticket` is of an epoch lower than its producer's newest.
+    fn stale(&self, ticket: &Ticket) -> bool {
+        ticket.epoch.is_some_and(|epoch| {
+            self.newest_epochs
+                .get(&ticket.producer)
+                .is_some_and(|newest| epoch < *newest)
+        })
+    }
+
+    /// Whether a send waits that is not stale and holds no place.
+    fn waiting_without_place(&self) -> bool {
+        self.tickets
+            .iter()
+            .any(|ticket| !ticket.placed && !self.stale(ticket))
+    }
+
+    /// Gives the room the queue has to the oldest tickets that are not stale and hold no place,
+    /// each as a place at the back.
+    fn grant(&mut self, capacity: usize) {
+        for at in 0..self.tickets.len() {
+            if self.items.len() >= capacity {
+                break;
+            }
+            let eligible = self
+                .tickets
+                .get(at)
+                .is_some_and(|ticket| !ticket.placed && !self.stale(ticket));
+            if eligible && let Some(ticket) = self.tickets.get_mut(at) {
+                ticket.placed = true;
+                let id = ticket.id;
+                self.items.push_back(Place::Granted(id));
+            }
+        }
+    }
+
+    fn ticket_at(&self, id: u64) -> Option<usize> {
+        self.tickets.iter().position(|ticket| ticket.id == id)
+    }
+
+    /// Removes the place granted to the ticket `id`, if it holds one; the ticket keeps its age.
+    fn remove_place(&mut self, id: u64) {
+        if let Some(at) = self
+            .items
+            .iter()
+            .position(|place| matches!(place, Place::Granted(held) if *held == id))
+        {
+            self.items.remove(at);
+        }
+        if let Some(at) = self.ticket_at(id)
+            && let Some(ticket) = self.tickets.get_mut(at)
+        {
+            ticket.placed = false;
+        }
+    }
+
+    /// Removes the places of tickets a raised epoch made stale.
+    fn remove_stale_places(&mut self) {
+        let stale: Vec<u64> = self
+            .tickets
+            .iter()
+            .filter(|ticket| ticket.placed && self.stale(ticket))
+            .map(|ticket| ticket.id)
+            .collect();
+        for id in stale {
+            self.remove_place(id);
+        }
+    }
+
+    /// Every task that waits for room: the waiting sends and the holders of a [`Room`].
+    fn waiting_wakers(&mut self) -> Vec<Waker> {
+        let mut wakers = std::mem::take(&mut self.waiting_senders);
+        wakers.extend(self.tickets.iter().map(|ticket| ticket.waker.clone()));
+        wakers
+    }
+
+    /// Removes every place no envelope landed in and every ticket: nothing that has not landed is
+    /// kept or counted. Answers the wakers of the waiting tasks, whose sends are refused as
+    /// closed at their next poll.
+    fn close(&mut self) -> Vec<Waker> {
+        let wakers = self.waiting_wakers();
+        self.items.retain(|place| matches!(place, Place::Landed(_)));
+        self.tickets.clear();
+        wakers
+    }
 }
 
 struct Shared<P> {
@@ -247,19 +371,21 @@ impl<P> Shared<P> {
     }
 
     fn len(&self) -> usize {
-        self.state().items.len()
+        self.state().landed()
     }
 
     fn discarded(&self) -> u64 {
         self.state().discarded
     }
 
-    /// One attempt to send the envelope in `slot`. A send that must wait leaves the envelope in
-    /// `slot` and registers the task; every other outcome takes it.
+    /// One attempt to send the envelope in `slot`, as a send that holds no ticket. A send that
+    /// must wait takes a ticket, sets `ticket`, leaves the envelope in `slot` and registers the
+    /// task; every other outcome takes the envelope.
     fn poll_send(
         &self,
         cx: &Context<'_>,
         slot: &mut Option<EventEnvelope<P>>,
+        ticket: &mut Option<u64>,
     ) -> Poll<Result<(), SendError<P>>> {
         let Some(envelope) = slot.take() else {
             return Poll::Ready(Ok(()));
@@ -270,11 +396,12 @@ impl<P> Shared<P> {
                 .and_then(|generation_id| self.epochs.epoch(generation_id)),
             _ => None,
         };
+        let capacity = self.capacity.get();
         let mut state = self.state();
         if !state.receiver || state.closed_to_senders {
             return Poll::Ready(Err(SendError::Closed(envelope)));
         }
-        let mut raised = false;
+        let mut woken = Vec::new();
         if let Some(epoch) = epoch {
             let newest = *state
                 .newest_epochs
@@ -288,33 +415,44 @@ impl<P> Shared<P> {
                 state.newest_epochs.insert(envelope.producer, epoch);
                 let before = state.items.len();
                 let producer = envelope.producer;
-                state.items.retain(|queued| {
-                    queued.envelope.producer != producer
-                        || queued.epoch.is_none_or(|queued| queued >= epoch)
+                state.items.retain(|place| match place {
+                    Place::Landed(queued) => {
+                        queued.envelope.producer != producer
+                            || queued.epoch.is_none_or(|queued| queued >= epoch)
+                    }
+                    Place::Granted(_) => true,
                 });
                 let stale = before - state.items.len();
                 state.discarded += stale as u64;
-                raised = true;
+                state.remove_stale_places();
+                state.grant(capacity);
+                // A raised epoch may have made a waiting send stale, or freed room for one: every
+                // waiting send polls again, and a stale one completes as discarded.
+                woken = state.waiting_wakers();
             }
         }
-        // A raised epoch may have made a waiting send stale, or freed room for one: every
-        // waiting sender polls again, and a stale one completes as discarded.
-        let senders = if raised {
-            std::mem::take(&mut state.waiting_senders)
-        } else {
-            Vec::new()
-        };
-        if state.items.len() < self.capacity.get() {
-            state.items.push_back(Queued { envelope, epoch });
+        if !state.waiting_without_place() && state.items.len() < capacity {
+            state
+                .items
+                .push_back(Place::Landed(Queued { envelope, epoch }));
             let receiver = state.waiting_receiver.take();
             drop(state);
             wake(receiver);
-            wake(senders);
+            wake(woken);
             return Poll::Ready(Ok(()));
         }
         let outcome = match self.policy {
             Policy::Pause | Policy::DropStaleEpochs => {
-                register(&mut state.waiting_senders, cx.waker());
+                let id = state.next_ticket;
+                state.next_ticket += 1;
+                state.tickets.push_back(Ticket {
+                    id,
+                    producer: envelope.producer,
+                    epoch,
+                    waker: cx.waker().clone(),
+                    placed: false,
+                });
+                *ticket = Some(id);
                 *slot = Some(envelope);
                 Poll::Pending
             }
@@ -326,35 +464,138 @@ impl<P> Shared<P> {
             Policy::Coalesce => {
                 let stream_id = envelope.stream_id;
                 let arrival = Queued { envelope, epoch };
-                if let Some(newest) = state
-                    .items
-                    .iter_mut()
-                    .rev()
-                    .find(|queued| queued.envelope.stream_id == stream_id)
-                {
+                if let Some(newest) = state.items.iter_mut().rev().find_map(|place| match place {
+                    Place::Landed(queued) if queued.envelope.stream_id == stream_id => Some(queued),
+                    Place::Landed(_) | Place::Granted(_) => None,
+                }) {
                     *newest = arrival;
                 } else {
                     state.items.pop_front();
-                    state.items.push_back(arrival);
+                    state.items.push_back(Place::Landed(arrival));
                 }
                 state.discarded += 1;
                 Poll::Ready(Ok(()))
             }
         };
         drop(state);
-        wake(senders);
+        wake(woken);
         outcome
     }
 
-    /// One attempt to take the oldest queued envelope. A queue closed to its senders never waits:
-    /// nothing more can land on it.
-    fn poll_recv(&self, cx: &Context<'_>) -> Poll<Option<EventEnvelope<P>>> {
+    /// One poll of the send holding `ticket`, whose envelope is in `slot`. Refused as closed with
+    /// its envelope once the queue is closed; discarded when a raised epoch made it stale; landed
+    /// in its place, which wakes the receiver, when it holds one; otherwise it waits. `None` when
+    /// the queue no longer knows the ticket and is open: the send then starts over.
+    fn poll_ticket(
+        &self,
+        cx: &Context<'_>,
+        id: u64,
+        slot: &mut Option<EventEnvelope<P>>,
+        ticket: &mut Option<u64>,
+    ) -> Option<Poll<Result<(), SendError<P>>>> {
+        let capacity = self.capacity.get();
         let mut state = self.state();
-        if let Some(queued) = state.items.pop_front() {
-            let senders = std::mem::take(&mut state.waiting_senders);
+        if !state.receiver || state.closed_to_senders {
+            *ticket = None;
+            let envelope = slot.take()?;
+            return Some(Poll::Ready(Err(SendError::Closed(envelope))));
+        }
+        let at = state.ticket_at(id)?;
+        let stale = state.tickets.get(at).is_some_and(|held| state.stale(held));
+        let placed = state.tickets.get(at).is_some_and(|held| held.placed);
+        if stale {
+            *ticket = None;
+            *slot = None;
+            state.remove_place(id);
+            state.tickets.remove(at);
+            state.discarded += 1;
+            state.grant(capacity);
+            let woken = state.waiting_wakers();
             drop(state);
-            wake(senders);
-            return Poll::Ready(Some(queued.envelope));
+            wake(woken);
+            return Some(Poll::Ready(Ok(())));
+        }
+        if !placed {
+            if let Some(held) = state.tickets.get_mut(at)
+                && !held.waker.will_wake(cx.waker())
+            {
+                held.waker = cx.waker().clone();
+            }
+            return Some(Poll::Pending);
+        }
+        *ticket = None;
+        let held = state.tickets.remove(at)?;
+        let Some(envelope) = slot.take() else {
+            return Some(Poll::Ready(Ok(())));
+        };
+        let landed = Place::Landed(Queued {
+            envelope,
+            epoch: held.epoch,
+        });
+        match state
+            .items
+            .iter_mut()
+            .find(|place| matches!(place, Place::Granted(granted) if *granted == id))
+        {
+            Some(place) => *place = landed,
+            None => state.items.push_back(landed),
+        }
+        let receiver = state.waiting_receiver.take();
+        drop(state);
+        wake(receiver);
+        Some(Poll::Ready(Ok(())))
+    }
+
+    /// The send holding `ticket` was dropped before it landed: its ticket leaves the line, and
+    /// the place it held goes to the next waiting send.
+    fn withdraw(&self, id: u64) {
+        let capacity = self.capacity.get();
+        let mut state = self.state();
+        let Some(at) = state.ticket_at(id) else {
+            return;
+        };
+        let placed = state.tickets.get(at).is_some_and(|held| held.placed);
+        state.remove_place(id);
+        state.tickets.remove(at);
+        if !placed {
+            return;
+        }
+        state.grant(capacity);
+        let woken = state.waiting_wakers();
+        drop(state);
+        wake(woken);
+    }
+
+    /// One attempt to take the oldest landed envelope. Every place in front of it is passed over,
+    /// its ticket keeps its age, and the room made goes to the oldest waiting sends; the receiver
+    /// never waits on a place. A queue closed to its senders never waits: nothing more can land
+    /// on it.
+    fn poll_recv(&self, cx: &Context<'_>) -> Poll<Option<EventEnvelope<P>>> {
+        let capacity = self.capacity.get();
+        let mut state = self.state();
+        if let Some(at) = state
+            .items
+            .iter()
+            .position(|place| matches!(place, Place::Landed(_)))
+        {
+            let passed: Vec<Place<P>> = state.items.drain(..at).collect();
+            for place in passed {
+                if let Place::Granted(id) = place
+                    && let Some(held) = state.ticket_at(id)
+                    && let Some(ticket) = state.tickets.get_mut(held)
+                {
+                    ticket.placed = false;
+                }
+            }
+            let taken = state.items.pop_front();
+            state.grant(capacity);
+            let woken = state.waiting_wakers();
+            drop(state);
+            wake(woken);
+            return match taken {
+                Some(Place::Landed(queued)) => Poll::Ready(Some(queued.envelope)),
+                Some(Place::Granted(_)) | None => Poll::Pending,
+            };
         }
         if state.senders == 0 || state.closed_to_senders {
             return Poll::Ready(None);
@@ -388,6 +629,8 @@ impl<P> Shared<P> {
             receiver: true,
             closed_to_senders: false,
             closes: true,
+            tickets: VecDeque::new(),
+            next_ticket: 0,
             waiting_senders: Vec::new(),
             waiting_receiver: None,
         };
@@ -618,10 +861,48 @@ impl<P> Drop for QueueSender<P> {
 
 impl<P: Send> OutputEndpoint<P> for QueueSender<P> {
     fn send(&self, envelope: EventEnvelope<P>) -> EndpointFuture<'_, Result<(), SendError<P>>> {
-        let mut slot = Some(envelope);
-        Box::pin(future::poll_fn(move |cx| {
-            self.shared.poll_send(cx, &mut slot)
-        }))
+        Box::pin(Sending {
+            shared: &self.shared,
+            slot: Some(envelope),
+            ticket: None,
+        })
+    }
+}
+
+/// One send of a [`QueueSender`]: the envelope until the queue answers or the send waits, then
+/// the ticket it holds. The envelope enters the queue only during a poll of this send that
+/// answers `Ready(Ok)`; dropped while it waits, the send withdraws its ticket and passes on any
+/// place it held.
+struct Sending<'a, P> {
+    shared: &'a Shared<P>,
+    slot: Option<EventEnvelope<P>>,
+    ticket: Option<u64>,
+}
+
+impl<P> Unpin for Sending<'_, P> {}
+
+impl<P> Future for Sending<'_, P> {
+    type Output = Result<(), SendError<P>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if let Some(id) = this.ticket
+            && let Some(outcome) = this
+                .shared
+                .poll_ticket(cx, id, &mut this.slot, &mut this.ticket)
+        {
+            return outcome;
+        }
+        this.ticket = None;
+        this.shared.poll_send(cx, &mut this.slot, &mut this.ticket)
+    }
+}
+
+impl<P> Drop for Sending<'_, P> {
+    fn drop(&mut self) {
+        if let Some(id) = self.ticket.take() {
+            self.shared.withdraw(id);
+        }
     }
 }
 
@@ -656,9 +937,9 @@ impl<P> Drop for QueueReceiver<P> {
     fn drop(&mut self) {
         let mut state = self.shared.state();
         state.receiver = false;
-        state.discarded += state.items.len() as u64;
+        state.discarded += state.landed() as u64;
         state.items.clear();
-        let senders = std::mem::take(&mut state.waiting_senders);
+        let senders = state.close();
         drop(state);
         wake(senders);
     }
@@ -666,7 +947,7 @@ impl<P> Drop for QueueReceiver<P> {
 
 impl<P: Send> InputEndpoint<P> for QueueReceiver<P> {
     fn recv(&mut self) -> EndpointFuture<'_, Option<EventEnvelope<P>>> {
-        Box::pin(future::poll_fn(move |cx| self.shared.poll_recv(cx)))
+        Box::pin(std::future::poll_fn(move |cx| self.shared.poll_recv(cx)))
     }
 
     /// Empty while nothing is queued, closed or not, and not empty otherwise; a `recv` future
@@ -696,12 +977,12 @@ impl<P: Send> InputEndpoint<P> for QueueReceiver<P> {
             return ClosedToSenders::Unsupported;
         }
         state.closed_to_senders = true;
-        let answer = if state.items.is_empty() {
+        let answer = if state.landed() == 0 {
             ClosedToSenders::Empty
         } else {
             ClosedToSenders::Holding
         };
-        let senders = std::mem::take(&mut state.waiting_senders);
+        let senders = state.close();
         drop(state);
         wake(senders);
         answer
