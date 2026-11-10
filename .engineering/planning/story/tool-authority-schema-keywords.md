@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:tool-authority-schema-keywords
 kind: story
-status: active
+status: implemented
 title: The tool authority admits or the tool attribute refuses every argument type schemars describes
 tags:
 - from-finding
@@ -17,10 +17,11 @@ scope:
   path: crates/inference/tests/tool_macro_schema_keywords.rs
 - confidence: inferred
   path: docs/design/sdk.md
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-10T00:17:28Z", actor: "human:operator", revision: 5}
 - {from: "proposed", to: "active", at: "2026-11-10T00:17:28Z", actor: "human:operator", revision: 6}
+- {from: "active", to: "implemented", at: "2026-11-10T02:46:22Z", actor: "human:operator", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 ## Context
 

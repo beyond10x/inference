@@ -15,7 +15,7 @@ relations:
 - decides: story:tool-authority-schema-keywords
 - decides: story:waiting-sends-land-in-the-order-they-started-waiting
 - decides: story:withdrawn-ingress-send-gives-back-its-sequence
-revision: 4
+revision: 6
 ---
 ## Decision
 
@@ -133,15 +133,50 @@ Branch `wave/defects-2026-11-10`, managed tree `inference-wave-defects`.
 
 ## Unit state
 
-| unit | tree id | branch | head | stage |
+| unit | branch | head | adversary passes | merge into the wave branch |
 |---|---|---|---|---|
-| U1 | inference-u1-duplex-turn-ids | impl/duplex-turn-ids | | planned |
-| U2 | inference-u2-cascade-turn-spans | impl/cascade-turn-spans-in-a-burst | | planned |
-| U3 | inference-u3-live-session-send | impl/live-session-send-after-its-own-turn | | planned |
-| U4 | inference-u4-tool-authority | impl/tool-authority-schema-keywords | | planned |
-| U5 | inference-u5-docs-build | impl/docs-build-without-warnings | | planned |
-| U6 | inference-u6-withdrawn-ingress | impl/withdrawn-ingress-send-gives-back-its-sequence | | planned |
-| U7 | inference-u7-waiting-sends | impl/waiting-sends-land-in-the-order-they-started-waiting | | planned |
+| U1 | impl/duplex-turn-ids | 38164e7f | 2, both fixed | e23b6130 |
+| U2 | impl/cascade-turn-spans-in-a-burst | e056c441 | 2, both fixed | a6f40976 |
+| U3 | impl/live-session-send-after-its-own-turn | 45748589 | 2: pass 1 no-op, pass 2 fixed | 966cdf29 |
+| U4 | impl/tool-authority-schema-keywords | 9ea2127d | 2: pass 1 no-op, pass 2 fixed | 27c08621 |
+| U5 | impl/docs-build-without-warnings | 7b99b079 | none (doc text and one gate line; the gate step is the check) | 50f6ff35 |
+| U6 | impl/withdrawn-ingress-send-gives-back-its-sequence | fdfeacb1 | 1, fixed | bc841d7a |
+| U7 | impl/waiting-sends-land-in-the-order-they-started-waiting | ae789d7a | 1, no-op (four notes) | 436d7c96 |
 
-Each tree builds into its own `target/`; each unit's scratch is a directory of the coordinator's
-session scratch named after the unit.
+Every unit tree was finished, archived and collected once its unit was merged.
+
+## Delivered
+
+Delivered on 2026-11-10. Seven stories moved active -> implemented:
+
+- story:duplex-turn-ids
+- story:cascade-turn-spans-in-a-burst
+- story:live-session-send-after-its-own-turn
+- story:tool-authority-schema-keywords
+- story:docs-build-without-warnings
+- story:withdrawn-ingress-send-gives-back-its-sequence
+- story:waiting-sends-land-in-the-order-they-started-waiting
+
+story:signed-url-token-copies stays active, for wave 2.
+
+The full gate ran once, step by step, on `wave/defects-2026-11-10` at 436d7c96. Every step exited
+0 except clippy:
+
+- docs-generate (it changed no file)
+- the sherpa-onnx archive
+- `ess specify validate`
+- `aep plan artifact validate`
+- docs-check
+- fmt
+- the docs build with warnings denied
+- `cargo test --workspace --all-features`: 3934 passed, 0 failed, 60 ignored
+- the `stack` test without default features
+
+Clippy exited 101: U4's test `tool_macro_schema_keywords.rs` never read two enum fields. 67bb0476
+fixed that, and the workspace clippy then exited 0. The CHANGELOG lines are in 8f9a90d8.
+
+Backlog drafts were filed from findings that already existed on the base. No later wave takes them
+before every planned wave is delivered.
+
+- story:tool-authority-more-schema-keywords, from review-result:adversary-u4-schema-keywords-pass-1
+- story:agent-turn-completed-names-its-turn, from review-result:adversary-u2-cascade-burst-pass-2

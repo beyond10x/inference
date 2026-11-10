@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:withdrawn-ingress-send-gives-back-its-sequence
 kind: story
-status: active
+status: implemented
 title: A run ingress send that ends untaken gives back its sequence
 summary: The sequence guard gives back exactly the sequence of a send whose envelope the queue never took.
 tags:
@@ -18,10 +18,11 @@ scope:
   path: crates/inference-runtime/tests/adversary1_parked_send_run.rs
 - confidence: cited
   path: crates/inference-runtime/tests/adversary2_parked_send_run.rs
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-10T00:16:59Z", actor: "human:operator", revision: 4}
 - {from: "proposed", to: "active", at: "2026-11-10T00:16:59Z", actor: "human:operator", revision: 5}
+- {from: "active", to: "implemented", at: "2026-11-10T02:46:22Z", actor: "human:operator", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 

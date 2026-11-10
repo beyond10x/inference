@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:duplex-turn-ids
 kind: story
-status: active
+status: implemented
 title: Duplex input events name the turn they belong to
 summary: InputCommitted and InputTranscribed carry an item or turn id, so DuplexNode pairs each transcript with its own turn
 relations:
@@ -60,10 +60,11 @@ scope:
   path: examples/realtime-voice/tests/adversary1_talk_over_cut_answer.rs
 - confidence: cited
   path: examples/realtime-voice/tests/compare.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-10T00:16:58Z", actor: "human:operator", revision: 5}
 - {from: "proposed", to: "active", at: "2026-11-10T00:16:58Z", actor: "human:operator", revision: 6}
+- {from: "active", to: "implemented", at: "2026-11-10T02:46:21Z", actor: "human:operator", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 ## Outcome
 

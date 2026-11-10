@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:docs-build-without-warnings
 kind: story
-status: active
+status: implemented
 title: The workspace's docs build without warnings and task check holds it
 tags:
 - from-finding
@@ -25,10 +25,11 @@ scope:
   path: adapters/inference-openai/src/lib.rs
 - confidence: cited
   path: crates/inference/src/lib.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-10T00:17:27Z", actor: "human:operator", revision: 5}
 - {from: "proposed", to: "active", at: "2026-11-10T00:17:27Z", actor: "human:operator", revision: 6}
+- {from: "active", to: "implemented", at: "2026-11-10T02:46:27Z", actor: "human:operator", revision: 8, decided_on: {"recorded":{"test_result":1,"verification":1}}}
 ---
 ## Context
 
