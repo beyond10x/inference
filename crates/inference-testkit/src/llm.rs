@@ -33,7 +33,7 @@
 //! A generator scripted for tools ([`MockGenerator::proposing`]) also claims `tool_calling`, and
 //! its model declares tools: each of its first `proposals` model requests ends with the
 //! same [`ToolProposal`], an `llm` tool call of the tool named as
-//! [`tool_name`](inference_llm::tools::tool_name) names it. Scripted with a round
+//! [`tool_name`] names it. Scripted with a round
 //! ([`MockGenerator::proposing_round`]), each of those turns ends with every proposal of the
 //! round, in the round's order. The text of a turn answering tool results contains each: the
 //! result's JSON, the failure's detail or the rejection's reason.
@@ -65,8 +65,6 @@ use inference_llm::{
 };
 use inference_tools::{Json, RejectionReason, ToolId};
 
-/// The mock model node of a text-only pipeline, behind the `run` feature: a [`ModelNode`] answers
-/// each input on one generation of a [`Generator`] per run.
 #[cfg(feature = "run")]
 mod node;
 

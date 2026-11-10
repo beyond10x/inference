@@ -71,15 +71,10 @@ use crate::stream::{StreamDomain, StreamEvent, TurnMoveError};
 use crate::stt::{FanOut, Heard, MockRecogniser, SttHandle, SttNode, SttPayload, SttPorts};
 use crate::tts::{MockSynthesiser, Spoken, TtsHandle, TtsNode, TtsPayload};
 
-/// The TTS node of a cascade whose playback an acknowledging sink confirms: the synthesis's
-/// frames out, the sink's receipts in.
 pub mod speech;
 
-/// The model node of a cascade that can be interrupted: one generation per turn, superseded at
-/// the opening of the next.
 pub mod agent;
 
-/// A synthesiser scripted to deliver the frames of one segment late, once it was discarded.
 pub mod late;
 
 /// The name of the ingress the utterance's frames enter by.

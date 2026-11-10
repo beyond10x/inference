@@ -16,65 +16,32 @@
 //! Every module of a domain `ess/system.yaml` lists exists, empty until the story that declares its
 //! domain fills it; a domain added to the system adds its module line here.
 
-/// `inference.model`: the in-memory stores of the declared models, adapters and capability
-/// records, their views, and the loader that checks an adapter's record file against its claims.
 pub mod model;
 
-/// `inference.policy`: the in-memory store of the declared deployment profiles, and its view.
 pub mod policy;
 
-/// `inference.graph`: the in-memory pipeline declaration, its nodes, ports, edges and bindings,
-/// their validation, their planning, behind the `run` feature the runs of planned pipelines with
-/// their node instances and the recording mock node, and their views.
 pub mod graph;
 
-/// `inference.stream`: the in-memory stores of the turns, spans, generations and output segments,
-/// their views, and the log that records their events in envelopes.
 pub mod stream;
 
-/// `inference.tools`: the in-memory stores of the declared tools and of the tool calls through
-/// their lifecycle, their views, and the scripted mock of the executor contract.
 pub mod tools;
 
-/// `inference.session`, behind the `run` feature: the in-memory store of the sessions, each holding
-/// its current run, and its view, over the session state machine of `inference-facade`.
 pub mod session;
 
-/// `inference.duplex`: the in-memory stores of the native speech sessions, their responses and
-/// tool calls, their views, and behind `duplex` the scripted mock native speech model.
 pub mod duplex;
 
-/// The marked reply audio of the mocks: which mock produced a frame, for which reply, as which
-/// frame of it ([`mark::encode`], [`mark::decode`]).
 pub mod mark;
 
-/// `inference.usage`: the in-memory store of the usage records of model calls, each of a
-/// declared adapter and model, and of the cost records that price them, each of a stored usage
-/// record.
 pub mod usage;
 
-/// The scripted mock recogniser of the STT contract, in two capability configurations, each
-/// recognition ending with its usage record, and synthetic audio of tone and silence.
 #[cfg(feature = "stt")]
 pub mod stt;
 
-/// The scripted mock `llm` model of the LLM contract, wrapped by its generator, in three
-/// capability configurations, which may also be scripted to propose tool calls, to report the
-/// usage of each turn and to hold a turn until it is cancelled.
 #[cfg(feature = "llm")]
 pub mod llm;
 
-/// The scripted mock synthesiser of the TTS contract, in four capability configurations, each
-/// synthesis ending with its usage record, a sink double that acknowledges playback, and the
-/// backend-neutral checks of the TTS adapter exit criteria, the usage record among them, that an
-/// adapter crate runs against its own synthesiser.
 #[cfg(feature = "tts")]
 pub mod tts;
 
-/// The voice cascade on the mocks: topology B declared with exposed ends, optionally with each
-/// model node's `usage` port exposed too, its payload and the node implementations of one run,
-/// the TTS node of a cascade whose sink acknowledges playback, the model node of a cascade that
-/// can be interrupted, one generation per turn, and a synthesiser scripted to deliver frames
-/// late, behind the `stt`, `llm`, `tts` and `run` features together.
 #[cfg(all(feature = "stt", feature = "llm", feature = "tts", feature = "run"))]
 pub mod cascade;
