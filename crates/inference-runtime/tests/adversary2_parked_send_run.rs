@@ -357,10 +357,11 @@ fn active(ingress: OverloadPolicy) -> Active {
 }
 
 /// What a caller of the run's ingress can tell after it gave a send up: only a send of the same
-/// envelope again tells. After the consumer took the given-up send's reserved envelope, the edge
-/// keeps its sequence and the same envelope again is refused as `SequenceNotIncreasing`, which
-/// the run records as a refusal; after the send took its envelope back, the same envelope again
-/// is taken. Either way the node receives each envelope once.
+/// envelope again tells. A send waits for room with its sequence under way until the queue takes
+/// the envelope or the send settles. When the queue took the envelope, the edge keeps its
+/// sequence and the same envelope again is refused as `SequenceNotIncreasing`, which the run
+/// records as a refusal; when the send was given up first, its sequence was given back and the
+/// same envelope again is taken. Either way the node receives each envelope once.
 #[test]
 fn an_ingress_send_given_up_is_told_delivered_or_not_only_by_sending_it_again() {
     let Active {
@@ -390,9 +391,9 @@ fn an_ingress_send_given_up_is_told_delivered_or_not_only_by_sending_it_again() 
     }
     let after_delivered = poll(ingress.send(second).as_mut(), noop);
     if matches!(after_delivered, Poll::Ready(Ok(()))) {
-        // story:run-ingress-admitted-send-outlives-the-drain: the node waits at the given-up
-        // send's reserved place, so the send took its envelope back and the same envelope sent
-        // again was taken; the node takes it before the next send.
+        // The given-up send waited for room and never had its envelope taken, so its sequence
+        // was given back and the same envelope sent again was taken; the node takes it before
+        // the next send.
         received.push(take_now(&mut input));
     }
 
