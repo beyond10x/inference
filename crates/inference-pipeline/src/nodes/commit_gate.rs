@@ -40,15 +40,24 @@
 //! would carry it. Content the gate does not read ([`Gated::Other`]), such as
 //! `GenerationStarted`, and every control event but the end of input pass as they are.
 //!
-//! When a turn event arrives, the gate first takes what its other lanes already hold, which their
-//! producer sent before it, so that a consumer of both outputs, such as the LLM node, has every
-//! committed span of a turn before the turn's completion, as the STT node sent them. The time at
-//! which each `TurnCompleted` was passed is recorded ([`CommitGateHandle::turns_passed`]).
+//! When a turn event, or the end of a lane, arrives, the gate first takes what its other lanes
+//! already hold, which their producer sent before it, so that a consumer of both outputs has every
+//! committed span of a turn before the turn's completion, as the STT node sent them. A gate of
+//! several lanes takes its first lane as the text lane: a turn event, other than the end of input,
+//! that arrives on another lane is passed on that lane's output and, once that first lane's spans
+//! were passed,
+//! on the first lane's output too, so that a consumer of the text lane alone, such as the agent
+//! node, reads each turn's spans and its turn events in one order. The copy is made after the
+//! gate took the event on its own lane, which is the only place the spans of the turns are
+//! counted. The time at which each `TurnCompleted` was passed on its own lane is recorded
+//! ([`CommitGateHandle::turns_passed`]).
 //!
 //! The end of input on a lane, a control event of kind `stop`, drops the deltas the lane holds,
 //! passes the rest and then the `stop`, and ends the lane; a lane whose input edge is closed ends
-//! the same way without a `stop`. The node ends once every lane ended. Cancelled, it sends nothing
-//! more, and a send waiting for room on a full edge ends at the cancel.
+//! the same way without a `stop`. The `stop` of the first lane passes only once every other lane
+//! ended, and if another lane never ends it is held until it does. The node ends once every lane
+//! ended. Cancelled, it sends nothing more, and a send waiting for room on a full edge ends at the
+//! cancel.
 //!
 //! The gate reads its payload through [`GatePayload`], which the payload of the run implements,
 //! so that this crate depends on no contract crate.
@@ -102,7 +111,7 @@ pub enum Gated {
 /// The payload of a run whose edges a [`CommitGate`] stands on: the gate reads what it carries
 /// and passes it on unchanged. A control event is told from content by its envelope's `kind`
 /// alone.
-pub trait GatePayload: Send + 'static {
+pub trait GatePayload: Clone + Send + 'static {
     /// What the payload carries.
     fn gated(&self) -> Gated;
 }
@@ -350,6 +359,17 @@ impl<P: GatePayload> Gate<P> {
         });
     }
 
+    /// Takes `envelope` onto the lane `lane` as it is, which counts nothing, and answers what the
+    /// lane passes now, in order.
+    fn copy(&mut self, lane: usize, envelope: EventEnvelope<P>) -> Vec<EventEnvelope<P>> {
+        let queue = &mut self.lanes[lane];
+        queue.push_back(Queued {
+            envelope,
+            waiting: None,
+        });
+        Self::release(queue)
+    }
+
     /// Takes from the front of `queue` every envelope no held delta stands before.
     fn release(queue: &mut VecDeque<Queued<P>>) -> Vec<EventEnvelope<P>> {
         let mut passed = Vec::new();
@@ -481,6 +501,10 @@ struct Exchanging<P> {
     inputs: Vec<Option<Box<dyn InputEndpoint<P>>>>,
     outputs: Vec<Box<dyn OutputEndpoint<P>>>,
     state: Arc<Watched<GateState>>,
+    /// The end of the first lane, taken from its edge while another lane still goes: it is held
+    /// until every other lane ended, so that the turn events they carry still reach the first
+    /// lane's output ahead of its end.
+    end_pending: Option<Option<EventEnvelope<P>>>,
 }
 
 impl<P: GatePayload> Exchanging<P> {
@@ -509,12 +533,18 @@ impl<P: GatePayload> Exchanging<P> {
         .await
     }
 
-    /// Sends what the lane `lane` passes, recording each `TurnCompleted` once it was passed.
-    async fn pass(&mut self, lane: usize, passed: Vec<EventEnvelope<P>>) -> Result<(), String> {
+    /// Sends what the lane `lane` passes, recording each `TurnCompleted` once it was passed, unless
+    /// what is passed is a copy of a turn event the gate took on another lane.
+    async fn pass(
+        &mut self,
+        lane: usize,
+        passed: Vec<EventEnvelope<P>>,
+        copied: bool,
+    ) -> Result<(), String> {
         for envelope in passed {
             let completed = match envelope.payload.gated() {
                 Gated::Turn(TurnEvent::Completed(completed))
-                    if ControlKind::of(&envelope.kind).is_none() =>
+                    if !copied && ControlKind::of(&envelope.kind).is_none() =>
                 {
                     Some(completed.turn_id)
                 }
@@ -539,8 +569,40 @@ impl<P: GatePayload> Exchanging<P> {
         Ok(())
     }
 
-    /// Takes `received` on the lane `lane` and passes what it lets through.
+    /// Takes `received` on the lane `lane` and passes what it lets through; a turn event taken on
+    /// a lane other than the first is passed on the first lane's output too, and the first lane's
+    /// end waits for the other lanes' ends.
     async fn take(
+        &mut self,
+        lane: usize,
+        received: Option<EventEnvelope<P>>,
+    ) -> Result<(), String> {
+        let ends = received
+            .as_ref()
+            .is_none_or(|envelope| ControlKind::of(&envelope.kind) == Some(ControlKind::Stop));
+        if lane == 0 && ends && self.inputs[1..].iter().any(Option::is_some) {
+            self.inputs[0] = None;
+            self.end_pending = Some(received);
+            return Ok(());
+        }
+        let copy = received.clone().filter(|envelope| {
+            lane != 0
+                && ControlKind::of(&envelope.kind).is_none()
+                && matches!(envelope.payload.gated(), Gated::Turn(_))
+        });
+        self.take_now(lane, received).await?;
+        if let Some(copy) = copy {
+            self.pass_copy(copy).await?;
+        }
+        if self.inputs[1..].iter().all(Option::is_none)
+            && let Some(end) = self.end_pending.take()
+        {
+            self.take_now(0, end).await?;
+        }
+        Ok(())
+    }
+
+    async fn take_now(
         &mut self,
         lane: usize,
         received: Option<EventEnvelope<P>>,
@@ -563,7 +625,14 @@ impl<P: GatePayload> Exchanging<P> {
                     .update(|state| gate.close(lane, &mut state.record))
             }
         };
-        self.pass(lane, passed).await
+        self.pass(lane, passed, false).await
+    }
+
+    /// Passes a copy of the turn event `envelope`, taken on another lane, on the output of the
+    /// first lane.
+    async fn pass_copy(&mut self, envelope: EventEnvelope<P>) -> Result<(), String> {
+        let passed = self.gate.copy(0, envelope);
+        self.pass(0, passed, true).await
     }
 
     /// Takes what the lanes other than `lane` already hold, without waiting.
@@ -589,7 +658,10 @@ impl<P: GatePayload> Exchanging<P> {
                         ControlKind::of(&envelope.kind).is_none()
                             && matches!(envelope.payload.gated(), Gated::Turn(_))
                     });
-                    if turn {
+                    let ending = received.as_ref().is_none_or(|envelope| {
+                        ControlKind::of(&envelope.kind) == Some(ControlKind::Stop)
+                    });
+                    if turn || ending {
                         self.take_held(lane).await?;
                     }
                     self.take(lane, received).await?;
@@ -659,6 +731,7 @@ impl CommitGate {
                 inputs: by_lane_in,
                 outputs,
                 state: Arc::clone(&self.state),
+                end_pending: None,
             }),
             _ => Err(NodeError::new(
                 "the gate was not handed one edge at each port of its lanes",

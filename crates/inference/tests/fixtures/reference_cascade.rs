@@ -49,7 +49,6 @@ pub fn declare(
             let policy = pipeline.node("turn policy", NodeRole::Policy, Vec::new());
             let stt = pipeline.node("stt", NodeRole::Model, Vec::new());
             let input_gate = pipeline.node("input gate", NodeRole::Policy, Vec::new());
-            let turn_split = pipeline.node("turn split", NodeRole::FanOut, Vec::new());
             let llm = pipeline.node("agent", NodeRole::Model, vec![Capability::OutputStreaming]);
             let text_split = pipeline.node("text split", NodeRole::FanOut, Vec::new());
             let output_gate = pipeline.node("output gate", NodeRole::Policy, Vec::new());
@@ -74,7 +73,6 @@ pub fn declare(
             let gate_turns_out =
                 pipeline.output::<modality::Control>(&input_gate, "turns_out", control);
             let user_input = pipeline.input::<modality::Text>(&llm, "user_input", text);
-            let llm_turns = pipeline.input::<modality::Control>(&llm, "turns", control);
             let answer = pipeline.output::<modality::Text>(&llm, "committed_text", text);
             let answered = pipeline.input::<modality::Text>(&text_split, "text", text);
             let to_gate = pipeline.output::<modality::Text>(&text_split, "gate", text);
@@ -86,10 +84,6 @@ pub fn declare(
             let spoken = pipeline.output::<modality::Audio>(&tts, "audio", audio);
             let playing = pipeline.input::<modality::Audio>(&sink, "audio", audio);
             let receipts = pipeline.output::<modality::Control>(&sink, "played", control);
-            let split_turns = pipeline.input::<modality::Control>(&turn_split, "turns", control);
-            let turns_to_llm = pipeline.output::<modality::Control>(&turn_split, "llm", control);
-            let turns_to_sink =
-                pipeline.output::<modality::Control>(&turn_split, "speaker", control);
             let sink_turns = pipeline.input::<modality::Control>(&sink, "turns", control);
             let tts_playback = pipeline.output::<modality::Control>(&tts, "playback", control);
             let llm_played = pipeline.input::<modality::Control>(&llm, "played", control);
@@ -101,9 +95,7 @@ pub fn declare(
             pipeline.connect(&transcript, &gate_in, capacity, pause);
             pipeline.connect(&turns_out, &gate_turns, capacity, pause);
             pipeline.connect(&gate_out, &user_input, capacity, pause);
-            pipeline.connect(&gate_turns_out, &split_turns, capacity, pause);
-            pipeline.connect(&turns_to_llm, &llm_turns, capacity, pause);
-            pipeline.connect(&turns_to_sink, &sink_turns, capacity, pause);
+            pipeline.connect(&gate_turns_out, &sink_turns, capacity, pause);
             pipeline.connect(&answer, &answered, capacity, pause);
             pipeline.connect(&to_gate, &held, capacity, pause);
             pipeline.connect(&passed, &speak, capacity, pause);

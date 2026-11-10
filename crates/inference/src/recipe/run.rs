@@ -270,15 +270,9 @@ impl<'i> Run<'i> {
     ) -> Result<Implementation, Error> {
         #[cfg(feature = "audio-host")]
         if matches!(self.recipe.topology, Topology::VoiceCascade) {
-            let agent = AgentNode::new(
-                run_id,
-                generator,
-                reply,
-                self.port(node, "turns")?,
-                self.log.clone(),
-            )
-            .with_playback(self.port(node, "played")?)
-            .with_instructions(self.recipe.instructions.clone().unwrap_or_default());
+            let agent = AgentNode::new(run_id, generator, reply, self.log.clone())
+                .with_playback(self.port(node, "played")?)
+                .with_instructions(self.recipe.instructions.clone().unwrap_or_default());
             let cutting = self.speaker.is_some_and(|speaker| speaker.auto_interrupt);
             return Ok(if cutting {
                 Box::new(agent)
