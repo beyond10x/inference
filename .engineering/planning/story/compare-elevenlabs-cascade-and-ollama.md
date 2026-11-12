@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:compare-elevenlabs-cascade-and-ollama
 kind: story
-status: active
+status: implemented
 title: compare measures an ElevenLabs cascade with a local LLM on Ollama against the realtime arms
 summary: compare's cascade arm can listen with ElevenLabs speech-to-text, its LLM is checked against Ollama, and the report names end of speech to first audio per arm.
 relations:
@@ -32,10 +32,11 @@ scope:
   path: website/docs/guides/run-the-local-voice-cascade-offline.md
 - confidence: inferred
   path: website/docs/reference/environment.md
-revision: 11
+revision: 12
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-12T15:36:17Z", actor: "human:operator", revision: 10}
 - {from: "proposed", to: "active", at: "2026-11-12T15:36:17Z", actor: "human:operator", revision: 11}
+- {from: "active", to: "implemented", at: "2026-11-12T21:52:24Z", actor: "human:operator", revision: 12, decided_on: {"recorded":{"test_result":2,"review_outcome":2}}}
 ---
 ## Context
 

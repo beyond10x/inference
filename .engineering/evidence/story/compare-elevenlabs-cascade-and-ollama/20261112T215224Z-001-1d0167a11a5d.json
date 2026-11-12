@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-12T21:52:24Z",
+  "actor": "human:operator",
+  "artifact": "story:compare-elevenlabs-cascade-and-ollama",
+  "kind": "story",
+  "revision": 11,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "github:beyond10x/inference/pull/45",
+    "reference": "main 89975c61: inference / task check pass, common / Security and privacy pass, Build documentation pass"
+  }
+}
