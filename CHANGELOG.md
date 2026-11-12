@@ -4,27 +4,6 @@
 
 ### Breaking
 
-- `inference-duplex`: `InputCommitted` and `InputTranscribed` carry a required `item:
-  InputItemId` naming the user turn they belong to, and `InputCommitted` is no longer `Copy`.
-  `SessionLedger::commit_input`, `input_committed` and `input_transcribed`, and the
-  `ProviderFrame` forms of the last two, take the id; `SessionLedger::assign_item` hands out
-  per-session `turn-N` ids. `InputItemId::new` returns `Option` and an id is never empty, also
-  when read back from its serialized form.
-- `inference-pipeline`: `AgentNode::new` loses its `turns` port argument and takes the turn
-  events on its input edge; `GatePayload` requires `Clone`. `inference`: the `voice_cascade`
-  declaration drops the `turn split` node and the agent's `turns` port, the gate's `turns_out`
-  feeding the speaker. The `local-voice-cascade` example drops them too, and its `CascadeIds`
-  loses `turn_split` and `llm_turns`.
-- `inference-facade`: `InputError` gains the variant `Cancelled`, which `LiveSession::send`
-  answers when the session was cancelled: a send started after `cancel()`, or one a cancel
-  overtook while the ingress took it, no longer answers `Refused`, which promises that nothing
-  was forwarded. `inference`: an `Agent` maps it to `Error::Closed`.
-- `inference-elevenlabs`: `ConfigError` gains the variant `Residency`, which
-  `Endpoint::from_env` answers when `ELEVENLABS_RESIDENCY` names no residency; an exhaustive
-  match on it breaks.
-- `realtime-voice`: `Measure` gains the variant `TtsOfferToAudio` (`Measure::ALL` is now
-  `[Self; 8]`), and `Measured` the public field `tts_segment_first_audio`; an exhaustive match
-  on `Measure`, a binding typed `[Measure; 7]` and a struct literal of `Measured` break.
 - `realtime-voice`: `run_cascade` and `run_cascade_live` take the recognition's failure
   (`fn(&R::Handle) -> Option<String>`, as `talk::converse` does), and they and `measure_cascade`
   bound the recognition's handle `R::Handle: Send + 'static`, as its worker outlives the turn;
@@ -51,6 +30,46 @@
   after the table is printed.
   Ollama's OpenAI-compatible API is a tested server of `inference-llama-server` (2026-11-12,
   `qwen2.5:1.5b`).
+
+## [0.28.0] — 2026-11-12
+
+Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these
+releases, and no other release since then has one.
+
+- [0.28.0](#0280--2026-11-12)
+- [0.27.0](#0270--2026-11-09)
+- [0.26.0](#0260--2026-11-07)
+- [0.25.0](#0250--2026-11-07)
+- [0.24.0](#0240--2026-11-07)
+- [0.23.0](#0230--2026-11-06)
+- [0.22.0](#0220--2026-11-06)
+- [0.20.0](#0200--2026-11-06)
+
+### Breaking
+
+- `inference-duplex`: `InputCommitted` and `InputTranscribed` carry a required `item:
+  InputItemId` naming the user turn they belong to, and `InputCommitted` is no longer `Copy`.
+  `SessionLedger::commit_input`, `input_committed` and `input_transcribed`, and the
+  `ProviderFrame` forms of the last two, take the id; `SessionLedger::assign_item` hands out
+  per-session `turn-N` ids. `InputItemId::new` returns `Option` and an id is never empty, also
+  when read back from its serialized form.
+- `inference-pipeline`: `AgentNode::new` loses its `turns` port argument and takes the turn
+  events on its input edge; `GatePayload` requires `Clone`. `inference`: the `voice_cascade`
+  declaration drops the `turn split` node and the agent's `turns` port, the gate's `turns_out`
+  feeding the speaker. The `local-voice-cascade` example drops them too, and its `CascadeIds`
+  loses `turn_split` and `llm_turns`.
+- `inference-facade`: `InputError` gains the variant `Cancelled`, which `LiveSession::send`
+  answers when the session was cancelled: a send started after `cancel()`, or one a cancel
+  overtook while the ingress took it, no longer answers `Refused`, which promises that nothing
+  was forwarded. `inference`: an `Agent` maps it to `Error::Closed`.
+- `inference-elevenlabs`: `ConfigError` gains the variant `Residency`, which
+  `Endpoint::from_env` answers when `ELEVENLABS_RESIDENCY` names no residency; an exhaustive
+  match on it breaks.
+- `realtime-voice`: `Measure` gains the variant `TtsOfferToAudio` (`Measure::ALL` is now
+  `[Self; 8]`), and `Measured` the public field `tts_segment_first_audio`; an exhaustive match
+  on `Measure`, a binding typed `[Measure; 7]` and a struct literal of `Measured` break.
+
+### Added
 
 - `realtime-voice`: `talk --provider elevenlabs-cascade` (feature `local`) holds a conversation
   over a cascade: ElevenLabs realtime speech to text (`pcm_16000`, the endpoint's voice activity
@@ -128,6 +147,11 @@
 - `inference-runtime`: sends that wait for room in an edge or exposure queue land in the order
   they started waiting; the queue's `len` and `known_contents` count only landed envelopes, and a
   drain no longer waits on a caller.
+
+### Changed
+
+- The `ess` pin moves to 0.94.0: CI's `ESS_VERSION`, the testkit's `ess-conformance` and
+  `ess-primitives` tags, and `requires` in `ess/ess-inputs.yaml`.
 
 ## [0.27.0] — 2026-11-09
 
