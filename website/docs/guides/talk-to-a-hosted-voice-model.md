@@ -107,15 +107,15 @@ ELEVENLABS_VOICE_ID=<voice id> ELEVENLABS_RESIDENCY=eu \
     cargo run -p realtime-voice --features local --example talk -- --provider elevenlabs-cascade
 ```
 
-| Variable | Effect | When it is unset |
+| Variable | Effect | When it is unset, or set to a value not taken |
 |---|---|---|
-| `INFERENCE_LLAMA_SERVER_URL` | the base URL of the `llama-server` API; a host that is not loopback is refused | `talk` exits with status 2, naming it |
-| `INFERENCE_LLAMA_SERVER_MODEL` | the model the server answers to, its `--alias` | `talk` exits with status 2, naming it |
-| `ELEVENLABS_VOICE_ID` | the voice the answer is spoken in, `pcm_24000` | `talk` exits with status 2, naming it |
-| `ELEVENLABS_API_KEY` | the ElevenLabs key, never printed | the OS keychain, secret `elevenlabs-api-key`; without either, exit status 2 |
-| `ELEVENLABS_RESIDENCY` | the data-residency host of the key, `global`, `us`, `eu`, `in` or `sg`, for both ElevenLabs endpoints; a key of a residency stack is refused by every other host | `global`; any other value exits with status 2, naming the variable |
+| `INFERENCE_LLAMA_SERVER_URL` | the base URL of the `llama-server` API, on loopback | `talk` exits with status 2, naming it; also for a host that is not loopback |
+| `INFERENCE_LLAMA_SERVER_MODEL` | the model the server answers to, its `--alias` | `talk` exits with status 2, naming it; also when the adapter takes no binding of the URL and model |
+| `ELEVENLABS_VOICE_ID` | the voice the answer is spoken in, `pcm_24000` | `talk` exits with status 2, naming it; also for a value that is not a voice id |
+| `ELEVENLABS_API_KEY` | the ElevenLabs key, never printed | the OS keychain, secret `elevenlabs-api-key`; exit status 2 when the keychain does not open or gives no key |
+| `ELEVENLABS_RESIDENCY` | the data-residency host of the key, `global`, `us`, `eu`, `in` or `sg`, for both ElevenLabs endpoints; a key of a residency stack is refused by every other host | `global`; any other value exits with status 2, naming the variable, never the value |
 
-The variables are checked in the order of the table, before anything opens. Without feature
+The variables are checked in the order of the table, before anything opens or is sent. Without feature
 `local` the provider exits with status 2, naming the feature. With none of them set:
 
 ```sh
@@ -128,10 +128,13 @@ error: INFERENCE_LLAMA_SERVER_URL is not set
 
 The microphone is sent in `pcm_16000`, and the endpoint's voice activity detection commits each
 turn when you pause. Each committed turn is asked of the server on its own, without the turns
-before it, and each committed sentence of the answer is spoken as it arrives. When you speak over
-the answer for 30 ms, its playback stops and the rest of it is dropped. ElevenLabs still generates
-and bills the sentence it was speaking: a barge-in saves playback, not generation. The cascade has
-no tool and prints no usage. Enter ends the conversation.
+before it, and each committed sentence of the answer is sent to ElevenLabs as it arrives, one
+after another. When you speak over the answer for 30 ms, or a new turn is committed while it
+still plays, its playback stops and no further sentence of it is sent. ElevenLabs still generates
+and bills the sentence it was speaking, whose audio is dropped as it arrives: a barge-in saves
+playback and the sentences not yet sent, not that one. When the recognition fails, as when the
+host refuses the key, the conversation ends and says why. The cascade has no tool and prints no
+usage. Enter ends the conversation without waiting for the rest of the answer.
 
 ## Add a cost estimate
 

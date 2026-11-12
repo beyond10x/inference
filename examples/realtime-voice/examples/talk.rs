@@ -29,10 +29,12 @@
 //! text to speech in the voice `ELEVENLABS_VOICE_ID` names (`pcm_24000`). Both ElevenLabs
 //! endpoints are at the host `ELEVENLABS_RESIDENCY` names, global when unset; the key is
 //! `ELEVENLABS_API_KEY`, or the OS keychain's `elevenlabs-api-key` when that is unset.
-//! Speaking over an answer stops its playback and drops the rest of it
-//! (`realtime_voice::talk::converse`); ElevenLabs still generates the segment it was speaking.
-//! It has no tool and no usage or cost. A variable it needs that is not set exits with status 2,
-//! naming it.
+//! Speaking over an answer, or a new turn while it plays, stops its playback and sends no further
+//! segment of it (`realtime_voice::talk::converse`); ElevenLabs still generates the one it was
+//! speaking. A failed recognition ends the conversation, saying why.
+//! It has no tool and no usage or cost. The variables are checked in the order the guide lists
+//! them, before anything opens; one that is not set, or set to a value not taken, exits with
+//! status 2, naming it.
 //!
 //! Speak, interrupt the model mid-answer, ask for the time. Enter ends the conversation and prints
 //! the session's usage totals and its duration; Ctrl-C ends it without them.
@@ -242,7 +244,7 @@ mod cascade {
     };
     use inference_elevenlabs::{
         CredentialSource, ELEVENLABS_KEY_NAME, ELEVENLABS_KEY_VARIABLE, ElevenLabsRecognition,
-        EnvironmentSource, KeychainSource,
+        EnvironmentSource, KeychainSource, OutputFormat, VoiceConfig,
     };
     use inference_llama_server::{Config, LlamaServer};
     use inference_llm::Generator;
@@ -261,12 +263,12 @@ mod cascade {
 
     /// Holds the conversation until Enter is pressed or the recognition ends.
     pub fn talk(host: &CpalHost) -> Result<(), Box<dyn Error>> {
-        let endpoint = elevenlabs::endpoint()?;
-        let source = key()?;
-        let recogniser = elevenlabs::recogniser(endpoint.clone(), Arc::clone(&source))?;
         let generator = generator()?;
-        let voice = std::env::var(VOICE_VARIABLE).ok();
-        let synthesiser = elevenlabs::synthesiser(endpoint, source, voice.as_deref())?;
+        let voice = voice()?;
+        let source = key()?;
+        let endpoint = elevenlabs::endpoint()?;
+        let recogniser = elevenlabs::recogniser(endpoint.clone(), Arc::clone(&source))?;
+        let synthesiser = elevenlabs::synthesiser(endpoint, source, Some(&voice))?;
         let mut cascade = Cascade::new(recogniser, generator, synthesiser, pcm16(16_000));
         let format = cascade.input_format;
         let mut microphone = Microphone::open(
@@ -315,32 +317,63 @@ mod cascade {
     /// The ElevenLabs key: `ELEVENLABS_API_KEY` when it is set, the OS keychain's
     /// `elevenlabs-api-key` otherwise, resolved once here so a missing key stops before anything
     /// opens. The key is never printed.
-    fn key() -> Result<Arc<dyn CredentialSource>, Box<dyn Error>> {
+    fn key() -> Result<Arc<dyn CredentialSource>, Refused> {
         let source: Arc<dyn CredentialSource> =
             if std::env::var_os(ELEVENLABS_KEY_VARIABLE).is_some() {
                 Arc::new(EnvironmentSource::elevenlabs())
             } else {
-                Arc::new(KeychainSource::native()?)
+                Arc::new(KeychainSource::native().map_err(|error| {
+                    Refused::Invalid(format!(
+                        "{ELEVENLABS_KEY_VARIABLE} is not set and the OS keychain did not open: \
+                         {error}"
+                    ))
+                })?)
             };
         elevenlabs::resolves(&*source).map_err(|why| {
             Refused::Invalid(format!(
-                "{ELEVENLABS_KEY_VARIABLE} is not set and the keychain gave no \
-                 {ELEVENLABS_KEY_NAME}: {why}"
+                "{ELEVENLABS_KEY_VARIABLE} or the keychain's {ELEVENLABS_KEY_NAME} gave no key: \
+                 {why}"
             ))
         })?;
         Ok(source)
     }
 
+    /// A variable `Provider::required` found set.
+    fn read(name: &'static str) -> Result<String, Refused> {
+        std::env::var(name)
+            .map(|value| value.trim().to_owned())
+            .map_err(|_| Refused::Missing(name))
+    }
+
     /// The generator of the `llama-server` the local voice cascade's variables name, refused
-    /// before anything is sent when its URL is not loopback.
-    fn generator() -> Result<Generator, Box<dyn Error>> {
-        let read = |name: &'static str| std::env::var(name).map_err(|_| Refused::Missing(name));
+    /// before anything is sent when its URL is not loopback. Nothing is sent before the first
+    /// turn.
+    fn generator() -> Result<Generator, Refused> {
         let url = read(SERVER_URL_VARIABLE)?;
-        loopback(&url)?;
+        loopback(&url)
+            .map_err(|refused| Refused::Invalid(format!("{SERVER_URL_VARIABLE}: {refused}")))?;
         let mut server = Config::new(url, read(SERVER_MODEL_VARIABLE)?);
         server.max_output_tokens = MAX_OUTPUT_TOKENS;
-        let adapter = server_adapter(&server)?;
-        Ok(LlamaServer::new(&server)?.generator(adapter)?)
+        let refused = |detail: String| {
+            Refused::Invalid(format!(
+                "{SERVER_URL_VARIABLE} and {SERVER_MODEL_VARIABLE} name no server the \
+                 llama-server adapter binds: {detail}"
+            ))
+        };
+        let adapter = server_adapter(&server).map_err(|error| refused(error.to_string()))?;
+        LlamaServer::new(&server)
+            .map_err(|error| refused(error.to_string()))?
+            .generator(adapter)
+            .map_err(|error| refused(error.to_string()))
+    }
+
+    /// The voice `ELEVENLABS_VOICE_ID` names, refused when it is not a voice id.
+    fn voice() -> Result<String, Refused> {
+        let voice = read(VOICE_VARIABLE)?;
+        VoiceConfig::new(voice.as_str(), OutputFormat::Pcm24000)
+            .validate()
+            .map_err(|error| Refused::Invalid(format!("{VOICE_VARIABLE}: {error}")))?;
+        Ok(voice)
     }
 
     /// Prints one note; an answer continues on one line.

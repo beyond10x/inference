@@ -81,7 +81,7 @@ use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Scope, ScopedJoinHandle};
@@ -876,7 +876,7 @@ pub const NO_HOSTED_TTS: &str = "no hosted TTS configured";
 pub const VOICE_VARIABLE: &str = "ELEVENLABS_VOICE_ID";
 
 /// The ElevenLabs synthesiser of `voice` in `format` at `endpoint`, its key resolved through
-/// `source` under `ELEVENLABS_KEY_NAME`, when that key resolves at once. Making it sends
+/// `source` under `ELEVENLABS_KEY_NAME`, when that key resolves (`elevenlabs::resolves`). Making it sends
 /// nothing.
 ///
 /// # Errors
@@ -957,6 +957,8 @@ pub(crate) enum Heard {
     Synthesised,
     /// A step refused what it was given.
     Note(String),
+    /// The recognition failed, and why: its last report.
+    Failed(String),
     /// No worker owes the loop a report.
     Idle,
 }
@@ -1050,14 +1052,22 @@ impl Wake for Prod {
 }
 
 /// The recogniser's worker: offers each frame, ends the input, and reports every event the
-/// recognition has after each; ahead of the usage record, the recognition's last event, what
-/// `failure` says of a recognition that failed.
+/// recognition has after each. Once `failure` says the recognition failed, which a recognition
+/// may do before its input ends while it delivers no event, the worker reports why, once, as
+/// [`Heard::Failed`], ahead of any later event.
 fn listening<H: RecognitionHandle>(
     mut recognition: H,
     tasks: Receiver<Task<Listen>>,
     report: impl Fn(Heard),
     failure: impl Fn(&H) -> Option<String>,
 ) {
+    let mut failed = false;
+    let mut check = |recognition: &H| {
+        if !failed && let Some(why) = failure(recognition) {
+            failed = true;
+            report(Heard::Failed(why));
+        }
+    };
     for Task { work, owed } in tasks {
         let ended = match work {
             Listen::Frame(frame) => {
@@ -1078,13 +1088,10 @@ fn listening<H: RecognitionHandle>(
             }
         };
         while let Some(event) = recognition.next() {
-            if matches!(event.payload, TranscriptEvent::Usage(_))
-                && let Some(why) = failure(&recognition)
-            {
-                report(Heard::Note(why));
-            }
+            check(&recognition);
             report(Heard::Transcript(event.payload));
         }
+        check(&recognition);
         if ended {
             report(Heard::Recognised);
         }
@@ -1130,14 +1137,19 @@ fn generating(
 
 /// The synthesiser's worker: offers each segment, ends the utterance, and reports every event the
 /// synthesis has after each, the first frame of each segment with the segment's time to first
-/// audio.
+/// audio. Once `cut` is set, it offers nothing more, reads no further event and ends, dropping
+/// the synthesis: what is still queued for it is dropped unoffered.
 fn speaking<H: SynthesisHandle>(
     mut synthesis: H,
     tasks: Receiver<Task<Speak>>,
     report: impl Fn(Heard),
+    cut: &AtomicBool,
 ) {
     let mut heard = std::collections::HashSet::new();
     for Task { work, owed } in tasks {
+        if cut.load(Ordering::SeqCst) {
+            return;
+        }
         let ended = match work {
             Speak::Segment(segment) => {
                 if let Err(refused) = synthesis.offer_segment(segment) {
@@ -1164,6 +1176,9 @@ fn speaking<H: SynthesisHandle>(
                 _ => None,
             };
             report(Heard::Spoken(event, first_audio));
+            if cut.load(Ordering::SeqCst) {
+                return;
+            }
         }
         if ended {
             report(Heard::Synthesised);
@@ -1207,17 +1222,18 @@ pub(crate) fn spawn_generation<'s>(
 }
 
 /// Starts the synthesiser's worker on `scope` over `synthesis`: the sender of its tasks and the
-/// worker.
+/// worker. Setting `cut` stops the worker after the call it is in, and drops what is queued.
 pub(crate) fn spawn_synthesis<'s, H>(
     scope: &'s Scope<'s, '_>,
     synthesis: H,
     report: impl Fn(Heard) + Send + 's,
+    cut: Arc<AtomicBool>,
 ) -> (Sender<Task<Speak>>, ScopedJoinHandle<'s, ()>)
 where
     H: SynthesisHandle + Send + 's,
 {
     let (tasks, receiver) = mpsc::channel();
-    let worker = scope.spawn(move || speaking(synthesis, receiver, report));
+    let worker = scope.spawn(move || speaking(synthesis, receiver, report, &cut));
     (tasks, worker)
 }
 
@@ -1804,7 +1820,7 @@ where
                 }
                 self.finish();
             }
-            Heard::Note(note) => self.note(note),
+            Heard::Note(note) | Heard::Failed(note) => self.note(note),
             Heard::Idle => {}
         }
     }
@@ -1853,7 +1869,12 @@ where
         match self.cascade.synthesiser.start() {
             Ok(synthesis) => {
                 let report = self.reporter();
-                let (tasks, worker) = spawn_synthesis(self.scope, synthesis, report);
+                let (tasks, worker) = spawn_synthesis(
+                    self.scope,
+                    synthesis,
+                    report,
+                    Arc::new(AtomicBool::new(false)),
+                );
                 self.workers.push(worker);
                 self.speak = Some(tasks);
             }

@@ -22,6 +22,7 @@ inference-stt = { path = "../../crates/inference-stt" }
 inference-tts = { path = "../../crates/inference-tts" }
 local-voice-cascade = { path = "../local-voice-cascade" }
 serde_json.workspace = true
+tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }

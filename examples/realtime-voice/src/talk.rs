@@ -13,17 +13,23 @@
 //! Barge-in is `compare`'s rule on a live input: once [`Cascade::attack`] of voiced input, a
 //! frame being voiced at the root mean square of the local voice cascade's detector
 //! ([`local_voice_cascade::VAD`]), arrives while the answer is in progress or its audio still
-//! plays, the playout is stopped and the answer is cut, as `compare` cuts it: the generation is
-//! told to stop, the synthesis is left to end with the segment it speaks and is then dropped, and
-//! every later report of the answer, its frames among them, is dropped on the client. A hosted
-//! synthesiser such as ElevenLabs still generates the segment it was speaking: this stops
-//! playback, not generation or cost. A turn committed while an answer is in progress cuts that
-//! answer the same way before its own starts. Each turn is asked on its own, without the turns
-//! before it.
+//! plays, the playout is stopped and the answer is cut: the generation is told to stop, the
+//! synthesis's worker ends once the call it is in returns, offering none of the segments still
+//! queued for it, and every later report of the answer, its frames among them, is dropped on the
+//! client. A hosted synthesiser such as ElevenLabs still generates the segment it was speaking:
+//! this stops playback, not the generation of that segment or its cost. A turn committed while
+//! an answer is in progress or its audio still plays stops that playout and cuts the answer the
+//! same way before its own starts. The end of the conversation cuts the answer too, and returns
+//! without waiting for the rest of it. Each turn is asked on its own, without the turns before
+//! it.
+//!
+//! The conversation ends when the recognition does: when the recogniser says it failed, which it
+//! may say before its input ends and while it delivers no event, the reason is noted and the
+//! conversation ends, as it does at the recognition's last event.
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
@@ -242,6 +248,7 @@ pub fn converse<R, S>(
             answering: false,
             generate: None,
             speak: None,
+            speaking: None,
             workers: Vec::new(),
             segments: Segments::default(),
             utterance_ended: false,
@@ -279,6 +286,8 @@ struct Talk<'a, 's, 'e, R, S> {
     answering: bool,
     generate: Option<Sender<Task<Generate>>>,
     speak: Option<Sender<Task<Speak>>>,
+    /// The cut flag of the synthesis worker that runs: set, it offers nothing more and ends.
+    speaking: Option<Arc<AtomicBool>>,
     /// The workers of the answers, joined before the next answer starts.
     workers: Vec<ScopedJoinHandle<'s, ()>>,
     segments: Segments,
@@ -325,8 +334,7 @@ where
                 (self.note)(CascadeNote::Refused(format!(
                     "the recogniser refused the conversation: {error}"
                 )));
-                (self.note)(CascadeNote::Ended);
-                self.ended = true;
+                self.end();
             }
         }
     }
@@ -364,11 +372,15 @@ where
         (self.note)(CascadeNote::BargeIn);
     }
 
-    /// Drops the answer that runs: its later reports are dropped, the generation is told to stop
-    /// and the synthesis's utterance is left, its worker ending with the segment it speaks.
+    /// Drops the answer that runs: its later reports are dropped, the generation is told to stop,
+    /// and the synthesis's worker is cut: it ends once the call it is in returns, offering none of
+    /// the segments still queued for it, and drops the synthesis.
     fn cut(&mut self) {
         self.turn += 1;
         self.answering = false;
+        if let Some(cut) = self.speaking.take() {
+            cut.store(true, Ordering::SeqCst);
+        }
         self.speak = None;
         if let Some(tasks) = self.generate.take() {
             hand(Some(&tasks), &self.owing, Generate::Stop);
@@ -428,12 +440,16 @@ where
                 (self.note)(CascadeNote::Answered);
             }
             Heard::Note(note) => (self.note)(CascadeNote::Refused(note)),
-            Heard::Spoken(..) | Heard::Transcript(_) | Heard::Recognised | Heard::Idle => {}
+            Heard::Spoken(..)
+            | Heard::Transcript(_)
+            | Heard::Recognised
+            | Heard::Failed(_)
+            | Heard::Idle => {}
         }
     }
 
-    /// Takes a report of the recognition: a committed transcript is a turn, the usage record
-    /// its end.
+    /// Takes a report of the recognition: a committed transcript is a turn; a failure, said as
+    /// soon as the recognition knows it, or the usage record, its last event, is its end.
     fn listened(&mut self, heard: Heard) {
         match heard {
             Heard::Transcript(TranscriptEvent::Committed(committed)) => {
@@ -444,19 +460,31 @@ where
                 (self.note)(CascadeNote::Heard(text.clone()));
                 self.answer(text);
             }
-            Heard::Transcript(TranscriptEvent::Usage(_)) | Heard::Recognised => {
-                self.ended = true;
-                (self.note)(CascadeNote::Ended);
+            Heard::Failed(why) => {
+                (self.note)(CascadeNote::Refused(format!(
+                    "the recognition failed: {why}"
+                )));
+                self.end();
             }
+            Heard::Transcript(TranscriptEvent::Usage(_)) | Heard::Recognised => self.end(),
             Heard::Note(note) => (self.note)(CascadeNote::Refused(note)),
             _ => {}
         }
     }
 
-    /// Starts the answer to `text`, after dropping the one in progress and waiting until its
-    /// workers stopped, so the steps find their handles dropped.
+    /// The recognition ended, and with it the conversation.
+    fn end(&mut self) {
+        if !self.ended {
+            self.ended = true;
+            (self.note)(CascadeNote::Ended);
+        }
+    }
+
+    /// Starts the answer to `text`, after stopping the playout of the one before when it is in
+    /// progress or its audio still plays, cutting it, and waiting until its workers stopped, so
+    /// the steps find their handles dropped. A cut worker stops once the call it is in returns.
     fn answer(&mut self, text: String) {
-        if self.answering {
+        if self.playing() {
             self.playout.stop();
             self.cursor = None;
         }
@@ -491,8 +519,11 @@ where
         match self.cascade.synthesiser.start() {
             Ok(synthesis) => {
                 let report = self.reporter(self.turn);
-                let (tasks, worker) = spawn_synthesis(self.scope, synthesis, report);
+                let cut = Arc::new(AtomicBool::new(false));
+                let (tasks, worker) =
+                    spawn_synthesis(self.scope, synthesis, report, Arc::clone(&cut));
                 self.speak = Some(tasks);
+                self.speaking = Some(cut);
                 self.workers.push(worker);
             }
             Err(error) => {

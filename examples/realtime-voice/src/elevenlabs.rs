@@ -3,7 +3,7 @@
 //! the host that takes it.
 
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::thread;
 
 use inference_elevenlabs::{
     CommitStrategy, ConfigError, CredentialSource, ELEVENLABS_KEY_NAME, ElevenLabsRecogniser,
@@ -43,21 +43,33 @@ pub fn recogniser(
     )
 }
 
-/// Whether the ElevenLabs key resolves through `source` under `ELEVENLABS_KEY_NAME` at once.
-/// The key is dropped unread.
+/// Whether the ElevenLabs key resolves through `source` under `ELEVENLABS_KEY_NAME`. The
+/// source's future is driven to its end on a Tokio runtime of its own, on a thread of its own,
+/// since a source such as the keychain's reads on Tokio's blocking pool, and the caller may be
+/// on a thread with no runtime or inside one. The key is dropped unread.
 ///
 /// # Errors
 ///
-/// Why it did not: the source's refusal, which never holds the key, or that it did not
-/// resolve at once.
+/// Why it did not: the source's refusal, which never holds the key, no runtime to drive it on,
+/// or a panic of the source.
 pub fn resolves(source: &dyn CredentialSource) -> Result<(), String> {
-    let mut future = source.resolve(ELEVENLABS_KEY_NAME);
-    let mut context = Context::from_waker(Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        Poll::Ready(Ok(_)) => Ok(()),
-        Poll::Ready(Err(error)) => Err(format!("the ElevenLabs key did not resolve: {error}")),
-        Poll::Pending => Err("the ElevenLabs key did not resolve at once".to_owned()),
-    }
+    thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| {
+                        format!("no runtime to resolve the ElevenLabs key on: {error}")
+                    })?;
+                runtime
+                    .block_on(source.resolve(ELEVENLABS_KEY_NAME))
+                    .map(drop)
+                    .map_err(|error| format!("the ElevenLabs key did not resolve: {error}"))
+            })
+            .join()
+            .unwrap_or_else(|_| Err("the ElevenLabs key source panicked".to_owned()))
+    })
 }
 
 /// The synthesiser of a cascade at `endpoint`: the voice `voice` names in `pcm_24000`, as

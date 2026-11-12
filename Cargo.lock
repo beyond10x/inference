@@ -3618,6 +3618,7 @@ dependencies = [
  "inference-tts",
  "local-voice-cascade",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

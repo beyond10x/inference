@@ -60,7 +60,8 @@ It has no options for them. A missing one skips the arm, naming the missing step
 
 The `realtime-voice` example `talk` with `--provider elevenlabs-cascade`, built with feature
 `local`, reads only `INFERENCE_LLAMA_SERVER_URL` and `INFERENCE_LLAMA_SERVER_MODEL` of these: its
-recogniser is ElevenLabs. A missing one exits with status 2, naming it.
+recogniser is ElevenLabs. A missing one, or a URL whose host is not loopback, exits with status 2,
+naming it.
 
 `talk` also takes `--max-output-tokens` (the most tokens of one answer, 64 by default), and `--input`
 and `--output` to pick devices by name.
