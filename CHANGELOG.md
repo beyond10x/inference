@@ -2,20 +2,6 @@
 
 ## [Unreleased]
 
-## [0.28.0] — 2026-11-12
-
-Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these
-releases, and no other release since then has one.
-
-- [0.28.0](#0280--2026-11-12)
-- [0.27.0](#0270--2026-11-09)
-- [0.26.0](#0260--2026-11-07)
-- [0.25.0](#0250--2026-11-07)
-- [0.24.0](#0240--2026-11-07)
-- [0.23.0](#0230--2026-11-06)
-- [0.22.0](#0220--2026-11-06)
-- [0.20.0](#0200--2026-11-06)
-
 ### Breaking
 
 - `inference-duplex`: `InputCommitted` and `InputTranscribed` carry a required `item:
@@ -39,8 +25,23 @@ releases, and no other release since then has one.
 - `realtime-voice`: `Measure` gains the variant `TtsOfferToAudio` (`Measure::ALL` is now
   `[Self; 8]`), and `Measured` the public field `tts_segment_first_audio`; an exhaustive match
   on `Measure`, a binding typed `[Measure; 7]` and a struct literal of `Measured` break.
+- `realtime-voice`: `run_cascade` and `run_cascade_live` take the recognition's failure
+  (`fn(&R::Handle) -> Option<String>`, as `talk::converse` does), `Spread` gains the public field
+  `p95` and `Measured` the public field `clip`; a call with the old arguments and a struct
+  literal of either break.
 
 ### Added
+
+- `realtime-voice`: `compare --cascade-stt elevenlabs` (feature `local`) listens in the cascade
+  arm with ElevenLabs realtime speech to text, committed manually when the arm's own detector ends
+  the turn, so the endpoint's 500 ms VAD quiet window is not in its first audio; its LLM is the
+  server `INFERENCE_LLAMA_SERVER_URL` and `INFERENCE_LLAMA_SERVER_MODEL` name, without the local
+  recogniser's variables. A failed recognition is a note of the arm's run, with its reason.
+  `--clips <dir>` asks each WAV clip of a directory in place of the built-in question, each cell
+  of the table gives the 95th percentile next to the median, lowest and highest when more than
+  one run measured it, and `--runs-out <file>` writes every run's per-step times as JSON lines.
+  Ollama's OpenAI-compatible API is a tested server of `inference-llama-server` (2026-11-12,
+  `qwen2.5:1.5b`).
 
 - `realtime-voice`: `talk --provider elevenlabs-cascade` (feature `local`) holds a conversation
   over a cascade: ElevenLabs realtime speech to text (`pcm_16000`, the endpoint's voice activity
@@ -118,11 +119,6 @@ releases, and no other release since then has one.
 - `inference-runtime`: sends that wait for room in an edge or exposure queue land in the order
   they started waiting; the queue's `len` and `known_contents` count only landed envelopes, and a
   drain no longer waits on a caller.
-
-### Changed
-
-- The `ess` pin moves to 0.94.0: CI's `ESS_VERSION`, the testkit's `ess-conformance` and
-  `ess-primitives` tags, and `requires` in `ess/ess-inputs.yaml`.
 
 ## [0.27.0] — 2026-11-09
 

@@ -2,15 +2,15 @@
 title: Compare voice providers
 sidebar_position: 5
 description: Send the same recorded question through each hosted native speech model and compare latency, barge-in stop time and usage, without a microphone or a speaker.
-lede: One recorded question, every provider, N runs each - the median and spread of each latency, and the usage of every run.
-source: examples/realtime-voice (examples/compare.rs, src/compare.rs, tests/compare.rs), adapters/inference-openai/tests/fixtures/speech.wav
+lede: One recorded question or a directory of them, every provider, N runs each - the median, p95 and spread of each latency, and the usage of every run.
+source: examples/realtime-voice (examples/compare.rs, src/compare.rs, src/elevenlabs.rs, tests/compare.rs, tests/compare_elevenlabs.rs), adapters/inference-openai/tests/fixtures/speech.wav
 ---
 
 # Compare voice providers
 
-The `compare` example of `realtime-voice` sends the same recorded question through each provider,
-N times, and prints per provider, native speech model or cascade of STT, LLM and TTS, the median
-and spread of:
+The `compare` example of `realtime-voice` sends the same recorded question, or each clip of a
+directory, through each provider, N times, and prints per provider, native speech model or
+cascade of STT, LLM and TTS, the median, the 95th percentile and the spread of:
 
 - end of the question's speech to the answer's first audio, first transcript and response end,
   the turn latency;
@@ -63,6 +63,40 @@ the local cascade's guide; a missing one skips it, naming which:
 cargo run -p realtime-voice --features local --example compare -- --providers openai,cascade
 ```
 
+With `--cascade-stt elevenlabs` the cascade arm listens with ElevenLabs realtime speech to text
+instead, in `pcm_16000` at the same host, its key `ELEVENLABS_API_KEY` or the OS keychain's
+`elevenlabs-api-key`. Its LLM is the server `INFERENCE_LLAMA_SERVER_URL` and
+`INFERENCE_LLAMA_SERVER_MODEL` name, on loopback, a `llama-server` or Ollama
+([Run the voice cascade offline](run-the-local-voice-cascade-offline.md)); the local recogniser's
+variables are not read. The arm still needs feature `local`, which binds that LLM:
+
+```sh
+INFERENCE_LLAMA_SERVER_URL=http://127.0.0.1:11434/v1 INFERENCE_LLAMA_SERVER_MODEL=qwen2.5:1.5b \
+    cargo run -p realtime-voice --features local --example compare -- \
+    --providers openai,elevenlabs,cascade --cascade-stt elevenlabs --runs 5
+```
+
+The ElevenLabs recognition commits manually: it is opened with `commit_strategy=manual`, and the
+arm's own detector, the local cascade's (600 ms of silence after speech), ends each turn and so
+sends the commit, as it ends the local recogniser's input. The endpoint's voice activity detection
+is not used, since it would add its quiet window of 500 ms after the commit's answer to the
+cascade's first audio. A failed recognition is a note of the arm's run, with the endpoint's reason.
+
+`--clips <dir>` asks each 16-bit PCM WAV file of a directory (`.wav`, in the order of the file
+names) in place of the built-in question: each provider runs `--runs` runs of each clip, every run
+of the first clip first, and the table pools the runs of all clips. `--runs-out <file>` writes
+every run as one JSON line: `provider`, `topology`, `clip` (the file name without `.wav`, or
+`question` for the built-in one), `run` (from 1 for each clip), each measure the provider's
+topology has as `<measure>_ms`, null when the run did not measure it, the cascade's
+`tts_segment_first_audio_ms`, `seconds` billed, and `notes`:
+
+```sh
+cargo run -p realtime-voice --example compare -- --providers openai --clips questions/ --runs 10 --runs-out runs.jsonl
+```
+
+Each cell of the table is `median [lowest-highest] measured/runs`, followed by `p95` and the 95th
+percentile, by nearest rank, when more than one run measured it.
+
 ```sh
 cargo run -q -p realtime-voice --example compare -- --help
 ```
@@ -82,9 +116,11 @@ Options:
           - nova:        Amazon Nova Sonic on Bedrock
           - elevenlabs:  An ElevenLabs agent conversation
           - deepgram:    A Deepgram Voice Agent session
-          - cascade:     The local voice cascade's recogniser and LLM, speaking with ElevenLabs
+          - phonic:      A Phonic speech-to-speech conversation
+          - deepslate:   A Deepslate Opal session
+          - cascade:     A recogniser (--cascade-stt), the local LLM and a hosted voice (--cascade-voice)
           
-          [default: openai,openai-live,nova,elevenlabs,deepgram,cascade]
+          [default: openai,openai-live,nova,elevenlabs,deepgram,phonic,deepslate,cascade]
 
       --runs <RUNS>
           The runs of each provider
@@ -98,6 +134,30 @@ Options:
           The length of one input frame, in milliseconds
           
           [default: 20]
+
+      --cascade-voice <CASCADE_VOICE>
+          The hosted voice the cascade arm speaks with
+
+          Possible values:
+          - elevenlabs: ElevenLabs streaming TTS
+          - cartesia:   Cartesia Sonic streaming TTS
+          
+          [default: elevenlabs]
+
+      --cascade-stt <CASCADE_STT>
+          The recogniser the cascade arm listens with
+
+          Possible values:
+          - local:      The local voice cascade's recogniser, sherpa-onnx or whisper.cpp
+          - elevenlabs: ElevenLabs realtime speech-to-text, committed when the arm's detector ends the turn
+          
+          [default: local]
+
+      --clips <DIR>
+          A directory of 16-bit PCM WAV question clips, each asked in turn in place of the built-in question
+
+      --runs-out <FILE>
+          A file to write every run's times to, one JSON line per run
 
   -h, --help
           Print help (see a summary with '-h')
@@ -116,12 +176,12 @@ cargo test -q -p realtime-voice --test compare two_scripted_providers_give_their
 ```text
 
 running 1 test
-times in ms, taken on the client at the receipt of each event: median [lowest-highest] measured/runs; n/a: a step the topology does not have
+times in ms, taken on the client at the receipt of each event: median [lowest-highest] measured/runs, then p95 when more than one run measured it; n/a: a step the topology does not have
 from the end of the question's speech; barge-in from the barge-in's first voiced frame; response end is the turn latency
 tts offer to audio: the synthesis's own, from the answer's first segment's offer to its first frame
-provider  topology  first audio           first transcript      response end          barge-in to stop      final transcript      first token           tts first audio       tts offer to audio
-fast      native    320 [300-340] 3/3     260 [250-270] 3/3     900 [900-900] 3/3     200 [200-200] 3/3     n/a                   n/a                   n/a                   n/a
-slow      native    640 [600-700] 3/3     520 [500-550] 3/3     1840 [1800-1900] 3/3  100 [100-100] 3/3     n/a                   n/a                   n/a                   n/a
+provider  topology  first audio                     first transcript                response end                    barge-in to stop                final transcript                first token                     tts first audio                 tts offer to audio
+fast      native    320 [300-340] 3/3 p95 340       260 [250-270] 3/3 p95 270       900 [900-900] 3/3 p95 900       200 [200-200] 3/3 p95 200       n/a                             n/a                             n/a                             n/a
+slow      native    640 [600-700] 3/3 p95 700       520 [500-550] 3/3 p95 550       1840 [1800-1900] 3/3 p95 1900   100 [100-100] 3/3 p95 100       n/a                             n/a                             n/a                             n/a
 nova      native    skipped: blocked on AWS access
 usage per run, as each provider reports it
 fast      run 1: responses 2: in text 20 audio 40 cached 0, out text 10 audio 80; transcription in ? out ? (0 of 0 turns reported)
@@ -132,6 +192,6 @@ slow      run 2: responses 2: in text 20 audio ? cached 0, out text 10 audio ?; 
 slow      run 3: responses 2: in text 20 audio ? cached 0, out text 10 audio ?; transcription in ? out ? (0 of 0 turns reported); billed 12.5 s
 
 .
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.11s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.05s
 
 ```

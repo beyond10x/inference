@@ -9,5 +9,5 @@
     "tool_calling"
   ],
   "held_by": "claims_record::the_duplex_record_holds_the_claims_of_the_binding",
-  "adapter_revision": "0.28.0"
+  "adapter_revision": "0.27.0"
 }

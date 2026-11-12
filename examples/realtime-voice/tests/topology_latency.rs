@@ -516,7 +516,7 @@ fn cascade_spoken(plan: &Plan, answer: &[&str]) -> (Measured, usize, usize) {
         move || clock.now()
     };
     let wait = move |by: Duration| clock.advance(by);
-    let measured = run_cascade(&mut cascade, plan, &now, &wait, &mut playout);
+    let measured = run_cascade(&mut cascade, plan, &now, &wait, &mut playout, |_| None);
     (measured, playout.stops, spoken.load(Ordering::SeqCst))
 }
 

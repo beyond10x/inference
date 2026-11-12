@@ -8,10 +8,14 @@
 //! INFERENCE_COMPARE_BARGE_IN_WAV=<a WAV file of speech> cargo run -p realtime-voice --example compare -- --runs 2
 //! cargo run -p realtime-voice --example compare -- --skip nova="no model access"
 //! cargo run -p realtime-voice --features local --example compare -- --providers openai,cascade
+//! cargo run -p realtime-voice --features local --example compare -- --providers elevenlabs,cascade --cascade-stt elevenlabs
+//! cargo run -p realtime-voice --example compare -- --clips questions/ --runs 10 --runs-out runs.jsonl
 //! ```
 //!
-//! The question is the OpenAI adapter's speech fixture ("What is the capital of France?"). The
-//! barge-in utterance is the 16-bit PCM WAV file `INFERENCE_COMPARE_BARGE_IN_WAV` names; without
+//! The question is the OpenAI adapter's speech fixture ("What is the capital of France?"), or with
+//! `--clips <dir>` each WAV file of the directory in turn (`realtime_voice::compare::Question`),
+//! every provider running `--runs` runs of each. `--runs-out <file>` writes every run's times as
+//! JSON lines (`Comparison::runs_json`). The barge-in utterance is the 16-bit PCM WAV file `INFERENCE_COMPARE_BARGE_IN_WAV` names; without
 //! it no barge-in is sent and that column stays empty. `realtime_voice::compare` says how each
 //! figure is taken: on the client, at the receipt of each event.
 //!
@@ -38,7 +42,13 @@
 //! Sonic instead, its key from `CARTESIA_API_KEY` and its voice from `CARTESIA_VOICE_ID`, in
 //! 16-bit PCM at 24 kHz. Its recogniser and LLM are those the local voice
 //! cascade configures (`local_voice_cascade::local::LocalConfig::from_env`), bound with feature
-//! `local`, with that cascade's detector; a missing one skips the arm, naming it.
+//! `local`, with that cascade's detector; a missing one skips the arm, naming it. With
+//! `--cascade-stt elevenlabs` it listens with ElevenLabs realtime speech-to-text instead
+//! (`realtime_voice::compare::elevenlabs_arm`), its key `ELEVENLABS_API_KEY` or the OS keychain's
+//! `elevenlabs-api-key` (`realtime_voice::elevenlabs::key`), committed manually when the arm's
+//! detector ends the turn, and its LLM is the server `INFERENCE_LLAMA_SERVER_URL` and
+//! `INFERENCE_LLAMA_SERVER_MODEL` name (`realtime_voice::elevenlabs::generator`), without the
+//! local recogniser's variables. A failed recognition is a note of the run.
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -62,7 +72,8 @@ use inference_openai::{
 };
 use inference_phonic::{PhonicConfig, PhonicEndpoint, PhonicSpeech};
 use realtime_voice::compare::{
-    Billing, Clip, Comparison, Measured, NO_HOSTED_TTS, Plan, Topology, VOICE_VARIABLE,
+    Billing, Clip, Comparison, Measured, NO_HOSTED_TTS, Plan, Question, Topology, VOICE_VARIABLE,
+    measure_arm,
 };
 use realtime_voice::{
     Reported, deepgram_config, elevenlabs, elevenlabs_config, nova_config, openai_config,
@@ -101,6 +112,25 @@ struct Args {
     /// The hosted voice the cascade arm speaks with.
     #[arg(long, value_enum, default_value = "elevenlabs")]
     cascade_voice: CascadeVoice,
+    /// The recogniser the cascade arm listens with.
+    #[arg(long, value_enum, default_value = "local")]
+    cascade_stt: CascadeStt,
+    /// A directory of 16-bit PCM WAV question clips, each asked in turn in place of the built-in
+    /// question.
+    #[arg(long, value_name = "DIR")]
+    clips: Option<PathBuf>,
+    /// A file to write every run's times to, one JSON line per run.
+    #[arg(long, value_name = "FILE")]
+    runs_out: Option<PathBuf>,
+}
+
+/// A recogniser the cascade arm can listen with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CascadeStt {
+    /// The local voice cascade's recogniser, sherpa-onnx or whisper.cpp.
+    Local,
+    /// ElevenLabs realtime speech-to-text, committed when the arm's detector ends the turn.
+    Elevenlabs,
 }
 
 /// A hosted TTS the cascade arm can speak with.
@@ -128,7 +158,7 @@ enum Provider {
     Phonic,
     /// A Deepslate Opal session.
     Deepslate,
-    /// The local voice cascade's recogniser and LLM, speaking with ElevenLabs.
+    /// A recogniser (--cascade-stt), the local LLM and a hosted voice (--cascade-voice).
     Cascade,
 }
 
@@ -222,7 +252,14 @@ fn strict(tool: &Tool) -> Tool {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    match compare(&args) {
+    let outcome = compare(&args).and_then(|comparison| {
+        if let Some(path) = &args.runs_out {
+            std::fs::write(path, comparison.runs_json())
+                .map_err(|error| format!("{} was not written: {error}", path.display()))?;
+        }
+        Ok(comparison)
+    });
+    match outcome {
         Ok(comparison) => {
             print!("{comparison}");
             ExitCode::SUCCESS
@@ -252,8 +289,20 @@ fn deepslate_config() -> SessionConfig {
     }
 }
 
+/// The questions to ask: the WAV clips of `--clips`, or the built-in question.
+fn questions(args: &Args) -> Result<Vec<Question>, Box<dyn Error>> {
+    Ok(match &args.clips {
+        Some(dir) => Question::in_dir(dir)?,
+        None => vec![Question {
+            name: "question".to_owned(),
+            clip: Clip::from_wav(QUESTION)?,
+        }],
+    })
+}
+
 fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
-    let mut plan = Plan::new(Clip::from_wav(QUESTION)?);
+    let questions = questions(args)?;
+    let mut plan = Plan::new(questions[0].clip.clone());
     plan.frame = Duration::from_millis(args.frame_ms.max(1));
     match std::env::var_os(BARGE_IN_VARIABLE) {
         Some(path) => {
@@ -276,10 +325,12 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
         let outcome = match provider {
             Provider::Cascade => {
                 let measured = match args.cascade_voice {
-                    CascadeVoice::Elevenlabs => hosted()
-                        .and_then(|synthesiser| cascade::measure(synthesiser, &plan, args.runs)),
-                    CascadeVoice::Cartesia => cartesia()
-                        .and_then(|synthesiser| cascade::measure(synthesiser, &plan, args.runs)),
+                    CascadeVoice::Elevenlabs => hosted().and_then(|synthesiser| {
+                        cascade::measure(synthesiser, &plan, &questions, args)
+                    }),
+                    CascadeVoice::Cartesia => cartesia().and_then(|synthesiser| {
+                        cascade::measure(synthesiser, &plan, &questions, args)
+                    }),
                 };
                 match measured {
                     Ok(runs) => comparison.ran_as(name, provider.topology(), runs),
@@ -294,6 +345,7 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                     &mut model,
                     openai_config,
                     &plan,
+                    &questions,
                     args.runs,
                     &Billing::tokens(Reported::OPENAI),
                 )
@@ -309,6 +361,7 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                     &mut model,
                     openai_live_config,
                     &plan,
+                    &questions,
                     args.runs,
                     &billing,
                 )
@@ -321,6 +374,7 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                         &mut model,
                         nova_config,
                         &plan,
+                        &questions,
                         args.runs,
                         &Billing::tokens(Reported::NOVA),
                     )
@@ -331,6 +385,7 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                     &mut model,
                     elevenlabs_config,
                     &plan,
+                    &questions,
                     args.runs,
                     &Billing::tokens(ELEVENLABS_REPORTED),
                 )
@@ -344,6 +399,7 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                             &mut model,
                             deepgram_config,
                             &plan,
+                            &questions,
                             args.runs,
                             &Billing::tokens(DEEPGRAM_REPORTED),
                         )
@@ -357,6 +413,7 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                         &mut model,
                         phonic_config,
                         &plan,
+                        &questions,
                         args.runs,
                         &Billing::tokens(PHONIC_REPORTED),
                     )
@@ -371,6 +428,7 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
                             &mut model,
                             deepslate_config,
                             &plan,
+                            &questions,
                             args.runs,
                             &Billing::tokens(DEEPSLATE_REPORTED),
                         )
@@ -417,7 +475,8 @@ fn cartesia() -> Result<inference_cartesia::CartesiaSynthesiser, String> {
     .map_err(|error| format!("{NO_HOSTED_TTS}: {error}"))
 }
 
-/// The cascade arm over the local voice cascade's recogniser and LLM.
+/// The cascade arm over the local voice cascade's recogniser and LLM, or over ElevenLabs
+/// speech-to-text and that LLM.
 #[cfg(feature = "local")]
 mod cascade {
     use inference_tts::Synthesiser;
@@ -425,8 +484,13 @@ mod cascade {
         LocalConfig, LocalModels, LocalRefused, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE,
         SPEECH_VAD,
     };
-    use realtime_voice::compare::{Cascade, ClientPlayout, Measured, Plan, run_cascade_live};
-    use realtime_voice::pcm16;
+    use realtime_voice::compare::{
+        Cascade, Measured, Plan, Question, elevenlabs_arm, measure_cascade,
+    };
+    use realtime_voice::talk::Refused;
+    use realtime_voice::{elevenlabs, pcm16};
+
+    use super::{Args, CascadeStt};
 
     /// The reason a local step is missing for, naming it.
     fn missing(refused: &LocalRefused) -> String {
@@ -443,41 +507,79 @@ mod cascade {
         format!("no local {step} configured: {refused}")
     }
 
-    /// `runs` runs of the plan over the local recogniser and LLM and `synthesiser`.
-    pub fn measure<S>(synthesiser: S, plan: &Plan, runs: usize) -> Result<Vec<Measured>, String>
+    /// The reason the ElevenLabs arm's LLM or recogniser is missing for, naming it.
+    fn refused(step: &str, refused: &Refused) -> String {
+        format!("no {step} configured: {refused}")
+    }
+
+    /// `runs` runs of each question over the recogniser `--cascade-stt` names, the LLM and
+    /// `synthesiser`.
+    pub fn measure<S>(
+        synthesiser: S,
+        plan: &Plan,
+        questions: &[Question],
+        args: &Args,
+    ) -> Result<Vec<Measured>, String>
     where
         S: Synthesiser,
         S::Handle: Send,
     {
-        let config = LocalConfig::from_env().map_err(|refused| missing(&refused))?;
-        let models = LocalModels::open(&config).map_err(|refused| missing(&refused))?;
-        let mut cascade = Cascade::new(
-            models.recogniser,
-            models.generator,
-            synthesiser,
-            pcm16(16_000),
-        );
-        cascade.attack = SPEECH_VAD.attack;
-        cascade.hold = SPEECH_VAD.hold;
-        Ok((1..=runs)
-            .map(|run| {
-                eprintln!("cascade: run {run} of {runs}");
-                run_cascade_live(&mut cascade, plan, &mut ClientPlayout)
-            })
-            .collect())
+        match args.cascade_stt {
+            CascadeStt::Local => {
+                let config = LocalConfig::from_env().map_err(|refused| missing(&refused))?;
+                let models = LocalModels::open(&config).map_err(|refused| missing(&refused))?;
+                let mut cascade = Cascade::new(
+                    models.recogniser,
+                    models.generator,
+                    synthesiser,
+                    pcm16(16_000),
+                );
+                cascade.attack = SPEECH_VAD.attack;
+                cascade.hold = SPEECH_VAD.hold;
+                Ok(measure_cascade(
+                    "cascade",
+                    &mut cascade,
+                    plan,
+                    questions,
+                    args.runs,
+                    |_| None,
+                ))
+            }
+            CascadeStt::Elevenlabs => {
+                let generator =
+                    elevenlabs::generator().map_err(|error| refused("local LLM", &error))?;
+                let source =
+                    elevenlabs::key().map_err(|error| refused("ElevenLabs STT", &error))?;
+                let endpoint =
+                    elevenlabs::endpoint().map_err(|error| refused("ElevenLabs STT", &error))?;
+                let mut cascade = elevenlabs_arm(endpoint, source, generator, synthesiser)
+                    .map_err(|error| format!("no ElevenLabs STT configured: {error}"))?;
+                Ok(measure_cascade(
+                    "cascade",
+                    &mut cascade,
+                    plan,
+                    questions,
+                    args.runs,
+                    elevenlabs::failure,
+                ))
+            }
+        }
     }
 }
 
-/// Without feature `local`, the cascade arm has no local recogniser or LLM.
+/// Without feature `local`, the cascade arm has no local LLM, nor a local recogniser.
 #[cfg(not(feature = "local"))]
 mod cascade {
-    use realtime_voice::compare::{Measured, Plan};
+    use realtime_voice::compare::{Measured, Plan, Question};
+
+    use super::Args;
 
     /// Skips the arm, naming the missing steps.
     pub fn measure<S>(
         _synthesiser: S,
         _plan: &Plan,
-        _runs: usize,
+        _questions: &[Question],
+        _args: &Args,
     ) -> Result<Vec<Measured>, String> {
         Err(
             "no local STT or LLM configured: compare was built without feature local, \
@@ -519,28 +621,19 @@ fn elevenlabs_agent() -> Result<ElevenLabsAgent, Box<dyn Error>> {
     Ok(ElevenLabsAgent::public(id, AgentEndpoint::new())?)
 }
 
-/// `runs` runs of the plan over `model`; an error when the first session does not open.
+/// `runs` runs of each question over `model`; an error when the first session does not open.
 fn measure<M: NativeSpeechModel>(
     name: &str,
     model: &mut M,
     config: fn() -> SessionConfig,
     plan: &Plan,
+    questions: &[Question],
     runs: usize,
     billing: &Billing<M::Session>,
 ) -> Result<Vec<Measured>, Box<dyn Error>> {
-    let mut measured = Vec::with_capacity(runs);
-    for run in 1..=runs {
-        eprintln!("{name}: run {run} of {runs}");
-        match realtime_voice::compare::run(model, config(), plan, &Instant::now, billing) {
-            Ok(outcome) => measured.push(outcome),
-            Err(error) if measured.is_empty() => {
-                return Err(format!("the session did not open: {error}").into());
-            }
-            Err(error) => measured.push(Measured {
-                notes: vec![format!("the session did not open: {error}")],
-                ..Measured::default()
-            }),
-        }
-    }
-    Ok(measured)
+    measure_arm(name, plan, questions, runs, |plan| {
+        realtime_voice::compare::run(model, config(), plan, &Instant::now, billing)
+            .map_err(|error| format!("the session did not open: {error}"))
+    })
+    .map_err(Into::into)
 }

@@ -286,7 +286,14 @@ where
         let clock = clock.clone();
         move |by: Duration| clock.advance(by)
     };
-    run_cascade(&mut cascade, &Plan::new(utterance()), &now, &wait, playout)
+    run_cascade(
+        &mut cascade,
+        &Plan::new(utterance()),
+        &now,
+        &wait,
+        playout,
+        |_| None,
+    )
 }
 
 /// A playout is the caller's code and may fail. Before the worker threads, a panic in it
@@ -482,7 +489,7 @@ fn the_live_arm_paces_the_barge_in_while_the_llm_and_the_synthesiser_block() {
         plan.barge_after = Duration::from_millis(60);
         plan.pause = Duration::from_millis(200);
         let mut playout = Counting::default();
-        let measured = run_cascade_live(&mut cascade, &plan, &mut playout);
+        let measured = run_cascade_live(&mut cascade, &plan, &mut playout, |_| None);
         (measured, playout.stops)
     });
     println!("{measured:?}");

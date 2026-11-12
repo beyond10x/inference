@@ -64,6 +64,42 @@ llama-server --host 127.0.0.1 --port 8080 -m qwen2.5-1.5b-instruct-q4_k_m.gguf \
     --alias qwen2.5-1.5b-instruct -c 4096 -np 1 -ngl 0
 ```
 
+### Or Ollama
+
+The adapter talks to any OpenAI-compatible Chat Completions API on loopback. Ollama's is tested:
+on 2026-11-12 the adapter's live test passed against Ollama 0.20.8 serving `qwen2.5:1.5b` at
+`http://127.0.0.1:11434/v1`. Start it, fetch the model and send one request, since the first one
+loads the model:
+
+```sh
+ollama serve
+ollama pull qwen2.5:1.5b
+curl -s http://127.0.0.1:11434/v1/chat/completions -H 'Content-Type: application/json' \
+    -d '{"model":"qwen2.5:1.5b","messages":[{"role":"user","content":"Say hi."}],"max_tokens":8}'
+```
+
+Then set `INFERENCE_LLAMA_SERVER_URL=http://127.0.0.1:11434/v1` and
+`INFERENCE_LLAMA_SERVER_MODEL=qwen2.5:1.5b` in step 3. The live test, run the same way:
+
+```sh
+INFERENCE_LLAMA_SERVER_URL=http://127.0.0.1:11434/v1 INFERENCE_LLAMA_SERVER_MODEL=qwen2.5:1.5b \
+    cargo test -p inference-llama-server --features live --test live -- --ignored --nocapture
+```
+
+```text
+running 1 test
+server build: unknown: /props names no build_info
+usage: Some(Some(Usage { input_tokens: Some(41), output_tokens: Some(21), cached_input_tokens: None, cache_creation_input_tokens: None, reasoning_output_tokens: None }))
+deltas: 20, first after Some(13.561500523s), completed after 45.113786792s
+text: "One, Two, Three, Four, Five, Six, Seven, Eight, Nine, Ten."
+test a_running_server_streams_a_generation_and_refuses_input_during_output ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.12s
+```
+
+Ollama has no `/props`, so the server build is unknown. The times are those of a machine running
+many builds at once, not of the model.
+
 ## 3. Run the cascade
 
 ```sh

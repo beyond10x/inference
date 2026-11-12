@@ -25,7 +25,8 @@ use inference_duplex::{
     SpeechSessionId, TokenCounts, TuningSupport, TurnDetection, TurnTuning,
 };
 use realtime_voice::compare::{
-    Billing, Clip, Comparison, Measure, Measured, Outcome, Plan, Spread, run,
+    Billing, Clip, Comparison, Measure, Measured, Outcome, Plan, Question, Spread, Topology,
+    measure_arm, run,
 };
 use realtime_voice::{Counts, Reported, pcm16};
 
@@ -476,9 +477,12 @@ fn runs_with(
         .collect()
 }
 
+/// The spread of three or fewer measured runs, whose 95th percentile, by nearest rank, is the
+/// highest.
 fn spread(median: u64, lowest: u64, highest: u64, measured: usize, runs: usize) -> Option<Spread> {
     Some(Spread {
         median: ms(median),
+        p95: ms(highest),
         lowest: ms(lowest),
         highest: ms(highest),
         measured,
@@ -658,8 +662,234 @@ fn the_spread_of_an_even_count_takes_the_mean_of_the_middle_two_and_counts_the_u
     assert_eq!(spread.median, ms(200));
     assert_eq!((spread.lowest, spread.highest), (ms(100), ms(300)));
     assert_eq!((spread.measured, spread.runs), (2, 3));
-    assert_eq!(spread.to_string(), "200 [100-300] 2/3");
+    assert_eq!(spread.p95, ms(300));
+    assert_eq!(spread.to_string(), "200 [100-300] 2/3 p95 300");
     assert_eq!(Spread::of(&[None, None]), None);
+}
+
+#[test]
+fn with_more_than_one_run_the_table_shows_p95_next_to_median_lowest_and_highest() {
+    let values: Vec<Option<Duration>> = (1..=20).map(|at| Some(ms(10 * at))).collect();
+    let spread = Spread::of(&values).expect("twenty measured");
+    assert_eq!(
+        (spread.median, spread.p95, spread.lowest, spread.highest),
+        (ms(105), ms(190), ms(10), ms(200)),
+        "the 95th percentile of twenty by nearest rank is the 19th"
+    );
+    let measured = |first_audio: Duration| Measured {
+        first_audio: Some(first_audio),
+        ..Measured::default()
+    };
+    let mut comparison = Comparison::new();
+    comparison.ran(
+        "many",
+        values.iter().flatten().copied().map(measured).collect(),
+    );
+    comparison.ran("once", vec![measured(ms(300))]);
+    let table = comparison.to_string();
+    println!("{table}");
+    let row = |name: &str| {
+        table
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("a row for {name} in\n{table}"))
+            .to_owned()
+    };
+    assert!(
+        row("many").contains("105 [10-200] 20/20 p95 190"),
+        "{table}"
+    );
+    assert!(row("once").contains("300 [300-300] 1/1"), "{table}");
+    assert!(!row("once").contains("p95"), "one run has no p95: {table}");
+    assert!(table.contains("p95"), "the heading names p95: {table}");
+}
+
+/// A RIFF WAV file of mono 16-bit PCM at `rate`: `speech` of a constant voiced sample, then
+/// `silence`.
+fn wav(rate: u32, speech: Duration, silence: Duration) -> Vec<u8> {
+    let count = |length: Duration| (length.as_millis() as usize) * rate as usize / 1_000;
+    let mut samples = vec![8_192_i16; count(speech)];
+    samples.extend(vec![0; count(silence)]);
+    let data: Vec<u8> = samples
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect();
+    let mut bytes = Vec::new();
+    bytes.extend(b"RIFF");
+    bytes.extend((36 + data.len() as u32).to_le_bytes());
+    bytes.extend(b"WAVEfmt ");
+    bytes.extend(16_u32.to_le_bytes());
+    bytes.extend(1_u16.to_le_bytes());
+    bytes.extend(1_u16.to_le_bytes());
+    bytes.extend(rate.to_le_bytes());
+    bytes.extend((rate * 2).to_le_bytes());
+    bytes.extend(2_u16.to_le_bytes());
+    bytes.extend(16_u16.to_le_bytes());
+    bytes.extend(b"data");
+    bytes.extend((data.len() as u32).to_le_bytes());
+    bytes.extend(data);
+    bytes
+}
+
+#[test]
+fn clips_from_a_directory_run_each_clip_on_each_arm() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("compare-clips-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the clip directory");
+    std::fs::write(dir.join("b-second.wav"), wav(16_000, ms(150), ms(100))).expect("written");
+    std::fs::write(dir.join("a-first.WAV"), wav(24_000, ms(400), ms(100))).expect("written");
+    std::fs::write(dir.join("notes.txt"), b"not a clip").expect("written");
+    let questions = Question::in_dir(&dir).expect("two WAV clips");
+    let names: Vec<&str> = questions
+        .iter()
+        .map(|question| question.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["a-first", "b-second"],
+        "WAV files by name, others left"
+    );
+    assert_eq!(questions[0].clip.duration(), ms(500));
+    assert_eq!(questions[1].clip.duration(), ms(250));
+
+    let mut comparison = Comparison::new();
+    for (arm, caller_cancels) in [("fast", true), ("slow", false)] {
+        let scripts = if caller_cancels {
+            vec![fast(250, 300, 1_500); 4]
+        } else {
+            vec![slow(500, 600); 4]
+        };
+        let clock = Fake::new();
+        let mut model = Scripted::new(caller_cancels, scripts, &clock);
+        let now = {
+            let clock = clock.clone();
+            move || clock.now()
+        };
+        let billing = Billing::tokens(Reported::OPENAI);
+        let mut asked = Vec::new();
+        let measured = measure_arm(arm, &plan(), &questions, 2, |plan: &Plan| {
+            asked.push(plan.question.clone());
+            let config = model.config();
+            run(&mut model, config, plan, &now, &billing)
+        })
+        .expect("the sessions open");
+        let expected: Vec<Clip> = [0, 0, 1, 1].map(|at| questions[at].clip.clone()).to_vec();
+        assert_eq!(asked, expected, "{arm} asked each clip, twice, in order");
+        let clips: Vec<&str> = measured.iter().map(|run| run.clip.as_str()).collect();
+        assert_eq!(
+            clips,
+            ["a-first", "a-first", "b-second", "b-second"],
+            "{arm}"
+        );
+        for run in &measured {
+            assert!(run.first_audio.is_some(), "{arm}: {run:?}");
+        }
+        comparison.ran(arm, measured);
+    }
+    assert_eq!(
+        comparison.spread("fast", Measure::FirstAudio),
+        Some(Spread {
+            median: ms(300),
+            p95: ms(300),
+            lowest: ms(300),
+            highest: ms(300),
+            measured: 4,
+            runs: 4,
+        })
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_directory_without_a_wav_clip_is_refused_naming_it() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("compare-no-clips-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the clip directory");
+    let refused = Question::in_dir(&dir).expect_err("no clip");
+    assert!(refused.to_string().contains("no WAV file"), "{refused}");
+    std::fs::write(dir.join("broken.wav"), b"not a wav file").expect("written");
+    let refused = Question::in_dir(&dir).expect_err("not a clip");
+    assert!(refused.to_string().contains("broken.wav"), "{refused}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn runs_out_writes_one_json_line_per_run_with_its_per_step_times() {
+    let mut fast_runs = runs(
+        true,
+        vec![fast(250, 300, 1_500), fast(270, 340, 1_500)],
+        false,
+    );
+    for run in &mut fast_runs {
+        run.clip = "question".to_owned();
+    }
+    let cascade = Measured {
+        topology: Topology::Cascade,
+        clip: "question".to_owned(),
+        first_audio: Some(ms(900)),
+        response_end: Some(ms(1_700)),
+        final_transcript: Some(ms(650)),
+        first_token: Some(ms(800)),
+        tts_first_audio: Some(ms(900)),
+        tts_segment_first_audio: vec![ms(95), ms(80)],
+        notes: vec!["barge-in: the answer had no audio".to_owned()],
+        ..Measured::default()
+    };
+    let mut comparison = Comparison::new();
+    comparison.ran("fast", fast_runs);
+    comparison.ran_as("cascade", Topology::Cascade, vec![cascade]);
+    comparison.skipped("nova", "blocked on AWS access");
+
+    let written = comparison.runs_json();
+    let lines: Vec<serde_json::Value> = written
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each line is JSON"))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        3,
+        "one line per run, none for a skipped one:\n{written}"
+    );
+    assert!(written.ends_with('\n'), "{written}");
+
+    let first = &lines[0];
+    assert_eq!(first["provider"], "fast");
+    assert_eq!(first["topology"], "native");
+    assert_eq!(first["clip"], "question");
+    assert_eq!(first["run"], 1);
+    assert_eq!(first["first_audio_ms"], 300.0);
+    assert_eq!(first["first_transcript_ms"], 250.0);
+    assert_eq!(first["response_end_ms"], 900.0);
+    assert_eq!(first["barge_in_stop_ms"], 200.0);
+    assert!(
+        first.get("first_token_ms").is_none(),
+        "n/a is left out: {first}"
+    );
+    assert_eq!(lines[1]["run"], 2);
+    assert_eq!(lines[1]["first_audio_ms"], 340.0);
+
+    let cascade = &lines[2];
+    assert_eq!(cascade["provider"], "cascade");
+    assert_eq!(cascade["topology"], "cascade");
+    assert_eq!(cascade["run"], 1);
+    assert_eq!(cascade["first_audio_ms"], 900.0);
+    assert_eq!(cascade["response_end_ms"], 1_700.0);
+    assert_eq!(cascade["barge_in_stop_ms"], serde_json::Value::Null);
+    assert_eq!(cascade["final_transcript_ms"], 650.0);
+    assert_eq!(cascade["first_token_ms"], 800.0);
+    assert_eq!(cascade["tts_first_audio_ms"], 900.0);
+    assert_eq!(cascade["tts_offer_to_audio_ms"], 95.0);
+    assert_eq!(
+        cascade["tts_segment_first_audio_ms"],
+        serde_json::json!([95.0, 80.0])
+    );
+    assert!(cascade.get("first_transcript_ms").is_none(), "{cascade}");
+    assert_eq!(
+        cascade["notes"],
+        serde_json::json!(["barge-in: the answer had no audio"])
+    );
 }
 
 #[test]

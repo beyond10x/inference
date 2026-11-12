@@ -71,15 +71,25 @@
 //! cascade's steps: the table shows such a cell as `n/a`, never as 0. [`hosted_tts`] makes the
 //! hosted synthesiser the `compare` example binds, or says why there is none.
 //!
+//! A cascade's runner reports why its recognition failed, as the caller's `failure` reads it off
+//! the recognition's handle, as a note of the run. `elevenlabs_arm` (feature `local`) is the
+//! cascade arm over ElevenLabs speech-to-text, committed manually when the arm's detector ends
+//! the turn.
+//!
+//! [`measure_arm`] runs each of a list of [`Question`]s, the built-in one or the WAV clips of a
+//! directory ([`Question::in_dir`]), on one provider, and names each run after its question.
 //! [`Comparison`] collects the runs of each provider, or why it was skipped, and prints the
-//! median and the spread (lowest and highest) of each measure over the runs that measured it, and
-//! the usage of each run as the provider reports it: tokens, and seconds for a provider that
-//! bills by the second.
+//! median, the 95th percentile and the spread (lowest and highest) of each measure over the runs
+//! that measured it, and the usage of each run as the provider reports it: tokens, and seconds for
+//! a provider that bills by the second. [`Comparison::runs_json`] gives every run as one JSON
+//! line.
 
 use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
 use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU32;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -215,6 +225,59 @@ impl fmt::Display for ClipError {
 
 impl Error for ClipError {}
 
+/// A question a run asks: its clip, and the name its runs are reported under.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Question {
+    /// The clip's file name without its extension, or `question` for the built-in one.
+    pub name: String,
+    pub clip: Clip,
+}
+
+impl Question {
+    /// The questions of the WAV files in `dir`, those whose extension is `wav` in any case, in the
+    /// order of their file names, each named after its file name without the extension. Other
+    /// files are left.
+    ///
+    /// # Errors
+    ///
+    /// [`ClipError`] naming the directory when it does not read or holds no WAV file, or naming
+    /// the file that does not read as a clip.
+    pub fn in_dir(dir: &Path) -> Result<Vec<Self>, ClipError> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|error| ClipError(format!("{} did not read: {error}", dir.display())))?;
+        let mut paths = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| ClipError(format!("{} did not read: {error}", dir.display())))?
+                .path();
+            let wav = path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"));
+            if wav && path.is_file() {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        if paths.is_empty() {
+            return Err(ClipError(format!("no WAV file in {}", dir.display())));
+        }
+        paths
+            .into_iter()
+            .map(|path| {
+                let bytes = std::fs::read(&path).map_err(|error| {
+                    ClipError(format!("{} did not read: {error}", path.display()))
+                })?;
+                let clip = Clip::from_wav(&bytes)
+                    .map_err(|error| ClipError(format!("{}: {error}", path.display())))?;
+                let name = path
+                    .file_stem()
+                    .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+                Ok(Self { name, clip })
+            })
+            .collect()
+    }
+}
+
 fn samples_in(duration: Duration, rate: NonZeroU32) -> usize {
     (duration.as_nanos() * u128::from(rate.get()) / 1_000_000_000) as usize
 }
@@ -317,6 +380,8 @@ impl Topology {
 pub struct Measured {
     /// The topology of the provider the run measured.
     pub topology: Topology,
+    /// The name of the question the run asked ([`Question::name`]).
+    pub clip: String,
     /// End of input speech to the answer's first audio.
     pub first_audio: Option<Duration>,
     /// End of input speech to the answer's first transcript.
@@ -1338,6 +1403,8 @@ impl Segments {
 
 struct CascadeRunner<'a, 's, 'e, R: Recogniser, S: Synthesiser> {
     cascade: &'a mut Cascade<R, S>,
+    /// Why a recognition failed, read off its handle.
+    failure: fn(&R::Handle) -> Option<String>,
     plan: &'a Plan,
     clock: &'a dyn Fn() -> Instant,
     /// The simulated clock's advance; none on the wall clock.
@@ -1390,15 +1457,17 @@ pub const SIMULATED_STALL: Duration = Duration::from_millis(250);
 /// time: a step that blocks until the caller's clock reaches a time, or a future that wakes
 /// itself until then, waits on the clock, and the clock then moves one frame per stall. A step
 /// that computes for longer than that on the wall clock sees the simulated clock move meanwhile.
-/// The answer's audio is played on `playout`. Returns what it measured; see the module
-/// documentation. Every failure is a note of the run; a panic of a step or of the caller's
-/// playout, clock or wait reaches the caller once every worker stopped.
+/// The answer's audio is played on `playout`; `failure` says why a recognition failed, when its
+/// recogniser says. Returns what it measured; see the module documentation. Every failure is a
+/// note of the run; a panic of a step or of the caller's playout, clock or wait reaches the
+/// caller once every worker stopped.
 pub fn run_cascade<R, S>(
     cascade: &mut Cascade<R, S>,
     plan: &Plan,
     clock: &dyn Fn() -> Instant,
     wait: &dyn Fn(Duration),
     playout: &mut dyn Playout,
+    failure: fn(&R::Handle) -> Option<String>,
 ) -> Measured
 where
     R: Recogniser,
@@ -1406,16 +1475,18 @@ where
     S: Synthesiser,
     S::Handle: Send,
 {
-    run_paced(cascade, plan, clock, Some(wait), playout)
+    run_paced(cascade, plan, clock, Some(wait), playout, failure)
 }
 
 /// Runs the plan once over `cascade` on the wall clock, waiting on the workers' reports until the
-/// next frame is due, and playing the answer's audio on `playout`. Returns what it measured; see
-/// the module documentation. Every failure is a note of the run.
+/// next frame is due, and playing the answer's audio on `playout`; `failure` says why a
+/// recognition failed, when its recogniser says. Returns what it measured; see the module
+/// documentation. Every failure is a note of the run.
 pub fn run_cascade_live<R, S>(
     cascade: &mut Cascade<R, S>,
     plan: &Plan,
     playout: &mut dyn Playout,
+    failure: fn(&R::Handle) -> Option<String>,
 ) -> Measured
 where
     R: Recogniser,
@@ -1423,7 +1494,96 @@ where
     S: Synthesiser,
     S::Handle: Send,
 {
-    run_paced(cascade, plan, &Instant::now, None, playout)
+    run_paced(cascade, plan, &Instant::now, None, playout, failure)
+}
+
+/// `runs` runs on the wall clock over `cascade`, as [`run_cascade_live`] runs them, of each of
+/// `questions` in `plan`, on a client without a speaker ([`ClientPlayout`]), as [`measure_arm`]
+/// takes them.
+pub fn measure_cascade<R, S>(
+    arm: &str,
+    cascade: &mut Cascade<R, S>,
+    plan: &Plan,
+    questions: &[Question],
+    runs: usize,
+    failure: fn(&R::Handle) -> Option<String>,
+) -> Vec<Measured>
+where
+    R: Recogniser,
+    R::Handle: Send,
+    S: Synthesiser,
+    S::Handle: Send,
+{
+    measure_arm(arm, plan, questions, runs, |plan| {
+        Ok::<_, Infallible>(run_cascade_live(cascade, plan, &mut ClientPlayout, failure))
+    })
+    .unwrap_or_else(|never| match never {})
+}
+
+/// `runs` runs of each of `questions` on one provider, `arm`, every run of the first question
+/// first: `once` runs `plan` with the question put in its place. Each run is named after its
+/// question ([`Measured::clip`]) and announced on standard error as `<arm>: <question> run <n> of
+/// <runs>`.
+///
+/// # Errors
+///
+/// The failure of `once` when no run before it measured: the provider is skipped for it. A later
+/// failure is a run of its own, with the failure as its note.
+pub fn measure_arm<E: fmt::Display>(
+    arm: &str,
+    plan: &Plan,
+    questions: &[Question],
+    runs: usize,
+    mut once: impl FnMut(&Plan) -> Result<Measured, E>,
+) -> Result<Vec<Measured>, E> {
+    let mut measured = Vec::with_capacity(questions.len() * runs);
+    for question in questions {
+        let plan = Plan {
+            question: question.clip.clone(),
+            ..plan.clone()
+        };
+        for run in 1..=runs {
+            eprintln!("{arm}: {} run {run} of {runs}", question.name);
+            match once(&plan) {
+                Ok(outcome) => measured.push(Measured {
+                    clip: question.name.clone(),
+                    ..outcome
+                }),
+                Err(error) if measured.is_empty() => return Err(error),
+                Err(error) => measured.push(Measured {
+                    clip: question.name.clone(),
+                    notes: vec![error.to_string()],
+                    ..Measured::default()
+                }),
+            }
+        }
+    }
+    Ok(measured)
+}
+
+/// The cascade arm `compare --cascade-stt elevenlabs` runs: ElevenLabs speech-to-text at
+/// `endpoint`, its key resolved through `source`, committed manually
+/// ([`crate::elevenlabs::manual_recogniser`]), offered `pcm_16000`, then `generator` and
+/// `synthesiser`, with the detector of the local cascade arm, `SPEECH_VAD`'s attack and hold:
+/// the hold of silence after speech ends the recognition's input, which commits it. Making it
+/// sends nothing.
+///
+/// # Errors
+///
+/// The [`inference_elevenlabs::ConfigError`] of the endpoint's URL.
+#[cfg(feature = "local")]
+pub fn elevenlabs_arm<S>(
+    endpoint: Endpoint,
+    source: Arc<dyn CredentialSource>,
+    generator: Generator,
+    synthesiser: S,
+) -> Result<Cascade<inference_elevenlabs::ElevenLabsRecogniser, S>, inference_elevenlabs::ConfigError>
+{
+    let recogniser = crate::elevenlabs::manual_recogniser(endpoint, source)?;
+    let mut cascade = Cascade::new(recogniser, generator, synthesiser, crate::pcm16(16_000));
+    cascade.attack = local_voice_cascade::local::SPEECH_VAD.attack;
+    cascade.hold = local_voice_cascade::local::SPEECH_VAD.hold;
+    Ok(cascade)
 }
 
 fn run_paced<R, S>(
@@ -1432,6 +1592,7 @@ fn run_paced<R, S>(
     clock: &dyn Fn() -> Instant,
     advance: Option<&dyn Fn(Duration)>,
     playout: &mut dyn Playout,
+    failure: fn(&R::Handle) -> Option<String>,
 ) -> Measured
 where
     R: Recogniser,
@@ -1449,6 +1610,7 @@ where
     thread::scope(|scope| {
         let mut runner = CascadeRunner {
             cascade,
+            failure,
             plan,
             clock,
             advance,
@@ -1659,7 +1821,7 @@ where
             Ok(recognition) => {
                 let report = self.reporter();
                 let (tasks, worker) =
-                    spawn_recognition(self.scope, recognition, report, |_: &R::Handle| None);
+                    spawn_recognition(self.scope, recognition, report, self.failure);
                 self.workers.push(worker);
                 self.listen = Some(tasks);
                 self.stage = Stage::Listening;
@@ -1820,7 +1982,8 @@ where
                 }
                 self.finish();
             }
-            Heard::Note(note) | Heard::Failed(note) => self.note(note),
+            Heard::Note(note) => self.note(note),
+            Heard::Failed(why) => self.note(format!("the recognition failed: {why}")),
             Heard::Idle => {}
         }
     }
@@ -1988,6 +2151,21 @@ impl Measure {
         }
     }
 
+    /// The measure's key in a line of [`Comparison::runs_json`], before its `_ms`.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::FirstAudio => "first_audio",
+            Self::FirstTranscript => "first_transcript",
+            Self::ResponseEnd => "response_end",
+            Self::BargeInStop => "barge_in_stop",
+            Self::FinalTranscript => "final_transcript",
+            Self::FirstToken => "first_token",
+            Self::TtsFirstAudio => "tts_first_audio",
+            Self::TtsOfferToAudio => "tts_offer_to_audio",
+        }
+    }
+
     /// Whether a provider of `topology` has the step the measure ends at: first audio, response
     /// end and barge-in to stop both have; the first transcript of the answer is a native
     /// model's, and the four steps after it the cascade's.
@@ -2025,11 +2203,14 @@ impl Measure {
     }
 }
 
-/// The median and the range of a measure over runs.
+/// The median, the 95th percentile and the range of a measure over runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Spread {
     /// The middle value, the mean of the two middle ones for an even count.
     pub median: Duration,
+    /// The 95th percentile by nearest rank: the value at rank ⌈0.95 · n⌉, counted from 1, of the
+    /// `n` measured values in ascending order.
+    pub p95: Duration,
     pub lowest: Duration,
     pub highest: Duration,
     /// The runs that measured it.
@@ -2051,8 +2232,10 @@ impl Spread {
         } else {
             measured[middle]
         };
+        let rank = (measured.len() * 95).div_ceil(100);
         Some(Self {
             median,
+            p95: measured[rank.max(1) - 1],
             lowest,
             highest,
             measured: measured.len(),
@@ -2062,7 +2245,8 @@ impl Spread {
 }
 
 impl fmt::Display for Spread {
-    /// `320 [300-340] 3/3`, in milliseconds.
+    /// `320 [300-340] 3/3 p95 340`, in milliseconds; the 95th percentile only when more than one
+    /// run measured it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -2072,9 +2256,21 @@ impl fmt::Display for Spread {
             self.highest.as_millis(),
             self.measured,
             self.runs
-        )
+        )?;
+        if self.measured > 1 {
+            write!(f, " p95 {}", self.p95.as_millis())?;
+        }
+        Ok(())
     }
 }
+
+/// A duration in milliseconds, as a JSON number.
+fn millis(duration: Duration) -> serde_json::Value {
+    serde_json::Value::from(duration.as_nanos() as f64 / 1_000_000.0)
+}
+
+/// The width of a cell of the table.
+const CELL: usize = 30;
 
 /// What became of a provider in a comparison.
 #[derive(Debug, Clone, PartialEq)]
@@ -2171,6 +2367,57 @@ impl Comparison {
         ranked.sort_by_key(|&(_, median)| median);
         ranked.into_iter().map(|(name, _)| name).collect()
     }
+
+    /// Every run of every provider that ran, in order, as one line of JSON each, every line ended
+    /// by a newline: `provider`, `topology`, `clip`, `run` (from 1 for each clip of the
+    /// provider), each measure the provider's topology has as `<key>_ms` ([`Measure::key`]),
+    /// `null` when the run did not measure it, the cascade's `tts_segment_first_audio_ms`,
+    /// `seconds` billed or `null`, and `notes`. Times are milliseconds.
+    #[must_use]
+    pub fn runs_json(&self) -> String {
+        let mut lines = String::new();
+        for (name, topology, outcome) in &self.providers {
+            let Outcome::Ran(runs) = outcome else {
+                continue;
+            };
+            let mut counted: HashMap<&str, usize> = HashMap::new();
+            for run in runs {
+                let count = counted.entry(run.clip.as_str()).or_default();
+                *count += 1;
+                let mut line = serde_json::Map::new();
+                line.insert("provider".to_owned(), name.as_str().into());
+                line.insert("topology".to_owned(), topology.name().into());
+                line.insert("clip".to_owned(), run.clip.as_str().into());
+                line.insert("run".to_owned(), (*count).into());
+                for measure in Measure::ALL {
+                    if measure.applies(*topology) {
+                        line.insert(
+                            format!("{}_ms", measure.key()),
+                            measure.of(run).map_or(serde_json::Value::Null, millis),
+                        );
+                    }
+                }
+                if *topology == Topology::Cascade {
+                    line.insert(
+                        "tts_segment_first_audio_ms".to_owned(),
+                        run.tts_segment_first_audio
+                            .iter()
+                            .copied()
+                            .map(millis)
+                            .collect(),
+                    );
+                }
+                line.insert("seconds".to_owned(), run.seconds.into());
+                line.insert(
+                    "notes".to_owned(),
+                    run.notes.iter().map(String::as_str).collect(),
+                );
+                lines.push_str(&serde_json::Value::Object(line).to_string());
+                lines.push('\n');
+            }
+        }
+        lines
+    }
 }
 
 impl fmt::Display for Comparison {
@@ -2187,7 +2434,8 @@ impl fmt::Display for Comparison {
         writeln!(
             f,
             "times in ms, taken on the client at the receipt of each event: \
-             median [lowest-highest] measured/runs; n/a: a step the topology does not have"
+             median [lowest-highest] measured/runs, then p95 when more than one run measured it; \
+             n/a: a step the topology does not have"
         )?;
         writeln!(
             f,
@@ -2201,7 +2449,7 @@ impl fmt::Display for Comparison {
         )?;
         let mut heading = format!("{:<width$}  {:<kind$}", "provider", "topology");
         for measure in Measure::ALL {
-            heading.push_str(&format!("  {:<20}", measure.name()));
+            heading.push_str(&format!("  {:<CELL$}", measure.name()));
         }
         writeln!(f, "{}", heading.trim_end())?;
         for (name, topology, outcome) in &self.providers {
@@ -2218,7 +2466,7 @@ impl fmt::Display for Comparison {
                                 |spread| spread.to_string(),
                             )
                         };
-                        row.push_str(&format!("  {cell:<20}"));
+                        row.push_str(&format!("  {cell:<CELL$}"));
                     }
                     writeln!(f, "{}", row.trim_end())?;
                 }

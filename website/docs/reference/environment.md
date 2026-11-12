@@ -29,7 +29,7 @@ the live tests read the same ones and are ignored without them.
 | `CARTESIA_API_KEY` | `inference-cartesia` (`EnvironmentSource::cartesia`); `realtime-voice`, example `compare` with `--cascade-voice cartesia` | the Cartesia key, sent only in the `X-API-Key` header | none: the cascade arm of `compare` is skipped; the live test also reads the OS keychain, secret `cartesia-api-key` |
 | `CARTESIA_VOICE_ID` | `inference-cartesia` live test; `realtime-voice`, example `compare` with `--cascade-voice cartesia` | the Sonic voice the cascade arm speaks with | none: the cascade arm is skipped |
 | `INFERENCE_COMPARE_BARGE_IN_WAV` | `realtime-voice`, example `compare` | a 16-bit PCM WAV file of speech sent over each answer as a barge-in | no barge-in |
-| `ELEVENLABS_API_KEY` | `inference-elevenlabs` (`EnvironmentSource::elevenlabs`), its example `live` and test `stt_live`; `realtime-voice`, examples `compare` and `talk` (`--provider elevenlabs-cascade`) | the ElevenLabs key, sent only in the `xi-api-key` header, read at every connection | the example `live`, the test `stt_live` and `talk` read the OS keychain, secret `elevenlabs-api-key`, and `talk` exits with status 2 without either, or when the keychain gives no answer within 8 s; the cascade arm of `compare` is skipped |
+| `ELEVENLABS_API_KEY` | `inference-elevenlabs` (`EnvironmentSource::elevenlabs`), its example `live` and test `stt_live`; `realtime-voice`, examples `compare` and `talk` (`--provider elevenlabs-cascade`) | the ElevenLabs key, sent only in the `xi-api-key` header, read at every connection | the example `live`, the test `stt_live`, `talk` and the recogniser of `compare --cascade-stt elevenlabs` read the OS keychain, secret `elevenlabs-api-key`, and `talk` exits with status 2 without either, or when the keychain gives no answer within 8 s; the cascade arm of `compare` is skipped |
 | `ELEVENLABS_RESIDENCY` | `inference-elevenlabs` (`Endpoint::from_env`), its example `live` and tests `stt_live` and `tts_cancel_live`; `realtime-voice` (`elevenlabs::endpoint`), the cascade arm of `compare` and `talk --provider elevenlabs-cascade` | the data-residency host the key belongs to: `global`, `us`, `eu`, `in` or `sg`; every other host refuses a key of a residency stack, and any other value is refused (`ConfigError::Residency`, which does not print it): `talk` exits with status 2, the cascade arm of `compare` is skipped | empty or unset: `global`, `wss://api.elevenlabs.io` |
 | `INFERENCE_ELEVENLABS_STT_CLIP` | `inference-elevenlabs` test `stt_live` (features `live` and `stt`) | a German speech clip of about 30 s in G.711 μ-law at 8 kHz, mono, as a WAV file of format 7 or bare μ-law bytes, which the live check transcribes | none: the test panics |
 | `ELEVENLABS_VOICE_ID` | `inference-elevenlabs`, example `live`; `realtime-voice`, examples `compare` and `talk` (`--provider elevenlabs-cascade`) | the voice the live check, the cascade arm of `compare` and the ElevenLabs cascade of `talk` speak with; with `ELEVENLABS_API_KEY` it configures the cascade arm's hosted TTS | none: the example `live` and `talk` exit with status 2 and the cascade arm is skipped |
@@ -56,7 +56,12 @@ below it logs the handshake at trace level: see
 The `cascade` arm of the `realtime-voice` example `compare`, built with feature `local`, reads the
 same five variables as `talk`: `INFERENCE_CASCADE_STT`, `INFERENCE_SHERPA_ONNX_STT_DIR`,
 `INFERENCE_WHISPERCPP_STT_MODEL`, `INFERENCE_LLAMA_SERVER_URL` and `INFERENCE_LLAMA_SERVER_MODEL`.
-It has no options for them. A missing one skips the arm, naming the missing step.
+It has no options for them. A missing one skips the arm, naming the missing step. With
+`--cascade-stt elevenlabs` the arm reads only `INFERENCE_LLAMA_SERVER_URL` and
+`INFERENCE_LLAMA_SERVER_MODEL` of these: its recogniser is ElevenLabs, with the key
+`ELEVENLABS_API_KEY` or the OS keychain's `elevenlabs-api-key`. A missing one, or a URL whose host
+is not loopback, skips the arm, naming it. Any server with an OpenAI-compatible Chat Completions
+API on loopback is taken: Ollama's is at `http://127.0.0.1:11434/v1`.
 
 The `realtime-voice` example `talk` with `--provider elevenlabs-cascade`, built with feature
 `local`, reads only `INFERENCE_LLAMA_SERVER_URL` and `INFERENCE_LLAMA_SERVER_MODEL` of these: its

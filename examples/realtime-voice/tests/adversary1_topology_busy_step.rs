@@ -296,7 +296,7 @@ fn cascade_run(plan: &Plan) -> (Measured, usize) {
         move || clock.now()
     };
     let wait = move |by: Duration| clock.advance(by);
-    let measured = run_cascade(&mut cascade, plan, &now, &wait, &mut playout);
+    let measured = run_cascade(&mut cascade, plan, &now, &wait, &mut playout, |_| None);
     (measured, playout.stops)
 }
 

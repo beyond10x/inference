@@ -15,7 +15,7 @@ local = ["dep:inference-llama-server", "local-voice-cascade/local"]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 inference-audio-device = { path = "../../adapters/inference-audio-device", default-features = false }
 inference-duplex = { path = "../../crates/inference-duplex" }
-inference-elevenlabs = { path = "../../adapters/inference-elevenlabs", features = ["stt"] }
+inference-elevenlabs = { path = "../../adapters/inference-elevenlabs", features = ["native-keychain", "stt"] }
 inference-llama-server = { path = "../../adapters/inference-llama-server", optional = true }
 inference-llm = { path = "../../crates/inference-llm" }
 inference-stt = { path = "../../crates/inference-stt" }
@@ -26,6 +26,7 @@ tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
 clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 inference-audio-device = { path = "../../adapters/inference-audio-device" }
 inference-aws = { path = "../../adapters/inference-aws", features = ["duplex"] }
 inference-cartesia = { path = "../../adapters/inference-cartesia" }
@@ -35,6 +36,8 @@ inference-elevenlabs = { path = "../../adapters/inference-elevenlabs", features 
 inference-openai = { path = "../../adapters/inference-openai", features = ["gpt-live", "live"] }
 inference-phonic = { path = "../../adapters/inference-phonic" }
 inference-testkit = { path = "../../crates/inference-testkit", features = ["duplex", "llm", "stt", "tts"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
+tokio-tungstenite = "0.30"
 
 [lints]
 workspace = true
