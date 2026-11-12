@@ -129,7 +129,6 @@ pub mod __private {
     pub use tokio;
 
     /// The end of the program `#[inference::main]` emits: [`report`](crate::report) over stderr.
-    #[must_use]
     pub fn exit(result: crate::Result<()>) -> std::process::ExitCode {
         crate::report(result, &mut std::io::stderr().lock())
     }
