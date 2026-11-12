@@ -8,18 +8,14 @@
 //!
 //! A synthesis takes the segments offered to it in order and speaks them on one connection,
 //! opened for its first segment, each segment a context of its own: the context's opening
-//! message and its text ending in one space with `flush` set. So only the first segment of an
-//! utterance pays a handshake. The audio chunks that come back for the context are emitted as
-//! frames of that segment while it is still Queued, on one sample clock across the synthesis,
-//! and the context's final message completes it. The context stays open while its audio comes:
-//! once it has gone without a message for the endpoint's context quiet
-//! ([`Endpoint::context_quiet`], [`DEFAULT_CONTEXT_QUIET`], 250 ms), counted from its last
-//! message, the binding sends its close, and the endpoint, which ends a flushed context only when
-//! it is closed, sends the final message; a final message that comes first needs no close. A
-//! segment is sent as soon as the handle is iterated after it was offered, before the utterance
-//! ends. So the binding claims `incremental_input` and `output_streaming` ([`claims`]), and
-//! `records/claims-tts.json` holds the same claims. Once the utterance has ended and its last
-//! segment is spoken, the binding sends `close_socket` and closes the connection.
+//! message, its text ending in one space with `flush` set, and the close of the context. So only
+//! the first segment of an utterance pays a handshake. The audio chunks that come back for the
+//! context are emitted as frames of that segment while it is still Queued, on one sample clock
+//! across the synthesis, and the context's final message completes it. A segment is sent as soon
+//! as the handle is iterated after it was offered, before the utterance ends. So the binding
+//! claims `incremental_input` and `output_streaming` ([`claims`]), and `records/claims-tts.json`
+//! holds the same claims. Once the utterance has ended and its last segment is spoken, the
+//! binding sends `close_socket` and closes the connection.
 //!
 //! The time to first audio of each segment, from its offer to its first frame, is the
 //! contract's: `inference_tts::SynthesisOutput::first_audio`, read through
@@ -32,17 +28,17 @@
 //! nor channels for `pcm_*`; 16-bit little-endian mono is this crate's assumption, and the live
 //! example checks it. MP3, Opus and WAV are refused when the configuration is parsed.
 //!
-//! A cancel is a discard of the segment being spoken, as a barge-in makes it: the binding sends
-//! the close of that segment's context, as ElevenLabs' multi-context guide handles a barge-in,
-//! writing it within [`CLOSE_BOUND`] and waiting for no answer, drops every later message of the
-//! context and emits nothing more of it; the connection stays open and the next segment speaks
-//! on it. The close is the documented way to end a context, and the guide closes the interrupted
-//! context so that the endpoint stops speaking it; the AsyncAPI page also says the close of a
-//! context already set to flush "will continue flushing", which leaves open whether the endpoint
-//! still generates, and bills, what the flush released ([`protocol`] says more). A context the
-//! binding already closed on its quiet is sent no second close: its audio had stopped coming for
-//! the quiet, so the endpoint had most likely sent it all. Dropping the handle closes the
-//! connection.
+//! A cancel is a discard of the segment being spoken, as a barge-in makes it: the binding ends
+//! that segment's context, drops every later message of it and emits nothing more of it, without
+//! waiting for the server; the connection stays open and the next segment speaks on it. A cancel
+//! stops playback and drops the remaining frames on the client; it stops nothing at the server.
+//! On the hosted endpoint a flushed context is generated to the end regardless of a close: in a
+//! billed probe on 2026-11-12 (`tests/tts_cancel_live.rs`), a close sent right after the first
+//! audio of a 401-character text was followed by 99% of the text's audio (22.5 of 22.7 s), all
+//! of it generated within 0.8 s of the text. A flush alone brought the context's final message
+//! only after the endpoint's 20 s inactivity timeout, so the close goes with the text, the one
+//! prompt way to end the segment, and a cancel sends no second one. A barge-in saves playback,
+//! not generation or cost. Dropping the handle closes the connection.
 //!
 //! A connection that ends between segments, as the endpoint's inactivity timeout may end it, is
 //! reopened once for the next segment: when sending its context fails because the connection
@@ -58,6 +54,12 @@
 //! or an async worker alike, that runtime is driven on a scoped thread of its own while the
 //! caller waits, so no thread panics or is refused; an async worker is still blocked meanwhile,
 //! so iterate the handle from `tokio::task::spawn_blocking` or a plain thread.
+//!
+//! A key belongs to one data-residency stack, and every other host refuses it. [`Endpoint`] is
+//! the global host unless told otherwise; [`Endpoint::with_residency`] picks a [`Residency`],
+//! and [`Endpoint::from_env`] the one [`RESIDENCY_VARIABLE`] (`ELEVENLABS_RESIDENCY`) names:
+//! `global`, `us`, `eu`, `in` or `sg`, unset for global, anything else a
+//! [`ConfigError::Residency`].
 //!
 //! The key is never read by the binding itself: the caller injects a [`CredentialSource`] and
 //! names the secret ([`EnvironmentSource::elevenlabs`] reads `ELEVENLABS_API_KEY`; with feature
@@ -190,8 +192,9 @@ pub use agent_duplex::{
 pub use inference_duplex;
 
 pub use config::{
-    DEFAULT_CONNECT_TIMEOUT, DEFAULT_CONTEXT_QUIET, DEFAULT_MODEL, DEFAULT_READ_TIMEOUT,
-    DEFAULT_URL, Endpoint, MAX_INACTIVITY_TIMEOUT, OutputFormat, VoiceConfig, VoiceSettings,
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL, Endpoint,
+    MAX_INACTIVITY_TIMEOUT, OutputFormat, RESIDENCY_VARIABLE, Residency, VoiceConfig,
+    VoiceSettings,
 };
 pub use connection::{CLOSE_BOUND, MAX_MESSAGE_SIZE};
 #[cfg(feature = "keychain")]

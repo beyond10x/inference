@@ -1,7 +1,8 @@
-//! Cancel on barge-in: a discard of the segment being spoken sends the close of its context, so
-//! the server stops generating it, and the binding drops every later message of it. No frame of
-//! the cancelled segment arrives after the discard, though the server had sent more, and the
-//! connection stays open for the next segment. Dropping the handle closes the connection.
+//! Cancel on barge-in: a discard of the segment being spoken ends its context for the binding,
+//! which drops every later message of it and sends nothing, since the close went with the text.
+//! No frame of the cancelled segment arrives after the discard, though the server had sent more,
+//! and the connection stays open for the next segment. Dropping the handle closes the
+//! connection.
 
 mod support;
 
@@ -14,11 +15,12 @@ use support::{FixtureServer, Script, committed};
 
 const FORMAT: OutputFormat = OutputFormat::Ulaw8000;
 
-/// story:elevenlabs-tts-provider-cancel: after a cancel the server receives the close of the
-/// cancelled context while it is still generating it, and so stops; the caller receives no frame
-/// of it; and the next segment speaks on the same connection.
+/// story:elevenlabs-tts-provider-cancel: a cancel while the server is still generating the
+/// segment drops the rest of its frames on the client and sends nothing to the server, whose
+/// context was closed with its text; the server sends the whole context regardless, as the
+/// hosted endpoint does; and the next segment speaks whole on the same connection.
 #[test]
-fn a_cancel_closes_the_context_at_the_server_mid_generation_and_the_next_segment_speaks() {
+fn a_cancel_mid_generation_drops_the_rest_on_the_client_and_sends_no_second_close() {
     let server = FixtureServer::paced(
         FORMAT,
         vec![Script::Serve, Script::Serve],
@@ -38,29 +40,23 @@ fn a_cancel_closes_the_context_at_the_server_mid_generation_and_the_next_segment
         );
     };
     assert_eq!(first.segment_id(), cancelled_id);
-    handle.discard(cancelled_id).unwrap();
-
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while server.seen()[0].closed.is_empty() && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
-    let seen = server.seen();
+    let messages_before = server.seen()[0].messages.len();
+    handle.discard(cancelled_id).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
     assert_eq!(
-        seen[0].closed,
+        server.seen()[0].messages.len(),
+        messages_before,
+        "the cancel sends nothing: {:?}",
+        server.seen()[0].messages
+    );
+    assert_eq!(
+        server.seen()[0].closed,
         ["s0"],
-        "the cancel sends the close of the cancelled context"
-    );
-    assert_eq!(
-        seen[0].cut.len(),
-        1,
-        "the close reaches the server while it still generates the context: {:?}",
-        seen[0].cut
-    );
-    let (cut, sent) = &seen[0].cut[0];
-    assert_eq!(cut, "s0");
-    assert!(
-        (1..4).contains(sent),
-        "the server sent {sent} of the context's 4 audio messages before the close"
+        "the context was closed once, with its text"
     );
 
     let next = segments.next().unwrap();
@@ -95,7 +91,7 @@ fn a_cancel_closes_the_context_at_the_server_mid_generation_and_the_next_segment
         "the next segment speaks on the connection of the cancelled one"
     );
     assert_eq!(seen[0].contexts, ["s0", "s1"]);
-    assert_eq!(seen[0].cut.len(), 1, "the next segment was not cut");
+    assert_eq!(seen[0].closed, ["s0", "s1"], "one close per context");
     assert_eq!(server.violations(), Vec::<String>::new());
 }
 

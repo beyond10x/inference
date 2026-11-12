@@ -19,11 +19,22 @@
   answers when the session was cancelled: a send started after `cancel()`, or one a cancel
   overtook while the ingress took it, no longer answers `Refused`, which promises that nothing
   was forwarded. `inference`: an `Agent` maps it to `Error::Closed`.
-- `inference-elevenlabs`: `Endpoint` gains the public field `context_quiet`
-  (`DEFAULT_CONTEXT_QUIET`, 250 ms, set with `Endpoint::with_context_quiet`), which breaks a
-  struct literal of it.
+- `inference-elevenlabs`: `ConfigError` gains the variant `Residency`, which
+  `Endpoint::from_env` answers when `ELEVENLABS_RESIDENCY` names no residency; an exhaustive
+  match on it breaks.
 
 ### Added
+
+- `inference-elevenlabs`: `Endpoint::from_env` reads `ELEVENLABS_RESIDENCY` (`global`, `us`,
+  `eu`, `in` or `sg`, global when unset) and `Endpoint::with_residency` sets the host of a
+  residency; `Residency` and `RESIDENCY_VARIABLE` are exported without feature `duplex`. The live
+  example and `stt_live` read it, so a residency key reaches its own host. The billed probe
+  `tts_cancel_live` (feature `live`, ignored) prints how the multi-stream endpoint answers a
+  flush, a close mid-generation and a text of punctuation only. Its run on 2026-11-12 found
+  that a close does not stop the generation of a flushed context (99% of a text's audio came
+  after a close sent at its first audio) and that a flush alone brings the final message only
+  at the 20 s inactivity timeout, so a cancel stays a client-side cut, which the crate
+  documentation now records.
 
 - `inference-tts`: `SynthesisOutput::first_audio` gives each segment's time to first audio, from
   its offer to its first frame, for every synthesiser, read through `SynthesisHandle::output`.
@@ -49,14 +60,6 @@
 
 ### Fixed
 
-- `inference-elevenlabs`: a cancel of the segment being spoken sends `close_context` for its
-  context, written within `CLOSE_BOUND`, as ElevenLabs' multi-context guide ends an interrupted
-  context, instead of nothing: the context's close no longer goes with its text, so the context
-  is still open at a barge-in. Its late frames are dropped and the next segment speaks on the same
-  connection. A segment's context is closed once it has gone without a message for
-  `context_quiet`, or not at all when its final message comes first. Whether the endpoint then
-  stops generating, and billing, what the flushed text released is not documented; the protocol
-  notes say why.
 - `inference-pipeline`: the tool authority validates `minLength`, `maxLength`, `prefixItems`,
   `minItems`, `maxItems`, `oneOf`, `anyOf` and `const`, so macro tools taking a `char`, a tuple,
   a fixed array or an enum with data prepare and have their calls checked instead of failing at

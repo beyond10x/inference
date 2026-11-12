@@ -1,6 +1,6 @@
 //! Adversary pass 1 on story:elevenlabs-multi-context-tts-connection. Each case attacks the
 //! multi-stream binding against a loopback server of this file that answers each context the
-//! client flushes with a script, and may send messages of any other context at any time. Every
+//! client closes with a script, and may send messages of any other context at any time. Every
 //! case runs under a wall-clock deadline under 30 s.
 
 mod support;
@@ -23,7 +23,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 
 const FORMAT: OutputFormat = OutputFormat::Ulaw8000;
 
-/// One step the server takes for a context the client flushed.
+/// One step the server takes for a context the client closed.
 #[derive(Clone)]
 enum Act {
     /// This text, naming the context in `contextId` when it is an object that names none.
@@ -155,7 +155,7 @@ async fn serve(
             seen.lock().unwrap()[index].close_socket = true;
             continue;
         }
-        if object.get("flush") != Some(&serde_json::Value::Bool(true)) {
+        if object.get("close_context") != Some(&serde_json::Value::Bool(true)) {
             continue;
         }
         let Some(serde_json::Value::String(context_id)) = object.get("context_id") else {

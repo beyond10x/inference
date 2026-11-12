@@ -11,11 +11,13 @@
 //! `tests/fixtures/`, each naming the context in `contextId`, as its [`Script`] says; the n-th
 //! context the server answers, across its connections, gets the n-th script.
 //!
-//! The server generates as the endpoint does (`tests/fixtures/tts-multi-stream-protocol.md`):
-//! a `close_context` that arrives before the server has sent every audio message of the context
-//! stops it there, and the server records the context as cut. A [`FixtureServer::paced`] server
-//! waits before the first audio message of each context and between the others, so a test can
-//! measure the time to first audio and land a cancel mid-segment.
+//! The server generates as the hosted endpoint was measured to (`src/lib.rs`,
+//! `tests/fixtures/tts-multi-stream-protocol.md`): a `close_context` does not cut a flushed
+//! context, whose audio the server sends whole; the final message follows the last audio of a
+//! closed context; a flushed context that is never closed gets no final message. A
+//! [`FixtureServer::paced`] server waits before the first audio message of each context and
+//! between the others, so a test can measure the time to first audio and land a cancel
+//! mid-segment.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -47,23 +49,14 @@ pub const KEY: &str = "fixture-key-d41d8cd98f00b204";
 /// The voice the fixture server expects.
 pub const VOICE: &str = "fixturevoice01";
 
-/// The context quiet of [`FixtureServer::endpoint`]: shorter than the default, so a segment
-/// whose context the server ends only on its close completes soon, and longer than any pace a
-/// test sets, so the binding never closes a context the server is still generating.
-pub const QUIET: Duration = Duration::from_millis(150);
-
 /// What the server does once the client has flushed a context's text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Script {
-    /// Sends every audio message of the fixture, and the context's final message once the client
-    /// closes the context: as the endpoint does, a flushed context ends only when it is closed.
-    /// A close that comes before the last audio message stops the audio there.
+    /// Sends every audio message of the fixture, a close or not, and the context's final message
+    /// after the last of them once the client has closed the context: as the endpoint does, a
+    /// flushed context ends only when it is closed, and a close cuts none of its audio.
     Serve,
-    /// Sends every audio message of the fixture and then the final message, without waiting for
-    /// a close.
-    FinalOnFlush,
-    /// Sends every audio message of the fixture and no final message, closed or not. A close
-    /// before the last audio message still stops the audio there.
+    /// Sends every audio message of the fixture and no final message, closed or not.
     NoFinal,
     /// Sends the first audio message, then closes the connection with code 1011.
     CloseAfterFirst,
@@ -92,9 +85,6 @@ pub struct Seen {
     pub contexts: Vec<String>,
     /// The contexts the client closed with `close_context`, in order.
     pub closed: Vec<String>,
-    /// The contexts closed before the server had sent every audio message of them, each with the
-    /// audio messages it had sent: the generation the close stopped.
-    pub cut: Vec<(String, usize)>,
     /// The client sent `close_socket`.
     pub close_socket: bool,
     /// The client closed the connection, by a close frame or by dropping it.
@@ -227,13 +217,12 @@ impl FixtureServer {
         self.closes.lock().unwrap().recv_timeout(bound).ok()
     }
 
-    /// An endpoint at this server, with short bounds and a context quiet of [`QUIET`].
+    /// An endpoint at this server, with short bounds.
     pub fn endpoint(&self) -> Endpoint {
         Endpoint::new()
             .with_url(&self.url)
             .with_read_timeout(Duration::from_secs(5))
             .with_connect_timeout(Duration::from_secs(5))
-            .with_context_quiet(QUIET)
     }
 
     /// A synthesiser of the fixture voice in `format` at this server, with the fixture key.
@@ -279,24 +268,6 @@ enum Asked {
     Answer(String),
     Close(String),
     CloseSocket,
-}
-
-/// Where the server's generation of one context stands, shared by the task answering it and the
-/// reader that sees its close.
-#[derive(Debug, Default)]
-struct Progress {
-    /// The audio messages sent so far.
-    sent: usize,
-    /// Every audio message of the script was sent.
-    done: bool,
-    /// The client closed the context.
-    closed: bool,
-}
-
-/// One context being answered: its progress and the signal of its close.
-struct Answering {
-    progress: Arc<Mutex<Progress>>,
-    closed: tokio::sync::watch::Sender<bool>,
 }
 
 /// The handshake callback's error type is tungstenite's `ErrorResponse`, which its `Callback`
@@ -376,7 +347,7 @@ async fn serve(
     });
 
     let mut contexts: HashMap<String, Context> = HashMap::new();
-    let mut answering: HashMap<String, Answering> = HashMap::new();
+    let mut answering: HashMap<String, tokio::sync::watch::Sender<bool>> = HashMap::new();
     let mut tasks = Vec::new();
     let mut socket_closed = false;
     let mut position = 0;
@@ -400,36 +371,20 @@ async fn serve(
                     Asked::Nothing => {}
                     Asked::Answer(context_id) => {
                         record(&|seen| seen.contexts.push(context_id.clone()));
-                        let progress = Arc::new(Mutex::new(Progress::default()));
                         let (closed_tx, closed_rx) = tokio::sync::watch::channel(false);
                         tasks.push(tokio::spawn(answer(
                             plan.take_script(),
                             Arc::clone(&plan),
                             context_id.clone(),
                             out_tx.clone(),
-                            Arc::clone(&progress),
                             closed_rx,
                         )));
-                        answering.insert(
-                            context_id,
-                            Answering {
-                                progress,
-                                closed: closed_tx,
-                            },
-                        );
+                        answering.insert(context_id, closed_tx);
                     }
                     Asked::Close(context_id) => {
                         record(&|seen| seen.closed.push(context_id.clone()));
-                        if let Some(context) = answering.get(&context_id) {
-                            let cut = {
-                                let mut progress = context.progress.lock().unwrap();
-                                progress.closed = true;
-                                (!progress.done).then_some(progress.sent)
-                            };
-                            if let Some(sent) = cut {
-                                record(&|seen| seen.cut.push((context_id.clone(), sent)));
-                            }
-                            let _ = context.closed.send(true);
+                        if let Some(closed) = answering.get(&context_id) {
+                            let _ = closed.send(true);
                         }
                     }
                     Asked::CloseSocket => {
@@ -455,25 +410,13 @@ async fn serve(
     let _ = closes.send(index);
 }
 
-/// Waits `wait`, or less when the context is closed first.
-async fn pause(wait: Duration, closed: &mut tokio::sync::watch::Receiver<bool>) {
-    if wait.is_zero() {
-        return;
-    }
-    tokio::select! {
-        () = tokio::time::sleep(wait) => {}
-        _ = closed.wait_for(|closed| *closed) => {}
-    }
-}
-
 /// Answers the context `context_id` by `script`: its audio messages, paced as the plan says and
-/// stopped by a close, then its final message as the script says.
+/// never stopped by a close, then its final message as the script says.
 async fn answer(
     script: Script,
     plan: Arc<Plan>,
     context_id: String,
     out: tokio::sync::mpsc::UnboundedSender<Out>,
-    progress: Arc<Mutex<Progress>>,
     mut closed: tokio::sync::watch::Receiver<bool>,
 ) {
     let with_context = |line: &str| -> String {
@@ -499,29 +442,17 @@ async fn answer(
         let _ = out.send(Out::Text(text));
     };
     match script {
-        Script::Serve | Script::FinalOnFlush | Script::NoFinal => {
-            let mut stopped = false;
+        Script::Serve | Script::NoFinal => {
             for (at, line) in audio.into_iter().enumerate() {
                 let wait = if at == 0 { plan.first_delay } else { plan.pace };
-                pause(wait, &mut closed).await;
-                let mut state = progress.lock().unwrap();
-                if state.closed {
-                    stopped = true;
-                    break;
+                if !wait.is_zero() {
+                    tokio::time::sleep(wait).await;
                 }
                 send(line);
-                state.sent += 1;
             }
-            if !stopped {
-                progress.lock().unwrap().done = true;
-            }
-            match script {
-                Script::FinalOnFlush => send(final_message),
-                Script::Serve => {
-                    let _ = closed.wait_for(|closed| *closed).await;
-                    send(final_message);
-                }
-                _ => {}
+            if script == Script::Serve {
+                let _ = closed.wait_for(|closed| *closed).await;
+                send(final_message);
             }
         }
         Script::CloseAtOnce => {

@@ -6,7 +6,9 @@
 //!
 //! It needs a key with text-to-speech access, in `ELEVENLABS_API_KEY` or else in the keychain
 //! secret `elevenlabs-api-key`, and a voice in `ELEVENLABS_VOICE_ID`. Without either it exits
-//! with status 2 and says what is missing; it is never skipped. It speaks one short utterance in
+//! with status 2 and says what is missing; it is never skipped. It speaks to the host of the
+//! residency `ELEVENLABS_RESIDENCY` names (`Endpoint::from_env`), global when unset, and exits
+//! with status 2 when that names none. It speaks one short utterance in
 //! `ulaw_8000` and one in `pcm_24000`, checks that every frame has the format's encoding, rate
 //! and one channel, carries the bytes its samples make and follows the frame before it, that the
 //! utterance completed with a final usage record, and prints the time to first audio. Any check
@@ -82,7 +84,7 @@ fn speak(
     source: Arc<dyn CredentialSource>,
 ) -> Result<String, Problem> {
     let mut synthesiser = ElevenLabsSynthesiser::new(
-        Endpoint::new(),
+        Endpoint::from_env().map_err(|error| Problem::Missing(error.to_string()))?,
         VoiceConfig::new(voice, format),
         source,
         ELEVENLABS_KEY_NAME,

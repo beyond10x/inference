@@ -22,7 +22,7 @@ use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
 use support::{FixedKey, FixtureServer, KEY, Script, VOICE, committed};
 use tokio_tungstenite::tungstenite::Message;
 
-/// One step a scripted server takes once the client has flushed a context
+/// One step a scripted server takes once the client has closed a context
 /// (story:elevenlabs-multi-context-tts-connection: the scripts follow contexts, not
 /// connections). Every text sent names the context in `contextId` when it is a JSON object that
 /// names none.
@@ -118,7 +118,7 @@ async fn serve(
         if object.contains_key("close_socket") {
             break;
         }
-        if object.get("flush") != Some(&serde_json::Value::Bool(true)) {
+        if object.get("close_context") != Some(&serde_json::Value::Bool(true)) {
             continue;
         }
         let Some(serde_json::Value::String(context_id)) = object.get("context_id") else {

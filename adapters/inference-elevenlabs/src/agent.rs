@@ -96,33 +96,9 @@ pub const DEFAULT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long an open connection may send nothing at all before it is taken as stalled.
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The host a conversation's data is served from. Each is a base URL with the same path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Residency {
-    /// `wss://api.elevenlabs.io`, the default.
-    Global,
-    /// `wss://api.us.elevenlabs.io`.
-    Us,
-    /// `wss://api.eu.residency.elevenlabs.io`.
-    Eu,
-    /// `wss://api.in.residency.elevenlabs.io`.
-    India,
-    /// `wss://api.sg.residency.elevenlabs.io`.
-    Singapore,
-}
-
-impl Residency {
-    /// The base URL of the residency's host.
-    pub const fn base_url(self) -> &'static str {
-        match self {
-            Self::Global => "wss://api.elevenlabs.io",
-            Self::Us => "wss://api.us.elevenlabs.io",
-            Self::Eu => "wss://api.eu.residency.elevenlabs.io",
-            Self::India => "wss://api.in.residency.elevenlabs.io",
-            Self::Singapore => "wss://api.sg.residency.elevenlabs.io",
-        }
-    }
-}
+/// The host a conversation's data is served from, the residency of the TTS binding's
+/// [`Endpoint`](crate::Endpoint) too.
+pub use crate::config::Residency;
 
 /// Where a public agent's sessions connect, and the bounds on opening and reading them. A
 /// signed URL names its own host; only the bounds apply to it.

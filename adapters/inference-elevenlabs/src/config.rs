@@ -19,14 +19,8 @@ pub const DEFAULT_URL: &str = "wss://api.elevenlabs.io";
 
 /// How long the segment being spoken may go without a message of its context before the
 /// synthesis fails as stalled. Every read waits at most this long from the last message of that
-/// context (from sending its text before the first, and from sending its close once it is
-/// closed), and every write at most this long.
+/// context (from sending its text before the first), and every write at most this long.
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long the context of the segment being spoken may go without a message, once its first
-/// message has arrived, before the binding closes it so that the endpoint sends its final
-/// message. Until then a cancel stops the endpoint generating the segment.
-pub const DEFAULT_CONTEXT_QUIET: Duration = Duration::from_millis(250);
 
 /// How long the TCP connection, TLS and the WebSocket handshake may take together.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -34,8 +28,67 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The largest `inactivity_timeout` the endpoint takes, in seconds.
 pub const MAX_INACTIVITY_TIMEOUT: u32 = 180;
 
-/// Where a synthesis connects: the base URL, the bounds on the handshake and on every read, and
-/// the quiet after which the context of the segment being spoken is closed.
+/// The variable [`Endpoint::from_env`] reads the [`Residency`] from: `global`, `us`, `eu`, `in`
+/// or `sg`; unset is `global`.
+pub const RESIDENCY_VARIABLE: &str = "ELEVENLABS_RESIDENCY";
+
+/// The host a key's data is served from. Each is a base URL with the same paths; a key of a
+/// data-residency stack is refused by any other host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Residency {
+    /// `wss://api.elevenlabs.io`, the default.
+    Global,
+    /// `wss://api.us.elevenlabs.io`.
+    Us,
+    /// `wss://api.eu.residency.elevenlabs.io`.
+    Eu,
+    /// `wss://api.in.residency.elevenlabs.io`.
+    India,
+    /// `wss://api.sg.residency.elevenlabs.io`.
+    Singapore,
+}
+
+impl Residency {
+    /// Every residency.
+    pub const ALL: [Self; 5] = [
+        Self::Global,
+        Self::Us,
+        Self::Eu,
+        Self::India,
+        Self::Singapore,
+    ];
+
+    /// The base URL of the residency's host.
+    pub const fn base_url(self) -> &'static str {
+        match self {
+            Self::Global => "wss://api.elevenlabs.io",
+            Self::Us => "wss://api.us.elevenlabs.io",
+            Self::Eu => "wss://api.eu.residency.elevenlabs.io",
+            Self::India => "wss://api.in.residency.elevenlabs.io",
+            Self::Singapore => "wss://api.sg.residency.elevenlabs.io",
+        }
+    }
+
+    /// The name [`RESIDENCY_VARIABLE`] takes for it: `global`, `us`, `eu`, `in` or `sg`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Us => "us",
+            Self::Eu => "eu",
+            Self::India => "in",
+            Self::Singapore => "sg",
+        }
+    }
+
+    /// The residency named `name`, exactly as [`Residency::name`] gives it.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|residency| residency.name() == name)
+    }
+}
+
+/// Where a synthesis connects: the base URL and the bounds on the handshake and on every read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     /// Scheme and host (and port), no path, query or trailing slash needed: `wss://` to any host,
@@ -43,9 +96,6 @@ pub struct Endpoint {
     pub url: String,
     pub read_timeout: Duration,
     pub connect_timeout: Duration,
-    /// See [`DEFAULT_CONTEXT_QUIET`]. One too large for an instant never closes a context on its
-    /// quiet: the segment then completes only on a final message the endpoint sends unasked.
-    pub context_quiet: Duration,
 }
 
 impl Default for Endpoint {
@@ -61,8 +111,38 @@ impl Endpoint {
             url: DEFAULT_URL.to_owned(),
             read_timeout: DEFAULT_READ_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-            context_quiet: DEFAULT_CONTEXT_QUIET,
         }
+    }
+
+    /// The hosted endpoint of the residency [`RESIDENCY_VARIABLE`] names, with the default
+    /// bounds; [`Residency::Global`] when it is unset.
+    ///
+    /// # Errors
+    /// [`ConfigError::Residency`] when it is set to anything but `global`, `us`, `eu`, `in` or
+    /// `sg`, or to text that is not Unicode.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        match std::env::var(RESIDENCY_VARIABLE) {
+            Ok(value) => Self::from_residency_value(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::from_residency_value(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::Residency(
+                "text that is not Unicode".to_owned(),
+            )),
+        }
+    }
+
+    /// [`Endpoint::from_env`] for the variable's value, `None` when it is unset.
+    fn from_residency_value(value: Option<&str>) -> Result<Self, ConfigError> {
+        let residency = match value {
+            None => Residency::Global,
+            Some(value) => Residency::named(value)
+                .ok_or_else(|| ConfigError::Residency(format!("`{value}`")))?,
+        };
+        Ok(Self::new().with_residency(residency))
+    }
+
+    /// This endpoint at the host of `residency`.
+    pub fn with_residency(self, residency: Residency) -> Self {
+        self.with_url(residency.base_url())
     }
 
     /// This endpoint at another base URL, such as a regional host or a local test server.
@@ -80,12 +160,6 @@ impl Endpoint {
     /// This endpoint with another connect timeout.
     pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
         self.connect_timeout = connect_timeout;
-        self
-    }
-
-    /// This endpoint with another context quiet.
-    pub fn with_context_quiet(mut self, context_quiet: Duration) -> Self {
-        self.context_quiet = context_quiet;
         self
     }
 }
@@ -263,5 +337,42 @@ impl VoiceConfig {
             return Err(ConfigError::Speed(speed));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_residency_variable_names_a_host_and_unset_is_global() {
+        for (value, residency) in [
+            (None, Residency::Global),
+            (Some("global"), Residency::Global),
+            (Some("us"), Residency::Us),
+            (Some("eu"), Residency::Eu),
+            (Some("in"), Residency::India),
+            (Some("sg"), Residency::Singapore),
+        ] {
+            let endpoint = Endpoint::from_residency_value(value).unwrap();
+            assert_eq!(endpoint.url, residency.base_url(), "{value:?}");
+            assert_eq!(endpoint, Endpoint::new().with_residency(residency));
+        }
+        assert_eq!(
+            Endpoint::new().with_residency(Residency::Eu).url,
+            "wss://api.eu.residency.elevenlabs.io"
+        );
+    }
+
+    #[test]
+    fn any_other_residency_is_refused_naming_the_variable() {
+        for value in ["", "EU", "europe", " eu"] {
+            match Endpoint::from_residency_value(Some(value)) {
+                Err(error @ ConfigError::Residency(_)) => {
+                    assert!(error.to_string().contains(RESIDENCY_VARIABLE), "{error}");
+                }
+                other => panic!("{value:?}: {other:?}"),
+            }
+        }
     }
 }

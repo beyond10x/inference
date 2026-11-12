@@ -128,45 +128,6 @@ fn time_to_first_audio_is_present_for_every_spoken_segment_and_at_least_the_serv
     assert_eq!(server.violations(), Vec::<String>::new());
 }
 
-/// A server that sends a context's final message after its audio, without waiting for the close,
-/// completes the segment, and the binding sends no close for a context that is already final.
-#[test]
-fn a_final_message_without_a_close_completes_the_segment_and_no_close_follows() {
-    let server = FixtureServer::start(OutputFormat::Ulaw8000, Script::FinalOnFlush);
-    let mut synthesiser = server.synthesiser(OutputFormat::Ulaw8000);
-    let mut handle = synthesiser.start().unwrap();
-    let segment = committed(&["Final on flush."]).remove(0);
-    let id = segment.segment_id();
-    handle.offer_segment(segment).unwrap();
-    handle.end_utterance().unwrap();
-    let events: Vec<SynthesisEvent> = handle.by_ref().collect();
-    assert!(handle.failure().is_none(), "{:?}", handle.failure());
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, SynthesisEvent::Audio(_)))
-            .count(),
-        4
-    );
-    assert_eq!(
-        handle.output().segment(id).map(|segment| segment.state()),
-        Some(SegmentState::Synthesized)
-    );
-    assert_eq!(
-        server.next_client_close(std::time::Duration::from_secs(5)),
-        Some(0)
-    );
-    let seen = server.seen();
-    assert_eq!(
-        seen[0].closed,
-        Vec::<String>::new(),
-        "{:?}",
-        seen[0].messages
-    );
-    assert!(seen[0].close_socket);
-    assert_eq!(server.violations(), Vec::<String>::new());
-}
-
 #[test]
 fn a_segment_is_sent_before_the_utterance_ends() {
     let server = FixtureServer::start(OutputFormat::Alaw8000, Script::Serve);

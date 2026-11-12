@@ -17,8 +17,7 @@ use crate::error::{ConnectError, ElevenLabsError};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// The most a cancel waits for its `close_context` to be written, and an orderly close for
-/// `close_socket` and the close frame.
+/// The most a cancel or an orderly close waits for the close frame to be written.
 pub const CLOSE_BOUND: Duration = Duration::from_secs(1);
 
 /// The largest message, and the largest frame, a connection reads, 4 MiB as the Deepgram
@@ -94,46 +93,23 @@ impl Connection {
 
     /// Writes `text` as one text message, waiting at most the read timeout.
     pub(crate) async fn send(&mut self, text: String) -> Result<(), ElevenLabsError> {
-        self.send_within(text, self.read_timeout).await
-    }
-
-    /// Writes `text` as one text message, waiting at most `bound`.
-    pub(crate) async fn send_within(
-        &mut self,
-        text: String,
-        bound: Duration,
-    ) -> Result<(), ElevenLabsError> {
-        tokio::time::timeout(bound, self.socket.send(Message::text(text)))
+        tokio::time::timeout(self.read_timeout, self.socket.send(Message::text(text)))
             .await
-            .map_err(|_| ElevenLabsError::Stalled(bound))?
+            .map_err(|_| ElevenLabsError::Stalled(self.read_timeout))?
             .map_err(|error| ElevenLabsError::Transport(error.to_string()))
     }
 
     /// The next text message, waiting at most until `deadline`, which the caller moves on the
-    /// messages it counts. Pings and pongs are skipped and move nothing. The recogniser's read;
-    /// the synthesiser reads with [`Connection::read_before`].
-    #[cfg(feature = "stt")]
+    /// messages it counts. Pings and pongs are skipped and move nothing.
     pub(crate) async fn read_until(
         &mut self,
         deadline: Option<Instant>,
     ) -> Result<String, ElevenLabsError> {
-        self.read_before(deadline)
-            .await?
-            .ok_or(ElevenLabsError::Stalled(self.read_timeout))
-    }
-
-    /// The next text message, or `None` once `instant` has passed without one. Pings and pongs
-    /// are skipped and move nothing.
-    pub(crate) async fn read_before(
-        &mut self,
-        instant: Option<Instant>,
-    ) -> Result<Option<String>, ElevenLabsError> {
         loop {
-            let next = match instant {
-                Some(instant) => match tokio::time::timeout_at(instant, self.socket.next()).await {
-                    Ok(next) => next,
-                    Err(_) => return Ok(None),
-                },
+            let next = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, self.socket.next())
+                    .await
+                    .map_err(|_| ElevenLabsError::Stalled(self.read_timeout))?,
                 None => self.socket.next().await,
             };
             let message = match next {
@@ -147,7 +123,7 @@ impl Connection {
                 Some(Ok(message)) => message,
             };
             match message {
-                Message::Text(text) => return Ok(Some(text.as_str().to_owned())),
+                Message::Text(text) => return Ok(text.as_str().to_owned()),
                 Message::Close(frame) => {
                     return Err(ElevenLabsError::Closed {
                         code: frame.as_ref().map(|frame| u16::from(frame.code)),

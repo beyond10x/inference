@@ -62,3 +62,7 @@ context that was set to flush stops the generation of what the flush released ("
 flushing" says it does not, while the guide closes the interrupted context to handle a barge-in);
 how a sixth concurrent context is answered; any error message, close code, or usage or billing
 message on the WebSocket; bit depth, byte order and channels of `pcm_*`.
+
+The first two were measured in a billed probe (`tests/tts_cancel_live.rs`); the crate
+documentation in `src/lib.rs` gives the result, and the fixture server of `tests/support/`
+follows it.

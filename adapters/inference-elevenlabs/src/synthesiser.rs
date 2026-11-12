@@ -18,7 +18,7 @@ use inference_tts::{
 };
 
 use crate::config::{Endpoint, VoiceConfig, VoiceSettings};
-use crate::connection::{CLOSE_BOUND, Connection};
+use crate::connection::Connection;
 use crate::credential::{CredentialSource, ELEVENLABS_KEY_NAME, EnvironmentSource};
 use crate::error::{ConfigError, ElevenLabsError};
 use crate::protocol::{self, CLOSE_SOCKET};
@@ -188,20 +188,16 @@ impl Drop for Slot {
 }
 
 /// The segment being spoken: its context on the connection and the text message sent to it, the
-/// instant its read timeout ends, moved on each message of the context and on its close, the
-/// instant its context's quiet ends, moved on each message of the context and none before the
-/// first, whether a message of the context has arrived, whether its connection was already
-/// reopened once for it, whether its close was sent, and the byte of a sample split across
-/// chunks.
+/// instant its read timeout ends, moved on each message of the context, whether a message of the
+/// context has arrived, whether its connection was already reopened once for it, and the byte of
+/// a sample split across chunks.
 struct Live {
     segment_id: SegmentId,
     context_id: String,
     message: String,
     deadline: Option<tokio::time::Instant>,
-    quiet: Option<tokio::time::Instant>,
     heard: bool,
     reopened: bool,
-    closing: bool,
     carry: Vec<u8>,
 }
 
@@ -316,10 +312,9 @@ impl ElevenLabsSynthesis {
     }
 
     /// Sends the context `context_id` with its text message `message` on the synthesis's
-    /// connection, opening it first when there is none: the context's opening message and the
-    /// text, flushed. The context stays open: its close goes once it is quiet, or with a cancel.
-    /// Returns the instant the read timeout of its first message ends. On a failure the
-    /// connection is dropped.
+    /// connection, opening it first when there is none: the context's opening message, the text
+    /// and the close of the context. Returns the instant the read timeout of its first message
+    /// ends. On a failure the connection is dropped.
     fn send_context(
         &mut self,
         context_id: &str,
@@ -329,6 +324,7 @@ impl ElevenLabsSynthesis {
         let connection = self.connection.take();
         let opening = protocol::context_message(context_id, shared.settings.as_ref());
         let message = message.to_owned();
+        let close = protocol::close_context_message(context_id);
         let connection = run(&mut self.runtime, async move {
             let mut connection = match connection {
                 Some(connection) => connection,
@@ -346,6 +342,7 @@ impl ElevenLabsSynthesis {
             };
             connection.send(opening).await?;
             connection.send(message).await?;
+            connection.send(close).await?;
             Ok::<_, ElevenLabsError>(connection)
         })??;
         let deadline = connection.deadline();
@@ -356,23 +353,13 @@ impl ElevenLabsSynthesis {
     /// Reads one message of the connection and acts on it: audio and the final message of the
     /// segment being spoken, or a message of a cancelled context, which is dropped. A connection
     /// that ends before any message of the context being spoken arrived is reopened once for it.
-    /// A context that goes quiet for the endpoint's context quiet after a message of it is
-    /// closed ([`Self::close_live`]).
     fn step(&mut self) -> Result<(), ElevenLabsError> {
         let (Some(live), Some(connection)) = (self.live.as_ref(), self.connection.as_mut()) else {
             return Ok(());
         };
         let may_reopen = !live.heard && !live.reopened;
-        let quiet = live.quiet.filter(|_| !live.closing);
-        let quiet_first =
-            quiet.is_some_and(|quiet| live.deadline.is_none_or(|deadline| quiet <= deadline));
-        let until = if quiet_first { quiet } else { live.deadline };
-        let text = match run(&mut self.runtime, connection.read_before(until))? {
-            Ok(Some(text)) => text,
-            Ok(None) if quiet_first => return self.close_live(),
-            Ok(None) => {
-                return Err(ElevenLabsError::Stalled(self.shared.endpoint.read_timeout));
-            }
+        let text = match run(&mut self.runtime, connection.read_until(live.deadline))? {
+            Ok(text) => text,
             Err(error) if may_reopen && ended(&error) => return self.reopen(),
             Err(error) => return Err(error),
         };
@@ -397,10 +384,8 @@ impl ElevenLabsSynthesis {
             return Ok(());
         }
         let deadline = connection.deadline();
-        let quiet = tokio::time::Instant::now().checked_add(self.shared.endpoint.context_quiet);
         if let Some(live) = self.live.as_mut() {
             live.deadline = deadline;
-            live.quiet = quiet;
             live.heard = true;
         }
         if let Some(audio) = message.audio {
@@ -410,39 +395,6 @@ impl ElevenLabsSynthesis {
             self.finish_segment()?;
         }
         Ok(())
-    }
-
-    /// Closes the context of the segment being spoken, which has gone quiet: the endpoint then
-    /// finishes what the flush released and sends the context's final message. The read timeout
-    /// runs anew from the close, and no second close follows.
-    fn close_live(&mut self) -> Result<(), ElevenLabsError> {
-        let (Some(live), Some(connection)) = (self.live.as_mut(), self.connection.as_mut()) else {
-            return Ok(());
-        };
-        let close = protocol::close_context_message(&live.context_id);
-        run(&mut self.runtime, connection.send(close))??;
-        live.closing = true;
-        live.deadline = connection.deadline();
-        Ok(())
-    }
-
-    /// Sends the close of the context `context_id`, a cancel's, waiting at most
-    /// [`CLOSE_BOUND`], as the guide ends an interrupted context. The connection stays open for
-    /// the next segment; one the close cannot be written on is dropped, and the next segment
-    /// opens a new one.
-    fn close_cancelled(&mut self, context_id: &str) {
-        let Some(mut connection) = self.connection.take() else {
-            return;
-        };
-        let close = protocol::close_context_message(context_id);
-        let sent = run(&mut self.runtime, async move {
-            let sent = connection.send_within(close, CLOSE_BOUND).await;
-            (connection, sent)
-        });
-        match sent {
-            Ok((connection, Ok(()))) => self.connection = Some(connection),
-            Ok((_, Err(_))) | Err(_) => self.cancelled.clear(),
-        }
     }
 
     /// Emits the whole samples of `audio`, after the bytes kept from the chunk before, as one
@@ -611,10 +563,8 @@ impl Iterator for ElevenLabsSynthesis {
                         context_id,
                         message,
                         deadline,
-                        quiet: None,
                         heard: false,
                         reopened,
-                        closing: false,
                         carry: Vec::new(),
                     });
                 }
@@ -655,12 +605,11 @@ impl SynthesisHandle for ElevenLabsSynthesis {
     }
 
     /// Discards the segment through [`SynthesisOutput::discard`] and drops every event of it not
-    /// yet delivered. When it is the segment being spoken, a barge-in, the discard sends the
-    /// `close_context` of its context, the documented end of a context and the guide's answer to
-    /// a barge-in, writing it within [`CLOSE_BOUND`] and waiting for no answer; every later
+    /// yet delivered. When it is the segment being spoken, a barge-in, its context ends for the
+    /// binding: nothing is sent, since its `close_context` went with its text, every later
     /// message of the context is dropped unread, and the connection stays open for the next
-    /// segment. A context the binding already closed on its quiet is sent no second close. What
-    /// the close stops at the endpoint is [`protocol`]'s to say.
+    /// segment. The discard does no I/O and does not wait for the server; it stops nothing at
+    /// the server, which still generates and sends the whole segment.
     fn discard(&mut self, segment_id: SegmentId) -> Result<SegmentDiscarded, DiscardRefused> {
         let event = self.output.discard(segment_id)?;
         self.delivered
@@ -671,12 +620,7 @@ impl SynthesisHandle for ElevenLabsSynthesis {
             .is_some_and(|live| live.segment_id == segment_id)
             && let Some(live) = self.live.take()
         {
-            if !live.closing {
-                self.close_cancelled(&live.context_id);
-            }
-            if self.connection.is_some() {
-                self.cancelled.insert(live.context_id);
-            }
+            self.cancelled.insert(live.context_id);
         }
         Ok(event)
     }

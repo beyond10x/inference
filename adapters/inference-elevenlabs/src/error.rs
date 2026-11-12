@@ -32,6 +32,8 @@ pub enum ConfigError {
     InvalidKeyterm,
     /// A VAD threshold is not a finite number of at least zero.
     VadSetting { name: &'static str, value: f64 },
+    /// `ELEVENLABS_RESIDENCY` names no residency; carries what it was set to.
+    Residency(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -63,6 +65,11 @@ impl fmt::Display for ConfigError {
             Self::VadSetting { name, value } => {
                 write!(f, "{name} {value} is not a finite number of at least zero")
             }
+            Self::Residency(value) => write!(
+                f,
+                "{} is {value}; it takes global, us, eu, in or sg, or is unset for global",
+                crate::config::RESIDENCY_VARIABLE
+            ),
         }
     }
 }
