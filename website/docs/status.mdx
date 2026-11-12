@@ -13,7 +13,7 @@ import status from '@site/data/status.json';
 
 # Status
 
-The current release is `0.27.0`, a source release at that Git tag; nothing is on a registry. The [changelog](https://github.com/beyond10x/inference/blob/main/CHANGELOG.md) records every change a consumer can see. **Shipped** means in a release, with a test on `main` that holds it: an item that says "Since" is in that release and every one after it. **Planned** means not built. What is on `main` and in no release yet is not counted as shipped; it is listed under [On main, in the next release](#on-main-in-the-next-release). Checked on 2026-10-23: 35 shipped, 12 planned, and 0 on main for the next release.
+The current release is `0.27.0`, a source release at that Git tag; nothing is on a registry. The [changelog](https://github.com/beyond10x/inference/blob/main/CHANGELOG.md) records every change a consumer can see. **Shipped** means in a release, with a test on `main` that holds it: an item that says "Since" is in that release and every one after it. **Planned** means not built. What is on `main` and in no release yet is not counted as shipped; it is listed under [On main, in the next release](#on-main-in-the-next-release). Checked on 2026-11-12: 44 shipped, 12 planned, and 0 on main for the next release.
 
 <StatusTable data={status} />
 
@@ -45,8 +45,17 @@ The generator refuses an item whose test is missing or ignored. A live acceptanc
 | Topology switch by configuration | [`one_session_switches_text_to_voice_and_back_with_one_vocabulary_and_one_history`](https://github.com/beyond10x/inference/blob/main/crates/inference-facade/tests/topology_switch.rs) |
 | OpenAI Realtime | [`audio_in_gives_audio_and_transcript_out_on_one_response_id`](https://github.com/beyond10x/inference/blob/main/adapters/inference-openai/tests/duplex.rs) |
 | OpenAI GPT-Live | [`the_declared_capabilities_are_what_gpt_live_takes`](https://github.com/beyond10x/inference/blob/main/adapters/inference-openai/tests/gpt_live_duplex.rs) |
-| Amazon Nova Sonic | [`audio_in_gives_audio_and_transcript_out_on_one_response_id`](https://github.com/beyond10x/inference/blob/main/adapters/inference-aws/tests/nova_sonic_duplex.rs) |
+| Amazon Nova Sonic on Bedrock | [`audio_in_gives_audio_and_transcript_out_on_one_response_id`](https://github.com/beyond10x/inference/blob/main/adapters/inference-aws/tests/nova_sonic_duplex.rs) |
 | Nova Sonic live acceptance | live: [`one_audio_in_audio_out_exchange`](https://github.com/beyond10x/inference/blob/main/adapters/inference-aws/tests/nova_sonic_live.rs), [`one_audio_in_audio_out_session_through_the_contract`](https://github.com/beyond10x/inference/blob/main/adapters/inference-aws/tests/nova_sonic_duplex_live.rs), [`native_duplex_evidence_agrees_with_the_claim`](https://github.com/beyond10x/inference/blob/main/adapters/inference-aws/tests/nova_sonic_duplex_live.rs) |
+| ElevenLabs streaming TTS | [`the_tts_record_holds_the_claims_of_the_binding`](https://github.com/beyond10x/inference/blob/main/adapters/inference-elevenlabs/tests/claims_record.rs) |
+| OpenAI streamed speech TTS | [`the_speech_record_holds_the_claims_of_the_binding`](https://github.com/beyond10x/inference/blob/main/adapters/inference-openai/tests/speech_claims_record.rs) |
+| ElevenLabs agent conversation | [`the_agent_record_holds_the_claims_of_the_binding`](https://github.com/beyond10x/inference/blob/main/adapters/inference-elevenlabs/tests/claims_record.rs) |
+| Cartesia Sonic streaming TTS | [`the_tts_record_holds_the_claims_of_the_binding`](https://github.com/beyond10x/inference/blob/main/adapters/inference-cartesia/tests/claims_record.rs) |
+| Deepgram streaming STT | [`the_stt_record_holds_the_claims_of_the_binding`](https://github.com/beyond10x/inference/blob/main/adapters/inference-deepgram/tests/claims_record.rs) |
+| ElevenLabs realtime STT | [`the_stt_record_holds_the_claims_of_the_binding`](https://github.com/beyond10x/inference/blob/main/adapters/inference-elevenlabs/tests/claims_record.rs) |
+| Deepgram Voice Agent | [`the_voice_agent_record_holds_the_claims_of_the_binding`](https://github.com/beyond10x/inference/blob/main/adapters/inference-deepgram/tests/claims_record.rs) |
+| Phonic speech-to-speech | [`the_duplex_record_holds_the_claims_of_the_binding`](https://github.com/beyond10x/inference/blob/main/adapters/inference-phonic/tests/claims_record.rs) |
+| Deepslate Opal | [`the_opal_record_holds_the_claims_of_the_binding`](https://github.com/beyond10x/inference/blob/main/adapters/inference-deepslate/tests/claims_record.rs) |
 | sherpa-onnx streaming STT | [`the_record_of_the_reference_machine_loads_and_evidences_exactly_the_claims`](https://github.com/beyond10x/inference/blob/main/adapters/inference-sherpa-onnx/tests/stt_record.rs) |
 | whisper.cpp batch STT | [`the_record_of_the_reference_machine_loads_and_names_no_evidence_for_no_claim`](https://github.com/beyond10x/inference/blob/main/adapters/inference-whispercpp/tests/stt_record.rs) |
 | llama-server LLM | [`a_delta_reaches_the_caller_while_the_server_still_holds_the_rest_of_the_stream`](https://github.com/beyond10x/inference/blob/main/adapters/inference-llama-server/tests/offline.rs) |

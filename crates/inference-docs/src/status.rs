@@ -22,7 +22,7 @@ pub const DATA: &str = "website/data/status.json";
 pub const PAGE: &str = "website/docs/status.mdx";
 
 /// The date the statuses below were last checked against `main`.
-const AS_OF: &str = "2026-10-23";
+const AS_OF: &str = "2026-11-12";
 
 /// The status of an item that is on `main` and in no release yet. `b10x-status/1` has no word for
 /// it, so it never reaches the status document.
@@ -237,7 +237,7 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     shipped(
         "Adapters",
-        "Amazon Nova Sonic",
+        "Amazon Nova Sonic on Bedrock",
         "Since 0.5.0: a native speech model on Bedrock behind feature duplex; service errors are shown with ARNs and account ids redacted.",
         "adapters/inference-aws/tests/nova_sonic_duplex.rs::audio_in_gives_audio_and_transcript_out_on_one_response_id",
         "/docs/reference/adapters",
@@ -252,6 +252,69 @@ pub const CAPABILITIES: &[Capability] = &[
             "adapters/inference-aws/tests/nova_sonic_duplex_live.rs::native_duplex_evidence_agrees_with_the_claim",
         ],
         "/docs/guides/talk-to-a-hosted-voice-model",
+    ),
+    shipped(
+        "Adapters",
+        "ElevenLabs streaming TTS",
+        "Since 0.16.0: streaming text-to-speech over ElevenLabs' WebSocket text input; since 0.22.0 one multi-stream-input connection per utterance, one context per segment.",
+        "adapters/inference-elevenlabs/tests/claims_record.rs::the_tts_record_holds_the_claims_of_the_binding",
+        "/docs/reference/adapters",
+    ),
+    shipped(
+        "Adapters",
+        "OpenAI streamed speech TTS",
+        "Since 0.22.0: streaming text-to-speech over the speech endpoint behind feature speech, PCM resampled to the requested rate and G.711 where asked.",
+        "adapters/inference-openai/tests/speech_claims_record.rs::the_speech_record_holds_the_claims_of_the_binding",
+        "/docs/reference/adapters",
+    ),
+    shipped(
+        "Adapters",
+        "ElevenLabs agent conversation",
+        "Since 0.17.0: a conversation with an ElevenLabs agent as a native speech model behind feature duplex, with the agent's own model, voice and formats.",
+        "adapters/inference-elevenlabs/tests/claims_record.rs::the_agent_record_holds_the_claims_of_the_binding",
+        "/docs/reference/adapters",
+    ),
+    shipped(
+        "Adapters",
+        "Cartesia Sonic streaming TTS",
+        "Since 0.22.0: streaming text-to-speech over Cartesia Sonic's WebSocket, one context per segment.",
+        "adapters/inference-cartesia/tests/claims_record.rs::the_tts_record_holds_the_claims_of_the_binding",
+        "/docs/reference/adapters",
+    ),
+    shipped(
+        "Adapters",
+        "Deepgram streaming STT",
+        "Since 0.17.0: streaming speech-to-text over v1/listen; interim results revise an open span and a final result commits it.",
+        "adapters/inference-deepgram/tests/claims_record.rs::the_stt_record_holds_the_claims_of_the_binding",
+        "/docs/reference/adapters",
+    ),
+    shipped(
+        "Adapters",
+        "ElevenLabs realtime STT",
+        "Since 0.28.0: realtime speech-to-text behind feature stt, G.711 μ-law at 8 kHz or 16-bit PCM in, committed spans with word timings.",
+        "adapters/inference-elevenlabs/tests/claims_record.rs::the_stt_record_holds_the_claims_of_the_binding",
+        "/docs/reference/adapters",
+    ),
+    shipped(
+        "Adapters",
+        "Deepgram Voice Agent",
+        "Since 0.17.0: a Deepgram Voice Agent session as a native speech model behind feature duplex, with the listen, think and speak providers its Settings name.",
+        "adapters/inference-deepgram/tests/claims_record.rs::the_voice_agent_record_holds_the_claims_of_the_binding",
+        "/docs/reference/adapters",
+    ),
+    shipped(
+        "Adapters",
+        "Phonic speech-to-speech",
+        "Since 0.22.0: a native speech model over Phonic's speech-to-speech WebSocket; a named agent's own tools are answered with an error.",
+        "adapters/inference-phonic/tests/claims_record.rs::the_duplex_record_holds_the_claims_of_the_binding",
+        "/docs/reference/adapters",
+    ),
+    shipped(
+        "Adapters",
+        "Deepslate Opal",
+        "Since 0.22.0: a native speech model over Deepslate Opal's protocol buffers WebSocket; a tool call is answered as unavailable and the session goes on.",
+        "adapters/inference-deepslate/tests/claims_record.rs::the_opal_record_holds_the_claims_of_the_binding",
+        "/docs/reference/adapters",
     ),
     shipped(
         "Adapters",
@@ -688,6 +751,41 @@ mod tests {
         let error = checked(&root, &item(&[])).unwrap_err();
         assert!(error.contains("names no test"), "{error}");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn every_hosted_binding_is_a_shipped_item_since_the_release_of_its_adapter_row() {
+        let document: serde_json::Value =
+            serde_json::from_str(&data(&crate::repository_root()).unwrap()).unwrap();
+        let items = document["items"].as_array().unwrap();
+        let mut hosted = 0;
+        for (name, since, is_hosted) in crate::adapters::releases() {
+            let Some(item) = items.iter().find(|item| item["label"] == name) else {
+                assert!(!is_hosted, "the hosted binding {name} has no status item");
+                continue;
+            };
+            hosted += usize::from(is_hosted);
+            assert_eq!(item["status"], "shipped", "{item}");
+            assert!(
+                item["detail"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("Since {since}: ")),
+                "{name} is since {since}: {item}"
+            );
+            let fields: Vec<_> = item
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                fields,
+                ["area", "detail", "href", "label", "status"],
+                "{item}"
+            );
+        }
+        assert!(hosted > 0);
     }
 
     #[test]

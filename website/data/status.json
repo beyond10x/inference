@@ -1,5 +1,5 @@
 {
-  "asOf": "2026-10-23",
+  "asOf": "2026-11-12",
   "format": "b10x-status/1",
   "items": [
     {
@@ -118,7 +118,7 @@
       "area": "Adapters",
       "detail": "Since 0.5.0: a native speech model on Bedrock behind feature duplex; service errors are shown with ARNs and account ids redacted.",
       "href": "/docs/reference/adapters",
-      "label": "Amazon Nova Sonic",
+      "label": "Amazon Nova Sonic on Bedrock",
       "status": "shipped"
     },
     {
@@ -126,6 +126,69 @@
       "detail": "Since 0.7.0: on 2026-10-21 the live tests passed against Bedrock with the adapter as released in 0.7.0: one audio-in, audio-out exchange with the client, one session through the native speech contract, and the native duplex probe, which agrees with the adapter not claiming native_duplex. They need AWS access and are ignored by default.",
       "href": "/docs/guides/talk-to-a-hosted-voice-model",
       "label": "Nova Sonic live acceptance",
+      "status": "shipped"
+    },
+    {
+      "area": "Adapters",
+      "detail": "Since 0.16.0: streaming text-to-speech over ElevenLabs' WebSocket text input; since 0.22.0 one multi-stream-input connection per utterance, one context per segment.",
+      "href": "/docs/reference/adapters",
+      "label": "ElevenLabs streaming TTS",
+      "status": "shipped"
+    },
+    {
+      "area": "Adapters",
+      "detail": "Since 0.22.0: streaming text-to-speech over the speech endpoint behind feature speech, PCM resampled to the requested rate and G.711 where asked.",
+      "href": "/docs/reference/adapters",
+      "label": "OpenAI streamed speech TTS",
+      "status": "shipped"
+    },
+    {
+      "area": "Adapters",
+      "detail": "Since 0.17.0: a conversation with an ElevenLabs agent as a native speech model behind feature duplex, with the agent's own model, voice and formats.",
+      "href": "/docs/reference/adapters",
+      "label": "ElevenLabs agent conversation",
+      "status": "shipped"
+    },
+    {
+      "area": "Adapters",
+      "detail": "Since 0.22.0: streaming text-to-speech over Cartesia Sonic's WebSocket, one context per segment.",
+      "href": "/docs/reference/adapters",
+      "label": "Cartesia Sonic streaming TTS",
+      "status": "shipped"
+    },
+    {
+      "area": "Adapters",
+      "detail": "Since 0.17.0: streaming speech-to-text over v1/listen; interim results revise an open span and a final result commits it.",
+      "href": "/docs/reference/adapters",
+      "label": "Deepgram streaming STT",
+      "status": "shipped"
+    },
+    {
+      "area": "Adapters",
+      "detail": "Since 0.28.0: realtime speech-to-text behind feature stt, G.711 μ-law at 8 kHz or 16-bit PCM in, committed spans with word timings.",
+      "href": "/docs/reference/adapters",
+      "label": "ElevenLabs realtime STT",
+      "status": "shipped"
+    },
+    {
+      "area": "Adapters",
+      "detail": "Since 0.17.0: a Deepgram Voice Agent session as a native speech model behind feature duplex, with the listen, think and speak providers its Settings name.",
+      "href": "/docs/reference/adapters",
+      "label": "Deepgram Voice Agent",
+      "status": "shipped"
+    },
+    {
+      "area": "Adapters",
+      "detail": "Since 0.22.0: a native speech model over Phonic's speech-to-speech WebSocket; a named agent's own tools are answered with an error.",
+      "href": "/docs/reference/adapters",
+      "label": "Phonic speech-to-speech",
+      "status": "shipped"
+    },
+    {
+      "area": "Adapters",
+      "detail": "Since 0.22.0: a native speech model over Deepslate Opal's protocol buffers WebSocket; a tool call is answered as unavailable and the session goes on.",
+      "href": "/docs/reference/adapters",
+      "label": "Deepslate Opal",
       "status": "shipped"
     },
     {
