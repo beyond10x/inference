@@ -108,7 +108,7 @@ impl Provider {
     /// Whether every variable the provider needs is set and taken, as `lookup` answers them; a
     /// blank value is unset. The OpenAI and Nova providers need none of the table: their keys
     /// and region are read when the model is made. `elevenlabs-cascade` needs
-    /// [`CASCADE_VARIABLES`] and feature `local`, checked row by row in that order, each value
+    /// `CASCADE_VARIABLES` (feature `local`) and that feature, checked row by row in that order, each value
     /// with its variable: the server URL set and on loopback, the model set and, with the URL,
     /// a server the `llama-server` adapter binds, the voice set and a voice id. Nothing is sent.
     ///
