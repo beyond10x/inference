@@ -3609,6 +3609,7 @@ dependencies = [
  "inference-deepslate",
  "inference-duplex",
  "inference-elevenlabs",
+ "inference-llama-server",
  "inference-llm",
  "inference-openai",
  "inference-phonic",
