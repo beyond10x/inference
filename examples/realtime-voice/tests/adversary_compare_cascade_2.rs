@@ -442,14 +442,15 @@ fn adv2_a_stall_caught_in_the_drain_is_noted_once_and_stays_in_its_run() {
     }
 }
 
-/// The `compare` example built next to this test binary.
+/// The `compare` example in the profile directory above this test binary: `target/<profile>/deps`
+/// before Cargo 1.100, `target/<profile>/build/<package>/<hash>/deps` since.
 fn compare_binary() -> std::path::PathBuf {
     let exe = std::env::current_exe().expect("the test's path");
-    let profile = exe
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("target/<profile>/deps");
-    let binary = profile.join("examples").join("compare");
+    let binary = exe
+        .ancestors()
+        .map(|dir| dir.join("examples").join("compare"))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| exe.with_file_name("examples").join("compare"));
     assert!(
         binary.is_file(),
         "{} is not built: run `cargo build -p realtime-voice --features local --example compare` \
