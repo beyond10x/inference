@@ -36,10 +36,15 @@
   arm with ElevenLabs realtime speech to text, committed manually when the arm's own detector ends
   the turn, so the endpoint's 500 ms VAD quiet window is not in its first audio; its LLM is the
   server `INFERENCE_LLAMA_SERVER_URL` and `INFERENCE_LLAMA_SERVER_MODEL` name, without the local
-  recogniser's variables. A failed recognition is a note of the arm's run, with its reason.
+  recogniser's variables. A failed recognition is a note of the arm's run, with its reason, also
+  when the run's limit passes first; the run waits for it at most the plan's drain. The cascade
+  arm's ElevenLabs key, for its synthesiser and recogniser, is `ELEVENLABS_API_KEY` or the OS
+  keychain's `elevenlabs-api-key`, as `talk`'s is, and the notice that the keychain is asked goes
+  to standard error, in `talk` too.
   `--clips <dir>` asks each WAV clip of a directory in place of the built-in question, each cell
   of the table gives the 95th percentile next to the median, lowest and highest when more than
-  one run measured it, and `--runs-out <file>` writes every run's per-step times as JSON lines.
+  one run measured it, and `--runs-out <file>` writes every run's per-step times as JSON lines
+  after the table is printed.
   Ollama's OpenAI-compatible API is a tested server of `inference-llama-server` (2026-11-12,
   `qwen2.5:1.5b`).
 

@@ -35,8 +35,10 @@
 //! made or whose first session does not open is skipped with the reason;
 //! `--skip <provider>=<reason>` skips one without trying it.
 //!
-//! The cascade arm, `cascade`, speaks with ElevenLabs when its key resolves from
-//! `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` names a voice, in `pcm_24000`, at the host
+//! The cascade arm, `cascade`, speaks with ElevenLabs when its key resolves, from
+//! `ELEVENLABS_API_KEY` or else the OS keychain's `elevenlabs-api-key`
+//! (`realtime_voice::elevenlabs::key`, which says on standard error when it asks the keychain),
+//! and `ELEVENLABS_VOICE_ID` names a voice, in `pcm_24000`, at the host
 //! `ELEVENLABS_RESIDENCY` names (`realtime_voice::elevenlabs::endpoint`); otherwise it is
 //! skipped as "no hosted TTS configured". With `--cascade-voice cartesia` it speaks with Cartesia
 //! Sonic instead, its key from `CARTESIA_API_KEY` and its voice from `CARTESIA_VOICE_ID`, in
@@ -75,6 +77,7 @@ use realtime_voice::compare::{
     Billing, Clip, Comparison, Measured, NO_HOSTED_TTS, Plan, Question, Topology, VOICE_VARIABLE,
     measure_arm,
 };
+use realtime_voice::talk::Refused;
 use realtime_voice::{
     Reported, deepgram_config, elevenlabs, elevenlabs_config, nova_config, openai_config,
     openai_live_config, pcm16,
@@ -123,6 +126,10 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     runs_out: Option<PathBuf>,
 }
+
+/// The ElevenLabs key as `realtime_voice::elevenlabs::key` resolves it, once for the cascade
+/// arm's synthesiser and recogniser, or why it did not.
+type ElevenLabsKey = Result<Arc<dyn inference_elevenlabs::CredentialSource>, Refused>;
 
 /// A recogniser the cascade arm can listen with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -252,23 +259,24 @@ fn strict(tool: &Tool) -> Tool {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let outcome = compare(&args).and_then(|comparison| {
-        if let Some(path) = &args.runs_out {
-            std::fs::write(path, comparison.runs_json())
-                .map_err(|error| format!("{} was not written: {error}", path.display()))?;
-        }
-        Ok(comparison)
-    });
-    match outcome {
-        Ok(comparison) => {
-            print!("{comparison}");
-            ExitCode::SUCCESS
-        }
+    let comparison = match compare(&args) {
+        Ok(comparison) => comparison,
         Err(error) => {
             eprintln!("error: {error}");
-            ExitCode::FAILURE
+            return ExitCode::FAILURE;
         }
+    };
+    print!("{comparison}");
+    if let Some(path) = &args.runs_out
+        && let Err(error) = std::fs::write(path, comparison.runs_json())
+    {
+        eprintln!(
+            "error: --runs-out {} was not written: {error}",
+            path.display()
+        );
+        return ExitCode::FAILURE;
     }
+    ExitCode::SUCCESS
 }
 
 /// What no Deepslate Opal message reports: every count.
@@ -324,12 +332,15 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
         }
         let outcome = match provider {
             Provider::Cascade => {
+                let key = (args.cascade_voice == CascadeVoice::Elevenlabs
+                    || args.cascade_stt == CascadeStt::Elevenlabs)
+                    .then(elevenlabs::key);
                 let measured = match args.cascade_voice {
-                    CascadeVoice::Elevenlabs => hosted().and_then(|synthesiser| {
-                        cascade::measure(synthesiser, &plan, &questions, args)
+                    CascadeVoice::Elevenlabs => hosted(key.as_ref()).and_then(|synthesiser| {
+                        cascade::measure(synthesiser, &plan, &questions, args, key.as_ref())
                     }),
                     CascadeVoice::Cartesia => cartesia().and_then(|synthesiser| {
-                        cascade::measure(synthesiser, &plan, &questions, args)
+                        cascade::measure(synthesiser, &plan, &questions, args, key.as_ref())
                     }),
                 };
                 match measured {
@@ -444,13 +455,18 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
 }
 
 /// The cascade arm's synthesiser: ElevenLabs in `pcm_24000` at the host `ELEVENLABS_RESIDENCY`
-/// names, its key from `ELEVENLABS_API_KEY` and its voice from [`VOICE_VARIABLE`].
-fn hosted() -> Result<ElevenLabsSynthesiser, String> {
+/// names, with the key `elevenlabs::key` resolved, `ELEVENLABS_API_KEY` or the OS keychain's
+/// `elevenlabs-api-key`, and its voice from [`VOICE_VARIABLE`].
+fn hosted(key: Option<&ElevenLabsKey>) -> Result<ElevenLabsSynthesiser, String> {
+    let source = key
+        .ok_or_else(|| format!("{NO_HOSTED_TTS}: the ElevenLabs key was not asked for"))?
+        .clone()
+        .map_err(|refused| format!("{NO_HOSTED_TTS}: {refused}"))?;
     let endpoint =
         elevenlabs::endpoint().map_err(|refused| format!("{NO_HOSTED_TTS}: {refused}"))?;
     elevenlabs::synthesiser(
         endpoint,
-        Arc::new(inference_elevenlabs::EnvironmentSource::elevenlabs()),
+        source,
         std::env::var(VOICE_VARIABLE).ok().as_deref(),
     )
 }
@@ -490,7 +506,7 @@ mod cascade {
     use realtime_voice::talk::Refused;
     use realtime_voice::{elevenlabs, pcm16};
 
-    use super::{Args, CascadeStt};
+    use super::{Args, CascadeStt, ElevenLabsKey};
 
     /// The reason a local step is missing for, naming it.
     fn missing(refused: &LocalRefused) -> String {
@@ -519,6 +535,7 @@ mod cascade {
         plan: &Plan,
         questions: &[Question],
         args: &Args,
+        key: Option<&ElevenLabsKey>,
     ) -> Result<Vec<Measured>, String>
     where
         S: Synthesiser,
@@ -548,8 +565,10 @@ mod cascade {
             CascadeStt::Elevenlabs => {
                 let generator =
                     elevenlabs::generator().map_err(|error| refused("local LLM", &error))?;
-                let source =
-                    elevenlabs::key().map_err(|error| refused("ElevenLabs STT", &error))?;
+                let source = key
+                    .ok_or_else(|| "no ElevenLabs STT configured: no key was asked for".to_owned())?
+                    .clone()
+                    .map_err(|error| refused("ElevenLabs STT", &error))?;
                 let endpoint =
                     elevenlabs::endpoint().map_err(|error| refused("ElevenLabs STT", &error))?;
                 let mut cascade = elevenlabs_arm(endpoint, source, generator, synthesiser)
@@ -572,7 +591,7 @@ mod cascade {
 mod cascade {
     use realtime_voice::compare::{Measured, Plan, Question};
 
-    use super::Args;
+    use super::{Args, ElevenLabsKey};
 
     /// Skips the arm, naming the missing steps.
     pub fn measure<S>(
@@ -580,6 +599,7 @@ mod cascade {
         _plan: &Plan,
         _questions: &[Question],
         _args: &Args,
+        _key: Option<&ElevenLabsKey>,
     ) -> Result<Vec<Measured>, String> {
         Err(
             "no local STT or LLM configured: compare was built without feature local, \

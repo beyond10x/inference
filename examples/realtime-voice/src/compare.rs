@@ -1268,6 +1268,22 @@ where
     (tasks, worker)
 }
 
+/// Starts the recogniser's worker over `recognition` on a thread of its own, outside any scope,
+/// so a run can leave a recognition that blocks past its bound, waiting out its endpoint's read
+/// timeout, to end on its own: the sender of its tasks and the worker.
+fn spawn_detached_recognition<H>(
+    recognition: H,
+    report: impl Fn(Heard) + Send + 'static,
+    failure: fn(&H) -> Option<String>,
+) -> (Sender<Task<Listen>>, thread::JoinHandle<()>)
+where
+    H: RecognitionHandle + Send + 'static,
+{
+    let (tasks, receiver) = mpsc::channel();
+    let worker = thread::spawn(move || listening(recognition, receiver, report, failure));
+    (tasks, worker)
+}
+
 /// Starts the generator's worker on `scope` over `generation`, with its first poll handed to
 /// it: the sender of its tasks and the worker.
 pub(crate) fn spawn_generation<'s>(
@@ -1420,6 +1436,9 @@ struct CascadeRunner<'a, 's, 'e, R: Recogniser, S: Synthesiser> {
     generate: Option<Sender<Task<Generate>>>,
     speak: Option<Sender<Task<Speak>>>,
     workers: Vec<ScopedJoinHandle<'s, ()>>,
+    /// The recogniser's worker of the turn, on a thread of its own ([`Plan::drain`] bounds the
+    /// wait for it when its turn is cut).
+    listener: Option<thread::JoinHandle<()>>,
     run_id: RunId,
     stt: NodeId,
     llm: NodeId,
@@ -1471,7 +1490,7 @@ pub fn run_cascade<R, S>(
 ) -> Measured
 where
     R: Recogniser,
-    R::Handle: Send,
+    R::Handle: Send + 'static,
     S: Synthesiser,
     S::Handle: Send,
 {
@@ -1490,7 +1509,7 @@ pub fn run_cascade_live<R, S>(
 ) -> Measured
 where
     R: Recogniser,
-    R::Handle: Send,
+    R::Handle: Send + 'static,
     S: Synthesiser,
     S::Handle: Send,
 {
@@ -1510,7 +1529,7 @@ pub fn measure_cascade<R, S>(
 ) -> Vec<Measured>
 where
     R: Recogniser,
-    R::Handle: Send,
+    R::Handle: Send + 'static,
     S: Synthesiser,
     S::Handle: Send,
 {
@@ -1596,7 +1615,7 @@ fn run_paced<R, S>(
 ) -> Measured
 where
     R: Recogniser,
-    R::Handle: Send,
+    R::Handle: Send + 'static,
     S: Synthesiser,
     S::Handle: Send,
 {
@@ -1624,6 +1643,7 @@ where
             generate: None,
             speak: None,
             workers: Vec::new(),
+            listener: None,
             run_id: RunId::generate(),
             stt: NodeId::generate(),
             llm: NodeId::generate(),
@@ -1683,7 +1703,7 @@ impl<R: Recogniser, S: Synthesiser> Drop for CascadeRunner<'_, '_, '_, R, S> {
 impl<'s, R, S> CascadeRunner<'_, 's, '_, R, S>
 where
     R: Recogniser,
-    R::Handle: Send + 's,
+    R::Handle: Send + 'static,
     S: Synthesiser,
     S::Handle: Send + 's,
 {
@@ -1820,9 +1840,8 @@ where
         match self.cascade.recogniser.start(request) {
             Ok(recognition) => {
                 let report = self.reporter();
-                let (tasks, worker) =
-                    spawn_recognition(self.scope, recognition, report, self.failure);
-                self.workers.push(worker);
+                let (tasks, worker) = spawn_detached_recognition(recognition, report, self.failure);
+                self.listener = Some(worker);
                 self.listen = Some(tasks);
                 self.stage = Stage::Listening;
             }
@@ -1834,9 +1853,9 @@ where
     }
 
     /// Drops every step that runs: tells each worker of the turn to stop and waits until it
-    /// stopped, so a step's next turn finds its handle dropped.
+    /// stopped, so a step's next turn finds its handle dropped; the recogniser's worker it waits
+    /// for at most [`Plan::drain`] ([`CascadeRunner::release_listener`]).
     fn cut(&mut self) {
-        self.turn += 1;
         self.listen = None;
         self.speak = None;
         if let Some(tasks) = self.generate.take() {
@@ -1847,9 +1866,56 @@ where
                 std::panic::resume_unwind(panic);
             }
         }
+        self.release_listener();
+        self.turn += 1;
         self.segments = Segments::default();
         self.utterance_ended = false;
         self.stage = Stage::Idle;
+    }
+
+    /// Waits for the recogniser's worker of the turn, its tasks ended, to stop, at most
+    /// [`Plan::drain`] of wall-clock time, and takes why the recognition failed, when the worker
+    /// reports it meanwhile, as a note of the run: a recognition blocked on its endpoint when its
+    /// turn is cut, as one waiting for the answer to its commit when the run's limit passes, fails
+    /// only when its own read timeout passes. A worker still blocked after the wait is left to end
+    /// on its own, and the run says so. Every other report of the turn is dropped, as the turn is
+    /// over.
+    fn release_listener(&mut self) {
+        let Some(listener) = self.listener.take() else {
+            return;
+        };
+        let deadline = Instant::now() + self.plan.drain;
+        loop {
+            let finished = listener.is_finished();
+            let left = deadline.saturating_duration_since(Instant::now());
+            let report = if finished || left.is_zero() {
+                self.reports.try_recv().ok()
+            } else {
+                self.reports
+                    .recv_timeout(left.min(Duration::from_millis(10)))
+                    .ok()
+            };
+            match report {
+                Some(Report {
+                    turn,
+                    heard: Heard::Failed(why),
+                }) if turn == self.turn => self.note(format!("the recognition failed: {why}")),
+                Some(_) => {}
+                None if finished => break,
+                None if left.is_zero() => {
+                    let drain = self.plan.drain;
+                    self.note(format!(
+                        "the recognition had not ended {drain:?} after its turn was cut; it is \
+                         left to end on its own"
+                    ));
+                    return;
+                }
+                None => {}
+            }
+        }
+        if let Err(panic) = listener.join() {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     /// Ends the turn and drops its steps.

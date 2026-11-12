@@ -76,8 +76,9 @@ pub fn failure(recognition: &ElevenLabsRecognition) -> Option<String> {
 
 /// The ElevenLabs key: `ELEVENLABS_API_KEY` when it is set, the OS keychain's
 /// `elevenlabs-api-key` otherwise, resolved once here so a missing key stops before anything
-/// opens. Before it asks the keychain it says so on one line, as the keychain may wait for an
-/// unlock prompt, and it gives up after [`KEY_WAIT`]. The key is never printed.
+/// opens. Before it asks the keychain it says so on one line of standard error, which leaves
+/// standard output to what the caller prints, as the keychain may wait for an unlock prompt, and
+/// it gives up after [`KEY_WAIT`]. The key is never printed.
 ///
 /// # Errors
 ///
@@ -96,7 +97,7 @@ pub fn key() -> Result<Arc<dyn CredentialSource>, Refused> {
                      {error}"
                 ))
             })?;
-            println!(
+            eprintln!(
                 "{ELEVENLABS_KEY_VARIABLE} is not set: waiting up to {} s for the OS \
                  keychain's {ELEVENLABS_KEY_NAME}; unlock the keychain if it asks",
                 KEY_WAIT.as_secs()

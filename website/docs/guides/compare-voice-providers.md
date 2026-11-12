@@ -52,8 +52,10 @@ barge-in utterance is the 16-bit PCM WAV file `INFERENCE_COMPARE_BARGE_IN_WAV` n
 barge-in is sent and that column stays empty. A provider whose model cannot be made, or whose first
 session does not open, is skipped with the reason.
 
-The `cascade` provider speaks with ElevenLabs when `ELEVENLABS_API_KEY` holds its key and
-`ELEVENLABS_VOICE_ID` names a voice; otherwise it is skipped as "no hosted TTS configured". It
+The `cascade` provider speaks with ElevenLabs when its key resolves, from `ELEVENLABS_API_KEY` or,
+when that is unset, the OS keychain's `elevenlabs-api-key` (waiting up to 8 s, and saying so on
+standard error), and `ELEVENLABS_VOICE_ID` names a voice; otherwise it is skipped as "no hosted
+TTS configured". It
 connects to the host `ELEVENLABS_RESIDENCY` names (`global`, `us`, `eu`, `in` or `sg`, global when
 unset), as a key of a data-residency stack needs; a value it does not take skips the arm. Its
 recogniser and LLM are the local voice cascade's, bound with feature `local` and configured as in
@@ -80,7 +82,9 @@ The ElevenLabs recognition commits manually: it is opened with `commit_strategy=
 arm's own detector, the local cascade's (600 ms of silence after speech), ends each turn and so
 sends the commit, as it ends the local recogniser's input. The endpoint's voice activity detection
 is not used, since it would add its quiet window of 500 ms after the commit's answer to the
-cascade's first audio. A failed recognition is a note of the arm's run, with the endpoint's reason.
+cascade's first audio. A failed recognition is a note of the arm's run, with the endpoint's reason,
+also when the run's limit passes first: the run then waits for the recognition at most 3 s, the
+plan's drain, and says so when it had still not ended.
 
 `--clips <dir>` asks each 16-bit PCM WAV file of a directory (`.wav`, in the order of the file
 names) in place of the built-in question: each provider runs `--runs` runs of each clip, every run
@@ -88,7 +92,9 @@ of the first clip first, and the table pools the runs of all clips. `--runs-out 
 every run as one JSON line: `provider`, `topology`, `clip` (the file name without `.wav`, or
 `question` for the built-in one), `run` (from 1 for each clip), each measure the provider's
 topology has as `<measure>_ms`, null when the run did not measure it, the cascade's
-`tts_segment_first_audio_ms`, `seconds` billed, and `notes`:
+`tts_segment_first_audio_ms`, `seconds` billed, and `notes`. The file is written after the table
+is printed; when it does not write, `compare` says why and exits with status 1, the table already
+out:
 
 ```sh
 cargo run -p realtime-voice --example compare -- --providers openai --clips questions/ --runs 10 --runs-out runs.jsonl
