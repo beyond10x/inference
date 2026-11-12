@@ -138,8 +138,15 @@
 //! ```
 //!
 //! [`SynthesisOutput`] is the bookkeeping every implementation shares: the segments offered and
-//! taken, moved only through the transitions of `inference-text`, the frames emitted of each and
-//! the usage of the synthesis.
+//! taken, moved only through the transitions of `inference-text`, the frames emitted of each, the
+//! time to first audio of each and the usage of the synthesis.
+//!
+//! The time to first audio of a segment ([`SynthesisOutput::first_audio`]) runs from its offer to
+//! the emission of its first frame, streamed or emitted with its completion, on this process's
+//! monotonic clock. So a caller reads it for every synthesiser alike, through
+//! [`SynthesisHandle::output`]; it holds whatever lay between the two, the implementation's wait
+//! for the caller to iterate the handle and for the segments before it among them. A segment with
+//! no frame has none.
 //!
 //! A synthesis is one model call, and a synthesis whose utterance has ended yields one usage
 //! record, [`SynthesisEvent::Usage`], the `inference.usage.UsageRecorded` that
@@ -179,7 +186,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use inference_audio;
 pub use inference_core;
@@ -667,11 +674,11 @@ refusal! {
 }
 
 /// One synthesis of one utterance: the segments offered, in the order they were, the first
-/// `taken` of them taken by the implementation, and the frames emitted of each and confirmed as
-/// played of each, with the capabilities, identity and model of the adapter producing it, and the
-/// usage of the synthesis. It is the one record of each segment offered to it:
-/// every segment moves through a transition of [`OutputSegment`], so a refused move changes
-/// nothing.
+/// `taken` of them taken by the implementation, the frames emitted of each and confirmed as
+/// played of each, and the time to first audio of each, with the capabilities, identity and model
+/// of the adapter producing it, and the usage of the synthesis. It is the one record of each
+/// segment offered to it: every segment moves through a transition of [`OutputSegment`], so a
+/// refused move changes nothing.
 ///
 /// It is not `Clone`: a copy would be a second record of the same segments.
 ///
@@ -687,6 +694,10 @@ pub struct SynthesisOutput {
     segments: Vec<OutputSegment>,
     frames: Vec<usize>,
     played: Vec<usize>,
+    /// The instant each segment was offered.
+    offered_at: Vec<Instant>,
+    /// Each segment's time to first audio, once a frame of it was emitted.
+    first_audio: Vec<Option<Duration>>,
     taken: usize,
     utterance_ended: bool,
     /// The Unicode scalar values of the text of every segment taken.
@@ -711,6 +722,8 @@ impl SynthesisOutput {
             segments: Vec::new(),
             frames: Vec::new(),
             played: Vec::new(),
+            offered_at: Vec::new(),
+            first_audio: Vec::new(),
             taken: 0,
             utterance_ended: false,
             characters_taken: 0,
@@ -745,6 +758,8 @@ impl SynthesisOutput {
         self.segments.push(queued);
         self.frames.push(0);
         self.played.push(0);
+        self.offered_at.push(Instant::now());
+        self.first_audio.push(None);
         Ok(event)
     }
 
@@ -822,6 +837,7 @@ impl SynthesisOutput {
         check_length(&frame)?;
         self.frames[index] += 1;
         self.count_emitted(&frame);
+        self.mark_first_audio(index);
         Ok(SynthesisEvent::Audio(SegmentAudio { segment_id, frame }))
     }
 
@@ -853,6 +869,9 @@ impl SynthesisOutput {
         self.frames[index] += frames.len();
         for frame in &frames {
             self.count_emitted(frame);
+        }
+        if !frames.is_empty() {
+            self.mark_first_audio(index);
         }
         let mut events = Vec::with_capacity(frames.len() + 1);
         events.push(SynthesisEvent::Completed(event));
@@ -1122,6 +1141,26 @@ impl SynthesisOutput {
         self.held_index(segment_id)
             .ok()
             .map(|index| self.played[index])
+    }
+
+    /// The time to first audio of the segment `segment_id`: from the call that offered it
+    /// ([`SynthesisOutput::offer`]) to the emission of its first frame, by
+    /// [`SynthesisOutput::audio`] or with its completion, on this process's monotonic clock.
+    /// `None` when the synthesis holds no such segment or has emitted no frame of it, as for a
+    /// segment discarded before its first frame or synthesized without frames. Once set it does
+    /// not move.
+    #[must_use]
+    pub fn first_audio(&self, segment_id: SegmentId) -> Option<Duration> {
+        self.held_index(segment_id)
+            .ok()
+            .and_then(|index| self.first_audio[index])
+    }
+
+    /// Records the time to first audio of the segment at `index`, when it has none yet.
+    fn mark_first_audio(&mut self, index: usize) {
+        if self.first_audio[index].is_none() {
+            self.first_audio[index] = Some(self.offered_at[index].elapsed());
+        }
     }
 
     fn held_index(&self, segment_id: SegmentId) -> Result<usize, SegmentNotHeld> {

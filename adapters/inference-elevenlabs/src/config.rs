@@ -19,8 +19,14 @@ pub const DEFAULT_URL: &str = "wss://api.elevenlabs.io";
 
 /// How long the segment being spoken may go without a message of its context before the
 /// synthesis fails as stalled. Every read waits at most this long from the last message of that
-/// context (from sending its text before the first), and every write at most this long.
+/// context (from sending its text before the first, and from sending its close once it is
+/// closed), and every write at most this long.
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the context of the segment being spoken may go without a message, once its first
+/// message has arrived, before the binding closes it so that the endpoint sends its final
+/// message. Until then a cancel stops the endpoint generating the segment.
+pub const DEFAULT_CONTEXT_QUIET: Duration = Duration::from_millis(250);
 
 /// How long the TCP connection, TLS and the WebSocket handshake may take together.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -28,7 +34,8 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The largest `inactivity_timeout` the endpoint takes, in seconds.
 pub const MAX_INACTIVITY_TIMEOUT: u32 = 180;
 
-/// Where a synthesis connects: the base URL and the bounds on the handshake and on every read.
+/// Where a synthesis connects: the base URL, the bounds on the handshake and on every read, and
+/// the quiet after which the context of the segment being spoken is closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     /// Scheme and host (and port), no path, query or trailing slash needed: `wss://` to any host,
@@ -36,6 +43,9 @@ pub struct Endpoint {
     pub url: String,
     pub read_timeout: Duration,
     pub connect_timeout: Duration,
+    /// See [`DEFAULT_CONTEXT_QUIET`]. One too large for an instant never closes a context on its
+    /// quiet: the segment then completes only on a final message the endpoint sends unasked.
+    pub context_quiet: Duration,
 }
 
 impl Default for Endpoint {
@@ -51,6 +61,7 @@ impl Endpoint {
             url: DEFAULT_URL.to_owned(),
             read_timeout: DEFAULT_READ_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            context_quiet: DEFAULT_CONTEXT_QUIET,
         }
     }
 
@@ -69,6 +80,12 @@ impl Endpoint {
     /// This endpoint with another connect timeout.
     pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
         self.connect_timeout = connect_timeout;
+        self
+    }
+
+    /// This endpoint with another context quiet.
+    pub fn with_context_quiet(mut self, context_quiet: Duration) -> Self {
+        self.context_quiet = context_quiet;
         self
     }
 }

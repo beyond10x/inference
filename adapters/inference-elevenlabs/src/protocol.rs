@@ -2,14 +2,15 @@
 //!
 //! # Source
 //!
-//! Read on 2026-11-06 from ElevenLabs' public API documentation, fetched without a key. None of
-//! the pages carries a publication or revision date of its own, so the retrieval date is the
-//! only date there is.
+//! Read from ElevenLabs' public API documentation, fetched without a key. None of the pages
+//! carries a publication or revision date of its own, so the retrieval date is the only date
+//! there is. Read again on 2026-11-12 (first on 2026-11-06), for how a context is closed, and
+//! summarized in `tests/fixtures/tts-multi-stream-protocol.md`, which the fixture server follows:
 //!
 //! - <https://elevenlabs.io/docs/api-reference/text-to-speech/v-1-text-to-speech-voice-id-multi-stream-input>,
 //!   the AsyncAPI description of the multi-stream endpoint, which this binding speaks;
 //! - <https://elevenlabs.io/docs/eleven-api/guides/how-to/websockets/multi-context-web-socket.md>,
-//!   the multi-context guide, with its worked conversation;
+//!   the multi-context guide, with its handling of interruptions and its worked conversation;
 //!
 //! and, read on 2026-11-05 for the single-stream binding this one replaced and still the source
 //! of what both endpoints share:
@@ -49,10 +50,13 @@
 //! 2. The segment's text, its trailing whitespace replaced by exactly one space, with the
 //!    `context_id` and `flush` set, so the endpoint generates what it holds at once
 //!    ([`text_message`]).
-//! 3. `close_context` for the context ([`close_context_message`]). The specification: "If it
-//!    has already been set to flush it will continue flushing"; the guide's worked conversation
-//!    flushes and closes a context the same way. The endpoint then finishes the audio of the
-//!    context and marks its end with its final message.
+//! 3. `close_context` for the context ([`close_context_message`]), once, and only when it is
+//!    needed: when the segment is cancelled (see Cancel), or when the context has gone without a
+//!    message for the endpoint's context quiet (`Endpoint::context_quiet`) after one arrived.
+//!    The specification: "If it has already been set to flush it will continue flushing"; the
+//!    guide's worked conversation flushes and closes a context the same way at the end of a
+//!    turn. The endpoint then finishes the audio of the context and marks its end with its final
+//!    message. A context whose final message comes before its close is sent none.
 //!
 //! The end of the utterance sends `close_socket` ([`CLOSE_SOCKET`]), which "closes all contexts
 //! and closes the entire WebSocket connection", then a close frame. Dropping the handle does the
@@ -70,27 +74,38 @@
 //!
 //! # Cancel
 //!
-//! A discard of the segment being spoken, as a barge-in makes it, ends that context for the
-//! binding: it sends nothing, since the context's `close_context` already went with its text and
-//! the specification defines no second close of a closing context, and it drops every later
-//! message of that context, its final message included, without reading it as audio. The
-//! connection stays open, and the next segment opens the next context on it. Messages of a
-//! cancelled context move no read deadline, so a server that keeps streaming one cannot hold the
-//! next segment past the read timeout.
+//! A discard of the segment being spoken, as a barge-in makes it, sends `close_context` for that
+//! context, as the guide handles an interruption: "close the current context and create a new
+//! one". The write waits at most `CLOSE_BOUND` and nothing waits for an answer. The binding then
+//! drops every later message of that context, its final message included, without reading it as
+//! audio. The connection stays open, and the next segment opens the next context on it; a
+//! connection the close cannot be written on is dropped, and the next segment opens a new one.
+//! Messages of a cancelled context move no read deadline, so a server that keeps streaming one
+//! cannot hold the next segment past the read timeout.
 //!
-//! A cancel stops nothing at the server: the context was flushed and closed when its text was
-//! sent, and the specification says a context set to flush "will continue flushing" when closed.
-//! So the endpoint still generates, sends and bills the whole cancelled segment; a barge-in saves
-//! playback, not cost.
+//! What the close stops at the server is the documentation's to say, and it says two things: the
+//! guide closes the interrupted context so that the endpoint stops speaking it, and the
+//! specification says the close of a context "already set to flush" will "continue flushing".
+//! Every context of the binding is set to flush, since its text carries `flush`; without it a
+//! segment shorter than the chunk schedule (120 characters by default) would not be generated
+//! until its close. So the binding keeps the context open until its audio is final and closes it
+//! at the cancel, the one moment the guide names; whether the endpoint then stops generating,
+//! and billing, what the flush released is not stated, and only a billed run can tell.
+//! A context the binding already closed on its quiet is sent no second close, which the
+//! specification does not describe.
 //!
 //! # Points the documentation leaves open, and what the binding decided
 //!
 //! - **When a context's final message comes.** The schema says only that it "indicates this is
-//!   the final message for the context". The binding closes each context right after its flush,
-//!   as the guide's worked conversation does, and reads the final message as the end of the
-//!   segment. Whether a flush alone, without a close, would bring one is not stated, so the
-//!   binding never relies on it.
-//! - **A second `close_context`.** Not described; a cancel therefore sends none (see Cancel).
+//!   the final message for the context", and a flush, per the single-stream page, is for "when
+//!   you have finished sending text, but want to keep the websocket connection open". Whether a
+//!   flush alone, without a close, brings a final message is not stated. The binding reads a
+//!   final message as the end of the segment whenever it comes, and does not rely on one coming
+//!   unasked: a context that has gone without a message for the context quiet after one arrived
+//!   is closed, and its final message follows the close. The quiet runs only once a message of
+//!   the context has arrived, so a slow first audio is bounded by the read timeout alone.
+//! - **A second `close_context`.** Not described; a context closed on its quiet is therefore
+//!   sent no second close when it is then cancelled (see Cancel).
 //! - **The two initialization messages.** The specification lists a connection initialization
 //!   (`text` must be a single space) and a context initialization (`text` should end with a
 //!   single space) and does not say how the endpoint tells them apart. The opening message of
@@ -106,9 +121,9 @@
 //!   that context again on it; a second failure fails the synthesis. Contexts cancelled on the
 //!   old connection are forgotten with it.
 //! - **Five contexts per connection.** The guide caps concurrent contexts at five. The binding
-//!   speaks one at a time; a cancelled context the endpoint is still flushing counts until its
-//!   final message, so more than four barge-ins within one context's flush could meet the cap,
-//!   whose answer the documentation does not give.
+//!   speaks one at a time and closes every cancelled context; one the endpoint is still flushing
+//!   may count until its final message, so more than four barge-ins within one context's flush
+//!   could meet the cap, whose answer the documentation does not give.
 //! - **PCM sample width, byte order and channels.** Not stated for any `pcm_*` format. The
 //!   binding takes them as signed 16-bit little-endian mono; a chunk with an odd byte count
 //!   keeps its last byte for the next chunk, and a segment that ends on half a sample fails.

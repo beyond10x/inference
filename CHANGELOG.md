@@ -19,8 +19,16 @@
   answers when the session was cancelled: a send started after `cancel()`, or one a cancel
   overtook while the ingress took it, no longer answers `Refused`, which promises that nothing
   was forwarded. `inference`: an `Agent` maps it to `Error::Closed`.
+- `inference-elevenlabs`: `Endpoint` gains the public field `context_quiet`
+  (`DEFAULT_CONTEXT_QUIET`, 250 ms, set with `Endpoint::with_context_quiet`), which breaks a
+  struct literal of it.
 
 ### Added
+
+- `inference-tts`: `SynthesisOutput::first_audio` gives each segment's time to first audio, from
+  its offer to its first frame, for every synthesiser, read through `SynthesisHandle::output`.
+  The `realtime-voice` latency report shows it per cascade run as `tts offer to audio` (the
+  answer's first segment; `Measured::tts_segment_first_audio` holds every segment).
 
 - `inference-elevenlabs`, feature `stt`: `ElevenLabsRecogniser`, ElevenLabs realtime
   speech-to-text (`/v1/speech-to-text/realtime`, `scribe_v2_realtime` unless configured) as an
@@ -41,6 +49,14 @@
 
 ### Fixed
 
+- `inference-elevenlabs`: a cancel of the segment being spoken sends `close_context` for its
+  context, written within `CLOSE_BOUND`, as ElevenLabs' multi-context guide ends an interrupted
+  context, instead of nothing: the context's close no longer goes with its text, so the context
+  is still open at a barge-in. Its late frames are dropped and the next segment speaks on the same
+  connection. A segment's context is closed once it has gone without a message for
+  `context_quiet`, or not at all when its final message comes first. Whether the endpoint then
+  stops generating, and billing, what the flushed text released is not documented; the protocol
+  notes say why.
 - `inference-pipeline`: the tool authority validates `minLength`, `maxLength`, `prefixItems`,
   `minItems`, `maxItems`, `oneOf`, `anyOf` and `const`, so macro tools taking a `char`, a tuple,
   a fixed array or an enum with data prepare and have their calls checked instead of failing at

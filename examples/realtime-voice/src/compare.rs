@@ -50,6 +50,13 @@
 //! * first token: the answer's first text delta;
 //! * TTS first audio: the synthesis's first frame.
 //!
+//! A fourth is the synthesiser's own: TTS offer to audio, the time to first audio of each segment
+//! the synthesis spoke in the latency turn, from the segment's offer to its first frame, as the
+//! TTS contract measures it (`SynthesisOutput::first_audio`) on the process's monotonic clock, not
+//! on the caller's clock, which [`run_cascade`] simulates; the table shows the answer's first
+//! segment, the one the answer waits on, and [`Measured::tts_segment_first_audio`] holds every
+//! segment.
+//!
 //! Its shared measures keep their names and are taken as a native model's are. The answer's audio
 //! is played on the client's model, not on a device: each frame from its receipt or from the end
 //! of the frame before it, whichever is later, cut where the client stops playout. First audio is
@@ -324,6 +331,10 @@ pub struct Measured {
     pub first_token: Option<Duration>,
     /// End of input speech to the TTS's first audio, for a cascade.
     pub tts_first_audio: Option<Duration>,
+    /// The time to first audio of each segment the synthesis spoke in the latency turn, in the
+    /// order of their first frames, from the segment's offer to its first frame as the TTS
+    /// contract measures it, for a cascade.
+    pub tts_segment_first_audio: Vec<Duration>,
     /// The usage the session reported over the run.
     pub usage: Totals,
     /// The seconds the provider billed, for one that bills by the second.
@@ -909,6 +920,8 @@ struct Steps {
     first_token: Option<Instant>,
     /// The synthesis's first frame, and so the start of the client's playout.
     tts_first_audio: Option<Instant>,
+    /// The time to first audio of each segment spoken, as the TTS contract measures it.
+    segment_first_audio: Vec<Duration>,
     /// The synthesis's last event.
     ended: Option<Instant>,
     /// Where the client's playout of the answer's audio received so far ends.
@@ -946,8 +959,9 @@ enum Heard {
     Generated(GenerationEvent, Option<String>),
     /// The generation delivered its last event.
     Answered,
-    /// An event of the synthesis.
-    Spoken(SynthesisEvent),
+    /// An event of the synthesis, with the segment's time to first audio when it is the first
+    /// frame of its segment.
+    Spoken(SynthesisEvent, Option<Duration>),
     /// The synthesis delivered its last event after the end of the utterance.
     Synthesised,
     /// A step refused what it was given.
@@ -1117,12 +1131,14 @@ fn generating(
 }
 
 /// The synthesiser's worker: offers each segment, ends the utterance, and reports every event the
-/// synthesis has after each.
+/// synthesis has after each, the first frame of each segment with the segment's time to first
+/// audio.
 fn speaking<H: SynthesisHandle>(
     mut synthesis: H,
     tasks: Receiver<Task<Speak>>,
     report: impl Fn(Heard),
 ) {
+    let mut heard = std::collections::HashSet::new();
     for Task { work, owed } in tasks {
         let ended = match work {
             Speak::Segment(segment) => {
@@ -1142,8 +1158,14 @@ fn speaking<H: SynthesisHandle>(
                 true
             }
         };
-        for event in synthesis.by_ref() {
-            report(Heard::Spoken(event));
+        while let Some(event) = synthesis.next() {
+            let first_audio = match &event {
+                SynthesisEvent::Audio(audio) if heard.insert(audio.segment_id()) => {
+                    synthesis.output().first_audio(audio.segment_id())
+                }
+                _ => None,
+            };
+            report(Heard::Spoken(event, first_audio));
         }
         if ended {
             report(Heard::Synthesised);
@@ -1317,6 +1339,9 @@ where
         measured.final_transcript = latency.since_speech_end(latency.final_transcript);
         measured.first_token = latency.since_speech_end(latency.first_token);
         measured.tts_first_audio = latency.since_speech_end(latency.tts_first_audio);
+        measured
+            .tts_segment_first_audio
+            .clone_from(&latency.segment_first_audio);
         measured
     })
 }
@@ -1628,7 +1653,7 @@ where
             }
             Heard::Generated(event, failure) => self.generated(event, failure),
             Heard::Answered => self.end_utterance(),
-            Heard::Spoken(event) => self.spoken(event),
+            Heard::Spoken(event, first_audio) => self.spoken(event, first_audio),
             Heard::Synthesised => {
                 if self
                     .steps()
@@ -1781,11 +1806,13 @@ where
     }
 
     /// Takes an event of the synthesis: a frame is played on the client's model from its receipt
-    /// or from the end of the frame before it, whichever is later, and handed to the playout.
-    fn spoken(&mut self, event: SynthesisEvent) {
+    /// or from the end of the frame before it, whichever is later, and handed to the playout; the
+    /// time to first audio of a segment's first frame is kept.
+    fn spoken(&mut self, event: SynthesisEvent, first_audio: Option<Duration>) {
         let at = (self.clock)();
         if let Some(steps) = self.steps() {
             steps.ended = Some(at);
+            steps.segment_first_audio.extend(first_audio);
         }
         let SynthesisEvent::Audio(audio) = event else {
             return;
@@ -1811,12 +1838,15 @@ pub enum Measure {
     FinalTranscript,
     FirstToken,
     TtsFirstAudio,
+    /// The synthesiser's time to first audio of the answer's first segment, from its offer to
+    /// its first frame, as the TTS contract measures it.
+    TtsOfferToAudio,
 }
 
 impl Measure {
     /// Every measure, in the order the table shows them: those of a native model, then the
     /// cascade's steps.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::FirstAudio,
         Self::FirstTranscript,
         Self::ResponseEnd,
@@ -1824,6 +1854,7 @@ impl Measure {
         Self::FinalTranscript,
         Self::FirstToken,
         Self::TtsFirstAudio,
+        Self::TtsOfferToAudio,
     ];
 
     /// The measure's column heading.
@@ -1837,20 +1868,22 @@ impl Measure {
             Self::FinalTranscript => "final transcript",
             Self::FirstToken => "first token",
             Self::TtsFirstAudio => "tts first audio",
+            Self::TtsOfferToAudio => "tts offer to audio",
         }
     }
 
     /// Whether a provider of `topology` has the step the measure ends at: first audio, response
     /// end and barge-in to stop both have; the first transcript of the answer is a native
-    /// model's, and the three steps after it the cascade's.
+    /// model's, and the four steps after it the cascade's.
     #[must_use]
     pub const fn applies(self, topology: Topology) -> bool {
         match self {
             Self::FirstAudio | Self::ResponseEnd | Self::BargeInStop => true,
             Self::FirstTranscript => matches!(topology, Topology::Native),
-            Self::FinalTranscript | Self::FirstToken | Self::TtsFirstAudio => {
-                matches!(topology, Topology::Cascade)
-            }
+            Self::FinalTranscript
+            | Self::FirstToken
+            | Self::TtsFirstAudio
+            | Self::TtsOfferToAudio => matches!(topology, Topology::Cascade),
         }
     }
 
@@ -1868,6 +1901,10 @@ impl Measure {
             Self::FinalTranscript => run.final_transcript,
             Self::FirstToken => run.first_token,
             Self::TtsFirstAudio => run.tts_first_audio,
+            Self::TtsOfferToAudio => match run.tts_segment_first_audio.as_slice() {
+                [first, ..] => Some(*first),
+                [] => None,
+            },
         }
     }
 }
@@ -2040,6 +2077,11 @@ impl fmt::Display for Comparison {
             f,
             "from the end of the question's speech; barge-in from the barge-in's first voiced \
              frame; response end is the turn latency"
+        )?;
+        writeln!(
+            f,
+            "tts offer to audio: the synthesis's own, from the answer's first segment's offer to \
+             its first frame"
         )?;
         let mut heading = format!("{:<width$}  {:<kind$}", "provider", "topology");
         for measure in Measure::ALL {

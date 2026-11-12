@@ -560,6 +560,7 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
         Measure::FinalTranscript,
         Measure::FirstToken,
         Measure::TtsFirstAudio,
+        Measure::TtsOfferToAudio,
     ] {
         assert_eq!(measure.of(&native), None, "{measure:?} of the native arm");
     }
@@ -600,6 +601,16 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
         TTS_DELAY,
     );
     assert_eq!(cascade.first_transcript, None);
+    assert!(
+        !cascade.tts_segment_first_audio.is_empty(),
+        "story:elevenlabs-tts-provider-cancel: the synthesis's time to first audio of each spoken \
+         segment reaches the report: {cascade:?}"
+    );
+    assert_eq!(
+        Measure::TtsOfferToAudio.of(&cascade),
+        cascade.tts_segment_first_audio.first().copied()
+    );
+    assert_eq!(native.tts_segment_first_audio, Vec::<Duration>::new());
 
     let mut comparison = Comparison::new();
     comparison.ran("native-mock", vec![native]);
@@ -636,6 +647,7 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
         "final transcript",
         "first token",
         "tts first audio",
+        "tts offer to audio",
     ] {
         assert!(heading.contains(name), "{name} in {heading}");
     }
@@ -645,8 +657,8 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
     assert!(cascade_row.contains(" cascade "), "{cascade_row}");
     assert_eq!(
         native_row.matches("n/a").count(),
-        3,
-        "the three cascade steps: {native_row}"
+        4,
+        "the four cascade steps: {native_row}"
     );
     assert!(!heading.contains("playout start"), "{heading}");
     assert_eq!(
@@ -667,6 +679,7 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
         runs[0].final_transcript,
         runs[0].first_token,
         runs[0].tts_first_audio,
+        Measure::TtsOfferToAudio.of(&runs[0]),
     ] {
         assert!(
             cascade_row.contains(&cell(value)),
@@ -832,6 +845,7 @@ fn a_cascade_measure_is_not_one_of_the_native_topology_and_the_shared_ones_are_b
         Measure::FinalTranscript,
         Measure::FirstToken,
         Measure::TtsFirstAudio,
+        Measure::TtsOfferToAudio,
     ] {
         assert!(!measure.applies(Topology::Native), "{measure:?}");
         assert!(measure.applies(Topology::Cascade), "{measure:?}");
