@@ -1,0 +1,7 @@
+{"on":"open","send":{"message_type":"session_started","session_id":"fixture-session","config":{"sample_rate":8000,"audio_format":"ulaw_8000","commit_strategy":"vad","model_id":"scribe_v2_realtime","include_timestamps":true}}}
+{"on":"audio:5","send":{"message_type":"partial_transcript","text":"ja"}}
+{"on":"audio:20","send":{"message_type":"committed_transcript_with_timestamps","text":"ja","words":[{"text":"ja","start":0.08,"end":0.3,"type":"word","logprob":-0.1}]}}
+{"on":"audio:25","send":{"message_type":"warning","warning":"fixture warning"}}
+{"on":"audio:30","send":{"message_type":"partial_transcript","text":"nein"}}
+{"on":"audio:40","send":{"message_type":"committed_transcript_with_timestamps","text":"nein","words":[{"text":"nein","start":0.62,"end":0.8,"type":"word","logprob":-0.1}]}}
+{"on":"commit:1","send":{"message_type":"committed_transcript_with_timestamps","text":"","words":[]}}

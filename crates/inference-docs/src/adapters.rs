@@ -123,6 +123,15 @@ const BINDINGS: &[Binding] = &[
         licence: "hosted service: audio leaves the machine",
     },
     Binding {
+        name: "ElevenLabs realtime STT",
+        package: "inference-elevenlabs",
+        runs: "STT, streaming; hosted, WebSocket (`v1/speech-to-text/realtime`), one connection per recognition, μ-law 8 kHz or PCM16 in, committed spans with word timings",
+        features: &[],
+        record: Record::Claims("records/claims-stt.json"),
+        environment: "`ELEVENLABS_API_KEY`, or the keychain secret `elevenlabs-api-key` with feature `keychain`",
+        licence: "hosted service: audio leaves the machine",
+    },
+    Binding {
         name: "Deepgram Voice Agent",
         package: "inference-deepgram",
         runs: "native speech (duplex); hosted, WebSocket (`v1/agent/converse`), the listen, think and speak providers its `Settings` name",

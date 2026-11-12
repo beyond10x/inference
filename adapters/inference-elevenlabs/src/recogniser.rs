@@ -1,0 +1,763 @@
+//! The binding of the STT contract: [`ElevenLabsRecogniser`] and its recognition handle.
+
+use std::collections::VecDeque;
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use inference_stt::inference_audio::AudioFormat;
+use inference_stt::inference_core::envelope::EventEnvelope;
+use inference_stt::inference_core::model::{
+    Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality, ModelId,
+};
+use inference_stt::inference_text::{ReviseSpan, SpanId};
+use inference_stt::{
+    CONTRACT_REVISION, ConcurrencyLimitReached, InputEnded, Recogniser, RecognitionHandle,
+    RecognitionRequest, RevisionRefused, TranscriptEvent, TranscriptOutput,
+};
+use tokio::sync::mpsc as async_mpsc;
+
+use crate::config::Endpoint;
+use crate::connection::Connection;
+use crate::credential::{CredentialSource, ELEVENLABS_KEY_NAME, EnvironmentSource};
+use crate::error::{ConfigError, ElevenLabsError};
+use crate::stt_config::{CommitStrategy, TranscriptionConfig};
+use crate::stt_protocol::{self, ServerMessage, SpanTiming};
+
+/// The backend name of the recogniser's adapter record.
+pub const STT_BACKEND: &str = "elevenlabs-speech-to-text-realtime";
+
+/// The most server messages that wait for the caller; while that many wait, the connection is
+/// not read until the caller iterates.
+pub const STT_INBOUND_DEPTH: usize = 32;
+
+/// The most `warning` messages a recognition keeps; later ones are dropped.
+pub const WARNINGS_KEPT_STT: usize = 16;
+
+/// With the `vad` commit strategy, how long the endpoint must stay silent after the end-of-input
+/// commit was answered, with no span open, before the recognition ends: a commit the endpoint
+/// made on its own may answer for the binding's, and the transcript of the audio after it then
+/// follows within this.
+pub const VAD_END_QUIET: Duration = Duration::from_millis(500);
+
+/// How long the connection's thread waits before it offers a message again to a full queue.
+const DELIVERY_RETRY: Duration = Duration::from_millis(10);
+
+/// The capabilities an adapter record of the recogniser claims. `incremental_input`: each frame
+/// is sent as soon as the handle is iterated after it was offered, before input ends.
+/// `output_streaming`: each partial transcript is a hypothesis or revision delivered before input
+/// ends. Nothing else.
+pub fn stt_claims() -> Vec<Capability> {
+    vec![Capability::IncrementalInput, Capability::OutputStreaming]
+}
+
+/// What every recognition of one recogniser shares.
+struct Shared {
+    url: String,
+    endpoint: Endpoint,
+    config: TranscriptionConfig,
+    format: AudioFormat,
+    source: Arc<dyn CredentialSource>,
+    credential: String,
+}
+
+/// ElevenLabs' realtime speech-to-text endpoint as a recogniser of the STT contract, at locality
+/// `external_provider`. See the crate documentation.
+pub struct ElevenLabsRecogniser {
+    adapter: Adapter,
+    shared: Arc<Shared>,
+    running: Arc<AtomicUsize>,
+}
+
+impl fmt::Debug for ElevenLabsRecogniser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ElevenLabsRecogniser")
+            .field("adapter", &self.adapter.adapter_id())
+            .field("config", &self.shared.config)
+            .field("endpoint", &self.shared.endpoint)
+            .field("credential", &self.shared.credential)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ElevenLabsRecogniser {
+    /// A recogniser of `config` at `endpoint`, resolving the secret `credential` names through
+    /// `source` for every connection, under an adapter record of its own claiming
+    /// [`stt_claims`] with a maximum concurrency of one.
+    ///
+    /// # Errors
+    /// The [`ConfigError`] of [`TranscriptionConfig::validate`] or of the URL.
+    pub fn new(
+        endpoint: Endpoint,
+        config: TranscriptionConfig,
+        source: Arc<dyn CredentialSource>,
+        credential: impl Into<String>,
+    ) -> Result<Self, ConfigError> {
+        config.validate()?;
+        let url = stt_protocol::request_url(&endpoint, &config)?;
+        Ok(Self {
+            adapter: declare(1)?,
+            shared: Arc::new(Shared {
+                url,
+                endpoint,
+                format: config.input_format.audio_format(),
+                config,
+                source,
+                credential: credential.into(),
+            }),
+            running: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    /// [`ElevenLabsRecogniser::new`] with the key from the environment variable
+    /// `ELEVENLABS_API_KEY`, read at every connection.
+    ///
+    /// # Errors
+    /// As [`ElevenLabsRecogniser::new`].
+    pub fn from_env(endpoint: Endpoint, config: TranscriptionConfig) -> Result<Self, ConfigError> {
+        Self::new(
+            endpoint,
+            config,
+            Arc::new(EnvironmentSource::elevenlabs()),
+            ELEVENLABS_KEY_NAME,
+        )
+    }
+
+    /// This recogniser under a new adapter record that allows `max_concurrency` recognitions at
+    /// once, as the account's plan allows.
+    ///
+    /// # Errors
+    /// [`ConfigError::MaxConcurrency`] when it is not positive.
+    pub fn with_max_concurrency(mut self, max_concurrency: i64) -> Result<Self, ConfigError> {
+        self.adapter = declare(max_concurrency)?;
+        Ok(self)
+    }
+
+    /// The configuration it recognises with.
+    pub fn config(&self) -> &TranscriptionConfig {
+        &self.shared.config
+    }
+
+    /// The URL every recognition connects to. It carries no key.
+    pub fn request_url(&self) -> &str {
+        &self.shared.url
+    }
+}
+
+fn declare(max_concurrency: i64) -> Result<Adapter, ConfigError> {
+    Adapter::declare(DeclareAdapter {
+        model_id: ModelId::generate(),
+        backend: STT_BACKEND.to_owned(),
+        contract_revision: CONTRACT_REVISION.to_owned(),
+        execution_form: ExecutionForm::HostedService,
+        locality: Locality::ExternalProvider,
+        capabilities: stt_claims(),
+        max_concurrency,
+        descriptor: AdapterDescriptor::default(),
+    })
+    .map(|(adapter, _)| adapter)
+    .map_err(|_| ConfigError::MaxConcurrency(max_concurrency))
+}
+
+impl Recogniser for ElevenLabsRecogniser {
+    type Handle = ElevenLabsRecognition;
+
+    fn adapter(&self) -> &Adapter {
+        &self.adapter
+    }
+
+    fn start(
+        &mut self,
+        request: RecognitionRequest,
+    ) -> Result<ElevenLabsRecognition, ConcurrencyLimitReached> {
+        let max_concurrency = self.adapter.max_concurrency();
+        let limit = usize::try_from(max_concurrency).unwrap_or(usize::MAX);
+        let slot = Slot(Arc::clone(&self.running));
+        if self.running.fetch_add(1, Ordering::AcqRel) >= limit {
+            drop(slot);
+            return Err(ConcurrencyLimitReached { max_concurrency });
+        }
+        Ok(ElevenLabsRecognition {
+            output: TranscriptOutput::start(&self.adapter, request),
+            shared: Arc::clone(&self.shared),
+            worker: None,
+            started: false,
+            open: None,
+            timings: Vec::new(),
+            outstanding: 0,
+            end_sent: false,
+            heard_at: std::time::Instant::now(),
+            delivered: VecDeque::new(),
+            failure: None,
+            finished: false,
+            cancelled: false,
+            warnings: Vec::new(),
+            _slot: slot,
+        })
+    }
+}
+
+/// The place of one running recognition, given back when it is dropped.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// What the handle tells the thread that drives the connection.
+enum Command {
+    /// One `input_audio_chunk` of these bytes.
+    Audio(Vec<u8>),
+    /// One `input_audio_chunk` without audio and with `commit` true.
+    Commit,
+    Cancel,
+}
+
+/// What that thread tells the handle, and what the handle makes of its silence.
+enum Inbound {
+    Message(ServerMessage),
+    Failed(ElevenLabsError),
+    /// The read timeout passed after the end of input without a message.
+    Quiet,
+    /// With the `vad` strategy, [`VAD_END_QUIET`] passed without a message once every commit was
+    /// answered and no span was open.
+    Settled,
+}
+
+/// The thread that drives the connection, as the handle sees it.
+struct Worker {
+    commands: async_mpsc::UnboundedSender<Command>,
+    inbound: mpsc::Receiver<Inbound>,
+    /// When the answer to the end-of-input commit is due at the latest, once it was sent.
+    due: Option<std::time::Instant>,
+}
+
+/// One recognition of an [`ElevenLabsRecogniser`]; it runs until it is dropped or cancelled.
+///
+/// The connection is driven on a thread of its own, so audio and transcripts move while the
+/// caller is elsewhere. Before the end of input, iterating takes the frames offered and yields
+/// what has arrived, without waiting: `None` then means nothing has arrived yet. Once input has
+/// ended, iterating blocks until the answer to the end-of-input commit (with `vad`, followed by
+/// [`VAD_END_QUIET`] of silence with no span open), a failure or the read timeout, one deadline
+/// from the end of input, and `None` means the recognition has ended. A
+/// failure ends the iteration; [`ElevenLabsRecognition::failure`] says why, and the usage record,
+/// delivered once input has ended, is then not final.
+pub struct ElevenLabsRecognition {
+    output: TranscriptOutput,
+    shared: Arc<Shared>,
+    worker: Option<Worker>,
+    /// Whether a connection was started; it is started at most once.
+    started: bool,
+    open: Option<(SpanId, String)>,
+    timings: Vec<(SpanId, SpanTiming)>,
+    /// The commits sent and not yet answered by a committed transcript.
+    outstanding: usize,
+    end_sent: bool,
+    /// When the last server message arrived after the end-of-input commit was sent, or when it
+    /// was sent.
+    heard_at: std::time::Instant,
+    delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
+    failure: Option<ElevenLabsError>,
+    finished: bool,
+    cancelled: bool,
+    warnings: Vec<String>,
+    _slot: Slot,
+}
+
+impl fmt::Debug for ElevenLabsRecognition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ElevenLabsRecognition")
+            .field("format", &self.shared.format)
+            .field("spans", &self.output.spans().len())
+            .field("connected", &self.worker.is_some())
+            .field("failure", &self.failure)
+            .field("finished", &self.finished)
+            .field("cancelled", &self.cancelled)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ElevenLabsRecognition {
+    /// Why the recognition failed, once it has.
+    pub fn failure(&self) -> Option<&ElevenLabsError> {
+        self.failure.as_ref()
+    }
+
+    /// Where the committed span `span_id` lies in the audio sent, as the endpoint timed its
+    /// words; none for a span not committed by a timed `committed_transcript_with_timestamps`.
+    /// The STT contract's events carry no timing, so it is read here.
+    pub fn span_timing(&self, span_id: SpanId) -> Option<SpanTiming> {
+        self.timings
+            .iter()
+            .find(|(id, _)| *id == span_id)
+            .map(|(_, timing)| *timing)
+    }
+
+    /// The `warning` texts the endpoint sent, the first [`WARNINGS_KEPT_STT`] of them.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Asks the endpoint to commit what it has heard so far: sends every frame offered and not
+    /// yet sent, then a commit. Its committed transcript commits the open span when it arrives.
+    /// It does nothing before the first frame was sent, once input has ended (the end of input
+    /// commits) and once the recognition has ended.
+    pub fn commit(&mut self) {
+        if self.failure.is_some() || self.finished || self.cancelled || self.output.input_ended() {
+            return;
+        }
+        self.forward_input();
+        if let Some(worker) = self.worker.as_ref()
+            && worker.commands.send(Command::Commit).is_ok()
+        {
+            self.outstanding += 1;
+        }
+    }
+
+    /// Cancels the recognition: closes its connection, sending a close frame within
+    /// [`CLOSE_BOUND`](crate::CLOSE_BOUND), and drops every event not yet delivered. Nothing
+    /// more is delivered, a usage record neither, as for a recognition dropped before its input
+    /// ended.
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
+        self.delivered.clear();
+        self.stop_worker();
+    }
+
+    fn stop_worker(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.commands.send(Command::Cancel);
+        }
+    }
+
+    /// Ends the recognition as failed by `error`: its connection closed, its call marked failed,
+    /// and nothing more recognised. A span left open stays open.
+    fn fail(&mut self, error: ElevenLabsError) {
+        self.stop_worker();
+        self.output.mark_failed();
+        self.failure = Some(error);
+    }
+
+    /// Ends the recognition: the connection is closed by its thread once the handle lets go.
+    fn finish(&mut self) {
+        self.finished = true;
+        self.worker = None;
+    }
+
+    /// Sends every frame offered and not yet taken, connecting at the first. A frame is taken
+    /// only once it can be sent: the first in another format than the configured one, or whose
+    /// bytes do not hold its samples, fails the recognition and stays offered with every frame
+    /// after it, so a failed call's usage counts only the audio sent. A frame the connection's
+    /// thread can no longer take is dropped: that thread has stopped, and why arrives through its
+    /// own message, or as its silence once input has ended.
+    fn forward_input(&mut self) {
+        while self.failure.is_none() {
+            let Some((format, bytes, samples)) = self
+                .output
+                .next_offered()
+                .map(|frame| (frame.format, frame.data.len(), frame.sample_count))
+            else {
+                return;
+            };
+            let expected = self.shared.format;
+            if format != expected {
+                let detail = format!(
+                    "a frame in {format:?} where the configured input format {} is {expected:?}",
+                    self.shared.config.input_format
+                );
+                self.fail(ElevenLabsError::UnsupportedAudio(detail));
+                return;
+            }
+            if u64::try_from(bytes).ok()
+                != u64::from(samples).checked_mul(expected.encoding.width())
+            {
+                let detail = format!("a frame of {samples} samples in {bytes} bytes");
+                self.fail(ElevenLabsError::UnsupportedAudio(detail));
+                return;
+            }
+            if !self.started {
+                self.started = true;
+                match spawn(Arc::clone(&self.shared)) {
+                    Ok(worker) => self.worker = Some(worker),
+                    Err(error) => {
+                        self.fail(error);
+                        return;
+                    }
+                }
+            }
+            let Ok(Some(frame)) = self.output.take_next() else {
+                return;
+            };
+            if !frame.data.is_empty()
+                && let Some(worker) = self.worker.as_ref()
+            {
+                let _ = worker.commands.send(Command::Audio(frame.data));
+            }
+        }
+    }
+
+    /// The next thing the connection's thread said: without waiting before the end of input, and
+    /// after it by one deadline, the read timeout from the end-of-input commit, whose passing is
+    /// [`Inbound::Quiet`]. `None` when nothing has arrived before the end of input.
+    fn receive(&mut self) -> Option<Inbound> {
+        let now = std::time::Instant::now();
+        if self.output.input_ended() && !self.end_sent {
+            let worker = self.worker.as_mut()?;
+            worker.due = Some(now + self.shared.endpoint.read_timeout);
+            if worker.commands.send(Command::Commit).is_ok() {
+                self.outstanding += 1;
+            }
+            self.end_sent = true;
+            self.heard_at = now;
+        }
+        let settling = matches!(self.shared.config.commit_strategy, CommitStrategy::Vad(_))
+            && self.outstanding == 0
+            && self.open.is_none();
+        let settled_at = self.heard_at + VAD_END_QUIET;
+        let worker = self.worker.as_mut()?;
+        let received = if let Some(due) = worker.due {
+            let until = if settling { due.min(settled_at) } else { due };
+            match worker
+                .inbound
+                .recv_timeout(until.saturating_duration_since(now))
+            {
+                Ok(inbound) => {
+                    self.heard_at = std::time::Instant::now();
+                    inbound
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) if until < due => Inbound::Settled,
+                Err(mpsc::RecvTimeoutError::Timeout) => Inbound::Quiet,
+                Err(mpsc::RecvTimeoutError::Disconnected) => Inbound::Failed(stopped()),
+            }
+        } else {
+            match worker.inbound.try_recv() {
+                Ok(inbound) => inbound,
+                Err(mpsc::TryRecvError::Empty) => return None,
+                Err(mpsc::TryRecvError::Disconnected) => Inbound::Failed(stopped()),
+            }
+        };
+        Some(received)
+    }
+
+    /// Acts on one server message; see the crate documentation for the mapping.
+    fn apply(&mut self, message: ServerMessage) -> Result<(), ElevenLabsError> {
+        match message {
+            ServerMessage::SessionStarted | ServerMessage::Ignored => {}
+            ServerMessage::Warning(warning) => {
+                if self.warnings.len() < WARNINGS_KEPT_STT {
+                    self.warnings.push(warning);
+                }
+            }
+            ServerMessage::Partial(text) | ServerMessage::Committed(text) => {
+                if !text.trim().is_empty() {
+                    self.hear(text)?;
+                }
+            }
+            ServerMessage::CommittedWithTimestamps { text, timing } => {
+                if !text.trim().is_empty() {
+                    self.hear(text)?;
+                }
+                self.commit_open(timing)?;
+                self.outstanding = self.outstanding.saturating_sub(1);
+                let manual = self.shared.config.commit_strategy == CommitStrategy::Manual;
+                if manual && self.end_sent && self.outstanding == 0 {
+                    self.finish();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The silence of the server for the read timeout after the end of input: the end when no
+    /// span is open, since nothing heard is left uncommitted, and a stall when one is.
+    fn quiet(&mut self) -> Result<(), ElevenLabsError> {
+        if self.open.is_some() {
+            return Err(ElevenLabsError::Stalled(self.shared.endpoint.read_timeout));
+        }
+        self.finish();
+        Ok(())
+    }
+
+    /// Opens a span reading `text`, or revises the open one to read it.
+    fn hear(&mut self, text: String) -> Result<(), ElevenLabsError> {
+        match self.open.as_mut() {
+            None => {
+                let envelope = self.output.hypothesis(text.clone()).map_err(refused)?;
+                let span_id = envelope
+                    .payload
+                    .span_id()
+                    .ok_or_else(|| refused("a hypothesis about no span"))?;
+                self.open = Some((span_id, text));
+                self.delivered.push_back(envelope);
+            }
+            Some((span_id, current)) if *current != text => {
+                let envelope = self
+                    .output
+                    .revise(ReviseSpan {
+                        span_id: *span_id,
+                        text: text.clone(),
+                    })
+                    .map_err(refused)?;
+                *current = text;
+                self.delivered.push_back(envelope);
+            }
+            Some(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Commits the open span, if there is one, with `timing`.
+    fn commit_open(&mut self, timing: Option<SpanTiming>) -> Result<(), ElevenLabsError> {
+        if let Some((span_id, _)) = self.open.take() {
+            let envelope = self.output.commit(span_id).map_err(refused)?;
+            self.delivered.push_back(envelope);
+            if let Some(timing) = timing {
+                self.timings.push((span_id, timing));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn stopped() -> ElevenLabsError {
+    ElevenLabsError::Runtime("the thread driving the connection stopped without a word".to_owned())
+}
+
+/// A refusal of the STT contract, which a well-formed stream of this binding never meets.
+fn refused(error: impl fmt::Display) -> ElevenLabsError {
+    ElevenLabsError::Protocol(format!("the STT contract refused the transcript: {error}"))
+}
+
+impl Iterator for ElevenLabsRecognition {
+    type Item = EventEnvelope<TranscriptEvent>;
+
+    /// The next event; see [`ElevenLabsRecognition`] for when it waits.
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(envelope) = self.delivered.pop_front() {
+                return Some(envelope);
+            }
+            if self.cancelled {
+                return None;
+            }
+            if self.failure.is_none() && !self.finished {
+                self.forward_input();
+            }
+            if self.failure.is_some() || self.finished {
+                return self.output.usage().ok();
+            }
+            if self.worker.is_none() {
+                if !self.output.input_ended() {
+                    return None;
+                }
+                self.finished = true;
+                continue;
+            }
+            let outcome = match self.receive()? {
+                Inbound::Message(message) => self.apply(message),
+                Inbound::Failed(error) => Err(error),
+                Inbound::Quiet => self.quiet(),
+                Inbound::Settled => {
+                    self.finish();
+                    Ok(())
+                }
+            };
+            if let Err(error) = outcome {
+                self.fail(error);
+            }
+        }
+    }
+}
+
+impl Drop for ElevenLabsRecognition {
+    fn drop(&mut self) {
+        self.stop_worker();
+    }
+}
+
+impl RecognitionHandle for ElevenLabsRecognition {
+    fn output(&self) -> &TranscriptOutput {
+        &self.output
+    }
+
+    fn offer_frame(
+        &mut self,
+        frame: inference_stt::inference_audio::AudioFrame,
+    ) -> Result<(), InputEnded> {
+        self.output.offer(frame)
+    }
+
+    fn end_input(&mut self) -> Result<(), InputEnded> {
+        self.output.end_input()
+    }
+
+    fn revise(&mut self, input: ReviseSpan) -> Result<(), RevisionRefused> {
+        let span_id = input.span_id;
+        let text = input.text.clone();
+        let envelope = self.output.revise(input)?;
+        if let Some((open, current)) = self.open.as_mut()
+            && *open == span_id
+        {
+            *current = text;
+        }
+        self.delivered.push_back(envelope);
+        Ok(())
+    }
+}
+
+/// Starts the thread that drives one connection.
+fn spawn(shared: Arc<Shared>) -> Result<Worker, ElevenLabsError> {
+    let (commands, receiver) = async_mpsc::unbounded_channel();
+    let (sender, inbound) = mpsc::sync_channel(STT_INBOUND_DEPTH);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| ElevenLabsError::Runtime(error.to_string()))?;
+    std::thread::Builder::new()
+        .name("inference-elevenlabs-stt".to_owned())
+        .spawn(move || runtime.block_on(drive(shared, receiver, sender)))
+        .map_err(|error| ElevenLabsError::Runtime(error.to_string()))?;
+    Ok(Worker {
+        commands,
+        inbound,
+        due: None,
+    })
+}
+
+/// What the thread does after one event of its loop.
+enum Step {
+    Go,
+    /// The handle is gone or cancelled: close the connection, say nothing.
+    Stop,
+    /// Close the connection and tell the handle this, its last word.
+    Finish(ElevenLabsError),
+    /// The connection is lost: tell the handle this, its last word.
+    Lost(ElevenLabsError),
+}
+
+/// Whether a message offered to the handle's queue was taken.
+enum Offered {
+    Taken,
+    Full(Inbound),
+    Gone,
+}
+
+fn offer(inbound: &mpsc::SyncSender<Inbound>, item: Inbound) -> Offered {
+    match inbound.try_send(item) {
+        Ok(()) => Offered::Taken,
+        Err(mpsc::TrySendError::Full(item)) => Offered::Full(item),
+        Err(mpsc::TrySendError::Disconnected(_)) => Offered::Gone,
+    }
+}
+
+/// Carries out one command of the handle on `connection`.
+async fn command(connection: &mut Connection, command: Option<Command>, rate: u32) -> Step {
+    let written = match command {
+        Some(Command::Audio(data)) => {
+            connection
+                .send(stt_protocol::audio_chunk(&data, rate, false))
+                .await
+        }
+        Some(Command::Commit) => {
+            connection
+                .send(stt_protocol::audio_chunk(&[], rate, true))
+                .await
+        }
+        Some(Command::Cancel) | None => return Step::Stop,
+    };
+    match written {
+        Ok(()) => Step::Go,
+        Err(error) => Step::Finish(error),
+    }
+}
+
+/// Drives one connection: opens it, sends audio and commits as the handle asks, and hands every
+/// server message to the handle, until a failure, a cancel or the handle letting go. A cancel or
+/// drop during the opening handshake drops the attempt at once. While the handle's queue is full
+/// the connection is not read.
+async fn drive(
+    shared: Arc<Shared>,
+    mut commands: async_mpsc::UnboundedReceiver<Command>,
+    inbound: mpsc::SyncSender<Inbound>,
+) {
+    let endpoint = &shared.endpoint;
+    let opening = Connection::open(
+        &shared.url,
+        shared.source.as_ref(),
+        &shared.credential,
+        endpoint.connect_timeout,
+        endpoint.read_timeout,
+    );
+    tokio::pin!(opening);
+    let mut early = VecDeque::new();
+    let mut connection = loop {
+        tokio::select! {
+            opened = &mut opening => match opened {
+                Ok(connection) => break connection,
+                Err(error) => {
+                    let _ = inbound.send(Inbound::Failed(error));
+                    return;
+                }
+            },
+            next = commands.recv() => match next {
+                Some(Command::Cancel) | None => return,
+                Some(next) => early.push_back(next),
+            },
+        }
+    };
+    let rate = shared.config.input_format.sample_rate();
+    let mut held: Option<Inbound> = None;
+    loop {
+        let step = if let Some(next) = early.pop_front() {
+            command(&mut connection, Some(next), rate).await
+        } else {
+            tokio::select! {
+                next = commands.recv() => command(&mut connection, next, rate).await,
+                text = connection.read_until(None), if held.is_none() => match text {
+                    Ok(text) => match stt_protocol::parse_server_message(&text) {
+                        Ok(message) => match offer(&inbound, Inbound::Message(message)) {
+                            Offered::Taken => Step::Go,
+                            Offered::Full(item) => {
+                                held = Some(item);
+                                Step::Go
+                            }
+                            Offered::Gone => Step::Stop,
+                        },
+                        Err(error) => Step::Finish(error),
+                    },
+                    Err(error) => Step::Lost(error),
+                },
+                () = tokio::time::sleep(DELIVERY_RETRY), if held.is_some() => {
+                    match held.take().map(|item| offer(&inbound, item)) {
+                        Some(Offered::Full(item)) => {
+                            held = Some(item);
+                            Step::Go
+                        }
+                        Some(Offered::Gone) => Step::Stop,
+                        Some(Offered::Taken) | None => Step::Go,
+                    }
+                }
+            }
+        };
+        let last = match step {
+            Step::Go => continue,
+            Step::Stop => {
+                connection.close(None).await;
+                return;
+            }
+            Step::Finish(error) => {
+                connection.close(None).await;
+                error
+            }
+            Step::Lost(error) => error,
+        };
+        if held.is_none_or(|item| inbound.send(item).is_ok()) {
+            let _ = inbound.send(Inbound::Failed(last));
+        }
+        return;
+    }
+}

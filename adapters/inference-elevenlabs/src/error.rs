@@ -1,4 +1,5 @@
-//! The errors of the binding: a configuration it refuses, and why a synthesis failed.
+//! The errors of the binding: a configuration it refuses, and why a synthesis or a recognition
+//! failed.
 
 use std::fmt;
 use std::time::Duration;
@@ -22,6 +23,15 @@ pub enum ConfigError {
     InvalidUrl(String),
     /// The maximum concurrency is not positive.
     MaxConcurrency(i64),
+    /// The `audio_format` of a recognition is not one the realtime speech-to-text endpoint
+    /// documents, with why.
+    UnsupportedInputFormat { name: String, reason: &'static str },
+    /// The language code is not two or three ASCII letters (ISO 639-1 or ISO 639-3).
+    InvalidLanguageCode,
+    /// A key term is blank.
+    InvalidKeyterm,
+    /// A VAD threshold is not a finite number of at least zero.
+    VadSetting { name: &'static str, value: f64 },
 }
 
 impl fmt::Display for ConfigError {
@@ -43,13 +53,28 @@ impl fmt::Display for ConfigError {
             Self::Speed(speed) => write!(f, "voice speed {speed} is outside 0.7 to 1.2"),
             Self::InvalidUrl(detail) => write!(f, "invalid base URL: {detail}"),
             Self::MaxConcurrency(max) => write!(f, "maximum concurrency {max} is not positive"),
+            Self::UnsupportedInputFormat { name, reason } => {
+                write!(f, "input format {name} is refused: {reason}")
+            }
+            Self::InvalidLanguageCode => {
+                f.write_str("the language code must be two or three ASCII letters")
+            }
+            Self::InvalidKeyterm => f.write_str("a key term is blank"),
+            Self::VadSetting { name, value } => {
+                write!(f, "{name} {value} is not a finite number of at least zero")
+            }
         }
     }
 }
 
 impl std::error::Error for ConfigError {}
 
-/// Why a synthesis failed. No variant carries the credential or any part of it.
+/// Why a synthesis or a recognition failed. No variant carries the credential or any part of it.
+///
+/// The variants from [`ElevenLabsError::ScribeError`] to [`ElevenLabsError::TranscriberError`]
+/// are the fourteen error types of the realtime speech-to-text endpoint, one each
+/// (`stt_protocol::ERROR_TYPES`, feature `stt`), each carrying
+/// the endpoint's `error` text, at most 256 characters of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ElevenLabsError {
     /// The injected source refused the credential name, or the credential it returned cannot be
@@ -75,8 +100,73 @@ pub enum ElevenLabsError {
     /// `detail` it sent, at most 256 characters of it.
     Server(String),
     /// The runtime the synthesis drives its connection on could not be built, or the thread
-    /// that drives it on a caller's runtime thread could not be started or panicked.
+    /// that drives it on a caller's runtime thread could not be started or panicked; for a
+    /// recognition, the runtime or the thread that drives its connection could not be started,
+    /// or that thread stopped without a word.
     Runtime(String),
+    /// A frame offered to a recognition is not in the configured input format, or its bytes do
+    /// not hold its samples.
+    UnsupportedAudio(String),
+    /// `error`: a transcription error the endpoint names no narrower type for.
+    ScribeError(String),
+    /// `auth_error`: the endpoint refused the credential.
+    AuthError(String),
+    /// `quota_exceeded`: the account's quota is used up.
+    QuotaExceeded(String),
+    /// `commit_throttled`: commits came faster than the endpoint takes them.
+    CommitThrottled(String),
+    /// `unaccepted_terms`: the account has not accepted the terms the endpoint needs.
+    UnacceptedTerms(String),
+    /// `rate_limited`: requests came faster than the account may make them.
+    RateLimited(String),
+    /// `queue_overflow`: the endpoint's queue for the session overflowed.
+    QueueOverflow(String),
+    /// `resource_exhausted`: the endpoint has no capacity for the session.
+    ResourceExhausted(String),
+    /// `session_time_limit_exceeded`: the session ran past its time limit.
+    SessionTimeLimitExceeded(String),
+    /// `input_error`: the endpoint could not take the audio sent.
+    InputError(String),
+    /// `invalid_request`: the endpoint refused the request's parameters.
+    InvalidRequest(String),
+    /// `chunk_size_exceeded`: an audio chunk was larger than the endpoint takes.
+    ChunkSizeExceeded(String),
+    /// `insufficient_audio_activity`: the endpoint found too little speech in the audio.
+    InsufficientAudioActivity(String),
+    /// `transcriber_error`: the transcriber itself failed.
+    TranscriberError(String),
+}
+
+impl ElevenLabsError {
+    /// The `message_type` of the realtime speech-to-text error this is, one of the fourteen the
+    /// endpoint documents; none for any other failure.
+    pub fn scribe_error_type(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::ScribeError(_) => "error",
+            Self::AuthError(_) => "auth_error",
+            Self::QuotaExceeded(_) => "quota_exceeded",
+            Self::CommitThrottled(_) => "commit_throttled",
+            Self::UnacceptedTerms(_) => "unaccepted_terms",
+            Self::RateLimited(_) => "rate_limited",
+            Self::QueueOverflow(_) => "queue_overflow",
+            Self::ResourceExhausted(_) => "resource_exhausted",
+            Self::SessionTimeLimitExceeded(_) => "session_time_limit_exceeded",
+            Self::InputError(_) => "input_error",
+            Self::InvalidRequest(_) => "invalid_request",
+            Self::ChunkSizeExceeded(_) => "chunk_size_exceeded",
+            Self::InsufficientAudioActivity(_) => "insufficient_audio_activity",
+            Self::TranscriberError(_) => "transcriber_error",
+            Self::Credential(_)
+            | Self::Connect(_)
+            | Self::Transport(_)
+            | Self::Closed { .. }
+            | Self::Stalled(_)
+            | Self::Protocol(_)
+            | Self::Server(_)
+            | Self::Runtime(_)
+            | Self::UnsupportedAudio(_) => return None,
+        })
+    }
 }
 
 impl fmt::Display for ElevenLabsError {
@@ -93,6 +183,25 @@ impl fmt::Display for ElevenLabsError {
             Self::Protocol(detail) => write!(f, "protocol violation: {detail}"),
             Self::Server(message) => write!(f, "server error: {message}"),
             Self::Runtime(detail) => write!(f, "the synthesis's runtime failed: {detail}"),
+            Self::UnsupportedAudio(detail) => write!(f, "unsupported audio: {detail}"),
+            Self::ScribeError(message)
+            | Self::AuthError(message)
+            | Self::QuotaExceeded(message)
+            | Self::CommitThrottled(message)
+            | Self::UnacceptedTerms(message)
+            | Self::RateLimited(message)
+            | Self::QueueOverflow(message)
+            | Self::ResourceExhausted(message)
+            | Self::SessionTimeLimitExceeded(message)
+            | Self::InputError(message)
+            | Self::InvalidRequest(message)
+            | Self::ChunkSizeExceeded(message)
+            | Self::InsufficientAudioActivity(message)
+            | Self::TranscriberError(message) => write!(
+                f,
+                "speech-to-text {}: {message}",
+                self.scribe_error_type().unwrap_or("error")
+            ),
         }
     }
 }

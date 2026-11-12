@@ -1,0 +1,8 @@
+{"on":"open","send":{"message_type":"session_started","session_id":"fixture-session","config":{"sample_rate":8000,"audio_format":"ulaw_8000","language_code":"de","commit_strategy":"vad","model_id":"scribe_v2_realtime","include_timestamps":true}}}
+{"on":"audio:10","send":{"message_type":"partial_transcript","text":"Guten"}}
+{"on":"audio:20","send":{"message_type":"partial_transcript","text":"Guten Morgen"}}
+{"on":"audio:60","send":{"message_type":"committed_transcript","text":"Guten Morgen."}}
+{"on":"audio:60","send":{"message_type":"committed_transcript_with_timestamps","text":"Guten Morgen.","language_code":"de","words":[{"text":"Guten","start":0.12,"end":0.48,"type":"word","logprob":-0.1},{"text":" ","start":0.48,"end":0.52,"type":"spacing","logprob":0.0},{"text":"Morgen.","start":0.52,"end":1.04,"type":"word","logprob":-0.2}]}}
+{"on":"audio:80","send":{"message_type":"partial_transcript","text":"Wie geht's"}}
+{"on":"commit:1","send":{"message_type":"committed_transcript","text":"Wie geht's?"}}
+{"on":"commit:1","send":{"message_type":"committed_transcript_with_timestamps","text":"Wie geht's?","language_code":"de","words":[{"text":"Wie","start":1.3,"end":1.52,"type":"word","logprob":-0.1},{"text":" ","start":1.52,"end":1.56,"type":"spacing","logprob":0.0},{"text":"geht's?","start":1.56,"end":2.1,"type":"word","logprob":-0.3}]}}

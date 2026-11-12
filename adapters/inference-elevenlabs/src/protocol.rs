@@ -192,7 +192,7 @@ pub fn request_url(endpoint: &Endpoint, config: &VoiceConfig) -> Result<String, 
 /// Whether the authority at the start of `rest`, what follows `ws://`, names a loopback host:
 /// `localhost`, an IPv4 address in `127.0.0.0/8` or `[::1]`, with or without a port. A user
 /// part (`user@host`) is refused, since it could make a host read as another.
-fn is_loopback(rest: &str) -> bool {
+pub(crate) fn is_loopback(rest: &str) -> bool {
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     if authority.contains('@') {
         return false;
