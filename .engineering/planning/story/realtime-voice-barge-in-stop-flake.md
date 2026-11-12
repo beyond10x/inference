@@ -2,12 +2,22 @@
 format: aep.planning-md/3
 id: story:realtime-voice-barge-in-stop-flake
 kind: story
-status: draft
+status: active
 title: Barge-in-to-stop test of the voice topology fails intermittently
 summary: A wall-clock assertion in adversary2_topology_workers fails in about 2 of 9 runs.
 relations:
 - serves: vision:inference
-revision: 1
+- decomposes: epic:elevenlabs-route
+- depends_on: story:compare-elevenlabs-cascade-and-ollama
+scope:
+- confidence: inferred
+  path: examples/realtime-voice/src/compare.rs
+- confidence: cited
+  path: examples/realtime-voice/tests/adversary2_topology_workers.rs
+revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-12T15:36:18Z", actor: "human:operator", revision: 6}
+- {from: "proposed", to: "active", at: "2026-11-12T15:36:18Z", actor: "human:operator", revision: 7}
 ---
 ## Context
 
@@ -20,8 +30,14 @@ by it.
 ## Planned scope
 
 - The test measures barge-in to stop on a clock the test controls, or bounds it so the suite under
-  the shared build pool's load does not fail it, without loosening what it proves.
+  the shared build pool's load does not fail it, without loosening what it proves. A clock hook
+  may go into the cascade runner in `examples/realtime-voice/src/compare.rs`.
+- Order: worked after story:compare-elevenlabs-cascade-and-ollama (a `depends_on` edge), which
+  changes the same runner in `src/compare.rs` and adds tests under `examples/realtime-voice/tests`.
 
 ## Acceptance
 
+- The test still fails when barge-in to stop exceeds the bound it proves today (the attack of
+  30 ms needs two frames of 20 ms sent at pace), shown by a run with the stop delayed past that
+  bound, recorded in the change.
 - The test passes 50 runs in a row alone and 5 full-suite runs in a row.
