@@ -105,15 +105,17 @@ impl Provider {
             .find(|provider| provider.name() == name)
     }
 
-    /// Whether every variable the provider needs is set, as `lookup` answers them; a blank value
-    /// is unset. The OpenAI and Nova providers need none of the table: their keys and region are
-    /// read when the model is made. `elevenlabs-cascade` needs [`CASCADE_VARIABLES`], in that
-    /// order, and feature `local`.
+    /// Whether every variable the provider needs is set and taken, as `lookup` answers them; a
+    /// blank value is unset. The OpenAI and Nova providers need none of the table: their keys
+    /// and region are read when the model is made. `elevenlabs-cascade` needs
+    /// [`CASCADE_VARIABLES`] and feature `local`, checked row by row in that order, each value
+    /// with its variable: the server URL set and on loopback, the model set and, with the URL,
+    /// a server the `llama-server` adapter binds, the voice set and a voice id. Nothing is sent.
     ///
     /// # Errors
     ///
-    /// [`Refused::Missing`] naming the first variable not set, or [`Refused::Unbuilt`] for
-    /// `elevenlabs-cascade` built without feature `local`.
+    /// [`Refused::Missing`] or [`Refused::Invalid`] naming the first variable not set or not
+    /// taken, or [`Refused::Unbuilt`] for `elevenlabs-cascade` built without feature `local`.
     pub fn required(self, lookup: impl Fn(&str) -> Option<String>) -> Result<(), Refused> {
         match self {
             Self::Openai | Self::OpenaiLive | Self::Nova => Ok(()),
@@ -133,13 +135,45 @@ pub const CASCADE_VARIABLES: [&str; 3] = [
     crate::compare::VOICE_VARIABLE,
 ];
 
+/// The value of `variable` `lookup` answers, trimmed.
+///
+/// # Errors
+///
+/// [`Refused::Missing`] when it is unset or blank.
+#[cfg(feature = "local")]
+fn set(
+    lookup: &impl Fn(&str) -> Option<String>,
+    variable: &'static str,
+) -> Result<String, Refused> {
+    lookup(variable)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or(Refused::Missing(variable))
+}
+
 #[cfg(feature = "local")]
 fn cascade_required(lookup: impl Fn(&str) -> Option<String>) -> Result<(), Refused> {
-    for variable in CASCADE_VARIABLES {
-        if lookup(variable).is_none_or(|value| value.trim().is_empty()) {
-            return Err(Refused::Missing(variable));
-        }
-    }
+    use crate::compare::VOICE_VARIABLE;
+    use inference_elevenlabs::{OutputFormat, VoiceConfig};
+    use local_voice_cascade::local::{
+        MAX_OUTPUT_TOKENS, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE, loopback, server_adapter,
+    };
+
+    let url = set(&lookup, SERVER_URL_VARIABLE)?;
+    loopback(&url)
+        .map_err(|refused| Refused::Invalid(format!("{SERVER_URL_VARIABLE}: {refused}")))?;
+    let mut server = inference_llama_server::Config::new(url, set(&lookup, SERVER_MODEL_VARIABLE)?);
+    server.max_output_tokens = MAX_OUTPUT_TOKENS;
+    server_adapter(&server).map_err(|error| {
+        Refused::Invalid(format!(
+            "{SERVER_URL_VARIABLE} and {SERVER_MODEL_VARIABLE} name no server the llama-server \
+             adapter binds: {error}"
+        ))
+    })?;
+    let voice = set(&lookup, VOICE_VARIABLE)?;
+    VoiceConfig::new(voice.as_str(), OutputFormat::Pcm24000)
+        .validate()
+        .map_err(|error| Refused::Invalid(format!("{VOICE_VARIABLE}: {error}")))?;
     Ok(())
 }
 

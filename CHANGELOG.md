@@ -37,7 +37,9 @@
   recognition ends the conversation, saying why. A variable it needs that is not set, or set to
   a value it does not take, exits with status 2, naming it, the variables checked in the order
   the guide lists them (`realtime_voice::talk::Provider::required`). The key is
-  `ELEVENLABS_API_KEY`, or the keychain secret `elevenlabs-api-key`. Both ElevenLabs endpoints
+  `ELEVENLABS_API_KEY`, or the keychain secret `elevenlabs-api-key`, which `talk` says it waits
+  for and gives up on, with status 2, when the keychain gives no answer within 8 s
+  (`realtime_voice::elevenlabs::KEY_WAIT`). Both ElevenLabs endpoints
   of `talk`, and the ElevenLabs voice of `compare`'s cascade arm, connect to the host
   `ELEVENLABS_RESIDENCY` names (`realtime_voice::elevenlabs::endpoint`), so a key of a
   data-residency stack is no longer refused by the global host.

@@ -244,12 +244,12 @@ mod cascade {
     };
     use inference_elevenlabs::{
         CredentialSource, ELEVENLABS_KEY_NAME, ELEVENLABS_KEY_VARIABLE, ElevenLabsRecognition,
-        EnvironmentSource, KeychainSource, OutputFormat, VoiceConfig,
+        EnvironmentSource, KeychainSource,
     };
     use inference_llama_server::{Config, LlamaServer};
     use inference_llm::Generator;
     use local_voice_cascade::local::{
-        MAX_OUTPUT_TOKENS, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE, loopback, server_adapter,
+        MAX_OUTPUT_TOKENS, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE, server_adapter,
     };
     use realtime_voice::compare::{Cascade, Playout, VOICE_VARIABLE};
     use realtime_voice::talk::{CascadeNote, Refused, converse};
@@ -316,25 +316,37 @@ mod cascade {
 
     /// The ElevenLabs key: `ELEVENLABS_API_KEY` when it is set, the OS keychain's
     /// `elevenlabs-api-key` otherwise, resolved once here so a missing key stops before anything
-    /// opens. The key is never printed.
+    /// opens. Before it asks the keychain it says so on one line, as the keychain may wait for an
+    /// unlock prompt, and it gives up after `elevenlabs::KEY_WAIT`. The key is never printed.
     fn key() -> Result<Arc<dyn CredentialSource>, Refused> {
-        let source: Arc<dyn CredentialSource> =
+        let (source, named): (Arc<dyn CredentialSource>, String) =
             if std::env::var_os(ELEVENLABS_KEY_VARIABLE).is_some() {
-                Arc::new(EnvironmentSource::elevenlabs())
+                (
+                    Arc::new(EnvironmentSource::elevenlabs()),
+                    ELEVENLABS_KEY_VARIABLE.to_owned(),
+                )
             } else {
-                Arc::new(KeychainSource::native().map_err(|error| {
+                let keychain = KeychainSource::native().map_err(|error| {
                     Refused::Invalid(format!(
                         "{ELEVENLABS_KEY_VARIABLE} is not set and the OS keychain did not open: \
                          {error}"
                     ))
-                })?)
+                })?;
+                println!(
+                    "{ELEVENLABS_KEY_VARIABLE} is not set: waiting up to {} s for the OS \
+                     keychain's {ELEVENLABS_KEY_NAME}; unlock the keychain if it asks",
+                    elevenlabs::KEY_WAIT.as_secs()
+                );
+                (
+                    Arc::new(keychain),
+                    format!(
+                        "{ELEVENLABS_KEY_VARIABLE} is not set and the OS keychain's \
+                         {ELEVENLABS_KEY_NAME}"
+                    ),
+                )
             };
-        elevenlabs::resolves(&*source).map_err(|why| {
-            Refused::Invalid(format!(
-                "{ELEVENLABS_KEY_VARIABLE} or the keychain's {ELEVENLABS_KEY_NAME} gave no key: \
-                 {why}"
-            ))
-        })?;
+        elevenlabs::resolves(&*source)
+            .map_err(|why| Refused::Invalid(format!("{named} gave no key: {why}")))?;
         Ok(source)
     }
 
@@ -345,14 +357,10 @@ mod cascade {
             .map_err(|_| Refused::Missing(name))
     }
 
-    /// The generator of the `llama-server` the local voice cascade's variables name, refused
-    /// before anything is sent when its URL is not loopback. Nothing is sent before the first
-    /// turn.
+    /// The generator of the `llama-server` the local voice cascade's variables name, whose URL
+    /// `Provider::required` found on loopback. Nothing is sent before the first turn.
     fn generator() -> Result<Generator, Refused> {
-        let url = read(SERVER_URL_VARIABLE)?;
-        loopback(&url)
-            .map_err(|refused| Refused::Invalid(format!("{SERVER_URL_VARIABLE}: {refused}")))?;
-        let mut server = Config::new(url, read(SERVER_MODEL_VARIABLE)?);
+        let mut server = Config::new(read(SERVER_URL_VARIABLE)?, read(SERVER_MODEL_VARIABLE)?);
         server.max_output_tokens = MAX_OUTPUT_TOKENS;
         let refused = |detail: String| {
             Refused::Invalid(format!(
@@ -367,13 +375,9 @@ mod cascade {
             .map_err(|error| refused(error.to_string()))
     }
 
-    /// The voice `ELEVENLABS_VOICE_ID` names, refused when it is not a voice id.
+    /// The voice `ELEVENLABS_VOICE_ID` names, which `Provider::required` found a voice id.
     fn voice() -> Result<String, Refused> {
-        let voice = read(VOICE_VARIABLE)?;
-        VoiceConfig::new(voice.as_str(), OutputFormat::Pcm24000)
-            .validate()
-            .map_err(|error| Refused::Invalid(format!("{VOICE_VARIABLE}: {error}")))?;
-        Ok(voice)
+        read(VOICE_VARIABLE)
     }
 
     /// Prints one note; an answer continues on one line.

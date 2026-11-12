@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use inference_elevenlabs::{
     CommitStrategy, ConfigError, CredentialSource, ELEVENLABS_KEY_NAME, ElevenLabsRecogniser,
@@ -43,15 +44,22 @@ pub fn recogniser(
     )
 }
 
-/// Whether the ElevenLabs key resolves through `source` under `ELEVENLABS_KEY_NAME`. The
-/// source's future is driven to its end on a Tokio runtime of its own, on a thread of its own,
-/// since a source such as the keychain's reads on Tokio's blocking pool, and the caller may be
-/// on a thread with no runtime or inside one. The key is dropped unread.
+/// How long [`resolves`] waits for the key source to answer: long enough for an unlocked
+/// keychain, not for an unlock prompt nobody answers.
+pub const KEY_WAIT: Duration = Duration::from_secs(8);
+
+/// Whether the ElevenLabs key resolves through `source` under `ELEVENLABS_KEY_NAME` within
+/// [`KEY_WAIT`]. The source's future is driven on a Tokio runtime of its own, on a thread of its
+/// own, since a source such as the keychain's reads on Tokio's blocking pool, and the caller may
+/// be on a thread with no runtime or inside one. When the wait passes, the runtime is shut down
+/// without waiting for a read still blocked, which is left to end on its own. The wait bounds a
+/// source that awaits, as the keychain's does, not one that blocks the thread polling it. The
+/// key is dropped unread.
 ///
 /// # Errors
 ///
-/// Why it did not: the source's refusal, which never holds the key, no runtime to drive it on,
-/// or a panic of the source.
+/// Why it did not: the source's refusal, which never holds the key, no answer within
+/// [`KEY_WAIT`], no runtime to drive it on, or a panic of the source.
 pub fn resolves(source: &dyn CredentialSource) -> Result<(), String> {
     thread::scope(|scope| {
         scope
@@ -62,8 +70,17 @@ pub fn resolves(source: &dyn CredentialSource) -> Result<(), String> {
                     .map_err(|error| {
                         format!("no runtime to resolve the ElevenLabs key on: {error}")
                     })?;
-                runtime
-                    .block_on(source.resolve(ELEVENLABS_KEY_NAME))
+                let answered = runtime.block_on(async {
+                    tokio::time::timeout(KEY_WAIT, source.resolve(ELEVENLABS_KEY_NAME)).await
+                });
+                runtime.shutdown_background();
+                answered
+                    .map_err(|_| {
+                        format!(
+                            "the key source gave no answer within {} s",
+                            KEY_WAIT.as_secs()
+                        )
+                    })?
                     .map(drop)
                     .map_err(|error| format!("the ElevenLabs key did not resolve: {error}"))
             })

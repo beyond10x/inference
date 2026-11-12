@@ -112,7 +112,7 @@ ELEVENLABS_VOICE_ID=<voice id> ELEVENLABS_RESIDENCY=eu \
 | `INFERENCE_LLAMA_SERVER_URL` | the base URL of the `llama-server` API, on loopback | `talk` exits with status 2, naming it; also for a host that is not loopback |
 | `INFERENCE_LLAMA_SERVER_MODEL` | the model the server answers to, its `--alias` | `talk` exits with status 2, naming it; also when the adapter takes no binding of the URL and model |
 | `ELEVENLABS_VOICE_ID` | the voice the answer is spoken in, `pcm_24000` | `talk` exits with status 2, naming it; also for a value that is not a voice id |
-| `ELEVENLABS_API_KEY` | the ElevenLabs key, never printed | the OS keychain, secret `elevenlabs-api-key`; exit status 2 when the keychain does not open or gives no key |
+| `ELEVENLABS_API_KEY` | the ElevenLabs key, never printed | the OS keychain, secret `elevenlabs-api-key`, after a line saying `talk` waits for it; exit status 2 when the keychain does not open, gives no key, or gives no answer within 8 s, as when an unlock prompt is not answered |
 | `ELEVENLABS_RESIDENCY` | the data-residency host of the key, `global`, `us`, `eu`, `in` or `sg`, for both ElevenLabs endpoints; a key of a residency stack is refused by every other host | `global`; any other value exits with status 2, naming the variable, never the value |
 
 The variables are checked in the order of the table, before anything opens or is sent. Without feature
