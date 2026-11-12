@@ -26,9 +26,11 @@
   `[Self; 8]`), and `Measured` the public field `tts_segment_first_audio`; an exhaustive match
   on `Measure`, a binding typed `[Measure; 7]` and a struct literal of `Measured` break.
 - `realtime-voice`: `run_cascade` and `run_cascade_live` take the recognition's failure
-  (`fn(&R::Handle) -> Option<String>`, as `talk::converse` does), `Spread` gains the public field
-  `p95` and `Measured` the public field `clip`; a call with the old arguments and a struct
-  literal of either break.
+  (`fn(&R::Handle) -> Option<String>`, as `talk::converse` does), and they and `measure_cascade`
+  bound the recognition's handle `R::Handle: Send + 'static`, as its worker outlives the turn;
+  `Spread` gains the public field `p95` and `Measured` the public field `clip`; a call with the
+  old arguments or a recogniser whose handle is not `Send + 'static`, and a struct literal of
+  either break.
 
 ### Added
 
@@ -37,10 +39,12 @@
   the turn, so the endpoint's 500 ms VAD quiet window is not in its first audio; its LLM is the
   server `INFERENCE_LLAMA_SERVER_URL` and `INFERENCE_LLAMA_SERVER_MODEL` name, without the local
   recogniser's variables. A failed recognition is a note of the arm's run, with its reason, also
-  when the run's limit passes first; the run waits for it at most the plan's drain. The cascade
-  arm's ElevenLabs key, for its synthesiser and recogniser, is `ELEVENLABS_API_KEY` or the OS
-  keychain's `elevenlabs-api-key`, as `talk`'s is, and the notice that the keychain is asked goes
-  to standard error, in `talk` too.
+  when the run's limit passes first; the run waits for it at most the plan's drain, and the next
+  turn waits for a recognition left to end on its own at most `Cascade::settle`, the endpoint's
+  read timeout, so it is not refused. The cascade arm's ElevenLabs key, for its synthesiser and
+  recogniser, is `ELEVENLABS_API_KEY` or the OS keychain's `elevenlabs-api-key`, as `talk`'s is,
+  asked only after the arm's other prerequisites are met, and the notice that the keychain is
+  asked goes to standard error, in `talk` too.
   `--clips <dir>` asks each WAV clip of a directory in place of the built-in question, each cell
   of the table gives the 95th percentile next to the median, lowest and highest when more than
   one run measured it, and `--runs-out <file>` writes every run's per-step times as JSON lines

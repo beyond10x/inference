@@ -478,6 +478,7 @@ fn compare(args: &[&str]) -> std::process::Output {
             "LD_LIBRARY_PATH",
             std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
         )
+        .env("ELEVENLABS_API_KEY", "fixture-key-not-a-real-key")
         .args(args)
         .output()
         .expect("compare runs")

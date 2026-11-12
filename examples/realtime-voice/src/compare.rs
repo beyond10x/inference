@@ -888,6 +888,15 @@ pub struct Cascade<R, S> {
     pub attack: Duration,
     /// The silence after speech that ends the recogniser's input.
     pub hold: Duration,
+    /// The longest a recognition whose turn was cut can take to end on its own, as its read
+    /// timeout bounds an ElevenLabs recognition's wait for its endpoint: the next turn, in the
+    /// run or the next one, waits at most this long for a recognition an earlier turn left to
+    /// end on its own before it starts its own, so a recogniser that takes one recognition at a
+    /// time does not refuse it. Ten seconds unless set.
+    pub settle: Duration,
+    /// The recogniser's worker an earlier turn left to end on its own: it may still hold one of
+    /// the recogniser's places.
+    leftover: Option<thread::JoinHandle<()>>,
 }
 
 impl<R, S> Cascade<R, S> {
@@ -908,7 +917,33 @@ impl<R, S> Cascade<R, S> {
             input_format,
             attack: local_voice_cascade::VAD.attack,
             hold: local_voice_cascade::VAD.hold,
+            settle: Duration::from_secs(10),
+            leftover: None,
         }
+    }
+
+    /// Waits for the recogniser's worker an earlier turn left to end on its own, at most
+    /// [`Cascade::settle`] of wall-clock time, so the recognition it holds gives its place back
+    /// before the next one starts. Returns why the turn starts without it, when the worker had
+    /// still not ended.
+    fn await_leftover(&mut self) -> Option<String> {
+        let leftover = self.leftover.take()?;
+        let bound = self.settle;
+        let deadline = Instant::now() + bound;
+        while !leftover.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !leftover.is_finished() {
+            self.leftover = Some(leftover);
+            return Some(format!(
+                "the recognition an earlier turn left to end on its own had not ended within \
+                 {bound:?}"
+            ));
+        }
+        if let Err(panic) = leftover.join() {
+            std::panic::resume_unwind(panic);
+        }
+        None
     }
 }
 
@@ -1584,8 +1619,8 @@ pub fn measure_arm<E: fmt::Display>(
 /// `endpoint`, its key resolved through `source`, committed manually
 /// ([`crate::elevenlabs::manual_recogniser`]), offered `pcm_16000`, then `generator` and
 /// `synthesiser`, with the detector of the local cascade arm, `SPEECH_VAD`'s attack and hold:
-/// the hold of silence after speech ends the recognition's input, which commits it. Making it
-/// sends nothing.
+/// the hold of silence after speech ends the recognition's input, which commits it. Its
+/// [`Cascade::settle`] is the endpoint's read timeout. Making it sends nothing.
 ///
 /// # Errors
 ///
@@ -1598,10 +1633,12 @@ pub fn elevenlabs_arm<S>(
     synthesiser: S,
 ) -> Result<Cascade<inference_elevenlabs::ElevenLabsRecogniser, S>, inference_elevenlabs::ConfigError>
 {
+    let settle = endpoint.read_timeout;
     let recogniser = crate::elevenlabs::manual_recogniser(endpoint, source)?;
     let mut cascade = Cascade::new(recogniser, generator, synthesiser, crate::pcm16(16_000));
     cascade.attack = local_voice_cascade::local::SPEECH_VAD.attack;
     cascade.hold = local_voice_cascade::local::SPEECH_VAD.hold;
+    cascade.settle = settle;
     Ok(cascade)
 }
 
@@ -1837,6 +1874,9 @@ where
             self.stt,
             "transcript",
         );
+        if let Some(note) = self.cascade.await_leftover() {
+            self.note(note);
+        }
         match self.cascade.recogniser.start(request) {
             Ok(recognition) => {
                 let report = self.reporter();
@@ -1878,8 +1918,8 @@ where
     /// reports it meanwhile, as a note of the run: a recognition blocked on its endpoint when its
     /// turn is cut, as one waiting for the answer to its commit when the run's limit passes, fails
     /// only when its own read timeout passes. A worker still blocked after the wait is left to end
-    /// on its own, and the run says so. Every other report of the turn is dropped, as the turn is
-    /// over.
+    /// on its own, and the run says so; the next turn waits for it ([`Cascade::settle`]). Every
+    /// other report of the turn is dropped, as the turn is over.
     fn release_listener(&mut self) {
         let Some(listener) = self.listener.take() else {
             return;
@@ -1908,6 +1948,7 @@ where
                         "the recognition had not ended {drain:?} after its turn was cut; it is \
                          left to end on its own"
                     ));
+                    self.cascade.leftover = Some(listener);
                     return;
                 }
                 None => {}

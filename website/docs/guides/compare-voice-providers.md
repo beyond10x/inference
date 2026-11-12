@@ -55,8 +55,8 @@ session does not open, is skipped with the reason.
 The `cascade` provider speaks with ElevenLabs when its key resolves, from `ELEVENLABS_API_KEY` or,
 when that is unset, the OS keychain's `elevenlabs-api-key` (waiting up to 8 s, and saying so on
 standard error), and `ELEVENLABS_VOICE_ID` names a voice; otherwise it is skipped as "no hosted
-TTS configured". It
-connects to the host `ELEVENLABS_RESIDENCY` names (`global`, `us`, `eu`, `in` or `sg`, global when
+TTS configured". The key is looked up last, once everything else the arm needs is there, so an arm
+skipped for another reason does not ask the keychain. It connects to the host `ELEVENLABS_RESIDENCY` names (`global`, `us`, `eu`, `in` or `sg`, global when
 unset), as a key of a data-residency stack needs; a value it does not take skips the arm. Its
 recogniser and LLM are the local voice cascade's, bound with feature `local` and configured as in
 the local cascade's guide; a missing one skips it, naming which:
@@ -84,7 +84,9 @@ sends the commit, as it ends the local recogniser's input. The endpoint's voice 
 is not used, since it would add its quiet window of 500 ms after the commit's answer to the
 cascade's first audio. A failed recognition is a note of the arm's run, with the endpoint's reason,
 also when the run's limit passes first: the run then waits for the recognition at most 3 s, the
-plan's drain, and says so when it had still not ended.
+plan's drain, and says so when it had still not ended. The next turn, of the next run or clip,
+waits for such a recognition at most the endpoint's read timeout of 10 s before it starts its own,
+as its recogniser takes one recognition at a time.
 
 `--clips <dir>` asks each 16-bit PCM WAV file of a directory (`.wav`, in the order of the file
 names) in place of the built-in question: each provider runs `--runs` runs of each clip, every run
