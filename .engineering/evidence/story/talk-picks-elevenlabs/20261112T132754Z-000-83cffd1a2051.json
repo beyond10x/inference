@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-12T13:27:54Z",
+  "actor": "human:operator",
+  "artifact": "story:talk-picks-elevenlabs",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p realtime-voice --all-features --no-fail-fast at 493a6bd9 (merged as the wave's U3): 91 passed, 0 failed, 1 ignored; talk --help lists elevenlabs-cascade; unset and refused variables exit 2 naming the variable"
+  }
+}

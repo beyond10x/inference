@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:elevenlabs-realtime-stt-adapter
 kind: story
-status: active
+status: implemented
 title: ElevenLabs realtime speech-to-text as a hosted STT adapter
 summary: 'Scribe realtime over WebSocket behind Recogniser: μ-law 8 kHz and PCM16 in, hypotheses and timestamped committed spans out, usage in audio seconds.'
 tags:
@@ -27,10 +27,11 @@ scope:
   path: adapters/inference-elevenlabs/tests
 - confidence: cited
   path: website/docs/reference/environment.md
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-12T09:37:26Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"review_outcome":1}}}
 - {from: "proposed", to: "active", at: "2026-11-12T09:37:26Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "active", to: "implemented", at: "2026-11-12T13:27:54Z", actor: "human:operator", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":9,"verification":1}}, correlation: "wave-elevenlabs-route-p1"}
 ---
 ## Context
 

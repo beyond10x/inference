@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-12T12:31:54Z",
+  "actor": "human:operator",
+  "artifact": "review-result:security-elevenlabs-tts-cancel-pass-1",
+  "kind": "review-result",
+  "revision": 2,
+  "change": {
+    "change": "redaction",
+    "literal_sha256": "2ba25d993af7d8ddc033d96fcd3c14941df1ed497f5623a1e4b2fbf725832ec8",
+    "literal_chars": 62,
+    "replacement": "<scratch>",
+    "count": 5,
+    "reason": "local machine path, not for a public repository"
+  }
+}

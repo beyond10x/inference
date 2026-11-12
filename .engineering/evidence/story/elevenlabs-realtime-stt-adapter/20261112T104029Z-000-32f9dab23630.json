@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-12T10:40:29Z",
+  "actor": "human:operator",
+  "artifact": "story:elevenlabs-realtime-stt-adapter",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo test -p inference-elevenlabs --all-features --no-fail-fast --test stt --test stt_conformance: base 1644e13f has no ElevenLabsRecogniser (does not compile), treatment deedb558 passes 15 and 8; VERIFIED, new behaviour",
+    "reference": "1644e13f vs deedb558"
+  }
+}

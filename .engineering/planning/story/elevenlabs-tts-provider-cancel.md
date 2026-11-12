@@ -2,9 +2,9 @@
 format: aep.planning-md/3
 id: story:elevenlabs-tts-provider-cancel
 kind: story
-status: active
-title: ElevenLabs TTS cancel stops generation at the provider, and time to first audio is readable
-summary: A cancel closes the segment's context so the provider stops generating; each segment's time to first audio reaches the caller.
+status: implemented
+title: ElevenLabs TTS cancel drops a segment on the client, and time to first audio is readable
+summary: A cancel stops a segment's playback and drops its remaining frames; the hosted endpoint does not stop a flushed context on close (measured); each segment's time to first audio reaches the caller.
 tags:
 - downstream-input
 relations:
@@ -36,10 +36,11 @@ scope:
   path: ess/domains/stream.yaml
 - confidence: inferred
   path: examples/realtime-voice
-revision: 6
+revision: 9
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-12T09:37:26Z", actor: "human:operator", revision: 5}
 - {from: "proposed", to: "active", at: "2026-11-12T09:37:26Z", actor: "human:operator", revision: 6}
+- {from: "active", to: "implemented", at: "2026-11-12T13:27:54Z", actor: "human:operator", revision: 9, decided_on: {"recorded":{"test_result":2,"review_outcome":3}}, correlation: "wave-elevenlabs-route-p1"}
 ---
 ## Context
 
@@ -70,8 +71,19 @@ segment, which the synthesis events do not carry.
 
 ## Acceptance
 
-- A fixture test: after a cancel, the fixture server receives the context close for that context
-  and the caller receives no frame of it.
+Revised on 2026-11-12, after a billed probe of the hosted `multi-stream-input` endpoint
+(test_result evidence on this story; `adapters/inference-elevenlabs/tests/tts_cancel_live.rs`):
+a `close_context` sent 138 ms after the first audio did not stop generation (99% of the text's
+audio arrived after it), the whole 22.7 s of audio was generated within 785 ms, and a flush
+without a close got its final message only 20012 ms after the last audio. A provider-side cancel
+is therefore not available on this endpoint; the close stays with the text, and a cancel stops
+playback on the client. The first acceptance line below replaces "the fixture server receives the
+context close for that context" (review-result:security-elevenlabs-tts-cancel-pass-1, finding 3).
+
+- A fixture test: after a cancel, the caller receives no frame of that context, and no second
+  context close is sent.
 - A fixture test: the next segment speaks on the same connection after a cancel.
 - A fixture test: time to first audio is present for every spoken segment and is at least the
   fixture server's injected delay.
+- The crate doc states the measured behaviour of a close on the hosted endpoint, with its date.
+- A billed live probe of the close and flush behaviour exists, ignored, behind feature `live`.

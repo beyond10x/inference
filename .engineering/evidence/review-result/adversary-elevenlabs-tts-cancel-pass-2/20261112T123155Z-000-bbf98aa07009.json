@@ -1,0 +1,15 @@
+{
+  "at": "2026-11-12T12:31:55Z",
+  "actor": "human:operator",
+  "artifact": "review-result:adversary-elevenlabs-tts-cancel-pass-2",
+  "kind": "review-result",
+  "revision": 3,
+  "change": {
+    "change": "redaction",
+    "literal_sha256": "c341f697d8e1d1a1ac2ef3a915e31b2ec4ade09bb5b6438c713d4af61f8cd6a5",
+    "literal_chars": 53,
+    "replacement": "<worktrees>",
+    "count": 1,
+    "reason": "local machine path, not for a public repository"
+  }
+}

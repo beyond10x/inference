@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-12T11:43:16Z",
+  "actor": "human:operator",
+  "artifact": "story:elevenlabs-tts-provider-cancel",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p inference-elevenlabs --features live --test tts_cancel_live -- --ignored, worktree impl-elevenlabs-tts-provider-cancel, ELEVENLABS_RESIDENCY=eu, ulaw_8000, 1 passed: P1 flush without close gives isFinal only 20012 ms after the last audio; P2 close_context 138 ms after the first audio still delivered 11 more audio messages, 99% of the whole text's audio (22530 of 22680 ms), final 827 ms; P3 largest gap between audio messages 166 ms, median 20 ms, final 40 ms after a close; P4 a text of only an ellipsis returned 1 audio message of 2973 B and its final 42 ms after a close"
+  }
+}

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:elevenlabs-agent-session-overrides
 kind: story
-status: draft
+status: archived
 title: ElevenLabs agent sends the session's prompt, first message, voice and language, and records what usage it can
 summary: conversation_config_override from the neutral session configuration; usage recorded or documented as unknown.
 tags:
@@ -40,7 +40,9 @@ scope:
   path: crates/inference-testkit/src/duplex
 - confidence: cited
   path: ess/domains/duplex.yaml
-revision: 6
+revision: 7
+transitions:
+- {from: "draft", to: "archived", at: "2026-11-12T12:32:16Z", actor: "human:operator", revision: 7, decided_on: {"recorded":{"review_outcome":6}}}
 ---
 ## Context
 

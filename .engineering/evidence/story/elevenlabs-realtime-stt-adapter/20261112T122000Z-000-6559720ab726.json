@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-12T12:20:00Z",
+  "actor": "human:operator",
+  "artifact": "story:elevenlabs-realtime-stt-adapter",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p inference-elevenlabs --features live,stt --test stt_live -- --ignored, on 016e083d with the endpoint set to wss://api.eu.residency.elevenlabs.io for one run (the operator's key is EU residency): 1 passed, 30000 ms of input audio, one committed span 0.04-29.9 s; on the default global host the same run fails AuthError"
+  }
+}

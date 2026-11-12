@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-12T13:26:43Z",
+  "actor": "human:operator",
+  "artifact": "story:talk-picks-elevenlabs",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-talk-elevenlabs-pass-1",
+    "review": "review-result:adversary-talk-elevenlabs-pass-1",
+    "outcome": "fixed"
+  }
+}

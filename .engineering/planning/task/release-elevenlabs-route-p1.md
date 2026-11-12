@@ -12,6 +12,7 @@ relations:
 - depends_on: story:elevenlabs-realtime-stt-adapter
 - depends_on: story:elevenlabs-tts-provider-cancel
 - serves: vision:inference
+- depends_on: story:talk-picks-elevenlabs
 revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-12T09:37:36Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"review_outcome":4}}}

@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-12T12:07:34Z",
+  "actor": "human:operator",
+  "artifact": "story:elevenlabs-tts-provider-cancel",
+  "kind": "story",
+  "revision": 8,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "correction of the earlier tts_cancel_live record of 2026-11-12: of P2's 22530 ms of audio, 371 ms came before the close and 22158 ms after it, which is 97.7% of the whole text's 22680 ms (P3), not 99% (review-result:adversary-elevenlabs-tts-cancel-pass-2, finding F2)"
+  }
+}

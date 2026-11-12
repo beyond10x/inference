@@ -3,16 +3,15 @@ format: aep.planning-md/3
 id: task:release-elevenlabs-route-p2
 kind: task
 status: draft
-title: Release carrying the ElevenLabs agent overrides and usage and the async speech handles
+title: Release carrying the async speech handles
 summary: One minor tag after the two P2 stories.
 tags:
 - downstream-input
 relations:
 - decomposes: epic:elevenlabs-route
-- depends_on: story:elevenlabs-agent-session-overrides
 - depends_on: story:async-speech-handles
 - serves: vision:inference
-revision: 1
+revision: 2
 ---
 ## Context
 
