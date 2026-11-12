@@ -81,15 +81,17 @@
 //! A cancel stops nothing at the server: the context was flushed and closed when its text was
 //! sent, and the specification says a context set to flush "will continue flushing" when closed.
 //! So the endpoint still generates, sends and bills the whole cancelled segment; a barge-in saves
-//! playback, not cost.
+//! playback, not cost. A billed probe confirmed it on the hosted endpoint; the crate
+//! documentation gives the measurement.
 //!
 //! # Points the documentation leaves open, and what the binding decided
 //!
 //! - **When a context's final message comes.** The schema says only that it "indicates this is
 //!   the final message for the context". The binding closes each context right after its flush,
 //!   as the guide's worked conversation does, and reads the final message as the end of the
-//!   segment. Whether a flush alone, without a close, would bring one is not stated, so the
-//!   binding never relies on it.
+//!   segment. Whether a flush alone, without a close, would bring one is not stated; the
+//!   billed probe found it comes only at the endpoint's inactivity timeout, so the binding
+//!   never relies on it.
 //! - **A second `close_context`.** Not described; a cancel therefore sends none (see Cancel).
 //! - **The two initialization messages.** The specification lists a connection initialization
 //!   (`text` must be a single space) and a context initialization (`text` should end with a

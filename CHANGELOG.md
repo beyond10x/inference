@@ -19,8 +19,31 @@
   answers when the session was cancelled: a send started after `cancel()`, or one a cancel
   overtook while the ingress took it, no longer answers `Refused`, which promises that nothing
   was forwarded. `inference`: an `Agent` maps it to `Error::Closed`.
+- `inference-elevenlabs`: `ConfigError` gains the variant `Residency`, which
+  `Endpoint::from_env` answers when `ELEVENLABS_RESIDENCY` names no residency; an exhaustive
+  match on it breaks.
+- `realtime-voice`: `Measure` gains the variant `TtsOfferToAudio` (`Measure::ALL` is now
+  `[Self; 8]`), and `Measured` the public field `tts_segment_first_audio`; an exhaustive match
+  on `Measure`, a binding typed `[Measure; 7]` and a struct literal of `Measured` break.
 
 ### Added
+
+- `inference-elevenlabs`: `Endpoint::from_env` reads `ELEVENLABS_RESIDENCY` (`global`, `us`,
+  `eu`, `in` or `sg`, global when empty or unset; the refusal of any other value never prints
+  it) and `Endpoint::with_residency` sets the host of a
+  residency; `Residency` and `RESIDENCY_VARIABLE` are exported without feature `duplex`. The live
+  example and `stt_live` read it, so a residency key reaches its own host. The billed probe
+  `tts_cancel_live` (feature `live`, ignored) prints how the multi-stream endpoint answers a
+  flush, a close mid-generation and a text of punctuation only. Its run on 2026-11-12 found
+  that a close does not stop the generation of a flushed context (97.7% of a text's audio,
+  22.2 of 22.7 s, came after a close sent at its first audio) and that a flush alone brings the final message only
+  at the 20 s inactivity timeout, so a cancel stays a client-side cut, which the crate
+  documentation now records.
+
+- `inference-tts`: `SynthesisOutput::first_audio` gives each segment's time to first audio, from
+  its offer to its first frame, for every synthesiser, read through `SynthesisHandle::output`.
+  The `realtime-voice` latency report shows it per cascade run as `tts offer to audio` (the
+  answer's first segment; `Measured::tts_segment_first_audio` holds every segment).
 
 - `inference-elevenlabs`, feature `stt`: `ElevenLabsRecogniser`, ElevenLabs realtime
   speech-to-text (`/v1/speech-to-text/realtime`, `scribe_v2_realtime` unless configured) as an

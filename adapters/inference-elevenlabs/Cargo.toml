@@ -56,6 +56,10 @@ required-features = ["stt"]
 name = "stt_live"
 required-features = ["live", "stt"]
 
+[[test]]
+name = "tts_cancel_live"
+required-features = ["live"]
+
 [[example]]
 name = "live"
 required-features = ["live"]

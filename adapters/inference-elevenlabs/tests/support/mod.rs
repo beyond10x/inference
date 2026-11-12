@@ -4,12 +4,22 @@
 //! The server listens on 127.0.0.1 at a port the system picks. Each connection is checked
 //! against the protocol: the `xi-api-key` header carries the fixture key, the path and query name
 //! the voice, model and format, and no message carries a key. Every context opens with a single
-//! space and its `context_id`, gets one text ending in exactly one space with `flush` set, and is
-//! closed with `close_context` after it; a context name is used once; `close_socket` is the last
-//! message. Every departure is recorded as a violation. Each context, once closed, is answered
-//! with the scripted messages of a recorded fixture under `tests/fixtures/`, each naming the
-//! context in `contextId`, as its [`Script`] says; the n-th context the server answers, across its
-//! connections, gets the n-th script.
+//! space and its `context_id` and gets one text ending in exactly one space with `flush` set; a
+//! `close_context` comes only after that text and at most once; a context name is used once;
+//! `close_socket` is the last message. Every departure is recorded as a violation. Each context,
+//! once its text is flushed, is answered with the scripted messages of a recorded fixture under
+//! `tests/fixtures/`, each naming the context in `contextId`, as its [`Script`] says; the n-th
+//! context the server answers, across its connections, gets the n-th script.
+//!
+//! The server generates as the hosted endpoint was measured to (`src/lib.rs`,
+//! `tests/fixtures/tts-multi-stream-protocol.md`): a `close_context` does not cut a flushed
+//! context, whose audio the server sends whole, and the final message follows the last audio
+//! of a closed context. The endpoint sends the final message of a flushed context that is
+//! never closed only at its inactivity timeout, about 20 s later (20012 ms in the probe); the
+//! server does not model that and sends such a context no final message at all. A
+//! [`FixtureServer::paced`] server waits before the first audio message of each context and
+//! between the others, so a test can measure the time to first audio and land a cancel
+//! mid-segment.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -41,12 +51,14 @@ pub const KEY: &str = "fixture-key-d41d8cd98f00b204";
 /// The voice the fixture server expects.
 pub const VOICE: &str = "fixturevoice01";
 
-/// What the server does once a context has been closed by the client.
+/// What the server does once the client has flushed a context's text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Script {
-    /// Sends every message of the fixture, the context's final message last.
+    /// Sends every audio message of the fixture, a close or not, and the context's final message
+    /// after the last of them once the client has closed the context: as the endpoint does, a
+    /// flushed context ends only when it is closed, and a close cuts none of its audio.
     Serve,
-    /// Sends every audio message of the fixture and no final message.
+    /// Sends every audio message of the fixture and no final message, closed or not.
     NoFinal,
     /// Sends the first audio message, then closes the connection with code 1011.
     CloseAfterFirst,
@@ -71,8 +83,10 @@ pub struct Seen {
     pub key: Option<String>,
     pub messages: Vec<String>,
     pub violations: Vec<String>,
-    /// The contexts the client closed, in order, each answered by its script.
+    /// The contexts the client flushed, in order, each answered by its script.
     pub contexts: Vec<String>,
+    /// The contexts the client closed with `close_context`, in order.
+    pub closed: Vec<String>,
     /// The client sent `close_socket`.
     pub close_socket: bool,
     /// The client closed the connection, by a close frame or by dropping it.
@@ -88,12 +102,15 @@ pub struct FixtureServer {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// What one connection's task shares with the server: the fixture lines, the scripts and how
-/// many contexts have been answered so far.
+/// What one connection's task shares with the server: the fixture lines, the scripts, how many
+/// contexts have been answered so far, the wait before the first audio message of a context and
+/// the wait before each later one.
 struct Plan {
     lines: Vec<String>,
     scripts: Vec<Script>,
     answered: Mutex<usize>,
+    first_delay: Duration,
+    pace: Duration,
 }
 
 impl Plan {
@@ -121,10 +138,23 @@ impl FixtureServer {
     /// A server answering its n-th context with `scripts[n]`, the last script for every context
     /// past them.
     pub fn scripted(format: OutputFormat, scripts: Vec<Script>) -> Self {
+        Self::paced(format, scripts, Duration::ZERO, Duration::ZERO)
+    }
+
+    /// [`FixtureServer::scripted`], waiting `first_delay` after a context's text is flushed
+    /// before its first audio message, and `pace` before each later one.
+    pub fn paced(
+        format: OutputFormat,
+        scripts: Vec<Script>,
+        first_delay: Duration,
+        pace: Duration,
+    ) -> Self {
         let plan = Arc::new(Plan {
             lines: fixture(format).lines().map(str::to_owned).collect(),
             scripts,
             answered: Mutex::new(0),
+            first_delay,
+            pace,
         });
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         std_listener.set_nonblocking(true).expect("non-blocking");
@@ -238,6 +268,7 @@ struct Context {
 enum Asked {
     Nothing,
     Answer(String),
+    Close(String),
     CloseSocket,
 }
 
@@ -318,6 +349,8 @@ async fn serve(
     });
 
     let mut contexts: HashMap<String, Context> = HashMap::new();
+    let mut answering: HashMap<String, tokio::sync::watch::Sender<bool>> = HashMap::new();
+    let mut tasks = Vec::new();
     let mut socket_closed = false;
     let mut position = 0;
     loop {
@@ -340,8 +373,20 @@ async fn serve(
                     Asked::Nothing => {}
                     Asked::Answer(context_id) => {
                         record(&|seen| seen.contexts.push(context_id.clone()));
-                        for out in answer(&plan, &context_id) {
-                            let _ = out_tx.send(out);
+                        let (closed_tx, closed_rx) = tokio::sync::watch::channel(false);
+                        tasks.push(tokio::spawn(answer(
+                            plan.take_script(),
+                            Arc::clone(&plan),
+                            context_id.clone(),
+                            out_tx.clone(),
+                            closed_rx,
+                        )));
+                        answering.insert(context_id, closed_tx);
+                    }
+                    Asked::Close(context_id) => {
+                        record(&|seen| seen.closed.push(context_id.clone()));
+                        if let Some(closed) = answering.get(&context_id) {
+                            let _ = closed.send(true);
                         }
                     }
                     Asked::CloseSocket => {
@@ -358,61 +403,76 @@ async fn serve(
             Some(Ok(Message::Close(_)) | Err(_)) | None => break,
         }
     }
+    for task in tasks {
+        task.abort();
+    }
     drop(out_tx);
     writer.abort();
     record(&|seen| seen.client_closed = true);
     let _ = closes.send(index);
 }
 
-/// The messages the server sends for the context `context_id`, by the next script.
-fn answer(plan: &Plan, context_id: &str) -> Vec<Out> {
+/// Answers the context `context_id` by `script`: its audio messages, paced as the plan says and
+/// never stopped by a close, then its final message as the script says.
+async fn answer(
+    script: Script,
+    plan: Arc<Plan>,
+    context_id: String,
+    out: tokio::sync::mpsc::UnboundedSender<Out>,
+    mut closed: tokio::sync::watch::Receiver<bool>,
+) {
     let with_context = |line: &str| -> String {
         match serde_json::from_str::<Value>(line) {
             Ok(Value::Object(mut object)) => {
                 object
                     .entry("contextId")
-                    .or_insert_with(|| Value::String(context_id.to_owned()));
+                    .or_insert_with(|| Value::String(context_id.clone()));
                 Value::Object(object).to_string()
             }
             _ => line.to_owned(),
         }
     };
-    let audio: Vec<Out> = plan
+    let audio: Vec<String> = plan
         .lines
         .iter()
         .filter(|line| !line.contains("isFinal"))
-        .map(|line| Out::Text(with_context(line)))
+        .map(|line| with_context(line))
         .collect();
-    let first = |mut audio: Vec<Out>| {
-        audio.truncate(1);
-        audio
+    let final_message = serde_json::json!({"isFinal": true, "contextId": context_id}).to_string();
+    let first = audio.first().cloned().unwrap_or_default();
+    let send = |text: String| {
+        let _ = out.send(Out::Text(text));
     };
-    let final_message =
-        Out::Text(serde_json::json!({"isFinal": true, "contextId": context_id}).to_string());
-    match plan.take_script() {
-        Script::Serve => {
-            let mut out = audio;
-            out.push(final_message);
-            out
+    match script {
+        Script::Serve | Script::NoFinal => {
+            for (at, line) in audio.into_iter().enumerate() {
+                let wait = if at == 0 { plan.first_delay } else { plan.pace };
+                if !wait.is_zero() {
+                    tokio::time::sleep(wait).await;
+                }
+                send(line);
+            }
+            if script == Script::Serve {
+                let _ = closed.wait_for(|closed| *closed).await;
+                send(final_message);
+            }
         }
-        Script::NoFinal => audio,
-        Script::CloseAtOnce => vec![Out::Close(1011, "fixture closes before any audio")],
+        Script::CloseAtOnce => {
+            let _ = out.send(Out::Close(1011, "fixture closes before any audio"));
+        }
         Script::CloseAfterFirst => {
-            let mut out = first(audio);
-            out.push(Out::Close(1011, "fixture closes mid-segment"));
-            out
+            send(first);
+            let _ = out.send(Out::Close(1011, "fixture closes mid-segment"));
         }
         Script::SendAfterFirst(raw) => {
-            let mut out = first(audio);
-            out.push(Out::Text(with_context(raw)));
-            out
+            send(first);
+            send(with_context(raw));
         }
         Script::SendBareAfterFirst(raw) => {
-            let mut out = first(audio);
-            out.push(Out::Text(raw.to_owned()));
-            out
+            send(first);
+            send(raw.to_owned());
         }
-        Script::Silent | Script::Refuse => Vec::new(),
+        Script::Silent | Script::Refuse => {}
     }
 }
 
@@ -471,7 +531,7 @@ fn check(
             violations.push(format!("message {position} closes a context with no text"));
         }
         context.closed = true;
-        return Asked::Answer(context_id.clone());
+        return Asked::Close(context_id.clone());
     }
     let Some(Value::String(said)) = message.get("text") else {
         violations.push(format!("message {position} has no text"));
@@ -508,7 +568,7 @@ fn check(
         violations.push(format!("message {position} does not flush"));
     }
     context.flushed = true;
-    Asked::Nothing
+    Asked::Answer(context_id.clone())
 }
 
 /// Runs `work` on a thread of its own and fails the case when it does not return within `bound`.

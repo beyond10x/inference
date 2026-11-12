@@ -394,3 +394,67 @@ fn the_frames_of_a_refused_receipt_stay_counted_and_later_receipts_add_to_them()
         Some(SegmentState::Played)
     );
 }
+
+/// The time to first audio of a segment runs from its offer to its first frame, streamed or
+/// emitted with its completion, and later frames do not move it; a segment with no frame, one
+/// discarded before any, and one the synthesis does not hold have none.
+#[test]
+fn time_to_first_audio_runs_from_the_offer_to_the_first_frame() {
+    let wait = std::time::Duration::from_millis(30);
+    let mut output = SynthesisOutput::start(&adapter(vec![
+        Capability::IncrementalInput,
+        Capability::OutputStreaming,
+    ]));
+    let streamed = committed("streamed");
+    let streamed_id = streamed.segment_id();
+    let completed = committed("completed");
+    let completed_id = completed.segment_id();
+    let silent = committed("silent");
+    let silent_id = silent.segment_id();
+    let discarded = committed("discarded");
+    let discarded_id = discarded.segment_id();
+    for segment in [streamed, completed, silent, discarded] {
+        output.offer(segment).expect("queued");
+    }
+    output.take_input().expect("incremental input is claimed");
+    assert_eq!(output.first_audio(streamed_id), None, "no frame yet");
+    std::thread::sleep(wait);
+
+    output.audio(streamed_id, frame(2, 4)).expect("emitted");
+    let first = output
+        .first_audio(streamed_id)
+        .expect("a frame was emitted");
+    assert!(first >= wait, "{first:?} is shorter than the wait {wait:?}");
+    std::thread::sleep(wait);
+    output.audio(streamed_id, frame(2, 4)).expect("emitted");
+    output.complete(streamed_id, Vec::new()).expect("completed");
+    assert_eq!(
+        output.first_audio(streamed_id),
+        Some(first),
+        "later frames do not move it"
+    );
+
+    output
+        .complete(completed_id, vec![frame(2, 4)])
+        .expect("completed with its frames");
+    assert!(
+        output
+            .first_audio(completed_id)
+            .is_some_and(|first| first >= wait),
+        "{:?}",
+        output.first_audio(completed_id)
+    );
+
+    output.complete(silent_id, Vec::new()).expect("completed");
+    assert_eq!(
+        output.first_audio(silent_id),
+        None,
+        "no frame, no first audio"
+    );
+    output.discard(discarded_id).expect("discarded");
+    assert_eq!(output.first_audio(discarded_id), None);
+    assert_eq!(
+        output.first_audio(committed("never offered").segment_id()),
+        None
+    );
+}

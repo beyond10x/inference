@@ -92,6 +92,42 @@ fn the_binding_sends_one_space_then_the_text_with_one_trailing_space_and_flush_t
     assert_eq!(server.violations(), Vec::<String>::new());
 }
 
+/// story:elevenlabs-tts-provider-cancel: the time to first audio of every spoken segment, from
+/// its offer to its first frame, is readable from the synthesis's output, and it is at least the
+/// delay the server takes before the first audio of each context.
+#[test]
+fn time_to_first_audio_is_present_for_every_spoken_segment_and_at_least_the_server_delay() {
+    const DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+    let server = FixtureServer::paced(
+        OutputFormat::Ulaw8000,
+        vec![Script::Serve],
+        DELAY,
+        std::time::Duration::ZERO,
+    );
+    let mut synthesiser = server.synthesiser(OutputFormat::Ulaw8000);
+    let mut handle = synthesiser.start().unwrap();
+    let segments = committed(&["First.", "Second.", "Third."]);
+    let ids: Vec<_> = segments
+        .iter()
+        .map(|segment| segment.segment_id())
+        .collect();
+    for segment in segments {
+        handle.offer_segment(segment).unwrap();
+    }
+    handle.end_utterance().unwrap();
+    let events: Vec<SynthesisEvent> = handle.by_ref().collect();
+    assert!(handle.failure().is_none(), "{:?}", handle.failure());
+    assert!(matches!(events.last(), Some(SynthesisEvent::Usage(_))));
+    for id in ids {
+        let first_audio = handle.output().first_audio(id);
+        assert!(
+            first_audio.is_some_and(|first_audio| first_audio >= DELAY),
+            "time to first audio {first_audio:?}, the server waits {DELAY:?}"
+        );
+    }
+    assert_eq!(server.violations(), Vec::<String>::new());
+}
+
 #[test]
 fn a_segment_is_sent_before_the_utterance_ends() {
     let server = FixtureServer::start(OutputFormat::Alaw8000, Script::Serve);

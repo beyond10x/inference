@@ -17,6 +17,11 @@
 //! holds the same claims. Once the utterance has ended and its last segment is spoken, the
 //! binding sends `close_socket` and closes the connection.
 //!
+//! The time to first audio of each segment, from its offer to its first frame, is the
+//! contract's: `inference_tts::SynthesisOutput::first_audio`, read through
+//! [`inference_tts::SynthesisHandle::output`]. A segment offered while another is spoken waits
+//! for it, and that wait counts.
+//!
 //! Output formats ([`OutputFormat`]): `ulaw_8000` gives G.711 μ-law frames at 8 kHz, `alaw_8000`
 //! A-law at 8 kHz, and `pcm_16000`, `pcm_22050`, `pcm_24000` and `pcm_44100` signed 16-bit
 //! little-endian mono PCM at that rate. The documentation states neither bit depth, byte order
@@ -26,9 +31,14 @@
 //! A cancel is a discard of the segment being spoken, as a barge-in makes it: the binding ends
 //! that segment's context, drops every later message of it and emits nothing more of it, without
 //! waiting for the server; the connection stays open and the next segment speaks on it. A cancel
-//! stops nothing at the server: the context was flushed and closed when its text was sent, so
-//! the endpoint still generates and sends the whole cancelled segment, and a barge-in still pays
-//! for it. It saves playback, not cost. Dropping the handle closes the connection.
+//! stops playback and drops the remaining frames on the client; it stops nothing at the server.
+//! On the hosted endpoint a flushed context is generated to the end regardless of a close: in a
+//! billed probe on 2026-11-12 (`tests/tts_cancel_live.rs`), a close sent right after the first
+//! audio of a 401-character text was followed by 97.7% of the text's audio (22.2 of 22.7 s),
+//! all of it generated within 0.8 s of the text. A flush alone brought the context's final message
+//! only after the endpoint's 20 s inactivity timeout, so the close goes with the text, the one
+//! prompt way to end the segment, and a cancel sends no second one. A barge-in saves playback,
+//! not generation or cost. Dropping the handle closes the connection.
 //!
 //! A connection that ends between segments, as the endpoint's inactivity timeout may end it, is
 //! reopened once for the next segment: when sending its context fails because the connection
@@ -44,6 +54,12 @@
 //! or an async worker alike, that runtime is driven on a scoped thread of its own while the
 //! caller waits, so no thread panics or is refused; an async worker is still blocked meanwhile,
 //! so iterate the handle from `tokio::task::spawn_blocking` or a plain thread.
+//!
+//! A key belongs to one data-residency stack, and every other host refuses it. [`Endpoint`] is
+//! the global host unless told otherwise; [`Endpoint::with_residency`] picks a [`Residency`],
+//! and [`Endpoint::from_env`] the one [`RESIDENCY_VARIABLE`] (`ELEVENLABS_RESIDENCY`) names:
+//! `global`, `us`, `eu`, `in` or `sg`, empty or unset for global, anything else a
+//! [`ConfigError::Residency`], which never prints the value.
 //!
 //! The key is never read by the binding itself: the caller injects a [`CredentialSource`] and
 //! names the secret ([`EnvironmentSource::elevenlabs`] reads `ELEVENLABS_API_KEY`; with feature
@@ -177,7 +193,8 @@ pub use inference_duplex;
 
 pub use config::{
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL, Endpoint,
-    MAX_INACTIVITY_TIMEOUT, OutputFormat, VoiceConfig, VoiceSettings,
+    MAX_INACTIVITY_TIMEOUT, OutputFormat, RESIDENCY_VARIABLE, Residency, VoiceConfig,
+    VoiceSettings,
 };
 pub use connection::{CLOSE_BOUND, MAX_MESSAGE_SIZE};
 #[cfg(feature = "keychain")]

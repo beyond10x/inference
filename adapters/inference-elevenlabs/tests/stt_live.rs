@@ -2,7 +2,8 @@
 //! behind features `live` and `stt` and ignored: it needs a key with speech-to-text access in
 //! `ELEVENLABS_API_KEY` (or the keychain secret `elevenlabs-api-key`) and a German speech clip of
 //! about 30 s in G.711 μ-law at 8 kHz, mono, in `INFERENCE_ELEVENLABS_STT_CLIP`: a WAV file of
-//! format 7 (μ-law), or the bare μ-law bytes. It is billed. Run it with
+//! format 7 (μ-law), or the bare μ-law bytes. The host is the residency `ELEVENLABS_RESIDENCY`
+//! names (`Endpoint::from_env`), global when unset. It is billed. Run it with
 //! `cargo test -p inference-elevenlabs --features live,stt --test stt_live -- --ignored --nocapture`.
 
 use std::num::{NonZeroU16, NonZeroU32};
@@ -34,6 +35,11 @@ fn source() -> Arc<dyn CredentialSource> {
     } else {
         Arc::new(KeychainSource::native().expect("a keychain"))
     }
+}
+
+/// The hosted endpoint of the residency `ELEVENLABS_RESIDENCY` names, global when unset.
+fn endpoint() -> Endpoint {
+    Endpoint::from_env().unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// The μ-law samples of `path`: the data chunk of a WAV file of format 7, mono, 8 kHz, or the
@@ -82,7 +88,7 @@ fn a_german_mulaw_clip_is_committed_in_spans_with_timestamps_and_a_usage_record(
         .with_language("de")
         .with_commit_strategy(CommitStrategy::Vad(VadSettings::default()));
     let mut recogniser =
-        ElevenLabsRecogniser::new(Endpoint::new(), config, source(), ELEVENLABS_KEY_NAME)
+        ElevenLabsRecogniser::new(endpoint(), config, source(), ELEVENLABS_KEY_NAME)
             .expect("the configuration is valid");
     let mut handle = recogniser
         .start(RecognitionRequest::new(
