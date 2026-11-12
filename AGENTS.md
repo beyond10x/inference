@@ -113,6 +113,9 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
 - Every commit, push, pull request and tag goes through the bot route (`b10x-gates bot -- <git
   args>`), a sub-agent's test-only commit included: a plain `git commit` records a personal
   identity, which the repository's ruleset refuses and which must not reach the history.
+  A commit recreated on a newer base replays its own diff (`git diff <c>^ <c> | git apply -3`),
+  never the whole tree of the old commit, which reverts what the base gained since (2026-11-12:
+  recreating the wave P2-1 commits that way undid release 0.28.0 on `main` for one merge).
   API writes go through `b10x-gates api`. Local hooks are optional; the shared gates on
   GitHub are the authority, and `main` is integrated only with its `Security and privacy` and
   `inference / task check` runs green.
