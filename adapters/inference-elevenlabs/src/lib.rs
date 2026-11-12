@@ -128,10 +128,15 @@
 //! recogniser), and a server silent for the read timeout once input has ended while a commit is
 //! unanswered or a span is open (`ElevenLabsError::Stalled`); never a panic or a hang. A server
 //! silent for it once every commit is answered and no span is open ends the recognition cleanly.
-//! The opening, the credential included, is bounded by the connect timeout and every write by the
-//! read timeout; after the end of input the read timeout runs from the later of the end of input,
-//! the opening of the connection and the last server message, and does not run while the
-//! handshake is pending. A timeout too large for an instant is no deadline.
+//! The opening, the credential included, is bounded by the connect timeout (once input has ended
+//! the handle waits for its outcome at most the connect timeout and `OPEN_SLACK`, 500 ms, from
+//! the start of the opening, then fails it as `Connect` itself, so a credential source that
+//! blocks its thread cannot hold the caller) and every write by the read timeout. After the end
+//! of input the read timeout runs from the latest of the end of input, the opening of the
+//! connection and the last server message that delivered an event or answered a commit, and does
+//! not run while the handshake is pending; a `warning` or a partial transcript repeating the open
+//! span's text moves nothing, so a server repeating them cannot hold the caller. A timeout too
+//! large for an instant is no deadline.
 //! `ElevenLabsRecognition::cancel` and dropping the handle close the connection and deliver
 //! nothing more. The connection is driven on a thread of its own, so the handle may be iterated
 //! from any thread; at most 32 server messages wait for the caller. The
@@ -184,8 +189,8 @@ pub use credential::{
 pub use error::{ConfigError, ConnectError, ElevenLabsError};
 #[cfg(feature = "stt")]
 pub use recogniser::{
-    ElevenLabsRecogniser, ElevenLabsRecognition, STT_BACKEND, STT_INBOUND_DEPTH, VAD_END_QUIET,
-    WARNINGS_KEPT_STT, stt_claims,
+    ElevenLabsRecogniser, ElevenLabsRecognition, OPEN_SLACK, STT_BACKEND, STT_INBOUND_DEPTH,
+    VAD_END_QUIET, WARNINGS_KEPT_STT, stt_claims,
 };
 #[cfg(feature = "stt")]
 pub use stt_config::{

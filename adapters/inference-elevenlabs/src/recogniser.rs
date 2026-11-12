@@ -42,6 +42,11 @@ pub const WARNINGS_KEPT_STT: usize = 16;
 /// follows within this.
 pub const VAD_END_QUIET: Duration = Duration::from_millis(500);
 
+/// How much longer than the connect timeout the handle waits, once input has ended, for the
+/// connection's thread to say how the opening ended, before it fails the recognition as
+/// `Connect` itself: the thread's own bound cannot fire while a credential source blocks it.
+pub const OPEN_SLACK: Duration = Duration::from_millis(500);
+
 /// How long the connection's thread waits before it offers a message again to a full queue.
 const DELIVERY_RETRY: Duration = Duration::from_millis(10);
 
@@ -189,6 +194,7 @@ impl Recogniser for ElevenLabsRecogniser {
             outstanding: 0,
             end_sent: false,
             opened: false,
+            started_at: std::time::Instant::now(),
             heard_at: std::time::Instant::now(),
             delivered: VecDeque::new(),
             failure: None,
@@ -244,10 +250,11 @@ struct Worker {
 /// what has arrived, without waiting: `None` then means nothing has arrived yet. Once input has
 /// ended, iterating blocks until the answer to the end-of-input commit (with `vad`, followed by
 /// [`VAD_END_QUIET`] of silence with no span open), a failure, or the read timeout passing
-/// without a server message, and `None` means the recognition has ended. The read timeout runs
-/// from the later of the end of input, the opening of the connection and the last server
-/// message; while the handshake is still pending it does not run, and the handshake's own bound,
-/// the connect timeout, applies. A failure ends the iteration;
+/// without a server message that delivers an event or answers a commit, and `None` means the
+/// recognition has ended. The read timeout runs from the latest of the end of input, the opening
+/// of the connection and the last such message; while the handshake is still pending it does not
+/// run, and the handshake's own bound applies, the connect timeout and [`OPEN_SLACK`] from the
+/// start of the opening. A failure ends the iteration;
 /// [`ElevenLabsRecognition::failure`] says why, and the usage record, delivered once input has
 /// ended, is then not final.
 pub struct ElevenLabsRecognition {
@@ -263,8 +270,12 @@ pub struct ElevenLabsRecognition {
     end_sent: bool,
     /// Whether the connection's thread said the handshake succeeded.
     opened: bool,
-    /// When the read timeout after the end of input starts: the later of the end-of-input commit,
-    /// the opening of the connection and the last server message.
+    /// When the opening of the connection started.
+    started_at: std::time::Instant,
+    /// When the read timeout after the end of input starts: the latest of the end-of-input
+    /// commit, the opening of the connection and the last server message that delivered an event
+    /// or answered a commit. A message that does neither, such as a `warning` or a partial
+    /// transcript repeating the open span's text, moves nothing.
     heard_at: std::time::Instant,
     delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
     failure: Option<ElevenLabsError>,
@@ -387,6 +398,7 @@ impl ElevenLabsRecognition {
             }
             if !self.started {
                 self.started = true;
+                self.started_at = std::time::Instant::now();
                 match spawn(Arc::clone(&self.shared)) {
                     Ok(worker) => self.worker = Some(worker),
                     Err(error) => {
@@ -408,10 +420,12 @@ impl ElevenLabsRecognition {
 
     /// The next thing the connection's thread said. Before the end of input, without waiting:
     /// `None` when nothing has arrived. After it, while the handshake is pending, until the
-    /// thread says how it ended, which the connect timeout bounds; once the connection is open,
-    /// until the read timeout from `heard_at` passes, which is
-    /// [`Inbound::Quiet`], or with `vad` and nothing left to answer, until [`VAD_END_QUIET`]
-    /// passes, which is [`Inbound::Settled`]. An instant too far to represent is no deadline.
+    /// thread says how it ended, at most the connect timeout and [`OPEN_SLACK`] from the start of
+    /// the opening, after which it is a `Connect` failure, so a credential source that blocks the
+    /// thread's runtime cannot hold the caller; once the connection is open, until the read
+    /// timeout from `heard_at` passes, which is [`Inbound::Quiet`], or with `vad` and nothing left
+    /// to answer, until [`VAD_END_QUIET`] passes, which is [`Inbound::Settled`]. An instant too far
+    /// to represent is no deadline.
     fn receive(&mut self) -> Option<Inbound> {
         let now = std::time::Instant::now();
         if self.output.input_ended() && !self.end_sent {
@@ -441,10 +455,33 @@ impl ElevenLabsRecognition {
                 Err(mpsc::TryRecvError::Disconnected) => Inbound::Failed(stopped()),
             }
         } else if !self.opened {
-            worker
-                .inbound
-                .recv()
-                .unwrap_or_else(|_| Inbound::Failed(stopped()))
+            let bound = self
+                .shared
+                .endpoint
+                .connect_timeout
+                .saturating_add(OPEN_SLACK);
+            let next = match self.started_at.checked_add(bound) {
+                Some(until) => worker
+                    .inbound
+                    .recv_timeout(until.saturating_duration_since(now)),
+                None => worker
+                    .inbound
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            };
+            match next {
+                Ok(inbound) => inbound,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    Inbound::Failed(ElevenLabsError::Connect(ConnectError {
+                        status: None,
+                        detail: format!(
+                            "no connection within {:?}",
+                            self.shared.endpoint.connect_timeout
+                        ),
+                    }))
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => Inbound::Failed(stopped()),
+            }
         } else {
             let until = if settle_first { settle } else { due };
             let next = match until {
@@ -463,7 +500,7 @@ impl ElevenLabsRecognition {
                 Err(mpsc::RecvTimeoutError::Disconnected) => Inbound::Failed(stopped()),
             }
         };
-        if self.end_sent && matches!(received, Inbound::Opened | Inbound::Message(_)) {
+        if self.end_sent && matches!(received, Inbound::Opened) {
             self.heard_at = std::time::Instant::now();
         }
         Some(received)
@@ -589,7 +626,16 @@ impl Iterator for ElevenLabsRecognition {
                     self.opened = true;
                     Ok(())
                 }
-                Inbound::Message(message) => self.apply(message),
+                Inbound::Message(message) => {
+                    let (delivered, outstanding) = (self.delivered.len(), self.outstanding);
+                    let applied = self.apply(message);
+                    if self.end_sent
+                        && (self.delivered.len() != delivered || self.outstanding != outstanding)
+                    {
+                        self.heard_at = std::time::Instant::now();
+                    }
+                    applied
+                }
                 Inbound::Failed(error) => Err(error),
                 Inbound::Quiet => self.quiet(),
                 Inbound::Settled => {

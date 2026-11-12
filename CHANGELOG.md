@@ -33,7 +33,8 @@
   The usage record is the audio sent. Each of the fourteen documented error types is an
   `ElevenLabsError` variant of its own, so `ElevenLabsError` and `ConfigError` gain variants,
   which breaks an exhaustive match on them. Once input has ended, an unanswered commit or an
-  open span fails the recognition as `Stalled` after the read timeout without a server message.
+  open span fails the recognition as `Stalled` after the read timeout without a server message
+  that delivers an event or answers a commit.
   The synthesiser's and the recogniser's connections read at most 4 MiB per message or frame
   (`MAX_MESSAGE_SIZE`). The live test (`tests/stt_live.rs`, features `live` and `stt`, billed)
   reads a German μ-law clip from `INFERENCE_ELEVENLABS_STT_CLIP`.
