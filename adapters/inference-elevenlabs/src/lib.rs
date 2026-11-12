@@ -86,6 +86,68 @@
 //! contract. It reads messages and frames of at most `agent::MAX_MESSAGE_BYTES` (1 MiB). Its
 //! claims are `agent_claims`, and `records/claims-agent.json` holds the same; `native_duplex`
 //! is not among them, since the agent answers speech over a response by interrupting it.
+//!
+//! # Speech to text
+//!
+//! With feature `stt`, `ElevenLabsRecogniser` implements `inference_stt::Recogniser` at locality
+//! `external_provider` over the realtime speech-to-text WebSocket `/v1/speech-to-text/realtime`:
+//! the audio of every recognition leaves the machine. `stt_protocol` says what it sends and
+//! reads, the documentation it was taken from with its date, and what that documentation leaves
+//! open.
+//!
+//! A recognition opens its connection when its first frame is taken, with the configured input
+//! format (`InputFormat`): `ulaw_8000`, G.711 μ-law at 8 kHz as telephony carries it, or 16-bit
+//! PCM at 8, 16, 22.05, 24, 44.1 or 48 kHz. Any other format is refused when the configuration
+//! is parsed, and a frame in another format than the configured one fails the recognition with
+//! `ElevenLabsError::UnsupportedAudio` before it is sent. Every frame is one `input_audio_chunk`,
+//! sent as soon as the handle is iterated after it was offered, and partial transcripts reach the
+//! caller before input ends, so the recogniser claims `incremental_input` and `output_streaming`
+//! (`stt_claims`), and `records/claims-stt.json` holds the same claims. The configuration
+//! (`TranscriptionConfig`) names the model (`scribe_v2_realtime` unless configured), the
+//! language, the key terms and the commit strategy: `manual`, where the end of input and
+//! `ElevenLabsRecognition::commit` commit, or `vad` with its thresholds, where the endpoint
+//! commits after silence and the end of input commits what is left.
+//!
+//! - A `partial_transcript` opens a Hypothesis span with its text, or revises the open one to
+//!   read it if that differs; a blank one emits nothing.
+//! - A `committed_transcript_with_timestamps` brings the open span to its text and commits it;
+//!   its words' first start and last end are the span's timing, read through
+//!   `ElevenLabsRecognition::span_timing`, since the contract's events carry none. A
+//!   `committed_transcript` only brings the open span to its text.
+//! - The end of input sends a commit; its committed transcript ends the recognition, with `vad`
+//!   once the endpoint has then been silent for `VAD_END_QUIET` with no span open, since a commit
+//!   the endpoint made on its own may answer for it. The usage record is then its last event. The protocol reports no usage, so the record is the
+//!   contract's: `input_audio_ms`, the audio sent (on a failed call, the audio sent before the
+//!   failure), `requests` 1 and `local_compute_ms` unknown.
+//!
+//! Each of the fourteen error types the endpoint documents fails the recognition with an
+//! `ElevenLabsError` variant of its own (`ElevenLabsError::scribe_error_type` names it), and so
+//! do a refused handshake or one not done within the connect timeout (`ElevenLabsError::Connect`,
+//! also when input ended while it was pending), a close, a message outside the protocol or larger
+//! than `MAX_MESSAGE_SIZE` (4 MiB, the bound of every connection of the TTS binding and the
+//! recogniser), and a server silent for the read timeout once input has ended while a commit is
+//! unanswered or a span is open (`ElevenLabsError::Stalled`); never a panic or a hang. A server
+//! silent for it once every commit is answered and no span is open ends the recognition cleanly.
+//! The opening, the credential included, is bounded by the connect timeout (once input has ended
+//! the handle waits for its outcome at most the connect timeout and `OPEN_SLACK`, 500 ms, from
+//! the start of the opening, then fails it as `Connect` itself, so a credential source that
+//! blocks its thread cannot hold the caller) and every write by the read timeout. After the end
+//! of input the read timeout runs from the latest of the end of input, the opening of the
+//! connection and the last server message that delivered an event or answered a commit, and does
+//! not run while the handshake is pending; a `warning` or a partial transcript repeating the open
+//! span's text moves nothing, so a server repeating them cannot hold the caller. A timeout too
+//! large for an instant is no deadline.
+//! `ElevenLabsRecognition::cancel` and dropping the handle close the connection and deliver
+//! nothing more. The connection is driven on a thread of its own, so the handle may be iterated
+//! from any thread; at most 32 server messages wait for the caller. The
+//! key travels as the TTS binding sends it: only in the `xi-api-key` header, from the injected
+//! source, zeroized, and `ws://` only to a loopback host.
+//!
+//! The live check is `tests/stt_live.rs`, behind features `live` and `stt` and ignored: with a
+//! key with speech-to-text access in `ELEVENLABS_API_KEY` (or the keychain) and a German G.711
+//! μ-law clip of about 30 s in `INFERENCE_ELEVENLABS_STT_CLIP`,
+//! `cargo test -p inference-elevenlabs --features live,stt --test stt_live -- --ignored`
+//! transcribes it. It is billed.
 
 #[cfg(feature = "duplex")]
 pub mod agent;
@@ -96,6 +158,12 @@ mod connection;
 mod credential;
 mod error;
 pub mod protocol;
+#[cfg(feature = "stt")]
+mod recogniser;
+#[cfg(feature = "stt")]
+mod stt_config;
+#[cfg(feature = "stt")]
+pub mod stt_protocol;
 mod synthesiser;
 
 #[cfg(feature = "duplex")]
@@ -111,7 +179,7 @@ pub use config::{
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL, Endpoint,
     MAX_INACTIVITY_TIMEOUT, OutputFormat, VoiceConfig, VoiceSettings,
 };
-pub use connection::CLOSE_BOUND;
+pub use connection::{CLOSE_BOUND, MAX_MESSAGE_SIZE};
 #[cfg(feature = "keychain")]
 pub use credential::KeychainSource;
 pub use credential::{
@@ -119,4 +187,15 @@ pub use credential::{
     ELEVENLABS_KEY_VARIABLE, EnvironmentSource,
 };
 pub use error::{ConfigError, ConnectError, ElevenLabsError};
+#[cfg(feature = "stt")]
+pub use recogniser::{
+    ElevenLabsRecogniser, ElevenLabsRecognition, OPEN_SLACK, STT_BACKEND, STT_INBOUND_DEPTH,
+    VAD_END_QUIET, WARNINGS_KEPT_STT, stt_claims,
+};
+#[cfg(feature = "stt")]
+pub use stt_config::{
+    CommitStrategy, DEFAULT_STT_MODEL, InputFormat, TranscriptionConfig, VadSettings,
+};
+#[cfg(feature = "stt")]
+pub use stt_protocol::SpanTiming;
 pub use synthesiser::{BACKEND, ElevenLabsSynthesis, ElevenLabsSynthesiser, claims};

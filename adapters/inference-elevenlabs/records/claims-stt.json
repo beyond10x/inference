@@ -1,0 +1,13 @@
+{
+  "model": "scribe_v2_realtime",
+  "binding": "inference_elevenlabs::ElevenLabsRecogniser",
+  "features": [
+    "stt"
+  ],
+  "claims": [
+    "incremental_input",
+    "output_streaming"
+  ],
+  "held_by": "claims_record::the_stt_record_holds_the_claims_of_the_binding",
+  "adapter_revision": "0.27.0"
+}

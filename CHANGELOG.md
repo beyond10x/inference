@@ -20,6 +20,25 @@
   overtook while the ingress took it, no longer answers `Refused`, which promises that nothing
   was forwarded. `inference`: an `Agent` maps it to `Error::Closed`.
 
+### Added
+
+- `inference-elevenlabs`, feature `stt`: `ElevenLabsRecogniser`, ElevenLabs realtime
+  speech-to-text (`/v1/speech-to-text/realtime`, `scribe_v2_realtime` unless configured) as an
+  `inference-stt` `Recogniser` at locality `external_provider`, claiming `incremental_input`
+  and `output_streaming` (`records/claims-stt.json`). Input is G.711 μ-law at 8 kHz or 16-bit
+  PCM at 8 to 48 kHz; any other format is refused at configuration. Partial transcripts open
+  and revise a span, `committed_transcript_with_timestamps` commits it, and
+  `ElevenLabsRecognition::span_timing` gives the committed span's start and end. Commit is
+  `manual` (the end of input and `ElevenLabsRecognition::commit`) or `vad` with its thresholds.
+  The usage record is the audio sent. Each of the fourteen documented error types is an
+  `ElevenLabsError` variant of its own, so `ElevenLabsError` and `ConfigError` gain variants,
+  which breaks an exhaustive match on them. Once input has ended, an unanswered commit or an
+  open span fails the recognition as `Stalled` after the read timeout without a server message
+  that delivers an event or answers a commit.
+  The synthesiser's and the recogniser's connections read at most 4 MiB per message or frame
+  (`MAX_MESSAGE_SIZE`). The live test (`tests/stt_live.rs`, features `live` and `stt`, billed)
+  reads a German μ-law clip from `INFERENCE_ELEVENLABS_STT_CLIP`.
+
 ### Fixed
 
 - `inference-pipeline`: the tool authority validates `minLength`, `maxLength`, `prefixItems`,

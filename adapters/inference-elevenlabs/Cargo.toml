@@ -1,6 +1,6 @@
 [package]
 name = "inference-elevenlabs"
-description = "ElevenLabs for the inference framework: a streaming TTS synthesiser over the multi-stream text-to-speech WebSocket, one connection per utterance, and, with feature duplex, an agent conversation as a native speech model."
+description = "ElevenLabs for the inference framework: a streaming TTS synthesiser over the multi-stream text-to-speech WebSocket, one connection per utterance; with feature stt, a recogniser of the STT contract over the realtime speech-to-text WebSocket; and, with feature duplex, an agent conversation as a native speech model."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,7 @@ repository.workspace = true
 keychain = ["dep:keyring-core", "dep:secrets-core", "dep:secrets-keychain"]
 native-keychain = ["keychain", "secrets-keychain/native-keychain"]
 duplex = ["dep:inference-duplex", "tokio/macros", "tokio/rt-multi-thread", "tokio/sync"]
+stt = ["dep:inference-stt", "tokio/macros", "tokio/sync"]
 live = ["native-keychain"]
 
 [dependencies]
@@ -18,6 +19,7 @@ base64.workspace = true
 bytes = "1.9"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 inference-duplex = { path = "../../crates/inference-duplex", optional = true }
+inference-stt = { path = "../../crates/inference-stt", optional = true }
 inference-tts = { path = "../../crates/inference-tts" }
 keyring-core = { version = "1", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -30,7 +32,7 @@ webpki-roots = "0.26"
 zeroize = "1"
 
 [dev-dependencies]
-inference-testkit = { path = "../../crates/inference-testkit", features = ["tts"] }
+inference-testkit = { path = "../../crates/inference-testkit", features = ["stt", "tts"] }
 serde.workspace = true
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
@@ -41,6 +43,18 @@ required-features = ["duplex"]
 [[test]]
 name = "agent_duplex_live"
 required-features = ["live", "duplex"]
+
+[[test]]
+name = "stt"
+required-features = ["stt"]
+
+[[test]]
+name = "stt_conformance"
+required-features = ["stt"]
+
+[[test]]
+name = "stt_live"
+required-features = ["live", "stt"]
 
 [[example]]
 name = "live"

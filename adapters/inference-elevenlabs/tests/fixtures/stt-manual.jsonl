@@ -1,0 +1,5 @@
+{"on":"open","send":{"message_type":"session_started","session_id":"fixture-session","config":{"sample_rate":8000,"audio_format":"ulaw_8000","commit_strategy":"manual","model_id":"scribe_v2_realtime","include_timestamps":true}}}
+{"on":"audio:5","send":{"message_type":"partial_transcript","text":"eins"}}
+{"on":"commit:1","send":{"message_type":"committed_transcript_with_timestamps","text":"eins","words":[{"text":"eins","start":0.1,"end":0.4,"type":"word","logprob":-0.1}]}}
+{"on":"audio:25","send":{"message_type":"partial_transcript","text":"zwei"}}
+{"on":"commit:2","send":{"message_type":"committed_transcript_with_timestamps","text":"zwei","words":[{"text":"zwei","start":0.5,"end":0.75,"type":"word","logprob":-0.1}]}}
