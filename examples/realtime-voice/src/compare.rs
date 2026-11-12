@@ -81,7 +81,7 @@ use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Scope, ScopedJoinHandle};
@@ -876,7 +876,7 @@ pub const NO_HOSTED_TTS: &str = "no hosted TTS configured";
 pub const VOICE_VARIABLE: &str = "ELEVENLABS_VOICE_ID";
 
 /// The ElevenLabs synthesiser of `voice` in `format` at `endpoint`, its key resolved through
-/// `source` under `ELEVENLABS_KEY_NAME`, when that key resolves at once. Making it sends
+/// `source` under `ELEVENLABS_KEY_NAME`, when that key resolves (`elevenlabs::resolves`). Making it sends
 /// nothing.
 ///
 /// # Errors
@@ -889,16 +889,7 @@ pub fn hosted_tts(
     voice: Option<&str>,
     format: OutputFormat,
 ) -> Result<ElevenLabsSynthesiser, String> {
-    let resolved = {
-        let mut future = source.resolve(ELEVENLABS_KEY_NAME);
-        let mut context = Context::from_waker(Waker::noop());
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(Ok(_)) => Ok(()),
-            Poll::Ready(Err(error)) => Err(format!("the ElevenLabs key did not resolve: {error}")),
-            Poll::Pending => Err("the ElevenLabs key did not resolve at once".to_owned()),
-        }
-    };
-    resolved.map_err(|why| format!("{NO_HOSTED_TTS}: {why}"))?;
+    crate::elevenlabs::resolves(&*source).map_err(|why| format!("{NO_HOSTED_TTS}: {why}"))?;
     let voice = voice
         .map(str::trim)
         .filter(|voice| !voice.is_empty())
@@ -950,7 +941,7 @@ enum Stage {
 }
 
 /// What a worker of a cascade arm hands the arm's loop.
-enum Heard {
+pub(crate) enum Heard {
     /// An event of the recognition.
     Transcript(TranscriptEvent),
     /// The recognition delivered its last event after the end of its input.
@@ -966,28 +957,30 @@ enum Heard {
     Synthesised,
     /// A step refused what it was given.
     Note(String),
+    /// The recognition failed, and why: its last report.
+    Failed(String),
     /// No worker owes the loop a report.
     Idle,
 }
 
 /// What a worker hands the loop, and the turn it belongs to: a report of a turn that was cut is
 /// dropped.
-struct Report {
-    turn: u64,
-    heard: Heard,
+pub(crate) struct Report {
+    pub(crate) turn: u64,
+    pub(crate) heard: Heard,
 }
 
 /// What the workers of a cascade arm owe its loop: one count for each task handed to a worker and
 /// each wake of the generation, held until the worker reported what that task produced.
-struct Owing {
-    count: AtomicUsize,
-    reports: Sender<Report>,
+pub(crate) struct Owing {
+    pub(crate) count: AtomicUsize,
+    pub(crate) reports: Sender<Report>,
 }
 
 /// One count of [`Owing`], released when dropped: by the worker once it reported what its task
 /// produced, or with a task that never reached a worker. The release of the last count reports
 /// [`Heard::Idle`], so a loop waiting on its workers wakes.
-struct Owed(Arc<Owing>);
+pub(crate) struct Owed(Arc<Owing>);
 
 impl Owed {
     fn new(owing: &Arc<Owing>) -> Self {
@@ -1008,13 +1001,13 @@ impl Drop for Owed {
 }
 
 /// A task handed to a worker, and the count it holds until the worker is done with it.
-struct Task<T> {
+pub(crate) struct Task<T> {
     work: T,
     owed: Owed,
 }
 
 /// Hands `work` to the worker `tasks` feeds, if there is one.
-fn hand<T>(tasks: Option<&Sender<Task<T>>>, owing: &Arc<Owing>, work: T) {
+pub(crate) fn hand<T>(tasks: Option<&Sender<Task<T>>>, owing: &Arc<Owing>, work: T) {
     if let Some(tasks) = tasks {
         let _ = tasks.send(Task {
             work,
@@ -1024,19 +1017,19 @@ fn hand<T>(tasks: Option<&Sender<Task<T>>>, owing: &Arc<Owing>, work: T) {
 }
 
 /// What the recogniser's worker is asked.
-enum Listen {
+pub(crate) enum Listen {
     Frame(AudioFrame),
     End,
 }
 
 /// What the generator's worker is asked: to poll the generation, or to drop it.
-enum Generate {
+pub(crate) enum Generate {
     Poll,
     Stop,
 }
 
 /// What the synthesiser's worker is asked.
-enum Speak {
+pub(crate) enum Speak {
     Segment(OutputSegment),
     End,
 }
@@ -1059,12 +1052,22 @@ impl Wake for Prod {
 }
 
 /// The recogniser's worker: offers each frame, ends the input, and reports every event the
-/// recognition has after each.
+/// recognition has after each. Once `failure` says the recognition failed, which a recognition
+/// may do before its input ends while it delivers no event, the worker reports why, once, as
+/// [`Heard::Failed`], ahead of any later event.
 fn listening<H: RecognitionHandle>(
     mut recognition: H,
     tasks: Receiver<Task<Listen>>,
     report: impl Fn(Heard),
+    failure: impl Fn(&H) -> Option<String>,
 ) {
+    let mut failed = false;
+    let mut check = |recognition: &H| {
+        if !failed && let Some(why) = failure(recognition) {
+            failed = true;
+            report(Heard::Failed(why));
+        }
+    };
     for Task { work, owed } in tasks {
         let ended = match work {
             Listen::Frame(frame) => {
@@ -1084,9 +1087,11 @@ fn listening<H: RecognitionHandle>(
                 true
             }
         };
-        for event in recognition.by_ref() {
+        while let Some(event) = recognition.next() {
+            check(&recognition);
             report(Heard::Transcript(event.payload));
         }
+        check(&recognition);
         if ended {
             report(Heard::Recognised);
         }
@@ -1132,14 +1137,19 @@ fn generating(
 
 /// The synthesiser's worker: offers each segment, ends the utterance, and reports every event the
 /// synthesis has after each, the first frame of each segment with the segment's time to first
-/// audio.
+/// audio. Once `cut` is set, it offers nothing more, reads no further event and ends, dropping
+/// the synthesis: what is still queued for it is dropped unoffered.
 fn speaking<H: SynthesisHandle>(
     mut synthesis: H,
     tasks: Receiver<Task<Speak>>,
     report: impl Fn(Heard),
+    cut: &AtomicBool,
 ) {
     let mut heard = std::collections::HashSet::new();
     for Task { work, owed } in tasks {
+        if cut.load(Ordering::SeqCst) {
+            return;
+        }
         let ended = match work {
             Speak::Segment(segment) => {
                 if let Err(refused) = synthesis.offer_segment(segment) {
@@ -1166,11 +1176,163 @@ fn speaking<H: SynthesisHandle>(
                 _ => None,
             };
             report(Heard::Spoken(event, first_audio));
+            if cut.load(Ordering::SeqCst) {
+                return;
+            }
         }
         if ended {
             report(Heard::Synthesised);
         }
         drop(owed);
+    }
+}
+
+/// Starts the recogniser's worker on `scope` over `recognition`: the sender of its tasks and
+/// the worker.
+pub(crate) fn spawn_recognition<'s, H>(
+    scope: &'s Scope<'s, '_>,
+    recognition: H,
+    report: impl Fn(Heard) + Send + 's,
+    failure: impl Fn(&H) -> Option<String> + Send + 's,
+) -> (Sender<Task<Listen>>, ScopedJoinHandle<'s, ()>)
+where
+    H: RecognitionHandle + Send + 's,
+{
+    let (tasks, receiver) = mpsc::channel();
+    let worker = scope.spawn(move || listening(recognition, receiver, report, failure));
+    (tasks, worker)
+}
+
+/// Starts the generator's worker on `scope` over `generation`, with its first poll handed to
+/// it: the sender of its tasks and the worker.
+pub(crate) fn spawn_generation<'s>(
+    scope: &'s Scope<'s, '_>,
+    generation: GenerationHandle,
+    owing: &Arc<Owing>,
+    report: impl Fn(Heard) + Send + 's,
+) -> (Sender<Task<Generate>>, ScopedJoinHandle<'s, ()>) {
+    let (tasks, receiver) = mpsc::channel();
+    let waker = Waker::from(Arc::new(Prod {
+        tasks: tasks.clone(),
+        owing: Arc::clone(owing),
+    }));
+    hand(Some(&tasks), owing, Generate::Poll);
+    let worker = scope.spawn(move || generating(generation, &receiver, &waker, report));
+    (tasks, worker)
+}
+
+/// Starts the synthesiser's worker on `scope` over `synthesis`: the sender of its tasks and the
+/// worker. Setting `cut` stops the worker after the call it is in, and drops what is queued.
+pub(crate) fn spawn_synthesis<'s, H>(
+    scope: &'s Scope<'s, '_>,
+    synthesis: H,
+    report: impl Fn(Heard) + Send + 's,
+    cut: Arc<AtomicBool>,
+) -> (Sender<Task<Speak>>, ScopedJoinHandle<'s, ()>)
+where
+    H: SynthesisHandle + Send + 's,
+{
+    let (tasks, receiver) = mpsc::channel();
+    let worker = scope.spawn(move || speaking(synthesis, receiver, report, &cut));
+    (tasks, worker)
+}
+
+/// The request of the generation answering `text` as user text, at `epoch` of the LLM node
+/// `llm` of the run `run_id`, to the model `generator` binds.
+pub(crate) fn request(
+    generator: &Generator,
+    run_id: RunId,
+    llm: NodeId,
+    epoch: i64,
+    text: String,
+) -> GenerationRequest {
+    let model = generator.model().provenance().model.as_str().to_owned();
+    GenerationRequest {
+        run_id,
+        node_id: llm,
+        epoch,
+        turn: TurnRequest::new(model.as_str(), vec![Item::user(text)]),
+    }
+}
+
+/// The answer's segments as its generation emits them: each delta emits into a tentative
+/// segment, which its commit hands on to be spoken.
+#[derive(Debug, Default)]
+pub(crate) struct Segments {
+    record: Option<Generation>,
+    tentative: HashMap<SegmentId, OutputSegment>,
+}
+
+/// What an event of the generation means for the answer.
+pub(crate) enum Segmented {
+    /// Nothing to do.
+    Nothing,
+    /// A text delta, with what refused it, if anything did.
+    Delta(Option<String>),
+    /// A segment committed: to be spoken.
+    Committed(OutputSegment),
+    /// The generation ended: completed, or cancelled with its failure.
+    Ended(Option<String>),
+    /// Something the run notes.
+    Note(String),
+}
+
+impl Segments {
+    /// Takes an event of the generation of the LLM node `llm`, with the generation's failure
+    /// when it was cancelled.
+    pub(crate) fn take(
+        &mut self,
+        llm: NodeId,
+        event: GenerationEvent,
+        failure: Option<String>,
+    ) -> Segmented {
+        match event {
+            GenerationEvent::Started(started) => {
+                let (record, _) = Generation::start_as(
+                    started.generation_id,
+                    StartGeneration {
+                        run_id: started.run_id,
+                        node_id: llm,
+                        epoch: started.epoch,
+                    },
+                );
+                self.record = Some(record);
+                Segmented::Nothing
+            }
+            GenerationEvent::TextDelta(delta) => {
+                let Some(record) = self.record.as_ref() else {
+                    return Segmented::Delta(None);
+                };
+                match OutputSegment::emit_as(delta.segment_id, record, delta.sequence, delta.text) {
+                    Ok((segment, _)) => {
+                        self.tentative.insert(delta.segment_id, segment);
+                        Segmented::Delta(None)
+                    }
+                    Err(refused) => {
+                        Segmented::Delta(Some(format!("a delta was refused: {refused:?}")))
+                    }
+                }
+            }
+            GenerationEvent::SegmentCommitted(committed) => {
+                let Some(segment) = self.tentative.remove(&committed.segment_id) else {
+                    return Segmented::Nothing;
+                };
+                match segment.commit() {
+                    Ok((segment, _)) => Segmented::Committed(segment),
+                    Err(refused) => {
+                        Segmented::Note(format!("a segment did not commit: {refused:?}"))
+                    }
+                }
+            }
+            GenerationEvent::Completed(_) => Segmented::Ended(None),
+            GenerationEvent::Cancelled(..) => Segmented::Ended(Some(
+                failure.unwrap_or_else(|| "no failure given".to_owned()),
+            )),
+            GenerationEvent::Refused(refused) => {
+                Segmented::Note(format!("the model refused: {}", refused.text))
+            }
+            _ => Segmented::Nothing,
+        }
     }
 }
 
@@ -1213,8 +1375,7 @@ struct CascadeRunner<'a, 's, 'e, R: Recogniser, S: Synthesiser> {
     /// Whether the turn's input was voiced yet, and the silence sent since its last voiced frame.
     voiced: bool,
     silent_for: Duration,
-    record: Option<Generation>,
-    tentative: HashMap<SegmentId, OutputSegment>,
+    segments: Segments,
     utterance_ended: bool,
     measured: Measured,
 }
@@ -1321,8 +1482,7 @@ where
             heard: Vec::new(),
             voiced: false,
             silent_for: Duration::ZERO,
-            record: None,
-            tentative: HashMap::new(),
+            segments: Segments::default(),
             utterance_ended: false,
             measured: Measured {
                 topology: Topology::Cascade,
@@ -1497,12 +1657,10 @@ where
         );
         match self.cascade.recogniser.start(request) {
             Ok(recognition) => {
-                let (tasks, receiver) = mpsc::channel();
                 let report = self.reporter();
-                self.workers.push(
-                    self.scope
-                        .spawn(move || listening(recognition, receiver, report)),
-                );
+                let (tasks, worker) =
+                    spawn_recognition(self.scope, recognition, report, |_: &R::Handle| None);
+                self.workers.push(worker);
                 self.listen = Some(tasks);
                 self.stage = Stage::Listening;
             }
@@ -1527,8 +1685,7 @@ where
                 std::panic::resume_unwind(panic);
             }
         }
-        self.record = None;
-        self.tentative.clear();
+        self.segments = Segments::default();
         self.utterance_ended = false;
         self.stage = Stage::Idle;
     }
@@ -1663,7 +1820,7 @@ where
                 }
                 self.finish();
             }
-            Heard::Note(note) => self.note(note),
+            Heard::Note(note) | Heard::Failed(note) => self.note(note),
             Heard::Idle => {}
         }
     }
@@ -1689,33 +1846,18 @@ where
             return;
         }
         self.epoch += 1;
-        let model = self
-            .cascade
-            .generator
-            .model()
-            .provenance()
-            .model
-            .as_str()
-            .to_owned();
-        let request = GenerationRequest {
-            run_id: self.run_id,
-            node_id: self.llm,
-            epoch: self.epoch,
-            turn: TurnRequest::new(model.as_str(), vec![Item::user(text)]),
-        };
+        let request = request(
+            &self.cascade.generator,
+            self.run_id,
+            self.llm,
+            self.epoch,
+            text,
+        );
         match self.cascade.generator.start(request) {
             Ok(generation) => {
-                let (tasks, receiver) = mpsc::channel();
-                let waker = Waker::from(Arc::new(Prod {
-                    tasks: tasks.clone(),
-                    owing: Arc::clone(&self.owing),
-                }));
-                hand(Some(&tasks), &self.owing, Generate::Poll);
                 let report = self.reporter();
-                self.workers.push(
-                    self.scope
-                        .spawn(move || generating(generation, &receiver, &waker, report)),
-                );
+                let (tasks, worker) = spawn_generation(self.scope, generation, &self.owing, report);
+                self.workers.push(worker);
                 self.generate = Some(tasks);
             }
             Err(error) => {
@@ -1726,12 +1868,14 @@ where
         }
         match self.cascade.synthesiser.start() {
             Ok(synthesis) => {
-                let (tasks, receiver) = mpsc::channel();
                 let report = self.reporter();
-                self.workers.push(
-                    self.scope
-                        .spawn(move || speaking(synthesis, receiver, report)),
+                let (tasks, worker) = spawn_synthesis(
+                    self.scope,
+                    synthesis,
+                    report,
+                    Arc::new(AtomicBool::new(false)),
                 );
+                self.workers.push(worker);
                 self.speak = Some(tasks);
             }
             Err(error) => {
@@ -1745,54 +1889,26 @@ where
     }
 
     fn generated(&mut self, event: GenerationEvent, failure: Option<String>) {
-        match event {
-            GenerationEvent::Started(started) => {
-                let (record, _) = Generation::start_as(
-                    started.generation_id,
-                    StartGeneration {
-                        run_id: started.run_id,
-                        node_id: self.llm,
-                        epoch: started.epoch,
-                    },
-                );
-                self.record = Some(record);
-            }
-            GenerationEvent::TextDelta(delta) => {
+        match self.segments.take(self.llm, event, failure) {
+            Segmented::Nothing => {}
+            Segmented::Delta(refused) => {
                 let at = (self.clock)();
                 if let Some(steps) = self.steps() {
                     steps.first_token.get_or_insert(at);
                 }
-                let Some(record) = self.record.as_ref() else {
-                    return;
-                };
-                match OutputSegment::emit_as(delta.segment_id, record, delta.sequence, delta.text) {
-                    Ok((segment, _)) => {
-                        self.tentative.insert(delta.segment_id, segment);
-                    }
-                    Err(refused) => self.note(format!("a delta was refused: {refused:?}")),
+                if let Some(refused) = refused {
+                    self.note(refused);
                 }
             }
-            GenerationEvent::SegmentCommitted(committed) => {
-                let Some(segment) = self.tentative.remove(&committed.segment_id) else {
-                    return;
-                };
-                match segment.commit() {
-                    Ok((segment, _)) => {
-                        hand(self.speak.as_ref(), &self.owing, Speak::Segment(segment));
-                    }
-                    Err(refused) => self.note(format!("a segment did not commit: {refused:?}")),
-                }
+            Segmented::Committed(segment) => {
+                hand(self.speak.as_ref(), &self.owing, Speak::Segment(segment));
             }
-            GenerationEvent::Completed(_) => self.end_utterance(),
-            GenerationEvent::Cancelled(..) => {
-                let failure = failure.unwrap_or_else(|| "no failure given".to_owned());
+            Segmented::Ended(None) => self.end_utterance(),
+            Segmented::Ended(Some(failure)) => {
                 self.note(format!("the generation was cancelled: {failure}"));
                 self.end_utterance();
             }
-            GenerationEvent::Refused(refused) => {
-                self.note(format!("the model refused: {}", refused.text));
-            }
-            _ => {}
+            Segmented::Note(note) => self.note(note),
         }
     }
 

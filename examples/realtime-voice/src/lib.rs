@@ -10,12 +10,19 @@
 //! cargo run -p realtime-voice --example talk -- --provider openai
 //! cargo run -p realtime-voice --example talk -- --provider openai-live
 //! cargo run -p realtime-voice --example talk -- --provider nova
+//! cargo run -p realtime-voice --features local --example talk -- --provider elevenlabs-cascade
 //! ```
 //!
 //! The provider is configuration only: each has its [`SessionConfig`] here and one binding of
 //! the same contract, and the conversation is the same code for all. [`compare`] sends the same
 //! recorded utterances through each provider and measures latency and usage
 //! (`examples/compare.rs`).
+//!
+//! `talk --provider elevenlabs-cascade` (feature `local`) is a cascade instead: ElevenLabs speech
+//! to text, the local voice cascade's LLM and ElevenLabs text to speech, held as a conversation
+//! by [`talk::converse`]; [`talk`] holds the providers and the variables each needs, and
+//! [`elevenlabs`] the ElevenLabs bindings `talk` and `compare` make at the host
+//! `ELEVENLABS_RESIDENCY` names.
 //!
 //! The microphone captures in the session's input format, resampled by the device adapter; the
 //! speaker plays the session's output format, resampled to the device.
@@ -70,6 +77,8 @@ use inference_duplex::{
 };
 
 pub mod compare;
+pub mod elevenlabs;
+pub mod talk;
 mod usage;
 
 pub use usage::{Cost, Counts, Prices, PricesError, Reported, Tally, Totals, Usage};

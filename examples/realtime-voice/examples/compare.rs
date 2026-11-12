@@ -32,7 +32,8 @@
 //! `--skip <provider>=<reason>` skips one without trying it.
 //!
 //! The cascade arm, `cascade`, speaks with ElevenLabs when its key resolves from
-//! `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` names a voice, in `pcm_24000`; otherwise it is
+//! `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` names a voice, in `pcm_24000`, at the host
+//! `ELEVENLABS_RESIDENCY` names (`realtime_voice::elevenlabs::endpoint`); otherwise it is
 //! skipped as "no hosted TTS configured". With `--cascade-voice cartesia` it speaks with Cartesia
 //! Sonic instead, its key from `CARTESIA_API_KEY` and its voice from `CARTESIA_VOICE_ID`, in
 //! 16-bit PCM at 24 kHz. Its recogniser and LLM are those the local voice
@@ -61,11 +62,11 @@ use inference_openai::{
 };
 use inference_phonic::{PhonicConfig, PhonicEndpoint, PhonicSpeech};
 use realtime_voice::compare::{
-    Billing, Clip, Comparison, Measured, Plan, Topology, VOICE_VARIABLE, hosted_tts,
+    Billing, Clip, Comparison, Measured, NO_HOSTED_TTS, Plan, Topology, VOICE_VARIABLE,
 };
 use realtime_voice::{
-    Reported, deepgram_config, elevenlabs_config, nova_config, openai_config, openai_live_config,
-    pcm16,
+    Reported, deepgram_config, elevenlabs, elevenlabs_config, nova_config, openai_config,
+    openai_live_config, pcm16,
 };
 
 const QUESTION: &[u8] =
@@ -384,21 +385,21 @@ fn compare(args: &Args) -> Result<Comparison, Box<dyn Error>> {
     Ok(comparison)
 }
 
-/// The cascade arm's synthesiser: ElevenLabs in `pcm_24000`, its key from `ELEVENLABS_API_KEY`
-/// and its voice from [`VOICE_VARIABLE`].
+/// The cascade arm's synthesiser: ElevenLabs in `pcm_24000` at the host `ELEVENLABS_RESIDENCY`
+/// names, its key from `ELEVENLABS_API_KEY` and its voice from [`VOICE_VARIABLE`].
 fn hosted() -> Result<ElevenLabsSynthesiser, String> {
-    hosted_tts(
-        inference_elevenlabs::Endpoint::new(),
+    let endpoint =
+        elevenlabs::endpoint().map_err(|refused| format!("{NO_HOSTED_TTS}: {refused}"))?;
+    elevenlabs::synthesiser(
+        endpoint,
         Arc::new(inference_elevenlabs::EnvironmentSource::elevenlabs()),
         std::env::var(VOICE_VARIABLE).ok().as_deref(),
-        inference_elevenlabs::OutputFormat::Pcm24000,
     )
 }
 
 /// The cascade arm's synthesiser with `--cascade-voice cartesia`: Cartesia Sonic in 16-bit PCM
 /// at 24 kHz, its key from `CARTESIA_API_KEY` and its voice from `CARTESIA_VOICE_ID`.
 fn cartesia() -> Result<inference_cartesia::CartesiaSynthesiser, String> {
-    use realtime_voice::compare::NO_HOSTED_TTS;
     if std::env::var_os(inference_cartesia::CARTESIA_KEY_VARIABLE).is_none() {
         return Err(format!("{NO_HOSTED_TTS}: CARTESIA_API_KEY is not set"));
     }

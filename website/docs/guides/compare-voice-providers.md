@@ -53,7 +53,9 @@ barge-in is sent and that column stays empty. A provider whose model cannot be m
 session does not open, is skipped with the reason.
 
 The `cascade` provider speaks with ElevenLabs when `ELEVENLABS_API_KEY` holds its key and
-`ELEVENLABS_VOICE_ID` names a voice; otherwise it is skipped as "no hosted TTS configured". Its
+`ELEVENLABS_VOICE_ID` names a voice; otherwise it is skipped as "no hosted TTS configured". It
+connects to the host `ELEVENLABS_RESIDENCY` names (`global`, `us`, `eu`, `in` or `sg`, global when
+unset), as a key of a data-residency stack needs; a value it does not take skips the arm. Its
 recogniser and LLM are the local voice cascade's, bound with feature `local` and configured as in
 the local cascade's guide; a missing one skips it, naming which:
 

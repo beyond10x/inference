@@ -1,6 +1,6 @@
-//! Talk to a realtime model from a laptop: the default microphone, a native speech model and the
-//! default output, with barge-in and the local time as a tool. Use a headset: a laptop's own
-//! speaker feeds back into its microphone, and the model interrupts itself.
+//! Talk to a realtime model from a laptop: the default microphone, a native speech model or a
+//! cascade, and the default output, with barge-in. Use a headset: a laptop's own speaker feeds
+//! back into its microphone, and the model interrupts itself.
 //!
 //! ```text
 //! cargo run -p realtime-voice --example talk -- --provider openai
@@ -8,10 +8,11 @@
 //! INFERENCE_OPENAI_KEY_SOURCE=env OPENAI_API_KEY=... cargo run -p realtime-voice --example talk -- --provider openai
 //! cargo run -p realtime-voice --example talk -- --provider openai-live
 //! AWS_REGION=us-east-1 cargo run -p realtime-voice --example talk -- --provider nova
+//! cargo run -p realtime-voice --features local --example talk -- --provider elevenlabs-cascade
 //! ```
 //!
-//! The provider is configuration only: each has its session configuration and binding, and the
-//! conversation is the same for all.
+//! The native providers are configuration only: each has its session configuration and binding,
+//! and the conversation is the same for all, with the local time as a tool.
 //!
 //! OpenAI, both the Realtime API (`openai`) and GPT-Live (`openai-live`), reads its key from the
 //! OS keychain, secret `openai-api-key`, or with `INFERENCE_OPENAI_KEY_SOURCE=env` from
@@ -20,6 +21,20 @@
 //! truncates it; it bills the voice in seconds, printed with the totals. Nova Sonic takes its
 //! credentials from the AWS default chain and its region from `AWS_REGION`;
 //! `INFERENCE_NOVA_SONIC_MODEL` names another model. The key is never printed.
+//!
+//! `elevenlabs-cascade`, built with feature `local`, is a cascade: ElevenLabs realtime speech to
+//! text (`pcm_16000` from the microphone, the endpoint's voice activity detection committing each
+//! turn), the `llama-server` on loopback `INFERENCE_LLAMA_SERVER_URL` and
+//! `INFERENCE_LLAMA_SERVER_MODEL` name, as the local voice cascade reads them, and ElevenLabs
+//! text to speech in the voice `ELEVENLABS_VOICE_ID` names (`pcm_24000`). Both ElevenLabs
+//! endpoints are at the host `ELEVENLABS_RESIDENCY` names, global when unset; the key is
+//! `ELEVENLABS_API_KEY`, or the OS keychain's `elevenlabs-api-key` when that is unset.
+//! Speaking over an answer, or a new turn while it plays, stops its playback and sends no further
+//! segment of it (`realtime_voice::talk::converse`); ElevenLabs still generates the one it was
+//! speaking. A failed recognition ends the conversation, saying why.
+//! It has no tool and no usage or cost. The variables are checked in the order the guide lists
+//! them, before anything opens; one that is not set, or set to a value not taken, exits with
+//! status 2, naming it.
 //!
 //! Speak, interrupt the model mid-answer, ask for the time. Enter ends the conversation and prints
 //! the session's usage totals and its duration; Ctrl-C ends it without them.
@@ -37,7 +52,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use clap::{Parser, ValueEnum};
+use clap::Parser;
+use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use inference_audio_device::CpalHost;
 use inference_aws::duplex::NovaSonicSpeech;
 use inference_duplex::{NativeSpeechModel, ResponseId, SessionConfig};
@@ -46,6 +62,7 @@ use inference_openai::live_duplex::{OpenAiLive, OpenAiLiveSession};
 use inference_openai::{
     CredentialSource, Endpoint, EnvironmentSource, KeychainSource, OPENAI_KEY_NAME,
 };
+use realtime_voice::talk::{Provider, Refused};
 use realtime_voice::{
     Conversation, Ending, Note, Options, Prices, Reported, Tally, Usage, local_time, nova_config,
     openai_config, openai_live_config,
@@ -58,66 +75,75 @@ const KEY_SOURCE_VARIABLE: &str = "INFERENCE_OPENAI_KEY_SOURCE";
 #[derive(Debug, Parser)]
 struct Args {
     /// The provider to talk to.
-    #[arg(long, value_enum)]
+    #[arg(long, value_parser = providers())]
     provider: Provider,
     /// A JSON price table, per million tokens, to estimate the cost of each response with.
     #[arg(long, value_name = "FILE")]
     prices: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum Provider {
-    /// The OpenAI Realtime API.
-    Openai,
-    /// OpenAI GPT-Live.
-    OpenaiLive,
-    /// Amazon Nova Sonic on Bedrock.
-    Nova,
+/// The values `--provider` takes: every `realtime_voice::talk::Provider`, by name.
+fn providers() -> impl TypedValueParser<Value = Provider> {
+    PossibleValuesParser::new(
+        Provider::ALL.map(|provider| PossibleValue::new(provider.name()).help(provider.about())),
+    )
+    .try_map(|name| Provider::named(&name).ok_or("no such provider"))
 }
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let outcome = prices(args.prices.as_ref()).and_then(|prices| {
-        let host = CpalHost::new();
-        match args.provider {
-            Provider::Openai => openai_key().and_then(|source| {
-                let mut model = OpenAiRealtime::new(Endpoint::from_env(), source, OPENAI_KEY_NAME);
-                talk(
-                    &mut model,
-                    openai_config(),
-                    &host,
-                    Report::new(Reported::OPENAI, prices),
-                    |_| None,
-                )
-            }),
-            Provider::OpenaiLive => openai_key().and_then(|source| {
-                let mut model = OpenAiLive::hosted(source, OPENAI_KEY_NAME);
-                talk(
-                    &mut model,
-                    openai_live_config(),
-                    &host,
-                    Report::new(Reported::OPENAI_LIVE, prices),
-                    OpenAiLiveSession::voice_seconds,
-                )
-            }),
-            Provider::Nova => NovaSonicSpeech::from_env()
-                .map_err(Box::<dyn Error>::from)
-                .and_then(|mut model| {
+    let outcome = args
+        .provider
+        .required(|name| std::env::var(name).ok())
+        .map_err(Box::<dyn Error>::from)
+        .and_then(|()| prices(args.prices.as_ref()))
+        .and_then(|prices| {
+            let host = CpalHost::new();
+            match args.provider {
+                Provider::Openai => openai_key().and_then(|source| {
+                    let mut model =
+                        OpenAiRealtime::new(Endpoint::from_env(), source, OPENAI_KEY_NAME);
                     talk(
                         &mut model,
-                        nova_config(),
+                        openai_config(),
                         &host,
-                        Report::new(Reported::NOVA, prices),
+                        Report::new(Reported::OPENAI, prices),
                         |_| None,
                     )
                 }),
-        }
-    });
+                Provider::OpenaiLive => openai_key().and_then(|source| {
+                    let mut model = OpenAiLive::hosted(source, OPENAI_KEY_NAME);
+                    talk(
+                        &mut model,
+                        openai_live_config(),
+                        &host,
+                        Report::new(Reported::OPENAI_LIVE, prices),
+                        OpenAiLiveSession::voice_seconds,
+                    )
+                }),
+                Provider::Nova => NovaSonicSpeech::from_env()
+                    .map_err(Box::<dyn Error>::from)
+                    .and_then(|mut model| {
+                        talk(
+                            &mut model,
+                            nova_config(),
+                            &host,
+                            Report::new(Reported::NOVA, prices),
+                            |_| None,
+                        )
+                    }),
+                Provider::ElevenlabsCascade => cascade::talk(&host),
+            }
+        });
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
-            ExitCode::FAILURE
+            error
+                .downcast_ref::<Refused>()
+                .map_or(ExitCode::FAILURE, |refused| {
+                    ExitCode::from(refused.exit_code())
+                })
         }
     }
 }
@@ -202,6 +228,221 @@ fn enter_pressed() -> Arc<AtomicBool> {
         set.store(true, Ordering::Relaxed);
     });
     flag
+}
+
+/// `elevenlabs-cascade`: ElevenLabs speech to text, the local LLM, ElevenLabs text to speech.
+#[cfg(feature = "local")]
+mod cascade {
+    use std::error::Error;
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    use inference_audio_device::{
+        CaptureConfig, CpalHost, DeviceSelector, Microphone, PlayoutConfig, Speaker,
+    };
+    use inference_elevenlabs::{
+        CredentialSource, ELEVENLABS_KEY_NAME, ELEVENLABS_KEY_VARIABLE, ElevenLabsRecognition,
+        EnvironmentSource, KeychainSource,
+    };
+    use inference_llama_server::{Config, LlamaServer};
+    use inference_llm::Generator;
+    use local_voice_cascade::local::{
+        MAX_OUTPUT_TOKENS, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE, server_adapter,
+    };
+    use realtime_voice::compare::{Cascade, Playout, VOICE_VARIABLE};
+    use realtime_voice::talk::{CascadeNote, Refused, converse};
+    use realtime_voice::{elevenlabs, pcm16};
+
+    /// How much answer audio the speaker queues: an answer arrives faster than it plays.
+    const PLAYOUT_BUFFER: Duration = Duration::from_secs(120);
+
+    /// How long one read of the microphone waits for a frame.
+    const PATIENCE: Duration = Duration::from_millis(10);
+
+    /// Holds the conversation until Enter is pressed or the recognition ends.
+    pub fn talk(host: &CpalHost) -> Result<(), Box<dyn Error>> {
+        let generator = generator()?;
+        let voice = voice()?;
+        let source = key()?;
+        let endpoint = elevenlabs::endpoint()?;
+        let recogniser = elevenlabs::recogniser(endpoint.clone(), Arc::clone(&source))?;
+        let synthesiser = elevenlabs::synthesiser(endpoint, source, Some(&voice))?;
+        let mut cascade = Cascade::new(recogniser, generator, synthesiser, pcm16(16_000));
+        let format = cascade.input_format;
+        let mut microphone = Microphone::open(
+            host,
+            &DeviceSelector::Default,
+            CaptureConfig {
+                sample_rate: format.sample_rate,
+                encoding: format.encoding,
+                ..CaptureConfig::default()
+            },
+        )?;
+        let speaker = Speaker::open(
+            host,
+            &DeviceSelector::Default,
+            PlayoutConfig {
+                buffer: PLAYOUT_BUFFER,
+            },
+        )?;
+        let started = Instant::now();
+        let enter = super::enter_pressed();
+        println!(
+            "listening on {:?}, playing on {:?}. Speak; speak over the answer to stop it. Enter \
+             ends.",
+            microphone.device().name,
+            speaker.device().name
+        );
+        let mut playout = SpeakerPlayout(&speaker);
+        let mut speaking = false;
+        converse(
+            &mut cascade,
+            &mut || microphone.next_frame(PATIENCE),
+            &mut playout,
+            &|| !enter.load(Ordering::Relaxed),
+            |recognition: &ElevenLabsRecognition| recognition.failure().map(ToString::to_string),
+            &mut |note| print(&note, &mut speaking),
+        );
+        if speaking {
+            println!();
+        }
+        println!("session: {:.1} s", started.elapsed().as_secs_f64());
+        println!("capture: {:?}", microphone.stats());
+        println!("playout: {:?}", speaker.stats());
+        Ok(())
+    }
+
+    /// The ElevenLabs key: `ELEVENLABS_API_KEY` when it is set, the OS keychain's
+    /// `elevenlabs-api-key` otherwise, resolved once here so a missing key stops before anything
+    /// opens. Before it asks the keychain it says so on one line, as the keychain may wait for an
+    /// unlock prompt, and it gives up after `elevenlabs::KEY_WAIT`. The key is never printed.
+    fn key() -> Result<Arc<dyn CredentialSource>, Refused> {
+        let (source, named): (Arc<dyn CredentialSource>, String) =
+            if std::env::var_os(ELEVENLABS_KEY_VARIABLE).is_some() {
+                (
+                    Arc::new(EnvironmentSource::elevenlabs()),
+                    ELEVENLABS_KEY_VARIABLE.to_owned(),
+                )
+            } else {
+                let keychain = KeychainSource::native().map_err(|error| {
+                    Refused::Invalid(format!(
+                        "{ELEVENLABS_KEY_VARIABLE} is not set and the OS keychain did not open: \
+                         {error}"
+                    ))
+                })?;
+                println!(
+                    "{ELEVENLABS_KEY_VARIABLE} is not set: waiting up to {} s for the OS \
+                     keychain's {ELEVENLABS_KEY_NAME}; unlock the keychain if it asks",
+                    elevenlabs::KEY_WAIT.as_secs()
+                );
+                (
+                    Arc::new(keychain),
+                    format!(
+                        "{ELEVENLABS_KEY_VARIABLE} is not set and the OS keychain's \
+                         {ELEVENLABS_KEY_NAME}"
+                    ),
+                )
+            };
+        elevenlabs::resolves(&*source)
+            .map_err(|why| Refused::Invalid(format!("{named} gave no key: {why}")))?;
+        Ok(source)
+    }
+
+    /// A variable `Provider::required` found set.
+    fn read(name: &'static str) -> Result<String, Refused> {
+        std::env::var(name)
+            .map(|value| value.trim().to_owned())
+            .map_err(|_| Refused::Missing(name))
+    }
+
+    /// The generator of the `llama-server` the local voice cascade's variables name, whose URL
+    /// `Provider::required` found on loopback. Nothing is sent before the first turn.
+    fn generator() -> Result<Generator, Refused> {
+        let mut server = Config::new(read(SERVER_URL_VARIABLE)?, read(SERVER_MODEL_VARIABLE)?);
+        server.max_output_tokens = MAX_OUTPUT_TOKENS;
+        let refused = |detail: String| {
+            Refused::Invalid(format!(
+                "{SERVER_URL_VARIABLE} and {SERVER_MODEL_VARIABLE} name no server the \
+                 llama-server adapter binds: {detail}"
+            ))
+        };
+        let adapter = server_adapter(&server).map_err(|error| refused(error.to_string()))?;
+        LlamaServer::new(&server)
+            .map_err(|error| refused(error.to_string()))?
+            .generator(adapter)
+            .map_err(|error| refused(error.to_string()))
+    }
+
+    /// The voice `ELEVENLABS_VOICE_ID` names, which `Provider::required` found a voice id.
+    fn voice() -> Result<String, Refused> {
+        read(VOICE_VARIABLE)
+    }
+
+    /// Prints one note; an answer continues on one line.
+    fn print(note: &CascadeNote, speaking: &mut bool) {
+        let end_line = |speaking: &mut bool| {
+            if std::mem::take(speaking) {
+                println!();
+            }
+        };
+        match note {
+            CascadeNote::Heard(text) => {
+                end_line(speaking);
+                println!("you:   {text}");
+            }
+            CascadeNote::Said(text) => {
+                if !*speaking {
+                    print!("model: ");
+                    *speaking = true;
+                }
+                print!("{text}");
+                let _ = std::io::stdout().flush();
+            }
+            CascadeNote::Answered => end_line(speaking),
+            CascadeNote::BargeIn => {
+                end_line(speaking);
+                println!("[barge-in: playout stopped]");
+            }
+            CascadeNote::Refused(detail) => {
+                end_line(speaking);
+                println!("[{detail}]");
+            }
+            CascadeNote::Ended => {
+                end_line(speaking);
+                println!("[the recognition ended]");
+            }
+        }
+    }
+
+    /// The speaker as the cascade's playout.
+    struct SpeakerPlayout<'a>(&'a Speaker);
+
+    impl Playout for SpeakerPlayout<'_> {
+        fn play(&mut self, frame: &inference_duplex::inference_audio::AudioFrame) {
+            if let Err(error) = self.0.try_push(frame) {
+                println!("[output audio: {error}]");
+            }
+        }
+
+        fn stop(&mut self) {
+            let _ = self.0.stop();
+        }
+    }
+}
+
+/// Without feature `local` the cascade has no LLM: `Provider::required` refuses it first.
+#[cfg(not(feature = "local"))]
+mod cascade {
+    use std::error::Error;
+
+    use inference_audio_device::CpalHost;
+    use realtime_voice::talk::Refused;
+
+    pub fn talk(_host: &CpalHost) -> Result<(), Box<dyn Error>> {
+        Err(Refused::Unbuilt { feature: "local" }.into())
+    }
 }
 
 /// What the terminal shows: the transcripts, the events, and the usage.

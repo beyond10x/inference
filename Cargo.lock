@@ -3609,6 +3609,7 @@ dependencies = [
  "inference-deepslate",
  "inference-duplex",
  "inference-elevenlabs",
+ "inference-llama-server",
  "inference-llm",
  "inference-openai",
  "inference-phonic",
@@ -3617,6 +3618,7 @@ dependencies = [
  "inference-tts",
  "local-voice-cascade",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

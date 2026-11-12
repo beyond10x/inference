@@ -28,6 +28,22 @@
 
 ### Added
 
+- `realtime-voice`: `talk --provider elevenlabs-cascade` (feature `local`) holds a conversation
+  over a cascade: ElevenLabs realtime speech to text (`pcm_16000`, the endpoint's voice activity
+  detection committing each turn), the `llama-server` that `INFERENCE_LLAMA_SERVER_URL` and
+  `INFERENCE_LLAMA_SERVER_MODEL` name, and ElevenLabs text to speech in the voice
+  `ELEVENLABS_VOICE_ID` names (`pcm_24000`). Speaking over an answer, or a new turn while it
+  plays, stops its playback and sends no further segment of it to ElevenLabs; a failed
+  recognition ends the conversation, saying why. A variable it needs that is not set, or set to
+  a value it does not take, exits with status 2, naming it, the variables checked in the order
+  the guide lists them (`realtime_voice::talk::Provider::required`). The key is
+  `ELEVENLABS_API_KEY`, or the keychain secret `elevenlabs-api-key`, which `talk` says it waits
+  for and gives up on, with status 2, when the keychain gives no answer within 8 s
+  (`realtime_voice::elevenlabs::KEY_WAIT`). Both ElevenLabs endpoints
+  of `talk`, and the ElevenLabs voice of `compare`'s cascade arm, connect to the host
+  `ELEVENLABS_RESIDENCY` names (`realtime_voice::elevenlabs::endpoint`), so a key of a
+  data-residency stack is no longer refused by the global host.
+
 - `inference-elevenlabs`: `Endpoint::from_env` reads `ELEVENLABS_RESIDENCY` (`global`, `us`,
   `eu`, `in` or `sg`, global when empty or unset; the refusal of any other value never prints
   it) and `Endpoint::with_residency` sets the host of a

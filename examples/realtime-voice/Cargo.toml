@@ -9,18 +9,20 @@ repository.workspace = true
 publish = false
 
 [features]
-local = ["local-voice-cascade/local"]
+local = ["dep:inference-llama-server", "local-voice-cascade/local"]
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 inference-audio-device = { path = "../../adapters/inference-audio-device", default-features = false }
 inference-duplex = { path = "../../crates/inference-duplex" }
-inference-elevenlabs = { path = "../../adapters/inference-elevenlabs" }
+inference-elevenlabs = { path = "../../adapters/inference-elevenlabs", features = ["stt"] }
+inference-llama-server = { path = "../../adapters/inference-llama-server", optional = true }
 inference-llm = { path = "../../crates/inference-llm" }
 inference-stt = { path = "../../crates/inference-stt" }
 inference-tts = { path = "../../crates/inference-tts" }
 local-voice-cascade = { path = "../local-voice-cascade" }
 serde_json.workspace = true
+tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
 clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
@@ -29,7 +31,7 @@ inference-aws = { path = "../../adapters/inference-aws", features = ["duplex"] }
 inference-cartesia = { path = "../../adapters/inference-cartesia" }
 inference-deepgram = { path = "../../adapters/inference-deepgram", features = ["duplex"] }
 inference-deepslate = { path = "../../adapters/inference-deepslate" }
-inference-elevenlabs = { path = "../../adapters/inference-elevenlabs", features = ["duplex"] }
+inference-elevenlabs = { path = "../../adapters/inference-elevenlabs", features = ["duplex", "native-keychain", "stt"] }
 inference-openai = { path = "../../adapters/inference-openai", features = ["gpt-live", "live"] }
 inference-phonic = { path = "../../adapters/inference-phonic" }
 inference-testkit = { path = "../../crates/inference-testkit", features = ["duplex", "llm", "stt", "tts"] }
