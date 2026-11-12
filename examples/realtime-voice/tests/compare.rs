@@ -58,13 +58,22 @@ fn ms(millis: u64) -> Duration {
 struct Fake {
     base: Instant,
     offset: Rc<Cell<Duration>>,
+    /// How far past its deadline a session's wait with no event before it moves the clock.
+    overshoot: Duration,
 }
 
 impl Fake {
     fn new() -> Self {
+        Self::overshooting(Duration::ZERO)
+    }
+
+    /// A clock that a session's wait with no event moves `overshoot` past its deadline, as a
+    /// loaded host wakes a waiting client late.
+    fn overshooting(overshoot: Duration) -> Self {
         Self {
             base: Instant::now(),
             offset: Rc::new(Cell::new(Duration::ZERO)),
+            overshoot,
         }
     }
 
@@ -398,7 +407,7 @@ impl SpeechSessionHandle for ScriptedSession {
                     self.apply(action);
                 }
                 _ => {
-                    self.clock.offset.set(deadline);
+                    self.clock.offset.set(deadline + self.clock.overshoot);
                     return None;
                 }
             }
@@ -454,9 +463,18 @@ fn runs_with(
     scripts: Vec<Script>,
     seconds: bool,
 ) -> Vec<Measured> {
-    let clock = Fake::new();
+    runs_on(&Fake::new(), plan, caller_cancels, scripts, seconds)
+}
+
+fn runs_on(
+    clock: &Fake,
+    plan: &Plan,
+    caller_cancels: bool,
+    scripts: Vec<Script>,
+    seconds: bool,
+) -> Vec<Measured> {
     let count = scripts.len();
-    let mut model = Scripted::new(caller_cancels, scripts, &clock);
+    let mut model = Scripted::new(caller_cancels, scripts, clock);
     let now = {
         let clock = clock.clone();
         move || clock.now()
@@ -635,6 +653,37 @@ fn an_answer_that_finished_playing_before_the_barge_in_is_not_measured_and_says_
                 && note.contains("started 500 ms after it")),
         "{:?}",
         measured[0].notes
+    );
+}
+
+/// The native arm says how far behind the plan's pace it sent the barge-in's first voiced frame:
+/// on a clock its waits move to their deadline, not at all; on one they move 7 ms past it, as a
+/// loaded host wakes the client late, those 7 ms, which barge-in to stop leaves out.
+#[test]
+fn the_native_arm_measures_how_late_it_sent_the_barge_in() {
+    const OVERSHOOT: Duration = Duration::from_millis(7);
+    let on_time = runs(true, vec![fast(250, 300, 1_500)], false);
+    let late = runs_on(
+        &Fake::overshooting(OVERSHOOT),
+        &plan(),
+        true,
+        vec![fast(250, 300, 1_500)],
+        false,
+    );
+    for run in on_time.iter().chain(&late) {
+        assert_eq!(run.notes, Vec::<String>::new(), "{run:?}");
+    }
+    assert_eq!(
+        (on_time[0].barge_in_sent_late, on_time[0].barge_in_stop),
+        (Some(Duration::ZERO), Some(ms(200))),
+        "{:?}",
+        on_time[0]
+    );
+    assert_eq!(
+        (late[0].barge_in_sent_late, late[0].barge_in_stop),
+        (Some(OVERSHOOT), Some(ms(200))),
+        "{:?}",
+        late[0]
     );
 }
 

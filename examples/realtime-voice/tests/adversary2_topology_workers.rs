@@ -482,6 +482,13 @@ impl llm_core::Model for SlowModel {
 /// which shortens barge-in to stop by the lag (`Measured::barge_in_sent_late`) and leaves their
 /// sum. A loop held by a step for the LLM's `GAP` sends both late, in one burst, and the sum
 /// grows by the hold; frames sent without waiting for their time make it zero.
+///
+/// The sum is at least one frame, exactly: it is the cut less the first frame's due time, on one
+/// clock, and the cut is read after the second frame went out, which is no sooner than its due
+/// time, one frame after the first's. A cut at the first voiced frame, the attack ignored, comes
+/// to the lag alone, short of a frame unless the host held that frame back a frame or more. A step that holds the loop for one
+/// to three frames at the barge-in is a lag the host could have made and passes; the case tells
+/// only longer holds from it.
 #[test]
 fn the_live_arm_paces_the_barge_in_while_the_llm_and_the_synthesiser_block() {
     let (measured, stops) = within_deadline(|| {
@@ -520,7 +527,7 @@ fn the_live_arm_paces_the_barge_in_while_the_llm_and_the_synthesiser_block() {
         .expect("the barge-in's lag behind the plan's pace was measured");
     let since_due = stop + late;
     assert!(
-        since_due >= Duration::from_millis(10) && since_due <= Duration::from_millis(80),
+        since_due >= FRAME && since_due <= Duration::from_millis(80),
         "barge-in to stop {since_due:?} from when the barge-in's first voiced frame was due \
          ({stop:?} from its send, {late:?} behind the pace): the attack of {ATTACK:?} needs two \
          frames of {FRAME:?} sent at pace"
