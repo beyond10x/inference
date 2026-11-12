@@ -126,6 +126,17 @@ fn mock_synthesiser() -> MockSynthesiser {
     )
 }
 
+/// The mock at 8 kHz: each of its frames is 20 ms of audio, so a synthesis that blocks 8 ms
+/// before each frame stays well ahead of the client's playout, and a host that holds its thread
+/// back for a frame or two does not leave the playout without audio before the barge-in.
+fn slow_rate_synthesiser() -> MockSynthesiser {
+    MockSynthesiser::new(
+        TtsConfiguration::IncrementalStreaming,
+        ModelId::generate(),
+        pcm16(8_000),
+    )
+}
+
 const ANSWER: [&str; 2] = [
     "one two three four five six seven eight nine ten \
      one two three four five six seven eight nine ten \
@@ -463,8 +474,14 @@ impl llm_core::Model for SlowModel {
 
 /// On the wall clock, with an LLM working on its second segment and a synthesiser that blocks
 /// while it streams each frame, the barge-in's frames go out at the plan's pace: the detector's
-/// attack of two frames is met one frame after the barge-in's first voiced frame, so barge-in to
-/// stop is about one frame, not the zero of a burst.
+/// attack of two frames is met one frame after the barge-in's first voiced frame was due, so the
+/// stop comes about one frame after it, not at once as in a burst and not a held step later.
+///
+/// Measured from when that frame was due, not from when it went out, the figure does not move
+/// with the host's load: a loop the host held back sends the frame late and the next one on time,
+/// which shortens barge-in to stop by the lag (`Measured::barge_in_sent_late`) and leaves their
+/// sum. A loop held by a step for the LLM's `GAP` sends both late, in one burst, and the sum
+/// grows by the hold; frames sent without waiting for their time make it zero.
 #[test]
 fn the_live_arm_paces_the_barge_in_while_the_llm_and_the_synthesiser_block() {
     let (measured, stops) = within_deadline(|| {
@@ -472,7 +489,7 @@ fn the_live_arm_paces_the_barge_in_while_the_llm_and_the_synthesiser_block() {
         let generator = Generator::new(mock.adapter().clone(), Arc::new(SlowModel { inner: mock }))
             .expect("the wrapper declares what the mock declares");
         let synthesiser = Wrapped {
-            inner: mock_synthesiser(),
+            inner: slow_rate_synthesiser(),
             wrap: |inner| Wrapping {
                 inner,
                 behaviour: Behaviour::Stream {
@@ -498,9 +515,14 @@ fn the_live_arm_paces_the_barge_in_while_the_llm_and_the_synthesiser_block() {
     let stop = measured
         .barge_in_stop
         .expect("barge-in to stop was measured");
+    let late = measured
+        .barge_in_sent_late
+        .expect("the barge-in's lag behind the plan's pace was measured");
+    let since_due = stop + late;
     assert!(
-        stop >= Duration::from_millis(10) && stop <= Duration::from_millis(80),
-        "barge-in to stop {stop:?}: the attack of {ATTACK:?} needs two frames of {FRAME:?} sent \
-         at pace"
+        since_due >= Duration::from_millis(10) && since_due <= Duration::from_millis(80),
+        "barge-in to stop {since_due:?} from when the barge-in's first voiced frame was due \
+         ({stop:?} from its send, {late:?} behind the pace): the attack of {ATTACK:?} needs two \
+         frames of {FRAME:?} sent at pace"
     );
 }

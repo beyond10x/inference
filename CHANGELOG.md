@@ -31,6 +31,9 @@
   `Spread` gains the public field `p95` and `Measured` the public field `clip`; a call with the
   old arguments or a recogniser whose handle is not `Send + 'static`, and a struct literal of
   either break.
+- `realtime-voice`: `Measured` gains the public field `barge_in_sent_late`, how far behind the
+  plan's pace `compare` sent the barge-in's first voiced frame, which barge-in to stop leaves out;
+  a struct literal of `Measured` breaks.
 
 ### Added
 

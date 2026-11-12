@@ -28,7 +28,9 @@
 //! speech started or that the answer was cancelled, and with `auto_interrupt` off it cancels the
 //! answer itself. A model that stops on its own side has stopped when its voiced audio pauses for
 //! [`Plan::quiet`] after the barge-in; an answer whose voiced audio had finished playing before
-//! the barge-in is not measured, and the run says so.
+//! the barge-in is not measured, and the run says so. How far behind the plan's pace the client
+//! sent that first voiced frame is [`Measured::barge_in_sent_late`]: a client its host held back
+//! sends it late and the frames after it on time, which shortens barge-in to stop by that much.
 //!
 //! [`run_cascade`] runs the same plan over the other topology, a [`Cascade`] of a recogniser, an
 //! LLM and a synthesiser, with the same turns, pace and clock. The cascade has no session to
@@ -390,6 +392,10 @@ pub struct Measured {
     pub response_end: Option<Duration>,
     /// The barge-in's first voiced frame sent to the end of the answer's playout.
     pub barge_in_stop: Option<Duration>,
+    /// How far behind the plan's pace the client sent the barge-in's first voiced frame: the time
+    /// from when the frame was due to its send, which barge-in to stop leaves out. A client its
+    /// host held back sends that frame late and catches up on the next ones.
+    pub barge_in_sent_late: Option<Duration>,
     /// End of input speech to the recogniser's final transcript, for a cascade.
     pub final_transcript: Option<Duration>,
     /// End of input speech to the LLM's first token, for a cascade.
@@ -635,7 +641,7 @@ impl<S: SpeechSessionHandle> Runner<'_, S> {
                 return;
             }
             if now >= next_send {
-                self.send(now);
+                self.send(now, next_send);
                 next_send += self.plan.frame;
                 continue;
             }
@@ -719,8 +725,9 @@ impl<S: SpeechSessionHandle> Runner<'_, S> {
         }
     }
 
-    /// Sends the next frame of input, silence when none is queued.
-    fn send(&mut self, now: Instant) {
+    /// Sends the next frame of input, due at `due` on the plan's pace, silence when none is
+    /// queued.
+    fn send(&mut self, now: Instant, due: Instant) {
         let input = self.queue.pop_front().unwrap_or_else(|| {
             let samples = samples_in(self.plan.frame, self.format.sample_rate).max(1);
             Input {
@@ -752,7 +759,10 @@ impl<S: SpeechSessionHandle> Runner<'_, S> {
                 Phase::BargeIn => self.barge.speech_end = Some(now),
                 _ => {}
             },
-            Mark::BargeStart => self.barge_start = Some(now),
+            Mark::BargeStart => {
+                self.barge_start = Some(now);
+                self.measured.barge_in_sent_late = Some(now.saturating_duration_since(due));
+            }
             Mark::None => {}
         }
     }
@@ -1755,7 +1765,7 @@ where
                 return;
             }
             if now >= next_send {
-                self.send(now);
+                self.send(now, next_send);
                 next_send += self.plan.frame;
                 continue;
             }
@@ -1967,9 +1977,10 @@ where
         self.cut();
     }
 
-    /// Sends the next frame of input, silence when none is queued, to the recogniser's worker
-    /// while it takes the turn's input and to the arm's detector.
-    fn send(&mut self, now: Instant) {
+    /// Sends the next frame of input, due at `due` on the plan's pace, silence when none is
+    /// queued, to the recogniser's worker while it takes the turn's input and to the arm's
+    /// detector.
+    fn send(&mut self, now: Instant, due: Instant) {
         let input = self.queue.pop_front().unwrap_or_else(|| {
             let format = self.cascade.input_format;
             let samples = samples_in(self.plan.frame, format.sample_rate).max(1);
@@ -1998,7 +2009,10 @@ where
                     steps.speech_end = Some(now);
                 }
             }
-            Mark::BargeStart => self.barge_start = Some(now),
+            Mark::BargeStart => {
+                self.barge_start = Some(now);
+                self.measured.barge_in_sent_late = Some(now.saturating_duration_since(due));
+            }
             Mark::None => {}
         }
         if self.stage == Stage::Listening {
