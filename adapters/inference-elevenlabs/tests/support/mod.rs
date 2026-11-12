@@ -13,8 +13,10 @@
 //!
 //! The server generates as the hosted endpoint was measured to (`src/lib.rs`,
 //! `tests/fixtures/tts-multi-stream-protocol.md`): a `close_context` does not cut a flushed
-//! context, whose audio the server sends whole; the final message follows the last audio of a
-//! closed context; a flushed context that is never closed gets no final message. A
+//! context, whose audio the server sends whole, and the final message follows the last audio
+//! of a closed context. The endpoint sends the final message of a flushed context that is
+//! never closed only at its inactivity timeout, about 20 s later (20012 ms in the probe); the
+//! server does not model that and sends such a context no final message at all. A
 //! [`FixtureServer::paced`] server waits before the first audio message of each context and
 //! between the others, so a test can measure the time to first audio and land a cancel
 //! mid-segment.

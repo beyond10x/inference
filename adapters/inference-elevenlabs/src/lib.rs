@@ -34,8 +34,8 @@
 //! stops playback and drops the remaining frames on the client; it stops nothing at the server.
 //! On the hosted endpoint a flushed context is generated to the end regardless of a close: in a
 //! billed probe on 2026-11-12 (`tests/tts_cancel_live.rs`), a close sent right after the first
-//! audio of a 401-character text was followed by 99% of the text's audio (22.5 of 22.7 s), all
-//! of it generated within 0.8 s of the text. A flush alone brought the context's final message
+//! audio of a 401-character text was followed by 97.7% of the text's audio (22.2 of 22.7 s),
+//! all of it generated within 0.8 s of the text. A flush alone brought the context's final message
 //! only after the endpoint's 20 s inactivity timeout, so the close goes with the text, the one
 //! prompt way to end the segment, and a cancel sends no second one. A barge-in saves playback,
 //! not generation or cost. Dropping the handle closes the connection.
@@ -58,8 +58,8 @@
 //! A key belongs to one data-residency stack, and every other host refuses it. [`Endpoint`] is
 //! the global host unless told otherwise; [`Endpoint::with_residency`] picks a [`Residency`],
 //! and [`Endpoint::from_env`] the one [`RESIDENCY_VARIABLE`] (`ELEVENLABS_RESIDENCY`) names:
-//! `global`, `us`, `eu`, `in` or `sg`, unset for global, anything else a
-//! [`ConfigError::Residency`].
+//! `global`, `us`, `eu`, `in` or `sg`, empty or unset for global, anything else a
+//! [`ConfigError::Residency`], which never prints the value.
 //!
 //! The key is never read by the binding itself: the caller injects a [`CredentialSource`] and
 //! names the secret ([`EnvironmentSource::elevenlabs`] reads `ELEVENLABS_API_KEY`; with feature

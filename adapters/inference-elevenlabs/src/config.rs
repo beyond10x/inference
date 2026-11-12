@@ -115,27 +115,29 @@ impl Endpoint {
     }
 
     /// The hosted endpoint of the residency [`RESIDENCY_VARIABLE`] names, with the default
-    /// bounds; [`Residency::Global`] when it is unset.
+    /// bounds; [`Residency::Global`] when it is unset or empty.
     ///
     /// # Errors
     /// [`ConfigError::Residency`] when it is set to anything but `global`, `us`, `eu`, `in` or
-    /// `sg`, or to text that is not Unicode.
+    /// `sg`, or to text that is not Unicode. The error never prints the value, which may be a
+    /// key set in the wrong variable.
     pub fn from_env() -> Result<Self, ConfigError> {
         match std::env::var(RESIDENCY_VARIABLE) {
             Ok(value) => Self::from_residency_value(Some(&value)),
             Err(std::env::VarError::NotPresent) => Self::from_residency_value(None),
             Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::Residency(
-                "text that is not Unicode".to_owned(),
+                "a value that is not Unicode".to_owned(),
             )),
         }
     }
 
-    /// [`Endpoint::from_env`] for the variable's value, `None` when it is unset.
+    /// [`Endpoint::from_env`] for the variable's value, `None` when it is unset. An empty value
+    /// is unset.
     fn from_residency_value(value: Option<&str>) -> Result<Self, ConfigError> {
-        let residency = match value {
+        let residency = match value.filter(|value| !value.is_empty()) {
             None => Residency::Global,
             Some(value) => Residency::named(value)
-                .ok_or_else(|| ConfigError::Residency(format!("`{value}`")))?,
+                .ok_or_else(|| ConfigError::Residency(refused_residency(value)))?,
         };
         Ok(Self::new().with_residency(residency))
     }
@@ -340,6 +342,21 @@ impl VoiceConfig {
     }
 }
 
+/// The longest refused residency [`refused_residency`] repeats.
+const ECHOED_RESIDENCY: usize = 12;
+
+/// What [`ConfigError::Residency`] keeps of a refused value: the value in backticks when it is
+/// a word of at most [`ECHOED_RESIDENCY`] ASCII letters, such as a misspelt residency, which no
+/// key is; for anything else only its length, since a key set in the wrong variable must not
+/// reach an error, and a line break must not reach a log.
+fn refused_residency(value: &str) -> String {
+    if value.len() <= ECHOED_RESIDENCY && value.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        format!("`{value}`")
+    } else {
+        format!("a value of {} characters", value.chars().count())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +365,7 @@ mod tests {
     fn the_residency_variable_names_a_host_and_unset_is_global() {
         for (value, residency) in [
             (None, Residency::Global),
+            (Some(""), Residency::Global),
             (Some("global"), Residency::Global),
             (Some("us"), Residency::Us),
             (Some("eu"), Residency::Eu),
@@ -366,13 +384,34 @@ mod tests {
 
     #[test]
     fn any_other_residency_is_refused_naming_the_variable() {
-        for value in ["", "EU", "europe", " eu"] {
+        for value in ["europe", "sk_0123456789abcdef", "eu\nforged"] {
             match Endpoint::from_residency_value(Some(value)) {
                 Err(error @ ConfigError::Residency(_)) => {
-                    assert!(error.to_string().contains(RESIDENCY_VARIABLE), "{error}");
+                    let shown = error.to_string();
+                    assert!(shown.contains(RESIDENCY_VARIABLE), "{shown}");
+                    assert!(!shown.contains(value), "{shown}");
+                    assert!(!shown.contains('\n'), "{shown:?}");
                 }
                 other => panic!("{value:?}: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_refused_residency_keeps_only_a_short_word_of_letters() {
+        for (value, kept) in [
+            ("europe", "`europe`"),
+            ("EU", "`EU`"),
+            (" eu", "a value of 3 characters"),
+            ("sk_0123456789abcdef", "a value of 19 characters"),
+            ("abcdefghijklm", "a value of 13 characters"),
+            ("eu\nforged", "a value of 9 characters"),
+        ] {
+            assert_eq!(
+                Endpoint::from_residency_value(Some(value)),
+                Err(ConfigError::Residency(kept.to_owned())),
+                "{value:?}"
+            );
         }
     }
 }

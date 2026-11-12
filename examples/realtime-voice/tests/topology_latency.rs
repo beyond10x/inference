@@ -10,7 +10,9 @@
 //! speech lies within one frame of its scripted value, since each arm hears the end of speech at
 //! a frame boundary; a step taken between two instants of the arm is exact.
 
+use std::collections::HashSet;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
@@ -69,6 +71,10 @@ const HOLD: Duration = Duration::from_millis(200);
 const STT_DELAY: Duration = Duration::from_millis(120);
 const LLM_DELAY: Duration = Duration::from_millis(200);
 const TTS_DELAY: Duration = Duration::from_millis(90);
+/// The wall-clock wait of the test synthesiser between a segment's offer and its first frame,
+/// which the synthesis's own time to first audio measures. Well under `SIMULATED_STALL`, so the
+/// simulated clock does not move meanwhile.
+const TTS_OFFER_DELAY: Duration = Duration::from_millis(30);
 /// The cascade's detector: voiced input this long opens a turn, and so stops the playout.
 const ATTACK: Duration = Duration::from_millis(30);
 /// The time the playout takes to stop.
@@ -346,6 +352,8 @@ impl llm_core::Model for DelayedModel {
 struct DelayedSynthesiser {
     inner: MockSynthesiser,
     clock: Fake,
+    /// The segments that sent a frame, across every synthesis.
+    spoken: Arc<AtomicUsize>,
 }
 
 impl Synthesiser for DelayedSynthesiser {
@@ -360,6 +368,8 @@ impl Synthesiser for DelayedSynthesiser {
             inner: self.inner.start()?,
             clock: self.clock.clone(),
             audio: false,
+            heard: HashSet::new(),
+            spoken: Arc::clone(&self.spoken),
         })
     }
 }
@@ -368,6 +378,8 @@ struct DelayedSynthesis {
     inner: MockSynthesis,
     clock: Fake,
     audio: bool,
+    heard: HashSet<SegmentId>,
+    spoken: Arc<AtomicUsize>,
 }
 
 impl Iterator for DelayedSynthesis {
@@ -375,6 +387,11 @@ impl Iterator for DelayedSynthesis {
 
     fn next(&mut self) -> Option<SynthesisEvent> {
         let event = self.inner.next()?;
+        if let SynthesisEvent::Audio(audio) = &event
+            && self.heard.insert(audio.segment_id())
+        {
+            self.spoken.fetch_add(1, Ordering::SeqCst);
+        }
         if matches!(event, SynthesisEvent::Audio(_)) && !self.audio {
             self.audio = true;
             self.clock.advance(TTS_DELAY);
@@ -388,8 +405,12 @@ impl SynthesisHandle for DelayedSynthesis {
         self.inner.output()
     }
 
+    /// Offers the segment and waits [`TTS_OFFER_DELAY`] on the wall clock, so its first frame
+    /// comes at least that long after its offer.
     fn offer_segment(&mut self, segment: OutputSegment) -> Result<SegmentQueued, OfferRefused> {
-        self.inner.offer_segment(segment)
+        let queued = self.inner.offer_segment(segment)?;
+        std::thread::sleep(TTS_OFFER_DELAY);
+        Ok(queued)
     }
 
     fn end_utterance(&mut self) -> Result<(), UtteranceEnded> {
@@ -438,6 +459,12 @@ fn cascade_run(plan: &Plan) -> (Measured, usize) {
 /// A run of the cascade whose LLM answers with the deltas `answer`; the mock synthesiser speaks
 /// one 10 ms frame per word.
 fn cascade_answering(plan: &Plan, answer: &[&str]) -> (Measured, usize) {
+    let (measured, stops, _) = cascade_spoken(plan, answer);
+    (measured, stops)
+}
+
+/// [`cascade_answering`], with the number of segments the synthesiser sent a frame of.
+fn cascade_spoken(plan: &Plan, answer: &[&str]) -> (Measured, usize, usize) {
     let clock = Fake::new();
     let script = vec![
         Cue {
@@ -474,7 +501,9 @@ fn cascade_answering(plan: &Plan, answer: &[&str]) -> (Measured, usize) {
             pcm16(16_000),
         ),
         clock: clock.clone(),
+        spoken: Arc::new(AtomicUsize::new(0)),
     };
+    let spoken = Arc::clone(&synthesiser.spoken);
     let mut cascade = Cascade::new(recogniser, generator, synthesiser, pcm16(16_000));
     cascade.hold = HOLD;
     cascade.attack = ATTACK;
@@ -488,7 +517,7 @@ fn cascade_answering(plan: &Plan, answer: &[&str]) -> (Measured, usize) {
     };
     let wait = move |by: Duration| clock.advance(by);
     let measured = run_cascade(&mut cascade, plan, &now, &wait, &mut playout);
-    (measured, playout.stops)
+    (measured, playout.stops, spoken.load(Ordering::SeqCst))
 }
 
 /// 200 ms of speech, then 100 ms of silence, at 24 kHz.
@@ -533,7 +562,7 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
 fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay_case() {
     let plan = Plan::new(utterance());
     let native = native_run(&plan);
-    let (cascade, _) = cascade_run(&plan);
+    let (cascade, _, spoken) = cascade_spoken(&plan, &ANSWER);
     assert_eq!(native.notes, Vec::<String>::new(), "{native:?}");
     assert_eq!(cascade.notes, Vec::<String>::new(), "{cascade:?}");
     assert_eq!(native.topology, Topology::Native);
@@ -601,11 +630,19 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
         TTS_DELAY,
     );
     assert_eq!(cascade.first_transcript, None);
-    assert!(
-        !cascade.tts_segment_first_audio.is_empty(),
+    assert!(spoken > 0, "the synthesiser spoke a segment");
+    assert_eq!(
+        cascade.tts_segment_first_audio.len(),
+        spoken,
         "story:elevenlabs-tts-provider-cancel: the synthesis's time to first audio of each spoken \
          segment reaches the report: {cascade:?}"
     );
+    for first_audio in &cascade.tts_segment_first_audio {
+        assert!(
+            *first_audio >= TTS_OFFER_DELAY,
+            "time to first audio {first_audio:?}, the synthesiser waits {TTS_OFFER_DELAY:?}"
+        );
+    }
     assert_eq!(
         Measure::TtsOfferToAudio.of(&cascade),
         cascade.tts_segment_first_audio.first().copied()
@@ -675,6 +712,11 @@ fn a_native_and_a_cascade_arm_land_in_one_report_each_step_at_its_scripted_delay
     else {
         panic!("the cascade ran");
     };
+    let offer_to_audio = Measure::TtsOfferToAudio.of(&runs[0]);
+    assert!(
+        offer_to_audio.is_some_and(|at| at >= TTS_OFFER_DELAY),
+        "tts offer to audio {offer_to_audio:?}, the synthesiser waits {TTS_OFFER_DELAY:?}"
+    );
     for value in [
         runs[0].final_transcript,
         runs[0].first_token,

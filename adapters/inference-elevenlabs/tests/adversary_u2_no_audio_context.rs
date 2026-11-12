@@ -1,9 +1,11 @@
 //! Adversary pass on story:elevenlabs-tts-provider-cancel: a context the endpoint answers with
-//! no audio. The hosted endpoint ends a flushed context only when it is closed (a flush alone
-//! brought its final message only at the 20 s inactivity timeout), so a segment whose text
-//! yields no audio (punctuation only, say) completes only if its close is sent without waiting
-//! for audio. A binding that closed a context only once a message of it had arrived would wait
-//! for the read timeout, fail the synthesis and lose every later segment of the utterance.
+//! no audio, whatever the cause. The hosted endpoint ends a flushed context promptly only when
+//! it is closed (a flush alone brought its final message only at the 20 s inactivity timeout).
+//! A binding that closed a context only once a message of it had arrived would wait for the
+//! read timeout on such a context, fail the synthesis and lose every later segment of the
+//! utterance. The hosted endpoint did return audio for a text of punctuation only (`…`, one
+//! audio message of 2973 B in the probe); this file's server answers it with none to stand for
+//! any context that yields no audio.
 //!
 //! The server of this file follows that model: a flushed context with text other than the
 //! ellipsis gets one audio message at once; every context gets its final message only on its
