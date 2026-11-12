@@ -316,16 +316,42 @@ fn a_server_silent_after_the_end_of_input_with_a_span_open_fails_as_stalled_with
 }
 
 #[test]
-fn a_server_silent_after_the_end_of_input_with_nothing_heard_ends_the_recognition_cleanly() {
+fn an_end_of_input_commit_answered_with_nothing_heard_ends_the_recognition_cleanly() {
+    let server = FixtureServer::start(Script::Steps(vec![
+        stt_support::Step {
+            on: stt_support::Trigger::Open,
+            action: stt_support::Action::Send(stt_support::session_started()),
+        },
+        stt_support::Step {
+            on: stt_support::Trigger::Commit(1),
+            action: stt_support::Action::Send(
+                r#"{"message_type":"committed_transcript_with_timestamps","text":"","words":[]}"#
+                    .to_owned(),
+            ),
+        },
+    ]));
+    let mut recogniser = server.recogniser(manual(InputFormat::Ulaw8000));
+    let (handle, events) = recognise(&mut recogniser, mulaw(5));
+    assert_eq!(handle.failure(), None);
+    assert_eq!(events.iter().map(describe).collect::<Vec<_>>(), ["usage"]);
+    assert_eq!(audio_ms(&events), (Some(100), true));
+}
+
+#[test]
+fn an_end_of_input_commit_never_answered_fails_as_stalled_though_nothing_was_heard() {
     let server = FixtureServer::start(Script::Steps(vec![stt_support::Step {
         on: stt_support::Trigger::Open,
         action: stt_support::Action::Send(stt_support::session_started()),
     }]));
     let mut recogniser = server.recogniser(manual(InputFormat::Ulaw8000));
     let (handle, events) = recognise(&mut recogniser, mulaw(5));
-    assert_eq!(handle.failure(), None);
+    assert!(
+        matches!(handle.failure(), Some(ElevenLabsError::Stalled(_))),
+        "{:?}",
+        handle.failure()
+    );
     assert_eq!(events.iter().map(describe).collect::<Vec<_>>(), ["usage"]);
-    assert_eq!(audio_ms(&events), (Some(100), true));
+    assert_eq!(audio_ms(&events), (Some(100), false));
 }
 
 #[test]

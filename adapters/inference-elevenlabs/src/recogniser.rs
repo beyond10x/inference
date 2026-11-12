@@ -22,7 +22,7 @@ use tokio::sync::mpsc as async_mpsc;
 use crate::config::Endpoint;
 use crate::connection::Connection;
 use crate::credential::{CredentialSource, ELEVENLABS_KEY_NAME, EnvironmentSource};
-use crate::error::{ConfigError, ElevenLabsError};
+use crate::error::{ConfigError, ConnectError, ElevenLabsError};
 use crate::stt_config::{CommitStrategy, TranscriptionConfig};
 use crate::stt_protocol::{self, ServerMessage, SpanTiming};
 
@@ -188,6 +188,7 @@ impl Recogniser for ElevenLabsRecogniser {
             timings: Vec::new(),
             outstanding: 0,
             end_sent: false,
+            opened: false,
             heard_at: std::time::Instant::now(),
             delivered: VecDeque::new(),
             failure: None,
@@ -219,6 +220,8 @@ enum Command {
 
 /// What that thread tells the handle, and what the handle makes of its silence.
 enum Inbound {
+    /// The handshake succeeded; every message follows this.
+    Opened,
     Message(ServerMessage),
     Failed(ElevenLabsError),
     /// The read timeout passed after the end of input without a message.
@@ -232,8 +235,6 @@ enum Inbound {
 struct Worker {
     commands: async_mpsc::UnboundedSender<Command>,
     inbound: mpsc::Receiver<Inbound>,
-    /// When the answer to the end-of-input commit is due at the latest, once it was sent.
-    due: Option<std::time::Instant>,
 }
 
 /// One recognition of an [`ElevenLabsRecogniser`]; it runs until it is dropped or cancelled.
@@ -242,10 +243,13 @@ struct Worker {
 /// caller is elsewhere. Before the end of input, iterating takes the frames offered and yields
 /// what has arrived, without waiting: `None` then means nothing has arrived yet. Once input has
 /// ended, iterating blocks until the answer to the end-of-input commit (with `vad`, followed by
-/// [`VAD_END_QUIET`] of silence with no span open), a failure or the read timeout, one deadline
-/// from the end of input, and `None` means the recognition has ended. A
-/// failure ends the iteration; [`ElevenLabsRecognition::failure`] says why, and the usage record,
-/// delivered once input has ended, is then not final.
+/// [`VAD_END_QUIET`] of silence with no span open), a failure, or the read timeout passing
+/// without a server message, and `None` means the recognition has ended. The read timeout runs
+/// from the later of the end of input, the opening of the connection and the last server
+/// message; while the handshake is still pending it does not run, and the handshake's own bound,
+/// the connect timeout, applies. A failure ends the iteration;
+/// [`ElevenLabsRecognition::failure`] says why, and the usage record, delivered once input has
+/// ended, is then not final.
 pub struct ElevenLabsRecognition {
     output: TranscriptOutput,
     shared: Arc<Shared>,
@@ -257,8 +261,10 @@ pub struct ElevenLabsRecognition {
     /// The commits sent and not yet answered by a committed transcript.
     outstanding: usize,
     end_sent: bool,
-    /// When the last server message arrived after the end-of-input commit was sent, or when it
-    /// was sent.
+    /// Whether the connection's thread said the handshake succeeded.
+    opened: bool,
+    /// When the read timeout after the end of input starts: the later of the end-of-input commit,
+    /// the opening of the connection and the last server message.
     heard_at: std::time::Instant,
     delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
     failure: Option<ElevenLabsError>,
@@ -400,14 +406,16 @@ impl ElevenLabsRecognition {
         }
     }
 
-    /// The next thing the connection's thread said: without waiting before the end of input, and
-    /// after it by one deadline, the read timeout from the end-of-input commit, whose passing is
-    /// [`Inbound::Quiet`]. `None` when nothing has arrived before the end of input.
+    /// The next thing the connection's thread said. Before the end of input, without waiting:
+    /// `None` when nothing has arrived. After it, while the handshake is pending, until the
+    /// thread says how it ended, which the connect timeout bounds; once the connection is open,
+    /// until the read timeout from `heard_at` passes, which is
+    /// [`Inbound::Quiet`], or with `vad` and nothing left to answer, until [`VAD_END_QUIET`]
+    /// passes, which is [`Inbound::Settled`]. An instant too far to represent is no deadline.
     fn receive(&mut self) -> Option<Inbound> {
         let now = std::time::Instant::now();
         if self.output.input_ended() && !self.end_sent {
-            let worker = self.worker.as_mut()?;
-            worker.due = Some(now + self.shared.endpoint.read_timeout);
+            let worker = self.worker.as_ref()?;
             if worker.commands.send(Command::Commit).is_ok() {
                 self.outstanding += 1;
             }
@@ -417,29 +425,47 @@ impl ElevenLabsRecognition {
         let settling = matches!(self.shared.config.commit_strategy, CommitStrategy::Vad(_))
             && self.outstanding == 0
             && self.open.is_none();
-        let settled_at = self.heard_at + VAD_END_QUIET;
-        let worker = self.worker.as_mut()?;
-        let received = if let Some(due) = worker.due {
-            let until = if settling { due.min(settled_at) } else { due };
-            match worker
-                .inbound
-                .recv_timeout(until.saturating_duration_since(now))
-            {
-                Ok(inbound) => {
-                    self.heard_at = std::time::Instant::now();
-                    inbound
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) if until < due => Inbound::Settled,
-                Err(mpsc::RecvTimeoutError::Timeout) => Inbound::Quiet,
-                Err(mpsc::RecvTimeoutError::Disconnected) => Inbound::Failed(stopped()),
-            }
-        } else {
+        let due = self.heard_at.checked_add(self.shared.endpoint.read_timeout);
+        let settle = self.heard_at.checked_add(VAD_END_QUIET);
+        let settle_first = settling
+            && match (settle, due) {
+                (Some(settle), Some(due)) => settle < due,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+        let worker = self.worker.as_ref()?;
+        let received = if !self.end_sent {
             match worker.inbound.try_recv() {
                 Ok(inbound) => inbound,
                 Err(mpsc::TryRecvError::Empty) => return None,
                 Err(mpsc::TryRecvError::Disconnected) => Inbound::Failed(stopped()),
             }
+        } else if !self.opened {
+            worker
+                .inbound
+                .recv()
+                .unwrap_or_else(|_| Inbound::Failed(stopped()))
+        } else {
+            let until = if settle_first { settle } else { due };
+            let next = match until {
+                Some(until) => worker
+                    .inbound
+                    .recv_timeout(until.saturating_duration_since(now)),
+                None => worker
+                    .inbound
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            };
+            match next {
+                Ok(inbound) => inbound,
+                Err(mpsc::RecvTimeoutError::Timeout) if settle_first => Inbound::Settled,
+                Err(mpsc::RecvTimeoutError::Timeout) => Inbound::Quiet,
+                Err(mpsc::RecvTimeoutError::Disconnected) => Inbound::Failed(stopped()),
+            }
         };
+        if self.end_sent && matches!(received, Inbound::Opened | Inbound::Message(_)) {
+            self.heard_at = std::time::Instant::now();
+        }
         Some(received)
     }
 
@@ -472,10 +498,11 @@ impl ElevenLabsRecognition {
         Ok(())
     }
 
-    /// The silence of the server for the read timeout after the end of input: the end when no
-    /// span is open, since nothing heard is left uncommitted, and a stall when one is.
+    /// The silence of the server for the read timeout after the end of input: a stall while a
+    /// commit is unanswered or a span is open, and otherwise the end, since every commit was
+    /// answered and nothing heard is left uncommitted.
     fn quiet(&mut self) -> Result<(), ElevenLabsError> {
-        if self.open.is_some() {
+        if self.open.is_some() || self.outstanding > 0 {
             return Err(ElevenLabsError::Stalled(self.shared.endpoint.read_timeout));
         }
         self.finish();
@@ -558,6 +585,10 @@ impl Iterator for ElevenLabsRecognition {
                 continue;
             }
             let outcome = match self.receive()? {
+                Inbound::Opened => {
+                    self.opened = true;
+                    Ok(())
+                }
                 Inbound::Message(message) => self.apply(message),
                 Inbound::Failed(error) => Err(error),
                 Inbound::Quiet => self.quiet(),
@@ -621,11 +652,7 @@ fn spawn(shared: Arc<Shared>) -> Result<Worker, ElevenLabsError> {
         .name("inference-elevenlabs-stt".to_owned())
         .spawn(move || runtime.block_on(drive(shared, receiver, sender)))
         .map_err(|error| ElevenLabsError::Runtime(error.to_string()))?;
-    Ok(Worker {
-        commands,
-        inbound,
-        due: None,
-    })
+    Ok(Worker { commands, inbound })
 }
 
 /// What the thread does after one event of its loop.
@@ -676,30 +703,49 @@ async fn command(connection: &mut Connection, command: Option<Command>, rate: u3
 }
 
 /// Drives one connection: opens it, sends audio and commits as the handle asks, and hands every
-/// server message to the handle, until a failure, a cancel or the handle letting go. A cancel or
-/// drop during the opening handshake drops the attempt at once. While the handle's queue is full
-/// the connection is not read.
+/// server message to the handle, until a failure, a cancel or the handle letting go. The opening,
+/// the credential's resolution included, is bounded by the connect timeout, and its outcome is
+/// the first thing the handle hears: [`Inbound::Opened`] or the failure. A cancel or drop during
+/// the opening handshake drops the attempt at once. While the handle's queue is full the
+/// connection is not read.
 async fn drive(
     shared: Arc<Shared>,
     mut commands: async_mpsc::UnboundedReceiver<Command>,
     inbound: mpsc::SyncSender<Inbound>,
 ) {
     let endpoint = &shared.endpoint;
-    let opening = Connection::open(
-        &shared.url,
-        shared.source.as_ref(),
-        &shared.credential,
-        endpoint.connect_timeout,
-        endpoint.read_timeout,
+    let connect_timeout = endpoint.connect_timeout;
+    let opening = tokio::time::timeout(
+        connect_timeout,
+        Connection::open(
+            &shared.url,
+            shared.source.as_ref(),
+            &shared.credential,
+            connect_timeout,
+            endpoint.read_timeout,
+        ),
     );
     tokio::pin!(opening);
     let mut early = VecDeque::new();
     let mut connection = loop {
         tokio::select! {
             opened = &mut opening => match opened {
-                Ok(connection) => break connection,
-                Err(error) => {
+                Ok(Ok(connection)) => {
+                    if inbound.send(Inbound::Opened).is_err() {
+                        connection.close(None).await;
+                        return;
+                    }
+                    break connection;
+                }
+                Ok(Err(error)) => {
                     let _ = inbound.send(Inbound::Failed(error));
+                    return;
+                }
+                Err(_) => {
+                    let _ = inbound.send(Inbound::Failed(ElevenLabsError::Connect(ConnectError {
+                        status: None,
+                        detail: format!("no connection within {connect_timeout:?}"),
+                    })));
                     return;
                 }
             },

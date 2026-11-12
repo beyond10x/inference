@@ -122,14 +122,19 @@
 //!
 //! Each of the fourteen error types the endpoint documents fails the recognition with an
 //! `ElevenLabsError` variant of its own (`ElevenLabsError::scribe_error_type` names it), and so
-//! do a refused handshake, a close, a message outside the protocol and a server silent past the
-//! read timeout once input has ended while a span is open (`ElevenLabsError::Stalled`); never a
-//! panic or a hang. A server silent past it with no span open ends the recognition cleanly,
-//! since nothing heard is left uncommitted. The handshake is bounded by the connect timeout,
-//! every write by the read timeout, and the end by one deadline, the read timeout from the
-//! end-of-input commit. `ElevenLabsRecognition::cancel` and dropping the handle close the
-//! connection and deliver nothing more. The connection is driven on a thread of its own, so the
-//! handle may be iterated from any thread; at most 32 server messages wait for the caller. The
+//! do a refused handshake or one not done within the connect timeout (`ElevenLabsError::Connect`,
+//! also when input ended while it was pending), a close, a message outside the protocol or larger
+//! than `MAX_MESSAGE_SIZE` (4 MiB, the bound of every connection of the TTS binding and the
+//! recogniser), and a server silent for the read timeout once input has ended while a commit is
+//! unanswered or a span is open (`ElevenLabsError::Stalled`); never a panic or a hang. A server
+//! silent for it once every commit is answered and no span is open ends the recognition cleanly.
+//! The opening, the credential included, is bounded by the connect timeout and every write by the
+//! read timeout; after the end of input the read timeout runs from the later of the end of input,
+//! the opening of the connection and the last server message, and does not run while the
+//! handshake is pending. A timeout too large for an instant is no deadline.
+//! `ElevenLabsRecognition::cancel` and dropping the handle close the connection and deliver
+//! nothing more. The connection is driven on a thread of its own, so the handle may be iterated
+//! from any thread; at most 32 server messages wait for the caller. The
 //! key travels as the TTS binding sends it: only in the `xi-api-key` header, from the injected
 //! source, zeroized, and `ws://` only to a loopback host.
 //!
@@ -169,7 +174,7 @@ pub use config::{
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL, Endpoint,
     MAX_INACTIVITY_TIMEOUT, OutputFormat, VoiceConfig, VoiceSettings,
 };
-pub use connection::CLOSE_BOUND;
+pub use connection::{CLOSE_BOUND, MAX_MESSAGE_SIZE};
 #[cfg(feature = "keychain")]
 pub use credential::KeychainSource;
 pub use credential::{

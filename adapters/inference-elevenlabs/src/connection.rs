@@ -9,6 +9,7 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use crate::credential::CredentialSource;
@@ -18,6 +19,11 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// The most a cancel or an orderly close waits for the close frame to be written.
 pub const CLOSE_BOUND: Duration = Duration::from_secs(1);
+
+/// The largest message, and the largest frame, a connection reads, 4 MiB as the Deepgram
+/// recogniser reads; a larger one fails the read as a transport error instead of being
+/// buffered.
+pub const MAX_MESSAGE_SIZE: usize = 4 << 20;
 
 /// An open connection and the bound on its writes and on each wait for the server.
 pub(crate) struct Connection {
@@ -56,8 +62,15 @@ impl Connection {
         } else {
             None
         };
-        let handshake =
-            tokio_tungstenite::connect_async_tls_with_config(request, None, true, connector);
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_MESSAGE_SIZE))
+            .max_frame_size(Some(MAX_MESSAGE_SIZE));
+        let handshake = tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            Some(config),
+            true,
+            connector,
+        );
         let (socket, _) = tokio::time::timeout(connect_timeout, handshake)
             .await
             .map_err(|_| {

@@ -35,7 +35,8 @@
 //! - `committed_transcript_with_timestamps` with its `text` and `words`, each with `start` and
 //!   `end` in seconds: the same commit with its word timings. The span's timing
 //!   ([`SpanTiming`]) runs from the first `start` to the last `end` of its words of type `word`
-//!   (or of no type), `spacing` and words without both numbers left out;
+//!   (or of no type), `spacing`, words without both numbers and words that do not lie in the
+//!   audio sent (a `start` below 0 or an `end` before its `start`) left out;
 //! - `warning` with its `warning`: kept, never a failure;
 //! - one of the fourteen error types ([`ERROR_TYPES`]) with its `error`: the recognition fails
 //!   with the [`ElevenLabsError`] variant of that type;
@@ -73,9 +74,12 @@
 //!   exactly that order. A transcript that comes later than the quiet time after a VAD commit
 //!   answered for the binding's is lost; the live test is where that shows.
 //! - **A commit with nothing to commit.** Whether the endpoint answers a commit of audio already
-//!   committed, or of silence, is not stated. Once input has ended, a server silent for the read
-//!   timeout ends the recognition cleanly when no span is open, since nothing heard is left
-//!   uncommitted, and fails it as [`ElevenLabsError::Stalled`] when one is.
+//!   committed, or of silence, is not stated. The binding holds the endpoint to answering every
+//!   commit: once input has ended, a server silent for the read timeout while a commit is
+//!   unanswered, or a span is open, fails the recognition as [`ElevenLabsError::Stalled`],
+//!   whatever was heard before; only once every commit is answered and no span is open does the
+//!   silence end it cleanly. If the endpoint turns out not to answer a commit of silence, every
+//!   such recognition fails as stalled, which the live test shows.
 //! - **An empty commit chunk.** `audio_base_64` is required and not documented as non-empty; the
 //!   binding sends an empty one with `commit` true rather than holding a frame back to carry the
 //!   flag.
@@ -275,7 +279,8 @@ pub fn parse_server_message(text: &str) -> Result<ServerMessage, ElevenLabsError
 }
 
 /// The timing of the `words` of a committed transcript: from the first `start` to the last `end`
-/// of its words of type `word` or of no type that carry both.
+/// of its words of type `word` or of no type that carry both, with a `start` of at least 0 and an
+/// `end` no earlier than it.
 fn timing(object: &Map<String, Value>) -> Result<Option<SpanTiming>, ElevenLabsError> {
     let words = match object.get("words") {
         None | Some(Value::Null) => return Ok(None),
@@ -303,7 +308,10 @@ fn timing(object: &Map<String, Value>) -> Result<Option<SpanTiming>, ElevenLabsE
         let (start, end) = (time("start")?, time("end")?);
         let spoken = matches!(word.get("type"), None | Some(Value::Null))
             || word.get("type").and_then(Value::as_str) == Some("word");
-        if let (true, Some(start), Some(end)) = (spoken, start, end) {
+        if let (true, Some(start), Some(end)) = (spoken, start, end)
+            && 0.0 <= start
+            && start <= end
+        {
             span = Some(match span {
                 None => SpanTiming { start, end },
                 Some(span) => SpanTiming {

@@ -182,7 +182,7 @@ impl fmt::Display for ElevenLabsError {
             Self::Stalled(waited) => write!(f, "no server message within {waited:?}"),
             Self::Protocol(detail) => write!(f, "protocol violation: {detail}"),
             Self::Server(message) => write!(f, "server error: {message}"),
-            Self::Runtime(detail) => write!(f, "the synthesis's runtime failed: {detail}"),
+            Self::Runtime(detail) => write!(f, "the runtime failed: {detail}"),
             Self::UnsupportedAudio(detail) => write!(f, "unsupported audio: {detail}"),
             Self::ScribeError(message)
             | Self::AuthError(message)
