@@ -125,6 +125,21 @@ async fn feed(host: &FakeHost, frames: &[AudioFrame]) {
     }
 }
 
+/// Feeds `frames` to the host's microphone over and over until the run closes it: its microphone
+/// thread does once the feeder stopped and the next captured frame finds no taker, or once the
+/// session ended. The close is the signal, not how many frames got in before it: the thread may
+/// capture, and the feeder stop, between any two of them, and it may already have.
+async fn fed_until_closed(host: &FakeHost, frames: &[AudioFrame]) {
+    let started = Instant::now();
+    for frame in frames.iter().cycle() {
+        if !host.feed(&decode(frame).expect("a well-formed frame")) {
+            return;
+        }
+        assert!(started.elapsed() < LIMIT, "the run closes the microphone");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 async fn waiting_for(hold: &SinkHold, mock: MockId, reply: u32) {
     let started = Instant::now();
     while !hold
@@ -262,7 +277,9 @@ async fn an_application_cut_of_a_cascade_reply_on_the_devices_closes_without_an_
 
 /// R146: once a close took the session out of Ready, the device feeder's `send_audio` answers
 /// `Error::Closed` and the feeder stops without an error, the run going on to the drain. A held
-/// cascade sink keeps the session draining, so frames fed then do reach the feeder's refused send.
+/// cascade sink keeps the session draining, so frames fed then do reach the feeder's refused send;
+/// they are fed until the run closes the microphone, however many got in before the feeder
+/// stopped.
 #[tokio::test(flavor = "multi_thread")]
 async fn frames_fed_while_a_close_drains_do_not_fail_the_device_run() {
     let agent = Arc::new(
@@ -284,7 +301,7 @@ async fn frames_fed_while_a_close_drains_do_not_fail_the_device_run() {
         assert!(started.elapsed() < LIMIT, "the close leaves Ready");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    feed(&host, &synthesize(&FIXTURE[1..2])).await;
+    fed_until_closed(&host, &synthesize(&FIXTURE[1..2])).await;
     let early = tokio::time::timeout(Duration::from_secs(1), &mut run).await;
     assert!(early.is_err(), "the run waits for the held sink: {early:?}");
     drop(hold);
