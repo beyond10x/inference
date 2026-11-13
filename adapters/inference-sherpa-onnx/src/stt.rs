@@ -483,6 +483,75 @@ impl Drop for Slot {
     }
 }
 
+/// The batches of one recogniser that decode at once, shared by its clones and their
+/// recognitions. A batch holds a [`Place`] from before it starts until it ends, also when the
+/// async form decodes it on a thread of its own whose recognition was dropped meanwhile, so a
+/// recogniser never decodes more batches at once than its maximum concurrency.
+#[derive(Debug, Default)]
+struct Gate {
+    state: std::sync::Mutex<GateState>,
+    freed: std::sync::Condvar,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    held: usize,
+    waiting: Vec<Waker>,
+}
+
+impl Gate {
+    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A place among `limit`, waiting on the calling thread while every place is held.
+    fn take(self: &Arc<Self>, limit: usize) -> Place {
+        let mut state = self.lock();
+        while state.held >= limit {
+            state = self
+                .freed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state.held += 1;
+        Place(Arc::clone(self))
+    }
+
+    /// A place among `limit`, or `Pending` while every place is held; the place given back
+    /// wakes `cx`.
+    fn poll_take(self: &Arc<Self>, limit: usize, cx: &Context<'_>) -> Poll<Place> {
+        let mut state = self.lock();
+        if state.held < limit {
+            state.held += 1;
+            return Poll::Ready(Place(Arc::clone(self)));
+        }
+        if !state.waiting.iter().any(|kept| kept.will_wake(cx.waker())) {
+            state.waiting.push(cx.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
+/// One decode's place in a [`Gate`], given back when it is dropped.
+#[derive(Debug)]
+struct Place(Arc<Gate>);
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        let waiting = {
+            let mut state = self.0.lock();
+            state.held = state.held.saturating_sub(1);
+            std::mem::take(&mut state.waiting)
+        };
+        self.0.freed.notify_all();
+        for waker in waiting {
+            waker.wake();
+        }
+    }
+}
+
 /// A streaming speech recogniser over sherpa-onnx's online recogniser and the pinned checkpoint.
 /// Its clones share the online recogniser and the count of running recognitions: they are the
 /// same adapter.
@@ -492,6 +561,8 @@ pub struct SherpaOnnxRecogniser {
     adapter: Adapter,
     recognizer: Arc<OnlineRecognizer>,
     running: Running,
+    /// The batches decoding at once, at most the maximum concurrency.
+    gate: Arc<Gate>,
 }
 
 impl fmt::Debug for SherpaOnnxRecogniser {
@@ -619,6 +690,7 @@ impl SherpaOnnxRecogniser {
             adapter,
             recognizer: Arc::new(recognizer),
             running: Running::default(),
+            gate: Arc::default(),
         })
     }
 
@@ -640,8 +712,12 @@ impl Recogniser for SherpaOnnxRecogniser {
         &mut self,
         request: RecognitionRequest,
     ) -> Result<SherpaOnnxRecognition, ConcurrencyLimitReached> {
-        let slot = self.running.admit(self.adapter.max_concurrency())?;
+        let max_concurrency = self.adapter.max_concurrency();
+        let slot = self.running.admit(max_concurrency)?;
         Ok(SherpaOnnxRecognition {
+            gate: Arc::clone(&self.gate),
+            limit: usize::try_from(max_concurrency).unwrap_or(usize::MAX),
+            batch: None,
             engine: Some(Engine {
                 stream: self.recognizer.create_stream(),
                 recognizer: Arc::clone(&self.recognizer),
@@ -730,8 +806,16 @@ impl Utterance {
 /// Iterating it decodes on the calling thread. Its async form,
 /// [`RecognitionHandle::poll_event`], decodes each batch of frames on a thread it starts for the
 /// batch and returns `Pending` until that thread is done, which wakes the caller, so the caller's
-/// runtime thread never decodes.
+/// runtime thread never decodes. Either way a batch waits while the recogniser already decodes
+/// its maximum concurrency of them. Dropped while a batch decodes, the recognition does not wait
+/// for it; the batch's thread decodes it to its end and holds its place among the batches
+/// decoding until then.
 pub struct SherpaOnnxRecognition {
+    gate: Arc<Gate>,
+    limit: usize,
+    /// The frames taken and whether input ended with them, while the async form waits for a
+    /// place to decode them.
+    batch: Option<(Vec<AudioFrame>, bool)>,
     /// The stream and what feeds it; `None` while a batch decodes on a thread of its own, which
     /// holds it.
     engine: Option<Engine>,
@@ -777,17 +861,23 @@ struct Decoding {
 }
 
 impl Decoding {
-    /// Feeds `frames`, and the end of input when `ended`, to `engine` on a new thread; the
-    /// engine back when no thread starts.
-    fn start(mut engine: Engine, frames: Vec<AudioFrame>, ended: bool) -> Result<Self, Engine> {
+    /// Feeds `frames`, and the end of input when `ended`, to `engine` on a new thread, which
+    /// holds `place` until it ends; the engine and the frames back when no thread starts.
+    fn start(
+        engine: Engine,
+        frames: Vec<AudioFrame>,
+        ended: bool,
+        place: Place,
+    ) -> Result<Self, (Engine, Vec<AudioFrame>)> {
         let (sender, result) = std::sync::mpsc::sync_channel(1);
         let waker: Arc<std::sync::Mutex<Option<Waker>>> = Arc::default();
         let wake = Arc::clone(&waker);
-        let (handing, handed) = std::sync::mpsc::sync_channel(1);
+        let (handing, handed) = std::sync::mpsc::sync_channel::<(Engine, Vec<AudioFrame>)>(1);
         let started = std::thread::Builder::new()
             .name("inference-sherpa-onnx".to_owned())
             .spawn(move || {
-                let Ok(mut engine) = handed.recv() else {
+                let _place = place;
+                let Ok((mut engine, frames)) = handed.recv() else {
                     return;
                 };
                 let (seen, spent) = Engine::feed(&mut engine, &frames, ended);
@@ -802,11 +892,10 @@ impl Decoding {
                 }
             });
         if started.is_err() {
-            return Err(engine);
+            return Err((engine, frames));
         }
-        if let Err(std::sync::mpsc::SendError(back)) = handing.send(engine) {
-            engine = back;
-            return Err(engine);
+        if let Err(std::sync::mpsc::SendError(back)) = handing.send((engine, frames)) {
+            return Err(back);
         }
         Ok(Self {
             result,
@@ -918,49 +1007,69 @@ impl SherpaOnnxRecognition {
     /// With `cx`, the async form's, a batch of frames, or the end of input, decodes on a thread
     /// of its own and this is `Pending` until it is done; without, a batch the async form started
     /// is waited for.
-    fn advance(&mut self, cx: Option<&mut Context<'_>>) -> Poll<()> {
-        if let Some(decoding) = self.decoding.as_ref() {
-            let decoded = ready!(decoding.poll(cx));
-            let ended = decoding.ended;
-            self.decoding = None;
-            match decoded {
-                Some((engine, seen, spent)) => {
-                    self.engine = Some(engine);
-                    self.settle(seen, spent, ended);
+    fn advance(&mut self, mut cx: Option<&mut Context<'_>>) -> Poll<()> {
+        loop {
+            if let Some(decoding) = self.decoding.as_ref() {
+                let decoded = ready!(decoding.poll(cx.as_deref_mut()));
+                let ended = decoding.ended;
+                self.decoding = None;
+                match decoded {
+                    Some((engine, seen, spent)) => {
+                        self.engine = Some(engine);
+                        self.settle(seen, spent, ended);
+                    }
+                    None => self.lose_engine(),
                 }
-                None => self.lose_engine(),
+                if !self.delivered.is_empty() || self.finished {
+                    return Poll::Ready(());
+                }
+                continue;
             }
-            return Poll::Ready(());
-        }
-        if self.finished {
-            return Poll::Ready(());
-        }
-        let Ok(frames) = self.output.take_input() else {
-            return Poll::Ready(());
-        };
-        let ended = self.output.input_ended();
-        let Some(mut engine) = self.engine.take() else {
-            self.lose_engine();
-            return Poll::Ready(());
-        };
-        let Some(cx) = cx else {
+            if self.batch.is_none() {
+                if self.finished {
+                    return Poll::Ready(());
+                }
+                let Ok(frames) = self.output.take_input() else {
+                    return Poll::Ready(());
+                };
+                let ended = self.output.input_ended();
+                if cx.is_some() && frames.is_empty() && !ended {
+                    return Poll::Ready(());
+                }
+                self.batch = Some((frames, ended));
+            }
+            let place = match cx.as_deref_mut() {
+                None => self.gate.take(self.limit),
+                Some(cx) => ready!(self.gate.poll_take(self.limit, cx)),
+            };
+            let Some((frames, ended)) = self.batch.take() else {
+                return Poll::Ready(());
+            };
+            let Some(mut engine) = self.engine.take() else {
+                self.lose_engine();
+                return Poll::Ready(());
+            };
+            let inline = if cx.is_some() {
+                match Decoding::start(engine, frames, ended, place) {
+                    Ok(decoding) => {
+                        self.decoding = Some(decoding);
+                        continue;
+                    }
+                    Err((back, frames)) => {
+                        engine = back;
+                        (frames, None)
+                    }
+                }
+            } else {
+                (frames, Some(place))
+            };
+            let (frames, place) = inline;
             let (seen, spent) = engine.feed(&frames, ended);
+            drop(place);
             self.engine = Some(engine);
             self.settle(seen, spent, ended);
             return Poll::Ready(());
-        };
-        if frames.is_empty() && !ended {
-            self.engine = Some(engine);
-            return Poll::Ready(());
         }
-        match Decoding::start(engine, frames, ended) {
-            Ok(decoding) => self.decoding = Some(decoding),
-            Err(engine) => {
-                self.engine = Some(engine);
-                return Poll::Ready(());
-            }
-        }
-        self.advance(Some(cx))
     }
 
     /// Acts on what one batch showed, in order, adds the time it took to the local compute, and,

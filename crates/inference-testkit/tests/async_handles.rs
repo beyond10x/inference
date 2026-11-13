@@ -521,8 +521,10 @@ fn the_stt_conformance_passes_through_the_async_form_for_every_mock_configuratio
             stt::conformance::claims_observed(&mut through(), &input),
         );
     }
+    let failing_backend = Failing::new();
+    let waited = Arc::clone(&failing_backend.pending);
     let mut failing = AsyncRecogniser {
-        inner: Failing::new(),
+        inner: failing_backend,
         runtime: Arc::clone(&runtime),
         pulled: Arc::clone(&pulled),
     };
@@ -537,6 +539,10 @@ fn the_stt_conformance_passes_through_the_async_form_for_every_mock_configuratio
     assert_eq!(observed.error, CLOSED);
     assert_eq!(observed.committed, 1, "one span before the failure");
     assert!(
+        waited.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the failure came through the woken form, which waited for the backend"
+    );
+    assert!(
         pulled.load(std::sync::atomic::Ordering::Relaxed) > 0,
         "events came through the async form"
     );
@@ -548,8 +554,10 @@ const CLOSED: &str = "the backend closed";
 /// A streaming recogniser whose backend fails after its first span: the mock recogniser has no
 /// failing backend, and [`stt::conformance::backend_failure`] needs one. From the 40th frame taken
 /// it emits a span and commits it, then marks the call failed and delivers its usage, not final.
+/// Its async form is woken: it waits for a backend thread that fails a moment later.
 struct Failing {
     adapter: Adapter,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Failing {
@@ -568,7 +576,10 @@ impl Failing {
             descriptor: inference_core::model::AdapterDescriptor::default(),
         })
         .expect("one is positive");
-        Self { adapter }
+        Self {
+            adapter,
+            pending: Arc::default(),
+        }
     }
 }
 
@@ -587,6 +598,8 @@ impl Recogniser for Failing {
             output: TranscriptOutput::start(&self.adapter, request),
             taken: 0,
             failed: false,
+            backend: None,
+            pending: Arc::clone(&self.pending),
             delivered: std::collections::VecDeque::new(),
         })
     }
@@ -596,7 +609,43 @@ struct FailingRecognition {
     output: TranscriptOutput,
     taken: usize,
     failed: bool,
+    /// The backend failing, once the async form waits for it.
+    backend: Option<Arc<Backend>>,
+    /// How many times the async form returned `Pending`, across the recogniser's recognitions.
+    pending: Arc<std::sync::atomic::AtomicUsize>,
     delivered: std::collections::VecDeque<EventEnvelope<TranscriptEvent>>,
+}
+
+/// A backend that fails a moment after it is asked: a thread of its own marks it failed and then
+/// wakes the waker kept.
+#[derive(Default)]
+struct Backend {
+    failed: std::sync::atomic::AtomicBool,
+    waker: std::sync::Mutex<Option<std::task::Waker>>,
+}
+
+impl Backend {
+    fn start() -> Arc<Self> {
+        let backend = Arc::new(Self::default());
+        let failing = Arc::clone(&backend);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            failing
+                .failed
+                .store(true, std::sync::atomic::Ordering::Release);
+            let kept = failing.waker.lock().expect("not poisoned").take();
+            if let Some(waker) = kept {
+                waker.wake();
+            }
+        });
+        backend
+    }
+
+    /// Whether the backend has failed; `cx` is woken when it does, if it has not.
+    fn failed(&self, cx: &std::task::Context<'_>) -> bool {
+        *self.waker.lock().expect("not poisoned") = Some(cx.waker().clone());
+        self.failed.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 impl FailingRecognition {
@@ -649,6 +698,28 @@ impl RecognitionHandle for FailingRecognition {
         let envelope = self.output.revise(input)?;
         self.delivered.push_back(envelope);
         Ok(())
+    }
+
+    /// Woken, not polled: once the failing span is due, `Pending` until the backend's thread
+    /// has failed it, which wakes `cx`.
+    fn poll_event(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<EventEnvelope<TranscriptEvent>>> {
+        if self.delivered.is_empty() && !self.failed {
+            if let Ok(frames) = self.output.take_input() {
+                self.taken += frames.len();
+            }
+            if self.taken >= 40 {
+                let backend = self.backend.get_or_insert_with(Backend::start);
+                if !backend.failed(cx) {
+                    self.pending
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return std::task::Poll::Pending;
+                }
+            }
+        }
+        std::task::Poll::Ready(self.next())
     }
 }
 

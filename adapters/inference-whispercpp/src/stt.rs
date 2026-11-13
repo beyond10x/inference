@@ -51,7 +51,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker, ready};
 use std::time::{Duration, Instant};
 
@@ -419,6 +419,75 @@ impl Drop for Slot {
     }
 }
 
+/// The decodes of one recogniser that run at once, shared by its clones and their recognitions.
+/// A decode holds a [`Place`] from before it starts until it ends, also when the async form
+/// decodes on a thread of its own whose recognition was dropped meanwhile, so a recogniser never
+/// decodes more than its maximum concurrency at once.
+#[derive(Debug, Default)]
+struct Gate {
+    state: std::sync::Mutex<GateState>,
+    freed: std::sync::Condvar,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    held: usize,
+    waiting: Vec<Waker>,
+}
+
+impl Gate {
+    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A place among `limit`, waiting on the calling thread while every place is held.
+    fn take(self: &Arc<Self>, limit: usize) -> Place {
+        let mut state = self.lock();
+        while state.held >= limit {
+            state = self
+                .freed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state.held += 1;
+        Place(Arc::clone(self))
+    }
+
+    /// A place among `limit`, or `Pending` while every place is held; the place given back
+    /// wakes `cx`.
+    fn poll_take(self: &Arc<Self>, limit: usize, cx: &Context<'_>) -> Poll<Place> {
+        let mut state = self.lock();
+        if state.held < limit {
+            state.held += 1;
+            return Poll::Ready(Place(Arc::clone(self)));
+        }
+        if !state.waiting.iter().any(|kept| kept.will_wake(cx.waker())) {
+            state.waiting.push(cx.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
+/// One decode's place in a [`Gate`], given back when it is dropped.
+#[derive(Debug)]
+struct Place(Arc<Gate>);
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        let waiting = {
+            let mut state = self.0.lock();
+            state.held = state.held.saturating_sub(1);
+            std::mem::take(&mut state.waiting)
+        };
+        self.0.freed.notify_all();
+        for waker in waiting {
+            waker.wake();
+        }
+    }
+}
+
 /// A batch speech recogniser over whisper.cpp and the pinned checkpoint. Its clones share the
 /// whisper.cpp context and the count of running recognitions: they are the same adapter.
 #[derive(Clone)]
@@ -427,6 +496,8 @@ pub struct WhisperCppRecogniser {
     adapter: Adapter,
     context: Arc<WhisperContext>,
     running: Running,
+    /// The transcriptions running at once, at most the maximum concurrency.
+    gate: Arc<Gate>,
 }
 
 impl fmt::Debug for WhisperCppRecogniser {
@@ -522,6 +593,7 @@ impl WhisperCppRecogniser {
             adapter,
             context: Arc::new(context),
             running: Running::default(),
+            gate: Arc::default(),
         })
     }
 
@@ -543,12 +615,16 @@ impl Recogniser for WhisperCppRecogniser {
         &mut self,
         request: RecognitionRequest,
     ) -> Result<WhisperCppRecognition, ConcurrencyLimitReached> {
-        let slot = self.running.admit(self.adapter.max_concurrency())?;
+        let max_concurrency = self.adapter.max_concurrency();
+        let slot = self.running.admit(max_concurrency)?;
         Ok(WhisperCppRecognition {
             context: Arc::clone(&self.context),
+            gate: Arc::clone(&self.gate),
+            limit: usize::try_from(max_concurrency).unwrap_or(usize::MAX),
             output: TranscriptOutput::start(&self.adapter, request),
             delivered: VecDeque::new(),
             finished: false,
+            samples: None,
             decoding: None,
             failure: None,
             _slot: slot,
@@ -562,12 +638,19 @@ impl Recogniser for WhisperCppRecogniser {
 /// Iterating it transcribes on the calling thread. Its async form,
 /// [`RecognitionHandle::poll_event`], transcribes on a thread the recognition starts for it and
 /// returns `Pending` until that thread is done, which wakes the caller, so the caller's runtime
-/// thread never decodes.
+/// thread never decodes. Either way a transcription waits while the recogniser already runs its
+/// maximum concurrency of them. Dropped while its thread transcribes, the recognition asks
+/// whisper.cpp to abort, without waiting; the thread holds its place among the transcriptions
+/// running until it ends.
 pub struct WhisperCppRecognition {
     context: Arc<WhisperContext>,
+    gate: Arc<Gate>,
+    limit: usize,
     output: TranscriptOutput,
     delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
     finished: bool,
+    /// The input to transcribe, while the async form waits for a place to transcribe it.
+    samples: Option<Vec<f32>>,
     /// The transcription the async form started on a thread of its own, until it is settled.
     decoding: Option<Decoding>,
     failure: Option<RecognitionFailed>,
@@ -575,23 +658,37 @@ pub struct WhisperCppRecognition {
 }
 
 /// A transcription running on a thread of its own: it sends what it came to and then wakes the
-/// waker kept.
+/// waker kept. Dropped, it asks whisper.cpp to abort the transcription.
 struct Decoding {
     result: std::sync::mpsc::Receiver<Transcription>,
     waker: Arc<std::sync::Mutex<Option<Waker>>>,
+    abort: Arc<AtomicBool>,
+}
+
+impl Drop for Decoding {
+    fn drop(&mut self) {
+        self.abort.store(true, Ordering::Release);
+    }
 }
 
 impl Decoding {
-    /// Transcribes `samples` on `context` on a new thread.
-    fn start(context: Arc<WhisperContext>, samples: Vec<f32>) -> Result<Self, RecognitionFailed> {
+    /// Transcribes `samples` on `context` on a new thread, which holds `place` until it ends.
+    fn start(
+        context: Arc<WhisperContext>,
+        samples: Vec<f32>,
+        place: Place,
+    ) -> Result<Self, RecognitionFailed> {
         let (sender, result) = std::sync::mpsc::sync_channel(1);
         let waker: Arc<std::sync::Mutex<Option<Waker>>> = Arc::default();
         let wake = Arc::clone(&waker);
+        let abort = Arc::new(AtomicBool::new(false));
+        let aborted = Arc::clone(&abort);
         std::thread::Builder::new()
             .name("inference-whispercpp".to_owned())
             .spawn(move || {
+                let _place = place;
                 let computing = Instant::now();
-                let result = transcribe(&context, &samples);
+                let result = transcribe(&context, &samples, Some(aborted));
                 let _ = sender.send(Transcription {
                     result,
                     spent: computing.elapsed(),
@@ -608,7 +705,11 @@ impl Decoding {
             .map_err(|error| RecognitionFailed {
                 detail: format!("no thread to transcribe on: {error}"),
             })?;
-        Ok(Self { result, waker })
+        Ok(Self {
+            result,
+            waker,
+            abort,
+        })
     }
 
     /// What the thread came to: blocking without `cx`; with it, `Pending` until the thread is
@@ -665,28 +766,40 @@ impl WhisperCppRecognition {
     ///
     /// With `cx`, the async form's, the transcription runs on a thread of its own and this is
     /// `Pending` until it is done; without, a transcription the async form started is waited for.
-    fn advance(&mut self, cx: Option<&mut Context<'_>>) -> Poll<()> {
+    /// Either way it first waits for a place among the recogniser's transcriptions.
+    fn advance(&mut self, mut cx: Option<&mut Context<'_>>) -> Poll<()> {
         if let Some(decoding) = self.decoding.as_ref() {
             let transcription = ready!(decoding.poll(cx));
             self.decoding = None;
             self.failure = settle(&mut self.output, Some(transcription), &mut self.delivered);
             return Poll::Ready(());
         }
-        if self.finished {
-            return Poll::Ready(());
+        if self.samples.is_none() {
+            if self.finished {
+                return Poll::Ready(());
+            }
+            let Ok(frames) = self.output.take_input() else {
+                return Poll::Ready(());
+            };
+            self.finished = true;
+            let samples = samples_16k(&frames);
+            if samples.is_empty() {
+                self.failure = settle(&mut self.output, None, &mut self.delivered);
+                return Poll::Ready(());
+            }
+            self.samples = Some(samples);
         }
-        let Ok(frames) = self.output.take_input() else {
+        let place = match cx.as_deref_mut() {
+            None => self.gate.take(self.limit),
+            Some(cx) => ready!(self.gate.poll_take(self.limit, cx)),
+        };
+        let Some(samples) = self.samples.take() else {
             return Poll::Ready(());
         };
-        self.finished = true;
-        let samples = samples_16k(&frames);
-        if samples.is_empty() {
-            self.failure = settle(&mut self.output, None, &mut self.delivered);
-            return Poll::Ready(());
-        }
         let Some(cx) = cx else {
             let computing = Instant::now();
-            let result = transcribe(&self.context, &samples);
+            let result = transcribe(&self.context, &samples, None);
+            drop(place);
             let transcription = Transcription {
                 result,
                 spent: computing.elapsed(),
@@ -694,7 +807,7 @@ impl WhisperCppRecognition {
             self.failure = settle(&mut self.output, Some(transcription), &mut self.delivered);
             return Poll::Ready(());
         };
-        match Decoding::start(Arc::clone(&self.context), samples) {
+        match Decoding::start(Arc::clone(&self.context), samples, place) {
             Ok(decoding) => self.decoding = Some(decoding),
             Err(failed) => {
                 let transcription = Transcription {
@@ -744,8 +857,13 @@ fn settle(
 }
 
 /// The text whisper.cpp transcribes from `samples`, 16 kHz mono, in a new state on `context`:
-/// greedy decoding in English on [`THREADS`] threads, its segments joined.
-fn transcribe(context: &WhisperContext, samples: &[f32]) -> Result<String, RecognitionFailed> {
+/// greedy decoding in English on [`THREADS`] threads, its segments joined. whisper.cpp aborts it
+/// once `abort`, when given, is set.
+fn transcribe(
+    context: &WhisperContext,
+    samples: &[f32],
+    abort: Option<Arc<AtomicBool>>,
+) -> Result<String, RecognitionFailed> {
     let failed = |what: &str, error: whisper_rs::WhisperError| RecognitionFailed {
         detail: format!("{what}: {error}"),
     };
@@ -763,6 +881,12 @@ fn transcribe(context: &WhisperContext, samples: &[f32]) -> Result<String, Recog
     params.set_print_timestamps(false);
     params.set_suppress_nst(true);
     params.set_no_speech_thold(NO_SPEECH_THRESHOLD);
+    if let Some(abort) = abort {
+        // A boxed closure: whisper-rs 0.16 calls the closure it was given through a pointer to
+        // that box, which is only the closure's own type when the closure is the box.
+        let aborted: Box<dyn FnMut() -> bool> = Box::new(move || abort.load(Ordering::Acquire));
+        params.set_abort_callback_safe(aborted);
+    }
     state
         .full(params, samples)
         .map_err(|error| failed("the transcription failed", error))?;
