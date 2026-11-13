@@ -1,7 +1,11 @@
 //! The events a recognition emits from the text whisper.cpp transcribed, and which segments are
-//! annotations rather than text, without weights.
+//! annotations rather than text, and the end of a transcription thread that panics, without
+//! weights.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use inference_stt::inference_core::envelope::EventEnvelope;
@@ -11,9 +15,55 @@ use inference_stt::inference_text::{SpanState, TurnId};
 use inference_stt::{RecognitionRequest, TranscriptEvent, TranscriptOutput};
 
 use super::{
-    RecognitionFailed, Transcription, declare_adapter, declare_model, is_annotation, settle,
-    transcribed,
+    Decoding, Outcome, RecognitionFailed, Transcription, declare_adapter, declare_model,
+    is_annotation, settle, transcribed,
 };
+
+/// Counts its wakes.
+#[derive(Default)]
+struct Wakes(AtomicUsize);
+
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn a_transcription_thread_that_panics_wakes_the_async_form_which_then_fails_the_call() {
+    let (outcome, result, waker) = Outcome::<Transcription>::channel();
+    let decoding = Decoding {
+        result,
+        waker,
+        abort: Arc::default(),
+    };
+    let wakes = Arc::new(Wakes::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut cx = Context::from_waker(&waker);
+    assert!(decoding.poll(Some(&mut cx)).is_pending());
+    let thread = std::thread::spawn(move || {
+        let _outcome = outcome;
+        panic!("the transcription thread panics, as this case wants");
+    });
+    assert!(thread.join().is_err(), "the thread panicked");
+    assert_eq!(
+        wakes.0.load(Ordering::SeqCst),
+        1,
+        "its end woke the async form"
+    );
+    let Poll::Ready(transcription) = decoding.poll(Some(&mut cx)) else {
+        panic!("the async form stayed pending after the thread ended");
+    };
+    let mut delivered = VecDeque::new();
+    let failure = settle(&mut output(1), Some(transcription), &mut delivered);
+    assert_eq!(
+        failure,
+        Some(RecognitionFailed {
+            detail: "the thread transcribing the input ended without a result".to_owned()
+        })
+    );
+    assert_eq!(kinds(&delivered), [("usage", String::new())]);
+}
 
 fn output(first_sequence: i64) -> TranscriptOutput {
     let (model, _) = declare_model();

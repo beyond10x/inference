@@ -1,7 +1,10 @@
 //! The events an utterance emits from the recogniser's successive results, and the resampling of
-//! frames at a second sample rate, without weights.
+//! frames at a second sample rate, and the end of a decode thread that panics, without weights.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use inference_stt::inference_core::envelope::EventEnvelope;
 use inference_stt::inference_core::id::{NodeId, RunId, StreamId};
@@ -9,9 +12,48 @@ use inference_stt::inference_text::{SpanState, TurnId};
 use inference_stt::{RecognitionRequest, TranscriptEvent, TranscriptOutput};
 
 use super::{
-    MAX_STREAM_RATE, MIN_STREAM_RATE, Resampler, UnsupportedRate, Utterance, admit_rate,
-    declare_adapter, declare_model, stream_rate, tail_padding,
+    Decoded, Decoding, MAX_STREAM_RATE, MIN_STREAM_RATE, Outcome, Resampler, UnsupportedRate,
+    Utterance, admit_rate, declare_adapter, declare_model, stream_rate, tail_padding,
 };
+
+/// Counts its wakes.
+#[derive(Default)]
+struct Wakes(AtomicUsize);
+
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn a_decode_thread_that_panics_wakes_the_async_form_which_then_sees_no_result() {
+    let (outcome, result, waker) = Outcome::<Decoded>::channel();
+    let decoding = Decoding {
+        result,
+        waker,
+        ended: true,
+    };
+    let wakes = Arc::new(Wakes::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut cx = Context::from_waker(&waker);
+    assert!(decoding.poll(Some(&mut cx)).is_pending());
+    let thread = std::thread::spawn(move || {
+        let _outcome = outcome;
+        panic!("the decode thread panics, as this case wants");
+    });
+    assert!(thread.join().is_err(), "the thread panicked");
+    assert_eq!(
+        wakes.0.load(Ordering::SeqCst),
+        1,
+        "its end woke the async form"
+    );
+    assert!(
+        matches!(decoding.poll(Some(&mut cx)), Poll::Ready(None)),
+        "the async form sees the thread ended without a result, which loses the engine and fails \
+         the call"
+    );
+}
 
 fn output(first_sequence: i64) -> TranscriptOutput {
     let (model, _) = declare_model();

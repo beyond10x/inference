@@ -3,6 +3,8 @@
 //! reference clip decodes, and the transcript reads the clip's words; and a recognition dropped
 //! while its batch decodes does not have that batch decode beside the next recognition's.
 //!
+//! The cases run one at a time, as the second counts the decode threads of the whole process.
+//!
 //! Needs the unpacked pinned checkpoint in the directory `INFERENCE_SHERPA_ONNX_STT_DIR`; ignored
 //! by default, as the conformance tests are.
 #![cfg(feature = "stt")]
@@ -12,6 +14,7 @@ mod support;
 use std::cell::Cell;
 use std::future::poll_fn;
 use std::rc::Rc;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -22,9 +25,17 @@ use support::{FIRST_PART_WORDS, PCM16_16K_MONO, frames, open, reference_clip, re
 const TICK: Duration = Duration::from_millis(10);
 const GAP_BOUND: Duration = Duration::from_millis(50);
 
+/// Held by each case for its whole run, so the cases of this file run one at a time.
+static ALONE: Mutex<()> = Mutex::new(());
+
+fn alone() -> MutexGuard<'static, ()> {
+    ALONE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[test]
 #[ignore = "needs the pinned checkpoint unpacked in the directory INFERENCE_SHERPA_ONNX_STT_DIR"]
 fn a_ticker_keeps_time_while_the_async_form_decodes() {
+    let _alone = alone();
     let mut recogniser = open(1);
     let mut handle = recogniser.start(request()).expect("a slot is free");
     for frame in frames(&reference_clip(), PCM16_16K_MONO) {
@@ -114,6 +125,7 @@ fn started(
 #[test]
 #[ignore = "needs the pinned checkpoint unpacked in the directory INFERENCE_SHERPA_ONNX_STT_DIR"]
 fn a_dropped_recognitions_batch_does_not_decode_beside_the_next_one_admitted() {
+    let _alone = alone();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()

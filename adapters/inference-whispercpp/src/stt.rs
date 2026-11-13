@@ -657,11 +657,56 @@ pub struct WhisperCppRecognition {
     _slot: Slot,
 }
 
-/// A transcription running on a thread of its own: it sends what it came to and then wakes the
-/// waker kept. Dropped, it asks whisper.cpp to abort the transcription.
+/// The waker a transcription thread wakes when it ends, kept by the recognition's last poll.
+type Kept = Arc<std::sync::Mutex<Option<Waker>>>;
+
+/// The sending end of a transcription thread's result. However the thread ends, a panic
+/// included, dropping it closes the channel and then wakes the waker kept, so the async form sees
+/// the result, or the channel closed without one, rather than staying `Pending`.
+struct Outcome<T> {
+    sender: Option<std::sync::mpsc::SyncSender<T>>,
+    waker: Kept,
+}
+
+impl<T> Outcome<T> {
+    /// A result channel: its sending end, its receiving end and the waker the sending end wakes.
+    fn channel() -> (Self, std::sync::mpsc::Receiver<T>, Kept) {
+        let (sender, result) = std::sync::mpsc::sync_channel(1);
+        let waker = Kept::default();
+        let outcome = Self {
+            sender: Some(sender),
+            waker: Arc::clone(&waker),
+        };
+        (outcome, result, waker)
+    }
+
+    /// Sends what the thread came to; dropping `self` then wakes the waker kept.
+    fn send(mut self, value: T) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(value);
+        }
+    }
+}
+
+impl<T> Drop for Outcome<T> {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        let kept = self
+            .waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(waker) = kept {
+            waker.wake();
+        }
+    }
+}
+
+/// A transcription running on a thread of its own: it sends what it came to and then, however
+/// it ends, wakes the waker kept. Dropped, it asks whisper.cpp to abort the transcription.
 struct Decoding {
     result: std::sync::mpsc::Receiver<Transcription>,
-    waker: Arc<std::sync::Mutex<Option<Waker>>>,
+    waker: Kept,
     abort: Arc<AtomicBool>,
 }
 
@@ -678,29 +723,20 @@ impl Decoding {
         samples: Vec<f32>,
         place: Place,
     ) -> Result<Self, RecognitionFailed> {
-        let (sender, result) = std::sync::mpsc::sync_channel(1);
-        let waker: Arc<std::sync::Mutex<Option<Waker>>> = Arc::default();
-        let wake = Arc::clone(&waker);
+        let (outcome, result, waker) = Outcome::channel();
         let abort = Arc::new(AtomicBool::new(false));
         let aborted = Arc::clone(&abort);
         std::thread::Builder::new()
             .name("inference-whispercpp".to_owned())
             .spawn(move || {
+                let outcome = outcome;
                 let _place = place;
                 let computing = Instant::now();
                 let result = transcribe(&context, &samples, Some(aborted));
-                let _ = sender.send(Transcription {
+                outcome.send(Transcription {
                     result,
                     spent: computing.elapsed(),
                 });
-                drop(sender);
-                let kept = wake
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                if let Some(waker) = kept {
-                    waker.wake();
-                }
             })
             .map_err(|error| RecognitionFailed {
                 detail: format!("no thread to transcribe on: {error}"),
@@ -884,6 +920,9 @@ fn transcribe(
     if let Some(abort) = abort {
         // A boxed closure: whisper-rs 0.16 calls the closure it was given through a pointer to
         // that box, which is only the closure's own type when the closure is the box.
+        // It leaks: whisper-rs never frees the boxes, so every transcription of the async form
+        // keeps about 50 bytes, the closure and the flag it reads. Freeing them would need its
+        // raw abort callback and user data, unsafe code, which the workspace forbids.
         let aborted: Box<dyn FnMut() -> bool> = Box::new(move || abort.load(Ordering::Acquire));
         params.set_abort_callback_safe(aborted);
     }

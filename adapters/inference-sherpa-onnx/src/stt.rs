@@ -852,11 +852,56 @@ enum Seen {
 /// What one batch came to: the engine back, what it showed, and the time it took.
 type Decoded = (Engine, Vec<Seen>, Duration);
 
-/// A batch decoding on a thread of its own: it sends what it came to and then wakes the waker
-/// kept.
+/// The waker a decode thread wakes when it ends, kept by the recognition's last poll.
+type Kept = Arc<std::sync::Mutex<Option<Waker>>>;
+
+/// The sending end of a decode thread's result. However the thread ends, a panic included,
+/// dropping it closes the channel and then wakes the waker kept, so the async form sees the
+/// result, or the channel closed without one, rather than staying `Pending`.
+struct Outcome<T> {
+    sender: Option<std::sync::mpsc::SyncSender<T>>,
+    waker: Kept,
+}
+
+impl<T> Outcome<T> {
+    /// A result channel: its sending end, its receiving end and the waker the sending end wakes.
+    fn channel() -> (Self, std::sync::mpsc::Receiver<T>, Kept) {
+        let (sender, result) = std::sync::mpsc::sync_channel(1);
+        let waker = Kept::default();
+        let outcome = Self {
+            sender: Some(sender),
+            waker: Arc::clone(&waker),
+        };
+        (outcome, result, waker)
+    }
+
+    /// Sends what the thread came to; dropping `self` then wakes the waker kept.
+    fn send(mut self, value: T) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(value);
+        }
+    }
+}
+
+impl<T> Drop for Outcome<T> {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        let kept = self
+            .waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(waker) = kept {
+            waker.wake();
+        }
+    }
+}
+
+/// A batch decoding on a thread of its own: it sends what it came to and then, however it ends,
+/// wakes the waker kept.
 struct Decoding {
     result: std::sync::mpsc::Receiver<Decoded>,
-    waker: Arc<std::sync::Mutex<Option<Waker>>>,
+    waker: Kept,
     ended: bool,
 }
 
@@ -869,27 +914,18 @@ impl Decoding {
         ended: bool,
         place: Place,
     ) -> Result<Self, (Engine, Vec<AudioFrame>)> {
-        let (sender, result) = std::sync::mpsc::sync_channel(1);
-        let waker: Arc<std::sync::Mutex<Option<Waker>>> = Arc::default();
-        let wake = Arc::clone(&waker);
+        let (outcome, result, waker) = Outcome::channel();
         let (handing, handed) = std::sync::mpsc::sync_channel::<(Engine, Vec<AudioFrame>)>(1);
         let started = std::thread::Builder::new()
             .name("inference-sherpa-onnx".to_owned())
             .spawn(move || {
+                let outcome = outcome;
                 let _place = place;
                 let Ok((mut engine, frames)) = handed.recv() else {
                     return;
                 };
                 let (seen, spent) = Engine::feed(&mut engine, &frames, ended);
-                let _ = sender.send((engine, seen, spent));
-                drop(sender);
-                let kept = wake
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                if let Some(waker) = kept {
-                    waker.wake();
-                }
+                outcome.send((engine, seen, spent));
             });
         if started.is_err() {
             return Err((engine, frames));
@@ -1002,7 +1038,8 @@ impl SherpaOnnxRecognition {
     /// Takes the frames offered so far into the stream and decodes what is ready, adding the time
     /// that took to the recognition's local compute; at the end of input flushes the stream,
     /// commits the last span and records the recognition's usage. Once that has run, nothing more
-    /// is decoded.
+    /// is decoded. With no frame offered and input open there is nothing to decode, and it
+    /// returns at once, without waiting for a place among the recogniser's decodes.
     ///
     /// With `cx`, the async form's, a batch of frames, or the end of input, decodes on a thread
     /// of its own and this is `Pending` until it is done; without, a batch the async form started
@@ -1033,7 +1070,7 @@ impl SherpaOnnxRecognition {
                     return Poll::Ready(());
                 };
                 let ended = self.output.input_ended();
-                if cx.is_some() && frames.is_empty() && !ended {
+                if frames.is_empty() && !ended {
                     return Poll::Ready(());
                 }
                 self.batch = Some((frames, ended));
