@@ -2449,6 +2449,7 @@ dependencies = [
  "inference-testkit",
  "sha2",
  "sherpa-onnx",
+ "tokio",
 ]
 
 [[package]]
@@ -2519,6 +2520,7 @@ dependencies = [
  "inference-stt",
  "inference-testkit",
  "sha2",
+ "tokio",
  "whisper-rs",
 ]
 

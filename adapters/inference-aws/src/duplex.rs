@@ -13,7 +13,9 @@
 //!
 //! The contract is synchronous and the client is not: the model runs a Tokio runtime of its own,
 //! and a session's reads and writes are tasks of it, so the session's operations never block on
-//! the provider. Drive a session from a thread, not from inside an async task.
+//! the provider. `next_event` blocks the calling thread while it waits for an event; the async
+//! form, `event`, is woken by the session's reader and writer instead, so an async caller
+//! awaits that.
 //!
 //! How provider events map to the record:
 //!
@@ -72,6 +74,7 @@ use std::io;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::Arc;
 use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use inference_duplex::inference_audio::{
@@ -97,6 +100,7 @@ use crate::nova_sonic::{
     ServiceErrorKind, Session, SessionReader, SessionWriter, StopReason, TextOutput, ToolSpec,
     ToolUse, Usage, redact,
 };
+use crate::wake::{Alarm, WakerSlot};
 
 /// The longest [`NativeSpeechModel::open`] waits for a session to open, unless
 /// [`NovaSonicSpeech::with_open_timeout`] sets another: the connector's whole connect, which for
@@ -466,6 +470,7 @@ impl<C: Connector> NativeSpeechModel for NovaSonicSpeech<C> {
                 open: true,
                 ..Turns::default()
             },
+            alarm: Alarm::default(),
             _pool: Arc::clone(&self.pool),
         })
     }
@@ -515,11 +520,13 @@ impl Received {
 }
 
 /// The sending side of the arrivals: the reader's take one place of room each; the writer's one
-/// failure report takes none, so that it never waits on a caller that stopped reading.
+/// failure report takes none, so that it never waits on a caller that stopped reading. Each
+/// arrival sent, and each side letting go of the arrivals, wakes the session's async form.
 #[derive(Debug, Clone)]
 struct Arrived {
-    sender: std_mpsc::Sender<(Arrival, bool)>,
+    sender: Option<std_mpsc::Sender<(Arrival, bool)>>,
     room: Arc<Semaphore>,
+    waker: Arc<WakerSlot>,
 }
 
 impl Arrived {
@@ -528,7 +535,7 @@ impl Arrived {
         let Ok(place) = self.room.acquire().await else {
             return false;
         };
-        if self.sender.send((arrival, true)).is_err() {
+        if !self.put((arrival, true)) {
             return false;
         }
         place.forget();
@@ -537,7 +544,28 @@ impl Arrived {
 
     /// Sends `arrival` at once, taking no room: for the writer's failure, sent once at most.
     fn send_now(&self, arrival: Arrival) {
-        let _ = self.sender.send((arrival, false));
+        let _ = self.put((arrival, false));
+    }
+
+    /// Queues `item` and wakes the session's async form; `false` once the session is gone.
+    fn put(&self, item: (Arrival, bool)) -> bool {
+        let sent = self
+            .sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(item).is_ok());
+        if sent {
+            self.waker.wake();
+        }
+        sent
+    }
+}
+
+impl Drop for Arrived {
+    /// Lets go of the arrivals first, so the session the wake reaches finds them disconnected
+    /// once every side has.
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        self.waker.wake();
     }
 }
 
@@ -547,9 +575,21 @@ impl Arrived {
 struct Arrivals {
     receiver: std_mpsc::Receiver<(Arrival, bool)>,
     room: Arc<Semaphore>,
+    waker: Arc<WakerSlot>,
 }
 
 impl Arrivals {
+    /// The next arrival, `Ready(None)` once every sender let go, or `Pending` until one arrives
+    /// or the last sender lets go, either of which wakes `cx`.
+    fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<Arrival>> {
+        self.waker.register(cx.waker());
+        match self.receiver.try_recv() {
+            Ok(taken) => Poll::Ready(Some(self.give_back(taken))),
+            Err(std_mpsc::TryRecvError::Disconnected) => Poll::Ready(None),
+            Err(std_mpsc::TryRecvError::Empty) => Poll::Pending,
+        }
+    }
+
     fn try_recv(&self) -> Result<Arrival, std_mpsc::TryRecvError> {
         let taken = self.receiver.try_recv()?;
         Ok(self.give_back(taken))
@@ -578,12 +618,18 @@ impl Drop for Arrivals {
 fn arrival_channel(capacity: usize) -> (Arrived, Arrivals) {
     let (sender, receiver) = std_mpsc::channel();
     let room = Arc::new(Semaphore::new(capacity));
+    let waker = Arc::new(WakerSlot::default());
     (
         Arrived {
-            sender,
+            sender: Some(sender),
             room: Arc::clone(&room),
+            waker: Arc::clone(&waker),
         },
-        Arrivals { receiver, room },
+        Arrivals {
+            receiver,
+            room,
+            waker,
+        },
     )
 }
 
@@ -848,6 +894,8 @@ pub struct NovaSonicSpeechSession {
     commands: tokio_mpsc::UnboundedSender<Command>,
     arrivals: Arrivals,
     turns: Turns,
+    /// Wakes the async form when the liveness bound runs out.
+    alarm: Alarm,
     _pool: Arc<Pool>,
 }
 
@@ -1350,6 +1398,46 @@ impl SpeechSessionHandle for NovaSonicSpeechSession {
         }
         self.ledger.check_liveness(Instant::now());
         self.ledger.next_event()
+    }
+
+    /// Takes each arrival as the reader or the writer queues it, woken by them, and wakes `cx`
+    /// when the liveness bound runs out; it never wakes itself.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
+        loop {
+            if let Some(event) = self.ledger.next_event() {
+                return Poll::Ready(Some(event));
+            }
+            if self.ledger.session().require_open().is_err() {
+                return Poll::Ready(None);
+            }
+            match self.arrivals.poll_recv(cx) {
+                Poll::Ready(Some(arrival)) => {
+                    let unreadable = matches!(arrival.what, Received::Undecodable(_));
+                    self.record(arrival);
+                    if unreadable {
+                        self.ledger.check_liveness(Instant::now());
+                    }
+                    continue;
+                }
+                Poll::Ready(None) => {
+                    self.transport_closed();
+                    continue;
+                }
+                Poll::Pending => {}
+            }
+            let now = Instant::now();
+            self.ledger.check_liveness(now);
+            if self.ledger.undelivered() > 0 || self.ledger.session().require_open().is_err() {
+                continue;
+            }
+            let liveness = self.ledger.liveness();
+            let Some(due) = crate::wake::due(None, liveness.due(), liveness.limit(), now) else {
+                return Poll::Pending;
+            };
+            if self.alarm.poll_at(due, cx).is_pending() {
+                return Poll::Pending;
+            }
+        }
     }
 }
 

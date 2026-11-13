@@ -52,6 +52,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker, ready};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -548,6 +549,7 @@ impl Recogniser for WhisperCppRecogniser {
             output: TranscriptOutput::start(&self.adapter, request),
             delivered: VecDeque::new(),
             finished: false,
+            decoding: None,
             failure: None,
             _slot: slot,
         })
@@ -556,13 +558,85 @@ impl Recogniser for WhisperCppRecogniser {
 
 /// One recognition of a [`WhisperCppRecogniser`]: the frames offered, buffered until input has
 /// ended, then one transcription in a whisper.cpp state of its own. It runs until it is dropped.
+///
+/// Iterating it transcribes on the calling thread. Its async form,
+/// [`RecognitionHandle::poll_event`], transcribes on a thread the recognition starts for it and
+/// returns `Pending` until that thread is done, which wakes the caller, so the caller's runtime
+/// thread never decodes.
 pub struct WhisperCppRecognition {
     context: Arc<WhisperContext>,
     output: TranscriptOutput,
     delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
     finished: bool,
+    /// The transcription the async form started on a thread of its own, until it is settled.
+    decoding: Option<Decoding>,
     failure: Option<RecognitionFailed>,
     _slot: Slot,
+}
+
+/// A transcription running on a thread of its own: it sends what it came to and then wakes the
+/// waker kept.
+struct Decoding {
+    result: std::sync::mpsc::Receiver<Transcription>,
+    waker: Arc<std::sync::Mutex<Option<Waker>>>,
+}
+
+impl Decoding {
+    /// Transcribes `samples` on `context` on a new thread.
+    fn start(context: Arc<WhisperContext>, samples: Vec<f32>) -> Result<Self, RecognitionFailed> {
+        let (sender, result) = std::sync::mpsc::sync_channel(1);
+        let waker: Arc<std::sync::Mutex<Option<Waker>>> = Arc::default();
+        let wake = Arc::clone(&waker);
+        std::thread::Builder::new()
+            .name("inference-whispercpp".to_owned())
+            .spawn(move || {
+                let computing = Instant::now();
+                let result = transcribe(&context, &samples);
+                let _ = sender.send(Transcription {
+                    result,
+                    spent: computing.elapsed(),
+                });
+                drop(sender);
+                let kept = wake
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(waker) = kept {
+                    waker.wake();
+                }
+            })
+            .map_err(|error| RecognitionFailed {
+                detail: format!("no thread to transcribe on: {error}"),
+            })?;
+        Ok(Self { result, waker })
+    }
+
+    /// What the thread came to: blocking without `cx`; with it, `Pending` until the thread is
+    /// done, which wakes `cx`.
+    fn poll(&self, cx: Option<&mut Context<'_>>) -> Poll<Transcription> {
+        let received = match cx {
+            None => self.result.recv().map_err(|_| ()),
+            Some(cx) => {
+                let mut kept = self
+                    .waker
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *kept = Some(cx.waker().clone());
+                drop(kept);
+                match self.result.try_recv() {
+                    Ok(transcription) => Ok(transcription),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return Poll::Pending,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(()),
+                }
+            }
+        };
+        Poll::Ready(received.unwrap_or_else(|()| Transcription {
+            result: Err(RecognitionFailed {
+                detail: "the thread transcribing the input ended without a result".to_owned(),
+            }),
+            spent: Duration::ZERO,
+        }))
+    }
 }
 
 impl fmt::Debug for WhisperCppRecognition {
@@ -588,24 +662,50 @@ impl WhisperCppRecognition {
     /// took to the recognition's local compute, emits the text and records the recognition's
     /// usage. Before that the contract refuses to give up any frame, as the adapter does not claim
     /// incremental input, and nothing happens; after it, nothing more is transcribed.
-    fn advance(&mut self) {
+    ///
+    /// With `cx`, the async form's, the transcription runs on a thread of its own and this is
+    /// `Pending` until it is done; without, a transcription the async form started is waited for.
+    fn advance(&mut self, cx: Option<&mut Context<'_>>) -> Poll<()> {
+        if let Some(decoding) = self.decoding.as_ref() {
+            let transcription = ready!(decoding.poll(cx));
+            self.decoding = None;
+            self.failure = settle(&mut self.output, Some(transcription), &mut self.delivered);
+            return Poll::Ready(());
+        }
         if self.finished {
-            return;
+            return Poll::Ready(());
         }
         let Ok(frames) = self.output.take_input() else {
-            return;
+            return Poll::Ready(());
         };
         self.finished = true;
         let samples = samples_16k(&frames);
-        let transcription = (!samples.is_empty()).then(|| {
+        if samples.is_empty() {
+            self.failure = settle(&mut self.output, None, &mut self.delivered);
+            return Poll::Ready(());
+        }
+        let Some(cx) = cx else {
             let computing = Instant::now();
             let result = transcribe(&self.context, &samples);
-            Transcription {
+            let transcription = Transcription {
                 result,
                 spent: computing.elapsed(),
+            };
+            self.failure = settle(&mut self.output, Some(transcription), &mut self.delivered);
+            return Poll::Ready(());
+        };
+        match Decoding::start(Arc::clone(&self.context), samples) {
+            Ok(decoding) => self.decoding = Some(decoding),
+            Err(failed) => {
+                let transcription = Transcription {
+                    result: Err(failed),
+                    spent: Duration::ZERO,
+                };
+                self.failure = settle(&mut self.output, Some(transcription), &mut self.delivered);
+                return Poll::Ready(());
             }
-        });
-        self.failure = settle(&mut self.output, transcription, &mut self.delivered);
+        }
+        self.advance(Some(cx))
     }
 }
 
@@ -737,7 +837,7 @@ impl Iterator for WhisperCppRecognition {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.delivered.is_empty() {
-            self.advance();
+            let _ = self.advance(None);
         }
         self.delivered.pop_front()
     }
@@ -760,6 +860,15 @@ impl RecognitionHandle for WhisperCppRecognition {
         let envelope = self.output.revise(input)?;
         self.delivered.push_back(envelope);
         Ok(())
+    }
+
+    /// Takes what iterating takes, but transcribes on a thread of its own: `Pending` while that
+    /// thread decodes, which wakes `cx` when it is done.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<EventEnvelope<TranscriptEvent>>> {
+        if self.delivered.is_empty() {
+            ready!(self.advance(Some(cx)));
+        }
+        Poll::Ready(self.delivered.pop_front())
     }
 }
 

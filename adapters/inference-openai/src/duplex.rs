@@ -4,10 +4,11 @@
 //! records every server event through the contract's [`SessionLedger`], so it refuses what every
 //! implementation refuses and yields the contract's events in order.
 //!
-//! The contract is synchronous: each session owns a single-threaded Tokio runtime and blocks on
-//! the client for each operation. A session must therefore not be driven from inside an async
-//! runtime; an async caller runs it on a blocking thread. Dropping a session is safe anywhere:
-//! its runtime is shut down without blocking.
+//! Each session owns a Tokio runtime with one thread of its own, which drives its connection.
+//! Opening, sending and `next_event` block the calling thread on the client, on any thread, an
+//! async worker included, which they then hold up; the async form, `event`, reads the connection
+//! without blocking, woken by the session's runtime, so an async caller awaits that instead.
+//! Dropping a session is safe anywhere: its runtime is shut down without blocking.
 //!
 //! How the provider maps onto the contract:
 //!
@@ -101,6 +102,7 @@
 //!   [`OpenAiRealtimeSession::server_error_count`].
 
 use std::collections::{HashMap, VecDeque};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
@@ -438,7 +440,9 @@ impl NativeSpeechModel for OpenAiRealtime {
         let client_config = self
             .client_config(&config)
             .map_err(OpenError::Unsupported)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("inference-openai-session")
             .enable_all()
             .build()
             .map_err(|error| {
@@ -447,15 +451,17 @@ impl NativeSpeechModel for OpenAiRealtime {
                     detail: format!("no runtime for the session: {error}"),
                 })
             })?;
-        let client = runtime
-            .block_on(RealtimeClient::connect_with(
+        let client = block(
+            &runtime,
+            RealtimeClient::connect_with(
                 &self.endpoint,
                 self.deadlines,
                 self.source.as_ref(),
                 &self.credential,
                 &client_config,
-            ))
-            .map_err(|error| OpenError::Failed(failure(&error)))?;
+            ),
+        )
+        .map_err(|error| OpenError::Failed(failure(&error)))?;
         let (ledger, _) = SessionLedger::open(
             SpeechSessionId::generate(),
             &self.adapter,
@@ -466,6 +472,7 @@ impl NativeSpeechModel for OpenAiRealtime {
         Ok(OpenAiRealtimeSession {
             runtime: Some(runtime),
             client: Some(client),
+            alarm: crate::wake::Alarm::default(),
             ledger,
             responses: HashMap::new(),
             audio_items: HashMap::new(),
@@ -509,6 +516,25 @@ pub(crate) async fn without_waiting<F: std::future::Future>(read: F) -> Option<F
     None
 }
 
+/// Runs `future` to its end on the calling thread inside `runtime`, so its I/O and timers belong
+/// to the runtime, whose own thread drives them. The thread is parked, never made to run a
+/// runtime, so this works on any thread, an async worker included, which it holds up meanwhile.
+pub(crate) fn block<F: std::future::Future>(runtime: &Runtime, future: F) -> F::Output {
+    let _entered = runtime.enter();
+    crate::wake::block_on(future)
+}
+
+/// Polls `read` once with `cx` inside `runtime`, whose thread wakes `cx` when the read can go
+/// on; `read` is dropped after the poll, so it must be cancel safe, as reading the next event is.
+pub(crate) fn poll_read<F: std::future::Future>(
+    runtime: &Runtime,
+    read: F,
+    cx: &mut Context<'_>,
+) -> Poll<F::Output> {
+    let _entered = runtime.enter();
+    std::pin::pin!(read).poll(cx)
+}
+
 /// The contract's failure of a client error.
 pub(crate) fn failure(error: &RealtimeError) -> SessionFailure {
     let kind = match error {
@@ -536,6 +562,8 @@ pub(crate) fn failure(error: &RealtimeError) -> SessionFailure {
 pub struct OpenAiRealtimeSession {
     runtime: Option<Runtime>,
     client: Option<RealtimeClient>,
+    /// Wakes the async form when the liveness bound runs out.
+    alarm: crate::wake::Alarm,
     ledger: SessionLedger,
     /// Provider response id to the contract's.
     responses: HashMap<String, ResponseId>,
@@ -643,7 +671,7 @@ impl OpenAiRealtimeSession {
                 .require_open()
                 .map_err(SessionError::NotOpen);
         };
-        if let Err(error) = runtime.block_on(operation(client)) {
+        if let Err(error) = block(runtime, operation(client)) {
             let error = self.record_arrived().unwrap_or(error);
             let failed = self.ledger.fail(failure(&error));
             self.or_drop(failed);
@@ -666,7 +694,7 @@ impl OpenAiRealtimeSession {
             else {
                 return None;
             };
-            match runtime.block_on(without_waiting(client.next_event())) {
+            match block(runtime, without_waiting(client.next_event())) {
                 Some(Ok(event)) => self.record(event),
                 Some(Err(error @ RealtimeError::Protocol(_))) => self.undecodable(&error),
                 None | Some(Err(RealtimeError::Stalled(_))) => return None,
@@ -1282,7 +1310,7 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
         }
         self.ledger.close()?;
         if let (Some(client), Some(runtime)) = (self.client.take(), self.runtime.as_ref()) {
-            let _ = runtime.block_on(client.close());
+            let _ = block(runtime, client.close());
         }
         Ok(())
     }
@@ -1304,8 +1332,9 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
             else {
                 return None;
             };
-            let read =
-                runtime.block_on(async { tokio::time::timeout(left, client.next_event()).await });
+            let read = block(runtime, async {
+                tokio::time::timeout(left, client.next_event()).await
+            });
             match read {
                 Ok(Ok(event)) => self.record(event),
                 Ok(Err(error @ RealtimeError::Protocol(_))) => {
@@ -1320,6 +1349,59 @@ impl SpeechSessionHandle for OpenAiRealtimeSession {
                     self.or_drop(failed);
                     self.client = None;
                 }
+            }
+        }
+    }
+
+    /// Reads the connection with `cx` as events arrive: the read is polled inside the session's
+    /// runtime, whose thread wakes `cx` when the socket has a message or the client's read
+    /// timeout passes, and is dropped when it would wait, as it is cancel safe. `cx` is woken
+    /// as well when the liveness bound runs out.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
+        loop {
+            if let Some(event) = self.ledger.next_event() {
+                return Poll::Ready(Some(event));
+            }
+            if self.ledger.session().require_open().is_err() {
+                return Poll::Ready(None);
+            }
+            let read = match (self.client.as_mut(), self.runtime.as_ref()) {
+                (Some(client), Some(runtime)) => poll_read(runtime, client.next_event(), cx),
+                _ => Poll::Pending,
+            };
+            match read {
+                Poll::Ready(Ok(event)) => {
+                    self.record(event);
+                    continue;
+                }
+                Poll::Ready(Err(error @ RealtimeError::Protocol(_))) => {
+                    self.undecodable(&error);
+                    self.ledger.check_liveness(Instant::now());
+                    continue;
+                }
+                Poll::Ready(Err(RealtimeError::Stalled(_))) => {
+                    self.ledger.check_liveness(Instant::now());
+                    continue;
+                }
+                Poll::Ready(Err(error)) => {
+                    let failed = self.ledger.fail(failure(&error));
+                    self.or_drop(failed);
+                    self.client = None;
+                    continue;
+                }
+                Poll::Pending => {}
+            }
+            let now = Instant::now();
+            self.ledger.check_liveness(now);
+            if self.ledger.undelivered() > 0 || self.ledger.session().require_open().is_err() {
+                continue;
+            }
+            let liveness = self.ledger.liveness();
+            let Some(due) = crate::wake::due(None, liveness.due(), liveness.limit(), now) else {
+                return Poll::Pending;
+            };
+            if self.alarm.poll_at(due, cx).is_pending() {
+                return Poll::Pending;
             }
         }
     }

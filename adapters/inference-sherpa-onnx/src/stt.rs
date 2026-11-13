@@ -51,7 +51,8 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::task::{Context, Poll, Waker, ready};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use sherpa_onnx::{
@@ -641,13 +642,16 @@ impl Recogniser for SherpaOnnxRecogniser {
     ) -> Result<SherpaOnnxRecognition, ConcurrencyLimitReached> {
         let slot = self.running.admit(self.adapter.max_concurrency())?;
         Ok(SherpaOnnxRecognition {
-            stream: self.recognizer.create_stream(),
-            recognizer: Arc::clone(&self.recognizer),
+            engine: Some(Engine {
+                stream: self.recognizer.create_stream(),
+                recognizer: Arc::clone(&self.recognizer),
+                stream_rate: None,
+                resampler: None,
+            }),
+            decoding: None,
             output: TranscriptOutput::start(&self.adapter, request),
             utterance: Utterance::default(),
             delivered: VecDeque::new(),
-            stream_rate: None,
-            resampler: None,
             finished: false,
             _slot: slot,
         })
@@ -722,22 +726,113 @@ impl Utterance {
 
 /// One recognition of a [`SherpaOnnxRecogniser`]: one sherpa-onnx online stream. It runs until
 /// it is dropped.
+///
+/// Iterating it decodes on the calling thread. Its async form,
+/// [`RecognitionHandle::poll_event`], decodes each batch of frames on a thread it starts for the
+/// batch and returns `Pending` until that thread is done, which wakes the caller, so the caller's
+/// runtime thread never decodes.
 pub struct SherpaOnnxRecognition {
+    /// The stream and what feeds it; `None` while a batch decodes on a thread of its own, which
+    /// holds it.
+    engine: Option<Engine>,
+    /// The batch the async form is decoding on a thread of its own.
+    decoding: Option<Decoding>,
+    output: TranscriptOutput,
+    utterance: Utterance,
+    delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
+    finished: bool,
+    _slot: Slot,
+}
+
+/// The decoding side of a recognition: its online stream and what feeds the stream.
+struct Engine {
     /// Declared before `recognizer`, so the stream is destroyed before the last reference to the
     /// online recogniser it belongs to can be.
     stream: OnlineStream,
     recognizer: Arc<OnlineRecognizer>,
-    output: TranscriptOutput,
-    utterance: Utterance,
-    delivered: VecDeque<EventEnvelope<TranscriptEvent>>,
     /// The sample rate of the first frame the stream took at a rate [`stream_rate`] admits, the
     /// only rate it is ever given: sherpa-onnx ends the process when one stream is given a
     /// second rate.
     stream_rate: Option<u32>,
     /// The resampler of the current run of frames at another rate than `stream_rate`.
     resampler: Option<Resampler>,
-    finished: bool,
-    _slot: Slot,
+}
+
+/// What decoding showed, in order: the text the recogniser shows for the utterance, or an
+/// endpoint, which ends it.
+enum Seen {
+    Text(String),
+    Endpoint,
+}
+
+/// What one batch came to: the engine back, what it showed, and the time it took.
+type Decoded = (Engine, Vec<Seen>, Duration);
+
+/// A batch decoding on a thread of its own: it sends what it came to and then wakes the waker
+/// kept.
+struct Decoding {
+    result: std::sync::mpsc::Receiver<Decoded>,
+    waker: Arc<std::sync::Mutex<Option<Waker>>>,
+    ended: bool,
+}
+
+impl Decoding {
+    /// Feeds `frames`, and the end of input when `ended`, to `engine` on a new thread; the
+    /// engine back when no thread starts.
+    fn start(mut engine: Engine, frames: Vec<AudioFrame>, ended: bool) -> Result<Self, Engine> {
+        let (sender, result) = std::sync::mpsc::sync_channel(1);
+        let waker: Arc<std::sync::Mutex<Option<Waker>>> = Arc::default();
+        let wake = Arc::clone(&waker);
+        let (handing, handed) = std::sync::mpsc::sync_channel(1);
+        let started = std::thread::Builder::new()
+            .name("inference-sherpa-onnx".to_owned())
+            .spawn(move || {
+                let Ok(mut engine) = handed.recv() else {
+                    return;
+                };
+                let (seen, spent) = Engine::feed(&mut engine, &frames, ended);
+                let _ = sender.send((engine, seen, spent));
+                drop(sender);
+                let kept = wake
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(waker) = kept {
+                    waker.wake();
+                }
+            });
+        if started.is_err() {
+            return Err(engine);
+        }
+        if let Err(std::sync::mpsc::SendError(back)) = handing.send(engine) {
+            engine = back;
+            return Err(engine);
+        }
+        Ok(Self {
+            result,
+            waker,
+            ended,
+        })
+    }
+
+    /// What the thread came to, `None` when it ended without a result: blocking without `cx`;
+    /// with it, `Pending` until the thread is done, which wakes `cx`.
+    fn poll(&self, cx: Option<&mut Context<'_>>) -> Poll<Option<Decoded>> {
+        let Some(cx) = cx else {
+            return Poll::Ready(self.result.recv().ok());
+        };
+        let mut kept = self
+            .waker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *kept = Some(cx.waker().clone());
+        drop(kept);
+        match self.result.try_recv() {
+            Ok(decoded) => Poll::Ready(Some(decoded)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => Poll::Pending,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Poll::Ready(None),
+        }
+    }
 }
 
 /// A sample rate as sherpa-onnx takes it.
@@ -819,15 +914,94 @@ impl SherpaOnnxRecognition {
     /// that took to the recognition's local compute; at the end of input flushes the stream,
     /// commits the last span and records the recognition's usage. Once that has run, nothing more
     /// is decoded.
-    fn advance(&mut self) {
+    ///
+    /// With `cx`, the async form's, a batch of frames, or the end of input, decodes on a thread
+    /// of its own and this is `Pending` until it is done; without, a batch the async form started
+    /// is waited for.
+    fn advance(&mut self, cx: Option<&mut Context<'_>>) -> Poll<()> {
+        if let Some(decoding) = self.decoding.as_ref() {
+            let decoded = ready!(decoding.poll(cx));
+            let ended = decoding.ended;
+            self.decoding = None;
+            match decoded {
+                Some((engine, seen, spent)) => {
+                    self.engine = Some(engine);
+                    self.settle(seen, spent, ended);
+                }
+                None => self.lose_engine(),
+            }
+            return Poll::Ready(());
+        }
         if self.finished {
-            return;
+            return Poll::Ready(());
         }
         let Ok(frames) = self.output.take_input() else {
-            return;
+            return Poll::Ready(());
         };
+        let ended = self.output.input_ended();
+        let Some(mut engine) = self.engine.take() else {
+            self.lose_engine();
+            return Poll::Ready(());
+        };
+        let Some(cx) = cx else {
+            let (seen, spent) = engine.feed(&frames, ended);
+            self.engine = Some(engine);
+            self.settle(seen, spent, ended);
+            return Poll::Ready(());
+        };
+        if frames.is_empty() && !ended {
+            self.engine = Some(engine);
+            return Poll::Ready(());
+        }
+        match Decoding::start(engine, frames, ended) {
+            Ok(decoding) => self.decoding = Some(decoding),
+            Err(engine) => {
+                self.engine = Some(engine);
+                return Poll::Ready(());
+            }
+        }
+        self.advance(Some(cx))
+    }
+
+    /// Acts on what one batch showed, in order, adds the time it took to the local compute, and,
+    /// at the end of input, commits the last span and records the recognition's usage.
+    fn settle(&mut self, seen: Vec<Seen>, spent: Duration, ended: bool) {
+        for seen in seen {
+            match seen {
+                Seen::Text(text) => {
+                    self.utterance
+                        .observe(&mut self.output, &text, &mut self.delivered);
+                }
+                Seen::Endpoint => self.utterance.close(&mut self.output, &mut self.delivered),
+            }
+        }
+        self.output.add_local_compute(spent);
+        if ended {
+            self.utterance.close(&mut self.output, &mut self.delivered);
+            if let Ok(usage) = self.output.usage() {
+                self.delivered.push_back(usage);
+            }
+            self.finished = true;
+        }
+    }
+
+    /// The thread decoding a batch ended without giving the stream back: the call is failed and
+    /// its usage recorded, and nothing more is decoded.
+    fn lose_engine(&mut self) {
+        self.output.mark_failed();
+        if let Ok(usage) = self.output.usage() {
+            self.delivered.push_back(usage);
+        }
+        self.finished = true;
+    }
+}
+
+impl Engine {
+    /// Feeds `frames` to the stream, and the end of input when `ended`, and decodes while the
+    /// stream is ready; returns what decoding showed, in order, and the time it all took.
+    fn feed(&mut self, frames: &[AudioFrame], ended: bool) -> (Vec<Seen>, Duration) {
         let computing = Instant::now();
-        for frame in &frames {
+        for frame in frames {
             let samples = mono_samples(frame);
             if samples.is_empty() {
                 continue;
@@ -853,7 +1027,6 @@ impl SherpaOnnxRecognition {
             self.stream
                 .accept_waveform(native_rate(stream_rate), &samples);
         }
-        let ended = self.output.input_ended();
         if ended {
             if let Some(stream_rate) = self.stream_rate
                 && let Ok(padding) = tail_padding(stream_rate)
@@ -863,35 +1036,28 @@ impl SherpaOnnxRecognition {
             }
             self.stream.input_finished();
         }
-        self.decode();
-        self.output.add_local_compute(computing.elapsed());
-        if ended {
-            self.utterance.close(&mut self.output, &mut self.delivered);
-            if let Ok(usage) = self.output.usage() {
-                self.delivered.push_back(usage);
-            }
-            self.finished = true;
-        }
+        let seen = self.decode();
+        (seen, computing.elapsed())
     }
 
-    /// Decodes while the stream is ready, emitting from each partial result, committing and
-    /// resetting at each endpoint.
-    fn decode(&mut self) {
+    /// Decodes while the stream is ready, noting each partial result's text, and each endpoint,
+    /// at which the stream is reset.
+    fn decode(&mut self) -> Vec<Seen> {
+        let mut seen = Vec::new();
         loop {
             let ready = self.recognizer.is_ready(&self.stream);
             if ready {
                 self.recognizer.decode(&self.stream);
             }
             if let Some(result) = self.recognizer.get_result(&self.stream) {
-                self.utterance
-                    .observe(&mut self.output, &result.text, &mut self.delivered);
+                seen.push(Seen::Text(result.text));
             }
             if self.recognizer.is_endpoint(&self.stream) {
-                self.utterance.close(&mut self.output, &mut self.delivered);
+                seen.push(Seen::Endpoint);
                 self.recognizer.reset(&self.stream);
             }
             if !ready {
-                return;
+                return seen;
             }
         }
     }
@@ -902,7 +1068,7 @@ impl Iterator for SherpaOnnxRecognition {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.delivered.is_empty() {
-            self.advance();
+            let _ = self.advance(None);
         }
         self.delivered.pop_front()
     }
@@ -925,6 +1091,15 @@ impl RecognitionHandle for SherpaOnnxRecognition {
         let envelope = self.output.revise(input)?;
         self.delivered.push_back(envelope);
         Ok(())
+    }
+
+    /// Takes what iterating takes, but decodes on a thread of its own: `Pending` while that
+    /// thread decodes, which wakes `cx` when it is done.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<EventEnvelope<TranscriptEvent>>> {
+        if self.delivered.is_empty() {
+            ready!(self.advance(Some(cx)));
+        }
+        Poll::Ready(self.delivered.pop_front())
     }
 }
 

@@ -13,12 +13,21 @@
   The default of a duplex session polls instead of being woken; `Liveness::due` says when a
   silent connection goes stale.
 - `inference-elevenlabs` (synthesiser, recogniser, agent), `inference-cartesia`,
-  `inference-openai` (feature `speech`), `inference-deepgram` (recogniser and feature `duplex`),
-  `inference-deepslate` and `inference-phonic`: the async form is woken by the connection or at
-  a deadline of the handle, so twenty handles awaited on one current-thread runtime leave its
-  other tasks running. A synthesis drives its connection on a runtime of its own with one
-  thread; its blocking form no longer moves to a scoped thread on a thread where a runtime is
-  current.
+  `inference-openai` (speech synthesiser with feature `speech`, Realtime session with feature
+  `duplex`, GPT-Live session with `gpt-live` and `duplex`), `inference-deepgram` (recogniser,
+  and agent with feature `duplex`), `inference-aws` (Nova Sonic session), `inference-deepslate`
+  and `inference-phonic`: the async form is woken by the connection or at a deadline of the
+  handle, never by itself, so twenty handles awaited on one current-thread runtime leave its
+  other tasks running. A synthesis, and a Realtime or GPT-Live session, drives its connection on
+  a runtime of its own with one thread; their blocking forms park the calling thread instead of
+  blocking on that runtime, so they no longer move to a scoped thread, or panic, on a thread
+  where a runtime is current.
+- `inference-sherpa-onnx` and `inference-whispercpp`: the recognition's async form decodes on a
+  thread the recognition starts and wakes the caller when it is done, so the caller's runtime
+  thread never decodes; iterating still decodes on the calling thread.
+- `inference-stt`: `RecognitionHandle::poll_event` documents that `Ready(None)` while input is
+  open means drained for now, as iterating's `None` does: the caller polls again after the next
+  offer or the end of input, from which on it waits for the finals.
 - `inference-testkit`: the mock duplex session's async form advances its clock by the real time
   between polls that found nothing to deliver, and the late-cascade wrapper passes the async form
   through.

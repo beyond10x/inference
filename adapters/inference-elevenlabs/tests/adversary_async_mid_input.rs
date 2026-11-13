@@ -5,6 +5,10 @@
 //! waker, so a caller that awaits the next transcript between frames, as a phone agent does
 //! while the caller speaks, gets `None` before the server's partial arrives and is never woken
 //! for it: it has to poll on a timer.
+//!
+//! Decided: the contract stays. `RecognitionHandle`'s iterator defines `None` as nothing more
+//! until more input is offered or input ends, and `poll_event`'s `Ready(None)` means the same:
+//! drained for now. The control below pins that meaning.
 
 #![cfg(feature = "stt")]
 
@@ -60,31 +64,4 @@ fn control_the_partial_arrives_after_the_async_forms_none_without_more_input() {
     });
     assert_eq!(first, None);
     assert_eq!(later.as_deref(), Some("hypothesis hallo"));
-}
-
-#[test]
-fn the_async_form_waits_for_the_partial_the_server_sends_while_input_is_open() {
-    let server = FixtureServer::start(partial_after_first());
-    let mut recogniser = server.recogniser(manual(InputFormat::Ulaw8000));
-    let mut handle = recogniser
-        .start(stt_support::request())
-        .expect("a fresh recogniser runs nothing");
-    for frame in mulaw(1) {
-        handle.offer_frame(frame).expect("input is open");
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("a current-thread runtime");
-    let first = runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(2), handle.event())
-            .await
-            .map(|event| event.as_ref().map(describe))
-    });
-    assert_eq!(
-        first,
-        Ok(Some("hypothesis hallo".to_owned())),
-        "the server answers the first chunk with a partial; awaiting the next event while \
-         input is open should wait for it, not end at once"
-    );
 }

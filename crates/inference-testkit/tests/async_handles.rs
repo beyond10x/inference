@@ -521,10 +521,135 @@ fn the_stt_conformance_passes_through_the_async_form_for_every_mock_configuratio
             stt::conformance::claims_observed(&mut through(), &input),
         );
     }
+    let mut failing = AsyncRecogniser {
+        inner: Failing::new(),
+        runtime: Arc::clone(&runtime),
+        pulled: Arc::clone(&pulled),
+    };
+    let observed = passed(
+        "a recogniser whose backend fails",
+        stt::conformance::backend_failure(
+            &mut failing,
+            &stt::conformance::Input::default(),
+            |handle: &AsyncRecognition<FailingRecognition>| handle.inner.failure(),
+        ),
+    );
+    assert_eq!(observed.error, CLOSED);
+    assert_eq!(observed.committed, 1, "one span before the failure");
     assert!(
         pulled.load(std::sync::atomic::Ordering::Relaxed) > 0,
         "events came through the async form"
     );
+}
+
+/// What [`Failing`]'s backend says when it fails.
+const CLOSED: &str = "the backend closed";
+
+/// A streaming recogniser whose backend fails after its first span: the mock recogniser has no
+/// failing backend, and [`stt::conformance::backend_failure`] needs one. From the 40th frame taken
+/// it emits a span and commits it, then marks the call failed and delivers its usage, not final.
+struct Failing {
+    adapter: Adapter,
+}
+
+impl Failing {
+    fn new() -> Self {
+        let (adapter, _) = Adapter::declare(inference_core::model::DeclareAdapter {
+            model_id: ModelId::generate(),
+            backend: "failing stt double".to_owned(),
+            contract_revision: inference_stt::CONTRACT_REVISION.to_owned(),
+            execution_form: inference_core::model::ExecutionForm::InProcess,
+            locality: inference_core::model::Locality::SameProcess,
+            capabilities: vec![
+                inference_core::model::Capability::IncrementalInput,
+                inference_core::model::Capability::OutputStreaming,
+            ],
+            max_concurrency: 1,
+            descriptor: inference_core::model::AdapterDescriptor::default(),
+        })
+        .expect("one is positive");
+        Self { adapter }
+    }
+}
+
+impl Recogniser for Failing {
+    type Handle = FailingRecognition;
+
+    fn adapter(&self) -> &Adapter {
+        &self.adapter
+    }
+
+    fn start(
+        &mut self,
+        request: RecognitionRequest,
+    ) -> Result<FailingRecognition, ConcurrencyLimitReached> {
+        Ok(FailingRecognition {
+            output: TranscriptOutput::start(&self.adapter, request),
+            taken: 0,
+            failed: false,
+            delivered: std::collections::VecDeque::new(),
+        })
+    }
+}
+
+struct FailingRecognition {
+    output: TranscriptOutput,
+    taken: usize,
+    failed: bool,
+    delivered: std::collections::VecDeque<EventEnvelope<TranscriptEvent>>,
+}
+
+impl FailingRecognition {
+    fn failure(&self) -> Option<String> {
+        self.failed.then(|| CLOSED.to_owned())
+    }
+}
+
+impl Iterator for FailingRecognition {
+    type Item = EventEnvelope<TranscriptEvent>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.delivered.is_empty() && !self.failed {
+            if let Ok(frames) = self.output.take_input() {
+                self.taken += frames.len();
+            }
+            if self.taken >= 40 {
+                let hypothesis = self.output.hypothesis("word".to_owned()).ok()?;
+                let span_id = hypothesis.payload.span_id()?;
+                self.delivered.push_back(hypothesis);
+                self.delivered.push_back(self.output.commit(span_id).ok()?);
+                self.output.mark_failed();
+                self.failed = true;
+            }
+        }
+        if self.delivered.is_empty()
+            && self.failed
+            && let Ok(usage) = self.output.usage()
+        {
+            self.delivered.push_back(usage);
+        }
+        self.delivered.pop_front()
+    }
+}
+
+impl RecognitionHandle for FailingRecognition {
+    fn output(&self) -> &TranscriptOutput {
+        &self.output
+    }
+
+    fn offer_frame(&mut self, frame: AudioFrame) -> Result<(), InputEnded> {
+        self.output.offer(frame)
+    }
+
+    fn end_input(&mut self) -> Result<(), InputEnded> {
+        self.output.end_input()
+    }
+
+    fn revise(&mut self, input: ReviseSpan) -> Result<(), RevisionRefused> {
+        let envelope = self.output.revise(input)?;
+        self.delivered.push_back(envelope);
+        Ok(())
+    }
 }
 
 /// A native speech model whose sessions wait for each event on the async form of the wrapped

@@ -12,3 +12,5 @@
 #[cfg(feature = "duplex")]
 pub mod duplex;
 pub mod nova_sonic;
+#[cfg(feature = "duplex")]
+mod wake;

@@ -3,9 +3,10 @@
 //! [`OpenAiLive`] opens a [`LiveClient`] session from a contract configuration and records what
 //! the provider sends through the contract's [`SessionLedger`], so it refuses what every
 //! implementation refuses and yields the contract's events in order. Like the Realtime binding,
-//! each session owns a single-threaded Tokio runtime and blocks on the client for each
-//! operation: drive it from a blocking thread, never from inside an async runtime. Dropping a
-//! session is safe anywhere.
+//! each session owns a Tokio runtime with one thread of its own, which drives its connection.
+//! Opening, sending and `next_event` block the calling thread on the client, on any thread, an
+//! async worker included, which they then hold up; the async form, `event`, reads the connection
+//! without blocking, woken by the session's runtime. Dropping a session is safe anywhere.
 //!
 //! GPT-Live has no responses, commits, cancellation or truncation on its voice side (see
 //! [`crate::live`]), so the mapping onto the response-centred contract is the binding's own:
@@ -110,6 +111,7 @@
 //!   most recent 64.
 
 use std::collections::HashMap;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
@@ -128,7 +130,7 @@ use tokio::runtime::Runtime;
 
 use crate::config::{Deadlines, Endpoint, FunctionTool};
 use crate::credential::CredentialSource;
-use crate::duplex::{failure, kept_push, milliseconds, without_waiting};
+use crate::duplex::{block, failure, kept_push, milliseconds, poll_read, without_waiting};
 use crate::error::RealtimeError;
 use crate::event::ServerError;
 use crate::live::{
@@ -462,7 +464,9 @@ impl NativeSpeechModel for OpenAiLive {
         let client_config = self
             .client_config(&config)
             .map_err(OpenError::Unsupported)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("inference-openai-session")
             .enable_all()
             .build()
             .map_err(|error| {
@@ -471,15 +475,17 @@ impl NativeSpeechModel for OpenAiLive {
                     detail: format!("no runtime for the session: {error}"),
                 })
             })?;
-        let client = runtime
-            .block_on(LiveClient::connect_with(
+        let client = block(
+            &runtime,
+            LiveClient::connect_with(
                 &self.endpoint,
                 self.deadlines,
                 self.source.as_ref(),
                 &self.credential,
                 &client_config,
-            ))
-            .map_err(|error| OpenError::Failed(failure(&error)))?;
+            ),
+        )
+        .map_err(|error| OpenError::Failed(failure(&error)))?;
         let rate = u64::from(client_config.format.sample_rate());
         let gap_samples = u64::try_from(self.segmentation.gap.as_millis())
             .unwrap_or(u64::MAX)
@@ -496,6 +502,7 @@ impl NativeSpeechModel for OpenAiLive {
         Ok(OpenAiLiveSession {
             runtime: Some(runtime),
             client: Some(client),
+            alarm: crate::wake::Alarm::default(),
             ledger,
             format: client_config.format,
             silence_peak: self.segmentation.silence_peak,
@@ -601,6 +608,8 @@ impl BackendSum {
 pub struct OpenAiLiveSession {
     runtime: Option<Runtime>,
     client: Option<LiveClient>,
+    /// Wakes the async form when the liveness bound runs out.
+    alarm: crate::wake::Alarm,
     ledger: SessionLedger,
     format: LiveFormat,
     silence_peak: u16,
@@ -730,7 +739,7 @@ impl OpenAiLiveSession {
                 .require_open()
                 .map_err(SessionError::NotOpen);
         };
-        if let Err(error) = runtime.block_on(operation(client)) {
+        if let Err(error) = block(runtime, operation(client)) {
             match self.record_arrived() {
                 Arrived::Closed(LiveClosed { reason, seconds }) => {
                     self.record(LiveEvent::SessionClosed { reason, seconds });
@@ -765,7 +774,7 @@ impl OpenAiLiveSession {
             else {
                 break;
             };
-            match runtime.block_on(without_waiting(client.next_event())) {
+            match block(runtime, without_waiting(client.next_event())) {
                 Some(Ok(LiveEvent::SessionClosed { reason, seconds })) => {
                     return Arrived::Closed(LiveClosed { reason, seconds });
                 }
@@ -1225,9 +1234,9 @@ impl SpeechSessionHandle for OpenAiLiveSession {
             }
             let mut seen = Vec::new();
             let closed = match (self.client.take(), self.runtime.as_ref()) {
-                (Some(client), Some(runtime)) => runtime
-                    .block_on(client.close_seeing(|event| seen.push(event)))
-                    .ok(),
+                (Some(client), Some(runtime)) => {
+                    block(runtime, client.close_seeing(|event| seen.push(event))).ok()
+                }
                 _ => None,
             };
             for event in seen {
@@ -1259,8 +1268,9 @@ impl SpeechSessionHandle for OpenAiLiveSession {
             else {
                 return None;
             };
-            let read =
-                runtime.block_on(async { tokio::time::timeout(left, client.next_event()).await });
+            let read = block(runtime, async {
+                tokio::time::timeout(left, client.next_event()).await
+            });
             match read {
                 Ok(Ok(event)) => self.record(event),
                 Ok(Err(error @ RealtimeError::Protocol(_))) => {
@@ -1276,6 +1286,60 @@ impl SpeechSessionHandle for OpenAiLiveSession {
                     self.current = None;
                     self.client = None;
                 }
+            }
+        }
+    }
+
+    /// Reads the connection with `cx` as events arrive: the read is polled inside the session's
+    /// runtime, whose thread wakes `cx` when the socket has a message or the client's read
+    /// timeout passes, and is dropped when it would wait, as it is cancel safe. `cx` is woken
+    /// as well when the liveness bound runs out.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
+        loop {
+            if let Some(event) = self.ledger.next_event() {
+                return Poll::Ready(Some(event));
+            }
+            if self.ledger.session().require_open().is_err() {
+                return Poll::Ready(None);
+            }
+            let read = match (self.client.as_mut(), self.runtime.as_ref()) {
+                (Some(client), Some(runtime)) => poll_read(runtime, client.next_event(), cx),
+                _ => Poll::Pending,
+            };
+            match read {
+                Poll::Ready(Ok(event)) => {
+                    self.record(event);
+                    continue;
+                }
+                Poll::Ready(Err(error @ RealtimeError::Protocol(_))) => {
+                    self.undecodable(&error);
+                    self.ledger.check_liveness(Instant::now());
+                    continue;
+                }
+                Poll::Ready(Err(RealtimeError::Stalled(_))) => {
+                    self.ledger.check_liveness(Instant::now());
+                    continue;
+                }
+                Poll::Ready(Err(error)) => {
+                    let refused = self.ledger.fail(failure(&error));
+                    self.or_drop(refused);
+                    self.current = None;
+                    self.client = None;
+                    continue;
+                }
+                Poll::Pending => {}
+            }
+            let now = Instant::now();
+            self.ledger.check_liveness(now);
+            if self.ledger.undelivered() > 0 || self.ledger.session().require_open().is_err() {
+                continue;
+            }
+            let liveness = self.ledger.liveness();
+            let Some(due) = crate::wake::due(None, liveness.due(), liveness.limit(), now) else {
+                return Poll::Pending;
+            };
+            if self.alarm.poll_at(due, cx).is_pending() {
+                return Poll::Pending;
             }
         }
     }

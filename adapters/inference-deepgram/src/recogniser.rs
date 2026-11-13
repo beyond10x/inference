@@ -587,8 +587,10 @@ impl RecognitionHandle for DeepgramRecognition {
         self.output.end_input()
     }
 
-    /// Takes what the connection's thread queued as it arrives, woken by the thread; after the
-    /// end of input, `Pending` where iterating blocks.
+    /// Takes what the connection's thread queued. While input is open, `Ready(None)` means
+    /// drained for now, as iterating's `None` does: poll again after the next offer or after the
+    /// end of input. From the end of input on, `Pending` where iterating blocks, woken by the
+    /// thread when it queues the finals, and by a deadline of the recognition.
     fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<EventEnvelope<TranscriptEvent>>> {
         self.advance(Some(cx))
     }

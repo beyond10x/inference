@@ -1064,6 +1064,12 @@ pub trait RecognitionHandle: Iterator<Item = EventEnvelope<TranscriptEvent>> {
     /// implementation wakes `cx` once the event, a failure or the end has arrived; polled again,
     /// it carries on from where it stood.
     ///
+    /// While input is open, `Ready(None)` means drained for now: nothing more is delivered until
+    /// more input is offered or input ends, so the caller polls again after its next
+    /// [`offer_frame`](RecognitionHandle::offer_frame) or after
+    /// [`end_input`](RecognitionHandle::end_input). From the end of input on, it waits, `Pending`,
+    /// for the finals and the usage record.
+    ///
     /// The default iterates once, so it blocks wherever iterating blocks; an implementation that
     /// waits for a backend overrides it.
     fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<EventEnvelope<TranscriptEvent>>> {

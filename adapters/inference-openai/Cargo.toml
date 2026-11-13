@@ -10,7 +10,7 @@ repository.workspace = true
 [features]
 keychain = ["dep:keyring-core", "dep:secrets-core", "dep:secrets-keychain"]
 native-keychain = ["keychain", "secrets-keychain/native-keychain"]
-duplex = ["dep:inference-core", "dep:inference-duplex", "dep:inference-tools", "tokio/rt"]
+duplex = ["dep:inference-core", "dep:inference-duplex", "dep:inference-tools", "tokio/rt", "tokio/rt-multi-thread"]
 live = ["native-keychain", "duplex"]
 gpt-live = []
 speech = ["dep:inference-tts", "dep:reqwest", "tokio/rt", "tokio/rt-multi-thread"]

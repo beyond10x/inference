@@ -17,6 +17,7 @@ sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shar
 
 [dev-dependencies]
 inference-testkit = { path = "../../crates/inference-testkit" }
+tokio = { version = "1", features = ["rt", "time"] }
 
 [lints]
 workspace = true
