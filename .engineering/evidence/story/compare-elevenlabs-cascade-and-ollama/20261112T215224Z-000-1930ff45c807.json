@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-12T21:52:24Z",
+  "actor": "human:operator",
+  "artifact": "story:compare-elevenlabs-cascade-and-ollama",
+  "kind": "story",
+  "revision": 11,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p inference-llama-server --features live --test live -- --ignored",
+    "reference": "Ollama 0.20.8 at http://127.0.0.1:11434/v1, model qwen2.5:1.5b, after one warm-up request: 1 passed, 0 failed, 2026-11-12; no adapter change"
+  }
+}
