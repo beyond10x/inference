@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-13T01:37:56Z",
+  "actor": "human:operator",
+  "artifact": "task:release-elevenlabs-route-p2",
+  "kind": "task",
+  "revision": 11,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "github:beyond10x/inference/releases/tag/0.29.0",
+    "reference": "tag 0.29.0 on main 4524fd65; PR #50 checks: inference / task check pass, common / Security and privacy pass, Build documentation pass"
+  }
+}
