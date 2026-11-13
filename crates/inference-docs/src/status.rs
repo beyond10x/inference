@@ -29,7 +29,7 @@ const AS_OF: &str = "2026-11-12";
 const NEXT: &str = "next";
 
 /// The heading of the status page's section for [`NEXT`] items.
-const NEXT_HEADING: &str = "On main, in the next release";
+pub const NEXT_HEADING: &str = "On main, in the next release";
 
 /// One line of the status table.
 pub struct Capability {
@@ -580,8 +580,13 @@ fn test_link(evidence: &str) -> String {
 /// The `b10x-status/1` document for the repository at `root`: the shipped and planned items, not
 /// the ones on `main` for the next release.
 pub fn data(root: &Path) -> Result<String> {
-    checked(root, CAPABILITIES)?;
-    let items: Vec<_> = CAPABILITIES
+    data_for(root, CAPABILITIES)
+}
+
+/// The `b10x-status/1` document of `capabilities`.
+fn data_for(root: &Path, capabilities: &[Capability]) -> Result<String> {
+    checked(root, capabilities)?;
+    let items: Vec<_> = capabilities
         .iter()
         .filter(|capability| capability.status != NEXT)
         .map(|capability| {
@@ -675,6 +680,7 @@ pub fn page(root: &Path, version: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::Release;
 
     #[test]
     fn every_capability_of_this_tree_passes_its_checks() {
@@ -755,37 +761,106 @@ mod tests {
 
     #[test]
     fn every_hosted_binding_is_a_shipped_item_since_the_release_of_its_adapter_row() {
+        let releases: Vec<_> = crate::adapters::releases().collect();
+        assert!(releases.iter().any(|(_, _, hosted)| *hosted));
+        let wrong = release_problems(&crate::repository_root(), CAPABILITIES, &releases);
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// What is wrong with the status items of `capabilities` for each `(binding, release,
+    /// hosted)`: a binding since a release has, if hosted, a shipped item of its name in the
+    /// status document naming that release, with the fields every item has; a binding on main in
+    /// no release yet has, if hosted, a next item of its name, which stays out of the document.
+    fn release_problems(
+        root: &Path,
+        capabilities: &[Capability],
+        releases: &[(&str, Release, bool)],
+    ) -> Vec<String> {
         let document: serde_json::Value =
-            serde_json::from_str(&data(&crate::repository_root()).unwrap()).unwrap();
+            serde_json::from_str(&data_for(root, capabilities).unwrap()).unwrap();
         let items = document["items"].as_array().unwrap();
-        let mut hosted = 0;
-        for (name, since, is_hosted) in crate::adapters::releases() {
-            let Some(item) = items.iter().find(|item| item["label"] == name) else {
-                assert!(!is_hosted, "the hosted binding {name} has no status item");
-                continue;
-            };
-            hosted += usize::from(is_hosted);
-            assert_eq!(item["status"], "shipped", "{item}");
-            assert!(
-                item["detail"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with(&format!("Since {since}: ")),
-                "{name} is since {since}: {item}"
-            );
-            let fields: Vec<_> = item
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect();
-            assert_eq!(
-                fields,
-                ["area", "detail", "href", "label", "status"],
-                "{item}"
-            );
+        let mut wrong = Vec::new();
+        for (name, release, hosted) in releases {
+            let item = items.iter().find(|item| item["label"] == *name);
+            let next = capabilities
+                .iter()
+                .any(|c| c.label == *name && c.status == NEXT);
+            match (release, item) {
+                (Release::Since(version), Some(item)) => {
+                    let detail = item["detail"].as_str().unwrap_or_default();
+                    if item["status"] != "shipped"
+                        || !detail.starts_with(&format!("Since {version}: "))
+                    {
+                        wrong.push(format!("{name} is since {version}: {item}"));
+                    }
+                    let fields: Vec<_> = item
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(String::as_str)
+                        .collect();
+                    if fields != ["area", "detail", "href", "label", "status"] {
+                        wrong.push(format!("{name} has the fields {fields:?}"));
+                    }
+                }
+                (Release::Next, Some(item)) => wrong.push(format!(
+                    "{name} is on main for the next release, but its item is in the status \
+                     document: {item}"
+                )),
+                (Release::Since(version), None) if *hosted => {
+                    wrong.push(format!(
+                        "the hosted binding {name}, since {version}, has no shipped status item"
+                    ));
+                }
+                (Release::Next, None) if *hosted && !next => wrong.push(format!(
+                    "the hosted binding {name} is on main for the next release and has no next \
+                     status item"
+                )),
+                _ => {}
+            }
         }
-        assert!(hosted > 0);
+        wrong
+    }
+
+    #[test]
+    fn a_hosted_binding_on_main_is_a_next_item_and_one_since_a_release_a_shipped_item() {
+        let root = crate::scratch("status-releases");
+        fs::write(root.join("t.rs"), "#[test]\nfn held() {}\n").unwrap();
+        let capabilities = [
+            shipped("A", "S", "Since 0.2.0: x", "t.rs::held", "/docs/"),
+            next("A", "N", "Built on main.", "t.rs::held", "/docs/"),
+        ];
+        let problems =
+            |releases: &[(&str, Release, bool)]| release_problems(&root, &capabilities, releases);
+        assert_eq!(
+            problems(&[
+                ("S", Release::Since("0.2.0"), true),
+                ("N", Release::Next, true)
+            ]),
+            Vec::<String>::new()
+        );
+        let wrong = problems(&[("N", Release::Since("0.2.0"), true)]);
+        assert!(
+            wrong.len() == 1 && wrong[0].contains("has no shipped status item"),
+            "{wrong:?}"
+        );
+        let wrong = problems(&[("S", Release::Next, true)]);
+        assert!(
+            wrong.len() == 1 && wrong[0].contains("its item is in the status document"),
+            "{wrong:?}"
+        );
+        let wrong = problems(&[("M", Release::Next, true)]);
+        assert!(
+            wrong.len() == 1 && wrong[0].contains("has no next status item"),
+            "{wrong:?}"
+        );
+        let wrong = problems(&[("S", Release::Since("0.3.0"), true)]);
+        assert!(
+            wrong.len() == 1 && wrong[0].contains("S is since 0.3.0"),
+            "{wrong:?}"
+        );
+        assert!(problems(&[("L", Release::Next, false)]).is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
