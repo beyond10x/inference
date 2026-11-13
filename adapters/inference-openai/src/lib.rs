@@ -92,6 +92,8 @@ pub mod live;
 pub mod live_duplex;
 #[cfg(feature = "speech")]
 pub mod speech;
+#[cfg(feature = "speech")]
+mod wake;
 
 pub use audio::encode_pcm16_24k;
 pub use client::{

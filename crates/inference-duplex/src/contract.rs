@@ -3,6 +3,8 @@
 
 use std::error::Error;
 use std::fmt;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
@@ -446,4 +448,68 @@ pub trait SpeechSessionHandle {
     /// [`SessionFailureKind::Stalled`]: crate::SessionFailureKind::Stalled
     /// [`SessionFailureKind::TransportClosed`]: crate::SessionFailureKind::TransportClosed
     fn next_event(&mut self, wait: Duration) -> Option<SessionEvent>;
+
+    /// The async form of [`Self::next_event`], without a wait: `Ready(Some(event))` is the next
+    /// event, delivered as `next_event` delivers it, and `Ready(None)` means the session has
+    /// closed or failed and every event of it was delivered, so nothing more will come.
+    /// Otherwise it returns `Pending`, and the implementation wakes `cx` once an event has
+    /// arrived or the liveness bound has run out, which yields [`SpeechSessionFailed`] with
+    /// [`SessionFailureKind::Stalled`] as `next_event` does. A caller that wants a bound sets
+    /// one with its runtime's timer.
+    ///
+    /// The default takes what `next_event(Duration::ZERO)` gives and otherwise wakes `cx` at
+    /// once and returns `Pending`, so the task is polled again after the runtime's other tasks:
+    /// it does not block the thread, but it polls instead of being woken, and it moves on only
+    /// where `next_event` without a wait takes what has already arrived. An implementation that
+    /// waits for a provider overrides it.
+    ///
+    /// [`SpeechSessionFailed`]: crate::SpeechSessionFailed
+    /// [`SessionFailureKind::Stalled`]: crate::SessionFailureKind::Stalled
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
+        if let Some(event) = self.next_event(Duration::ZERO) {
+            return Poll::Ready(Some(event));
+        }
+        let ledger = self.ledger();
+        if ledger.session().require_open().is_err() && ledger.undelivered() == 0 {
+            return Poll::Ready(None);
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+
+    /// The next event as a future through [`Self::poll_event`]; dropped before it is ready, it
+    /// loses nothing.
+    ///
+    /// ```
+    /// # use inference_duplex::{SessionEvent, SpeechSessionHandle};
+    /// async fn until_closed<S: SpeechSessionHandle>(session: &mut S) -> Vec<SessionEvent> {
+    ///     let mut events = Vec::new();
+    ///     while let Some(event) = session.event().await {
+    ///         events.push(event);
+    ///     }
+    ///     events
+    /// }
+    /// ```
+    fn event(&mut self) -> NextSessionEvent<'_, Self>
+    where
+        Self: Sized,
+    {
+        NextSessionEvent { session: self }
+    }
+}
+
+/// The future of [`SpeechSessionHandle::event`]: the session's next event, or `None` once it has
+/// ended and every event of it was delivered.
+#[derive(Debug)]
+#[must_use = "a future does nothing unless it is awaited"]
+pub struct NextSessionEvent<'a, S: ?Sized> {
+    session: &'a mut S,
+}
+
+impl<S: SpeechSessionHandle + ?Sized> Future for NextSessionEvent<'_, S> {
+    type Output = Option<SessionEvent>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut().session.poll_event(cx)
+    }
 }

@@ -186,6 +186,8 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use inference_audio;
@@ -1344,6 +1346,54 @@ pub trait SynthesisHandle: Iterator<Item = SynthesisEvent> {
     ///
     /// The [`DiscardRefused`] of [`SynthesisOutput::discard`]; nothing moves.
     fn discard(&mut self, segment_id: SegmentId) -> Result<SegmentDiscarded, DiscardRefused>;
+
+    /// The async form of iterating the handle. `Ready(Some(event))` is the event iterating
+    /// would yield next, and `Ready(None)` means what iterating's `None` means. Where iterating
+    /// would block the thread to wait for the backend, this returns `Pending` instead and the
+    /// implementation wakes `cx` once the event, a failure or the end has arrived; polled again,
+    /// it carries on from where it stood.
+    ///
+    /// The default iterates once, so it blocks wherever iterating blocks; an implementation that
+    /// waits for a backend overrides it.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SynthesisEvent>> {
+        let _ = cx;
+        Poll::Ready(self.next())
+    }
+
+    /// The next event as a future through [`SynthesisHandle::poll_event`]; dropped before it is
+    /// ready, it loses nothing.
+    ///
+    /// ```
+    /// # use inference_tts::{SynthesisEvent, SynthesisHandle};
+    /// async fn drain<H: SynthesisHandle>(handle: &mut H) -> Vec<SynthesisEvent> {
+    ///     let mut events = Vec::new();
+    ///     while let Some(event) = handle.event().await {
+    ///         events.push(event);
+    ///     }
+    ///     events
+    /// }
+    /// ```
+    fn event(&mut self) -> NextSynthesisEvent<'_, Self>
+    where
+        Self: Sized,
+    {
+        NextSynthesisEvent { handle: self }
+    }
+}
+
+/// The future of [`SynthesisHandle::event`]: the handle's next event, or `None`.
+#[derive(Debug)]
+#[must_use = "a future does nothing unless it is awaited"]
+pub struct NextSynthesisEvent<'a, H: ?Sized> {
+    handle: &'a mut H,
+}
+
+impl<H: SynthesisHandle + ?Sized> Future for NextSynthesisEvent<'_, H> {
+    type Output = Option<SynthesisEvent>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut().handle.poll_event(cx)
+    }
 }
 
 #[cfg(test)]

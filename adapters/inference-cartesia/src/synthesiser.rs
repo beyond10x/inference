@@ -2,8 +2,11 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, ready};
 
 use inference_tts::inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
 use inference_tts::inference_core::model::{
@@ -22,6 +25,7 @@ use crate::connection::{CLOSE_BOUND, Connection};
 use crate::credential::{CARTESIA_KEY_NAME, CredentialSource, EnvironmentSource};
 use crate::error::{CartesiaError, ConfigError};
 use crate::protocol::{self, ServerMessage};
+use crate::wake;
 
 /// The backend name of the adapter record.
 pub const BACKEND: &str = "cartesia-tts-websocket";
@@ -164,6 +168,7 @@ impl Synthesiser for CartesiaSynthesiser {
             shared: Arc::clone(&self.shared),
             runtime: None,
             connection: None,
+            exchange: None,
             live: None,
             retired: HashSet::new(),
             contexts: 0,
@@ -194,8 +199,10 @@ struct Live {
 
 /// One synthesis of a [`CartesiaSynthesiser`]; it runs until it is dropped.
 ///
+/// Each exchange with the server runs on a runtime of the synthesis's own, with one thread.
 /// Iterating it blocks while it waits for the server, each wait bounded by the endpoint's read
-/// timeout. A failure ends the iteration of the segments it took; [`CartesiaSynthesis::failure`]
+/// timeout; its async form, [`SynthesisHandle::poll_event`], returns `Pending` there instead and
+/// is woken when the exchange ends. A failure ends the iteration of the segments it took; [`CartesiaSynthesis::failure`]
 /// says why, the usage record then is not final, and the segments offered after it are taken and
 /// not spoken.
 pub struct CartesiaSynthesis {
@@ -203,6 +210,8 @@ pub struct CartesiaSynthesis {
     shared: Arc<Shared>,
     runtime: Option<tokio::runtime::Runtime>,
     connection: Option<Connection>,
+    /// The exchange in flight, which holds the connection until it ends.
+    exchange: Option<Exchange>,
     live: Option<Live>,
     /// The contexts cancelled or finished, whose later messages are dropped.
     retired: HashSet<String>,
@@ -255,12 +264,13 @@ impl CartesiaSynthesis {
         self.output.segment(segment_id).map(OutputSegment::state)
     }
 
-    /// Sends the generation request of one segment on a new context, opening the connection
-    /// first when the synthesis has none.
-    fn send_request(&mut self, message: String) -> Result<(), CartesiaError> {
+    /// Starts speaking the segment `segment_id` on the context `context_id`: the segment is the
+    /// one being spoken from now on, and its generation request `message` is sent, on a
+    /// connection opened first when the synthesis has none.
+    fn send_request(&mut self, segment_id: SegmentId, context_id: String, message: String) {
         let shared = Arc::clone(&self.shared);
         let connection = self.connection.take();
-        let connection = run(&mut self.runtime, async move {
+        let task = self.start(async move {
             let mut connection = match connection {
                 Some(connection) => connection,
                 None => {
@@ -277,21 +287,98 @@ impl CartesiaSynthesis {
             };
             connection.send(message).await?;
             Ok::<_, CartesiaError>(connection)
-        })??;
-        self.connection = Some(connection);
-        Ok(())
+        });
+        match task {
+            Ok(task) => {
+                self.live = Some(Live {
+                    segment_id,
+                    context_id,
+                    carry: Vec::new(),
+                });
+                self.exchange = Some(Exchange::Send(task));
+            }
+            Err(error) => self.fail(error),
+        }
     }
 
-    /// Reads one message of the connection and acts on it.
-    fn step(&mut self) -> Result<(), CartesiaError> {
-        let Some(connection) = self.connection.as_mut() else {
+    /// Starts reading the next message of the connection.
+    fn read(&mut self) -> Result<(), CartesiaError> {
+        let Some(mut connection) = self.connection.take() else {
             return Err(CartesiaError::Closed {
                 code: None,
                 reason: String::new(),
             });
         };
-        let text = run(&mut self.runtime, connection.read())??;
-        let message = protocol::parse_server_message(&text)?;
+        let task = self.start(async move {
+            let text = connection.read().await;
+            (connection, text)
+        })?;
+        self.exchange = Some(Exchange::Read(task));
+        Ok(())
+    }
+
+    /// The synthesis's runtime, built on first use, with one worker thread of its own.
+    fn runtime(&mut self) -> Result<&tokio::runtime::Runtime, CartesiaError> {
+        if self.runtime.is_none() {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("inference-cartesia")
+                .enable_all()
+                .build()
+                .map_err(|error| CartesiaError::Runtime(error.to_string()))?;
+            self.runtime = Some(runtime);
+        }
+        self.runtime
+            .as_ref()
+            .ok_or_else(|| CartesiaError::Runtime("no runtime".to_owned()))
+    }
+
+    /// Runs `future` on the synthesis's runtime.
+    fn start<F>(&mut self, future: F) -> Result<tokio::task::JoinHandle<F::Output>, CartesiaError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        Ok(self.runtime()?.spawn(future))
+    }
+
+    /// Waits for the exchange in flight to end and acts on how it ended: blocking without `cx`,
+    /// `Pending` with it until the exchange ends, which wakes `cx`.
+    fn settle(&mut self, cx: Option<&mut Context<'_>>) -> Poll<()> {
+        let outcome = match self.exchange.as_mut() {
+            None => return Poll::Ready(()),
+            Some(Exchange::Send(task)) => {
+                ready!(join(task, cx))
+                    .and_then(|sent| sent)
+                    .map(|connection| {
+                        self.connection = Some(connection);
+                        String::new()
+                    })
+            }
+            Some(Exchange::Read(task)) => ready!(join(task, cx)).and_then(|(connection, read)| {
+                self.connection = Some(connection);
+                read
+            }),
+            Some(Exchange::Close(task)) => {
+                let _ = ready!(join(task, cx));
+                Ok(String::new())
+            }
+        };
+        let read = matches!(self.exchange.take(), Some(Exchange::Read(_)));
+        let outcome = match outcome {
+            Ok(text) if read => self.receive(&text),
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = outcome {
+            self.fail(error);
+        }
+        Poll::Ready(())
+    }
+
+    /// Acts on `text`, one message read from the connection.
+    fn receive(&mut self, text: &str) -> Result<(), CartesiaError> {
+        let message = protocol::parse_server_message(text)?;
         let live_context = self.live.as_ref().map(|live| live.context_id.as_str());
         match message.context_id() {
             Some(context_id) if Some(context_id) == live_context => {}
@@ -382,23 +469,37 @@ impl CartesiaSynthesis {
         let Some(mut connection) = self.connection.take() else {
             return;
         };
-        let sent = run(&mut self.runtime, async move {
+        let Ok(task) = self.start(async move {
             let sent = connection.send_within(message, CLOSE_BOUND).await;
             (connection, sent)
-        });
+        }) else {
+            return;
+        };
+        let Some(Ok((connection, sent))) =
+            wake::block_on_until(task, std::time::Instant::now().checked_add(CLOSE_BOUND * 2))
+        else {
+            return;
+        };
         match sent {
-            Ok((connection, Ok(()))) => self.connection = Some(connection),
-            Ok((connection, Err(_))) => {
-                let _ = run(&mut self.runtime, connection.close());
-            }
-            Err(_) => {}
+            Ok(()) => self.connection = Some(connection),
+            Err(_) => self.close_now(connection),
         }
     }
 
-    /// Closes the connection, if there is one, reading nothing more.
+    /// Closes `connection` at once, waiting at most [`CLOSE_BOUND`].
+    fn close_now(&mut self, connection: Connection) {
+        if let Ok(task) = self.start(connection.close()) {
+            let _ = wake::block_on_until(task, std::time::Instant::now().checked_add(CLOSE_BOUND));
+        }
+    }
+
+    /// Closes the connection, if there is one, reading nothing more. The close is an exchange
+    /// the next step waits for.
     fn close(&mut self) {
-        if let Some(connection) = self.connection.take() {
-            let _ = run(&mut self.runtime, connection.close());
+        if let Some(connection) = self.connection.take()
+            && let Ok(task) = self.start(connection.close())
+        {
+            self.exchange = Some(Exchange::Close(task));
         }
     }
 
@@ -411,78 +512,31 @@ impl CartesiaSynthesis {
         self.output.mark_failed();
         self.failure = Some(error);
     }
-}
 
-/// Runs `future` to its end on the synthesis's own runtime, built on first use, and blocks the
-/// calling thread until it has.
-///
-/// On a thread where a runtime handle is current, blocking on another runtime panics on an
-/// async worker and not on a `spawn_blocking` thread, and tokio gives no public way to tell the
-/// two apart. So on any such thread the synthesis's runtime is driven on a scoped thread of its
-/// own while the caller waits, and no thread is refused. The caller's thread is still blocked:
-/// on an async worker that holds up the worker's other tasks.
-fn run<F>(
-    runtime: &mut Option<tokio::runtime::Runtime>,
-    future: F,
-) -> Result<F::Output, CartesiaError>
-where
-    F: Future + Send,
-    F::Output: Send,
-{
-    let runtime = match runtime {
-        Some(runtime) => runtime,
-        None => runtime.insert(
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| CartesiaError::Runtime(error.to_string()))?,
-        ),
-    };
-    if tokio::runtime::Handle::try_current().is_err() {
-        return Ok(runtime.block_on(future));
-    }
-    let runtime = &*runtime;
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("inference-cartesia".to_owned())
-            .spawn_scoped(scope, move || runtime.block_on(future))
-            .map_err(|error| CartesiaError::Runtime(error.to_string()))?
-            .join()
-            .map_err(|_| {
-                CartesiaError::Runtime("the thread driving the connection panicked".to_owned())
-            })
-    })
-}
-
-/// A refusal of the TTS contract, which a well-formed segment of this binding never meets.
-fn refused(error: impl fmt::Display) -> CartesiaError {
-    CartesiaError::Protocol(format!("the TTS contract refused the audio: {error}"))
-}
-
-impl Iterator for CartesiaSynthesis {
-    type Item = SynthesisEvent;
-
-    /// The next event. It blocks while a segment is being spoken, each read bounded by the read
-    /// timeout; `None` once nothing more is delivered until more is offered or the utterance
-    /// ends.
-    fn next(&mut self) -> Option<SynthesisEvent> {
+    /// The next event: blocking while it waits for the server, or with `cx`, the async form's,
+    /// `Pending` there instead.
+    fn advance(&mut self, mut cx: Option<&mut Context<'_>>) -> Poll<Option<SynthesisEvent>> {
         loop {
             if let Some(event) = self.delivered.pop_front() {
-                return Some(event);
+                return Poll::Ready(Some(event));
+            }
+            if self.exchange.is_some() {
+                ready!(self.settle(cx.as_deref_mut()));
+                continue;
             }
             if self.failure.is_some() {
                 self.take_input();
-                return self.output.usage().ok();
+                return Poll::Ready(self.output.usage().ok());
             }
             if self.live.is_some() {
-                if let Err(error) = self.step() {
+                if let Err(error) = self.read() {
                     self.fail(error);
                 }
                 continue;
             }
             self.take_input();
             let Some((segment_id, text)) = self.pending.pop_front() else {
-                return self.output.usage().ok();
+                return Poll::Ready(self.output.usage().ok());
             };
             if self.state(segment_id) != Some(SegmentState::Queued) {
                 continue;
@@ -498,23 +552,86 @@ impl Iterator for CartesiaSynthesis {
                 }
                 continue;
             };
-            match self.send_request(message) {
-                Ok(()) => {
-                    self.live = Some(Live {
-                        segment_id,
-                        context_id,
-                        carry: Vec::new(),
-                    });
-                }
-                Err(error) => self.fail(error),
-            }
+            self.send_request(segment_id, context_id, message);
+        }
+    }
+}
+
+/// An exchange with the server in flight on the synthesis's runtime; the connection travels
+/// with it and comes back when it ends.
+enum Exchange {
+    /// A generation request is sent, on a connection opened first when there was none.
+    Send(tokio::task::JoinHandle<Result<Connection, CartesiaError>>),
+    /// One message is read.
+    Read(tokio::task::JoinHandle<(Connection, Result<String, CartesiaError>)>),
+    /// The connection is closed.
+    Close(tokio::task::JoinHandle<()>),
+}
+
+impl Exchange {
+    /// Stops the exchange; the connection it holds is dropped with it.
+    fn abort(self) {
+        match self {
+            Exchange::Send(task) => task.abort(),
+            Exchange::Read(task) => task.abort(),
+            Exchange::Close(task) => task.abort(),
+        }
+    }
+}
+
+/// What `task` returned: blocking the calling thread without `cx`, `Pending` with it until the
+/// task ends, which wakes `cx`.
+fn join<T>(
+    task: &mut tokio::task::JoinHandle<T>,
+    cx: Option<&mut Context<'_>>,
+) -> Poll<Result<T, CartesiaError>> {
+    let joined = match cx {
+        None => wake::block_on(&mut *task),
+        Some(cx) => ready!(Pin::new(task).poll(cx)),
+    };
+    Poll::Ready(joined.map_err(|error| {
+        CartesiaError::Runtime(format!("the task driving the connection ended: {error}"))
+    }))
+}
+
+/// A refusal of the TTS contract, which a well-formed segment of this binding never meets.
+fn refused(error: impl fmt::Display) -> CartesiaError {
+    CartesiaError::Protocol(format!("the TTS contract refused the audio: {error}"))
+}
+
+impl Iterator for CartesiaSynthesis {
+    type Item = SynthesisEvent;
+
+    /// The next event. It blocks while a segment is being spoken, each read bounded by the read
+    /// timeout; `None` once nothing more is delivered until more is offered or the utterance
+    /// ends.
+    fn next(&mut self) -> Option<SynthesisEvent> {
+        match self.advance(None) {
+            Poll::Ready(event) => event,
+            Poll::Pending => None,
         }
     }
 }
 
 impl Drop for CartesiaSynthesis {
+    /// Closes the connection, waiting at most [`CLOSE_BOUND`]; an exchange in flight other than
+    /// a close is dropped with its connection.
     fn drop(&mut self) {
-        self.close();
+        let closing = match self.exchange.take() {
+            Some(Exchange::Close(task)) => Some(task),
+            Some(exchange) => {
+                exchange.abort();
+                None
+            }
+            None => None,
+        };
+        let closing = closing.or_else(|| {
+            let connection = self.connection.take()?;
+            self.start(connection.close()).ok()
+        });
+        if let Some(task) = closing {
+            let _ = wake::block_on_until(task, std::time::Instant::now().checked_add(CLOSE_BOUND));
+        }
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
@@ -542,10 +659,19 @@ impl SynthesisHandle for CartesiaSynthesis {
         self.output.acknowledge_playback(segment_id, receipt)
     }
 
+    /// Takes the next event, `Pending` where iterating blocks: while an exchange with the
+    /// server is in flight, which wakes `cx` when it ends.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SynthesisEvent>> {
+        self.advance(Some(cx))
+    }
+
     /// Discards the segment through [`SynthesisOutput::discard`] and drops every event of it not
     /// yet delivered. When it is the segment being spoken, a barge-in, the protocol's cancel for
     /// its context is sent, waiting at most [`CLOSE_BOUND`](crate::CLOSE_BOUND), and every later
-    /// message of that context is dropped; the connection stays open for the next segment.
+    /// message of that context is dropped; the connection stays open for the next segment. When
+    /// the async form left a request or a read in flight, which holds the connection, that
+    /// exchange is dropped with the connection instead, without waiting, and the next segment
+    /// opens another.
     fn discard(&mut self, segment_id: SegmentId) -> Result<SegmentDiscarded, DiscardRefused> {
         let event = self.output.discard(segment_id)?;
         self.delivered
@@ -555,7 +681,16 @@ impl SynthesisHandle for CartesiaSynthesis {
             .as_ref()
             .is_some_and(|live| live.segment_id == segment_id)
         {
-            self.cancel_live();
+            if matches!(self.exchange, Some(Exchange::Send(_) | Exchange::Read(_))) {
+                if let Some(exchange) = self.exchange.take() {
+                    exchange.abort();
+                }
+                if let Some(live) = self.live.take() {
+                    self.retired.insert(live.context_id);
+                }
+            } else {
+                self.cancel_live();
+            }
         }
         Ok(event)
     }

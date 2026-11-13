@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use inference_stt::inference_audio::AudioFormat;
@@ -25,6 +26,7 @@ use crate::credential::{CredentialSource, ELEVENLABS_KEY_NAME, EnvironmentSource
 use crate::error::{ConfigError, ConnectError, ElevenLabsError};
 use crate::stt_config::{CommitStrategy, TranscriptionConfig};
 use crate::stt_protocol::{self, ServerMessage, SpanTiming};
+use crate::wake::{Alarm, WakerSlot};
 
 /// The backend name of the recogniser's adapter record.
 pub const STT_BACKEND: &str = "elevenlabs-speech-to-text-realtime";
@@ -201,6 +203,7 @@ impl Recogniser for ElevenLabsRecogniser {
             finished: false,
             cancelled: false,
             warnings: Vec::new(),
+            alarm: Alarm::default(),
             _slot: slot,
         })
     }
@@ -241,6 +244,48 @@ enum Inbound {
 struct Worker {
     commands: async_mpsc::UnboundedSender<Command>,
     inbound: mpsc::Receiver<Inbound>,
+    /// Woken by the thread after each message it queued and when it lets go of the queue.
+    waker: Arc<WakerSlot>,
+}
+
+/// Why [`wait`] took nothing from the queue.
+enum Waited {
+    Timeout,
+    Disconnected,
+}
+
+/// The next thing `worker`'s thread queued, waiting until `until`, or without a deadline when
+/// there is none. Without `cx` it blocks the calling thread; with `cx`, the async form's, it is
+/// `Pending` instead, and the thread queuing a message or letting go of the queue, or `alarm` at
+/// `until`, wakes `cx`.
+fn wait(
+    worker: &Worker,
+    alarm: &mut Alarm,
+    until: Option<std::time::Instant>,
+    cx: Option<&mut Context<'_>>,
+) -> Poll<Result<Inbound, Waited>> {
+    let Some(cx) = cx else {
+        let received = match until {
+            Some(until) => worker
+                .inbound
+                .recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => Waited::Timeout,
+                    mpsc::RecvTimeoutError::Disconnected => Waited::Disconnected,
+                }),
+            None => worker.inbound.recv().map_err(|_| Waited::Disconnected),
+        };
+        return Poll::Ready(received);
+    };
+    worker.waker.register(cx.waker());
+    match worker.inbound.try_recv() {
+        Ok(inbound) => Poll::Ready(Ok(inbound)),
+        Err(mpsc::TryRecvError::Disconnected) => Poll::Ready(Err(Waited::Disconnected)),
+        Err(mpsc::TryRecvError::Empty) => match until {
+            Some(until) if alarm.poll_at(until, cx).is_ready() => Poll::Ready(Err(Waited::Timeout)),
+            _ => Poll::Pending,
+        },
+    }
 }
 
 /// One recognition of an [`ElevenLabsRecogniser`]; it runs until it is dropped or cancelled.
@@ -282,6 +327,8 @@ pub struct ElevenLabsRecognition {
     finished: bool,
     cancelled: bool,
     warnings: Vec<String>,
+    /// Wakes the async form when a deadline of the recognition passes.
+    alarm: Alarm,
     _slot: Slot,
 }
 
@@ -425,11 +472,14 @@ impl ElevenLabsRecognition {
     /// thread's runtime cannot hold the caller; once the connection is open, until the read
     /// timeout from `heard_at` passes, which is [`Inbound::Quiet`], or with `vad` and nothing left
     /// to answer, until [`VAD_END_QUIET`] passes, which is [`Inbound::Settled`]. An instant too far
-    /// to represent is no deadline.
-    fn receive(&mut self) -> Option<Inbound> {
+    /// to represent is no deadline. With `cx`, the async form's, it never blocks: `Pending` where
+    /// it would wait, woken as [`wait`] says.
+    fn receive(&mut self, cx: Option<&mut Context<'_>>) -> Poll<Option<Inbound>> {
         let now = std::time::Instant::now();
         if self.output.input_ended() && !self.end_sent {
-            let worker = self.worker.as_ref()?;
+            let Some(worker) = self.worker.as_ref() else {
+                return Poll::Ready(None);
+            };
             if worker.commands.send(Command::Commit).is_ok() {
                 self.outstanding += 1;
             }
@@ -447,11 +497,13 @@ impl ElevenLabsRecognition {
                 (Some(_), None) => true,
                 (None, _) => false,
             };
-        let worker = self.worker.as_ref()?;
+        let Some(worker) = self.worker.as_ref() else {
+            return Poll::Ready(None);
+        };
         let received = if !self.end_sent {
             match worker.inbound.try_recv() {
                 Ok(inbound) => inbound,
-                Err(mpsc::TryRecvError::Empty) => return None,
+                Err(mpsc::TryRecvError::Empty) => return Poll::Ready(None),
                 Err(mpsc::TryRecvError::Disconnected) => Inbound::Failed(stopped()),
             }
         } else if !self.opened {
@@ -460,50 +512,31 @@ impl ElevenLabsRecognition {
                 .endpoint
                 .connect_timeout
                 .saturating_add(OPEN_SLACK);
-            let next = match self.started_at.checked_add(bound) {
-                Some(until) => worker
-                    .inbound
-                    .recv_timeout(until.saturating_duration_since(now)),
-                None => worker
-                    .inbound
-                    .recv()
-                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-            };
-            match next {
+            let until = self.started_at.checked_add(bound);
+            match ready!(wait(worker, &mut self.alarm, until, cx)) {
                 Ok(inbound) => inbound,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    Inbound::Failed(ElevenLabsError::Connect(ConnectError {
-                        status: None,
-                        detail: format!(
-                            "no connection within {:?}",
-                            self.shared.endpoint.connect_timeout
-                        ),
-                    }))
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => Inbound::Failed(stopped()),
+                Err(Waited::Timeout) => Inbound::Failed(ElevenLabsError::Connect(ConnectError {
+                    status: None,
+                    detail: format!(
+                        "no connection within {:?}",
+                        self.shared.endpoint.connect_timeout
+                    ),
+                })),
+                Err(Waited::Disconnected) => Inbound::Failed(stopped()),
             }
         } else {
             let until = if settle_first { settle } else { due };
-            let next = match until {
-                Some(until) => worker
-                    .inbound
-                    .recv_timeout(until.saturating_duration_since(now)),
-                None => worker
-                    .inbound
-                    .recv()
-                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-            };
-            match next {
+            match ready!(wait(worker, &mut self.alarm, until, cx)) {
                 Ok(inbound) => inbound,
-                Err(mpsc::RecvTimeoutError::Timeout) if settle_first => Inbound::Settled,
-                Err(mpsc::RecvTimeoutError::Timeout) => Inbound::Quiet,
-                Err(mpsc::RecvTimeoutError::Disconnected) => Inbound::Failed(stopped()),
+                Err(Waited::Timeout) if settle_first => Inbound::Settled,
+                Err(Waited::Timeout) => Inbound::Quiet,
+                Err(Waited::Disconnected) => Inbound::Failed(stopped()),
             }
         };
         if self.end_sent && matches!(received, Inbound::Opened) {
             self.heard_at = std::time::Instant::now();
         }
-        Some(received)
+        Poll::Ready(Some(received))
     }
 
     /// Acts on one server message; see the crate documentation for the mapping.
@@ -601,27 +634,44 @@ impl Iterator for ElevenLabsRecognition {
 
     /// The next event; see [`ElevenLabsRecognition`] for when it waits.
     fn next(&mut self) -> Option<Self::Item> {
+        match self.advance(None) {
+            Poll::Ready(envelope) => envelope,
+            Poll::Pending => None,
+        }
+    }
+}
+
+impl ElevenLabsRecognition {
+    /// The next event: blocking where the iterator waits, or with `cx`, the async form's,
+    /// `Pending` there instead.
+    fn advance(
+        &mut self,
+        mut cx: Option<&mut Context<'_>>,
+    ) -> Poll<Option<EventEnvelope<TranscriptEvent>>> {
         loop {
             if let Some(envelope) = self.delivered.pop_front() {
-                return Some(envelope);
+                return Poll::Ready(Some(envelope));
             }
             if self.cancelled {
-                return None;
+                return Poll::Ready(None);
             }
             if self.failure.is_none() && !self.finished {
                 self.forward_input();
             }
             if self.failure.is_some() || self.finished {
-                return self.output.usage().ok();
+                return Poll::Ready(self.output.usage().ok());
             }
             if self.worker.is_none() {
                 if !self.output.input_ended() {
-                    return None;
+                    return Poll::Ready(None);
                 }
                 self.finished = true;
                 continue;
             }
-            let outcome = match self.receive()? {
+            let Some(received) = ready!(self.receive(cx.as_deref_mut())) else {
+                return Poll::Ready(None);
+            };
+            let outcome = match received {
                 Inbound::Opened => {
                     self.opened = true;
                     Ok(())
@@ -672,6 +722,13 @@ impl RecognitionHandle for ElevenLabsRecognition {
         self.output.end_input()
     }
 
+    /// Takes what the connection's thread queued as it arrives, woken by the thread; after the
+    /// end of input, `Pending` where iterating blocks, and woken as well when a deadline of the
+    /// recognition passes.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<EventEnvelope<TranscriptEvent>>> {
+        self.advance(Some(cx))
+    }
+
     fn revise(&mut self, input: ReviseSpan) -> Result<(), RevisionRefused> {
         let span_id = input.span_id;
         let text = input.text.clone();
@@ -690,6 +747,8 @@ impl RecognitionHandle for ElevenLabsRecognition {
 fn spawn(shared: Arc<Shared>) -> Result<Worker, ElevenLabsError> {
     let (commands, receiver) = async_mpsc::unbounded_channel();
     let (sender, inbound) = mpsc::sync_channel(STT_INBOUND_DEPTH);
+    let waker = Arc::new(WakerSlot::default());
+    let sender = Inbox::new(sender, Arc::clone(&waker));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -698,7 +757,11 @@ fn spawn(shared: Arc<Shared>) -> Result<Worker, ElevenLabsError> {
         .name("inference-elevenlabs-stt".to_owned())
         .spawn(move || runtime.block_on(drive(shared, receiver, sender)))
         .map_err(|error| ElevenLabsError::Runtime(error.to_string()))?;
-    Ok(Worker { commands, inbound })
+    Ok(Worker {
+        commands,
+        inbound,
+        waker,
+    })
 }
 
 /// What the thread does after one event of its loop.
@@ -719,7 +782,53 @@ enum Offered {
     Gone,
 }
 
-fn offer(inbound: &mpsc::SyncSender<Inbound>, item: Inbound) -> Offered {
+/// The handle's queue as the connection's thread fills it: each message queued, and the
+/// thread letting go of the queue, wakes the handle's async form.
+struct Inbox {
+    sender: Option<mpsc::SyncSender<Inbound>>,
+    waker: Arc<WakerSlot>,
+}
+
+impl Inbox {
+    fn new(sender: mpsc::SyncSender<Inbound>, waker: Arc<WakerSlot>) -> Self {
+        Self {
+            sender: Some(sender),
+            waker,
+        }
+    }
+
+    fn try_send(&self, item: Inbound) -> Result<(), mpsc::TrySendError<Inbound>> {
+        let sent = match self.sender.as_ref() {
+            Some(sender) => sender.try_send(item),
+            None => Err(mpsc::TrySendError::Disconnected(item)),
+        };
+        if sent.is_ok() {
+            self.waker.wake();
+        }
+        sent
+    }
+
+    fn send(&self, item: Inbound) -> Result<(), mpsc::SendError<Inbound>> {
+        let sent = match self.sender.as_ref() {
+            Some(sender) => sender.send(item),
+            None => Err(mpsc::SendError(item)),
+        };
+        if sent.is_ok() {
+            self.waker.wake();
+        }
+        sent
+    }
+}
+
+impl Drop for Inbox {
+    /// Lets go of the queue first, so the handle the wake reaches finds it disconnected.
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        self.waker.wake();
+    }
+}
+
+fn offer(inbound: &Inbox, item: Inbound) -> Offered {
     match inbound.try_send(item) {
         Ok(()) => Offered::Taken,
         Err(mpsc::TrySendError::Full(item)) => Offered::Full(item),
@@ -757,7 +866,7 @@ async fn command(connection: &mut Connection, command: Option<Command>, rate: u3
 async fn drive(
     shared: Arc<Shared>,
     mut commands: async_mpsc::UnboundedReceiver<Command>,
-    inbound: mpsc::SyncSender<Inbound>,
+    inbound: Inbox,
 ) {
     let endpoint = &shared.endpoint;
     let connect_timeout = endpoint.connect_timeout;

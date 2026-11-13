@@ -35,6 +35,7 @@ ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.94.0" }
 inference = { path = "../inference", features = ["testing"] }
 serde.workspace = true
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "time"] }
 
 [[test]]
 name = "conform"

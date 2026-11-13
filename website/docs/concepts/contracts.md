@@ -3,7 +3,7 @@ title: Contracts
 sidebar_position: 2
 description: What a model kind must do, with no model inside, and the capability claims an adapter makes and the contracts check.
 lede: A contract crate carries no concrete model; an adapter implements it and claims capabilities the contract enforces where it can observe them.
-source: crates/inference-core (model.rs), crates/inference-stt, crates/inference-llm, crates/inference-duplex (conformance.rs), adapters/inference-openai/src/live_duplex.rs
+source: crates/inference-core (model.rs), crates/inference-stt, crates/inference-llm, crates/inference-tts, crates/inference-duplex (conformance.rs, contract.rs), adapters/inference-openai/src/live_duplex.rs
 ---
 
 # Contracts
@@ -25,6 +25,12 @@ The shared vocabulary (models, adapters, capabilities, locality, deployment prof
 the usage record) is in `inference-core`; audio frames and formats in `inference-audio`; spans,
 turns and output segments in `inference-text`. Every crate is listed in
 [Crates](../reference/crates.md).
+
+A handle of the three speech contracts, a synthesis, a recognition or a native speech session,
+has a blocking form, its iterator or `next_event` with a wait, and an async form, `event()`: a
+future of the same next event, which an async caller awaits without blocking a worker of its
+runtime. The async form is a default method built on the blocking one, so every adapter has it;
+the hosted adapters override it so that the connection or a deadline wakes it.
 
 ## Capabilities are claims, checked
 

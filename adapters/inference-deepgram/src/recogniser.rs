@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -27,6 +28,7 @@ use crate::connection::{self, CLOSE_BOUND, Socket};
 use crate::credential::{CredentialSource, DEEPGRAM_KEY_NAME, EnvironmentSource};
 use crate::error::{CloseCause, ConfigError, DeepgramError};
 use crate::listen::{self, CLOSE_STREAM, KEEP_ALIVE, ServerMessage};
+use crate::wake::{Alarm, WakerSlot};
 
 /// The backend name of the adapter record.
 pub const BACKEND: &str = "deepgram-listen";
@@ -188,6 +190,7 @@ impl Recogniser for DeepgramRecogniser {
             finished: false,
             cancelled: false,
             duration: None,
+            alarm: Alarm::default(),
             _slot: slot,
         })
     }
@@ -221,6 +224,8 @@ enum Inbound {
 struct Worker {
     commands: async_mpsc::UnboundedSender<Command>,
     inbound: mpsc::Receiver<Inbound>,
+    /// Woken by the thread after each message it queued and when it lets go of the queue.
+    waker: Arc<WakerSlot>,
     /// When the summary is due at the latest, once the end of input was sent.
     due: Option<std::time::Instant>,
 }
@@ -256,6 +261,8 @@ pub struct DeepgramRecognition {
     finished: bool,
     cancelled: bool,
     duration: Option<f64>,
+    /// Wakes the async form when the summary's deadline passes.
+    alarm: Alarm,
     _slot: Slot,
 }
 
@@ -362,31 +369,47 @@ impl DeepgramRecognition {
 
     /// The next thing the connection's thread said: without waiting before the end of input,
     /// and after it by the summary's one deadline, the read timeout from the end of input plus
-    /// [`CLOSE_BOUND`]. `None` when nothing has arrived before the end of input.
-    fn receive(&mut self) -> Option<Inbound> {
+    /// [`CLOSE_BOUND`]. `None` when nothing has arrived before the end of input. With `cx`, the
+    /// async form's, it does not block: `Pending` until the thread queues a message or lets go
+    /// of the queue, or the deadline passes, each of which wakes `cx`.
+    fn receive(&mut self, cx: Option<&mut Context<'_>>) -> Poll<Option<Inbound>> {
         let ended = self.output.input_ended();
         let bound = self.shared.endpoint.read_timeout + CLOSE_BOUND;
-        let worker = self.worker.as_mut()?;
+        let Some(worker) = self.worker.as_mut() else {
+            return Poll::Ready(None);
+        };
         if ended && worker.due.is_none() {
             worker.due = Some(std::time::Instant::now() + bound);
             let _ = worker.commands.send(Command::End);
         }
-        let received = if let Some(due) = worker.due {
-            worker
+        let received = match (worker.due, cx) {
+            (Some(due), None) => worker
                 .inbound
                 .recv_timeout(due.saturating_duration_since(std::time::Instant::now()))
                 .map_err(|error| match error {
                     mpsc::RecvTimeoutError::Timeout => DeepgramError::Stalled(bound),
                     mpsc::RecvTimeoutError::Disconnected => stopped(),
-                })
-        } else {
-            match worker.inbound.try_recv() {
-                Ok(inbound) => Ok(inbound),
-                Err(mpsc::TryRecvError::Empty) => return None,
-                Err(mpsc::TryRecvError::Disconnected) => Err(stopped()),
+                }),
+            (Some(due), Some(cx)) => {
+                worker.waker.register(cx.waker());
+                match worker.inbound.try_recv() {
+                    Ok(inbound) => Ok(inbound),
+                    Err(mpsc::TryRecvError::Disconnected) => Err(stopped()),
+                    Err(mpsc::TryRecvError::Empty) => {
+                        if self.alarm.poll_at(due, cx).is_pending() {
+                            return Poll::Pending;
+                        }
+                        Err(DeepgramError::Stalled(bound))
+                    }
+                }
             }
+            (None, _) => match worker.inbound.try_recv() {
+                Ok(inbound) => Ok(inbound),
+                Err(mpsc::TryRecvError::Empty) => return Poll::Ready(None),
+                Err(mpsc::TryRecvError::Disconnected) => Err(stopped()),
+            },
         };
-        Some(received.unwrap_or_else(Inbound::Failed))
+        Poll::Ready(Some(received.unwrap_or_else(Inbound::Failed)))
     }
 
     /// Acts on one server message; see the crate documentation for the mapping.
@@ -496,27 +519,43 @@ impl Iterator for DeepgramRecognition {
 
     /// The next event; see [`DeepgramRecognition`] for when it waits.
     fn next(&mut self) -> Option<Self::Item> {
+        match self.advance(None) {
+            Poll::Ready(envelope) => envelope,
+            Poll::Pending => None,
+        }
+    }
+}
+
+impl DeepgramRecognition {
+    /// The next event: blocking where the iterator waits, or with `cx`, the async form's,
+    /// `Pending` there instead.
+    fn advance(
+        &mut self,
+        mut cx: Option<&mut Context<'_>>,
+    ) -> Poll<Option<EventEnvelope<TranscriptEvent>>> {
         loop {
             if let Some(envelope) = self.delivered.pop_front() {
-                return Some(envelope);
+                return Poll::Ready(Some(envelope));
             }
             if self.cancelled {
-                return None;
+                return Poll::Ready(None);
             }
             if self.failure.is_none() && !self.finished {
                 self.forward_input();
             }
             if self.failure.is_some() || self.finished {
-                return self.output.usage().ok();
+                return Poll::Ready(self.output.usage().ok());
             }
             if self.worker.is_none() {
                 if !self.output.input_ended() {
-                    return None;
+                    return Poll::Ready(None);
                 }
                 self.finished = true;
                 continue;
             }
-            let inbound = self.receive()?;
+            let Some(inbound) = ready!(self.receive(cx.as_deref_mut())) else {
+                return Poll::Ready(None);
+            };
             let outcome = match inbound {
                 Inbound::Message(message) => self.apply(message),
                 Inbound::Summary(duration) => self.summarise(duration),
@@ -548,6 +587,12 @@ impl RecognitionHandle for DeepgramRecognition {
         self.output.end_input()
     }
 
+    /// Takes what the connection's thread queued as it arrives, woken by the thread; after the
+    /// end of input, `Pending` where iterating blocks.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<EventEnvelope<TranscriptEvent>>> {
+        self.advance(Some(cx))
+    }
+
     fn revise(&mut self, input: ReviseSpan) -> Result<(), RevisionRefused> {
         let span_id = input.span_id;
         let text = input.text.clone();
@@ -566,6 +611,8 @@ impl RecognitionHandle for DeepgramRecognition {
 fn spawn(shared: Arc<Shared>, url: String) -> Result<Worker, DeepgramError> {
     let (commands, receiver) = async_mpsc::unbounded_channel();
     let (sender, inbound) = mpsc::sync_channel(listen::INBOUND_DEPTH);
+    let waker = Arc::new(WakerSlot::default());
+    let sender = Inbox::new(sender, Arc::clone(&waker));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -577,6 +624,7 @@ fn spawn(shared: Arc<Shared>, url: String) -> Result<Worker, DeepgramError> {
     Ok(Worker {
         commands,
         inbound,
+        waker,
         due: None,
     })
 }
@@ -599,7 +647,53 @@ enum Offered {
     Gone,
 }
 
-fn offer(inbound: &mpsc::SyncSender<Inbound>, item: Inbound) -> Offered {
+/// The handle's queue as the connection's thread fills it: each message queued, and the
+/// thread letting go of the queue, wakes the handle's async form.
+struct Inbox {
+    sender: Option<mpsc::SyncSender<Inbound>>,
+    waker: Arc<WakerSlot>,
+}
+
+impl Inbox {
+    fn new(sender: mpsc::SyncSender<Inbound>, waker: Arc<WakerSlot>) -> Self {
+        Self {
+            sender: Some(sender),
+            waker,
+        }
+    }
+
+    fn try_send(&self, item: Inbound) -> Result<(), mpsc::TrySendError<Inbound>> {
+        let sent = match self.sender.as_ref() {
+            Some(sender) => sender.try_send(item),
+            None => Err(mpsc::TrySendError::Disconnected(item)),
+        };
+        if sent.is_ok() {
+            self.waker.wake();
+        }
+        sent
+    }
+
+    fn send(&self, item: Inbound) -> Result<(), mpsc::SendError<Inbound>> {
+        let sent = match self.sender.as_ref() {
+            Some(sender) => sender.send(item),
+            None => Err(mpsc::SendError(item)),
+        };
+        if sent.is_ok() {
+            self.waker.wake();
+        }
+        sent
+    }
+}
+
+impl Drop for Inbox {
+    /// Lets go of the queue first, so the handle the wake reaches finds it disconnected.
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        self.waker.wake();
+    }
+}
+
+fn offer(inbound: &Inbox, item: Inbound) -> Offered {
     match inbound.try_send(item) {
         Ok(()) => Offered::Taken,
         Err(mpsc::TrySendError::Full(item)) => Offered::Full(item),
@@ -669,7 +763,7 @@ async fn drive(
     shared: Arc<Shared>,
     url: String,
     mut commands: async_mpsc::UnboundedReceiver<Command>,
-    inbound: mpsc::SyncSender<Inbound>,
+    inbound: Inbox,
 ) {
     let endpoint = &shared.endpoint;
     let opening = connection::open(
@@ -919,6 +1013,7 @@ mod tests {
     #[test]
     fn a_full_queue_holds_the_message_and_a_dropped_one_says_gone() {
         let (sender, receiver) = mpsc::sync_channel(1);
+        let sender = Inbox::new(sender, Arc::default());
         assert!(matches!(
             offer(&sender, Inbound::Summary(None)),
             Offered::Taken

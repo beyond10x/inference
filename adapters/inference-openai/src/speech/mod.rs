@@ -28,10 +28,10 @@
 //! connection is bounded by the endpoint's connect timeout, the wait for the response's head and
 //! for each chunk of its body by its read timeout.
 //!
-//! The handle is a blocking iterator, as the contract defines it. It drives its requests on a
-//! runtime of its own; on a thread where an async runtime is current, that runtime is driven on a
-//! scoped thread of its own while the caller waits, so iterate the handle from
-//! `tokio::task::spawn_blocking` or a plain thread.
+//! The handle drives its requests on a runtime of its own, with one thread. Iterated, as the
+//! contract defines it, it blocks the calling thread while it waits for the server, on any
+//! thread, an async worker included, which it then holds up. Its async form,
+//! [`SynthesisHandle::event`], waits without blocking, so an async caller awaits that instead.
 //!
 //! The key is never read by the binding itself: the caller injects a
 //! [`CredentialSource`](crate::CredentialSource) and names the secret
@@ -64,8 +64,10 @@ mod transcode;
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, ready};
 
 use inference_tts::inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
 use inference_tts::inference_core::model::{
@@ -254,6 +256,7 @@ impl Synthesiser for OpenAiSpeech {
             output: SynthesisOutput::start(&self.adapter),
             shared: Arc::clone(&self.shared),
             transport: None,
+            exchange: None,
             live: None,
             pending: VecDeque::new(),
             delivered: VecDeque::new(),
@@ -283,7 +286,9 @@ struct Transport {
 
 impl Transport {
     fn new(endpoint: &SpeechEndpoint) -> Result<Self, SpeechError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("inference-openai-speech")
             .enable_all()
             .build()
             .map_err(|error| SpeechError::Runtime(error.to_string()))?;
@@ -297,23 +302,35 @@ impl Transport {
     }
 }
 
-/// The response of the segment being spoken.
+/// The segment being spoken and its response: `None` until the response's head arrives, and
+/// while a read of its body is in flight, which holds it.
 struct Live {
     segment_id: SegmentId,
-    response: reqwest::Response,
+    response: Option<reqwest::Response>,
     transcoder: Transcoder,
+}
+
+/// A request in flight on the synthesis's runtime.
+enum Exchange {
+    /// The request of the segment being spoken is sent and its response's head awaited.
+    Open(tokio::task::JoinHandle<Result<reqwest::Response, SpeechError>>),
+    /// One chunk of the response's body is read; the response comes back with it.
+    Read(tokio::task::JoinHandle<(reqwest::Response, Result<Option<bytes::Bytes>, SpeechError>)>),
 }
 
 /// One synthesis of an [`OpenAiSpeech`]; it runs until it is dropped.
 ///
 /// Iterating it blocks while it waits for the server, each wait bounded by the endpoint's read
-/// timeout. A failure ends the iteration of the segments it took;
+/// timeout; its async form, [`SynthesisHandle::poll_event`], returns `Pending` there instead and
+/// is woken when the request's step ends. A failure ends the iteration of the segments it took;
 /// [`OpenAiSpeechSynthesis::failure`] says why, the usage record then is not final, and the
 /// segments offered after it are taken and not spoken.
 pub struct OpenAiSpeechSynthesis {
     output: SynthesisOutput,
     shared: Arc<Shared>,
     transport: Option<Transport>,
+    /// The request in flight, if there is one.
+    exchange: Option<Exchange>,
     live: Option<Live>,
     pending: VecDeque<(SegmentId, String)>,
     delivered: VecDeque<SynthesisEvent>,
@@ -359,8 +376,11 @@ impl OpenAiSpeechSynthesis {
         self.output.segment(segment_id).map(OutputSegment::state)
     }
 
-    /// Sends the request that speaks `text` and waits for its response's head.
-    fn open(&mut self, text: &str) -> Result<reqwest::Response, SpeechError> {
+    /// Starts the request that speaks `text`, which ends with its response's head.
+    fn open(
+        &mut self,
+        text: &str,
+    ) -> Result<tokio::task::JoinHandle<Result<reqwest::Response, SpeechError>>, SpeechError> {
         if self.transport.is_none() {
             self.transport = Some(Transport::new(&self.shared.endpoint)?);
         }
@@ -370,7 +390,7 @@ impl OpenAiSpeechSynthesis {
         let shared = Arc::clone(&self.shared);
         let body = protocol::request_body(&shared.config, text).to_string();
         let client = transport.client.clone();
-        run(&transport.runtime, async move {
+        Ok(transport.runtime.spawn(async move {
             let authorization = authorization(shared.source.as_ref(), &shared.credential).await?;
             let request = client
                 .post(&shared.endpoint.url)
@@ -388,21 +408,61 @@ impl OpenAiSpeechSynthesis {
                 return Err(SpeechError::Status(status.as_u16()));
             }
             Ok(response)
-        })?
+        }))
     }
 
-    /// Reads one chunk of the response being spoken and acts on it.
-    fn step(&mut self) -> Result<(), SpeechError> {
+    /// Starts reading one chunk of the response being spoken.
+    fn read(&mut self) -> Result<(), SpeechError> {
         let read_timeout = self.shared.endpoint.read_timeout;
-        let (Some(live), Some(transport)) = (self.live.as_mut(), self.transport.as_ref()) else {
+        let response = self.live.as_mut().and_then(|live| live.response.take());
+        let (Some(mut response), Some(transport)) = (response, self.transport.as_ref()) else {
+            return Err(SpeechError::Runtime("no response to read".to_owned()));
+        };
+        let task = transport.runtime.spawn(async move {
+            let chunk = match within(read_timeout, response.chunk()).await {
+                None => Err(SpeechError::Stalled(read_timeout)),
+                Some(chunk) => chunk.map_err(|error| SpeechError::Transport(describe(error))),
+            };
+            (response, chunk)
+        });
+        self.exchange = Some(Exchange::Read(task));
+        Ok(())
+    }
+
+    /// Waits for the request in flight to end its step and acts on how it ended: blocking
+    /// without `cx`, `Pending` with it until the step ends, which wakes `cx`.
+    fn settle(&mut self, cx: Option<&mut Context<'_>>) -> Poll<()> {
+        let (response, chunk) = match self.exchange.as_mut() {
+            None => return Poll::Ready(()),
+            Some(Exchange::Open(task)) => match ready!(join(task, cx)).and_then(|opened| opened) {
+                Ok(response) => (Some(response), Ok(None)),
+                Err(error) => (None, Err(error)),
+            },
+            Some(Exchange::Read(task)) => match ready!(join(task, cx)) {
+                Ok((response, chunk)) => (Some(response), chunk.map(Some)),
+                Err(error) => (None, Err(error)),
+            },
+        };
+        self.exchange = None;
+        if let Some(live) = self.live.as_mut() {
+            live.response = response;
+        }
+        let outcome = match chunk {
+            Ok(Some(chunk)) => self.receive(chunk),
+            Ok(None) => Ok(()),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = outcome {
+            self.fail(error);
+        }
+        Poll::Ready(())
+    }
+
+    /// Acts on `chunk`, the next chunk of the response being spoken, `None` at its end.
+    fn receive(&mut self, chunk: Option<bytes::Bytes>) -> Result<(), SpeechError> {
+        let Some(live) = self.live.as_mut() else {
             return Ok(());
         };
-        let chunk = run(
-            &transport.runtime,
-            within(read_timeout, live.response.chunk()),
-        )?
-        .ok_or(SpeechError::Stalled(read_timeout))?
-        .map_err(|error| SpeechError::Transport(describe(error)))?;
         match chunk {
             Some(bytes) => {
                 let (count, data) = live.transcoder.push(&bytes);
@@ -457,11 +517,15 @@ impl OpenAiSpeechSynthesis {
         Ok(())
     }
 
-    /// Drops the response being spoken, if there is one, and with it the runtime and the client,
-    /// so its connection is closed at once instead of when the runtime next runs.
+    /// Drops the response being spoken, if there is one, and with it the request in flight, the
+    /// runtime and the client, so its connection is closed at once instead of when the runtime
+    /// next runs.
     fn close_live(&mut self) {
         if let Some(live) = self.live.take() {
             drop(live);
+            if let Some(exchange) = self.exchange.take() {
+                exchange.abort();
+            }
             if let Some(transport) = self.transport.take() {
                 drop(transport.client);
                 transport.runtime.shutdown_background();
@@ -513,29 +577,28 @@ fn describe(error: reqwest::Error) -> String {
     detail
 }
 
-/// Runs `future` to its end on `runtime` and blocks the calling thread until it has.
-///
-/// On a thread where a runtime handle is current, blocking on another runtime panics on an
-/// async worker and not on a `spawn_blocking` thread, and tokio gives no public way to tell the
-/// two apart. So on any such thread the runtime is driven on a scoped thread of its own while the
-/// caller waits, and no thread is refused. The caller's thread is still blocked: on an async
-/// worker that holds up the worker's other tasks.
-fn run<F>(runtime: &tokio::runtime::Runtime, future: F) -> Result<F::Output, SpeechError>
-where
-    F: Future + Send,
-    F::Output: Send,
-{
-    if tokio::runtime::Handle::try_current().is_err() {
-        return Ok(runtime.block_on(future));
+impl Exchange {
+    fn abort(self) {
+        match self {
+            Exchange::Open(task) => task.abort(),
+            Exchange::Read(task) => task.abort(),
+        }
     }
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("inference-openai-speech".to_owned())
-            .spawn_scoped(scope, move || runtime.block_on(future))
-            .map_err(|error| SpeechError::Runtime(error.to_string()))?
-            .join()
-            .map_err(|_| SpeechError::Runtime("the thread driving the request panicked".to_owned()))
-    })
+}
+
+/// What `task` returned: blocking the calling thread without `cx`, `Pending` with it until the
+/// task ends, which wakes `cx`.
+fn join<T>(
+    task: &mut tokio::task::JoinHandle<T>,
+    cx: Option<&mut Context<'_>>,
+) -> Poll<Result<T, SpeechError>> {
+    let joined = match cx {
+        None => crate::wake::block_on(&mut *task),
+        Some(cx) => ready!(Pin::new(task).poll(cx)),
+    };
+    Poll::Ready(joined.map_err(|error| {
+        SpeechError::Runtime(format!("the task driving the request ended: {error}"))
+    }))
 }
 
 /// A refusal of the TTS contract, which a well-formed segment of this binding never meets.
@@ -550,23 +613,38 @@ impl Iterator for OpenAiSpeechSynthesis {
     /// timeout; `None` once nothing more is delivered until more is offered or the utterance
     /// ends.
     fn next(&mut self) -> Option<SynthesisEvent> {
+        match self.advance(None) {
+            Poll::Ready(event) => event,
+            Poll::Pending => None,
+        }
+    }
+}
+
+impl OpenAiSpeechSynthesis {
+    /// The next event: blocking while it waits for the server, or with `cx`, the async form's,
+    /// `Pending` there instead.
+    fn advance(&mut self, mut cx: Option<&mut Context<'_>>) -> Poll<Option<SynthesisEvent>> {
         loop {
             if let Some(event) = self.delivered.pop_front() {
-                return Some(event);
+                return Poll::Ready(Some(event));
+            }
+            if self.exchange.is_some() {
+                ready!(self.settle(cx.as_deref_mut()));
+                continue;
             }
             if self.failure.is_some() {
                 self.take_input();
-                return self.output.usage().ok();
+                return Poll::Ready(self.output.usage().ok());
             }
             if self.live.is_some() {
-                if let Err(error) = self.step() {
+                if let Err(error) = self.read() {
                     self.fail(error);
                 }
                 continue;
             }
             self.take_input();
             let Some((segment_id, text)) = self.pending.pop_front() else {
-                return self.output.usage().ok();
+                return Poll::Ready(self.output.usage().ok());
             };
             if self.state(segment_id) != Some(SegmentState::Queued) {
                 continue;
@@ -593,14 +671,13 @@ impl Iterator for OpenAiSpeechSynthesis {
                     continue;
                 }
             };
+            self.live = Some(Live {
+                segment_id,
+                response: None,
+                transcoder,
+            });
             match self.open(&text) {
-                Ok(response) => {
-                    self.live = Some(Live {
-                        segment_id,
-                        response,
-                        transcoder,
-                    });
-                }
+                Ok(task) => self.exchange = Some(Exchange::Open(task)),
                 Err(error) => self.fail(error),
             }
         }
@@ -610,6 +687,9 @@ impl Iterator for OpenAiSpeechSynthesis {
 impl Drop for OpenAiSpeechSynthesis {
     fn drop(&mut self) {
         self.live = None;
+        if let Some(exchange) = self.exchange.take() {
+            exchange.abort();
+        }
         if let Some(transport) = self.transport.take() {
             drop(transport.client);
             transport.runtime.shutdown_background();
@@ -636,6 +716,12 @@ impl SynthesisHandle for OpenAiSpeechSynthesis {
         receipt: PlaybackReceipt,
     ) -> Result<AudioPlayed, PlaybackRefused> {
         self.output.acknowledge_playback(segment_id, receipt)
+    }
+
+    /// Takes the next event, `Pending` where iterating blocks: while a request's step is in
+    /// flight, which wakes `cx` when it ends.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SynthesisEvent>> {
+        self.advance(Some(cx))
     }
 
     /// Discards the segment through [`SynthesisOutput::discard`] and drops every event of it not

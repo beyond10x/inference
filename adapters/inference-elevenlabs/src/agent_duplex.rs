@@ -36,9 +36,10 @@
 //! ([`AgentError::Oversize`]), and a connection that sends nothing for
 //! [`AgentEndpoint::read_timeout`] fails it as stalled. Closing or dropping the session sends a
 //! close frame and waits at most [`CLOSE_BOUND`] in all for it; dropping one inside an async
-//! runtime does not wait, and the connection closes with the runtime. Drive a session from a
-//! blocking thread, never from inside an async runtime: each operation blocks on the session's
-//! runtime.
+//! runtime does not wait, and the connection closes with the runtime. Opening, sending and
+//! `next_event` block the calling thread, on any thread, an async worker included, which they
+//! then hold up; the async form, `event`, waits for the server without blocking, woken by the connection or a deadline of the
+//! session, so an async caller awaits that instead.
 //!
 //! # The mapping onto the contract
 //!
@@ -90,6 +91,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -117,6 +119,7 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 use crate::agent::{self, AgentEndpoint, AgentError, MAX_MESSAGE_BYTES, ServerMessage, SignedUrl};
 use crate::connection::{CLOSE_BOUND, tls_config};
+use crate::wake;
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -423,12 +426,15 @@ impl NativeSpeechModel for ElevenLabsAgent {
         };
         self.generation += 1;
         self.cancel.begin(self.generation);
-        let opened = runtime.block_on(connect(
-            &self.target,
-            &self.endpoint,
-            &self.cancel,
-            self.generation,
-        ));
+        let opened = {
+            let _entered = runtime.enter();
+            wake::block_on(connect(
+                &self.target,
+                &self.endpoint,
+                &self.cancel,
+                self.generation,
+            ))
+        };
         self.cancel.end();
         let (socket, metadata, early) = match opened {
             Ok(opened) => opened,
@@ -437,7 +443,10 @@ impl NativeSpeechModel for ElevenLabsAgent {
         let input = agent::audio_format(&metadata.input);
         let output = agent::audio_format(&metadata.output);
         if input != Some(config.input_format) || output != Some(config.output_format) {
-            runtime.block_on(close_socket(socket));
+            {
+                let _entered = runtime.enter();
+                wake::block_on(close_socket(socket));
+            }
             runtime.shutdown_background();
             let refused = if input == Some(config.input_format) {
                 Unsupported::OutputFormat(config.output_format)
@@ -485,6 +494,7 @@ impl NativeSpeechModel for ElevenLabsAgent {
             quiet: MESSAGE_QUIET.min(config.idle_limit / 2),
             failure: None,
             closing: false,
+            alarm: wake::Alarm::default(),
         };
         let now = Instant::now();
         for message in early {
@@ -882,6 +892,8 @@ pub struct ElevenLabsAgentSession {
     failure: Option<AgentError>,
     /// The caller is closing: what would fail the session is not recorded.
     closing: bool,
+    /// Wakes the async form when a quiet period or the liveness bound runs out.
+    alarm: wake::Alarm,
 }
 
 impl std::fmt::Debug for ElevenLabsAgentSession {
@@ -1218,22 +1230,29 @@ impl ElevenLabsAgentSession {
         }
     }
 
+    /// The connection task ended without a word: the session fails as closed.
+    fn ended(&mut self) {
+        self.fail_with(AgentError::Closed {
+            code: None,
+            reason: "the connection task ended".to_owned(),
+        });
+    }
+
     /// Hands `text` to the connection task; a task that is gone fails the session with what it
     /// said last.
     fn send(&mut self, text: String) -> Result<(), SessionError> {
-        let sent = match (self.commands.as_ref(), self.runtime.as_ref()) {
-            (Some(commands), Some(runtime)) => runtime.block_on(async {
-                tokio::time::timeout(self.write_timeout, commands.send(text)).await
-            }),
-            _ => return self.require_open(),
+        let (Some(commands), Some(_)) = (self.commands.as_ref(), self.runtime.as_ref()) else {
+            return self.require_open();
         };
-        match sent {
-            Ok(Ok(())) => return Ok(()),
-            Ok(Err(_)) => {
+        match wake::send_within(commands, text, self.write_timeout) {
+            Ok(()) => return Ok(()),
+            Err(wake::Unsent::Closed) => {
                 self.record_arrived();
                 self.fail_with(AgentError::Transport("the connection ended".to_owned()));
             }
-            Err(_) => self.fail_with(AgentError::Stalled(self.write_timeout)),
+            Err(wake::Unsent::Stalled) => {
+                self.fail_with(AgentError::Stalled(self.write_timeout));
+            }
         }
         self.require_open()
     }
@@ -1322,19 +1341,57 @@ impl SpeechSessionHandle for ElevenLabsAgentSession {
                 self.ledger.check_liveness(Instant::now());
                 return self.ledger.next_event();
             }
-            let runtime = self.runtime.as_ref()?;
-            let inbound = &mut self.inbound;
-            let read = runtime.block_on(async { tokio::time::timeout(left, inbound.recv()).await });
-            match read {
-                Ok(Some(inbound)) => self.record(inbound, Instant::now()),
-                Ok(None) => self.fail_with(AgentError::Closed {
-                    code: None,
-                    reason: "the connection task ended".to_owned(),
-                }),
-                Err(_) => {
+            self.runtime.as_ref()?;
+            let until = Instant::now().checked_add(left);
+            match wake::block_on_until(self.inbound.recv(), until) {
+                Some(Some(inbound)) => self.record(inbound, Instant::now()),
+                Some(None) => self.ended(),
+                None => {
                     self.finish_if_quiet(Instant::now());
                     self.ledger.check_liveness(Instant::now());
                 }
+            }
+        }
+    }
+
+    /// Takes each message the connection task handed over as it arrives, woken by it, and
+    /// wakes `cx` when the finishing response's quiet period or the liveness bound runs out;
+    /// see [`SpeechSessionHandle::poll_event`].
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
+        loop {
+            if let Some(event) = self.ledger.next_event() {
+                return Poll::Ready(Some(event));
+            }
+            self.finish_if_quiet(Instant::now());
+            if let Some(event) = self.ledger.next_event() {
+                return Poll::Ready(Some(event));
+            }
+            if self.require_open().is_err() || self.runtime.is_none() {
+                return Poll::Ready(None);
+            }
+            match self.inbound.poll_recv(cx) {
+                Poll::Ready(Some(inbound)) => {
+                    self.record(inbound, Instant::now());
+                    continue;
+                }
+                Poll::Ready(None) => {
+                    self.ended();
+                    continue;
+                }
+                Poll::Pending => {}
+            }
+            let now = Instant::now();
+            self.ledger.check_liveness(now);
+            if self.ledger.undelivered() > 0 || self.require_open().is_err() {
+                continue;
+            }
+            let liveness = self.ledger.liveness();
+            let Some(due) = wake::due(self.quiet_due(), liveness.due(), liveness.limit(), now)
+            else {
+                return Poll::Pending;
+            };
+            if self.alarm.poll_at(due, cx).is_pending() {
+                return Poll::Pending;
             }
         }
     }

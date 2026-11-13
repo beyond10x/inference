@@ -306,6 +306,13 @@ impl Liveness {
         self.last_heard = self.last_heard.max(now);
     }
 
+    /// The instant the bound runs out if the provider stays silent; none when it lies beyond
+    /// what an `Instant` holds.
+    #[must_use]
+    pub fn due(&self) -> Option<Instant> {
+        self.last_heard.checked_add(self.limit)
+    }
+
     /// Whether the provider has been silent for the whole bound at `now`.
     #[must_use]
     pub fn expired(&self, now: Instant) -> bool {

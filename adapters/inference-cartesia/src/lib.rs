@@ -27,11 +27,11 @@
 //! endpoint's connect timeout, every read and write by its read timeout, a cancel's write by
 //! [`CLOSE_BOUND`].
 //!
-//! The handle is a blocking iterator, as the contract defines it. It drives its connection on a
-//! runtime of its own. On a thread where an async runtime is current, that runtime is driven on a
-//! scoped thread of its own while the caller waits, so no thread panics or is refused; an async
-//! worker is still blocked meanwhile, so iterate the handle from `tokio::task::spawn_blocking` or
-//! a plain thread.
+//! The handle drives its connection on a runtime of its own, with one thread. Iterated, as the
+//! contract defines it, it blocks the calling thread while it waits for the server, on any
+//! thread, an async worker included, which it then holds up. Its async form,
+//! [`SynthesisHandle::event`](inference_tts::SynthesisHandle::event), waits without blocking, so
+//! an async caller awaits that instead.
 //!
 //! The key is never read by the binding itself: the caller injects a [`CredentialSource`] and
 //! names the secret ([`EnvironmentSource::cartesia`] reads `CARTESIA_API_KEY`; with feature
@@ -68,6 +68,7 @@ mod credential;
 mod error;
 pub mod protocol;
 mod synthesiser;
+mod wake;
 
 pub use config::{
     API_VERSION, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MODEL, DEFAULT_READ_TIMEOUT, DEFAULT_URL,

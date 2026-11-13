@@ -40,8 +40,10 @@
 //! [`Endpoint::read_timeout`]. A frame larger than [`crate::MAX_MESSAGE_SIZE`] fails the session
 //! as a transport error, and a connection that sends nothing, pongs included, for
 //! [`Endpoint::read_timeout`] while the task reads fails it as stalled. Closing or dropping the
-//! session sends a close frame and waits at most [`CLOSE_BOUND`] in all for it. Drive a session
-//! from a blocking thread, never from inside an async runtime.
+//! session sends a close frame and waits at most [`CLOSE_BOUND`] in all for it. Opening, sending
+//! and `next_event` block the calling thread, on any thread, an async worker included, which they
+//! then hold up; the async form, `event`, waits for the server without blocking, woken by the connection or a deadline of the
+//! session, so an async caller awaits that instead.
 //!
 //! # The mapping onto the contract
 //!
@@ -100,6 +102,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -129,6 +132,7 @@ use crate::protocol::{
     AudioLine, ClientBound, ErrorCategory, HostedTts, InitializeSession, ServiceBound,
     ToolDefinition, TriggerMode, Vad, VadState,
 };
+use crate::wake;
 
 /// The backend an adapter record of the binding names.
 pub const BACKEND: &str = "deepslate-opal";
@@ -424,7 +428,11 @@ impl NativeSpeechModel for DeepslateOpal {
             source: self.source.as_ref(),
             credential: &self.credential,
         };
-        let (socket, early) = match runtime.block_on(connect(&link, opening)) {
+        let opened = {
+            let _entered = runtime.enter();
+            wake::block_on(connect(&link, opening))
+        };
+        let (socket, early) = match opened {
             Ok(opened) => opened,
             Err(error) => {
                 runtime.shutdown_background();
@@ -468,6 +476,7 @@ impl NativeSpeechModel for DeepslateOpal {
             late_audio: 0,
             failure: None,
             closing: false,
+            alarm: wake::Alarm::default(),
         };
         let now = Instant::now();
         for inbound in early {
@@ -876,6 +885,8 @@ pub struct DeepslateOpalSession {
     failure: Option<DeepslateError>,
     /// The caller is closing: what would fail the session is not recorded.
     closing: bool,
+    /// Wakes the async form when the liveness bound runs out.
+    alarm: wake::Alarm,
 }
 
 impl std::fmt::Debug for DeepslateOpalSession {
@@ -1312,22 +1323,29 @@ impl DeepslateOpalSession {
         }
     }
 
+    /// The connection task ended without a word: the session fails as closed.
+    fn ended(&mut self) {
+        self.fail_with(DeepslateError::Closed {
+            code: None,
+            reason: "the connection task ended".to_owned(),
+        });
+    }
+
     /// Hands `bytes` to the connection task; a task that is gone fails the session with what it
     /// said last.
     fn send(&mut self, bytes: Vec<u8>) -> Result<(), SessionError> {
-        let sent = match (self.commands.as_ref(), self.runtime.as_ref()) {
-            (Some(commands), Some(runtime)) => runtime.block_on(async {
-                tokio::time::timeout(self.write_timeout, commands.send(bytes)).await
-            }),
-            _ => return self.require_open(),
+        let (Some(commands), Some(_)) = (self.commands.as_ref(), self.runtime.as_ref()) else {
+            return self.require_open();
         };
-        match sent {
-            Ok(Ok(())) => return Ok(()),
-            Ok(Err(_)) => {
+        match wake::send_within(commands, bytes, self.write_timeout) {
+            Ok(()) => return Ok(()),
+            Err(wake::Unsent::Closed) => {
                 self.record_arrived();
                 self.fail_with(DeepslateError::Transport("the connection ended".to_owned()));
             }
-            Err(_) => self.fail_with(DeepslateError::Stalled(self.write_timeout)),
+            Err(wake::Unsent::Stalled) => {
+                self.fail_with(DeepslateError::Stalled(self.write_timeout));
+            }
         }
         self.require_open()
     }
@@ -1429,18 +1447,50 @@ impl SpeechSessionHandle for DeepslateOpalSession {
                 self.ledger.check_liveness(Instant::now());
                 return self.ledger.next_event();
             }
-            let runtime = self.runtime.as_ref()?;
-            let inbound = &mut self.inbound;
-            let read = runtime.block_on(async { tokio::time::timeout(left, inbound.recv()).await });
-            match read {
-                Ok(Some(inbound)) => self.record(inbound, Instant::now()),
-                Ok(None) => self.fail_with(DeepslateError::Closed {
-                    code: None,
-                    reason: "the connection task ended".to_owned(),
-                }),
-                Err(_) => {
+            self.runtime.as_ref()?;
+            let until = Instant::now().checked_add(left);
+            match wake::block_on_until(self.inbound.recv(), until) {
+                Some(Some(inbound)) => self.record(inbound, Instant::now()),
+                Some(None) => self.ended(),
+                None => {
                     self.ledger.check_liveness(Instant::now());
                 }
+            }
+        }
+    }
+
+    /// Takes each message the connection task handed over as it arrives, woken by it, and
+    /// wakes `cx` when the liveness bound runs out; see [`SpeechSessionHandle::poll_event`].
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
+        loop {
+            if let Some(event) = self.ledger.next_event() {
+                return Poll::Ready(Some(event));
+            }
+            if self.require_open().is_err() || self.runtime.is_none() {
+                return Poll::Ready(None);
+            }
+            match self.inbound.poll_recv(cx) {
+                Poll::Ready(Some(inbound)) => {
+                    self.record(inbound, Instant::now());
+                    continue;
+                }
+                Poll::Ready(None) => {
+                    self.ended();
+                    continue;
+                }
+                Poll::Pending => {}
+            }
+            let now = Instant::now();
+            self.ledger.check_liveness(now);
+            if self.ledger.undelivered() > 0 || self.require_open().is_err() {
+                continue;
+            }
+            let liveness = self.ledger.liveness();
+            let Some(due) = wake::due(None, liveness.due(), liveness.limit(), now) else {
+                return Poll::Pending;
+            };
+            if self.alarm.poll_at(due, cx).is_pending() {
+                return Poll::Pending;
             }
         }
     }

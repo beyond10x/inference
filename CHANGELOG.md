@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- `inference-tts`, `inference-stt`, `inference-duplex`: each handle has an async form next to its
+  blocking one. `SynthesisHandle::poll_event` and `event()` (a `NextSynthesisEvent` future),
+  `RecognitionHandle::poll_event` and `event()` (`NextTranscriptEvent`) and
+  `SpeechSessionHandle::poll_event` and `event()` (`NextSessionEvent`) deliver the same events
+  as the iterator or `next_event`, `Pending` where those block. They are default methods built on
+  the blocking form, which stays, and the contract crates take no runtime dependency for them.
+  The default of a duplex session polls instead of being woken; `Liveness::due` says when a
+  silent connection goes stale.
+- `inference-elevenlabs` (synthesiser, recogniser, agent), `inference-cartesia`,
+  `inference-openai` (feature `speech`), `inference-deepgram` (recogniser and feature `duplex`),
+  `inference-deepslate` and `inference-phonic`: the async form is woken by the connection or at
+  a deadline of the handle, so twenty handles awaited on one current-thread runtime leave its
+  other tasks running. A synthesis drives its connection on a runtime of its own with one
+  thread; its blocking form no longer moves to a scoped thread on a thread where a runtime is
+  current.
+- `inference-testkit`: the mock duplex session's async form advances its clock by the real time
+  between polls that found nothing to deliver, and the late-cascade wrapper passes the async form
+  through.
+
 ## [0.29.0] — 2026-11-13
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these

@@ -16,6 +16,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll, ready};
 
 use inference_tts::inference_core::model::Adapter;
 use inference_tts::inference_text::{
@@ -124,16 +125,21 @@ impl<H> LateSynthesis<H> {
     }
 }
 
-impl<H: SynthesisHandle> Iterator for LateSynthesis<H> {
-    type Item = SynthesisEvent;
-
-    fn next(&mut self) -> Option<SynthesisEvent> {
+impl<H: SynthesisHandle> LateSynthesis<H> {
+    /// The next event, each of the wrapped synthesis's taken by `take`: `Pending` where `take`
+    /// is, so the iterator and the async form hold back the same frames.
+    fn pull(
+        &mut self,
+        mut take: impl FnMut(&mut H) -> Poll<Option<SynthesisEvent>>,
+    ) -> Poll<Option<SynthesisEvent>> {
         if let Some(event) = self.released.pop_front() {
-            return Some(event);
+            return Poll::Ready(Some(event));
         }
         let withheld = self.handle.withheld();
         loop {
-            let event = self.inner.next()?;
+            let Some(event) = ready!(take(&mut self.inner)) else {
+                return Poll::Ready(None);
+            };
             match &event {
                 SynthesisEvent::Audio(audio)
                     if Some(audio.segment_id()) == withheld
@@ -144,8 +150,19 @@ impl<H: SynthesisHandle> Iterator for LateSynthesis<H> {
                 SynthesisEvent::Usage(_) if !self.held.is_empty() => {
                     self.usage = Some(event);
                 }
-                _ => return Some(event),
+                _ => return Poll::Ready(Some(event)),
             }
+        }
+    }
+}
+
+impl<H: SynthesisHandle> Iterator for LateSynthesis<H> {
+    type Item = SynthesisEvent;
+
+    fn next(&mut self) -> Option<SynthesisEvent> {
+        match self.pull(|inner| Poll::Ready(inner.next())) {
+            Poll::Ready(event) => event,
+            Poll::Pending => None,
         }
     }
 }
@@ -186,6 +203,11 @@ impl<H: SynthesisHandle> SynthesisHandle for LateSynthesis<H> {
             self.release();
         }
         Ok(discarded)
+    }
+
+    /// The wrapped synthesis's async form, holding back what iterating holds back.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SynthesisEvent>> {
+        self.pull(|inner| inner.poll_event(cx))
     }
 }
 

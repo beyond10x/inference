@@ -46,6 +46,7 @@
 mod credential;
 mod duplex;
 pub mod protocol;
+mod wake;
 
 #[cfg(feature = "keychain")]
 pub use credential::KeychainSource;

@@ -66,7 +66,8 @@
 //!
 //! The connection is driven on a thread of its own with a runtime of its own, so the handle may
 //! be iterated from any thread, an async worker among them; once input has ended an iteration
-//! blocks while it waits for the server.
+//! blocks while it waits for the server. The recognition's async form, `event`, waits without
+//! blocking, woken by the connection's thread.
 //!
 //! # The key
 //!
@@ -126,6 +127,7 @@ mod credential;
 mod error;
 pub mod listen;
 mod recogniser;
+mod wake;
 
 #[cfg(feature = "duplex")]
 pub use agent_duplex::{

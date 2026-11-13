@@ -29,6 +29,8 @@
 //!
 //! Time is the mock's own: it starts when the session opens, and a `next_event` with nothing to
 //! deliver advances it by `wait`, so the liveness bound is reached by waiting, deterministically.
+//! Its async form, [`SpeechSessionHandle::poll_event`], advances it by the real time between its
+//! polls that found nothing to deliver.
 //! [`Faults`] stop the provider after a number of events (a stall) or close its transport.
 //! [`MockSpeechModel::closes`] ends a session once its script is spent and nothing is pending,
 //! and [`MockSpeechModel::fails_responses`] fails each response where it would complete.
@@ -41,6 +43,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use inference_core::model::{
@@ -475,6 +478,7 @@ impl NativeSpeechModel for MockSpeechModel {
             speech: self.speech,
             answered: false,
             reported: false,
+            idle_since: None,
         })
     }
 }
@@ -519,6 +523,9 @@ pub struct MockSpeechSession {
     answered: bool,
     /// The user's speech of the current turn was reported.
     reported: bool,
+    /// When the async form last found nothing to deliver: the mock's time moves on by the time
+    /// since then at its next poll.
+    idle_since: Option<Instant>,
 }
 
 impl MockSpeechSession {
@@ -875,6 +882,27 @@ impl SpeechSessionHandle for MockSpeechSession {
         self.now += wait;
         self.ledger.check_liveness(self.now);
         self.ledger.next_event()
+    }
+
+    /// [`SpeechSessionHandle::next_event`] without a wait, the mock's time moved on by the real
+    /// time since the async form last found nothing to deliver, so a stalled provider runs out
+    /// the liveness bound here as well. Nothing reaches the mock but the caller's operations and
+    /// that time, so with nothing to deliver it wakes `cx` at once and returns `Pending`.
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<SessionEvent>> {
+        let now = Instant::now();
+        let idle = self
+            .idle_since
+            .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+        if let Some(event) = self.next_event(idle) {
+            self.idle_since = None;
+            return Poll::Ready(Some(event));
+        }
+        if self.ledger.session().require_open().is_err() {
+            return Poll::Ready(None);
+        }
+        self.idle_since = Some(now);
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 }
 

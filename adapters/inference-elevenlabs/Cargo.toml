@@ -10,7 +10,7 @@ repository.workspace = true
 [features]
 keychain = ["dep:keyring-core", "dep:secrets-core", "dep:secrets-keychain"]
 native-keychain = ["keychain", "secrets-keychain/native-keychain"]
-duplex = ["dep:inference-duplex", "tokio/macros", "tokio/rt-multi-thread", "tokio/sync"]
+duplex = ["dep:inference-duplex", "tokio/macros", "tokio/sync"]
 stt = ["dep:inference-stt", "tokio/macros", "tokio/sync"]
 live = ["native-keychain"]
 
@@ -26,7 +26,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 secrets-core = { git = "https://github.com/beyond10x/secrets", tag = "v0.6.0", optional = true }
 secrets-keychain = { git = "https://github.com/beyond10x/secrets", tag = "v0.6.0", optional = true }
 serde_json.workspace = true
-tokio = { version = "1", features = ["net", "rt", "time"] }
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "time"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 webpki-roots = "0.26"
 zeroize = "1"
@@ -39,6 +39,10 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi
 [[test]]
 name = "agent_duplex"
 required-features = ["duplex"]
+
+[[test]]
+name = "async_handles"
+required-features = ["stt", "duplex"]
 
 [[test]]
 name = "agent_duplex_live"

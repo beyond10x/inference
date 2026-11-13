@@ -49,11 +49,10 @@
 //! endpoint's connect timeout, every write by its read timeout, and every wait for the segment
 //! being spoken by its read timeout from that segment's last message.
 //!
-//! The handle is a blocking iterator, as the contract defines it. It drives its connection on a
-//! runtime of its own. On a thread where an async runtime is current, a `spawn_blocking` thread
-//! or an async worker alike, that runtime is driven on a scoped thread of its own while the
-//! caller waits, so no thread panics or is refused; an async worker is still blocked meanwhile,
-//! so iterate the handle from `tokio::task::spawn_blocking` or a plain thread.
+//! Each handle drives its connection on a runtime of its own, with one thread. Its blocking forms,
+//! the iterator and `next_event`, block the calling thread while they wait for the server, on any
+//! thread, an async worker included, which they then hold up. Its async form, `event`, waits
+//! without blocking, woken by the connection, so an async caller awaits that instead.
 //!
 //! A key belongs to one data-residency stack, and every other host refuses it. [`Endpoint`] is
 //! the global host unless told otherwise; [`Endpoint::with_residency`] picks a [`Residency`],
@@ -181,6 +180,7 @@ mod stt_config;
 #[cfg(feature = "stt")]
 pub mod stt_protocol;
 mod synthesiser;
+mod wake;
 
 #[cfg(feature = "duplex")]
 pub use agent_duplex::{

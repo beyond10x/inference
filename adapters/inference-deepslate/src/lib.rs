@@ -55,6 +55,7 @@ mod credential;
 mod error;
 mod opal;
 pub mod protocol;
+mod wake;
 mod wire;
 
 pub use config::{
