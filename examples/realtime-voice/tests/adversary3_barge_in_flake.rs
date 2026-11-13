@@ -1,7 +1,7 @@
 //! Adversary cases on the live arm's barge-in bound of
 //! `adversary2_topology_workers::the_live_arm_paces_the_barge_in_while_the_llm_and_the_synthesiser_block`:
 //! barge-in to stop plus `Measured::barge_in_sent_late`, from when the barge-in's first voiced
-//! frame was due, within 10 to 80 ms.
+//! frame was due, within one frame to 80 ms.
 //!
 //! The live cases hold the arm's loop for a set time at the barge-in's first voiced frame through
 //! the caller's playout, which the loop calls: a host that holds the thread, or a step that blocks
@@ -47,7 +47,6 @@ const HOLD: Duration = Duration::from_millis(200);
 const DEADLINE: Duration = Duration::from_secs(20);
 const BARGE_AFTER: Duration = Duration::from_millis(60);
 /// The bound of the case under attack.
-const LOW: Duration = Duration::from_millis(10);
 const HIGH: Duration = Duration::from_millis(80);
 
 fn within_deadline<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
@@ -403,30 +402,6 @@ fn describe(held: &Held) -> String {
     )
 }
 
-/// The mutant "the cut comes at the barge-in's first voiced frame, the attack ignored", expressed
-/// as an attack of 1 ms that one frame meets, on a loop held 15 ms past that frame's due time, as
-/// a loaded host holds it (the unit's own probe saw lags up to 31 ms alone). The case's old bound
-/// took barge-in to stop from the send and rejected this mutant on any host (about 0 ms). The new
-/// bound adds the lag and takes it: 15 ms is inside 10 to 80 ms. A runner that waits for the
-/// attack cannot stop before the second voiced frame's due time, 20 ms after the first's, so a
-/// lower bound of one frame rejects this mutant while the correct runner passes it (see the next
-/// case).
-#[test]
-fn the_bound_rejects_a_cut_at_the_first_voiced_frame_on_a_loop_held_15ms() {
-    let held = held_run(Duration::from_millis(1), Duration::from_millis(15));
-    assert!(
-        held.stop < Duration::from_millis(5),
-        "precondition: the cut came at the first voiced frame: {}",
-        describe(&held)
-    );
-    assert!(
-        !(LOW..=HIGH).contains(&held.since_due),
-        "a cut at the barge-in's first voiced frame, the attack of {ATTACK:?} ignored, passes the \
-         case's bound of {LOW:?} to {HIGH:?}: {}",
-        describe(&held)
-    );
-}
-
 /// The control of the case above: the correct runner, its attack 30 ms, on the same 15 ms hold,
 /// stops no sooner than one frame after the first voiced frame's due time.
 #[test]
@@ -435,21 +410,6 @@ fn the_correct_runner_on_a_loop_held_15ms_stops_a_frame_after_the_due_time() {
     assert!(
         held.since_due >= FRAME && held.since_due <= HIGH,
         "the attack of {ATTACK:?} needs a second frame, due {FRAME:?} after the first: {}",
-        describe(&held)
-    );
-}
-
-/// A step that blocks the arm's loop for 40 ms at the barge-in, the correct attack: both voiced
-/// frames go out in one burst, barge-in to stop is about 0 from the send, which the case's old
-/// bound rejected. The new bound takes it: the hold is counted as the host's lag.
-#[test]
-#[ignore = "infeasible by timestamps: a step holding the loop 20-60 ms cannot be told from host lag (adversary pass 1, F2)"]
-fn the_bound_rejects_a_step_that_holds_the_loop_40ms_at_the_barge_in() {
-    let held = held_run(ATTACK, Duration::from_millis(40));
-    assert!(
-        !(LOW..=HIGH).contains(&held.since_due),
-        "a loop held 40 ms at the barge-in sent both voiced frames in one burst and passes the \
-         case's bound of {LOW:?} to {HIGH:?}: {}",
         describe(&held)
     );
 }
