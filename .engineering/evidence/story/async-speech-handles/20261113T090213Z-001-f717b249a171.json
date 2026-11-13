@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-13T09:02:13Z",
+  "actor": "human:operator",
+  "artifact": "story:async-speech-handles",
+  "kind": "story",
+  "revision": 46,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo +1.100.0 test --ignored on the sherpa-onnx and whisper.cpp adversary and stt_async files",
+    "reference": "pinned sherpa-onnx checkpoint and the whisper.cpp base.en model: every case passed at 12b6dbac (2026-11-13); CI ignores them without a checkpoint"
+  }
+}

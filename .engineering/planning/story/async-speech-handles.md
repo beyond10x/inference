@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:async-speech-handles
 kind: story
-status: active
+status: implemented
 title: Async handles for synthesis, recognition and speech sessions
 summary: A Stream or async next_event on each speech handle, so a tokio service drives calls without a thread each.
 tags:
@@ -75,10 +75,11 @@ scope:
   path: crates/inference-tts/Cargo.toml
 - confidence: cited
   path: crates/inference-tts/src/lib.rs
-revision: 46
+revision: 47
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-12T15:36:19Z", actor: "human:operator", revision: 45, decided_on: {"recorded":{"review_outcome":2}}}
 - {from: "proposed", to: "active", at: "2026-11-12T15:36:19Z", actor: "human:operator", revision: 46, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "active", to: "implemented", at: "2026-11-13T09:02:13Z", actor: "human:operator", revision: 47, decided_on: {"recorded":{"test_result":2,"review_outcome":5}}}
 ---
 ## Context
 

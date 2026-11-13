@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-13T09:02:13Z",
+  "actor": "human:operator",
+  "artifact": "story:async-speech-handles",
+  "kind": "story",
+  "revision": 46,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "github:beyond10x/inference/pull/52",
+    "reference": "main 0303510c: inference / task check pass, common / Security and privacy pass, Build documentation pass"
+  }
+}
