@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: task:release-elevenlabs-route-p2
 kind: task
-status: active
+status: implemented
 title: 'Release 0.29.0: the ElevenLabs cascade comparison, the status page, the barge-in test'
 summary: One minor tag after the three P2 stories merged on 2026-11-12 and 13.
 tags:
@@ -13,10 +13,11 @@ relations:
 - depends_on: story:status-page-voice-adapters
 - depends_on: story:realtime-voice-barge-in-stop-flake
 - depends_on: story:compare-elevenlabs-cascade-and-ollama
-revision: 11
+revision: 12
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-12T15:36:19Z", actor: "human:operator", revision: 7}
 - {from: "proposed", to: "active", at: "2026-11-12T15:36:20Z", actor: "human:operator", revision: 8}
+- {from: "active", to: "implemented", at: "2026-11-13T01:37:56Z", actor: "human:operator", revision: 12, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
