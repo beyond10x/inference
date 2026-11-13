@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-13T00:54:45Z",
+  "actor": "human:operator",
+  "artifact": "story:realtime-voice-barge-in-stop-flake",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo +1.100.0 test -p realtime-voice --all-features",
+    "reference": "barge-in case 50 of 50 alone; 5 crate suites in a row, 111 passed 0 failed each; red with the stop delayed 70 ms (2026-11-13)"
+  }
+}

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:realtime-voice-barge-in-stop-flake
 kind: story
-status: active
+status: implemented
 title: Barge-in-to-stop test of the voice topology fails intermittently
 summary: A wall-clock assertion in adversary2_topology_workers fails in about 2 of 9 runs.
 relations:
@@ -14,10 +14,11 @@ scope:
   path: examples/realtime-voice/src/compare.rs
 - confidence: cited
   path: examples/realtime-voice/tests/adversary2_topology_workers.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-12T15:36:18Z", actor: "human:operator", revision: 6}
 - {from: "proposed", to: "active", at: "2026-11-12T15:36:18Z", actor: "human:operator", revision: 7}
+- {from: "active", to: "implemented", at: "2026-11-13T00:54:46Z", actor: "human:operator", revision: 8, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 ## Context
 

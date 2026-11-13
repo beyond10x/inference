@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-13T00:54:45Z",
+  "actor": "human:operator",
+  "artifact": "story:status-page-voice-adapters",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "github:beyond10x/inference/pull/48",
+    "reference": "main c0ba0028: inference / task check pass, common / Security and privacy pass, Build documentation pass"
+  }
+}

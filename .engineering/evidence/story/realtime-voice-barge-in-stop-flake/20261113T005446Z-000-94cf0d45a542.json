@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-13T00:54:46Z",
+  "actor": "human:operator",
+  "artifact": "story:realtime-voice-barge-in-stop-flake",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "github:beyond10x/inference/pull/49",
+    "reference": "main e76fd3fc: inference / task check pass, common / Security and privacy pass, Build documentation pass"
+  }
+}

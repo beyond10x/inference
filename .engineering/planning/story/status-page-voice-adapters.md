@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:status-page-voice-adapters
 kind: story
-status: active
+status: implemented
 title: Status page and adapter reference list every hosted voice adapter with its first release
 summary: Generated pages show ElevenLabs, Deepgram and Cartesia adapters with Since versions.
 tags:
@@ -25,10 +25,11 @@ scope:
   path: website/docs/reference/adapters.md
 - confidence: cited
   path: website/docs/status.mdx
-revision: 13
+revision: 14
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-12T15:36:18Z", actor: "human:operator", revision: 12, decided_on: {"recorded":{"review_outcome":6}}}
 - {from: "proposed", to: "active", at: "2026-11-12T15:36:18Z", actor: "human:operator", revision: 13, decided_on: {"recorded":{"review_outcome":6}}}
+- {from: "active", to: "implemented", at: "2026-11-13T00:54:45Z", actor: "human:operator", revision: 14, decided_on: {"recorded":{"test_result":1,"review_outcome":7}}}
 ---
 ## Context
 

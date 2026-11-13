@@ -5,11 +5,13 @@ kind: task
 status: active
 title: Billed latency comparison of the ElevenLabs cascade and the realtime arms
 summary: Median and p95 of end of speech to first audio per arm on the same clips, recorded as evidence and in the compare guide.
+tags:
+- parked
 relations:
 - decomposes: epic:elevenlabs-route
 - depends_on: story:compare-elevenlabs-cascade-and-ollama
 - serves: vision:inference
-revision: 5
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-12T15:36:24Z", actor: "human:operator", revision: 4}
 - {from: "proposed", to: "active", at: "2026-11-12T15:36:25Z", actor: "human:operator", revision: 5}
@@ -41,3 +43,11 @@ their own keys for this comparison (2026-11-12).
   first audio, with the conditions.
 - Every arm `compare` offers appears in the evidence, as measured or as "not run: no key".
 - The guide shows the table with the measurement date.
+
+## Parked (2026-11-13)
+
+Parked before any billed call: the run serves neither of the goals the work is ordered by now.
+It stays the operator's ask. What is prepared: `compare --cascade-stt elevenlabs`, `--clips`,
+`--runs-out` and p95 (story:compare-elevenlabs-cascade-and-ollama, merged), and Ollama tested
+with `qwen2.5:1.5b`. To take it up, run it on a quiet host: the local LLM's first token took
+13.6 s on the loaded host of 2026-11-12, which would distort the cascade arm.

@@ -13,6 +13,7 @@ relations:
 - depends_on: story:elevenlabs-realtime-stt-adapter
 - depends_on: story:elevenlabs-tts-provider-cancel
 - depends_on: story:realtime-voice-barge-in-stop-flake
+- depends_on: task:release-elevenlabs-route-p2
 scope:
 - confidence: inferred
   path: Cargo.lock
