@@ -2,14 +2,17 @@
 format: aep.planning-md/3
 id: task:release-async-speech-handles
 kind: task
-status: draft
+status: active
 title: 'Release 0.30.0: the async form of the speech handles'
 summary: One minor tag after story:async-speech-handles merged on 2026-11-13.
 relations:
 - decomposes: epic:elevenlabs-route
 - serves: vision:inference
 - depends_on: story:async-speech-handles
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-13T09:03:47Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-13T09:03:47Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 
