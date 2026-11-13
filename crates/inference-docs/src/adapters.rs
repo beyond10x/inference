@@ -23,12 +23,34 @@ use crate::{Result, SOURCE, TREE, cell, front_matter, test_defined};
 pub const PAGE: &str = "website/docs/reference/adapters.md";
 
 /// Where a binding's claims come from.
+#[derive(Clone, Copy)]
 enum Record {
     /// A claims record of a hosted binding, under the adapter's directory.
     Claims(&'static str),
     /// A capability record of a local binding, under the adapter's directory, and the model it
     /// was measured with.
     Capability(&'static str, &'static str),
+}
+
+/// When a binding shipped, by its `CHANGELOG.md` entry.
+#[derive(Clone, Copy, Debug)]
+pub enum Release {
+    /// In the release `0.x.0` whose section introduced it, and in every one after it.
+    Since(&'static str),
+    /// On `main`, its entry under `[Unreleased]`, and in no release yet. Unused from a release
+    /// until the next binding lands on `main`, as `status::next` is.
+    #[allow(dead_code)]
+    Next,
+}
+
+impl Release {
+    /// The status the page gives it.
+    pub fn status(self) -> String {
+        match self {
+            Self::Since(version) => format!("Since {version}"),
+            Self::Next => crate::status::NEXT_HEADING.to_owned(),
+        }
+    }
 }
 
 /// One model binding the page lists.
@@ -46,6 +68,8 @@ struct Binding {
     environment: &'static str,
     /// The licences of its code and weights, or where its data goes.
     licence: &'static str,
+    /// When it shipped, by its `CHANGELOG.md` entry.
+    release: Release,
 }
 
 /// Every model binding, in the order the page lists them.
@@ -58,6 +82,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-realtime.json"),
         environment: "`OPENAI_API_KEY`, or the keychain secret `openai-api-key` with feature `keychain`; `INFERENCE_OPENAI_REALTIME_MODEL`",
         licence: "hosted service: audio leaves the machine",
+        release: Release::Since("0.5.0"),
     },
     Binding {
         name: "OpenAI GPT-Live",
@@ -67,6 +92,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-gpt-live.json"),
         environment: "`OPENAI_API_KEY`, or the keychain secret `openai-api-key` with feature `keychain`",
         licence: "hosted service: audio leaves the machine; billed per session second",
+        release: Release::Since("0.6.0"),
     },
     Binding {
         name: "Amazon Nova Sonic on Bedrock",
@@ -76,6 +102,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-nova-sonic.json"),
         environment: "the AWS default credential chain; `AWS_REGION`; `INFERENCE_NOVA_SONIC_MODEL`",
         licence: "hosted service: audio leaves the machine",
+        release: Release::Since("0.5.0"),
     },
     Binding {
         name: "ElevenLabs streaming TTS",
@@ -85,6 +112,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-tts.json"),
         environment: "`ELEVENLABS_API_KEY`, or the keychain secret `elevenlabs-api-key` with feature `keychain`",
         licence: "hosted service: text leaves the machine",
+        release: Release::Since("0.16.0"),
     },
     Binding {
         name: "OpenAI streamed speech TTS",
@@ -94,6 +122,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-speech.json"),
         environment: "`OPENAI_API_KEY`, or the keychain secret `openai-api-key` with feature `keychain`",
         licence: "hosted service: text leaves the machine",
+        release: Release::Since("0.22.0"),
     },
     Binding {
         name: "ElevenLabs agent conversation",
@@ -103,6 +132,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-agent.json"),
         environment: "`ELEVENLABS_AGENT_ID` for a public agent, or `ELEVENLABS_AGENT_SIGNED_URL` for a private one (the live test and `compare`)",
         licence: "hosted service: audio leaves the machine",
+        release: Release::Since("0.17.0"),
     },
     Binding {
         name: "Cartesia Sonic streaming TTS",
@@ -112,6 +142,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-tts.json"),
         environment: "`CARTESIA_API_KEY`, or the keychain secret `cartesia-api-key` with feature `keychain`",
         licence: "hosted service: text leaves the machine",
+        release: Release::Since("0.22.0"),
     },
     Binding {
         name: "Deepgram streaming STT",
@@ -121,6 +152,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-stt.json"),
         environment: "`DEEPGRAM_API_KEY`, or the keychain secret `deepgram-api-key` with feature `keychain`",
         licence: "hosted service: audio leaves the machine",
+        release: Release::Since("0.17.0"),
     },
     Binding {
         name: "ElevenLabs realtime STT",
@@ -130,6 +162,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-stt.json"),
         environment: "`ELEVENLABS_API_KEY`, or the keychain secret `elevenlabs-api-key` with feature `keychain`",
         licence: "hosted service: audio leaves the machine",
+        release: Release::Since("0.28.0"),
     },
     Binding {
         name: "Deepgram Voice Agent",
@@ -139,6 +172,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-voice-agent.json"),
         environment: "`DEEPGRAM_API_KEY` with Voice Agent access, or the keychain secret `deepgram-api-key` with feature `keychain`",
         licence: "hosted service: audio leaves the machine",
+        release: Release::Since("0.17.0"),
     },
     Binding {
         name: "Phonic speech-to-speech",
@@ -148,6 +182,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-duplex.json"),
         environment: "`PHONIC_API_KEY`, or the keychain secret `phonic-api-key` with feature `keychain`",
         licence: "hosted service: audio leaves the machine",
+        release: Release::Since("0.22.0"),
     },
     Binding {
         name: "Deepslate Opal",
@@ -157,6 +192,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Claims("records/claims-opal.json"),
         environment: "`DEEPSLATE_API_KEY`, or the keychain secret `deepslate-api-key` with feature `keychain`; `DEEPSLATE_VENDOR_ID`, `DEEPSLATE_ORGANIZATION_ID`, and `DEEPSLATE_VOICE_ID` for spoken output",
         licence: "hosted service: audio leaves the machine",
+        release: Release::Since("0.22.0"),
     },
     Binding {
         name: "sherpa-onnx streaming STT",
@@ -169,6 +205,7 @@ const BINDINGS: &[Binding] = &[
         ),
         environment: "`INFERENCE_SHERPA_ONNX_STT_DIR`",
         licence: "code Apache-2.0 (sherpa-onnx 1.13.8), MIT (onnxruntime); weights Apache-2.0, trained on LibriSpeech (CC BY 4.0)",
+        release: Release::Since("0.6.0"),
     },
     Binding {
         name: "whisper.cpp batch STT",
@@ -178,6 +215,7 @@ const BINDINGS: &[Binding] = &[
         record: Record::Capability("records/stt-i9-10900k-cpu.json", "Whisper base.en"),
         environment: "`INFERENCE_WHISPERCPP_STT_MODEL`",
         licence: "code MIT (whisper.cpp), Unlicense (whisper-rs); weights MIT",
+        release: Release::Since("0.6.0"),
     },
     Binding {
         name: "llama-server LLM",
@@ -190,6 +228,7 @@ const BINDINGS: &[Binding] = &[
         ),
         environment: "`INFERENCE_LLAMA_SERVER_URL`, `INFERENCE_LLAMA_SERVER_MODEL`",
         licence: "code MIT (llama.cpp); weights Apache-2.0",
+        release: Release::Since("0.6.0"),
     },
     Binding {
         name: "llama-server LLM, tools on",
@@ -202,6 +241,7 @@ const BINDINGS: &[Binding] = &[
         ),
         environment: "`INFERENCE_LLAMA_SERVER_URL`, `INFERENCE_LLAMA_SERVER_MODEL`",
         licence: "code MIT (llama.cpp); weights Apache-2.0",
+        release: Release::Since("0.6.0"),
     },
 ];
 
@@ -414,19 +454,24 @@ fn page_for(root: &Path, metadata: &Value, bindings: &[Binding]) -> Result<Strin
         "Every model binding of the inference adapters: what it claims, the features it needs and what it measured.",
         2,
     );
-    out.push_str(
+    out.push_str(&format!(
         "# Adapters\n\nGenerated by `inference-docs` from the records the adapters commit. A \
          hosted binding's claims are a claims record that a test in its adapter holds equal to the \
          code; a local binding's claims are the capabilities its capability record gives evidence \
          for, each evidence a named test of the adapter. Every adapter is off until you depend on \
          it and turn on the features below. [Contracts](../concepts/contracts.md) says what each \
          capability means.\n\n## Bindings\n\n\
-         | Binding | Package | Runs | Model | Features |\n\
-         |---|---|---|---|---|\n",
-    );
+         Status names the release whose [changelog]({SOURCE}/CHANGELOG.md) section introduced \
+         the binding: \"Since 0.x.0\" is in that release and every one after it, and \
+         \"{next}\" is built and tested on `main`, its entry under Unreleased, and in no \
+         release yet.\n\n\
+         | Binding | Package | Runs | Model | Features | Status |\n\
+         |---|---|---|---|---|---|\n",
+        next = crate::status::NEXT_HEADING,
+    ));
     for read in &reads {
         out.push_str(&format!(
-            "| {} | [`{}`]({TREE}/{}) | {} | `{}` | {} |\n",
+            "| {} | [`{}`]({TREE}/{}) | {} | `{}` | {} | {} |\n",
             read.binding.name,
             read.binding.package,
             all.iter()
@@ -436,6 +481,7 @@ fn page_for(root: &Path, metadata: &Value, bindings: &[Binding]) -> Result<Strin
             cell(read.binding.runs),
             cell(&read.model),
             code_list(&read.features),
+            read.binding.release.status(),
         ));
     }
     out.push_str(
@@ -510,6 +556,18 @@ pub fn page(root: &Path, metadata: &Value) -> Result<String> {
     page_for(root, metadata, BINDINGS)
 }
 
+/// Each binding's name, the release it shipped in, and whether it is hosted.
+#[cfg(test)]
+pub fn releases() -> impl Iterator<Item = (&'static str, Release, bool)> {
+    BINDINGS.iter().map(|binding| {
+        (
+            binding.name,
+            binding.release,
+            matches!(binding.record, Record::Claims(_)),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,7 +594,7 @@ mod tests {
         let page = page(&crate::repository_root(), &metadata()).unwrap();
         assert!(
             page.contains(
-                "| Binding | Package | Runs | Model | Features |\n|---|---|---|---|---|\n"
+                "| Binding | Package | Runs | Model | Features | Status |\n|---|---|---|---|---|---|\n"
             ),
             "{page}"
         );
@@ -572,6 +630,7 @@ mod tests {
             record: Record::Claims("records/c.json"),
             environment: "e",
             licence: "l",
+            release: Release::Since("0.1.0"),
         };
         let write = |revision: &str, held_by: &str, claim: &str| {
             fs::write(
@@ -610,6 +669,268 @@ mod tests {
             "{error}"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Per binding, a phrase of the `CHANGELOG.md` entry that introduced it.
+    const INTRODUCED: &[(&str, &str)] = &[
+        (
+            "OpenAI Realtime",
+            "OpenAI Realtime as an `inference-duplex` native speech model",
+        ),
+        (
+            "OpenAI GPT-Live",
+            "OpenAI GPT-Live (`v1/live/sessions`) behind feature `gpt-live`",
+        ),
+        (
+            "Amazon Nova Sonic on Bedrock",
+            "Amazon Nova Sonic as an `inference-duplex` native speech model",
+        ),
+        (
+            "ElevenLabs streaming TTS",
+            "`inference-elevenlabs`, the first hosted TTS adapter",
+        ),
+        (
+            "OpenAI streamed speech TTS",
+            "`inference-openai`: feature `speech`, `speech::OpenAiSpeech`",
+        ),
+        (
+            "ElevenLabs agent conversation",
+            "`ElevenLabsAgent` in `inference-elevenlabs`, behind feature `duplex`",
+        ),
+        (
+            "Cartesia Sonic streaming TTS",
+            "`inference-cartesia`: a new adapter crate",
+        ),
+        (
+            "Deepgram streaming STT",
+            "`DeepgramRecogniser`, Deepgram streaming speech-to-text",
+        ),
+        (
+            "ElevenLabs realtime STT",
+            "`ElevenLabsRecogniser`, ElevenLabs realtime speech-to-text",
+        ),
+        (
+            "Deepgram Voice Agent",
+            "`DeepgramAgent` is a Deepgram Voice Agent session",
+        ),
+        (
+            "Phonic speech-to-speech",
+            "`inference-phonic`: a new adapter crate",
+        ),
+        (
+            "Deepslate Opal",
+            "`inference-deepslate`: a new adapter crate",
+        ),
+        (
+            "sherpa-onnx streaming STT",
+            "the sherpa-onnx streaming recogniser as a local STT adapter",
+        ),
+        (
+            "whisper.cpp batch STT",
+            "whisper.cpp as a local batch STT adapter",
+        ),
+        (
+            "llama-server LLM",
+            "a local llama.cpp `llama-server` as an output-streaming LLM",
+        ),
+        (
+            "llama-server LLM, tools on",
+            "tool proposals as structured events, and one capability record per configuration",
+        ),
+    ];
+
+    /// One section of `CHANGELOG.md`, `[Unreleased]` or a release, its text and its `### Added`
+    /// list with their whitespace collapsed, so a phrase matches across the file's line breaks.
+    struct Section {
+        version: String,
+        text: String,
+        added: String,
+    }
+
+    const UNRELEASED: &str = "Unreleased";
+
+    fn collapsed(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The sections of `changelog`, oldest first, `[Unreleased]` last.
+    fn sections(changelog: &str) -> Vec<Section> {
+        let mut sections: Vec<_> = changelog
+            .split("\n## [")
+            .skip(1)
+            .filter_map(|section| {
+                let (version, text) = section.split_once(']')?;
+                Some(Section {
+                    version: version.to_owned(),
+                    text: collapsed(text),
+                    added: text
+                        .split("\n### ")
+                        .find(|list| list.starts_with("Added\n"))
+                        .map(collapsed)
+                        .unwrap_or_default(),
+                })
+            })
+            .collect();
+        sections.reverse();
+        sections
+    }
+
+    /// What is wrong with each `(binding, release, introducing phrase)` against `changelog`: the
+    /// oldest section that carries the phrase, in its Added list, must be the binding's release,
+    /// `[Unreleased]` for one on main in no release yet.
+    fn introduction_problems(changelog: &str, bindings: &[(&str, Release, &str)]) -> Vec<String> {
+        let sections = sections(changelog);
+        let mut wrong = Vec::new();
+        for (name, release, phrase) in bindings {
+            let expected = match release {
+                Release::Since(version) if version.starts_with(|c: char| c.is_ascii_digit()) => {
+                    *version
+                }
+                Release::Since(version) => {
+                    wrong.push(format!("{name}: since {version:?}, which is no release"));
+                    continue;
+                }
+                Release::Next => UNRELEASED,
+            };
+            match sections
+                .iter()
+                .find(|section| section.text.contains(phrase))
+            {
+                Some(section) if section.version == expected && section.added.contains(phrase) => {}
+                Some(section) => wrong.push(format!(
+                    "{name}: {}, but {phrase:?} is first in the {} section{}",
+                    release.status(),
+                    section.version,
+                    if section.added.contains(phrase) {
+                        ""
+                    } else {
+                        ", outside its Added list"
+                    }
+                )),
+                None => wrong.push(format!(
+                    "{name}: {}, but no section says {phrase:?}",
+                    release.status()
+                )),
+            }
+        }
+        wrong
+    }
+
+    #[test]
+    fn every_binding_is_since_the_release_whose_changelog_section_introduced_it() {
+        let changelog = fs::read_to_string(crate::repository_root().join("CHANGELOG.md")).unwrap();
+        assert!(
+            sections(&changelog).len() > 20,
+            "{} sections",
+            sections(&changelog).len()
+        );
+        let mut bindings = Vec::new();
+        let mut wrong = Vec::new();
+        for binding in BINDINGS {
+            match INTRODUCED.iter().find(|(name, _)| *name == binding.name) {
+                Some((_, phrase)) => bindings.push((binding.name, binding.release, *phrase)),
+                None => wrong.push(format!("{}: no introducing phrase", binding.name)),
+            }
+        }
+        wrong.extend(introduction_problems(&changelog, &bindings));
+        for (name, _) in INTRODUCED {
+            if !BINDINGS.iter().any(|binding| binding.name == *name) {
+                wrong.push(format!("{name}: no such binding"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_binding_is_on_main_only_while_its_entry_is_unreleased() {
+        let changelog = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- `fresh`: a new \
+                         adapter\n  crate.\n\n## [0.2.0] — 2026-01-02\n\n### Added\n\n- `old`: a \
+                         new adapter crate.\n\n## [0.1.0] — 2026-01-01\n\n### Added\n\n- The \
+                         contracts.\n";
+        let fresh = "`fresh`: a new adapter crate";
+        let old = "`old`: a new adapter crate";
+        assert_eq!(
+            introduction_problems(
+                changelog,
+                &[
+                    ("F", Release::Next, fresh),
+                    ("O", Release::Since("0.2.0"), old)
+                ]
+            ),
+            Vec::<String>::new()
+        );
+        let refused = |release, phrase| introduction_problems(changelog, &[("B", release, phrase)]);
+        let wrong = refused(Release::Next, old);
+        assert!(
+            wrong.len() == 1 && wrong[0].contains("is first in the 0.2.0 section"),
+            "{wrong:?}"
+        );
+        let wrong = refused(Release::Since("0.2.0"), fresh);
+        assert!(
+            wrong.len() == 1 && wrong[0].contains("is first in the Unreleased section"),
+            "{wrong:?}"
+        );
+        let wrong = refused(Release::Since(UNRELEASED), fresh);
+        assert!(
+            wrong.len() == 1 && wrong[0].contains("which is no release"),
+            "{wrong:?}"
+        );
+        let wrong = refused(Release::Next, "`gone`");
+        assert!(
+            wrong.len() == 1 && wrong[0].contains("no section says"),
+            "{wrong:?}"
+        );
+    }
+
+    #[test]
+    fn a_binding_on_main_is_shown_as_in_the_next_release() {
+        let next = [Binding {
+            release: Release::Next,
+            ..BINDINGS[0]
+        }];
+        let page = page_for(&crate::repository_root(), &metadata(), &next).unwrap();
+        let row = page
+            .lines()
+            .find(|line| line.starts_with(&format!("| {} |", BINDINGS[0].name)))
+            .unwrap();
+        assert!(row.ends_with(" | On main, in the next release |"), "{row}");
+        assert!(page.contains("\"On main, in the next release\""), "{page}");
+    }
+
+    #[test]
+    fn every_row_of_the_bindings_table_names_the_release_it_shipped_in() {
+        let page = page(&crate::repository_root(), &metadata()).unwrap();
+        let table = page
+            .split_once("\n## Bindings\n")
+            .unwrap()
+            .1
+            .split_once("\n## ")
+            .unwrap()
+            .0;
+        assert!(
+            table.contains(
+                "| Binding | Package | Runs | Model | Features | Status |\n|---|---|---|---|---|---|\n"
+            ),
+            "{table}"
+        );
+        let rows: Vec<_> = table
+            .lines()
+            .filter(|line| line.starts_with("| ") && !line.starts_with("| Binding |"))
+            .collect();
+        assert_eq!(rows.len(), BINDINGS.len(), "{table}");
+        for (row, binding) in rows.iter().zip(BINDINGS) {
+            assert!(row.starts_with(&format!("| {} |", binding.name)), "{row}");
+            assert!(
+                row.ends_with(&format!(" | {} |", binding.release.status())),
+                "{row}"
+            );
+        }
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with("| ElevenLabs realtime STT |")
+                    && row.ends_with(" | Since 0.28.0 |")),
+            "{table}"
+        );
     }
 
     #[test]
