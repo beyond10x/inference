@@ -13,6 +13,7 @@ on this repository. `README.md` is for people.
 
 | read | for |
 |---|---|
+| `docs/handoff/2026-11-13.md` | the latest hand-off (after release 0.30.0): what is done, what waits and on whom, what the next session starts with |
 | `docs/design/inference.md` | the design (v0.2, 2026-10-16): vocabulary, contracts, streaming semantics, graph, runtime, roadmap, open questions |
 | `docs/design/review-2026-10-18.md` | the review of that design: findings, what the plan does differently, and why |
 | `docs/handoff/2026-10-19-implementation.md`, `docs/handoff/2026-10-19-planning.md` | historical snapshots from 2026-10-19, before 0.5.0; the planning store and `CHANGELOG.md` are current, these are not |
