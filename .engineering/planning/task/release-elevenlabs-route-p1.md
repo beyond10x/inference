@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: task:release-elevenlabs-route-p1
 kind: task
-status: active
+status: implemented
 title: 'Release carrying ElevenLabs STT, the provider-side TTS cancel and #39, with breaking changes per minor'
 summary: One minor tag after the two P1 stories, and a page listing breaking changes per minor since 0.12.0.
 tags:
@@ -13,10 +13,11 @@ relations:
 - depends_on: story:elevenlabs-tts-provider-cancel
 - serves: vision:inference
 - depends_on: story:talk-picks-elevenlabs
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-12T09:37:36Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"review_outcome":4}}}
 - {from: "proposed", to: "active", at: "2026-11-12T09:37:36Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"review_outcome":4}}}
+- {from: "active", to: "implemented", at: "2026-11-12T16:44:01Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":4}}}
 ---
 ## Context
 

@@ -50,8 +50,8 @@ task check                      # the sherpa-onnx archive, specification and pla
 task docs-generate              # rewrite the generated files of the site
 npm --prefix website ci --allow-git=root && npm --prefix website run build   # build the site into website/build
 ess specify validate --path ess
-ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json   # the obliged scenarios plus the authored ones; as of ess 0.90.0 the only refusal allowed is ESS-SYNTH-001 for the `affects` cascade `inference.graph.CancelRun/outcome/cancelled`, executed by the authored scenario `cancel-run-discards-unplayed.yaml` past ESS story:a-cascade-onto-rows-of-a-guarded-creator-is-witnessed, which ESS 0.70.0 shipped and which does not cover it; the other four cascades are synthesized since ess 0.69.0, and their authored scenarios stay until that refusal clears
-ess verify conform run --path ess --scenarios ess/scenarios --target interpreted --report-format 2 --report-out .engineering/drafts/report.json   # every scenario against the specification itself; as of ess 0.90.0 one is unsupported, `inference.graph.AddSubgraphNode/outcome/added` (ESS-CF-TARGET: the model does not determine a complete typed view observation), which the run reports while exiting 0; the run stays outside `task check`, whose testkit target runs the scenario and passes, until ESS story:an-unfillable-required-field-is-named-by-validate-and-the-view, an ESS draft
+ess verify conform synthesize --path ess --scenarios ess/scenarios --out .engineering/drafts/suite.json   # the obliged scenarios plus the authored ones; as of ess 0.94.0 the only refusal allowed is ESS-SYNTH-001 for the `affects` cascade `inference.graph.CancelRun/outcome/cancelled`, executed by the authored scenario `cancel-run-discards-unplayed.yaml` past ESS story:a-cascade-onto-rows-of-a-guarded-creator-is-witnessed, which ESS 0.70.0 shipped and which does not cover it; the other four cascades are synthesized since ess 0.69.0, and their authored scenarios stay until that refusal clears
+ess verify conform run --path ess --scenarios ess/scenarios --target interpreted --report-format 2 --report-out .engineering/drafts/report.json   # every scenario against the specification itself; as of ess 0.94.0 one is unsupported, `inference.graph.AddSubgraphNode/outcome/added` (ESS-CF-TARGET: the model does not determine a complete typed view observation), which the run reports while exiting 0; the run stays outside `task check`, whose testkit target runs the scenario and passes, until ESS story:an-unfillable-required-field-is-named-by-validate-and-the-view, an ESS draft
 aep plan artifact validate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -106,8 +106,17 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   credential lookup behind a feature (owner decision, 2026-10-19).
 - The planning store is the plan. Work is recorded there, never only in a document or a chat.
 - Work in a managed worktree (`worktree create --purpose <what>`), build into its own `target/`.
+  The host is shared: a unit's own gate builds only the crates it touches, with
+  `CARGO_INCREMENTAL=0`, the full `task check` runs once in CI on the pull request, and the
+  unit deletes its `target/` when it hands off (2026-11-12: one unit's `target/` reached 41 GB
+  while the host was at 19 GB free).
 - Every commit, push, pull request and tag goes through the bot route (`b10x-gates bot -- <git
-  args>`); API writes through `b10x-gates api`. Local hooks are optional; the shared gates on
+  args>`), a sub-agent's test-only commit included: a plain `git commit` records a personal
+  identity, which the repository's ruleset refuses and which must not reach the history.
+  A commit recreated on a newer base replays its own diff (`git diff <c>^ <c> | git apply -3`),
+  never the whole tree of the old commit, which reverts what the base gained since (2026-11-12:
+  recreating the wave P2-1 commits that way undid release 0.28.0 on `main` until PR #47 restored it).
+  API writes go through `b10x-gates api`. Local hooks are optional; the shared gates on
   GitHub are the authority, and `main` is integrated only with its `Security and privacy` and
   `inference / task check` runs green.
 - A release is a bare annotated version tag (`0.1.0`) on gated `main`, pushed through the bot

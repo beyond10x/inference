@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-12T21:52:23Z",
+  "actor": "human:operator",
+  "artifact": "story:compare-elevenlabs-cascade-and-ollama",
+  "kind": "story",
+  "revision": 11,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adversary-compare-cascade-pass-2",
+    "review": "review-result:adversary-compare-cascade-pass-2",
+    "outcome": "fixed"
+  }
+}
