@@ -2,9 +2,15 @@
 format: aep.planning-md/3
 id: story:inference-agent-close-drain-flake
 kind: story
-status: draft
+status: implemented
 title: The device-run close-drain test of inference does not fail under host load
-revision: 2
+relations:
+- serves: vision:inference
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-13T10:49:31Z", actor: "human:operator", revision: 3, decided_on: {"recorded":{"test_result":2}}}
+- {from: "proposed", to: "active", at: "2026-11-13T10:49:31Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":2}}}
+- {from: "active", to: "implemented", at: "2026-11-13T10:49:31Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":2}}}
 ---
 ## Context
 
