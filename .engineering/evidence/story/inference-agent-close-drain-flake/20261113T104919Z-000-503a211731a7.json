@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-13T10:49:19Z",
+  "actor": "human:operator",
+  "artifact": "story:inference-agent-close-drain-flake",
+  "kind": "story",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo +1.100.0 test -p inference --features testing --test adversary2_agent",
+    "reference": "before the fix, 8 parallel copies x 20 rounds: 127 passed, 33 failed (32 at adversary2_agent.rs:124); after: 160 passed, 0 failed; the test alone 50 of 50; property broken at devices.rs:324: fails at adversary2_agent.rs:306 (2026-11-13)"
+  }
+}

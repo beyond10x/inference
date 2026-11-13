@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-13T10:49:19Z",
+  "actor": "human:operator",
+  "artifact": "story:inference-agent-close-drain-flake",
+  "kind": "story",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo +1.100.0 test -p inference --features testing",
+    "reference": "5 runs in a row: 23 targets, 257 passed, 0 failed each (2026-11-13)"
+  }
+}
