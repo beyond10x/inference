@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-11-13
+
+Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these
+releases, and no other release since then has one.
+
+- [0.29.0](#0290--2026-11-13)
+- [0.28.0](#0280--2026-11-12)
+- [0.27.0](#0270--2026-11-09)
+- [0.26.0](#0260--2026-11-07)
+- [0.25.0](#0250--2026-11-07)
+- [0.24.0](#0240--2026-11-07)
+- [0.23.0](#0230--2026-11-06)
+- [0.22.0](#0220--2026-11-06)
+- [0.20.0](#0200--2026-11-06)
+
 ### Added
 
 - `inference-tts`, `inference-stt`, `inference-duplex`: each handle has an async form next to its
