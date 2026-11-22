@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-11-22
+
+Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these
+releases, and no other release since then has one.
+
+- [0.29.0](#0290--2026-11-13)
+- [0.28.0](#0280--2026-11-12)
+- [0.27.0](#0270--2026-11-09)
+- [0.26.0](#0260--2026-11-07)
+- [0.25.0](#0250--2026-11-07)
+- [0.24.0](#0240--2026-11-07)
+- [0.23.0](#0230--2026-11-06)
+- [0.22.0](#0220--2026-11-06)
+- [0.20.0](#0200--2026-11-06)
+
+### Changed
+
+- The `ess` pin moves from 0.94.0 to 0.97.1: CI, the documentation workflow and the testkit's
+  `ess-conformance` and `ess-primitives` tags.
+
+### Fixed
+
+- A test of `inference` that failed intermittently under load now feeds a draining device run until
+  it closes the microphone. Tests only; no library behaviour changes.
+
 ## [0.30.0] — 2026-11-13
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these
