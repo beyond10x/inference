@@ -1,12 +1,15 @@
 //! The reference cascade's declaration, copied from `local_voice_cascade::declare_requiring`
 //! (`examples/local-voice-cascade/src/lib.rs`) as it stands with the shared payload, so that the
-//! comparison with `Recipe::voice_cascade()` survives the example's port onto the recipe.
+//! comparison with `Recipe::voice_cascade()` survives the example's port onto the recipe. Beyond
+//! the example, each model node, `stt`, `agent` and `tts`, declares a structured output port
+//! `usage`, exposed as `stt_usage`, `agent_usage` and `tts_usage`, on which it sends the usage
+//! record of each of its model calls.
 
 use std::num::NonZeroUsize;
 
 use inference::graph::{
     AdapterId, Capability, Catalog, Declaration, Delivery, Essentiality, InteractionMode, NodeRole,
-    OverloadPolicy, PipelineId, PipelineSpec, PortTraits, ProfileId, modality,
+    OverloadPolicy, PipelineId, PipelineSpec, PortTraits, ProfileId, USAGE_PORT, modality,
 };
 
 /// Declares the reference cascade in `declaration` under `profile_id`, its nodes `stt`, `agent`
@@ -105,6 +108,10 @@ pub fn declare(
             pipeline.expose(&microphone, "audio", capacity, pause);
             pipeline.expose(&committed, "transcript", capacity, pause);
             pipeline.expose(&to_app, "assistant_text", capacity, pause);
+            for (node, name) in [(&stt, "stt_usage"), (&llm, "agent_usage"), (&tts, "tts_usage")] {
+                let usage = pipeline.output::<modality::Structured>(node, USAGE_PORT, control);
+                pipeline.expose(&usage, name, capacity, pause);
+            }
             for (node, adapter) in [&stt, &llm, &tts].into_iter().zip(adapters) {
                 pipeline
                     .bind(node, adapter)
