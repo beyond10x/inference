@@ -13,7 +13,7 @@ source: examples/stt-only, Taskfile.yml, .cargo/config.toml, Cargo.toml, CHANGEL
 | For | You need |
 |---|---|
 | building | Rust stable, 1.98 or later |
-| `task check` | [go-task](https://taskfile.dev), and the `ess` and `aep` command-line tools |
+| `task check` | the rustc `rust-toolchain.toml` pins, [go-task](https://taskfile.dev), [cargo-nextest](https://nexte.st), and the `ess` and `aep` command-line tools |
 | the sherpa-onnx adapter | Linux x86_64: `task sherpa-onnx-archive` fetches the pinned `linux-x64` native archive |
 | the whisper.cpp adapter | `cmake`, a C++ compiler and `libclang`; whisper.cpp is compiled from source, CPU only |
 | the voice examples | a microphone and an output device; use a headset, there is no echo cancellation |

@@ -18,13 +18,7 @@ fn workflow_value(workflow: &str, key: &str) -> Option<String> {
     let line = workflow
         .lines()
         .find(|line| line.trim_start().starts_with(&format!("{key}:")))?;
-    Some(
-        line.split_once(':')?
-            .1
-            .trim()
-            .trim_matches('"')
-            .to_owned(),
-    )
+    Some(line.split_once(':')?.1.trim().trim_matches('"').to_owned())
 }
 
 /// The `run: |` block of the step whose `id:` is `id`, its indentation removed.
@@ -62,8 +56,17 @@ fn gate(event: &str, changed: &[&str]) -> String {
     let case = tempfile_dir();
     let bin = case.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    let list = case.join("changed-paths");
-    fs::write(&list, changed.iter().map(|path| format!("{path}\n")).collect::<String>()).unwrap();
+    let runner = case.join("runner");
+    fs::create_dir_all(&runner).unwrap();
+    let list = case.join("paths-git-answers");
+    fs::write(
+        &list,
+        changed
+            .iter()
+            .map(|path| format!("{path}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
     let git = bin.join("git");
     fs::write(
         &git,
@@ -82,7 +85,7 @@ fn gate(event: &str, changed: &[&str]) -> String {
         .arg(&script)
         .env("PATH", path)
         .env("EVENT", event)
-        .env("RUNNER_TEMP", &case)
+        .env("RUNNER_TEMP", &runner)
         .env("GITHUB_OUTPUT", &output)
         .output()
         .unwrap();
@@ -91,6 +94,13 @@ fn gate(event: &str, changed: &[&str]) -> String {
         "the scope step failed for {changed:?}: {}",
         String::from_utf8_lossy(&run.stderr)
     );
+    if event == "pull_request" {
+        assert_eq!(
+            fs::read_to_string(runner.join("changed-paths")).ok(),
+            fs::read_to_string(&list).ok(),
+            "the scope step decides over the paths git answered"
+        );
+    }
     let written = fs::read_to_string(&output).unwrap();
     written
         .lines()
@@ -122,7 +132,10 @@ fn a_pull_request_of_planning_and_prose_files_only_skips_the_build() {
             ".engineering/evidence/story/a/20261123T000000Z-000-0.json",
         ],
         &["AGENTS.md", "README.md", "docs/design/inference.md"],
-        &["docs/handoff/2026-11-23.md", ".engineering/planning/epic/b.md"],
+        &[
+            "docs/handoff/2026-11-23.md",
+            ".engineering/planning/epic/b.md",
+        ],
         &["adapters/inference-openai/README.md"],
     ] {
         assert_eq!(gate("pull_request", changed), "planning", "{changed:?}");
@@ -164,7 +177,8 @@ fn ci_installs_the_rustc_rust_toolchain_toml_pins() {
         .map(|value| value.trim_matches('"').to_owned())
         .expect("rust-toolchain.toml names a channel");
     assert!(
-        channel.split('.').count() == 3 && channel.split('.').all(|part| part.parse::<u32>().is_ok()),
+        channel.split('.').count() == 3
+            && channel.split('.').all(|part| part.parse::<u32>().is_ok()),
         "rust-toolchain.toml pins one rustc release, not {channel:?}"
     );
     for workflow in ["check.yml", "pages.yml", "slow.yml"] {

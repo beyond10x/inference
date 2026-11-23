@@ -6,7 +6,14 @@ tasks:
       - task: check
 
   check:
-    desc: The verified sherpa-onnx native library, specification and planning store validation, the documentation drift check, then format, lint, the documentation build with warnings denied and tests of the workspace.
+    desc: The checks of the source, then the build of the tests, then the tests of the workspace, as CI runs them.
+    cmds:
+      - task: check-source
+      - task: test-build
+      - task: test-run
+
+  check-source:
+    desc: The verified sherpa-onnx native library, specification and planning store validation, the documentation drift check, then format, lint and the documentation build with warnings denied.
     cmds:
       - task: sherpa-onnx-archive
       - ess specify validate --path ess
@@ -15,8 +22,46 @@ tasks:
       - cargo fmt --all --check
       - cargo clippy --workspace --all-targets --all-features -- -D warnings
       - RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
-      - cargo test --workspace --all-features
-      - cargo test -p inference --no-default-features --test stack
+
+  test-build:
+    desc: Builds the tests test-run runs, without running one.
+    cmds:
+      - cargo nextest run --workspace --all-features --no-run
+      - cargo nextest run -p inference --no-default-features --test stack --no-run
+
+  test-run:
+    desc: Runs the tests of the workspace with cargo-nextest under .config/nextest.toml, where a test over 60 s is killed and fails, and prints the ten slowest; then the stack test without default features and the doc tests.
+    cmds:
+      - task: test-workspace
+      - cargo nextest run -p inference --no-default-features --test stack
+      - cargo test --workspace --all-features --doc
+
+  test-workspace:
+    desc: Runs the tests of the workspace with cargo-nextest and prints the ten slowest, also when one failed.
+    cmds:
+      - defer: { task: test-slowest }
+      - cargo nextest run --workspace --all-features
+
+  test-slowest:
+    desc: Prints the ten slowest tests of the last run of the default nextest profile, in seconds.
+    cmds:
+      - echo "the ten slowest tests, in seconds:"
+      - grep '<testcase ' target/nextest/default/junit.xml | sed -E 's/.* name="([^"]*)" classname="([^"]*)".* time="([^"]*)".*/\3 \2 \1/' | sort -rn | head -n 10
+
+  test-slow:
+    desc: The slow lane, every trybuild case of the inference crate in one trybuild run, under the slow nextest profile; runs again only when one of its sources changed.
+    sources:
+      - crates/inference-macros/**/*
+      - crates/inference/src/**/*
+      - crates/inference-tools/src/**/*
+      - crates/inference/tests/ui.rs
+      - crates/inference/tests/ui/**/*
+      - crates/inference/tests/compile_fail/**/*
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .config/nextest.toml
+    cmds:
+      - cargo nextest run -p inference --features audio-device --profile slow
 
   docs-generate:
     desc: Regenerates the derived pages and data of the documentation site under website/.
