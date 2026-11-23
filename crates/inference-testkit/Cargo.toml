@@ -30,8 +30,8 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-ess-conformance = { git = "https://github.com/beyond10x/ess", tag = "0.97.1" }
-ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.97.1" }
+ess-conformance = { git = "https://github.com/beyond10x/ess", tag = "0.97.4" }
+ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.97.4" }
 inference = { path = "../inference", features = ["testing"] }
 serde.workspace = true
 tempfile = "3"

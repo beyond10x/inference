@@ -42,8 +42,8 @@ audio tokens, never added to either.
 
 A failed call is recorded with `final: false`, and its counts are a lower bound.
 
-A record reaches a session only from a node whose `usage` port the pipeline declares. On main, in
-the next release: the SDK's built-in recipes `chat`, `transcribe` and `speak` expose their model
+A record reaches a session only from a node whose `usage` port the pipeline declares. Since 0.32.0,
+the SDK's built-in recipes `chat`, `transcribe` and `speak` expose their model
 node's usage as the egress `usage`, so an agent's event stream carries `Event::Usage` and its
 session total counts the call; `native_voice` carries its usage on `events`. `voice_cascade` does
 not declare one yet, and its total stays empty.
@@ -56,7 +56,7 @@ The [session facade](session.md) keeps one per run and one over the session. A r
 includes the usage of its subgraphs whose `usage` port has an edge; the record still names the
 child run it was made in, and is counted once.
 
-On main, in the next release: the session counts a record once by its `usage_record_id`, however
+Since 0.32.0, the session counts a record once by its `usage_record_id`, however
 many egresses carry it. A fan-out node that hands the record to two outputs delivers it on each,
 and the run's total, the session's and the cost count it once; a meter of your own that adds
 the delivered events keys on `usage_record_id` the same way.
