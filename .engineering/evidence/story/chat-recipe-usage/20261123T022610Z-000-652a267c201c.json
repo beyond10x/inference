@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-23T02:26:10Z",
+  "actor": "human:timo",
+  "artifact": "story:chat-recipe-usage",
+  "kind": "story",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p inference --features testing,cost (lib and 21 test targets; adversary_w25_tool_macro_pass2_ui excluded by brief)",
+    "reference": "branch impl/chat-recipe-usage c3e6bdb8f: agent 66 passed (65 on base), recipes 37 passed (35 on base); tool_macro_schema_keywords ui snapshot mismatch pre-existing (rustc 1.99.1 vs snapshot blessed for 1.100)"
+  }
+}

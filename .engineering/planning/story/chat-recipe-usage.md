@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:chat-recipe-usage
 kind: story
-status: draft
+status: implemented
 title: The built-in recipes keep the usage record of every model call they run
 summary: chat, transcribe and speak expose their model node's usage port, so a completed reply reaches the SDK event stream and the session total
 relations:
@@ -19,7 +19,11 @@ scope:
   path: crates/inference/tests/agent.rs
 - confidence: cited
   path: crates/inference/tests/recipes.rs
-revision: 2
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-23T02:26:11Z", actor: "agent:inference-u1-implementor", revision: 3, decided_on: {"recorded":{"test_result":1},"asserted":{"test_result":1}}}
+- {from: "proposed", to: "active", at: "2026-11-23T02:26:11Z", actor: "agent:inference-u1-implementor", revision: 4, decided_on: {"recorded":{"test_result":1},"asserted":{"test_result":1}}}
+- {from: "active", to: "implemented", at: "2026-11-23T02:26:12Z", actor: "agent:inference-u1-implementor", revision: 5, decided_on: {"recorded":{"test_result":1},"asserted":{"test_result":1}}}
 ---
 ## Context
 
