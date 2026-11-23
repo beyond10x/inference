@@ -42,6 +42,11 @@ audio tokens, never added to either.
 
 A failed call is recorded with `final: false`, and its counts are a lower bound.
 
+On main, in the next release: a native speech response is recorded `final: true` only when the
+provider confirmed its counts, by a final report or by starting its next response. A running
+count that the session's close or failure settles keeps `final: false`, and so does usage held
+for no response that the session's end records.
+
 A record reaches a session only from a node whose `usage` port the pipeline declares. Since 0.32.0,
 the SDK's built-in recipes `chat`, `transcribe` and `speak` expose their model
 node's usage as the egress `usage`, so an agent's event stream carries `Event::Usage` and its

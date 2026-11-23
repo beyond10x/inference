@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
+use inference_audio::{AudioFormat, AudioFrame, FrameLengthMismatch, SampleClockPosition};
 use inference_core::model::Adapter;
 use inference_core::usage::UsageRecorded;
 use inference_tools::{Json, Tool, ToolId};
@@ -254,6 +254,10 @@ pub enum SessionError {
         expected: AudioFormat,
         found: AudioFormat,
     },
+    /// The frame's data is not as long as its samples make it
+    /// ([`AudioFrame::check_length`]): it is neither accepted nor emitted, and moves no
+    /// position.
+    FrameLength(FrameLengthMismatch),
     /// A response is already in progress; one response runs at a time.
     ResponseInProgress { response_id: ResponseId },
     /// A response already carries the identity the adapter issued.
@@ -287,6 +291,7 @@ impl fmt::Display for SessionError {
                 f,
                 "the frame is in {found:?}, and the session takes {expected:?}"
             ),
+            Self::FrameLength(error) => fmt::Display::fmt(error, f),
             Self::ResponseInProgress { response_id } => {
                 write!(f, "the response {response_id} is still in progress")
             }
@@ -368,7 +373,8 @@ pub trait SpeechSessionHandle {
     ///
     /// # Errors
     ///
-    /// [`SessionError::NotOpen`] or [`SessionError::FormatMismatch`]; nothing is sent.
+    /// [`SessionError::NotOpen`], [`SessionError::FormatMismatch`] or
+    /// [`SessionError::FrameLength`]; nothing is sent.
     fn append_audio(&mut self, frame: AudioFrame) -> Result<(), SessionError>;
 
     /// Ends the user turn with the input sent so far.

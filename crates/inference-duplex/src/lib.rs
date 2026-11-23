@@ -326,7 +326,8 @@ impl TranscriptionUsage {
 /// Whether a provider's report of a response's usage is the response's final total, which no
 /// later report changes ([`UsageTotal::Final`]), or a running total that a later report may still
 /// replace, also after the response ended ([`UsageTotal::Running`]). It decides when
-/// [`SessionLedger`] records the response's usage.
+/// [`SessionLedger`] records the response's usage, and whether the record is `final`: a running
+/// total the session's end settles is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UsageTotal {
     /// A later report may still replace it, also after the response ended.

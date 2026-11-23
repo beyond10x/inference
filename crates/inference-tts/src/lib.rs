@@ -79,8 +79,9 @@
 //!   final before it can be played.
 //! * A frame's data is `sample_count * channels * width(encoding)` bytes
 //!   ([`AudioFormat::data_len`](inference_audio::AudioFormat::data_len)); a frame that
-//!   disagrees is refused with [`FrameLengthMismatch`]. `inference-audio` itself admits such a
-//!   frame, as the specification does.
+//!   disagrees is refused with [`FrameLengthMismatch`], by
+//!   [`AudioFrame::check_length`](inference_audio::AudioFrame::check_length).
+//!   `inference-audio` itself admits such a frame, as the specification does.
 //!
 //! Without output streaming, the call that completes a segment returns its `SynthesisCompleted`
 //! and then its frames, and no frame follows:
@@ -194,7 +195,7 @@ pub use inference_audio;
 pub use inference_core;
 pub use inference_text;
 
-use inference_audio::AudioFrame;
+use inference_audio::{AudioFrame, FrameLengthMismatch};
 use inference_core::model::{Adapter, AdapterId, Capability, ModelId};
 use inference_core::usage::{Quantity, QuantityKind, RecordUsage, UsageRecord, UsageRecorded};
 use inference_text::{
@@ -412,26 +413,6 @@ impl fmt::Display for SegmentNotHeld {
 }
 
 impl Error for SegmentNotHeld {}
-
-/// The frame's data is `actual` bytes where its sample count, channels and encoding width make
-/// `expected`, so it is not emitted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrameLengthMismatch {
-    pub expected: u64,
-    pub actual: u64,
-}
-
-impl fmt::Display for FrameLengthMismatch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "the frame carries {} bytes of data where its samples make {}",
-            self.actual, self.expected
-        )
-    }
-}
-
-impl Error for FrameLengthMismatch {}
 
 /// A playback receipt speaks one segment, `segment_id`, and a frame of `other` was among its
 /// frames, or was offered as the receipt of `segment_id`; no receipt is made and nothing changed.
@@ -836,7 +817,7 @@ impl SynthesisOutput {
             }
             .into());
         }
-        check_length(&frame)?;
+        frame.check_length()?;
         self.frames[index] += 1;
         self.count_emitted(&frame);
         self.mark_first_audio(index);
@@ -865,7 +846,7 @@ impl SynthesisOutput {
         let index = self.taken_index(segment_id)?;
         self.require(index, SegmentState::Queued)?;
         for frame in &frames {
-            check_length(frame)?;
+            frame.check_length()?;
         }
         let event = self.move_segment(index, OutputSegment::synthesize)?;
         self.frames[index] += frames.len();
@@ -1226,17 +1207,6 @@ impl SynthesisOutput {
             .iter()
             .position(|segment| segment.segment_id() == segment_id)
             .ok_or(SegmentNotTaken { segment_id })
-    }
-}
-
-/// Passes when the data of `frame` is as long as its samples make it.
-fn check_length(frame: &AudioFrame) -> Result<(), FrameLengthMismatch> {
-    let expected = frame.format.data_len(frame.sample_count);
-    let actual = frame.data.len() as u64;
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(FrameLengthMismatch { expected, actual })
     }
 }
 
