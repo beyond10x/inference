@@ -9,8 +9,8 @@ source: examples/realtime-voice (examples/compare.rs, src/compare.rs, src/eleven
 # Compare voice providers
 
 The `compare` example of `realtime-voice` sends the same recorded question, or each clip of a
-directory, through each provider, N times, and prints per provider, native speech model or
-cascade of STT, LLM and TTS, the median, the 95th percentile and the spread of:
+directory, through each provider N times. A provider is a native speech model or a cascade of
+STT, LLM and TTS. For each one it prints the median, the 95th percentile and the spread of:
 
 - end of the question's speech to the answer's first audio, first transcript and response end,
   the turn latency;
@@ -24,13 +24,15 @@ cascade of STT, LLM and TTS, the median, the 95th percentile and the spread of:
 A step a topology does not have shows `n/a`. Every time is taken on the client, on one clock, at
 the receipt of each event. No microphone or speaker is used.
 
-Since no device plays the answer, both topologies play it on the client's model of playout: each
-frame from its receipt or from the end of the frame before it, whichever is later, cut where the
-client stops playout. Barge-in to output stop runs to the end of the answer's audio as the client
-plays it. For the cascade, playout therefore starts at the TTS's first audio, so the cascade's
-first audio is its TTS first audio and the table has no playout start column. The cascade's
-client stops playout once the local cascade's detector has heard the barge-in; an answer that ends
-before then stops where it ends.
+No device plays the answer, so both topologies play it on the client's model of playout. Each
+frame plays from its receipt or from the end of the frame before it, whichever is later, and is
+cut where the client stops playout. Barge-in to output stop runs to the end of the answer's audio
+as the client plays it.
+
+For the cascade, playout starts at the TTS's first audio. The cascade's first audio is therefore
+its TTS first audio, and the table has no playout start column. The cascade's client stops
+playout after the local cascade's detector has heard the barge-in. An answer that ends before then
+stops where it ends.
 
 :::warning[Requirements]
 
@@ -48,28 +50,31 @@ cargo run -p realtime-voice --example compare -- --skip nova="no model access"
 ```
 
 The question is the OpenAI adapter's speech fixture, "What is the capital of France?". The
-barge-in utterance is the 16-bit PCM WAV file `INFERENCE_COMPARE_BARGE_IN_WAV` names; without it no
+barge-in utterance is the 16-bit PCM WAV file in `INFERENCE_COMPARE_BARGE_IN_WAV`. Without it no
 barge-in is sent and that column stays empty. A provider whose model cannot be made, or whose first
 session does not open, is skipped with the reason.
 
-The `cascade` provider speaks with ElevenLabs when its key resolves, from `ELEVENLABS_API_KEY` or,
-when that is unset, the OS keychain's `elevenlabs-api-key` (waiting up to 8 s, and saying so on
-standard error), and `ELEVENLABS_VOICE_ID` names a voice; otherwise it is skipped as "no hosted
-TTS configured". The key is looked up last, once everything else the arm needs is there, so an arm
-skipped for another reason does not ask the keychain. It connects to the host `ELEVENLABS_RESIDENCY` names (`global`, `us`, `eu`, `in` or `sg`, global when
-unset), as a key of a data-residency stack needs; a value it does not take skips the arm. Its
-recogniser and LLM are the local voice cascade's, bound with feature `local` and configured as in
-the local cascade's guide; a missing one skips it, naming which:
+The `cascade` provider speaks with ElevenLabs and reads these values:
+
+| what | from | when missing or not taken |
+|---|---|---|
+| the key | `ELEVENLABS_API_KEY`, or when that is unset the OS keychain's `elevenlabs-api-key`, waiting up to 8 s and saying so on standard error | skipped as "no hosted TTS configured" |
+| the voice | `ELEVENLABS_VOICE_ID` | skipped as "no hosted TTS configured" |
+| the host | `ELEVENLABS_RESIDENCY`: `global`, `us`, `eu`, `in` or `sg`, global when unset, as a key of a data-residency stack needs | skipped |
+| the recogniser and the LLM | the local voice cascade's, bound with feature `local` and configured as in the local cascade's guide | skipped, naming which is missing |
+
+The key is looked up last, after everything else the arm needs is there. An arm skipped for
+another reason does not ask the keychain. Run the cascade arm with feature `local`:
 
 ```sh
 cargo run -p realtime-voice --features local --example compare -- --providers openai,cascade
 ```
 
 With `--cascade-stt elevenlabs` the cascade arm listens with ElevenLabs realtime speech to text
-instead, in `pcm_16000` at the same host, its key `ELEVENLABS_API_KEY` or the OS keychain's
-`elevenlabs-api-key`. Its LLM is the server `INFERENCE_LLAMA_SERVER_URL` and
-`INFERENCE_LLAMA_SERVER_MODEL` name, on loopback, a `llama-server` or Ollama
-([Run the voice cascade offline](run-the-local-voice-cascade-offline.md)); the local recogniser's
+instead, in `pcm_16000` at the same host. Its key is `ELEVENLABS_API_KEY` or the OS keychain's
+`elevenlabs-api-key`. Its LLM is the server in `INFERENCE_LLAMA_SERVER_URL` and
+`INFERENCE_LLAMA_SERVER_MODEL`, on loopback: a `llama-server` or Ollama, as in
+[Run the voice cascade offline](run-the-local-voice-cascade-offline.md). The local recogniser's
 variables are not read. The arm still needs feature `local`, which binds that LLM:
 
 ```sh
@@ -78,32 +83,38 @@ INFERENCE_LLAMA_SERVER_URL=http://127.0.0.1:11434/v1 INFERENCE_LLAMA_SERVER_MODE
     --providers openai,elevenlabs,cascade --cascade-stt elevenlabs --runs 5
 ```
 
-The ElevenLabs recognition commits manually: it is opened with `commit_strategy=manual`, and the
-arm's own detector, the local cascade's (600 ms of silence after speech), ends each turn and so
-sends the commit, as it ends the local recogniser's input. The endpoint's voice activity detection
-is not used, since it would add its quiet window of 500 ms after the commit's answer to the
-cascade's first audio. A failed recognition is a note of the arm's run, with the endpoint's reason,
-also when the run's limit passes first: the run then waits for the recognition at most 3 s, the
-plan's drain, and says so when it had still not ended. The next turn, of the next run or clip,
-waits for such a recognition at most the endpoint's read timeout of 10 s before it starts its own,
-as its recogniser takes one recognition at a time.
+The ElevenLabs recognition commits manually: it is opened with `commit_strategy=manual`. The arm's
+own detector ends each turn and so sends the commit, as it ends the local recogniser's input. That
+detector is the local cascade's: 600 ms of silence after speech. The endpoint's voice activity
+detection is not used, since it would add its quiet window of 500 ms after the commit's answer to
+the cascade's first audio.
 
-`--clips <dir>` asks each 16-bit PCM WAV file of a directory (`.wav`, in the order of the file
-names) in place of the built-in question: each provider runs `--runs` runs of each clip, every run
-of the first clip first, and the table pools the runs of all clips. `--runs-out <file>` writes
-every run as one JSON line: `provider`, `topology`, `clip` (the file name without `.wav`, or
-`question` for the built-in one), `run` (from 1 for each clip), each measure the provider's
-topology has as `<measure>_ms`, null when the run did not measure it, the cascade's
-`tts_segment_first_audio_ms`, `seconds` billed, and `notes`. The file is written after the table
-is printed; when it does not write, `compare` says why and exits with status 1, the table already
-out:
+A failed recognition is a note of the arm's run, with the endpoint's reason, also when the run's
+limit passes first. The run then waits for the recognition at most 3 s, the plan's drain, and says
+so when it had still not ended. The next turn, of the next run or clip, waits for such a
+recognition at most the endpoint's read timeout of 10 s before it starts its own. Its recogniser
+takes one recognition at a time.
+
+`--clips <dir>` asks each 16-bit PCM WAV file of a directory in place of the built-in question,
+in the order of the file names. A file counts when its name ends in `.wav`. Each provider runs
+`--runs` runs of each clip, every run of the first clip first, and the table pools the runs of all
+clips.
+
+`--runs-out <file>` writes every run as one JSON line with the fields `provider`, `topology`,
+`clip`, `run`, `<measure>_ms` for each measure the provider's topology has, the cascade's
+`tts_segment_first_audio_ms`, `seconds` billed, and `notes`. `clip` is the file name without
+`.wav`, or `question` for the built-in one. `run` counts from 1 for each clip. A measure the run
+did not measure is null.
+
+The file is written after the table is printed. When it does not write,
+`compare` says why and exits with status 1, the table already out:
 
 ```sh
 cargo run -p realtime-voice --example compare -- --providers openai --clips questions/ --runs 10 --runs-out runs.jsonl
 ```
 
-Each cell of the table is `median [lowest-highest] measured/runs`, followed by `p95` and the 95th
-percentile, by nearest rank, when more than one run measured it.
+Each cell of the table is `median [lowest-highest] measured/runs`. When more than one run measured
+it, `p95` and the 95th percentile by nearest rank follow.
 
 ```sh
 cargo run -q -p realtime-voice --example compare -- --help
@@ -173,9 +184,9 @@ Options:
 
 ## What the table looks like
 
-A live comparison is billed, so no live output is shown. The test below runs the same comparison
-with two scripted providers on a fake clock, `fast` and `slow`, and a skipped `nova`, and prints
-the table the example prints:
+A live comparison is billed, so no live output is shown. This test runs the same comparison with
+two scripted providers on a fake clock, `fast` and `slow`, and a skipped `nova`. It prints the
+table the example prints:
 
 ```sh
 cargo test -q -p realtime-voice --test compare two_scripted_providers_give_their_figures_their_order_and_the_table -- --nocapture

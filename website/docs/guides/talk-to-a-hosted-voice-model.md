@@ -55,14 +55,14 @@ Options:
 | `nova` | Amazon Nova Sonic on Bedrock, `amazon.nova-2-sonic-v1:0` unless `INFERENCE_NOVA_SONIC_MODEL` names another | the AWS default credential chain; the region from `AWS_REGION` |
 | `elevenlabs-cascade` | a cascade, built with feature `local`: ElevenLabs speech to text (`scribe_v2_realtime`), the `llama-server` that `INFERENCE_LLAMA_SERVER_URL` and `INFERENCE_LLAMA_SERVER_MODEL` name, ElevenLabs text to speech in the voice `ELEVENLABS_VOICE_ID` names | `ELEVENLABS_API_KEY`, or the OS keychain, secret `elevenlabs-api-key`, when it is unset; the host from `ELEVENLABS_RESIDENCY` |
 
-The `Conversation` code is the same for the three native models: `--provider` changes the
-binding, not the application. `elevenlabs-cascade` is a cascade of three models instead; see
+The `Conversation` code is the same for the three native models. `--provider` changes only the
+binding. `elevenlabs-cascade` is a cascade of three models instead, described in
 [Talk to the ElevenLabs cascade](#talk-to-the-elevenlabs-cascade).
 
 ## Store the OpenAI key once
 
-The keychain secret is written with `secretsctl` from [Secrets](https://beyond10x.github.io/secrets/),
-which reads the value from a hidden prompt, never from the command line:
+The keychain secret is written with `secretsctl` from [Secrets](https://beyond10x.github.io/secrets/).
+It reads the value from a hidden prompt, not from the command line:
 
 ```sh
 secretsctl put openai-api-key
@@ -81,13 +81,13 @@ AWS_REGION=us-east-1 cargo run -p realtime-voice --example talk -- --provider no
 
 Speak, interrupt the model mid-answer, ask for the time. Both transcripts are printed. Each
 response's usage is printed when it ends, with `?` for a count the provider did not report. Enter
-ends the conversation and prints the session's usage totals and its duration; Ctrl-C ends it
+ends the conversation and prints the session's usage totals and its duration. Ctrl-C ends it
 without them.
 
 GPT-Live decides itself when to speak and when it is interrupted, so the conversation never
-cancels or truncates it; it bills the voice in seconds, which are printed with the totals. When you
-speak over its answer, the binding reports the speech start from where your transcript falls on
-the session timeline, and the answer's queued audio stops playing.
+cancels or truncates it. GPT-Live bills the voice in seconds, which are printed with the totals.
+When you speak over its answer, the binding reports the speech start from where your transcript
+falls on the session timeline, and the answer's queued audio stops playing.
 
 No output is shown here: every run is a live, billed session with a microphone. The conversation
 logic is tested against the duplex mock and a fake audio host in
@@ -97,8 +97,8 @@ logic is tested against the duplex mock and a fake audio host in
 
 `elevenlabs-cascade` hears you with ElevenLabs realtime speech to text, answers with a local
 `llama-server`, and speaks with ElevenLabs text to speech. Start the server on loopback as in
-[Run the local voice cascade offline](run-the-local-voice-cascade-offline.md), store the ElevenLabs key once with
-`secretsctl put elevenlabs-api-key` (or set `ELEVENLABS_API_KEY`), and run:
+[Run the local voice cascade offline](run-the-local-voice-cascade-offline.md). Store the
+ElevenLabs key once with `secretsctl put elevenlabs-api-key` or set `ELEVENLABS_API_KEY`, and run:
 
 ```sh
 INFERENCE_LLAMA_SERVER_URL=http://127.0.0.1:8080/v1 \
@@ -116,7 +116,7 @@ ELEVENLABS_VOICE_ID=<voice id> ELEVENLABS_RESIDENCY=eu \
 | `ELEVENLABS_RESIDENCY` | the data-residency host of the key, `global`, `us`, `eu`, `in` or `sg`, for both ElevenLabs endpoints; a key of a residency stack is refused by every other host | `global`; any other value exits with status 2, naming the variable, never the value |
 
 The variables are checked in the order of the table, before anything opens or is sent. Without feature
-`local` the provider exits with status 2, naming the feature. With none of them set:
+`local` the provider exits with status 2, and the message names the feature. With none of them set:
 
 ```sh
 cargo run -q -p realtime-voice --features local --example talk -- --provider elevenlabs-cascade
@@ -128,13 +128,17 @@ error: INFERENCE_LLAMA_SERVER_URL is not set
 
 The microphone is sent in `pcm_16000`, and the endpoint's voice activity detection commits each
 turn when you pause. Each committed turn is asked of the server on its own, without the turns
-before it, and each committed sentence of the answer is sent to ElevenLabs as it arrives, one
-after another. When you speak over the answer for 30 ms, or a new turn is committed while it
-still plays, its playback stops and no further sentence of it is sent. ElevenLabs still generates
-and bills the sentence it was speaking, whose audio is dropped as it arrives: a barge-in saves
-playback and the sentences not yet sent, not that one. When the recognition fails, as when the
-host refuses the key, the conversation ends and says why. The cascade has no tool and prints no
-usage. Enter ends the conversation without waiting for the rest of the answer.
+before it. Each committed sentence of the answer is sent to ElevenLabs as it arrives, one after
+another.
+
+When you speak over the answer for 30 ms, or a new turn is committed while it still plays, its
+playback stops and no further sentence of it is sent. ElevenLabs still generates and bills the
+sentence it was speaking, and that audio is dropped as it arrives. A barge-in saves playback and
+the sentences not yet sent.
+
+When the recognition fails, as when the host refuses the key, the conversation ends and says why.
+The cascade has no tool and prints no usage. Enter ends the conversation without waiting for the
+rest of the answer.
 
 ## Add a cost estimate
 
@@ -142,37 +146,45 @@ usage. Enter ends the conversation without waiting for the rest of the answer.
 cargo run -p realtime-voice --example talk -- --provider openai --prices prices.json
 ```
 
-The price table is yours; its format is in
+The price table is yours. Its format is in
 [Estimate cost from a price table](estimate-cost-from-a-price-table.md).
 
 ## Realtime session settings
 
-Since 0.7.0 the OpenAI Realtime output speed can be set, as a multiple of the model's own pace
-from 0.25 to 1.5 (the server's default is 1.0): `inference_openai::SessionConfig::speed` on the
-client, and `OpenAiRealtime::with_output_speed` on the native speech binding. The binding clamps a
-value outside that range to its nearer end, 0.25 or 1.5, and treats a value that is not a number
-as unset, so the server's default applies. The client sends `SessionConfig::speed` as given and
-leaves the range to the server.
+Since 0.7.0 the OpenAI Realtime output speed can be set: `inference_openai::SessionConfig::speed`
+on the client, and `OpenAiRealtime::with_output_speed` on the native speech binding.
 
-Since 0.10.0 `SessionConfig` also sends input noise reduction (`NoiseReduction`), the input
-transcription's language and prompt beside its model, and a session `tool_choice`
-(`ToolChoice`); each unset field is left out of `session.update`. On the open client,
-`RealtimeClient::create_item` adds a user, assistant or function-output item with an optional
-`event_id` and a `previous_item_id` placement, `RealtimeClient::create_response_with` creates a
-response with its own instructions, tool choice, tools and input, or out of band with
-conversation `none`, and `RealtimeClient::ping` and `LiveClient::ping` send a WebSocket ping
-for a keepalive the caller schedules.
+The speed is
+a multiple of the model's own pace, from 0.25 to 1.5. The server's default is 1.0. The binding
+clamps a value outside that range to its nearer end, 0.25 or 1.5. It treats a value that is not a
+number as unset, so the server's default applies. The client sends `SessionConfig::speed` as given
+and leaves the range to the server.
 
-Since 0.11.0 `RealtimeClient::into_split` and `LiveClient::into_split` split an
-open session into a sender (`RealtimeSender`, `LiveSender`), which holds every send method, and a
-receiver (`RealtimeReceiver`, `LiveReceiver`), which holds `next_event`, `session` and the events
-kept during setup. Two tasks own them, so events keep arriving while an audio write the peer does
-not drain is pending. `RealtimeClient::reunite` and `LiveClient::reunite` put the halves back
-together for `close`; halves of two sessions are refused with `ReuniteError`, which hands both
-back. The read timeout holds across `next_event` calls: a session that sends no message for that
-long reports `RealtimeError::Stalled`, even when the caller drops and repeats its read.
-`ConversationItem::SystemText` adds a system-role item, so an out-of-band response can carry
-instructions in context without adding them to the conversation.
+These ship in `inference_openai` since 0.10.0:
+
+- `SessionConfig` also sends input noise reduction (`NoiseReduction`), the input transcription's
+  language and prompt beside its model, and a session `tool_choice` (`ToolChoice`). Each unset
+  field is left out of `session.update`.
+- On the open client, `RealtimeClient::create_item` adds a user, assistant or function-output
+  item with an optional `event_id` and a `previous_item_id` placement.
+- `RealtimeClient::create_response_with` creates a response with its own instructions, tool
+  choice, tools and input, or out of band with conversation `none`.
+- `RealtimeClient::ping` and `LiveClient::ping` send a WebSocket ping for a keepalive the caller
+  schedules.
+
+These ship in `inference_openai` since 0.11.0:
+
+- `RealtimeClient::into_split` and `LiveClient::into_split` split an open session into a sender
+  and a receiver. The sender (`RealtimeSender`, `LiveSender`) holds every send method. The
+  receiver (`RealtimeReceiver`, `LiveReceiver`) holds `next_event`, `session` and the events kept
+  during setup. Two tasks own them, so events keep arriving while an audio write the peer does not
+  drain is pending.
+- `RealtimeClient::reunite` and `LiveClient::reunite` put the halves back together for `close`.
+  Halves of two sessions are refused with `ReuniteError`, which hands both back.
+- The read timeout holds across `next_event` calls. A session that sends no message for that long
+  reports `RealtimeError::Stalled`, even when the caller drops and repeats its read.
+- `ConversationItem::SystemText` adds a system-role item, so an out-of-band response can carry
+  instructions in context without adding them to the conversation.
 
 ## Next
 
