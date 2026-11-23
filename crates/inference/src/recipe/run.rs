@@ -206,6 +206,7 @@ impl<'i> Run<'i> {
                             audio: self.port(node, "audio")?,
                         },
                         playback: self.port(node, "playback")?,
+                        usage: self.port(node, USAGE_PORT).ok(),
                     }
                 } else {
                     Synthesis::Plain {
@@ -258,8 +259,9 @@ impl<'i> Run<'i> {
     }
 
     /// The LLM node: the cascade's agent, one generation per turn, which keeps its replies when
-    /// the cascade does not cut at a turn's opening; any other recipe's model node, sending the
-    /// usage record of each turn on the node's port `usage` when the recipe declares one.
+    /// the cascade does not cut at a turn's opening; any other recipe's model node. Either sends
+    /// the usage record of each model call on the node's port `usage` when the recipe declares
+    /// one.
     #[cfg_attr(
         not(feature = "audio-host"),
         allow(
@@ -275,9 +277,12 @@ impl<'i> Run<'i> {
     ) -> Result<Implementation, Error> {
         #[cfg(feature = "audio-host")]
         if matches!(self.recipe.topology, Topology::VoiceCascade) {
-            let agent = AgentNode::new(run_id, generator, reply, self.log.clone())
+            let mut agent = AgentNode::new(run_id, generator, reply, self.log.clone())
                 .with_playback(self.port(node, "played")?)
                 .with_instructions(self.recipe.instructions.clone().unwrap_or_default());
+            if let Ok(usage) = self.port(node, USAGE_PORT) {
+                agent = agent.with_usage(usage);
+            }
             let cutting = self.speaker.is_some_and(|speaker| speaker.auto_interrupt);
             return Ok(if cutting {
                 Box::new(agent)

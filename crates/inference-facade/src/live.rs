@@ -14,9 +14,9 @@
 //! | operation | what the session does |
 //! |---|---|
 //! | [`LiveSession::send`] | `SendInput`, then forwards the application's envelope to the ingress its `port` names, stamped with the session and the current run (310) |
-//! | [`LiveSession::commit_input`] | `CommitInput`, then sends a control event of kind `commit` into every ingress |
+//! | [`LiveSession::commit_input`] | sends a control event of kind `commit` into every ingress, then `CommitInput` once every ingress took it |
 //! | [`LiveSession::receive`] | the next [`SessionEvent`]: the session's own events first, then what the run sends on its egresses, converted by [`SessionPayload`] |
-//! | [`LiveSession::close`] | `CloseSession` (Draining), then a control event of kind `stop` into every ingress, which ends the run's input |
+//! | [`LiveSession::close`] | `CloseSession` (Draining), then a control event of kind `stop` into every ingress, which ends the run's input; a later `close` sends it again into an ingress that refused it as full |
 //!
 //! `SendInput` and `CommitInput` refuse a session that is not Ready, so a draining session admits
 //! no new input. Once the run has drained and completed and the application received what the
@@ -48,14 +48,16 @@
 //!
 //! The session records its history ([`crate::history`]) from what it accepts and delivers: the
 //! committed input texts the application sent since its last commit as one user turn at
-//! [`LiveSession::commit_input`], joined by a space; a committed transcript it delivers, a voice
-//! turn's, as a user turn; a committed segment it delivers as an assistant segment; a tool result
-//! it delivers as a tool result with its call. A delta or a hypothesis records nothing. A user
-//! turn is open from its first [`LiveSession::send`] to its commit: a fact the session delivers
-//! meanwhile is recorded after the turn, at the commit, so that the turn precedes the reply that
-//! answers it, and the history's positions follow the order it was recorded in. A turn the
-//! application does not commit, because it closes, cancels, switches or lets go of its handle,
-//! is not recorded; the facts delivered while it was open are, then.
+//! [`LiveSession::commit_input`], once every ingress took the commit, joined by a space; a
+//! committed transcript it delivers, a voice turn's, as a user turn; a committed segment it
+//! delivers as an assistant segment; a tool result it delivers as a tool result with its call. A
+//! delta or a hypothesis records nothing. A user turn is open from its first
+//! [`LiveSession::send`] to its commit: a fact the session delivers meanwhile is recorded after
+//! the turn, at the commit, so that the turn precedes the reply that answers it, and the
+//! history's positions follow the order it was recorded in. A turn whose commit an ingress
+//! refused stays open. A turn the application does not commit, because it closes, cancels,
+//! switches or lets go of its handle, is not recorded; the facts delivered while it was open
+//! are, then.
 //!
 //! A usage record a model node sends on an exposed `usage` port, or a subgraph node forwards on
 //! one from its child run, is delivered as `UsageRecorded` and added to the session's usage view,
@@ -306,12 +308,14 @@ impl Generations {
 }
 
 /// The user turn the application is sending: the committed input texts it sent since its last
-/// commit, and the facts the session delivered since the first of them, which join the history
-/// after the turn.
+/// commit, the facts the session delivered since the first of them, which join the history
+/// after the turn, and the ingresses that took the turn's commit while another refused it, which
+/// a retried commit does not send it into again.
 #[derive(Debug, Default)]
 pub(crate) struct Turn {
     texts: Vec<String>,
     held: Vec<Fact>,
+    committed: Vec<String>,
 }
 
 /// A committed fact the session delivered while a user turn was open, under the run it came from.
@@ -663,7 +667,8 @@ impl<P: fmt::Debug> Error for InputError<P> {}
 pub enum CloseError<P> {
     /// `CloseSession` refused: nothing moved.
     Refused(SessionMoveError),
-    /// An ingress refused the end of input; the session is Draining all the same.
+    /// An ingress refused the end of input; the session is Draining, and a later
+    /// [`LiveSession::close`] sends the end of input into an ingress that refused it as full.
     Forward(Box<SendError<P>>),
 }
 
@@ -791,6 +796,7 @@ impl LiveSessions {
             shared: Arc::clone(&shared),
             run_id,
             ingresses: Mutex::new(ingresses),
+            unstopped: Mutex::new(Vec::new()),
             receiving: Mutex::new(Receiving { egresses }),
             producer: NodeId::generate(),
             stream_id: StreamId::generate(),
@@ -933,6 +939,9 @@ pub struct LiveSession<P> {
     pub(crate) shared: Arc<Shared>,
     pub(crate) run_id: RunId,
     pub(crate) ingresses: Mutex<Vec<Arc<Ingress<P>>>>,
+    /// The ingresses a close let go of whose end of input they refused as full: a later
+    /// [`LiveSession::close`] of the draining session sends it into them again.
+    pub(crate) unstopped: Mutex<Vec<Arc<Ingress<P>>>>,
     pub(crate) receiving: Mutex<Receiving<P>>,
     pub(crate) producer: NodeId,
     pub(crate) stream_id: StreamId,
@@ -1071,26 +1080,67 @@ impl<P: SessionPayload> LiveSession<P> {
         Ok(())
     }
 
-    /// `commit_input`: runs `CommitInput` and sends a control event of kind `commit` into every
-    /// ingress.
+    /// `commit_input`: sends a control event of kind `commit` into every ingress and runs
+    /// `CommitInput` once every ingress took it, so that `InputCommitted` and the user turn it
+    /// records name only a commit the run took, as `InputSent` names only input the run took.
+    ///
+    /// A commit an ingress refused leaves the turn open: no `InputCommitted` is recorded and no
+    /// turn joins the history, so the application commits again. That commit is sent only into
+    /// the ingresses that did not take the refused one.
     ///
     /// # Errors
     ///
     /// [`InputError::Refused`] when the session is not Ready; nothing is sent and no event
-    /// recorded. [`InputError::Forward`] when an ingress refused the commit.
+    /// recorded. [`InputError::Forward`] when an ingress refused the commit, as a full ingress
+    /// whose overload policy is `fail` does; no event is recorded and the turn stays open.
+    /// [`InputError::Cancelled`] when the session was cancelled; no event is recorded.
+    ///
+    /// Once every ingress took the commit, a session that moved to Draining, or on to Closed by
+    /// that drain, meanwhile answers `Ok` with no `InputCommitted`, as [`LiveSession::send`]
+    /// answers an input taken then.
     pub async fn commit_input(&self) -> Result<(), InputError<P>> {
-        let committed = lock(&self.shared.sessions)
-            .commit_input(self.shared.session_id)
+        lock(&self.shared.sessions)
+            .admits_input(self.shared.session_id)
             .map_err(InputError::Refused)?;
-        self.shared.record(SessionEvent::InputCommitted(committed));
-        self.end_turn(true);
-        for ingress in self.shared_ingresses() {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(InputError::Cancelled);
+        }
+        let ingresses = self.shared_ingresses();
+        let owed: Vec<Arc<Ingress<P>>> = {
+            let turn = lock(&self.turn);
+            ingresses
+                .into_iter()
+                .filter(|ingress| !turn.committed.contains(&ingress.name))
+                .collect()
+        };
+        for ingress in owed {
             ingress
                 .endpoint
                 .send(self.control(&ingress.name, ControlKind::Commit))
                 .await
                 .map_err(|error| InputError::Forward(Box::new(error)))?;
+            lock(&self.turn).committed.push(ingress.name.clone());
         }
+        let committed = {
+            let mut sessions = lock(&self.shared.sessions);
+            if self.cancelled.load(Ordering::Acquire) {
+                return Err(InputError::Cancelled);
+            }
+            match sessions.commit_input(self.shared.session_id) {
+                Ok(committed) => committed,
+                Err(SessionMoveError::WrongState(conflict))
+                    if matches!(
+                        conflict.current,
+                        SessionState::Draining | SessionState::Closed
+                    ) =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(InputError::Refused(error)),
+            }
+        };
+        self.shared.record(SessionEvent::InputCommitted(committed));
+        self.end_turn(true);
         Ok(())
     }
 
@@ -1101,25 +1151,48 @@ impl<P: SessionPayload> LiveSession<P> {
     /// drain: `CompleteSessionClose` runs at once. While the run it left is still in flight, that
     /// run's end is the one the close waits for.
     ///
+    /// An ingress that refused the end of input as full, as one whose overload policy is `fail`
+    /// does, is kept: a later `close` of the Draining session sends the end of input into each
+    /// such ingress again, and once every ingress took it the run drains as above.
+    ///
     /// # Errors
     ///
-    /// [`CloseError::Refused`] when the session is neither Opened nor Ready; nothing moves.
-    /// [`CloseError::Forward`] when an ingress refused the end of input; the session is Draining
-    /// and the ingresses are let go all the same.
+    /// [`CloseError::Refused`] when the session is neither Opened nor Ready, nor Draining with
+    /// an end of input an ingress refused as full; nothing moves.
+    /// [`CloseError::Forward`] when an ingress refused the end of input; the session is
+    /// Draining, and a later `close` sends the end of input into an ingress that refused it as
+    /// full once it has room.
     pub async fn close(&self) -> Result<(), CloseError<P>> {
-        let draining = lock(&self.shared.sessions)
-            .close_session(self.shared.session_id)
-            .map_err(CloseError::Refused)?;
-        self.shared.record(SessionEvent::SessionDraining(draining));
-        self.end_turn(false);
-        let ingresses = std::mem::take(&mut *lock(&self.ingresses));
+        let closed = lock(&self.shared.sessions).close_session(self.shared.session_id);
+        let owed = match closed {
+            Ok(draining) => {
+                self.shared.record(SessionEvent::SessionDraining(draining));
+                self.end_turn(false);
+                std::mem::take(&mut *lock(&self.ingresses))
+            }
+            Err(SessionMoveError::WrongState(conflict))
+                if conflict.current == SessionState::Draining =>
+            {
+                let owed = std::mem::take(&mut *lock(&self.unstopped));
+                if owed.is_empty() {
+                    return Err(CloseError::Refused(SessionMoveError::WrongState(conflict)));
+                }
+                owed
+            }
+            Err(error) => return Err(CloseError::Refused(error)),
+        };
         let mut refused = None;
-        for ingress in ingresses {
+        let mut unstopped = Vec::new();
+        for ingress in owed {
             let stop = self.control(&ingress.name, ControlKind::Stop);
             if let Err(error) = ingress.endpoint.send(stop).await {
+                if matches!(error, SendError::Full(_)) {
+                    unstopped.push(ingress);
+                }
                 refused.get_or_insert(error);
             }
         }
+        lock(&self.unstopped).extend(unstopped);
         self.shared.closing();
         refused.map_or(Ok(()), |error| Err(CloseError::Forward(Box::new(error))))
     }
@@ -1416,7 +1489,7 @@ impl<P> LiveSession<P> {
     /// application sent text in it, then the facts delivered while it was open, in order.
     pub(crate) fn end_turn(&self, committed: bool) {
         let mut turn = lock(&self.turn);
-        let Turn { texts, held } = std::mem::take(&mut *turn);
+        let Turn { texts, held, .. } = std::mem::take(&mut *turn);
         if committed && !texts.is_empty() {
             self.shared.remember(Fact {
                 run_id: self.run_id,

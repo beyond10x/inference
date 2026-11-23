@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- `inference-tts`: `FrameLengthMismatch` moves to `inference-audio`, with the one length check
+  `AudioFrame::check_length`; `AudioRefused` and `CompletionRefused` carry that type.
+- `inference-duplex`: `SessionError::FrameLength(FrameLengthMismatch)` is a new variant.
+
+### Added
+
+- `inference-pipeline`: `AgentNode::with_usage` and `SpeechNode::with_usage` give the cascade's
+  agent and speech nodes a `usage` port; `SpeechPayload::usage` carries a record, none by default.
+
+### Changed
+
+- The test step runs under cargo-nextest 0.9.143 (`.config/nextest.toml`): a test over 60 s is killed
+  and fails, and the run prints its ten slowest tests. `task check` is `task check-source`,
+  `task test-build` and `task test-run`, the three steps CI runs.
+- Every `trybuild` case of `inference` runs in one `trybuild` run, `crates/inference/tests/ui.rs`,
+  in the slow lane (`task test-slow`, workflow `slow`), which runs when the macro crate, the SDK
+  crate's sources or the cases change; before, five tests ran a `trybuild` build each.
+- `rust-toolchain.toml` pins rustc 1.100.0, which CI, the documentation workflow and the local gate
+  use; test builds carry no debug info (`.cargo/config.toml`).
+- A pull request that changes only `.engineering/` files or `*.md` files outside `website/` and
+  `ess/`, other than `CHANGELOG.md`, passes `inference / task check` after validating the planning
+  store, without building or testing.
+
+### Fixed
+
+- `inference-facade`: `LiveSession::commit_input` delivers `InputCommitted` and records the user
+  turn only once every ingress took the commit; a refused commit, such as a full `fail` ingress's
+  `Full`, leaves the turn open for a retry.
+- `inference-facade`: a `LiveSession::close` whose end of input a full ingress refused can be
+  called again once the ingress has room; it delivers the end of input, and the run drains and the
+  session closes instead of staying Draining.
+- `inference-duplex`: a response's usage record is `final` only when the provider confirmed its
+  counts, by a `UsageTotal::Final` report or by creating the next response. A running count the
+  session's close or failure settles, or one settled because its final frame was lost, is
+  recorded `final: false`; before, a failed session recorded it as final. Usage held for no
+  response and recorded at the session's end is `final: false` too.
+- `inference-duplex`: input and output audio whose data is not as long as its samples make it
+  are refused with `SessionError::FrameLength`, before the response's emitted samples move; before,
+  a two-byte frame declaring two PCM16 samples was accepted and truncation at sample 2 succeeded.
+- `inference-duplex`: delivering a received event (`SessionLedger::next_event`) no longer searches
+  the session's whole history for it, so N frames read back one by one cost N lookups, not
+  N(N+1)/2.
+- The built-in recipe `voice_cascade` no longer drops the usage of its model calls: its `stt`,
+  `agent` and `tts` nodes each declare a `usage` port, exposed as the egresses `stt_usage`,
+  `agent_usage` and `tts_usage`, so a spoken turn yields one `Event::Usage` per model call and
+  the session's total counts them. A superseded or cancelled generation of the agent still sends
+  the records of its turns, the cut turn's among them.
+- `Agent::commit` sends the text `send_text` buffered to the recipe's own text ingress, `user_input`
+  or else its one exposed text input: an agent over `speak` now synthesises it, as one committed
+  segment of a generation of its own, where before the commit failed with "the pipeline exposes no
+  ingress `user_input`". The text leaves the buffer only once the ingress took it, so a commit
+  that fails, as on a recipe with no text ingress, keeps it, and a retry no longer succeeds with
+  nothing sent.
+
 ## [0.32.0] — 2026-11-23
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these

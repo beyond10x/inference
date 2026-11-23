@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-23T15:29:24Z",
+  "actor": "human:timo",
+  "artifact": "story:duplex-ledger-correctness",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "wave gate on wave/2026-11-23-next at ea186a570, rustc 1.100.0: fmt, docs generate --check, ess validate, aep validate, clippy -D warnings and nextest --no-run of inference, inference-facade, inference-duplex, inference-audio, inference-tts, inference-pipeline, inference-runtime, inference-docs, inference-openai, inference-aws, inference-elevenlabs, inference-deepgram, inference-testkit (all features but sherpa-onnx and whispercpp), stack test without default features, doc tests, cargo doc -D warnings of the workspace without sherpa-onnx and whispercpp, task test-slow (ui 371.7 s): all exit 0. nextest run of the 13 crates at load average 120-139: 3195 of 3215 passed, 9 failed and 11 killed at 60 s, every one a timing test (ticker gap, 28 s deadline, stall, pace) or an inference-testkit suite-synthesis test; the 17 re-run on base 62991a94 and on the wave tree with a 240 s kill: base 4 failed and 6 over 60 s, the wave tree at load 51 15 passed, slowest 51.5 s, and only the two inference-elevenlabs ticker tests failed, which fail on base too",
+    "reference": "wave/2026-11-23-next ea186a570"
+  }
+}

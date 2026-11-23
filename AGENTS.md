@@ -38,16 +38,22 @@ on this repository. `README.md` is for people.
 | `ess/` | the ESS specification: `system.yaml`, `ess-inputs.yaml` and one domain document per layer of the design under `domains/` (audio, duplex, graph, model, policy, session, stream, tools, usage); every declaration carries a `read from:` line naming the design line it was read from; `scenarios/` holds authored scenarios for what synthesis cannot witness |
 | `.engineering/planning` | the AEP planning store; change it only through `aep plan artifact` verbs |
 | `.engineering/drafts` | scratch bodies for `aep plan artifact … --from`; git-ignored |
-| `.github/workflows/` | `check.yml` runs `task check` with pinned `ess` and `aep` releases; `shared-gates.yml` calls the common source gates of `beyond10x/gates` at an exact commit; `pages.yml` ("Documentation validation") checks the generated pages, builds `website/` and binds the build to its commit on every pull request and push to `main`, and uploads it as the `b10x-project-site` artifact from `main`; `b10x-docs-site.yml` hands that artifact to the shared project-site workflow, which publishes it, so a documentation fix ships from `main` without a release |
+| `rust-toolchain.toml`, `.config/nextest.toml` | the one rustc the local gate and every workflow use (the UI snapshots of `crates/inference/tests/ui/` and `tests/compile_fail/` are rustc's messages, blessed on it), and the cargo-nextest profiles: `default` kills a test at 60 s and leaves out the `trybuild` binary `crates/inference/tests/ui.rs`, `slow` runs only that binary; `.cargo/config.toml` builds without debug info |
+| `.github/workflows/` | `check.yml` runs `task check` with pinned `ess`, `aep` and cargo-nextest releases, as `task check-source`, `task test-build` and `task test-run`, after its `scope` step: a pull request whose changed paths are all under `.engineering/` or `*.md` outside `website/` and `ess/` and other than `CHANGELOG.md` (the one path list, tested by `crates/inference-docs/tests/workflows.rs`) only validates the planning store, and the required check passes; `slow.yml` runs `task test-slow` when the macro crate, the SDK crate's sources or the UI cases change; `shared-gates.yml` calls the common source gates of `beyond10x/gates` at an exact commit; `pages.yml` ("Documentation validation") checks the generated pages, builds `website/` and binds the build to its commit on every pull request and push to `main`, and uploads it as the `b10x-project-site` artifact from `main`; `b10x-docs-site.yml` hands that artifact to the shared project-site workflow, which publishes it, so a documentation fix ships from `main` without a release |
 | `CHANGELOG.md` | one entry per release, written before the tag; a change a consumer can see goes under `## [Unreleased]` when it lands on `main` |
 
 ## Commands
 
-Tools: Rust stable 1.98 or later, [go-task](https://taskfile.dev), `ess` and `aep`; Node 22 and npm
-for the site only.
+Tools: the rustc `rust-toolchain.toml` pins (the crates' `rust-version` stays 1.98),
+[go-task](https://taskfile.dev), cargo-nextest at the version `.config/nextest.toml` requires,
+`ess` and `aep`; Node 22 and npm for the site only.
 
 ```
-task check                      # the sherpa-onnx archive, specification and planning store validation, the documentation drift check, then format, lint, the docs build with warnings denied and tests
+task check                      # task check-source, then task test-build and task test-run, as CI runs them
+task check-source               # the sherpa-onnx archive, specification and planning store validation, the documentation drift check, then format, lint and the docs build with warnings denied
+task test-build                 # builds the tests, runs none
+task test-run                   # cargo nextest run --workspace --all-features (a test over 60 s is killed and fails; prints the ten slowest), the stack test without default features, the doc tests
+task test-slow                  # the slow lane: every trybuild case of crates/inference in one trybuild run; go-task skips it while its sources are unchanged
 task docs-generate              # rewrite the generated files of the site
 npm --prefix website ci --allow-git=root && npm --prefix website run build   # build the site into website/build
 ess specify validate --path ess
@@ -56,7 +62,7 @@ ess verify conform run --path ess --scenarios ess/scenarios --target interpreted
 aep plan artifact validate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features   # --all-features builds the inference-testkit mocks behind its features run, stt, llm, tts and duplex
+cargo nextest run -p <crate> --all-features   # one crate's tests under the 60 s kill; --all-features builds the inference-testkit mocks behind its features run, stt, llm, tts and duplex
 cargo test -p inference-testkit --features run --test conform   # the testkit conformance target alone: synthesizes the suite, runs it in process, has `ess verify conform report` write the verdict; prints target/tmp/conform-<run>/, where suite.json, results.json and report.json stay, red or green
 git add <paths> && b10x-gates bot -- commit -F <file>   # staging is plain git; the route refuses add
 b10x-gates scan-text --policy <file> <path>...           # release and pull-request bodies before they are sent; no policy found is "not scanned", never "passed"

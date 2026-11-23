@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-23T11:07:52Z",
+  "actor": "human:operator",
+  "artifact": "story:live-session-commit-and-close-under-full-ingress",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "CARGO_INCREMENTAL=0 cargo test -p inference-facade --all-features (125 passed, 0 failed; live_session_close_and_bounded_log 7 passed at 455add154)",
+    "reference": "git:455add154"
+  }
+}

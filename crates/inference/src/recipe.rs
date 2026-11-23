@@ -41,8 +41,8 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use inference_core::id::RunId;
-use inference_core::model::{AdapterId, Capability, Locality};
+use inference_core::id::{NodeId, RunId};
+use inference_core::model::{AdapterId, Capability, Locality, Modality};
 use inference_core::policy::{
     DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind, ProfileNotFound,
 };
@@ -54,6 +54,7 @@ use inference_pipeline::nodes::vad::VadConfig;
 use inference_pipeline::{
     AdapterNotFound, BindNode, Catalog, Declaration, ExposePort, InteractionMode, LocalityDenied,
     Node, OverloadPolicy, PipelineId, PipelineSpec, PlanPipelineError, PlannedPipeline,
+    PortDirection,
 };
 use inference_tools::ToolExecutor;
 
@@ -197,8 +198,9 @@ impl Recipe {
     }
 
     /// The reference cascade of `local-voice-cascade`: microphone in, its VAD, turn policy, `stt`,
-    /// gates, `agent` and `tts` nodes and its speaker sink, with the egresses `transcript` and
-    /// `assistant_text`.
+    /// gates, `agent` and `tts` nodes and its speaker sink, with the egresses `transcript`,
+    /// `assistant_text` and, the usage record of each model call of its model nodes,
+    /// `stt_usage`, `agent_usage` and `tts_usage`.
     #[must_use]
     pub fn voice_cascade() -> Self {
         Self::built_in(
@@ -683,6 +685,16 @@ pub struct Instantiation {
     tools: Option<Tools>,
 }
 
+/// Where an agent's typed text enters an instantiated recipe ([`Instantiation::text_ingress`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TextIngress {
+    /// The ingress's name.
+    pub(crate) name: String,
+    /// Whether the node behind it is role-bound to `tts`, which speaks the committed segments of
+    /// a generation, rather than a node that takes committed user text.
+    pub(crate) spoken: bool,
+}
+
 /// The tool handles of the run [`Instantiation::open`] opened last.
 #[derive(Debug, Clone)]
 struct Tools {
@@ -713,6 +725,41 @@ impl Instantiation {
     #[must_use]
     pub const fn planned(&self) -> &PlannedPipeline {
         &self.planned
+    }
+
+    /// The ingress an agent's typed text goes to: the recipe's exposed text input named
+    /// `user_input`, as `chat`'s, or else its first exposed text input, as `speak`'s `text`;
+    /// none when it exposes no text input, as `transcribe` and `voice_cascade`.
+    pub(crate) fn text_ingress(&self) -> Option<TextIngress> {
+        let declaration = &self.declaration;
+        let inputs: Vec<(&str, NodeId)> = declaration
+            .exposures()
+            .filter(|exposure| exposure.pipeline_id() == self.pipeline_id)
+            .filter_map(|exposure| {
+                let port = declaration
+                    .ports()
+                    .find(|port| port.port_id() == exposure.port_id())?;
+                (port.direction() == PortDirection::Input && port.modality() == Modality::Text)
+                    .then(|| (exposure.name(), port.node_id()))
+            })
+            .collect();
+        let (name, node_id) = inputs
+            .iter()
+            .find(|(name, _)| *name == "user_input")
+            .or_else(|| inputs.first())?;
+        let node = declaration
+            .nodes()
+            .find(|node| node.node_id() == *node_id)?
+            .name();
+        let spoken = self
+            .recipe
+            .roles
+            .iter()
+            .any(|(bound, role)| bound == node && *role == Role::Tts);
+        Some(TextIngress {
+            name: (*name).to_owned(),
+            spoken,
+        })
     }
 
     /// Opens a live session of `sessions` over the planned pipeline in the recipe's interaction

@@ -10,9 +10,11 @@ source: Taskfile.yml, ess/, crates/inference-testkit (tests/conform.rs), crates/
 
 :::note[Requirements]
 
-Rust stable 1.98 or later, [go-task](https://taskfile.dev), and the `ess` and `aep` command-line
-tools. `task check` fetches the pinned sherpa-onnx archive on its first run; whisper.cpp is compiled
-from source, so `cmake`, a C++ compiler and `libclang` are needed too.
+The rustc `rust-toolchain.toml` pins (rustup installs it on first use),
+[go-task](https://taskfile.dev), [cargo-nextest](https://nexte.st) at the version
+`.config/nextest.toml` requires, and the `ess` and `aep` command-line tools. `task check` fetches
+the pinned sherpa-onnx archive on its first run; whisper.cpp is compiled from source, so `cmake`, a
+C++ compiler and `libclang` are needed too.
 
 :::
 
@@ -30,23 +32,51 @@ It runs, in order, and stops at the first failure:
 | the generated documentation | `task docs-check`, which is `cargo run -q -p inference-docs -- generate --check` |
 | format | `cargo fmt --all --check` |
 | lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
-| tests | `cargo test --workspace --all-features` |
+| the API documentation | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` |
+| the build of the tests | `task test-build`, which runs no test |
+| tests | `task test-run`: `cargo nextest run --workspace --all-features`, then the stack test without default features and the doc tests |
 
-CI runs the same task on every pull request.
+The first seven steps are `task check-source`. Under `.config/nextest.toml` a test that runs over 60
+seconds is killed and fails, and the test step prints its ten slowest tests, also when one failed.
 
-The steps as `task check` prints them, from a passing run in this tree:
+CI runs the same three tasks, `task check-source`, `task test-build` and `task test-run`, as
+separate steps of the required check `inference / task check`. A pull request whose changed files
+are all under `.engineering/` or are `*.md` files outside `website/` and `ess/`, other than
+`CHANGELOG.md`, only validates the planning store, and the check passes without a build.
+
+The steps as `task --dry check` lists them in this tree:
 
 ```text
 task: Task "sherpa-onnx-archive" is up to date
-task: [check] ess specify validate --path ess
-task: [check] aep plan artifact validate
+task: [check-source] ess specify validate --path ess
+task: [check-source] aep plan artifact validate
 task: [docs-check] cargo run -q -p inference-docs -- generate --check
-task: [check] cargo fmt --all --check
-task: [check] cargo clippy --workspace --all-targets --all-features -- -D warnings
-task: [check] cargo test --workspace --all-features
+task: [check-source] cargo fmt --all --check
+task: [check-source] cargo clippy --workspace --all-targets --all-features -- -D warnings
+task: [check-source] RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+task: [test-build] cargo nextest run --workspace --all-features --no-run
+task: [test-build] cargo nextest run -p inference --no-default-features --test stack --no-run
+task: [test-workspace] cargo nextest run --workspace --all-features
+task: [test-slowest] echo "the ten slowest tests, in seconds:"
+task: [test-slowest] grep '<testcase ' target/nextest/default/junit.xml | sed -E 's/.* name="([^"]*)" classname="([^"]*)".* time="([^"]*)".*/\3 \2 \1/' | sort -rn | head -n 10
+task: [test-run] cargo nextest run -p inference --no-default-features --test stack
+task: [test-run] cargo test --workspace --all-features --doc
 ```
 
-In that run, every one of the 314 test targets ended `test result: ok`: 2177 tests passed and 50 ignored.
+## The slow lane
+
+The `trybuild` cases of the `inference` crate, what its macros and its agent builder accept and
+refuse, run in one `trybuild` run, which builds the crate and its dependencies once more on its own:
+
+```sh
+task test-slow
+```
+
+It runs `cargo nextest run -p inference --features audio-device --profile slow`, and go-task skips
+it while none of its sources changed: the macro crate, the sources of `inference` and
+`inference-tools`, the cases, `Cargo.lock`, `rust-toolchain.toml` and `.config/nextest.toml`. The
+workflow `slow` runs it in CI on a change to those paths. The `.stderr` snapshots are rustc's
+messages: bless them (`TRYBUILD=overwrite`) only with the rustc `rust-toolchain.toml` pins.
 
 ## The conformance suite alone
 

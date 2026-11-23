@@ -357,6 +357,11 @@ impl Liveness {
 ///   recorded with every token count unknown. The next response does not settle a response
 ///   whose final usage the provider sends in a frame of its own ([`SessionLedger::usage_awaited`]):
 ///   that frame does, the binding's word that it was lost does, or the session's end does.
+/// * A response's record is `final` only when the provider confirmed its counts: by a report of
+///   its [`UsageTotal::Final`] total, or by creating the next response, which settles a running
+///   total. A response the ledger settles itself, at the session's end or because its final frame
+///   was lost ([`SessionLedger::response_usage_unknown`]), is recorded `final: false`: its counts
+///   are the last the provider reported, a lower bound.
 /// * A transcription's usage is recorded when reported, and so is usage of the whole session
 ///   ([`SessionLedger::session_usage`]); neither names a response.
 /// * Usage no response holds yet ([`SessionLedger::hold_usage`]) is recorded at the session's
@@ -406,11 +411,15 @@ pub struct SessionLedger {
     opened: (Instant, i64),
     /// The latest instant the ledger was given.
     latest: Instant,
-    /// The events recorded and not yet delivered, each with the received event it carries, if any.
-    outbox: VecDeque<(SessionEvent, Option<ReceivedEventId>)>,
+    /// The events recorded and not yet delivered, each with the place in `received` of the
+    /// received event it carries, if any, so delivering it looks nothing up.
+    outbox: VecDeque<(SessionEvent, Option<usize>)>,
     /// The events the provider sent the open session, in the order received
     /// ([`SessionLedger::received_events`]).
     received: Vec<ReceivedSessionEvent>,
+    /// How many received events delivering them looked at, for the tests that bound it.
+    #[cfg(test)]
+    visited: u64,
 }
 
 /// What the ledger keeps to record one response's usage.
@@ -422,6 +431,10 @@ struct Meter {
     quantities: Vec<Quantity>,
     /// Whether no later report changes them.
     settled: bool,
+    /// Whether the provider confirmed them final: by a report of its final total, or by
+    /// creating the next response, which settles a running total. A settlement the ledger makes
+    /// itself, at the session's end or for a lost final frame, confirms nothing.
+    confirmed: bool,
     /// Whether the provider reports the response's final usage in a frame of its own, however
     /// the response ends: the next response does not settle it ([`SessionLedger::usage_awaited`]).
     awaited: bool,
@@ -588,6 +601,8 @@ impl SessionLedger {
             latest: now,
             outbox: VecDeque::new(),
             received: Vec::new(),
+            #[cfg(test)]
+            visited: 0,
         }
     }
 
@@ -667,9 +682,13 @@ impl SessionLedger {
     /// open session that is still held, the caller now has that one too:
     /// `inference.duplex.DeliverSessionEvent`.
     pub fn next_event(&mut self) -> Option<SessionEvent> {
-        let (event, received_id) = self.outbox.pop_front()?;
-        if let Some(received_id) = received_id {
-            let _ = self.deliver_event(received_id);
+        let (event, place) = self.outbox.pop_front()?;
+        if let Some(place) = place {
+            #[cfg(test)]
+            {
+                self.visited += 1;
+            }
+            let _ = self.deliver_at(place);
         }
         Some(event)
     }
@@ -714,11 +733,26 @@ impl SessionLedger {
         &mut self,
         received_id: ReceivedEventId,
     ) -> Result<SessionEventDelivered, DeliverSessionEventError> {
-        let slot = self
+        let place = self
             .received
-            .iter_mut()
-            .find(|received| received.received_id() == received_id)
+            .iter()
+            .position(|received| {
+                #[cfg(test)]
+                {
+                    self.visited += 1;
+                }
+                received.received_id() == received_id
+            })
             .ok_or(DeliverSessionEventError::Unknown { received_id })?;
+        self.deliver_at(place)
+    }
+
+    /// `inference.duplex.DeliverSessionEvent` of the received event at `place` in `received`.
+    fn deliver_at(
+        &mut self,
+        place: usize,
+    ) -> Result<SessionEventDelivered, DeliverSessionEventError> {
+        let slot = &mut self.received[place];
         let (moved, event) = slot.deliver().map_err(DeliverSessionEventError::Conflict)?;
         *slot = moved;
         Ok(event)
@@ -729,10 +763,12 @@ impl SessionLedger {
     ///
     /// # Errors
     ///
-    /// [`SessionError::NotOpen`], then [`SessionError::FormatMismatch`].
+    /// [`SessionError::NotOpen`], [`SessionError::FormatMismatch`], then
+    /// [`SessionError::FrameLength`] when the frame's data is not as long as its samples make it.
     pub fn accept_input(&mut self, frame: AudioFrame) -> Result<(), SessionError> {
         self.require_open()?;
         Self::same_format(*self.session.input_format(), frame.format)?;
+        frame.check_length().map_err(SessionError::FrameLength)?;
         let session_id = self.session.session_id();
         self.push(SessionEvent::InputAccepted(InputAccepted {
             session_id,
@@ -1202,7 +1238,7 @@ impl SessionLedger {
             Response::create_as(response_id, &self.session).map_err(SessionError::NotOpen)?;
         self.heard(now);
         self.requested = false;
-        self.settle_ended();
+        self.settle_ended(true);
         self.responses.push(response);
         self.emitted.push(0);
         self.usage.push(None);
@@ -1211,6 +1247,7 @@ impl SessionLedger {
             ended: None,
             quantities: Vec::new(),
             settled: false,
+            confirmed: false,
             awaited: false,
             recorded: false,
         });
@@ -1223,8 +1260,9 @@ impl SessionLedger {
     /// # Errors
     ///
     /// [`SessionError::NotOpen`], [`SessionError::UnknownResponse`],
-    /// [`SessionError::ResponseNotInProgress`], then [`SessionError::FormatMismatch`] against the
-    /// session's output format.
+    /// [`SessionError::ResponseNotInProgress`], [`SessionError::FormatMismatch`] against the
+    /// session's output format, then [`SessionError::FrameLength`] when the frame's data is not
+    /// as long as its samples make it: a refused frame advances none of the response's samples.
     pub fn output_audio(
         &mut self,
         response_id: ResponseId,
@@ -1233,6 +1271,7 @@ impl SessionLedger {
     ) -> Result<(), SessionError> {
         let index = self.in_progress_index(response_id)?;
         Self::same_format(*self.session.output_format(), frame.format)?;
+        frame.check_length().map_err(SessionError::FrameLength)?;
         self.heard(now);
         self.emitted[index] += u64::from(frame.sample_count);
         self.push_received(
@@ -1424,7 +1463,8 @@ impl SessionLedger {
 
     /// The frame that carried the response's final usage was lost or could not be read: its
     /// usage is settled at `now` with every count the provider did not report unknown, and
-    /// recorded once it ended. This is no sign of life: the liveness bound runs on.
+    /// recorded once it ended, not final unless the provider confirmed its counts before. This is
+    /// no sign of life: the liveness bound runs on.
     ///
     /// # Errors
     ///
@@ -1438,8 +1478,11 @@ impl SessionLedger {
         let index = self.index_of(response_id)?;
         self.require_unrecorded(index)?;
         self.tick(now);
-        let quantities = std::mem::take(&mut self.meters[index].quantities);
-        self.count(index, quantities, UsageTotal::Final);
+        let meter = &mut self.meters[index];
+        meter.settled = true;
+        if meter.ended.is_some() {
+            self.record_response(index);
+        }
         Ok(())
     }
 
@@ -1504,7 +1547,8 @@ impl SessionLedger {
     /// replace what was held before, and an empty list holds nothing; an adapter releases them
     /// so once a response takes them. What is held when the session ends, by a close, a failure
     /// or a stall, is recorded as usage of the session, naming no response, before the end
-    /// events; held after the end, it is recorded at once.
+    /// events, and `final: false`: no report confirmed it. Held after the end, it is recorded at
+    /// once.
     pub fn hold_usage(&mut self, quantities: Vec<Quantity>) {
         if self.session.require_open().is_err() {
             if !quantities.is_empty() {
@@ -1539,6 +1583,7 @@ impl SessionLedger {
         let meter = &mut self.meters[index];
         meter.quantities = quantities;
         meter.settled |= total == UsageTotal::Final;
+        meter.confirmed |= total == UsageTotal::Final;
         if meter.settled && meter.ended.is_some() {
             self.record_response(index);
         }
@@ -1552,28 +1597,32 @@ impl SessionLedger {
         }
     }
 
-    /// Records every response that ended and is not recorded yet: the next response, or the
-    /// session's end, settles them; the next response does not settle one whose final usage is
-    /// awaited ([`Self::usage_awaited`]).
-    fn settle_ended(&mut self) {
+    /// Records every response that ended and is not recorded yet: the provider's next response
+    /// (`by_next_response`), which confirms a running total, or the session's end, which does
+    /// not, settles them; the next response does not settle one whose final usage is awaited
+    /// ([`Self::usage_awaited`]).
+    fn settle_ended(&mut self, by_next_response: bool) {
         for index in 0..self.meters.len() {
-            let meter = &self.meters[index];
+            let meter = &mut self.meters[index];
             if meter.ended.is_some() && (meter.settled || !meter.awaited) {
+                meter.confirmed |= by_next_response && !meter.settled;
                 self.record_response(index);
             }
         }
     }
 
     /// The session ends: every response settles, every one that ended is recorded, and the one
-    /// in progress is recorded by its end, just before its end event.
+    /// in progress is recorded by its end, just before its end event. The ledger settles them,
+    /// not the provider: what the provider did not confirm final is recorded `final: false`, and
+    /// so is usage held for no response.
     fn settle_for_end(&mut self) {
         for meter in &mut self.meters {
             meter.settled = true;
         }
-        self.settle_ended();
+        self.settle_ended(false);
         let held = std::mem::take(&mut self.held);
         if !held.is_empty() {
-            self.record_of_session(held, true, self.opened.0, self.latest);
+            self.record_of_session(held, false, self.opened.0, self.latest);
         }
     }
 
@@ -1584,7 +1633,7 @@ impl SessionLedger {
         }
     }
 
-    /// Records the usage of the response at `index`, once.
+    /// Records the usage of the response at `index`, once, final when the provider confirmed it.
     fn record_response(&mut self, index: usize) {
         let meter = &mut self.meters[index];
         if meter.recorded {
@@ -1592,7 +1641,11 @@ impl SessionLedger {
         }
         meter.recorded = true;
         let quantities = response_quantities(std::mem::take(&mut meter.quantities));
-        let (started, ended) = (meter.started, meter.ended.unwrap_or(self.latest));
+        let (started, ended, confirmed) = (
+            meter.started,
+            meter.ended.unwrap_or(self.latest),
+            meter.confirmed,
+        );
         let mut usage = RecordUsage::new(
             self.session.adapter_id(),
             self.model_id,
@@ -1602,6 +1655,7 @@ impl SessionLedger {
         );
         usage.speech_session_id = Some(self.session.session_id());
         usage.response_id = Some(self.responses[index].response_id());
+        usage.r#final = confirmed;
         self.push_record(usage);
     }
 
@@ -1645,9 +1699,11 @@ impl SessionLedger {
             .unwrap_or(i64::MAX)
             .saturating_add(1);
         let received_id = ReceivedEventId::generate();
-        let received = self.receive_event(received_id, kind, sequence).ok();
-        self.outbox
-            .push_back((event, received.map(|received| received.received_id)));
+        let place = self
+            .receive_event(received_id, kind, sequence)
+            .ok()
+            .map(|_| self.received.len() - 1);
+        self.outbox.push_back((event, place));
     }
 
     /// The session ends with `end`: every event the provider sent that is still held is
@@ -1812,5 +1868,96 @@ impl SessionLedger {
             .require_in_progress()
             .map_err(SessionError::ResponseNotInProgress)?;
         Ok(index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::{NonZeroU16, NonZeroU32};
+
+    use inference_audio::AudioEncoding;
+    use inference_core::model::{
+        AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality,
+    };
+
+    use super::*;
+    use crate::{TurnDetection, TurnTuning};
+
+    #[test]
+    fn delivering_each_received_frame_looks_at_that_frame_only() {
+        const FRAMES: u32 = 4_000;
+        let format = AudioFormat {
+            encoding: AudioEncoding::PcmS16le,
+            sample_rate: NonZeroU32::new(16_000).expect("a positive rate"),
+            channels: NonZeroU16::MIN,
+        };
+        let (adapter, _) = Adapter::declare(DeclareAdapter {
+            model_id: ModelId::generate(),
+            backend: "scripted".to_owned(),
+            contract_revision: "1".to_owned(),
+            execution_form: ExecutionForm::HostedService,
+            locality: Locality::ExternalProvider,
+            capabilities: vec![Capability::ConcurrentInputOutput],
+            max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
+        })
+        .expect("a positive concurrency");
+        let capabilities = SpeechCapabilities {
+            input_formats: vec![format],
+            output_formats: vec![format],
+            turn_detection: TurnDetection::ALL.to_vec(),
+            turn_tuning: TuningSupport::ALL,
+            manual_commit: true,
+            manual_response: true,
+            manual_interrupt: true,
+            client_cancel: true,
+            truncation: true,
+            tool_calling: true,
+        };
+        let config = SessionConfig {
+            voice: "calm".to_owned(),
+            instructions: String::new(),
+            input_format: format,
+            output_format: format,
+            turn_detection: TurnDetection::Disabled,
+            turn_tuning: TurnTuning::default(),
+            auto_response: false,
+            auto_interrupt: false,
+            tools: Vec::new(),
+            idle_limit: Duration::from_secs(10),
+        };
+        let now = Instant::now();
+        let (mut ledger, _) = SessionLedger::open(
+            SpeechSessionId::generate(),
+            &adapter,
+            &capabilities,
+            config,
+            now,
+        )
+        .expect("the session opens");
+        let response = ResponseId::generate();
+        ledger.response_created(response, now).expect("created");
+        ledger.next_event().expect("ResponseCreated");
+        let samples = 320;
+        for index in 0..FRAMES {
+            let frame = AudioFrame {
+                format,
+                position: SampleClockPosition::new(u64::from(index * samples)).expect("a position"),
+                sample_count: samples,
+                data: vec![0; 640],
+            };
+            ledger
+                .output_audio(response, frame, now)
+                .expect("in progress");
+            assert!(matches!(
+                ledger.next_event(),
+                Some(SessionEvent::OutputAudio(_))
+            ));
+        }
+        assert_eq!(
+            ledger.visited,
+            u64::from(FRAMES),
+            "each delivery looks at the event it delivers, not at every earlier one"
+        );
     }
 }

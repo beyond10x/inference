@@ -302,6 +302,10 @@ impl SpeechPayload for Payload {
         Self::Speech(Handoff::new(audio))
     }
 
+    fn usage(recorded: UsageRecorded) -> Option<Self> {
+        Some(Self::Usage(recorded))
+    }
+
     fn said(self) -> Said {
         match self {
             Self::Stream(event) => Said::Stream(event),

@@ -194,6 +194,20 @@ fn text_pipeline(
 /// A sink node alone behind the ingress `user text`, a turn-based pipeline with no egress,
 /// declared, validated and planned: what the session forwards, the sink records.
 pub fn sink_planned(generator: &MockGenerator) -> (Declaration, PlannedPipeline) {
+    sink_planned_with_ingress(
+        generator,
+        NonZeroUsize::new(8).expect("8"),
+        OverloadPolicy::Pause,
+    )
+}
+
+/// As [`sink_planned`], the ingress holding at most `capacity` envelopes and meeting overload
+/// with `policy`.
+pub fn sink_planned_with_ingress(
+    generator: &MockGenerator,
+    capacity: NonZeroUsize,
+    policy: OverloadPolicy,
+) -> (Declaration, PlannedPipeline) {
     let (profile, _) = DeploymentProfile::declare(DeclareProfile {
         kind: ProfileKind::OfflineStrict,
         egress: Egress::Denied,
@@ -223,12 +237,7 @@ pub fn sink_planned(generator: &MockGenerator) -> (Declaration, PlannedPipeline)
         .build(&catalog, profile_id, spec, |pipeline| {
             let sink = pipeline.node("sink", NodeRole::Sink, Vec::new());
             let input = pipeline.input::<modality::Text>(&sink, "in", text);
-            pipeline.expose(
-                &input,
-                INGRESS,
-                NonZeroUsize::new(8).expect("8"),
-                OverloadPolicy::Pause,
-            );
+            pipeline.expose(&input, INGRESS, capacity, policy);
         })
         .expect("the profile is declared");
     let validated = declaration

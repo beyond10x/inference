@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-23T11:32:21Z",
+  "actor": "human:operator",
+  "artifact": "story:speak-recipe-keeps-text-on-commit",
+  "kind": "story",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p inference --features testing,cost --test recipes (with the lib and the other inference test targets but the trybuild ui targets): recipes 40 passed, 0 failed; a_speak_agent_synthesises_the_text_it_commits and a_commit_that_fails_keeps_the_words_for_the_retry pass"
+  }
+}

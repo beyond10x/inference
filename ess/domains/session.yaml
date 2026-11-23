@@ -417,7 +417,10 @@ commands:
 
   # close drains or cancels processing and releases resources; closing starts the drain, and
   # CancelSession below is the cancel branch. A session that never became ready may be closed
-  # either way.
+  # either way. Below the session the facade then sends the end of input, a control event of
+  # kind stop, into every ingress; one an ingress refused as full is sent again by a later close
+  # of the Draining session, which does not run this command again, so a drain is never held by
+  # an end of input the run did not take.
   # read from: docs/design/inference.md:719
   # read from: docs/design/inference.md:339
   - name: inference.session.CloseSession
@@ -523,7 +526,11 @@ commands:
         summary: No session carries this identity; nothing was sent.
 
   # commit_input finalizes a text span or logical user turn: below the session the facade sends a
-  # control event of kind commit into the run's ingress. Refused unless Ready, as send is.
+  # control event of kind commit into the run's ingresses and runs this command, emitting
+  # InputCommitted and recording the user turn, only once every ingress took it, as SendInput
+  # emits InputSent only for input the ingress took. A commit an ingress refused, as a full
+  # ingress whose overload policy is fail does, emits nothing and leaves the turn open for the
+  # application to commit again. Refused unless Ready, as send is.
   # read from: docs/design/inference.md:716
   # read from: docs/design/inference.md:297
   # read from: docs/design/inference.md:339

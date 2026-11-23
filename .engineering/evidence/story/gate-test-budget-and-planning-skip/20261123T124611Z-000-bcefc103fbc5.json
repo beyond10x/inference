@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-23T12:46:11Z",
+  "actor": "human:operator",
+  "artifact": "story:gate-test-budget-and-planning-skip",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "slot --timeout 30m task test-slow: cargo nextest run -p inference --features audio-device --profile slow, 1 passed (ui, 186 s, rustc 1.100.0)"
+  }
+}
