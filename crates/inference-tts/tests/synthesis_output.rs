@@ -5,7 +5,9 @@
 
 use std::num::{NonZeroU16, NonZeroU32};
 
-use inference_tts::inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
+use inference_tts::inference_audio::{
+    AudioEncoding, AudioFormat, AudioFrame, FrameLengthMismatch, SampleClockPosition,
+};
 use inference_tts::inference_core::generation::{Generation, StartGeneration};
 use inference_tts::inference_core::id::{NodeId, RunId};
 use inference_tts::inference_core::model::{
@@ -13,7 +15,7 @@ use inference_tts::inference_core::model::{
 };
 use inference_tts::inference_text::{OutputSegment, SegmentId, SegmentState, SegmentStateConflict};
 use inference_tts::{
-    AudioRefused, CONTRACT_REVISION, CapabilityNotClaimed, CompletionRefused, FrameLengthMismatch,
+    AudioRefused, CONTRACT_REVISION, CapabilityNotClaimed, CompletionRefused,
     FrameOfAnotherSegment, OfferRefused, PlaybackReceipt, PlaybackRefused, PlayedFramesMismatch,
     SegmentAudio, SegmentNotTaken, SynthesisEvent, SynthesisOutput, UtteranceEnded,
 };

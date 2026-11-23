@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- `inference-tts`: `FrameLengthMismatch` moves to `inference-audio`, with the one length check
+  `AudioFrame::check_length`; `AudioRefused` and `CompletionRefused` carry that type.
+- `inference-duplex`: `SessionError::FrameLength(FrameLengthMismatch)` is a new variant.
+
+### Fixed
+
+- `inference-duplex`: a response's usage record is `final` only when the provider confirmed its
+  counts, by a `UsageTotal::Final` report or by creating the next response. A running count the
+  session's close or failure settles, or one settled because its final frame was lost, is
+  recorded `final: false`; before, a failed session recorded it as final. Usage held for no
+  response and recorded at the session's end is `final: false` too.
+- `inference-duplex`: input and output audio whose data is not as long as its samples make it
+  are refused with `SessionError::FrameLength`, before the response's emitted samples move; before,
+  a two-byte frame declaring two PCM16 samples was accepted and truncation at sample 2 succeeded.
+- `inference-duplex`: delivering a received event (`SessionLedger::next_event`) no longer searches
+  the session's whole history for it, so N frames read back one by one cost N lookups, not
+  N(N+1)/2.
+
 ## [0.32.0] — 2026-11-23
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these

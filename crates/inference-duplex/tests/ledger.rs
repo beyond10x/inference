@@ -5,7 +5,7 @@ use std::num::{NonZeroU16, NonZeroU32};
 use std::time::{Duration, Instant};
 
 use inference_duplex::inference_audio::{
-    AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition,
+    AudioEncoding, AudioFormat, AudioFrame, FrameLengthMismatch, SampleClockPosition,
 };
 use inference_duplex::inference_core::model::{
     Adapter, AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality,
@@ -1308,6 +1308,10 @@ fn usage_held_for_no_response_is_recorded_before_any_end_of_the_session() {
             held(50),
             "the latest held replaces the rest"
         );
+        assert!(
+            !recorded.r#final,
+            "held usage the session's end records was confirmed by no report"
+        );
         assert_eq!(ledger.usage_records().len(), 1);
     }
 }
@@ -1402,9 +1406,12 @@ fn record_of(events: &[SessionEvent], response: ResponseId) -> &UsageRecorded {
     found[0]
 }
 
+/// A way to end the session, and its name.
+type End = (&'static str, fn(&mut SessionLedger));
+
 #[test]
 fn a_running_count_settled_by_the_sessions_end_is_not_final() {
-    let ends: [(&str, fn(&mut SessionLedger)); 2] = [
+    let ends: [End; 2] = [
         ("a failure", |ledger| {
             ledger
                 .fail(SessionFailure {
@@ -1520,8 +1527,12 @@ fn two_samples(bytes: usize) -> AudioFrame {
 fn input_whose_data_is_shorter_than_its_samples_is_refused() {
     let now = Instant::now();
     let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
-    assert!(
-        ledger.accept_input(two_samples(2)).is_err(),
+    assert_eq!(
+        ledger.accept_input(two_samples(2)),
+        Err(SessionError::FrameLength(FrameLengthMismatch {
+            expected: 4,
+            actual: 2
+        })),
         "two samples of pcm_s16le need four bytes"
     );
     assert!(drain(&mut ledger).is_empty(), "nothing accepted");
@@ -1535,8 +1546,12 @@ fn output_whose_data_is_shorter_than_its_samples_is_refused_and_plays_nothing() 
     let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
     let response = ResponseId::generate();
     ledger.response_created(response, now).expect("created");
-    assert!(
-        ledger.output_audio(response, two_samples(2), now).is_err(),
+    assert_eq!(
+        ledger.output_audio(response, two_samples(2), now),
+        Err(SessionError::FrameLength(FrameLengthMismatch {
+            expected: 4,
+            actual: 2
+        })),
         "two samples of pcm_s16le need four bytes"
     );
     let heard = SampleClockPosition::new(2).expect("a position");

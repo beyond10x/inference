@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::{AudioEncoding, AudioFrame};
+use crate::{AudioEncoding, AudioFrame, FrameLengthMismatch};
 
 /// The bias μ-law adds to a magnitude, 33 in the standard's 14-bit units, here in 16-bit units.
 const MULAW_BIAS: i32 = 0x84;
@@ -133,14 +133,6 @@ impl fmt::Display for ConversionError {
 
 impl std::error::Error for ConversionError {}
 
-/// The data length a frame's format and sample count require and the length it carries, when the
-/// two differ.
-pub(crate) fn data_len_mismatch(frame: &AudioFrame) -> Option<(u64, u64)> {
-    let expected = frame.format.data_len(frame.sample_count);
-    let actual = frame.data.len() as u64;
-    (expected != actual).then_some((expected, actual))
-}
-
 impl AudioFrame {
     /// This frame in `encoding`: the same sample rate, channels, position and sample count, each
     /// sample converted on its own. `pcm_s16le` converts to and from `pcm_mulaw` and `pcm_alaw`
@@ -150,7 +142,7 @@ impl AudioFrame {
     /// itself. A frame whose data is not the length its format and sample count require is
     /// refused, and nothing panics.
     pub fn to_encoding(&self, encoding: AudioEncoding) -> Result<AudioFrame, ConversionError> {
-        if let Some((expected, actual)) = data_len_mismatch(self) {
+        if let Err(FrameLengthMismatch { expected, actual }) = self.check_length() {
             return Err(ConversionError::DataLength { expected, actual });
         }
         let from = self.format.encoding;

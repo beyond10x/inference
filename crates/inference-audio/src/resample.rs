@@ -4,8 +4,7 @@
 use std::fmt;
 use std::num::{NonZeroU16, NonZeroU32};
 
-use crate::g711::data_len_mismatch;
-use crate::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
+use crate::{AudioEncoding, AudioFormat, AudioFrame, FrameLengthMismatch, SampleClockPosition};
 
 /// The sample rates, in hertz, [`Resampler`] converts between.
 pub const RESAMPLER_RATES: [u32; 4] = [8_000, 16_000, 24_000, 48_000];
@@ -160,7 +159,7 @@ impl Resampler {
                 actual: frame.format,
             });
         }
-        if let Some((expected, actual)) = data_len_mismatch(frame) {
+        if let Err(FrameLengthMismatch { expected, actual }) = frame.check_length() {
             return Err(ResampleError::DataLength { expected, actual });
         }
         let output_start = match self.next_position {

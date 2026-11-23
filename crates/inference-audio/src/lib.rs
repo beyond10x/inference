@@ -33,6 +33,8 @@ mod resample;
 pub use g711::{ConversionError, decode_alaw, decode_mulaw, encode_alaw, encode_mulaw};
 pub use resample::{RESAMPLER_RATES, ResampleError, Resampler};
 
+use std::error::Error;
+use std::fmt;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;
 
@@ -166,8 +168,9 @@ fn samples_at(samples: u64, sample_rate: NonZeroU32) -> Duration {
 ///
 /// A well-formed frame carries [`AudioFormat::data_len`] of its `sample_count` bytes of data. The
 /// frame does not refuse one that does not: `ess/domains/audio.yaml` cannot state the invariant,
-/// so the wire admits what the specification admits, and a contract that produces frames, such as
-/// the TTS contract, refuses a mismatched one instead.
+/// so the wire admits what the specification admits, and a contract that takes or produces
+/// frames, such as the TTS and the native speech contracts, refuses a mismatched one instead,
+/// through [`AudioFrame::check_length`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AudioFrame {
@@ -184,7 +187,43 @@ impl AudioFrame {
     pub fn duration(&self) -> Duration {
         samples_at(u64::from(self.sample_count), self.format.sample_rate)
     }
+
+    /// Passes when the frame's data is as long as its samples make it,
+    /// [`AudioFormat::data_len`] of its `sample_count`.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameLengthMismatch`] naming both lengths when they differ.
+    pub fn check_length(&self) -> Result<(), FrameLengthMismatch> {
+        let expected = self.format.data_len(self.sample_count);
+        let actual = self.data.len() as u64;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(FrameLengthMismatch { expected, actual })
+        }
+    }
 }
+
+/// The frame's data is `actual` bytes where its sample count, channels and encoding width make
+/// `expected` ([`AudioFrame::check_length`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameLengthMismatch {
+    pub expected: u64,
+    pub actual: u64,
+}
+
+impl fmt::Display for FrameLengthMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the frame carries {} bytes of data where its samples make {}",
+            self.actual, self.expected
+        )
+    }
+}
+
+impl Error for FrameLengthMismatch {}
 
 /// The ESS `Bytes` wire form: a padded standard base64 string. Decoding refuses a missing or
 /// surplus pad, any character outside the standard alphabet and non-zero trailing bits: only the
