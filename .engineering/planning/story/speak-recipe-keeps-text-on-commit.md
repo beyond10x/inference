@@ -2,13 +2,17 @@
 format: aep.planning-md/3
 id: story:speak-recipe-keeps-text-on-commit
 kind: story
-status: draft
+status: implemented
 title: The speak recipe keeps the text an agent commits and synthesises it
 summary: Agent::commit sends buffered words to the recipe's own text ingress and keeps them when the send fails
 relations:
 - decomposes: epic:sdk
 - serves: vision:inference
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-23T12:35:47Z", actor: "human:operator", revision: 2, decided_on: {"recorded":{"test_result":1}}}
+- {from: "proposed", to: "active", at: "2026-11-23T12:35:48Z", actor: "human:operator", revision: 3, decided_on: {"recorded":{"test_result":1}}}
+- {from: "active", to: "implemented", at: "2026-11-23T12:35:48Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
