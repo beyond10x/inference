@@ -1,0 +1,8 @@
+{
+  "kind": "task",
+  "card": "rotating",
+  "task": "Find how to compare the latency of hosted voice providers.",
+  "start": "docs/concepts/overview",
+  "words": ["compare", "voice providers"],
+  "truth": {"path": "docs/guides/compare-voice-providers", "text": "--runs-out"}
+}

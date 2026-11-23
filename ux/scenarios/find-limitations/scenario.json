@@ -1,0 +1,8 @@
+{
+  "kind": "task",
+  "card": "rotating",
+  "task": "Find what the library does not support yet.",
+  "start": "",
+  "words": ["limitations", "status"],
+  "truth": {"path": "docs/status/limitations", "text": "No local text-to-speech"}
+}

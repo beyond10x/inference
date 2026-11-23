@@ -1,0 +1,342 @@
+{
+  "about": "Lower is better. Keys are <viewport>/<metric>. The sitemap scenario sums over every page and theme of the built site; a task scenario takes the worst theme. Written by `node tools/ratchet.ts --update`.",
+  "scenarios": {
+    "sitemap": {
+      "1440x900/layout.h_scroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/layout.overflow_elements": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/always_visible.misses": {
+        "value": 108,
+        "tolerance": 0
+      },
+      "1440x900/axe.serious_critical": {
+        "value": 134,
+        "tolerance": 0
+      },
+      "390x844/layout.h_scroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/layout.overflow_elements": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/always_visible.misses": {
+        "value": 216,
+        "tolerance": 0
+      },
+      "390x844/axe.serious_critical": {
+        "value": 130,
+        "tolerance": 0
+      },
+      "1440x900/keyboard.unreachable": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/keyboard.unreachable": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "find-dependency-lines": {
+      "1440x900/completion_miss": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.actions": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.looks": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.time_to_act_steps.max": {
+        "value": 1,
+        "tolerance": 0.05
+      },
+      "1440x900/glance_cost.median": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "1440x900/glance_cost.p95": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/completion_miss": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.actions": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "390x844/screen_only.looks": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.time_to_act_steps.max": {
+        "value": 1,
+        "tolerance": 0.05
+      },
+      "390x844/glance_cost.median": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/glance_cost.p95": {
+        "value": 1,
+        "tolerance": 0
+      }
+    },
+    "find-error-kinds": {
+      "1440x900/completion_miss": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.actions": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.looks": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.time_to_act_steps.max": {
+        "value": 2,
+        "tolerance": 0.1
+      },
+      "1440x900/glance_cost.median": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "1440x900/glance_cost.p95": {
+        "value": 3,
+        "tolerance": 0
+      },
+      "390x844/completion_miss": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.actions": {
+        "value": 4,
+        "tolerance": 0
+      },
+      "390x844/screen_only.looks": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.time_to_act_steps.max": {
+        "value": 2,
+        "tolerance": 0.1
+      },
+      "390x844/glance_cost.median": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/glance_cost.p95": {
+        "value": 3,
+        "tolerance": 0
+      }
+    },
+    "find-limitations": {
+      "1440x900/completion_miss": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.actions": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.looks": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.time_to_act_steps.max": {
+        "value": 2,
+        "tolerance": 0.1
+      },
+      "1440x900/glance_cost.median": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "1440x900/glance_cost.p95": {
+        "value": 3,
+        "tolerance": 0
+      },
+      "390x844/completion_miss": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.actions": {
+        "value": 4,
+        "tolerance": 0
+      },
+      "390x844/screen_only.looks": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.time_to_act_steps.max": {
+        "value": 2,
+        "tolerance": 0.1
+      },
+      "390x844/glance_cost.median": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/glance_cost.p95": {
+        "value": 3,
+        "tolerance": 0
+      }
+    },
+    "find-provider-comparison": {
+      "1440x900/completion_miss": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.actions": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.looks": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.time_to_act_steps.max": {
+        "value": 1,
+        "tolerance": 0.05
+      },
+      "1440x900/glance_cost.median": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "1440x900/glance_cost.p95": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/completion_miss": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.actions": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "390x844/screen_only.looks": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.time_to_act_steps.max": {
+        "value": 1,
+        "tolerance": 0.05
+      },
+      "390x844/glance_cost.median": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/glance_cost.p95": {
+        "value": 3,
+        "tolerance": 0
+      }
+    },
+    "find-realtime-model-variable": {
+      "1440x900/completion_miss": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.actions": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.looks": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "1440x900/screen_only.time_to_act_steps.max": {
+        "value": 1,
+        "tolerance": 0.05
+      },
+      "1440x900/glance_cost.median": {
+        "value": 3,
+        "tolerance": 0
+      },
+      "1440x900/glance_cost.p95": {
+        "value": 3,
+        "tolerance": 0
+      },
+      "390x844/completion_miss": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.actions": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "390x844/screen_only.looks": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "390x844/screen_only.time_to_act_steps.max": {
+        "value": 1,
+        "tolerance": 0.05
+      },
+      "390x844/glance_cost.median": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "390x844/glance_cost.p95": {
+        "value": 3,
+        "tolerance": 0
+      }
+    }
+  },
+  "tolerances": {
+    "counts": 0,
+    "steps": 0.05,
+    "layout_shift": 0.01
+  }
+}

@@ -1,0 +1,57 @@
+name: Docs UX
+
+on:
+  pull_request:
+    paths:
+      - "website/**"
+      - "docs/**"
+      - "ux/**"
+      - ".github/workflows/docs-ux.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-ux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ux:
+    name: Docs UX gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Fetch the baseline on main
+        run: git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            website/package-lock.json
+            ux/package-lock.json
+      - name: Build the Docusaurus site
+        run: npm --prefix website ci --allow-git=root && npm --prefix website run build
+      - name: Install the UX tools
+        working-directory: ux
+        run: npm ci && npx playwright install --with-deps chromium
+      - name: Layout contract, accessibility and the screen-only user
+        working-directory: ux
+        timeout-minutes: 2
+        run: npx playwright test --workers=2
+      - name: Ratchet against ux/baseline.json
+        working-directory: ux
+        run: node tools/ratchet.ts
+      - name: Keep the measurement
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: docs-ux-measurement
+          path: ux/.out
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: ignore

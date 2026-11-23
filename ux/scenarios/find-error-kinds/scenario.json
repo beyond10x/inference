@@ -1,0 +1,8 @@
+{
+  "kind": "task",
+  "card": "anchor",
+  "task": "Find the error kinds the graph runtime reports.",
+  "start": "",
+  "words": ["errors", "error", "reference"],
+  "truth": {"path": "docs/reference/errors", "text": "inference.graph"}
+}
