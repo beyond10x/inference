@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The built-in recipes `chat`, `transcribe` and `speak` no longer drop the usage record of their
+  model calls. Each declares a `usage` port on its model node and exposes it as the egress
+  `usage`, so a completed chat reply yields one `Event::Usage` and is counted in the session's
+  usage total, which before read as complete with no record in it. An application recipe whose
+  LLM, STT or TTS node declares a port `usage` gets the same wiring. `voice_cascade` still drops
+  the usage of its three model calls: its `agent` and `tts` nodes have no usage port yet.
+
 ## [0.31.0] — 2026-11-22
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these

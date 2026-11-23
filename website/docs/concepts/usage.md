@@ -42,6 +42,12 @@ audio tokens, never added to either.
 
 A failed call is recorded with `final: false`, and its counts are a lower bound.
 
+A record reaches a session only from a node whose `usage` port the pipeline declares. On main, in
+the next release: the SDK's built-in recipes `chat`, `transcribe` and `speak` expose their model
+node's usage as the egress `usage`, so an agent's event stream carries `Event::Usage` and its
+session total counts the call; `native_voice` carries its usage on `events`. `voice_cascade` does
+not declare one yet, and its total stays empty.
+
 ## Totals
 
 Since 0.8.0, a `UsageTotal` adds, per quantity kind, the known values and counts

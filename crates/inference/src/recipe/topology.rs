@@ -1,11 +1,16 @@
 //! The topologies of the five built-in recipes, each declared into a pipeline builder with every
 //! exposure at the recipe's capacity under `OverloadPolicy::Pause`. A role's node takes the
-//! requirements `requirement` returns for its role and default.
+//! requirements `requirement` returns for its role and default. The model node of `chat`,
+//! `transcribe` and `speak` declares a port [`USAGE_PORT`], exposed as the egress `usage`, on
+//! which it sends the usage record of each model call; `native_voice`'s records travel on its
+//! `events`. `voice_cascade` declares none yet: its `agent` and `tts` nodes have no usage port.
 
 use std::num::NonZeroUsize;
 
 use inference_core::model::Capability;
-use inference_pipeline::{Delivery, Essentiality, NodeRole, OverloadPolicy, PortTraits, modality};
+use inference_pipeline::{
+    Delivery, Essentiality, NodeRole, OverloadPolicy, PortTraits, USAGE_PORT, modality,
+};
 
 use super::MAX_TOOL_ITERATIONS;
 use crate::Role;
@@ -28,6 +33,13 @@ const STREAM: PortTraits = PortTraits {
     provisional_allowed: false,
 };
 
+/// A model node's `usage` port: its records are committed facts, reliable and ended like a
+/// stream, one record per model call rather than increments.
+const USAGE: PortTraits = PortTraits {
+    incremental: false,
+    ..STREAM
+};
+
 const PAUSE: OverloadPolicy = OverloadPolicy::Pause;
 
 pub(super) fn chat(
@@ -42,8 +54,10 @@ pub(super) fn chat(
     );
     let input = pipeline.input::<modality::Text>(&agent, "user_input", STREAM);
     let output = pipeline.output::<modality::Text>(&agent, "committed_text", STREAM);
+    let usage = pipeline.output::<modality::Structured>(&agent, USAGE_PORT, USAGE);
     pipeline.expose(&input, "user_input", capacity, PAUSE);
     pipeline.expose(&output, "assistant_text", capacity, PAUSE);
+    pipeline.expose(&usage, USAGE_PORT, capacity, PAUSE);
 }
 
 pub(super) fn transcribe(
@@ -54,8 +68,10 @@ pub(super) fn transcribe(
     let stt = pipeline.node("stt", NodeRole::Model, requirement(Role::Stt, &[]));
     let audio = pipeline.input::<modality::Audio>(&stt, "audio", STREAM);
     let committed = pipeline.output::<modality::Text>(&stt, "committed_text", STREAM);
+    let usage = pipeline.output::<modality::Structured>(&stt, USAGE_PORT, USAGE);
     pipeline.expose(&audio, "audio", capacity, PAUSE);
     pipeline.expose(&committed, "transcript", capacity, PAUSE);
+    pipeline.expose(&usage, USAGE_PORT, capacity, PAUSE);
 }
 
 pub(super) fn speak(
@@ -66,8 +82,10 @@ pub(super) fn speak(
     let tts = pipeline.node("tts", NodeRole::Model, requirement(Role::Tts, &[]));
     let text = pipeline.input::<modality::Text>(&tts, "text", STREAM);
     let audio = pipeline.output::<modality::Audio>(&tts, "audio", STREAM);
+    let usage = pipeline.output::<modality::Structured>(&tts, USAGE_PORT, USAGE);
     pipeline.expose(&text, "text", capacity, PAUSE);
     pipeline.expose(&audio, "audio", capacity, PAUSE);
+    pipeline.expose(&usage, USAGE_PORT, capacity, PAUSE);
 }
 
 /// The reference cascade's topology (`examples/local-voice-cascade/src/lib.rs`, `declare`).

@@ -11,8 +11,9 @@ use std::sync::{Mutex, PoisonError};
 
 use inference_core::id::RunId;
 use inference_core::model::{Adapter, Locality, Model};
+use inference_pipeline::PortId;
 use inference_pipeline::nodes::log::RunLog;
-use inference_pipeline::nodes::stt::{SttNode, SttPorts};
+use inference_pipeline::nodes::stt::SttPorts;
 use inference_whispercpp::stt::{
     DEFAULT_MAX_CONCURRENCY, WhisperCppRecogniser, declare_adapter, declare_model,
 };
@@ -20,7 +21,7 @@ use inference_whispercpp::stt::{
 use super::AdapterDescriptor;
 use crate::error::Error;
 use crate::graph::Implementation;
-use crate::stack::{Binding, BoundRecogniser, Role};
+use crate::stack::{Binding, BoundRecogniser, Role, stt_node};
 
 const NAME: &str = "whispercpp";
 
@@ -66,8 +67,14 @@ impl BoundRecogniser for Deferred {
         self.opened().map(drop)
     }
 
-    fn node(&self, run_id: RunId, ports: SttPorts, log: RunLog) -> Result<Implementation, Error> {
-        Ok(Box::new(SttNode::new(run_id, self.opened()?, ports, log)))
+    fn node(
+        &self,
+        run_id: RunId,
+        ports: SttPorts,
+        usage: Option<PortId>,
+        log: RunLog,
+    ) -> Result<Implementation, Error> {
+        Ok(stt_node(run_id, self.opened()?, ports, usage, log))
     }
 }
 
