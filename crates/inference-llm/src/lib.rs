@@ -462,6 +462,9 @@ pub struct GenerationOutput {
     capabilities: Vec<Capability>,
     generation: Generation,
     segments: Vec<OutputSegment>,
+    /// How many segments the commits looked at, for the tests that bound it.
+    #[cfg(test)]
+    visited: usize,
 }
 
 impl GenerationOutput {
@@ -474,6 +477,8 @@ impl GenerationOutput {
             capabilities: adapter.capabilities().to_vec(),
             generation,
             segments: Vec::new(),
+            #[cfg(test)]
+            visited: 0,
         };
         (output, event)
     }
@@ -505,6 +510,10 @@ impl GenerationOutput {
     pub fn commit_tentative(&mut self) -> Result<Vec<TextSegmentCommitted>, SegmentStateConflict> {
         let mut events = Vec::new();
         let mut refusal = None;
+        #[cfg(test)]
+        {
+            self.visited += self.segments.len();
+        }
         self.segments = std::mem::take(&mut self.segments)
             .into_iter()
             .map(|segment| {
@@ -1518,5 +1527,104 @@ impl Iterator for GenerationHandle {
             self.turn.as_ref()?;
             thread::park();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inference_core::model::{
+        AdapterDescriptor, DeclareAdapter, ExecutionForm, Locality, ModelId,
+    };
+    use llm_core::{Capabilities, Id, Protocol, Provenance, TurnObservation};
+
+    /// A streaming model whose one turn shows `count` deltas of one character and returns them
+    /// as one message.
+    struct Deltas {
+        provenance: Provenance,
+        capabilities: Capabilities,
+        count: usize,
+    }
+
+    impl Model for Deltas {
+        fn provenance(&self) -> &Provenance {
+            &self.provenance
+        }
+
+        fn capabilities(&self) -> &Capabilities {
+            &self.capabilities
+        }
+
+        fn turn<'a>(
+            &'a self,
+            _: &'a TurnRequest,
+            sink: &'a mut dyn StreamSink,
+            _: &'a Cancel,
+        ) -> BoxFuture<'a, Result<TurnOutcome, llm_core::Error>> {
+            Box::pin(async move {
+                for _ in 0..self.count {
+                    sink.emit(StreamEvent::TextDelta {
+                        text: "x".to_owned(),
+                    })
+                    .await?;
+                }
+                Ok(TurnOutcome {
+                    stop_reason: llm_core::StopReason::EndTurn,
+                    items: vec![Item::assistant("x".repeat(self.count))],
+                    observation: TurnObservation {
+                        final_usage: true,
+                        ..TurnObservation::new(self.provenance.clone())
+                    },
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn each_streamed_delta_commits_by_visiting_its_own_segment_only() {
+        let count = 1000;
+        let id = |value: &str| Id::new(value).expect("a printable identifier");
+        let model = Deltas {
+            provenance: Provenance {
+                protocol: Protocol::Messages,
+                provider: id("test"),
+                account: id("test"),
+                endpoint: id("in-process"),
+                model: id("deltas"),
+                binding_revision: id("1"),
+            },
+            capabilities: Capabilities::text(1024, 256).with_output_streaming(true),
+            count,
+        };
+        let (adapter, _) = Adapter::declare(DeclareAdapter {
+            model_id: ModelId::generate(),
+            backend: "a model of one-character deltas".to_owned(),
+            contract_revision: CONTRACT_REVISION.to_owned(),
+            execution_form: ExecutionForm::InProcess,
+            locality: Locality::SameProcess,
+            capabilities: vec![Capability::OutputStreaming],
+            max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
+        })
+        .expect("one is positive");
+        let mut handle = Generator::new(adapter, Arc::new(model))
+            .expect("the model declares what the adapter claims")
+            .start(GenerationRequest {
+                run_id: RunId::generate(),
+                node_id: NodeId::generate(),
+                epoch: 1,
+                turn: TurnRequest::new("deltas", vec![Item::user("Go.")]),
+            })
+            .expect("a fresh generator runs nothing else");
+        let committed = handle
+            .by_ref()
+            .filter(|event| matches!(event, GenerationEvent::SegmentCommitted(_)))
+            .count();
+        assert_eq!(committed, count, "every delta is committed");
+        assert_eq!(
+            handle.output().visited,
+            count,
+            "each commit looks at the one segment it commits, not at every earlier one"
+        );
     }
 }
