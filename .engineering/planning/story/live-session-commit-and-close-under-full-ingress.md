@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:live-session-commit-and-close-under-full-ingress
 kind: story
-status: draft
+status: implemented
 title: A live session commits and closes over a full ingress only once the run took the commit or the stop
 summary: InputCommitted and the turn follow the ingress taking the commit; a close the full ingress refused can be retried.
 tags:
@@ -21,7 +21,11 @@ scope:
   path: crates/inference-runtime/src/drive.rs
 - confidence: cited
   path: ess/domains/session.yaml
-revision: 3
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-23T11:31:38Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":1}}}
+- {from: "proposed", to: "active", at: "2026-11-23T11:31:38Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":1}}}
+- {from: "active", to: "implemented", at: "2026-11-23T11:31:39Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
