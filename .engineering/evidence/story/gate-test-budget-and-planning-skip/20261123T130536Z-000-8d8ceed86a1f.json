@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-23T13:05:36Z",
+  "actor": "human:operator",
+  "artifact": "story:gate-test-budget-and-planning-skip",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "slot bash gate.sh: cargo fmt --all --check; cargo clippy -p inference -p inference-docs --all-targets --all-features -- -D warnings; cargo nextest run -p inference --all-features (257 passed); cargo nextest run -p inference-docs (36 passed); cargo nextest run -p inference --no-default-features --test stack (23 passed); cargo test -p inference -p inference-docs --all-features --doc; aep plan artifact validate; all exit 0"
+  }
+}

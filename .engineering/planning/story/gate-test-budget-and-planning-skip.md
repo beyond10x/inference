@@ -2,12 +2,16 @@
 format: aep.planning-md/3
 id: story:gate-test-budget-and-planning-skip
 kind: story
-status: draft
-title: The test step holds the 60 s and 120 s budget, and a planning-only pull request skips the build
+status: implemented
+title: The test step kills a test at 60 s, the trybuild cases run once in a slow lane, and a planning-only pull request skips the build
 summary: 'Review findings 16 and 17: nextest with a 60 s kill, one trybuild run in a slow lane, a pinned rustc, and an early exit for planning-only pull requests'
 relations:
 - serves: vision:inference
-revision: 1
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-23T13:06:04Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":2}}}
+- {from: "proposed", to: "active", at: "2026-11-23T13:06:05Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":2}}}
+- {from: "active", to: "implemented", at: "2026-11-23T13:06:06Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":2}}}
 ---
 ## Context
 
@@ -50,3 +54,26 @@ Review finding 17: PR 55 changed two files under `.engineering/` and its `task c
 - A pull request that changes only `.engineering/` files or `*.md` files outside `website/` passes
   the required check `inference / task check` without building or testing; any other changed path
   runs the full gate, and a `website/` change still runs the documentation check (finding 17).
+
+## Result
+
+Measured 2026-11-23 on branch `impl/gate-test-budget-and-planning-skip`.
+
+- Before, CI run 45115048722 (0.32.0, `cargo test --workspace --all-features`, one binary after
+  another): test build 7 min 59 s, test execution 9 min 19 s, of which `inference` 262 s
+  (`adversary_w25_tool_macro_pass2_ui` 187 s, `agent` 59 s), `inference-openai` 88 s,
+  `inference-testkit` 67 s, `realtime-voice` 30 s, `inference-elevenlabs` 24 s,
+  `inference-deepgram` 22 s, every other crate under 14 s.
+- Red, `cargo nextest run -p inference --all-features --test-threads 4` on the base tests with
+  the 60 s kill: 7 of 263 tests killed (the five `trybuild` tests and the 16,000-round agent
+  test), 139 s.
+- After, same command: 257 of 257 passed in 61.6 s at a load average of about 125 on this
+  host; slowest `cascade_burst` 37 s, `adversary_u2_turn_at_close` 15 s, the agent test 8.8 s.
+  On an idle moment `cascade_burst` took 10.5 s and `adversary_u2_turn_at_close` 2.5 s; on CI
+  they took 4.1 s and 0.8 s. At load averages of 146 and 263, `cascade_burst` was killed at
+  60 s once each.
+- Slow lane, `task test-slow`: the one `trybuild` run, 186 s, passed on rustc 1.100.0 with the
+  snapshots unchanged.
+- Not done here: a whole-workspace nextest run (the host allowed builds of the touched crates
+  only) and the 120 s kill of the whole step (`global-timeout`), which waits for the step's wall
+  time on CI.
