@@ -353,7 +353,11 @@ fn chat_transcribe_and_speak_plan_the_table_topologies() {
             })
             .collect();
         ends.sort();
-        let mut wanted = vec![format!("Input {ingress}"), format!("Output {egress}")];
+        let mut wanted = vec![
+            format!("Input {ingress}"),
+            format!("Output {egress}"),
+            "Output Structured".to_owned(),
+        ];
         wanted.sort();
         assert_eq!(ends, wanted, "{}", recipe.name());
     }
@@ -788,6 +792,104 @@ fn every_exposure_has_the_recipe_capacity_under_pause() {
         assert_eq!(exposure.capacity(), NonZeroUsize::MIN);
         assert_eq!(exposure.overload(), OverloadPolicy::Pause);
     }
+}
+
+/// The model nodes of a built-in recipe whose usage reaches no egress, as `(recipe, node)`: the
+/// cascade's, whose `AgentNode` and `SpeechNode` have no usage port yet
+/// (`story:cascade-recipe-usage`).
+const USAGE_GAPS: [(&str, &str); 3] = [
+    ("voice_cascade", "stt"),
+    ("voice_cascade", "agent"),
+    ("voice_cascade", "tts"),
+];
+
+/// Every model node of a built-in recipe sends its usage to an egress: a structured output port
+/// `usage` the recipe exposes, or, for a native speech node, the exposed `events` its usage
+/// records travel on. The nodes that do not are exactly [`USAGE_GAPS`].
+#[test]
+fn every_model_node_of_a_built_in_recipe_sends_its_usage_to_an_egress() {
+    use inference::core::model::Modality;
+    use inference::pipeline::{PortDirection, USAGE_PORT};
+
+    let mut uncarried = Vec::new();
+    for recipe in five() {
+        let declaration = recipe.declaration();
+        for node in declaration
+            .nodes()
+            .filter(|node| node.role() == NodeRole::Model)
+        {
+            let exposed = |name: &str| {
+                declaration
+                    .ports()
+                    .filter(|port| {
+                        port.node_id() == node.node_id()
+                            && port.name() == name
+                            && port.direction() == PortDirection::Output
+                            && port.modality() == Modality::Structured
+                    })
+                    .any(|port| {
+                        declaration
+                            .exposures()
+                            .any(|exposure| exposure.port_id() == port.port_id())
+                    })
+            };
+            if !exposed(USAGE_PORT) && !exposed("events") {
+                uncarried.push((recipe.name().to_owned(), node.name().to_owned()));
+            }
+        }
+    }
+    let gaps: Vec<(String, String)> = USAGE_GAPS
+        .iter()
+        .map(|(recipe, node)| ((*recipe).to_owned(), (*node).to_owned()))
+        .collect();
+    assert_eq!(uncarried, gaps);
+}
+
+/// An instantiated `speak` over the mock synthesiser, drained with no text, delivers the usage
+/// record of its one synthesis on its egress and counts it in the session's total.
+#[test]
+fn an_instantiated_speak_reports_its_synthesis_usage() {
+    use inference::core::usage::QuantityKind;
+    use inference::facade::events::SessionEvent;
+    use inference::facade::live::LiveSessions;
+    use inference::runtime::run::RunState;
+
+    let stack = Stack::new()
+        .bind(Binding::named(Role::Tts, "mock", BTreeMap::new()))
+        .resolve_with(&Env::new())
+        .expect("resolves");
+    let mut instantiation = Recipe::speak().instantiate(&stack).expect("speak plans");
+    let sessions = LiveSessions::new();
+    let (session, driver) = block_on(instantiation.open(&stack, &sessions)).expect("the run opens");
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(block_on(driver.drive()));
+    });
+    block_on(session.close()).expect("a Ready session drains");
+    let mut received = Vec::new();
+    while let Some(event) = block_on(session.receive()) {
+        received.push(event);
+    }
+    let run = ended
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the run ends within 20 s")
+        .expect("the run ends");
+    assert_eq!(run.state(), RunState::Completed, "{received:#?}");
+    let delivered = received
+        .iter()
+        .filter(|event| matches!(event, SessionEvent::UsageRecorded(_)))
+        .count();
+    assert_eq!(delivered, 1, "one record delivered: {received:#?}");
+    let usage = session.usage();
+    assert_eq!(usage.session.records(), 1, "{usage:#?}");
+    assert_eq!(
+        usage
+            .session
+            .kind(QuantityKind::Requests)
+            .map(|total| total.known),
+        Some(1),
+        "{usage:#?}"
+    );
 }
 
 #[test]

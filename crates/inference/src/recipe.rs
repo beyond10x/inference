@@ -160,7 +160,8 @@ impl Recipe {
         }
     }
 
-    /// Text in, the `agent` LLM node, text out: ingress `user_input`, egress `assistant_text`.
+    /// Text in, the `agent` LLM node, text out: ingress `user_input`, egresses `assistant_text`
+    /// and `usage`, the usage record of each model call.
     #[must_use]
     pub fn chat() -> Self {
         Self::built_in(
@@ -171,7 +172,8 @@ impl Recipe {
         )
     }
 
-    /// Audio in, the `stt` node, committed text out: ingress `audio`, egress `transcript`.
+    /// Audio in, the `stt` node, committed text out: ingress `audio`, egresses
+    /// `transcript` and `usage`, the usage record of each recognition.
     #[must_use]
     pub fn transcribe() -> Self {
         Self::built_in(
@@ -182,7 +184,8 @@ impl Recipe {
         )
     }
 
-    /// Text in, the `tts` node, audio out: ingress `text`, egress `audio`.
+    /// Text in, the `tts` node, audio out: ingress `text`, egresses `audio` and `usage`,
+    /// the usage record of the synthesis.
     #[must_use]
     pub fn speak() -> Self {
         Self::built_in(

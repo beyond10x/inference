@@ -18,6 +18,12 @@
   node hands it to each of its outputs, counts once in the run's total, the session's total and,
   with the feature `cost`, the session's cost; the session counts distinct `usage_record_id`s.
   Every output still delivers its `SessionEvent::UsageRecorded`.
+- The built-in recipes `chat`, `transcribe` and `speak` no longer drop the usage record of their
+  model calls. Each declares a `usage` port on its model node and exposes it as the egress
+  `usage`, so a completed chat reply yields one `Event::Usage` and is counted in the session's
+  usage total, which before read as complete with no record in it. An application recipe whose
+  LLM, STT or TTS node declares a port `usage` gets the same wiring. `voice_cascade` still drops
+  the usage of its three model calls: its `agent` and `tts` nodes have no usage port yet.
 
 ## [0.31.0] — 2026-11-22
 
