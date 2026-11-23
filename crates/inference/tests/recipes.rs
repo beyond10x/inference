@@ -1949,7 +1949,7 @@ fn expose_adds_that_exposed_end_to_the_planned_pipeline_and_nothing_else() {
 /// An `Agent` over a built-in recipe on the testkit mocks, one turn at a time, read through its
 /// event stream and its session's usage total.
 mod agent_turns {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::time::Duration;
 
     use futures_util::StreamExt;
@@ -1957,7 +1957,7 @@ mod agent_turns {
     use inference::core::usage::{Quantity, QuantityKind, UsageRecorded};
     use inference::stt::Recogniser as _;
     use inference::tts::Synthesiser as _;
-    use inference::{Agent, Binding, Event, Recipe, Stack};
+    use inference::{Agent, Binding, Event, Recipe, Role, Stack};
     use inference_testkit::llm::{self, MockGenerator};
     use inference_testkit::stt::synthetic_audio::{FIXTURE, synthesize};
     use inference_testkit::stt::{self, MockRecogniser};
@@ -2088,5 +2088,63 @@ mod agent_turns {
             Some(3),
             "{usage:#?}"
         );
+    }
+
+    /// The words an agent over `speak` is given reach its synthesiser on commit: the synthesis's
+    /// usage record counts their characters.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_speak_agent_synthesises_the_text_it_commits() {
+        const TEXT: &str = "hello there";
+        let synthesiser = MockSynthesiser::new(
+            tts::MockConfiguration::IncrementalStreaming,
+            ModelId::generate(),
+            super::pcm16(),
+        );
+        let agent = Agent::from_recipe(Recipe::speak())
+            .stack(Stack::new().bind(Binding::tts(synthesiser)))
+            .start()
+            .await
+            .expect("starts");
+        let mut events = agent.events();
+        agent.send_text(TEXT).await.expect("sent");
+        agent.commit().await.expect("committed");
+        agent.close().await.expect("closes");
+        let seen = read_all(&mut events).await;
+        let records = records(&seen);
+        assert_eq!(records.len(), 1, "one synthesis: {seen:#?}");
+        assert_eq!(
+            value(records[0], QuantityKind::InputCharacters),
+            Some(i64::try_from(TEXT.chars().count()).expect("small")),
+            "the synthesis took the committed text: {records:#?}"
+        );
+        assert!(
+            seen.iter().any(|event| matches!(event, Event::Audio(_))),
+            "{seen:#?}"
+        );
+    }
+
+    /// A commit whose text has nowhere to go, as on `voice_cascade`, whose one ingress is
+    /// `audio`, fails and keeps the words: the retry fails the same way instead of succeeding
+    /// with nothing sent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_commit_that_fails_keeps_the_words_for_the_retry() {
+        let stack = [Role::Stt, Role::Llm, Role::Tts]
+            .into_iter()
+            .fold(Stack::new(), |stack, role| {
+                stack.bind(Binding::named(role, "mock", BTreeMap::new()))
+            });
+        let agent = Agent::from_recipe(Recipe::voice_cascade())
+            .stack(stack)
+            .start()
+            .await
+            .expect("starts");
+        agent.send_text("kept").await.expect("sent");
+        let first = agent.commit().await.expect_err("no text ingress");
+        let retry = agent
+            .commit()
+            .await
+            .expect_err("the words are still buffered, and still have nowhere to go");
+        assert_eq!(first.kind(), retry.kind(), "{first} / {retry}");
+        agent.close().await.expect("closes");
     }
 }
