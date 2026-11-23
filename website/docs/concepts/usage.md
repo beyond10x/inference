@@ -50,8 +50,10 @@ for no response that the session's end records.
 A record reaches a session only from a node whose `usage` port the pipeline declares. Since 0.32.0,
 the SDK's built-in recipes `chat`, `transcribe` and `speak` expose their model
 node's usage as the egress `usage`, so an agent's event stream carries `Event::Usage` and its
-session total counts the call; `native_voice` carries its usage on `events`. `voice_cascade` does
-not declare one yet, and its total stays empty.
+session total counts the call; `native_voice` carries its usage on `events`. On main, in the next
+release: `voice_cascade` exposes the usage of its three model nodes as the egresses `stt_usage`,
+`agent_usage` and `tts_usage`, so one spoken turn yields a record for the recognition and one for
+the model turn, and the end of the run's utterance one for the synthesis.
 
 ## Totals
 

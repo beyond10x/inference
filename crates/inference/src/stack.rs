@@ -302,10 +302,11 @@ pub(crate) enum Synthesis {
     /// usage record of its synthesis sent on `usage` when given one.
     Plain { usage: Option<PortId> },
     /// A cascade's [`SpeechNode`] through `ports`, sending each segment's playback on its port
-    /// `playback`.
+    /// `playback`, and the usage record of its synthesis on `usage` when given one.
     Speech {
         ports: SpeechPorts,
         playback: PortId,
+        usage: Option<PortId>,
     },
 }
 
@@ -337,8 +338,17 @@ where
                     None => Box::new(node),
                 }
             }
-            Synthesis::Speech { ports, playback } => {
-                Box::new(SpeechNode::new(run_id, self.clone(), ports, log).with_playback(playback))
+            Synthesis::Speech {
+                ports,
+                playback,
+                usage,
+            } => {
+                let node =
+                    SpeechNode::new(run_id, self.clone(), ports, log).with_playback(playback);
+                match usage {
+                    Some(usage) => Box::new(node.with_usage(usage)),
+                    None => Box::new(node),
+                }
             }
         }
     }

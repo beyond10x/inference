@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-23T11:32:21Z",
+  "actor": "human:operator",
+  "artifact": "story:cascade-recipe-usage",
+  "kind": "story",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p inference --features testing,cost --test recipes (with the lib and the other inference test targets but the trybuild ui targets): recipes 40 passed, 0 failed; a_completed_cascade_turn_reports_the_usage_of_each_model_call, every_model_node_of_a_built_in_recipe_sends_its_usage_to_an_egress and voice_cascade_has_the_reference_cascades_nodes_ports_edges_and_traits pass"
+  }
+}

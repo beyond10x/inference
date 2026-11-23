@@ -43,9 +43,19 @@
 //! (`ess/domains/stream.yaml`: superseding or cancelling a generation discards its unplayed
 //! segments).
 //!
+//! Given a usage port ([`SpeechNode::with_usage`]), the output port its pipeline declares under
+//! the name `usage`, the node sends on the edge or exposure leaving it the usage record of its
+//! synthesis, as `inference-tts` delivers it once the utterance has ended, after the synthesis's
+//! last segment: an envelope of kind `inference.usage.UsageRecorded` on a stream of its own,
+//! whose record the node places on the run and itself as the node, as the
+//! [`TtsNode`](super::tts::TtsNode) does. A node with no edge leaving its usage port, or given
+//! none, or on a payload that carries no usage ([`SpeechPayload::usage`]), sends no record. A
+//! synthesis the node drops before its utterance ended, as a cancel does, yields none.
+//!
 //! Every `inference.stream` event it emits is recorded in the run's log in its envelope. On the
 //! end of input on `text`, a control event of kind `stop`, or once that edge is closed, it ends
-//! the utterance, sends what the synthesis has left and passes the end of input on, on `audio`;
+//! the utterance, sends what the synthesis has left, its usage record last, and passes the end
+//! of input on, on `usage` and then on `audio`;
 //! it then goes on taking receipts until the end of input on `played`, or until that edge is
 //! closed, passes the end of input on, on its playback port if it has one, and ends. Cancelled,
 //! it sends nothing more: a cancel taken while a send waits for room
@@ -64,11 +74,13 @@ use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId, Timebase};
 use inference_core::generation::{Generation, GenerationState, StartGeneration};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
+use inference_core::usage::UsageRecorded;
 use inference_text::{OutputSegment, SegmentId, SegmentSnapshot, SegmentState, SynthesisCompleted};
 use inference_tts::{PlaybackReceipt, SegmentAudio, SynthesisEvent, SynthesisHandle, Synthesiser};
 
 use super::log::{self, RunLog, StreamEmitter, StreamEvent};
 use super::tool_authority::send_unless;
+use super::usage_out::UsageOut;
 use super::{Exchange, Watched, block_on};
 
 /// What a payload of the edges around a [`SpeechNode`] carries, as the node reads it.
@@ -95,6 +107,13 @@ pub trait SpeechPayload: From<ControlKind> + Send + 'static {
 
     /// The payload carrying `audio`, a frame of a segment as the synthesis emitted it.
     fn speech(audio: SegmentAudio) -> Self;
+
+    /// The payload carrying the usage record `recorded`; none, the default, for a payload that
+    /// carries no usage, on whose edges the node sends no record.
+    fn usage(recorded: UsageRecorded) -> Option<Self> {
+        let _ = recorded;
+        None
+    }
 
     /// What the payload carries, taken out of it.
     fn said(self) -> Said;
@@ -140,6 +159,7 @@ pub struct SpeechNode<S> {
     synthesiser: S,
     ports: SpeechPorts,
     playback: Option<PortId>,
+    usage: Option<PortId>,
     log: RunLog,
     node_id: Option<NodeId>,
     state: Arc<Watched<State>>,
@@ -153,6 +173,7 @@ impl<S: fmt::Debug> fmt::Debug for SpeechNode<S> {
             .field("synthesiser", &self.synthesiser)
             .field("ports", &self.ports)
             .field("playback", &self.playback)
+            .field("usage", &self.usage)
             .field("node_id", &self.node_id)
             .field("state", &self.state)
             .field("exchange", &self.exchange)
@@ -170,6 +191,7 @@ impl<S: Synthesiser> SpeechNode<S> {
             synthesiser,
             ports,
             playback: None,
+            usage: None,
             log,
             node_id: None,
             state: Arc::new(Watched::new(State::default())),
@@ -182,6 +204,15 @@ impl<S: Synthesiser> SpeechNode<S> {
     #[must_use]
     pub fn with_playback(mut self, playback: PortId) -> Self {
         self.playback = Some(playback);
+        self
+    }
+
+    /// The same node given a usage port, `usage`, the output port its pipeline declares under the
+    /// name `usage`: once an edge or exposure leaves it, the node sends there the usage record of
+    /// its synthesis; see the module documentation.
+    #[must_use]
+    pub fn with_usage(mut self, usage: PortId) -> Self {
+        self.usage = Some(usage);
         self
     }
 
@@ -279,6 +310,8 @@ struct Exchanging<P, H> {
     audio: Box<dyn OutputEndpoint<P>>,
     /// The edge at the playback port, if the node was given one, and its emitter.
     playback: Option<(Box<dyn OutputEndpoint<P>>, StreamEmitter)>,
+    /// The node's `usage` port, given one with an edge or exposure leaving it.
+    usage: Option<UsageOut<P>>,
     text_ended: bool,
     played_ended: bool,
     emitter: StreamEmitter,
@@ -401,7 +434,13 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
                         self.completing.push(completed);
                     }
                 }
-                SynthesisEvent::Usage(_) => {}
+                SynthesisEvent::Usage(recorded) => {
+                    if let Some(usage) = self.usage.as_mut() {
+                        usage
+                            .send(recorded, None, &self.state, |state| state.cancel)
+                            .await?;
+                    }
+                }
             }
             self.complete().await?;
         }
@@ -598,13 +637,16 @@ impl<P: SpeechPayload, H: SynthesisHandle> Exchanging<P, H> {
         Ok(())
     }
 
-    /// The end of input on `text`: ends the utterance, sends what the synthesis has left and
-    /// passes the end of input on.
+    /// The end of input on `text`: ends the utterance, sends what the synthesis has left, its
+    /// usage record last, and passes the end of input on, on `usage` and then on `audio`.
     async fn end_of_text(&mut self) -> Result<(), String> {
         self.text_ended = true;
         let _ = self.synthesis.end_utterance();
         self.pump().await?;
         self.complete().await?;
+        if let Some(usage) = self.usage.as_mut() {
+            usage.end(&self.state, |state| state.cancel).await?;
+        }
         let end = self.emitter.control(ControlKind::Stop);
         self.send(end).await
     }
@@ -655,11 +697,21 @@ where
     /// of its ports; otherwise the error saying what it was handed.
     fn exchanging<P: SpeechPayload>(
         &mut self,
-        endpoints: NodeEndpoints<P>,
+        mut endpoints: NodeEndpoints<P>,
     ) -> Result<Exchanging<P, S::Handle>, NodeError> {
         let producer = self
             .node_id
             .ok_or_else(|| NodeError::new("the node was started before it was described"))?;
+        let usage = self
+            .usage
+            .and_then(|port| {
+                endpoints
+                    .outputs
+                    .iter()
+                    .position(|output| output.port_id == port)
+            })
+            .map(|at| endpoints.outputs.remove(at))
+            .map(|usage| UsageOut::new(usage, self.run_id, producer, P::usage));
         let ports = self.ports;
         let outputs_wanted = 1 + usize::from(self.playback.is_some());
         if endpoints.inputs.len() != 2 || endpoints.outputs.len() != outputs_wanted {
@@ -726,6 +778,7 @@ where
             played,
             audio,
             playback,
+            usage,
             text_ended: false,
             played_ended: false,
             audio_stream: StreamId::generate(),

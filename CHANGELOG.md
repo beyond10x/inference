@@ -8,6 +8,11 @@
   `AudioFrame::check_length`; `AudioRefused` and `CompletionRefused` carry that type.
 - `inference-duplex`: `SessionError::FrameLength(FrameLengthMismatch)` is a new variant.
 
+### Added
+
+- `inference-pipeline`: `AgentNode::with_usage` and `SpeechNode::with_usage` give the cascade's
+  agent and speech nodes a `usage` port; `SpeechPayload::usage` carries a record, none by default.
+
 ### Changed
 
 - The test step runs under cargo-nextest 0.9.143 (`.config/nextest.toml`): a test over 60 s is killed
@@ -41,6 +46,17 @@
 - `inference-duplex`: delivering a received event (`SessionLedger::next_event`) no longer searches
   the session's whole history for it, so N frames read back one by one cost N lookups, not
   N(N+1)/2.
+- The built-in recipe `voice_cascade` no longer drops the usage of its model calls: its `stt`,
+  `agent` and `tts` nodes each declare a `usage` port, exposed as the egresses `stt_usage`,
+  `agent_usage` and `tts_usage`, so a spoken turn yields one `Event::Usage` per model call and
+  the session's total counts them. A superseded or cancelled generation of the agent still sends
+  the records of its turns, the cut turn's among them.
+- `Agent::commit` sends the text `send_text` buffered to the recipe's own text ingress, `user_input`
+  or else its one exposed text input: an agent over `speak` now synthesises it, as one committed
+  segment of a generation of its own, where before the commit failed with "the pipeline exposes no
+  ingress `user_input`". The text leaves the buffer only once the ingress took it, so a commit
+  that fails, as on a recipe with no text ingress, keeps it, and a retry no longer succeeds with
+  nothing sent.
 
 ## [0.32.0] — 2026-11-23
 

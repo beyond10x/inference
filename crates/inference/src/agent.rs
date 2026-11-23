@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use inference_audio::AudioFrame;
 use inference_core::envelope::{EventEnvelope, EventId, Timebase};
+use inference_core::generation::{Generation, StartGeneration};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_duplex::SessionConfig;
 use inference_facade::events::SessionEvent;
@@ -25,7 +26,7 @@ use inference_pipeline::nodes::AuthorityHandle;
 use inference_pipeline::nodes::duplex::CallIds;
 use inference_pipeline::nodes::log::StreamEvent;
 use inference_runtime::RunError;
-use inference_text::SpanId;
+use inference_text::{OutputSegment, SpanId};
 use inference_tools::{
     CancellationSignal, ExecutionFuture, IntoTool, Tool, ToolCall, ToolCallId, ToolExecutor, ToolId,
 };
@@ -33,7 +34,7 @@ use tokio::sync::{Notify, broadcast, watch};
 use tokio::task::JoinHandle;
 
 use crate::event::{Event, Events, Item};
-use crate::recipe::SwitchFailed;
+use crate::recipe::{SwitchFailed, TextIngress};
 use crate::stack::{Bound, default_session_config, role};
 use crate::{BindingSource, Env, Error, Instantiation, Payload, Recipe, Result, Role, Stack};
 
@@ -699,6 +700,47 @@ impl Inner {
         }
     }
 
+    /// The envelopes that carry `text` into `ingress`: one `TranscriptCommitted`, or, into a
+    /// synthesiser, the `GenerationStarted`, `TextDelta` and `TextSegmentCommitted` of one
+    /// segment of a generation of its own, each naming that generation.
+    fn text_envelopes(
+        &self,
+        ingress: &TextIngress,
+        text: String,
+    ) -> Result<Vec<EventEnvelope<Payload>>> {
+        let envelope = |event: StreamEvent, generation_id: Option<GenerationId>| {
+            let kind = event.name().to_owned();
+            let mut envelope = self.envelope(&ingress.name, &kind, Payload::Stream(event));
+            envelope.generation_id = generation_id;
+            envelope
+        };
+        if !ingress.spoken {
+            let event = StreamEvent::TranscriptCommitted(inference_text::TranscriptCommitted {
+                span_id: SpanId::generate(),
+                text,
+            });
+            return Ok(vec![envelope(event, None)]);
+        }
+        let refused = |refusal: &dyn fmt::Debug| Error::Layer {
+            message: format!("the text could not be made a committed segment: {refusal:?}"),
+            source: None,
+        };
+        let (generation, started) = Generation::start(StartGeneration {
+            run_id: self.session.run_id(),
+            node_id: NodeId::generate(),
+            epoch: 1,
+        });
+        let generation_id = Some(started.generation_id);
+        let (segment, delta) =
+            OutputSegment::emit(&generation, 1, text).map_err(|refusal| refused(&refusal))?;
+        let (_, committed) = segment.commit().map_err(|refusal| refused(&refusal))?;
+        Ok(vec![
+            envelope(StreamEvent::GenerationStarted(started), generation_id),
+            envelope(StreamEvent::TextDelta(delta), generation_id),
+            envelope(StreamEvent::TextSegmentCommitted(committed), generation_id),
+        ])
+    }
+
     /// Denies every held call, so the node's stop never waits on one.
     fn reject_held(&self) {
         if let Some(authority) = self.core.authority.as_ref() {
@@ -1260,8 +1302,8 @@ impl Agent {
         }
     }
 
-    /// Adds `text` to the user's text turn, which [`Agent::commit`] sends on the recipe's
-    /// `user_input` as one text, the turn's texts joined by a space.
+    /// Adds `text` to the user's text turn, which [`Agent::commit`] sends on the recipe's text
+    /// ingress as one text, the turn's texts joined by a space.
     ///
     /// # Errors
     ///
@@ -1292,27 +1334,42 @@ impl Agent {
     }
 
     /// Commits the user's turn: its texts, if [`Agent::send_text`] gave any, reach the recipe's
-    /// `user_input` as one text, joined by a space, and then the commit.
+    /// text ingress as one text, joined by a space, and then the commit. The text ingress is the
+    /// recipe's exposed text input `user_input`, as `chat`'s, or else its first exposed text
+    /// input, as `speak`'s `text`. Into one whose node is role-bound to `tts` the text goes as the
+    /// one committed segment of a generation of its own, which the node synthesises; into any
+    /// other, as one `TranscriptCommitted`. The texts leave the buffer only once the ingress took
+    /// them: a commit that fails keeps them for the next.
     ///
     /// # Errors
     ///
-    /// [`Error::Closed`] once the session admits no input; [`Error::Layer`] otherwise.
+    /// [`Error::Closed`] once the session admits no input; [`Error::Layer`] when the recipe
+    /// exposes no text ingress for texts [`Agent::send_text`] gave, and otherwise.
     pub async fn commit(&self) -> Result<()> {
-        let texts = std::mem::take(&mut *lock(&self.inner.typed));
+        let texts = lock(&self.inner.typed).clone();
         if !texts.is_empty() {
-            let event = StreamEvent::TranscriptCommitted(inference_text::TranscriptCommitted {
-                span_id: SpanId::generate(),
-                text: texts.join(" "),
-            });
-            let kind = event.name().to_owned();
-            let envelope = self
+            let ingress = self
                 .inner
-                .envelope("user_input", &kind, Payload::Stream(event));
-            self.inner
-                .session
-                .send(envelope)
-                .await
-                .map_err(input_error)?;
+                .instantiation
+                .text_ingress()
+                .ok_or_else(|| Error::Layer {
+                    message: format!(
+                        "the recipe `{}` exposes no text ingress: the text given to send_text \
+                         stays buffered",
+                        self.inner.instantiation.recipe()
+                    ),
+                    source: None,
+                })?;
+            for envelope in self.inner.text_envelopes(&ingress, texts.join(" "))? {
+                self.inner
+                    .session
+                    .send(envelope)
+                    .await
+                    .map_err(input_error)?;
+            }
+            let mut typed = lock(&self.inner.typed);
+            let sent = texts.len().min(typed.len());
+            typed.drain(..sent);
         }
         self.inner.session.commit_input().await.map_err(input_error)
     }

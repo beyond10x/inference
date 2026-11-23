@@ -794,14 +794,9 @@ fn every_exposure_has_the_recipe_capacity_under_pause() {
     }
 }
 
-/// The model nodes of a built-in recipe whose usage reaches no egress, as `(recipe, node)`: the
-/// cascade's, whose `AgentNode` and `SpeechNode` have no usage port yet
-/// (`story:cascade-recipe-usage`).
-const USAGE_GAPS: [(&str, &str); 3] = [
-    ("voice_cascade", "stt"),
-    ("voice_cascade", "agent"),
-    ("voice_cascade", "tts"),
-];
+/// The model nodes of a built-in recipe whose usage reaches no egress, as `(recipe, node)`: none
+/// since the cascade's `stt`, `agent` and `tts` expose their usage (`story:cascade-recipe-usage`).
+const USAGE_GAPS: [(&str, &str); 0] = [];
 
 /// Every model node of a built-in recipe sends its usage to an egress: a structured output port
 /// `usage` the recipe exposes, or, for a native speech node, the exposed `events` its usage
@@ -1949,4 +1944,222 @@ fn expose_adds_that_exposed_end_to_the_planned_pipeline_and_nothing_else() {
         exposures(&Recipe::chat().declaration()),
         "an end the recipe already exposes is not exposed twice"
     );
+}
+
+/// An `Agent` over a built-in recipe on the testkit mocks, one turn at a time, read through its
+/// event stream and its session's usage total.
+mod agent_turns {
+    use std::collections::{BTreeMap, HashMap};
+    use std::time::Duration;
+
+    use futures_util::StreamExt;
+    use inference::core::model::{AdapterId, ModelId};
+    use inference::core::usage::{Quantity, QuantityKind, UsageRecorded};
+    use inference::stt::Recogniser as _;
+    use inference::tts::Synthesiser as _;
+    use inference::{Agent, Binding, Event, Recipe, Role, Stack};
+    use inference_testkit::llm::{self, MockGenerator};
+    use inference_testkit::stt::synthetic_audio::{FIXTURE, synthesize};
+    use inference_testkit::stt::{self, MockRecogniser};
+    use inference_testkit::tts::{self, MockSynthesiser};
+
+    const LIMIT: Duration = Duration::from_secs(5);
+
+    /// Reads `events` until it ends, within the limit.
+    async fn read_all(events: &mut inference::Events) -> Vec<Event> {
+        tokio::time::timeout(LIMIT, async {
+            let mut seen = Vec::new();
+            while let Some(event) = events.next().await {
+                seen.push(event.expect("no terminal error"));
+            }
+            seen
+        })
+        .await
+        .expect("the stream ends within 5 s")
+    }
+
+    /// Reads `events` until what was read satisfies `done`, within the limit.
+    async fn read_until(
+        events: &mut inference::Events,
+        done: impl Fn(&[Event]) -> bool,
+    ) -> Vec<Event> {
+        tokio::time::timeout(LIMIT, async {
+            let mut seen = Vec::new();
+            while let Some(event) = events.next().await {
+                seen.push(event.expect("no terminal error"));
+                if done(&seen) {
+                    return seen;
+                }
+            }
+            panic!("the stream ended first: {seen:#?}");
+        })
+        .await
+        .expect("the events arrive within 5 s")
+    }
+
+    fn records(seen: &[Event]) -> Vec<&UsageRecorded> {
+        seen.iter()
+            .filter_map(|event| match event {
+                Event::Usage(recorded) => Some(recorded),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn value(recorded: &UsageRecorded, kind: QuantityKind) -> Option<i64> {
+        recorded
+            .quantities
+            .iter()
+            .find(|quantity| quantity.kind() == kind)
+            .and_then(Quantity::value)
+    }
+
+    /// One completed spoken turn through `voice_cascade` on the mocks yields one usage record per
+    /// model call, of the recogniser, the generator and the synthesiser, each one request, and
+    /// the session's total counts those three records. The recogniser commits one span, so the
+    /// generator is asked once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_completed_cascade_turn_reports_the_usage_of_each_model_call() {
+        let recogniser = MockRecogniser::new(
+            stt::MockConfiguration::Incremental,
+            ModelId::generate(),
+            vec![
+                stt::Cue {
+                    after_frames: 1,
+                    step: stt::ScriptStep::Hypothesis("hello there".to_owned()),
+                },
+                stt::Cue {
+                    after_frames: 2,
+                    step: stt::ScriptStep::Commit { span: 0 },
+                },
+            ],
+        );
+        let generator = MockGenerator::new(
+            llm::MockConfiguration::StreamingAndConcurrentInput,
+            ModelId::generate(),
+            ["Hello", " from", " the mock"],
+        );
+        let synthesiser = MockSynthesiser::new(
+            tts::MockConfiguration::IncrementalStreaming,
+            ModelId::generate(),
+            super::pcm16(),
+        );
+        let called: HashMap<AdapterId, &str> = [
+            (recogniser.adapter().adapter_id(), "stt"),
+            (generator.adapter().adapter_id(), "llm"),
+            (synthesiser.adapter().adapter_id(), "tts"),
+        ]
+        .into();
+        let stack = Stack::new()
+            .bind(Binding::stt(recogniser))
+            .bind(Binding::llm(generator.clone()))
+            .bind(Binding::tts(synthesiser));
+        let agent = Agent::from_recipe(Recipe::voice_cascade())
+            .stack(stack)
+            .start()
+            .await
+            .expect("starts");
+        let mut events = agent.events();
+        for frame in synthesize(&FIXTURE[..2]) {
+            agent.send_audio(frame).await.expect("sent");
+        }
+        agent.commit().await.expect("committed");
+        let seen = read_until(&mut events, |seen| {
+            seen.iter().any(|event| matches!(event, Event::Said { .. }))
+                && seen.iter().any(|event| matches!(event, Event::Audio(_)))
+        })
+        .await;
+        agent.close().await.expect("closes");
+        let seen = [seen, read_all(&mut events).await].concat();
+
+        let records = records(&seen);
+        let mut by_role: Vec<&str> = records
+            .iter()
+            .map(|recorded| called.get(&recorded.adapter_id).copied().unwrap_or("other"))
+            .collect();
+        by_role.sort_unstable();
+        assert_eq!(
+            generator.asked(),
+            [vec!["hello there".to_owned()]],
+            "one model call"
+        );
+        assert_eq!(by_role, ["llm", "stt", "tts"], "{records:#?}");
+        for recorded in &records {
+            assert_eq!(
+                value(recorded, QuantityKind::Requests),
+                Some(1),
+                "{recorded:#?}"
+            );
+            assert!(recorded.node_id.is_some(), "{recorded:#?}");
+        }
+
+        let usage = agent.session().usage();
+        assert_eq!(usage.session.records(), 3, "{usage:#?}");
+        assert_eq!(
+            usage
+                .session
+                .kind(QuantityKind::Requests)
+                .map(|total| total.known),
+            Some(3),
+            "{usage:#?}"
+        );
+    }
+
+    /// The words an agent over `speak` is given reach its synthesiser on commit: the synthesis's
+    /// usage record counts their characters.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_speak_agent_synthesises_the_text_it_commits() {
+        const TEXT: &str = "hello there";
+        let synthesiser = MockSynthesiser::new(
+            tts::MockConfiguration::IncrementalStreaming,
+            ModelId::generate(),
+            super::pcm16(),
+        );
+        let agent = Agent::from_recipe(Recipe::speak())
+            .stack(Stack::new().bind(Binding::tts(synthesiser)))
+            .start()
+            .await
+            .expect("starts");
+        let mut events = agent.events();
+        agent.send_text(TEXT).await.expect("sent");
+        agent.commit().await.expect("committed");
+        agent.close().await.expect("closes");
+        let seen = read_all(&mut events).await;
+        let records = records(&seen);
+        assert_eq!(records.len(), 1, "one synthesis: {seen:#?}");
+        assert_eq!(
+            value(records[0], QuantityKind::InputCharacters),
+            Some(i64::try_from(TEXT.chars().count()).expect("small")),
+            "the synthesis took the committed text: {records:#?}"
+        );
+        assert!(
+            seen.iter().any(|event| matches!(event, Event::Audio(_))),
+            "{seen:#?}"
+        );
+    }
+
+    /// A commit whose text has nowhere to go, as on `voice_cascade`, whose one ingress is
+    /// `audio`, fails and keeps the words: the retry fails the same way instead of succeeding
+    /// with nothing sent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_commit_that_fails_keeps_the_words_for_the_retry() {
+        let stack = [Role::Stt, Role::Llm, Role::Tts]
+            .into_iter()
+            .fold(Stack::new(), |stack, role| {
+                stack.bind(Binding::named(role, "mock", BTreeMap::new()))
+            });
+        let agent = Agent::from_recipe(Recipe::voice_cascade())
+            .stack(stack)
+            .start()
+            .await
+            .expect("starts");
+        agent.send_text("kept").await.expect("sent");
+        let first = agent.commit().await.expect_err("no text ingress");
+        let retry = agent
+            .commit()
+            .await
+            .expect_err("the words are still buffered, and still have nowhere to go");
+        assert_eq!(first.kind(), retry.kind(), "{first} / {retry}");
+        agent.close().await.expect("closes");
+    }
 }
