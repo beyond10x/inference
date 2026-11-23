@@ -102,7 +102,8 @@ async function main(): Promise<number> {
   const baseline: Baseline | undefined = existsSync(join(uxDir, 'baseline.json')) ? JSON.parse(readFileSync(join(uxDir, 'baseline.json'), 'utf8')) : undefined;
   const last = previousRound(round);
   const results = gates(rows);
-  const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {cwd: repoDir}).toString().trim();
+  const dirty = execFileSync('git', ['status', '--porcelain', '--', 'website'], {cwd: repoDir}).toString().trim() !== '';
+  const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {cwd: repoDir}).toString().trim() + (dirty ? ' with uncommitted website changes' : '');
   const date = new Date().toISOString().slice(0, 10);
   const {sheet, worst} = await images(rows, shotsDir, suffix);
 
@@ -176,7 +177,7 @@ async function main(): Promise<number> {
   const row = `| ${round} | ${date} | ${commit} | ${results.map((g) => g.value).join(' | ')} | ${label} |`;
   const kept = existing.filter((l) => !l.startsWith(`| ${round} |`) || !l.endsWith(`| ${label} |`));
   writeFileSync(trend, `${[...headerLines, ...kept, row].join('\n')}\n`);
-  process.stdout.write(`round: wrote ${join('ux', 'rounds', round)}/report.md, round.json, ${worst.length} worst moments, ${sheet ? 'a contact sheet' : 'no contact sheet'}\n`);
+  process.stdout.write(`round: wrote ${join('ux', 'rounds', round)}/report${suffix}.md, round${suffix}.json, ${worst.length} worst moments, ${sheet ? 'a contact sheet' : 'no contact sheet'}\n`);
   return 0;
 }
 

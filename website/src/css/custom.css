@@ -2,3 +2,17 @@
   .b10x-product-page .b10x-flow { gap: 2.6rem; }
   .b10x-product-page .b10x-flow__step:not(:last-child)::after { bottom: -1.85rem; }
 }
+
+:root {
+  --ifm-navbar-search-input-placeholder-color: var(--ifm-color-emphasis-800);
+}
+
+@media (max-width: 996px) {
+  .navbar__items--right > [class*='colorModeToggle_'] { display: block; }
+  .navbar__items--right > [class*='navbarSearchContainer_'] { position: static; padding: 0 0 0 0.25rem; }
+}
+
+.markdown :is(p, li, td, th, blockquote) a:not(.hash-link) {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}

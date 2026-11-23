@@ -40,4 +40,4 @@ No S1 finding. The change set holds 3 changes.
    Target: always_visible.misses at 390x844 (the toggle share: 108).
 
 Each change is checked by the gate that found it, which fails on the R-01 measurement
-(`report.md`) and passes after the change (`report-gate.md`).
+(`report.md`) and passes after the change (`report-after.md`).

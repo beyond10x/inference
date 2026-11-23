@@ -11,11 +11,11 @@
         "tolerance": 0
       },
       "1440x900/always_visible.misses": {
-        "value": 108,
+        "value": 0,
         "tolerance": 0
       },
       "1440x900/axe.serious_critical": {
-        "value": 134,
+        "value": 0,
         "tolerance": 0
       },
       "390x844/layout.h_scroll": {
@@ -27,11 +27,11 @@
         "tolerance": 0
       },
       "390x844/always_visible.misses": {
-        "value": 216,
+        "value": 0,
         "tolerance": 0
       },
       "390x844/axe.serious_critical": {
-        "value": 130,
+        "value": 0,
         "tolerance": 0
       },
       "1440x900/keyboard.unreachable": {

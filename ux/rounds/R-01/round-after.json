@@ -1,0 +1,137 @@
+{
+  "round": "R-01",
+  "label": "after",
+  "commit": "f13aedde0 with uncommitted website changes",
+  "date": "2026-11-23",
+  "gates": [
+    {
+      "id": 1,
+      "name": "no horizontal scroll, no element past its box",
+      "value": 0,
+      "pass": true,
+      "note": "page states with horizontal scroll plus overflowing elements"
+    },
+    {
+      "id": 2,
+      "name": "always visible: navbar, search, theme toggle, sidebar at desktop",
+      "value": 0,
+      "pass": true,
+      "note": "misses at the top and at a reading position: half the page, at most to where the article ends"
+    },
+    {
+      "id": 3,
+      "name": "unmissable completion",
+      "value": 0,
+      "pass": true,
+      "note": "completion_miss over every task run; false_complete cannot occur, completion is the truth page"
+    },
+    {
+      "id": 4,
+      "name": "screen-only user completes every task",
+      "value": 0,
+      "pass": true,
+      "note": "runs that did not reach the truth page"
+    },
+    {
+      "id": 5,
+      "name": "axe 0 serious or critical, keyboard reaches nav and search",
+      "value": 0,
+      "pass": true,
+      "note": "serious or critical nodes plus navbar controls Tab does not reach"
+    }
+  ],
+  "measured": {
+    "sitemap": {
+      "1440x900/layout.h_scroll": 0,
+      "1440x900/layout.overflow_elements": 0,
+      "1440x900/always_visible.misses": 0,
+      "1440x900/axe.serious_critical": 0,
+      "390x844/layout.h_scroll": 0,
+      "390x844/layout.overflow_elements": 0,
+      "390x844/always_visible.misses": 0,
+      "390x844/axe.serious_critical": 0,
+      "1440x900/keyboard.unreachable": 0,
+      "390x844/keyboard.unreachable": 0
+    },
+    "find-dependency-lines": {
+      "1440x900/completion_miss": 0,
+      "1440x900/screen_only.actions": 1,
+      "1440x900/screen_only.looks": 0,
+      "1440x900/screen_only.steers": 0,
+      "1440x900/screen_only.time_to_act_steps.max": 1,
+      "1440x900/glance_cost.median": 1,
+      "1440x900/glance_cost.p95": 1,
+      "390x844/completion_miss": 0,
+      "390x844/screen_only.actions": 2,
+      "390x844/screen_only.looks": 0,
+      "390x844/screen_only.steers": 0,
+      "390x844/screen_only.time_to_act_steps.max": 1,
+      "390x844/glance_cost.median": 1,
+      "390x844/glance_cost.p95": 1
+    },
+    "find-error-kinds": {
+      "1440x900/completion_miss": 0,
+      "1440x900/screen_only.actions": 2,
+      "1440x900/screen_only.looks": 1,
+      "1440x900/screen_only.steers": 0,
+      "1440x900/screen_only.time_to_act_steps.max": 2,
+      "1440x900/glance_cost.median": 1,
+      "1440x900/glance_cost.p95": 3,
+      "390x844/completion_miss": 0,
+      "390x844/screen_only.actions": 4,
+      "390x844/screen_only.looks": 1,
+      "390x844/screen_only.steers": 0,
+      "390x844/screen_only.time_to_act_steps.max": 2,
+      "390x844/glance_cost.median": 1,
+      "390x844/glance_cost.p95": 3
+    },
+    "find-limitations": {
+      "1440x900/completion_miss": 0,
+      "1440x900/screen_only.actions": 2,
+      "1440x900/screen_only.looks": 1,
+      "1440x900/screen_only.steers": 0,
+      "1440x900/screen_only.time_to_act_steps.max": 2,
+      "1440x900/glance_cost.median": 1,
+      "1440x900/glance_cost.p95": 3,
+      "390x844/completion_miss": 0,
+      "390x844/screen_only.actions": 4,
+      "390x844/screen_only.looks": 1,
+      "390x844/screen_only.steers": 0,
+      "390x844/screen_only.time_to_act_steps.max": 2,
+      "390x844/glance_cost.median": 1,
+      "390x844/glance_cost.p95": 3
+    },
+    "find-provider-comparison": {
+      "1440x900/completion_miss": 0,
+      "1440x900/screen_only.actions": 1,
+      "1440x900/screen_only.looks": 0,
+      "1440x900/screen_only.steers": 0,
+      "1440x900/screen_only.time_to_act_steps.max": 1,
+      "1440x900/glance_cost.median": 1,
+      "1440x900/glance_cost.p95": 1,
+      "390x844/completion_miss": 0,
+      "390x844/screen_only.actions": 2,
+      "390x844/screen_only.looks": 1,
+      "390x844/screen_only.steers": 0,
+      "390x844/screen_only.time_to_act_steps.max": 1,
+      "390x844/glance_cost.median": 1,
+      "390x844/glance_cost.p95": 3
+    },
+    "find-realtime-model-variable": {
+      "1440x900/completion_miss": 0,
+      "1440x900/screen_only.actions": 1,
+      "1440x900/screen_only.looks": 1,
+      "1440x900/screen_only.steers": 0,
+      "1440x900/screen_only.time_to_act_steps.max": 1,
+      "1440x900/glance_cost.median": 3,
+      "1440x900/glance_cost.p95": 3,
+      "390x844/completion_miss": 0,
+      "390x844/screen_only.actions": 2,
+      "390x844/screen_only.looks": 1,
+      "390x844/screen_only.steers": 0,
+      "390x844/screen_only.time_to_act_steps.max": 1,
+      "390x844/glance_cost.median": 1,
+      "390x844/glance_cost.p95": 3
+    }
+  }
+}

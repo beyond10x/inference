@@ -30,15 +30,15 @@ for (const path of sitemapPages()) {
         };
         const details: Record<string, unknown> = {offenders: layout.offenders, misses: [...misses, ...missesScrolled]};
         if (gating) {
-          const axe = await new AxeBuilder({page}).setLegacyMode(true).options({resultTypes: ['violations']}).withTags(adapter.axeTags).analyze();
-          const serious = axe.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical');
-          metrics['axe.serious_critical'] = serious.reduce((n, v) => n + v.nodes.length, 0);
-          details.axe = serious.map((v) => ({id: v.id, impact: v.impact, nodes: v.nodes.length, target: v.nodes.slice(0, 3).map((n) => n.target.join(' '))}));
           if (keyboardPages.has(path)) {
             const unreachable = await keyboardUnreachable(page);
             metrics['keyboard.unreachable'] = unreachable.length;
             details.keyboard = unreachable;
           }
+          const axe = await new AxeBuilder({page}).setLegacyMode(true).options({resultTypes: ['violations']}).withTags(adapter.axeTags).analyze();
+          const serious = axe.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical');
+          metrics['axe.serious_critical'] = serious.reduce((n, v) => n + v.nodes.length, 0);
+          details.axe = serious.map((v) => ({id: v.id, impact: v.impact, nodes: v.nodes.length, target: v.nodes.slice(0, 3).map((n) => n.target.join(' '))}));
         }
         let shot: string | undefined;
         const bad = metrics['layout.h_scroll'] + metrics['layout.overflow_elements'] + metrics['always_visible.misses'] + (metrics['axe.serious_critical'] ?? 0) + (metrics['keyboard.unreachable'] ?? 0);
