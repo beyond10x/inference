@@ -13,6 +13,15 @@
 //! | [`a_telemetry_channel_that_is_never_read_drops_telemetry_and_no_usage_record`] | a telemetry channel of capacity 1, never read, reports drops; all three records still arrive |
 //! | [`the_recording_lists_the_usage_records_and_a_replay_reporting_other_counts_does_not_diverge`] | the recording lists the three usage envelopes; a replay whose LLM reports other counts reports no divergence |
 //! | [`a_session_switching_from_text_to_the_cascade_keeps_one_total_per_run_and_one_over_both`] | a total per run and a session total over both runs |
+//!
+//! A record a fan-out hands to several outputs counts once (`story:usage-dedup-fan-out`): a model
+//! node's `usage` port feeds a fan-out whose output edges are each exposed as a usage egress
+//! ([`fan_out_planned`]).
+//!
+//! | case | acceptance |
+//! |---|---|
+//! | [`fan_out_of_one_usage_record_counts_it_once_and_delivers_it_on_each_output`] | two outputs: the record is delivered twice, the run and session totals hold one record, one request |
+//! | [`fan_out_of_one_usage_record_onto_one_output_counts_it_once`] | one output, the control: the record is delivered once and counted once |
 
 #![allow(dead_code)]
 
@@ -28,12 +37,19 @@ use inference_core::endpoint::InputEndpoint;
 use inference_core::envelope::{EventEnvelope, EventId, Timebase};
 use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
 use inference_core::model::ModelId;
+use inference_core::model::{Adapter, AdapterId, Capability};
+use inference_core::policy::{DeclareProfile, DeploymentProfile, Egress, ProfileId, ProfileKind};
 use inference_core::usage::{KindTotal, QuantityKind, QuantitySource, UsageRecorded, UsageTotal};
 use inference_facade::events::SessionEvent;
 use inference_facade::live::{AlreadyRecorded, LiveSession, LiveSessions};
 use inference_facade::usage::SessionUsage;
 use inference_llm::llm_core::Usage;
-use inference_pipeline::{Declaration, InteractionMode, Node, NodeImplementation};
+use inference_pipeline::nodes::FanOut;
+use inference_pipeline::{
+    Catalog, Declaration, Delivery, Essentiality, InteractionMode, Node, NodeImplementation,
+    NodeRole, OverloadPolicy, PipelineSpec, PlannedPipeline, PortId, PortTraits, USAGE_PORT,
+    modality,
+};
 use inference_runtime::RunController;
 use inference_runtime::record::{Recorder, Recording};
 use inference_runtime::replay::Replay;
@@ -43,7 +59,7 @@ use inference_testkit::cascade::{
     AUDIO_INGRESS, CascadePayload, LLM_USAGE_EGRESS, Mocks, SPEECH_EGRESS, STT_USAGE_EGRESS,
     TEXT_EGRESS, TRANSCRIPT_EGRESS, TTS_USAGE_EGRESS, TurnStore, VoiceCascade, declare,
 };
-use inference_testkit::graph::RunLog;
+use inference_testkit::graph::{PipelinePayload, RunLog};
 use inference_testkit::llm::{MockConfiguration as LlmConfiguration, MockGenerator, ModelNode};
 use inference_testkit::stream::StreamEvent;
 use inference_testkit::stt::inference_stt::inference_audio::{
@@ -752,4 +768,204 @@ fn a_second_tap_of_a_runs_ingresses_is_refused_so_every_input_is_recorded_once()
         1,
         "the end of input the close sent, once"
     );
+}
+
+/// The catalog of the fan-out pipeline: the profile and the mock LLM's adapter.
+struct FanOutCatalog {
+    profile: DeploymentProfile,
+    adapter: Adapter,
+}
+
+impl Catalog for FanOutCatalog {
+    fn profile(&self, profile_id: ProfileId) -> Option<&DeploymentProfile> {
+        (self.profile.profile_id() == profile_id).then_some(&self.profile)
+    }
+
+    fn adapter(&self, adapter_id: AdapterId) -> Option<&Adapter> {
+        (self.adapter.adapter_id() == adapter_id).then_some(&self.adapter)
+    }
+}
+
+/// The usage egress the fan-out's output edge number `output` is exposed as.
+fn fan_out_egress(output: usize) -> String {
+    format!("usage {output}")
+}
+
+/// A turn-based pipeline of a model node between the ingress [`INGRESS`] and the egress
+/// [`text::EGRESS`] whose `usage` port has one edge, into a fan-out, and the fan-out's `outputs`
+/// output ports each exposed as the usage egress [`fan_out_egress`]; declared, validated and
+/// planned. Returns the model node, its `usage` port and the fan-out node.
+fn fan_out_planned(
+    generator: &MockGenerator,
+    outputs: usize,
+) -> (Declaration, PlannedPipeline, (NodeId, PortId, NodeId)) {
+    let (profile, _) = DeploymentProfile::declare(DeclareProfile {
+        kind: ProfileKind::OfflineStrict,
+        egress: Egress::Denied,
+        admitted: vec![inference_core::model::Locality::SameProcess],
+    })
+    .expect("a row of the table");
+    let profile_id = profile.profile_id();
+    let adapter_id = generator.adapter().adapter_id();
+    let catalog = FanOutCatalog {
+        profile,
+        adapter: generator.adapter().clone(),
+    };
+    let text = PortTraits {
+        essentiality: Essentiality::Essential,
+        delivery: Delivery::Reliable,
+        incremental: true,
+        end_marker_required: true,
+        provisional_allowed: false,
+    };
+    let records = PortTraits {
+        incremental: false,
+        ..text
+    };
+    let capacity = NonZeroUsize::new(16).expect("16");
+    let spec = PipelineSpec {
+        name: "fan-out usage".to_owned(),
+        schema_revision: "1".to_owned(),
+        mode: InteractionMode::TurnBased,
+        required_capabilities: vec![Capability::OutputStreaming],
+    };
+    let mut declaration = Declaration::new();
+    let (pipeline_id, ids) = declaration
+        .build(&catalog, profile_id, spec, |pipeline| {
+            let model = pipeline.node("model", NodeRole::Model, vec![Capability::OutputStreaming]);
+            let prompt = pipeline.input::<modality::Text>(&model, "prompt", text);
+            let answer = pipeline.output::<modality::Text>(&model, "answer", text);
+            pipeline.expose(&prompt, INGRESS, capacity, OverloadPolicy::Pause);
+            pipeline.expose(&answer, text::EGRESS, capacity, OverloadPolicy::Pause);
+            let used = pipeline.output::<modality::Structured>(&model, USAGE_PORT, records);
+            pipeline
+                .bind(&model, adapter_id)
+                .expect("the catalog holds the mock LLM's adapter");
+            let split = pipeline.node("usage split", NodeRole::FanOut, Vec::new());
+            let into = pipeline.input::<modality::Structured>(&split, "records", records);
+            pipeline.connect(&used, &into, capacity, OverloadPolicy::Pause);
+            for output in 0..outputs {
+                let out = pipeline.output::<modality::Structured>(
+                    &split,
+                    &format!("records {output}"),
+                    records,
+                );
+                pipeline.expose(
+                    &out,
+                    &fan_out_egress(output),
+                    capacity,
+                    OverloadPolicy::Pause,
+                );
+            }
+            (model.id(), used.id(), split.id())
+        })
+        .expect("the profile is declared");
+    let validated = declaration
+        .validate(pipeline_id)
+        .expect("a model whose usage a fan-out splits is valid");
+    let planned = declaration
+        .plan(validated, &catalog)
+        .expect("the model is bound to an adapter that streams output");
+    (declaration, planned, ids)
+}
+
+/// A session over [`fan_out_planned`] with `outputs` output edges answers one typed turn, its
+/// model reporting usage once; returns its run, what it delivered and its usage view.
+fn fan_out_turn(outputs: usize) -> (RunId, Vec<SessionEvent>, SessionUsage) {
+    let generator = generator(Vec::<String>::new()).reporting([Some(Usage {
+        input_tokens: Some(7),
+        output_tokens: Some(2),
+        ..Usage::default()
+    })]);
+    let (declaration, planned, (model_id, usage_port, split_id)) =
+        fan_out_planned(&generator, outputs);
+    let sessions = LiveSessions::new();
+    let (mut session, driver) = block_on(sessions.open(
+        &declaration,
+        &planned,
+        InteractionMode::TurnBased,
+        move |run_id, node: &Node| -> Box<dyn NodeImplementation<PipelinePayload>> {
+            if node.node_id() == split_id {
+                return Box::new(FanOut::new());
+            }
+            assert_eq!(node.node_id(), model_id);
+            Box::new(
+                ModelNode::new(run_id, generator.clone(), reply, RunLog::new())
+                    .with_usage(usage_port),
+            )
+        },
+    ))
+    .expect("a session opens over the fan-out pipeline");
+    let run_id = session.run_id();
+    let drive = thread::spawn(move || block_on(driver.drive()));
+    block_on(session.send(text::Application::new(run_id).text("hello"))).expect("sent");
+    block_on(session.commit_input()).expect("committed");
+    block_on(session.close()).expect("a Ready session drains");
+    let mut received = Vec::new();
+    while let Some(event) = block_on(session.receive()) {
+        received.push(event);
+    }
+    let ended = drive.join().expect("no panic").expect("the run ends");
+    assert_eq!(ended.state(), RunState::Completed, "{received:#?}");
+    (run_id, received, session.usage())
+}
+
+/// Asserts that `usage` holds one total, of the run `run_id`, and that it and the session's total
+/// each took one record of one request.
+fn one_request_counted(run_id: RunId, usage: &SessionUsage) {
+    let [(held, run)] = usage.runs.as_slice() else {
+        panic!("the session holds one run: {usage:#?}")
+    };
+    assert_eq!(*held, run_id);
+    for (name, total) in [("run", run), ("session", &usage.session)] {
+        assert_eq!(
+            total.records(),
+            1,
+            "the {name} total took the one record once: {usage:#?}"
+        );
+        assert_eq!(
+            total.kind(QuantityKind::Requests).map(|kind| kind.known),
+            Some(1),
+            "the {name} total counts one request: {usage:#?}"
+        );
+        assert_eq!(
+            total
+                .kind(QuantityKind::InputTextTokens)
+                .map(|kind| kind.known),
+            Some(7),
+            "the {name} total counts the input tokens once: {usage:#?}"
+        );
+    }
+    #[cfg(feature = "cost")]
+    assert_eq!(
+        usage.cost.pending, 1,
+        "the session, never priced, holds the one record once to price: {usage:#?}"
+    );
+}
+
+#[test]
+fn fan_out_of_one_usage_record_counts_it_once_and_delivers_it_on_each_output() {
+    let (run_id, received, usage) = fan_out_turn(2);
+    let delivered = records(&received);
+    assert_eq!(
+        delivered.len(),
+        2,
+        "each of the fan-out's two outputs delivers the record: {received:#?}"
+    );
+    assert_eq!(
+        delivered[0].usage_record_id, delivered[1].usage_record_id,
+        "both outputs carry the one record the model made"
+    );
+    one_request_counted(run_id, &usage);
+}
+
+#[test]
+fn fan_out_of_one_usage_record_onto_one_output_counts_it_once() {
+    let (run_id, received, usage) = fan_out_turn(1);
+    assert_eq!(
+        records(&received).len(),
+        1,
+        "the fan-out's one output delivers the record: {received:#?}"
+    );
+    one_request_counted(run_id, &usage);
 }
