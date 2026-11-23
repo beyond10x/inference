@@ -30,7 +30,22 @@ const config: Config = {
     mermaid: true,
   },
 
-  themes: ['@docusaurus/theme-mermaid'],
+  clientModules: ['./src/client-modules/search-aria.ts'],
+
+  themes: [
+    '@docusaurus/theme-mermaid',
+    [
+      '@easyops-cn/docusaurus-search-local',
+      {
+        hashed: true,
+        indexDocs: true,
+        indexBlog: false,
+        indexPages: false,
+        docsRouteBasePath: 'docs',
+        language: ['en'],
+      },
+    ],
+  ],
 
   i18n: {
     defaultLocale: 'en',

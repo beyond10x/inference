@@ -1,0 +1,8 @@
+{
+  "kind": "task",
+  "card": "rotating",
+  "task": "Find the environment variable that picks another OpenAI Realtime model.",
+  "start": "docs/getting-started",
+  "words": ["environment", "variables"],
+  "truth": {"path": "docs/reference/environment", "text": "INFERENCE_OPENAI_REALTIME_MODEL"}
+}

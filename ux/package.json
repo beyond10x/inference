@@ -1,0 +1,18 @@
+{
+  "name": "inference-docs-ux",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test --workers=2",
+    "ratchet": "node tools/ratchet.ts",
+    "round": "node tools/round.ts"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.65.0"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}

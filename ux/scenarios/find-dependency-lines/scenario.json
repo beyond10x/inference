@@ -1,0 +1,8 @@
+{
+  "kind": "task",
+  "card": "anchor",
+  "task": "Find the Cargo dependency lines that add inference to a project.",
+  "start": "",
+  "words": ["getting started", "dependencies", "install"],
+  "truth": {"path": "docs/getting-started", "text": "[dependencies]"}
+}

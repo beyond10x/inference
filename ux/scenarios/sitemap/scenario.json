@@ -1,0 +1,6 @@
+{
+  "kind": "sitemap",
+  "card": "anchor",
+  "about": "Every page of the built site, read from website/build/sitemap.xml, at every gating viewport in both themes: gates 1, 2 and 5.",
+  "source": "website/build/sitemap.xml"
+}
