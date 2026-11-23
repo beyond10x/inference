@@ -1,0 +1,93 @@
+name: slow
+
+on:
+  pull_request:
+    paths:
+      - crates/inference-macros/**
+      - crates/inference/src/**
+      - crates/inference-tools/src/**
+      - crates/inference/tests/ui.rs
+      - crates/inference/tests/ui/**
+      - crates/inference/tests/compile_fail/**
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .config/nextest.toml
+      - Taskfile.yml
+      - .github/workflows/slow.yml
+  push:
+    branches: [main]
+    paths:
+      - crates/inference-macros/**
+      - crates/inference/src/**
+      - crates/inference-tools/src/**
+      - crates/inference/tests/ui.rs
+      - crates/inference/tests/ui/**
+      - crates/inference/tests/compile_fail/**
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .config/nextest.toml
+      - Taskfile.yml
+      - .github/workflows/slow.yml
+
+concurrency:
+  group: slow-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  ui:
+    name: inference / task test-slow
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain rust-toolchain.toml pins
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+          rustc --version
+
+      - name: Install go-task
+        env:
+          TASK_VERSION: "3.52.0"
+          TASK_SHA256: 02c679ffae53dca791804847d78b31731615894e292948397c971c87ac9e95bd
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/task.tar.gz" \
+            "https://github.com/go-task/task/releases/download/v$TASK_VERSION/task_linux_amd64.tar.gz"
+          echo "$TASK_SHA256  $RUNNER_TEMP/task.tar.gz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/task-bin"
+          tar -xzf "$RUNNER_TEMP/task.tar.gz" -C "$RUNNER_TEMP/task-bin" task
+          echo "$RUNNER_TEMP/task-bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-nextest
+        env:
+          NEXTEST_VERSION: "0.9.143"
+          NEXTEST_SHA256: 66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e
+        run: |
+          set -euo pipefail
+          asset="cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$asset" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/$asset"
+          echo "$NEXTEST_SHA256  $RUNNER_TEMP/$asset" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/nextest-bin"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/nextest-bin" cargo-nextest
+          echo "$RUNNER_TEMP/nextest-bin" >> "$GITHUB_PATH"
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev
+
+      - name: task test-slow
+        run: task test-slow

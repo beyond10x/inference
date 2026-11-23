@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The test step runs under cargo-nextest 0.9.143 (`.config/nextest.toml`): a test over 60 s is killed
+  and fails, and the run prints its ten slowest tests. `task check` is `task check-source`,
+  `task test-build` and `task test-run`, the three steps CI runs.
+- Every `trybuild` case of `inference` runs in one `trybuild` run, `crates/inference/tests/ui.rs`,
+  in the slow lane (`task test-slow`, workflow `slow`), which runs when the macro crate, the SDK
+  crate's sources or the cases change; before, five tests ran a `trybuild` build each.
+- `rust-toolchain.toml` pins rustc 1.100.0, which CI, the documentation workflow and the local gate
+  use; test builds carry no debug info (`.cargo/config.toml`).
+- A pull request that changes only `.engineering/` files or `*.md` files outside `website/` and
+  `ess/`, other than `CHANGELOG.md`, passes `inference / task check` after validating the planning
+  store, without building or testing.
+
 ## [0.32.0] — 2026-11-23
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these
