@@ -73,7 +73,8 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
 
 - Anything committed here that runs is Rust, with clap derive for command lines. A model worker in
   another language is an external process this repository talks to over a versioned protocol; it is
-  not committed here.
+  not committed here. The documentation site (`website/`) and its UX checks (`ux/`) are
+  TypeScript, the language Docusaurus and Playwright run.
 - Spec first: a story that introduces a noun declares it in `ess/` before code builds on it, checked
   with `ess specify validate --path ess`. A story's acceptance is a set of named conformance
   scenarios.
