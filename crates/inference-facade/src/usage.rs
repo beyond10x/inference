@@ -34,9 +34,17 @@
 //! no way to pass that usage on; the session marks the run's total and its own partial, naming
 //! the node ([`UsageTotal::uncounted`], `inference_runtime::uncounted_usage`), so that neither
 //! reads as complete.
+//!
+//! A record counts once by its identity, its `usage_record_id`, however many ends of the run carry
+//! it (`story:usage-dedup-fan-out`): a fan-out node hands the one record to each of its output
+//! edges, and two of them may reach egresses. The session delivers the record off each egress
+//! and counts, and with the feature `cost` prices, only the first it reads; it keeps the identity
+//! of every record it counted, one per model call, for as long as the session lives.
+
+use std::collections::BTreeSet;
 
 use inference_core::id::{NodeId, RunId};
-use inference_core::usage::{UsageRecorded, UsageTotal};
+use inference_core::usage::{UsageRecordId, UsageRecorded, UsageTotal};
 
 /// The usage a live session counted: a total per run it held, in the order it attached them, and
 /// one over the session; with the feature `cost`, what that usage cost.
@@ -51,6 +59,8 @@ pub struct SessionUsage {
     /// session's usage total ([`crate::cost`]).
     #[cfg(feature = "cost")]
     pub cost: crate::cost::SessionCost,
+    /// The identity of every record counted, so that a record read again is not.
+    counted: BTreeSet<UsageRecordId>,
 }
 
 impl SessionUsage {
@@ -68,12 +78,17 @@ impl SessionUsage {
         self.total_of(run_id);
     }
 
-    /// Adds `recorded`, read off an egress of the run `run_id`, to that run's total and the
-    /// session's.
-    pub(crate) fn add(&mut self, run_id: RunId, recorded: &UsageRecorded) {
+    /// Adds `recorded`, read off an end of the run `run_id`, to that run's total and the
+    /// session's, unless a record of its identity was added already; returns whether it was
+    /// added.
+    pub(crate) fn add(&mut self, run_id: RunId, recorded: &UsageRecorded) -> bool {
+        if !self.counted.insert(recorded.usage_record_id) {
+            return false;
+        }
         self.total_of(run_id)
             .add(&recorded.quantities, recorded.r#final);
         self.session.add(&recorded.quantities, recorded.r#final);
+        true
     }
 
     /// Marks the total of the run `run_id`, and the session's, partial, naming the node `node_id`

@@ -431,6 +431,81 @@ async fn a_text_agent_says_the_generators_text() {
     assert_eq!(said(&seen).concat(), "Hello from the mock", "{seen:#?}");
 }
 
+/// One completed chat turn reports its usage record on the SDK's stream and in the session's
+/// total, both carrying the request and the counts the model reported.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_text_agents_completed_turn_reports_its_usage_on_the_stream_and_in_the_total() {
+    use inference::core::usage::{Quantity, QuantityKind};
+    use inference::llm::llm_core::Usage;
+
+    const INPUT_TOKENS: u64 = 7;
+    const OUTPUT_TOKENS: u64 = 4;
+    let generator = MockGenerator::new(
+        MockConfiguration::StreamingAndConcurrentInput,
+        ModelId::generate(),
+        ["Hello from the mock"],
+    )
+    .reporting([Some(Usage {
+        input_tokens: Some(INPUT_TOKENS),
+        output_tokens: Some(OUTPUT_TOKENS),
+        ..Usage::default()
+    })]);
+    let agent = Agent::text()
+        .stack(Stack::new().bind(Binding::llm(generator)))
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    agent.send_text("hello").await.expect("sent");
+    agent.commit().await.expect("committed");
+    let seen = read_until(&mut events, "Said").await;
+    agent.close().await.expect("closes");
+    let seen = [seen, read_all(&mut events).await].concat();
+    assert_eq!(said(&seen).concat(), "Hello from the mock", "{seen:#?}");
+
+    let records: Vec<_> = seen
+        .iter()
+        .filter_map(|event| match event {
+            Event::Usage(recorded) => Some(recorded),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(records.len(), 1, "one usage event: {seen:#?}");
+    let value = |kind| {
+        records[0]
+            .quantities
+            .iter()
+            .find(|quantity| quantity.kind() == kind)
+            .and_then(Quantity::value)
+    };
+    assert_eq!(value(QuantityKind::Requests), Some(1), "{records:#?}");
+    assert_eq!(
+        value(QuantityKind::InputTextTokens),
+        Some(i64::try_from(INPUT_TOKENS).expect("small")),
+        "{records:#?}"
+    );
+    assert_eq!(
+        value(QuantityKind::OutputTextTokens),
+        Some(i64::try_from(OUTPUT_TOKENS).expect("small")),
+        "{records:#?}"
+    );
+
+    let usage = agent.session().usage();
+    assert_eq!(usage.session.records(), 1, "{usage:#?}");
+    let known = |kind| usage.session.kind(kind).map(|total| total.known);
+    assert_eq!(known(QuantityKind::Requests), Some(1), "{usage:#?}");
+    assert_eq!(
+        known(QuantityKind::InputTextTokens),
+        Some(i128::from(INPUT_TOKENS)),
+        "{usage:#?}"
+    );
+    assert_eq!(
+        known(QuantityKind::OutputTextTokens),
+        Some(i128::from(OUTPUT_TOKENS)),
+        "{usage:#?}"
+    );
+}
+
 fn instructed_generator() -> MockGenerator {
     MockGenerator::new(
         MockConfiguration::StreamingAndConcurrentInput,

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-23T02:01:50Z",
+  "actor": "human:timo",
+  "artifact": "story:usage-dedup-fan-out",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p inference-facade --all-features exit 0: 123 passed, 0 failed (usage lane 5 to 7); clippy not yet run on the fix",
+    "reference": "branch impl/usage-dedup-fan-out bec4c9607"
+  }
+}

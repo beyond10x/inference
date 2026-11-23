@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-23T02:43:09Z",
+  "actor": "human:timo",
+  "artifact": "story:usage-dedup-fan-out",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo clippy -p inference-facade --all-targets --all-features -- -D warnings exit 0 on 2026-11-23",
+    "reference": "branch impl/usage-dedup-fan-out 1b6c58f4a"
+  }
+}

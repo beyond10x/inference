@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-23T02:18:19Z",
+  "actor": "human:timo",
+  "artifact": "story:final-message-commit",
+  "kind": "story",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p inference-llm --all-features (lib 2, model_turns 23, every lane 0 failed); cargo clippy -p inference-llm --all-targets --all-features -D warnings; cargo fmt --all --check",
+    "reference": "branch impl/final-message-commit commit a22cc40b5; red cases at be79c4694"
+  }
+}

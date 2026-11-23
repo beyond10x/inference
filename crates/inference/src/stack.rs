@@ -239,13 +239,40 @@ pub(crate) trait BoundRecogniser: Send + Sync {
         Ok(())
     }
 
-    /// The STT node of the run `run_id` over the bound recogniser, through `ports`, recording
-    /// what it emits in `log`. A deferred recogniser is opened first.
+    /// The STT node of the run `run_id` over the bound recogniser, through `ports`, sending the
+    /// usage record of each recognition on `usage` when given one, recording what it emits in
+    /// `log`. A deferred recogniser is opened first.
     ///
     /// # Errors
     ///
     /// The refusal of opening a deferred recogniser; no node is built.
-    fn node(&self, run_id: RunId, ports: SttPorts, log: RunLog) -> Result<Implementation, Error>;
+    fn node(
+        &self,
+        run_id: RunId,
+        ports: SttPorts,
+        usage: Option<PortId>,
+        log: RunLog,
+    ) -> Result<Implementation, Error>;
+}
+
+/// The STT node of the run `run_id` over `recogniser`, through `ports`, sending the usage record
+/// of each recognition on `usage` when given one, recording what it emits in `log`.
+pub(crate) fn stt_node<R>(
+    run_id: RunId,
+    recogniser: R,
+    ports: SttPorts,
+    usage: Option<PortId>,
+    log: RunLog,
+) -> Implementation
+where
+    R: Recogniser + Clone + Send + 'static,
+    R::Handle: Send + 'static,
+{
+    let node = SttNode::new(run_id, recogniser, ports, log);
+    match usage {
+        Some(usage) => Box::new(node.with_usage(usage)),
+        None => Box::new(node),
+    }
 }
 
 impl<T> BoundRecogniser for T
@@ -257,16 +284,23 @@ where
         Recogniser::adapter(self)
     }
 
-    fn node(&self, run_id: RunId, ports: SttPorts, log: RunLog) -> Result<Implementation, Error> {
-        Ok(Box::new(SttNode::new(run_id, self.clone(), ports, log)))
+    fn node(
+        &self,
+        run_id: RunId,
+        ports: SttPorts,
+        usage: Option<PortId>,
+        log: RunLog,
+    ) -> Result<Implementation, Error> {
+        Ok(stt_node(run_id, self.clone(), ports, usage, log))
     }
 }
 
 /// What a run's synthesiser node is built as.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Synthesis {
-    /// A [`TtsNode`]: one input edge of text, one output edge of audio, no playback.
-    Plain,
+    /// A [`TtsNode`]: one input edge of text, one output edge of audio, no playback, and the
+    /// usage record of its synthesis sent on `usage` when given one.
+    Plain { usage: Option<PortId> },
     /// A cascade's [`SpeechNode`] through `ports`, sending each segment's playback on its port
     /// `playback`.
     Speech {
@@ -296,7 +330,13 @@ where
 
     fn node(&self, run_id: RunId, synthesis: Synthesis, log: RunLog) -> Implementation {
         match synthesis {
-            Synthesis::Plain => Box::new(TtsNode::<T>::new(run_id, self.clone(), log)),
+            Synthesis::Plain { usage } => {
+                let node = TtsNode::<T>::new(run_id, self.clone(), log);
+                match usage {
+                    Some(usage) => Box::new(node.with_usage(usage)),
+                    None => Box::new(node),
+                }
+            }
             Synthesis::Speech { ports, playback } => {
                 Box::new(SpeechNode::new(run_id, self.clone(), ports, log).with_playback(playback))
             }
@@ -1467,7 +1507,13 @@ mod tests {
             Ok(())
         }
 
-        fn node(&self, _: RunId, _: SttPorts, _: RunLog) -> Result<Implementation, Error> {
+        fn node(
+            &self,
+            _: RunId,
+            _: SttPorts,
+            _: Option<PortId>,
+            _: RunLog,
+        ) -> Result<Implementation, Error> {
             Err(Error::Layer {
                 message: "the counting recogniser builds no node".to_owned(),
                 source: None,

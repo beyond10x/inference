@@ -26,6 +26,7 @@ use inference_llm::{
     CONTRACT_REVISION, CallNotAwaited, CapabilityNotDeclared, GenerationEvent, GenerationHandle,
     GenerationRequest, Generator, OutcomeRefused,
 };
+use inference_text::SegmentState;
 use serde_json::json;
 
 /// The upstream model a [`Answer::Text`] turn reports serving.
@@ -39,6 +40,10 @@ enum Answer {
     Text(Vec<&'static str>, Vec<ToolCall>),
     /// These deltas, then an outcome reporting no usage and no upstream model.
     Unreported(Vec<&'static str>),
+    /// These deltas, then an outcome of these assistant messages, reporting no usage: as `llm`
+    /// keeps them, a message carries the deltas shown for it, and one no delta was shown for
+    /// carries the text the server sent.
+    Messages(Vec<&'static str>, Vec<&'static str>),
     /// A failure, before any delta.
     Fail,
     /// This delta, then nothing until the turn is cancelled.
@@ -157,6 +162,22 @@ impl Model for Scripted {
                     Ok(TurnOutcome {
                         stop_reason: StopReason::EndTurn,
                         items: vec![Item::assistant(deltas.concat())],
+                        observation: TurnObservation {
+                            final_usage: true,
+                            ..TurnObservation::new(self.provenance.clone())
+                        },
+                    })
+                }
+                Answer::Messages(deltas, messages) => {
+                    for text in &deltas {
+                        sink.emit(StreamEvent::TextDelta {
+                            text: (*text).to_owned(),
+                        })
+                        .await?;
+                    }
+                    Ok(TurnOutcome {
+                        stop_reason: StopReason::EndTurn,
+                        items: messages.into_iter().map(Item::assistant).collect(),
                         observation: TurnObservation {
                             final_usage: true,
                             ..TurnObservation::new(self.provenance.clone())
@@ -974,4 +995,102 @@ fn a_failed_turn_yields_a_record_of_one_request_with_every_token_count_unknown()
         "the counts of a failed turn are never final"
     );
     assert!(record.started_at_ms <= record.ended_at_ms);
+}
+
+/// The text of every committed segment in `seen`, in order.
+fn committed(seen: &[(GenerationEvent, GenerationState)]) -> Vec<String> {
+    seen.iter()
+        .filter_map(|(event, _)| match event {
+            GenerationEvent::SegmentCommitted(commit) => Some(commit.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What a streaming adapter over one turn answering `answer` commits, in order.
+fn committed_by_streaming(answer: Answer) -> Vec<String> {
+    let model = Scripted::new([answer]);
+    let mut handle = generator(vec![Capability::OutputStreaming], &model)
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+    committed(&drain(&mut handle))
+}
+
+#[test]
+fn a_message_no_delta_was_shown_for_is_committed_after_the_streamed_one() {
+    assert_eq!(
+        committed_by_streaming(Answer::Messages(vec!["First."], vec!["First.", "Second."])),
+        ["First.", "Second."],
+        "the streamed message once, and the message the server sent whole once"
+    );
+}
+
+#[test]
+fn a_turn_that_only_streamed_commits_its_text_once() {
+    assert_eq!(
+        committed_by_streaming(Answer::Messages(vec!["First."], vec!["First."])),
+        ["First."]
+    );
+}
+
+#[test]
+fn a_turn_that_streamed_nothing_commits_its_messages_as_one_segment() {
+    assert_eq!(
+        committed_by_streaming(Answer::Messages(Vec::new(), vec!["First.", "Second."])),
+        ["First.Second."]
+    );
+}
+
+#[test]
+fn a_streamed_message_after_one_sent_whole_is_not_committed_twice() {
+    assert_eq!(
+        committed_by_streaming(Answer::Messages(vec!["Second."], vec!["First.", "Second."])),
+        ["Second.", "First."],
+        "the streamed text was committed as it arrived; the other message follows once"
+    );
+}
+
+#[test]
+fn a_non_streaming_adapter_delivers_every_message_of_a_mixed_turn_as_one_segment() {
+    let model = Scripted::new([Answer::Messages(vec!["First."], vec!["First.", "Second."])]);
+    let mut handle = generator(Vec::new(), &model)
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+    let seen = drain(&mut handle);
+    assert_eq!(
+        texts(&seen),
+        [("First.Second.".to_owned(), GenerationState::Completed)]
+    );
+    assert_eq!(committed(&seen), ["First.Second."]);
+}
+
+#[test]
+fn a_model_delta_commits_its_own_segment_and_not_the_callers_draft() {
+    let model = Scripted::new([Answer::Text(vec!["First."], Vec::new())]);
+    let mut handle = generator(vec![Capability::OutputStreaming], &model)
+        .start(request())
+        .expect("a fresh generator runs nothing else");
+    handle
+        .emit("outside draft")
+        .expect("an Active generation takes a delta");
+    let seen = drain(&mut handle);
+    assert_eq!(
+        committed(&seen),
+        ["First."],
+        "only the segment the model's delta made is committed"
+    );
+    let segments: Vec<(&str, SegmentState)> = handle
+        .output()
+        .segments()
+        .iter()
+        .map(|segment| (segment.text(), segment.state()))
+        .collect();
+    assert_eq!(
+        segments,
+        [
+            ("outside draft", SegmentState::Tentative),
+            ("First.", SegmentState::Committed)
+        ],
+        "the caller's draft stays Tentative until the caller commits it"
+    );
 }

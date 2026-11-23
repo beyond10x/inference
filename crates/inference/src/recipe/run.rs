@@ -29,7 +29,7 @@ use inference_pipeline::nodes::vad::VoiceActivityDetector;
 use inference_pipeline::nodes::{AuthorityHandle, FanOut, ToolAuthority, ToolExecutorNode};
 use inference_pipeline::{
     Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeRole,
-    PipelineId, PlannedPipeline, PortId,
+    PipelineId, PlannedPipeline, PortId, USAGE_PORT,
 };
 #[cfg(feature = "audio-host")]
 use inference_text::{OpenTurn, Turn, TurnCompleted, TurnId, TurnNotFound, TurnOpened};
@@ -190,10 +190,12 @@ impl<'i> Run<'i> {
                     turns_out: self.port(node, "turns_out")?,
                     transcript: self.port(node, "transcript").ok(),
                 };
-                binding
-                    .recogniser()
-                    .ok_or_else(missing)?
-                    .node(run_id, ports, log)
+                binding.recogniser().ok_or_else(missing)?.node(
+                    run_id,
+                    ports,
+                    self.port(node, USAGE_PORT).ok(),
+                    log,
+                )
             }
             Role::Tts => {
                 let synthesis = if matches!(self.recipe.topology, Topology::VoiceCascade) {
@@ -206,7 +208,9 @@ impl<'i> Run<'i> {
                         playback: self.port(node, "playback")?,
                     }
                 } else {
-                    Synthesis::Plain
+                    Synthesis::Plain {
+                        usage: self.port(node, USAGE_PORT).ok(),
+                    }
                 };
                 Ok(binding
                     .synthesiser()
@@ -254,7 +258,8 @@ impl<'i> Run<'i> {
     }
 
     /// The LLM node: the cascade's agent, one generation per turn, which keeps its replies when
-    /// the cascade does not cut at a turn's opening; any other recipe's model node.
+    /// the cascade does not cut at a turn's opening; any other recipe's model node, sending the
+    /// usage record of each turn on the node's port `usage` when the recipe declares one.
     #[cfg_attr(
         not(feature = "audio-host"),
         allow(
@@ -280,11 +285,12 @@ impl<'i> Run<'i> {
                 Box::new(agent.keeping_replies())
             });
         }
-        let _ = node;
-        Ok(Box::new(
-            ModelNode::<Payload>::carrying(run_id, generator, reply, self.log.clone())
-                .with_instructions(self.recipe.instructions.clone().unwrap_or_default()),
-        ))
+        let model = ModelNode::<Payload>::carrying(run_id, generator, reply, self.log.clone())
+            .with_instructions(self.recipe.instructions.clone().unwrap_or_default());
+        Ok(match self.port(node, USAGE_PORT) {
+            Ok(usage) => Box::new(model.with_usage(usage)),
+            Err(_) => Box::new(model),
+        })
     }
 
     /// A node no role binds: a fan-out by its role, the cascade's policy nodes and speaker by
