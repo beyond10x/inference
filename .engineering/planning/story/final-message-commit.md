@@ -2,12 +2,16 @@
 format: aep.planning-md/3
 id: story:final-message-commit
 kind: story
-status: draft
+status: implemented
 title: Every final assistant message of a model turn is committed once
 summary: A turn that streams one message and returns another commits both, each once; a model delta commits only its own segment, in time linear in the deltas
 relations:
 - serves: vision:inference
-revision: 1
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-23T02:18:23Z", actor: "human:timo", revision: 2, decided_on: {"recorded":{"test_result":1}}, executor: "agent:implementor-u3-final-messages"}
+- {from: "proposed", to: "active", at: "2026-11-23T02:18:23Z", actor: "human:timo", revision: 3, decided_on: {"recorded":{"test_result":1}}, executor: "agent:implementor-u3-final-messages"}
+- {from: "active", to: "implemented", at: "2026-11-23T02:18:23Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}, executor: "agent:implementor-u3-final-messages"}
 ---
 ## Context
 
@@ -50,7 +54,9 @@ Two more findings of the same review sit on the same commit path:
   "First.Second." at completion.
 - A segment the caller emitted through `GenerationHandle::emit` before a model turn stays
   Tentative after the turn's delta commits; only the model's segment is committed.
-- Committing N streamed deltas of one generation takes time linear in N: the time for 8N deltas
-  stays well under the 64-fold a quadratic scan costs, in a test under 5 s.
+- The commits of N streamed deltas of one generation look at N segments, one each, not at every
+  earlier one (N(N+1)/2), counted in test builds; `commit_tentative` looks only at the segments
+  still Tentative. A wall-clock ratio test was tried and dropped: on the shared host the time of
+  8N deltas against N varied from 5 to 85 times on linear code.
 - `cargo test -p inference-llm`, `cargo clippy -p inference-llm --all-targets -- -D warnings` and
   `cargo fmt --all --check` pass.
