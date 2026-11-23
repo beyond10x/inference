@@ -371,12 +371,15 @@ impl NodeImplementation<PipelinePayload> for HandsOverItsInput {
     }
 }
 
+/// The thread driving a session's run.
+type Drive = thread::JoinHandle<Result<inference_runtime::Run, inference_runtime::RunError>>;
+
 /// A Ready session over a sink behind a one-place ingress that fails on overload, its run driven
 /// on a thread of its own, and the inner end of that ingress.
 fn over_a_one_place_failing_ingress() -> (
     LiveSessions,
     LiveSession<PipelinePayload>,
-    thread::JoinHandle<Result<inference_runtime::Run, inference_runtime::RunError>>,
+    Drive,
     Box<dyn InputEndpoint<PipelinePayload>>,
 ) {
     let unused = generator(Vec::<String>::new());

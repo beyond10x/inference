@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `inference-facade`: `LiveSession::commit_input` delivers `InputCommitted` and records the user
+  turn only once every ingress took the commit; a refused commit, such as a full `fail` ingress's
+  `Full`, leaves the turn open for a retry.
+- `inference-facade`: a `LiveSession::close` whose end of input a full ingress refused can be
+  called again once the ingress has room; it delivers the end of input, and the run drains and the
+  session closes instead of staying Draining.
+
 ## [0.32.0] — 2026-11-23
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these
