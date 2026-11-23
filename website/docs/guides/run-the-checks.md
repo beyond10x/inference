@@ -87,7 +87,7 @@ ess specify validate --path ess
 cargo test -p inference-testkit --features run --test conform
 ```
 
-With ess 0.97.4, the release CI installs, the validation prints the following. Long lines are
+With ess 0.98.0, the release CI installs, the validation prints the following. Long lines are
 wrapped here, and their continuation lines are indented four spaces:
 
 ```text

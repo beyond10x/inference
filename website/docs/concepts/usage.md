@@ -42,7 +42,7 @@ audio tokens, never added to either.
 
 A failed call is recorded with `final: false`, and its counts are a lower bound.
 
-On main, in the next release: a native speech response is recorded `final: true` only when the
+Since 0.33.0, a native speech response is recorded `final: true` only when the
 provider confirmed its counts, by a final report or by starting its next response. A running
 count that the session's close or failure settles keeps `final: false`, and so does usage held
 for no response that the session's end records.
@@ -50,8 +50,8 @@ for no response that the session's end records.
 A record reaches a session only from a node whose `usage` port the pipeline declares. Since 0.32.0,
 the SDK's built-in recipes `chat`, `transcribe` and `speak` expose their model
 node's usage as the egress `usage`, so an agent's event stream carries `Event::Usage` and its
-session total counts the call; `native_voice` carries its usage on `events`. On main, in the next
-release: `voice_cascade` exposes the usage of its three model nodes as the egresses `stt_usage`,
+session total counts the call; `native_voice` carries its usage on `events`. Since 0.33.0,
+`voice_cascade` exposes the usage of its three model nodes as the egresses `stt_usage`,
 `agent_usage` and `tts_usage`, so one spoken turn yields a record for the recognition and one for
 the model turn, and the end of the run's utterance one for the synthesis.
 
