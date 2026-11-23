@@ -2016,13 +2016,23 @@ mod agent_turns {
 
     /// One completed spoken turn through `voice_cascade` on the mocks yields one usage record per
     /// model call, of the recogniser, the generator and the synthesiser, each one request, and
-    /// the session's total counts those three records.
+    /// the session's total counts those three records. The recogniser commits one span, so the
+    /// generator is asked once.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_completed_cascade_turn_reports_the_usage_of_each_model_call() {
         let recogniser = MockRecogniser::new(
             stt::MockConfiguration::Incremental,
             ModelId::generate(),
-            stt::script(),
+            vec![
+                stt::Cue {
+                    after_frames: 1,
+                    step: stt::ScriptStep::Hypothesis("hello there".to_owned()),
+                },
+                stt::Cue {
+                    after_frames: 2,
+                    step: stt::ScriptStep::Commit { span: 0 },
+                },
+            ],
         );
         let generator = MockGenerator::new(
             llm::MockConfiguration::StreamingAndConcurrentInput,
@@ -2042,7 +2052,7 @@ mod agent_turns {
         .into();
         let stack = Stack::new()
             .bind(Binding::stt(recogniser))
-            .bind(Binding::llm(generator))
+            .bind(Binding::llm(generator.clone()))
             .bind(Binding::tts(synthesiser));
         let agent = Agent::from_recipe(Recipe::voice_cascade())
             .stack(stack)
@@ -2068,6 +2078,11 @@ mod agent_turns {
             .map(|recorded| called.get(&recorded.adapter_id).copied().unwrap_or("other"))
             .collect();
         by_role.sort_unstable();
+        assert_eq!(
+            generator.asked(),
+            [vec!["hello there".to_owned()]],
+            "one model call"
+        );
         assert_eq!(by_role, ["llm", "stt", "tts"], "{records:#?}");
         for recorded in &records {
             assert_eq!(

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- `inference-pipeline`: `AgentNode::with_usage` and `SpeechNode::with_usage` give the cascade's
+  agent and speech nodes a `usage` port; `SpeechPayload::usage` carries a record, none by default.
+
+### Fixed
+
+- The built-in recipe `voice_cascade` no longer drops the usage of its model calls: its `stt`,
+  `agent` and `tts` nodes each declare a `usage` port, exposed as the egresses `stt_usage`,
+  `agent_usage` and `tts_usage`, so a spoken turn yields one `Event::Usage` per model call and
+  the session's total counts them. A superseded or cancelled generation of the agent still sends
+  the records of its turns, the cut turn's among them.
+
 ## [0.32.0] — 2026-11-23
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these

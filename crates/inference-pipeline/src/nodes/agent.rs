@@ -55,9 +55,21 @@
 //! room ends the wait. A turn of the model that fails cancels the generation: the node emits its
 //! `GenerationCancelled` and fails with the `llm` error.
 //!
+//! Given a usage port ([`AgentNode::with_usage`]), the output port its pipeline declares under
+//! the name `usage`, the node sends on the edge or exposure leaving it the usage record of each
+//! model call, every turn of its generations that ended, a failed one among them, as
+//! `inference-llm` delivers it after the events of that turn: an envelope of kind
+//! `inference.usage.UsageRecorded` on a stream of its own, naming the generation, whose record
+//! the node places on the run and itself as the node. A generation it supersedes or cancels still
+//! delivers the records of its turns that ended and of the turn the supersede or cancel cut,
+//! given up if its model has not returned, then counted as one request with every token count
+//! unknown, not final, as the [`ModelNode`](super::llm::ModelNode) does; the node sends them
+//! before it lets the generation go. It passes the end of input on there too, ahead of its
+//! output port. A node with no edge leaving its usage port, or given none, or on a payload that
+//! carries no usage ([`ModelPayload::usage`]), sends no record.
+//!
 //! Every event it emits is recorded in the run's [`RunLog`] in its envelope, which names the
-//! event's generation. It has no usage port and sends no usage record; the usage of a cascade
-//! is the [`ModelNode`](super::llm::ModelNode)'s to send. [`AgentHandle`] reads every generation, the turn it answered and its
+//! event's generation. [`AgentHandle`] reads every generation, the turn it answered and its
 //! state, as the node goes.
 
 use std::collections::{HashSet, VecDeque};
@@ -65,7 +77,7 @@ use std::fmt;
 use std::future;
 use std::pin::pin;
 use std::sync::{Arc, Weak};
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use crate::{Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, PortId};
@@ -75,6 +87,7 @@ use inference_core::envelope::{ControlKind, EventEnvelope};
 use inference_core::generation::GenerationState;
 use inference_core::id::{GenerationId, NodeId, RunId};
 use inference_core::model::Capability;
+use inference_core::usage::UsageRecorded;
 use inference_llm::llm_core::{Item, TurnRequest};
 use inference_llm::{GenerationEvent, GenerationHandle, GenerationRequest, Generator};
 use inference_text::{SegmentId, SegmentSnapshot, TurnId};
@@ -82,6 +95,7 @@ use inference_text::{SegmentId, SegmentSnapshot, TurnId};
 use super::llm::{Carried, ModelPayload};
 use super::log::{self, RunLog, StreamEmitter, StreamEvent};
 use super::tool_authority::send_unless;
+use super::usage_out::UsageOut;
 use super::{Exchange, Watched, block_on, started};
 
 /// One generation of the node: the turn it answers, its epoch, and its state and segments as
@@ -129,6 +143,7 @@ pub struct AgentNode {
     instructions: String,
     reply: fn(&str) -> String,
     playback: Option<PortId>,
+    usage: Option<PortId>,
     keeping: bool,
     log: RunLog,
     node_id: Option<NodeId>,
@@ -142,6 +157,7 @@ impl fmt::Debug for AgentNode {
             .field("run_id", &self.run_id)
             .field("generator", &self.generator)
             .field("playback", &self.playback)
+            .field("usage", &self.usage)
             .field("node_id", &self.node_id)
             .field("state", &self.state)
             .field("exchange", &self.exchange)
@@ -168,6 +184,7 @@ impl AgentNode {
             instructions: String::new(),
             reply,
             playback: None,
+            usage: None,
             keeping: false,
             log,
             node_id: None,
@@ -188,6 +205,15 @@ impl AgentNode {
     #[must_use]
     pub const fn with_playback(mut self, playback: PortId) -> Self {
         self.playback = Some(playback);
+        self
+    }
+
+    /// The same node given a usage port, `usage`, the output port its pipeline declares under the
+    /// name `usage`: once an edge or exposure leaves it, the node sends there the usage record of
+    /// each model call; see the module documentation.
+    #[must_use]
+    pub const fn with_usage(mut self, usage: PortId) -> Self {
+        self.usage = Some(usage);
         self
     }
 
@@ -260,6 +286,25 @@ fn carry<P: ModelPayload>(envelope: EventEnvelope<StreamEvent>) -> EventEnvelope
     log::carry(envelope, P::stream)
 }
 
+/// The usage records a generation that is no longer Active still holds: polled without waiting,
+/// the turn its end cut given up if it has not returned.
+fn held_usage(handle: &mut GenerationHandle) -> Vec<UsageRecorded> {
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut records = Vec::new();
+    loop {
+        match handle.poll_turn_event(&mut cx) {
+            Poll::Ready(Some(GenerationEvent::Usage(recorded))) => records.push(recorded),
+            Poll::Ready(Some(_)) => {}
+            Poll::Ready(None) => return records,
+            Poll::Pending => {
+                if !handle.abandon_cut_turn() {
+                    return records;
+                }
+            }
+        }
+    }
+}
+
 /// What the exchange acts on next.
 enum Step<P> {
     Cancel,
@@ -283,6 +328,8 @@ struct Exchanging<P> {
     input: Box<dyn InputEndpoint<P>>,
     output: Box<dyn OutputEndpoint<P>>,
     emitter: StreamEmitter,
+    /// The node's `usage` port, given one with an edge or exposure leaving it.
+    usage: Option<UsageOut<P>>,
     state: Arc<Watched<State>>,
     current: Option<Current>,
     /// The turn opened last, the envelope of its `TurnOpened` and its ordinal among the turns
@@ -360,12 +407,32 @@ impl<P: ModelPayload> Exchanging<P> {
         });
     }
 
-    /// Emits `event` of the current generation; a cancellation, of a turn that failed, fails the
-    /// node with the `llm` error. The node has no usage port, so the usage record of a turn is
-    /// not sent.
+    /// Sends `recorded`, the usage of a model call of the generation `generation_id`, on the
+    /// `usage` port; a node with no edge leaving its `usage` port sends nothing.
+    async fn send_usage(
+        &mut self,
+        recorded: UsageRecorded,
+        generation_id: Option<GenerationId>,
+    ) -> Result<(), String> {
+        let Some(usage) = self.usage.as_mut() else {
+            return Ok(());
+        };
+        usage
+            .send(recorded, generation_id, &self.state, |state| state.cancel)
+            .await
+    }
+
+    /// Emits `event` of the current generation, or sends its usage record on the `usage` port; a
+    /// cancellation, of a turn that failed, fails the node with the `llm` error.
     async fn deliver(&mut self, event: GenerationEvent) -> Result<(), String> {
         let (event, failed) = match event {
-            GenerationEvent::Usage(_) => return Ok(()),
+            GenerationEvent::Usage(recorded) => {
+                let generation_id = self
+                    .current
+                    .as_ref()
+                    .map(|current| current.handle.output().generation().generation_id());
+                return self.send_usage(recorded, generation_id).await;
+            }
             GenerationEvent::Started(started) => (StreamEvent::GenerationStarted(started), false),
             GenerationEvent::TextDelta(delta) => (StreamEvent::TextDelta(delta), false),
             GenerationEvent::SegmentCommitted(committed) => {
@@ -447,6 +514,11 @@ impl<P: ModelPayload> Exchanging<P> {
         self.emit(StreamEvent::GenerationSuperseded(superseded))
             .await?;
         let delivery = Instant::now();
+        let held = self
+            .current
+            .as_mut()
+            .map(|current| held_usage(&mut current.handle))
+            .unwrap_or_default();
         self.current = None;
         let computation = Instant::now();
         self.state.update(|state| {
@@ -457,6 +529,10 @@ impl<P: ModelPayload> Exchanging<P> {
                 computation,
             });
         });
+        for recorded in held {
+            self.send_usage(recorded, Some(superseded.generation_id))
+                .await?;
+        }
         Ok(())
     }
 
@@ -611,6 +687,9 @@ impl<P: ModelPayload> Exchanging<P> {
         }
         self.complete().await?;
         self.current = None;
+        if let Some(usage) = self.usage.as_mut() {
+            usage.end(&self.state, |state| state.cancel).await?;
+        }
         let end = self.emitter.control(ControlKind::Stop);
         send_unless(&self.state, |state| state.cancel, self.output.as_ref(), end).await?;
         while self.playback.is_some() {
@@ -623,7 +702,8 @@ impl<P: ModelPayload> Exchanging<P> {
         Ok(true)
     }
 
-    /// Cancels the current generation, recording its `GenerationCancelled` unsent.
+    /// Cancels the current generation, recording its `GenerationCancelled` unsent, and sends
+    /// every usage record it still holds, the turn the cancel cut among them.
     fn cancel(&mut self) {
         let Some(current) = self.current.as_mut() else {
             return;
@@ -633,8 +713,15 @@ impl<P: ModelPayload> Exchanging<P> {
                 .emitter
                 .stream(StreamEvent::GenerationCancelled(cancelled));
         }
+        let generation_id = current.handle.output().generation().generation_id();
+        let held = held_usage(&mut current.handle);
         self.record();
         self.current = None;
+        block_on(async {
+            for recorded in held {
+                let _ = self.send_usage(recorded, Some(generation_id)).await;
+            }
+        });
     }
 
     fn run(mut self) {
@@ -659,7 +746,16 @@ impl<P: ModelPayload> NodeImplementation<P> for AgentNode {
         Box::pin(future::ready(Ok(())))
     }
 
-    fn start(&mut self, endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
+    fn start(&mut self, mut endpoints: NodeEndpoints<P>) -> NodeFuture<'_, Result<(), NodeError>> {
+        let usage = self
+            .usage
+            .and_then(|port| {
+                endpoints
+                    .outputs
+                    .iter()
+                    .position(|output| output.port_id == port)
+            })
+            .map(|at| endpoints.outputs.remove(at));
         let inputs_wanted = 1 + usize::from(self.playback.is_some());
         let started = started(self.node_id, &endpoints, inputs_wanted, 1).and_then(|node_id| {
             let NodeEndpoints {
@@ -695,6 +791,7 @@ impl<P: ModelPayload> NodeImplementation<P> for AgentNode {
                     self.log.clone(),
                 ),
                 output: output.endpoint,
+                usage: usage.map(|usage| UsageOut::new(usage, self.run_id, node_id, P::usage)),
                 state: Arc::clone(&self.state),
                 current: None,
                 open: None,

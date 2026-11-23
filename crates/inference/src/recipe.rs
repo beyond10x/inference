@@ -197,8 +197,9 @@ impl Recipe {
     }
 
     /// The reference cascade of `local-voice-cascade`: microphone in, its VAD, turn policy, `stt`,
-    /// gates, `agent` and `tts` nodes and its speaker sink, with the egresses `transcript` and
-    /// `assistant_text`.
+    /// gates, `agent` and `tts` nodes and its speaker sink, with the egresses `transcript`,
+    /// `assistant_text` and, the usage record of each model call of its model nodes,
+    /// `stt_usage`, `agent_usage` and `tts_usage`.
     #[must_use]
     pub fn voice_cascade() -> Self {
         Self::built_in(

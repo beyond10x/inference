@@ -108,7 +108,11 @@ pub fn declare(
             pipeline.expose(&microphone, "audio", capacity, pause);
             pipeline.expose(&committed, "transcript", capacity, pause);
             pipeline.expose(&to_app, "assistant_text", capacity, pause);
-            for (node, name) in [(&stt, "stt_usage"), (&llm, "agent_usage"), (&tts, "tts_usage")] {
+            for (node, name) in [
+                (&stt, "stt_usage"),
+                (&llm, "agent_usage"),
+                (&tts, "tts_usage"),
+            ] {
                 let usage = pipeline.output::<modality::Structured>(node, USAGE_PORT, control);
                 pipeline.expose(&usage, name, capacity, pause);
             }

@@ -75,6 +75,8 @@ mod tool_executor;
 #[cfg(feature = "tts")]
 pub mod tts;
 pub mod turn_policy;
+#[cfg(any(feature = "llm", feature = "tts"))]
+mod usage_out;
 pub mod vad;
 
 #[cfg(feature = "llm")]

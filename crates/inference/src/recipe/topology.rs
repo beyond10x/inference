@@ -2,8 +2,9 @@
 //! exposure at the recipe's capacity under `OverloadPolicy::Pause`. A role's node takes the
 //! requirements `requirement` returns for its role and default. The model node of `chat`,
 //! `transcribe` and `speak` declares a port [`USAGE_PORT`], exposed as the egress `usage`, on
-//! which it sends the usage record of each model call; `native_voice`'s records travel on its
-//! `events`. `voice_cascade` declares none yet: its `agent` and `tts` nodes have no usage port.
+//! which it sends the usage record of each model call; each of `voice_cascade`'s three model
+//! nodes declares one too, exposed as `stt_usage`, `agent_usage` and `tts_usage`, as egress
+//! names are unique in a pipeline; `native_voice`'s records travel on its `events`.
 
 use std::num::NonZeroUsize;
 
@@ -176,6 +177,14 @@ pub(super) fn voice_cascade(
     pipeline.expose(&microphone, "audio", capacity, PAUSE);
     pipeline.expose(&committed, "transcript", capacity, PAUSE);
     pipeline.expose(&to_app, "assistant_text", capacity, PAUSE);
+    for (node, name) in [
+        (&stt, "stt_usage"),
+        (&llm, "agent_usage"),
+        (&tts, "tts_usage"),
+    ] {
+        let usage = pipeline.output::<modality::Structured>(node, USAGE_PORT, USAGE);
+        pipeline.expose(&usage, name, capacity, PAUSE);
+    }
 }
 
 /// The native speech model's node and the runtime's tool nodes, wired as
