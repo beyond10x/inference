@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `inference-llm`: a model turn that streamed one assistant message and returned another one whole
+  now commits both, each once. The wrapper matches the turn's deltas to its messages in order and
+  commits the text of every message no delta was shown for when the turn ends; before, it took no
+  text from the outcome once any delta had streamed, so speech lost the second message.
+- `inference-llm`: a model delta commits only the segment it made. Text a caller emitted with
+  `GenerationHandle::emit` stays Tentative, as documented, instead of being committed by the next
+  delta.
+- `inference-llm`: committing a delta no longer looks at every segment the generation emitted
+  before it, so a generation of N deltas does work linear in N, not N(N+1)/2 segment visits;
+  `GenerationOutput::commit_tentative` visits only the segments still Tentative.
+
 ## [0.31.0] — 2026-11-22
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these

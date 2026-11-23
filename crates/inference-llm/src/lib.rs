@@ -31,8 +31,10 @@
 //! [`StreamEvent`] is final, that each assistant message of a successful turn carries exactly the
 //! text deltas shown for it, and that a message no delta was shown for carries the text the
 //! server sent. So the commit point is the delta: each becomes one segment, committed as it is
-//! emitted; a turn that showed no delta gives the assistant text of its outcome as one segment
-//! when it ends.
+//! emitted, and that commit takes no other segment, such as text a caller emitted with
+//! [`GenerationHandle::emit`]. When a turn ends, its deltas are matched to its assistant messages
+//! in order, and the text of every message no delta was shown for becomes one segment, so a turn
+//! that streamed one message and sent another whole delivers both, each once.
 //!
 //! A refusal is not prose: the model's refusal item of a turn that ended is delivered as
 //! [`GenerationEvent::Refused`] with its text, after that turn's text and before its usage
@@ -245,6 +247,44 @@ fn wall_clock_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+/// The text of the assistant messages among `items` that no delta of `shown` carried, joined in
+/// order. `shown` is the text deltas a turn showed, joined, and `ends` where each delta ends in
+/// it. Under `llm`'s contract a message the caller was shown carries exactly the deltas shown for
+/// it, and one no delta was shown for carries the text the server sent; so each message is looked
+/// for in `shown` after the message found before it, starting and ending on a delta's edge, and a
+/// message found nowhere was not shown. Shown text no message carries, which `llm` reports as
+/// unpaired, keeps the segment its deltas made and is matched by none.
+fn unshown_text(shown: &str, ends: &[usize], items: &[Item]) -> String {
+    let mut from = 0;
+    let mut unshown = String::new();
+    for item in items {
+        let Item::AssistantText { text } = item else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        match shown_end(shown, ends, from, text) {
+            Some(end) => from = end,
+            None => unshown.push_str(text),
+        }
+    }
+    unshown
+}
+
+/// Where `text` ends in `shown` when it is the deltas from one delta's start at or after `from`
+/// to another's end; `ends` is where each delta ends.
+fn shown_end(shown: &str, ends: &[usize], from: usize, text: &str) -> Option<usize> {
+    let after = ends.partition_point(|&end| end < from);
+    std::iter::once(0)
+        .chain(ends[after..].iter().copied())
+        .filter(|&start| start >= from)
+        .find_map(|start| {
+            let end = start + text.len();
+            (shown[start..].starts_with(text) && ends.binary_search(&end).is_ok()).then_some(end)
         })
 }
 
@@ -462,6 +502,9 @@ pub struct GenerationOutput {
     capabilities: Vec<Capability>,
     generation: Generation,
     segments: Vec<OutputSegment>,
+    /// Where the segments still Tentative sit among `segments`, in emission order, so a commit
+    /// visits only them.
+    tentative: Vec<usize>,
     /// How many segments the commits looked at, for the tests that bound it.
     #[cfg(test)]
     visited: usize,
@@ -477,6 +520,7 @@ impl GenerationOutput {
             capabilities: adapter.capabilities().to_vec(),
             generation,
             segments: Vec::new(),
+            tentative: Vec::new(),
             #[cfg(test)]
             visited: 0,
         };
@@ -493,6 +537,7 @@ impl GenerationOutput {
     pub fn emit(&mut self, text: String) -> Result<TextDelta, GenerationStateConflict> {
         let sequence = i64::try_from(self.segments.len()).map_or(i64::MAX, |count| count + 1);
         let (segment, event) = OutputSegment::emit(&self.generation, sequence, text)?;
+        self.tentative.push(self.segments.len());
         self.segments.push(segment);
         Ok(event)
     }
@@ -501,38 +546,56 @@ impl GenerationOutput {
     /// emitted, and returns their [`TextSegmentCommitted`] events. As `ess/domains/stream.yaml`
     /// declares it, `CommitSegment` has no guard on the generation's state: the Tentative segment
     /// of a Completed generation commits. Superseding or cancelling discards every segment, so
-    /// none of a stale generation is left Tentative to commit.
+    /// none of a stale generation is left Tentative to commit. It visits only the segments still
+    /// Tentative, not every segment the generation emitted.
     ///
     /// # Errors
     ///
     /// [`SegmentStateConflict`], the only refusal of `CommitSegment`, carrying the state of a
     /// segment that is not Tentative. Only Tentative segments are selected, so it is not reached.
     pub fn commit_tentative(&mut self) -> Result<Vec<TextSegmentCommitted>, SegmentStateConflict> {
-        let mut events = Vec::new();
-        let mut refusal = None;
+        let mut events = Vec::with_capacity(self.tentative.len());
+        let mut tentative = std::mem::take(&mut self.tentative).into_iter();
+        for index in tentative.by_ref() {
+            match self.commit_at(index) {
+                Ok(event) => events.push(event),
+                Err(conflict) => {
+                    self.tentative = tentative.collect();
+                    return Err(conflict);
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    /// Runs `inference.stream.CommitSegment` on the segment emitted last, and on no other: the
+    /// commit of one delta leaves every other Tentative segment, such as text a caller emitted
+    /// and has not committed, as it is. None when there is no segment or it is not Tentative.
+    fn commit_last(&mut self) -> Option<TextSegmentCommitted> {
+        let index = self.segments.len().checked_sub(1)?;
+        let place = self.tentative.iter().rposition(|&at| at == index)?;
+        self.tentative.remove(place);
+        self.commit_at(index).ok()
+    }
+
+    /// Commits the segment at `index` in place, leaving every other segment where it is.
+    fn commit_at(&mut self, index: usize) -> Result<TextSegmentCommitted, SegmentStateConflict> {
         #[cfg(test)]
         {
-            self.visited += self.segments.len();
+            self.visited += 1;
         }
-        self.segments = std::mem::take(&mut self.segments)
-            .into_iter()
-            .map(|segment| {
-                if refusal.is_some() || segment.state() != SegmentState::Tentative {
-                    return segment;
-                }
-                match segment.commit() {
-                    Ok((committed, event)) => {
-                        events.push(event);
-                        committed
-                    }
-                    Err(refused) => {
-                        refusal = Some(refused.conflict());
-                        refused.into_segment()
-                    }
-                }
-            })
-            .collect();
-        refusal.map_or(Ok(events), Err)
+        let segment = self.segments.swap_remove(index);
+        let (moved, committed) = match segment.commit() {
+            Ok((moved, event)) => (moved, Ok(event)),
+            Err(refused) => {
+                let conflict = refused.conflict();
+                (refused.into_segment(), Err(conflict))
+            }
+        };
+        self.segments.push(moved);
+        let last = self.segments.len() - 1;
+        self.segments.swap(index, last);
+        committed
     }
 
     /// Runs `inference.stream.CompleteGeneration` with its `stop_reason` input, which the
@@ -663,6 +726,9 @@ impl GenerationOutput {
                 Err(refused) => refused.into_segment(),
             })
             .collect();
+        let segments = &self.segments;
+        self.tentative
+            .retain(|&at| segments[at].state() == SegmentState::Tentative);
         events
     }
 }
@@ -843,8 +909,8 @@ impl Generator {
             delivered: VecDeque::from([GenerationEvent::Started(started)]),
             held: VecDeque::new(),
             ending: None,
-            text: String::new(),
-            shown: false,
+            shown: String::new(),
+            shown_ends: Vec::new(),
             stop_reason: None,
             outcomes: Vec::new(),
             failure: None,
@@ -932,10 +998,11 @@ pub struct GenerationHandle {
     /// The [`GenerationEvent::Completed`] of a completion that cut a running turn, delivered
     /// once that turn returned and its usage record was.
     ending: Option<GenerationEvent>,
-    /// The text of the running turn of an adapter that does not stream.
-    text: String,
-    /// Whether the running turn showed a text delta.
-    shown: bool,
+    /// The text deltas the running turn showed, joined: delivered already by an adapter that
+    /// streams, held as the turn's text by one that does not.
+    shown: String,
+    /// Where each delta of `shown` ends in it, in order.
+    shown_ends: Vec<usize>,
     /// Why the turn that ended last stopped; none before a turn ended and while one runs.
     stop_reason: Option<StopReason>,
     outcomes: Vec<TurnOutcome>,
@@ -1228,7 +1295,8 @@ impl GenerationHandle {
                 .extend(self.inputs.drain(..).map(Item::user));
         }
         self.answered = false;
-        self.shown = false;
+        self.shown.clear();
+        self.shown_ends.clear();
         self.stop_reason = None;
         let request = self.conversation.clone();
         let model = Arc::clone(&self.model);
@@ -1255,18 +1323,17 @@ impl GenerationHandle {
             if let StreamEvent::TextDelta { text } = event
                 && !text.is_empty()
             {
-                self.shown = true;
+                self.shown.push_str(&text);
+                self.shown_ends.push(self.shown.len());
                 if self.streams {
                     self.segment(text);
-                } else {
-                    self.text.push_str(&text);
                 }
             }
         }
     }
 
-    /// Emits `text` as one segment and commits it, queueing both events for delivery, or, for
-    /// an adapter that does not stream, holding them.
+    /// Emits `text` as one segment and commits that segment and no other, queueing both events
+    /// for delivery, or, for an adapter that does not stream, holding them.
     fn segment(&mut self, text: String) {
         let Ok(delta) = self.output.emit(text) else {
             return;
@@ -1277,32 +1344,28 @@ impl GenerationHandle {
             &mut self.held
         };
         queue.push_back(GenerationEvent::TextDelta(delta));
-        if let Ok(committed) = self.output.commit_tentative() {
-            queue.extend(committed.into_iter().map(GenerationEvent::SegmentCommitted));
+        if let Some(committed) = self.output.commit_last() {
+            queue.push_back(GenerationEvent::SegmentCommitted(committed));
         }
     }
 
-    /// Takes the outcome of the turn that ended: its text, when no delta showed it, becomes one
-    /// segment, followed by its usage record, its items join the conversation and its calls are
+    /// Takes the outcome of the turn that ended: the text of every assistant message no delta
+    /// showed becomes one segment, after the text the deltas showed for an adapter that does not
+    /// stream, followed by its usage record; its items join the conversation and its calls are
     /// staged. A turn ending with calls is the safe boundary at which an adapter that does not
     /// stream delivers what it held, so the caller can take the calls while the generation is
     /// Active.
     fn turn_ended(&mut self, outcome: TurnOutcome) {
         self.turn = None;
         let ended_at_ms = wall_clock_ms();
-        let text = if self.shown {
-            std::mem::take(&mut self.text)
+        let shown = std::mem::take(&mut self.shown);
+        let shown_ends = std::mem::take(&mut self.shown_ends);
+        let unshown = unshown_text(&shown, &shown_ends, &outcome.items);
+        let text = if self.streams {
+            unshown
         } else {
-            outcome
-                .items
-                .iter()
-                .filter_map(|item| match item {
-                    Item::AssistantText { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect()
+            shown + &unshown
         };
-        self.shown = false;
         if !text.is_empty() {
             self.segment(text);
         }
@@ -1489,7 +1552,8 @@ impl GenerationHandle {
     /// cancel, and drops what no later turn or delivery will take.
     fn stop(&mut self) {
         self.cancel.cancel();
-        self.text.clear();
+        self.shown.clear();
+        self.shown_ends.clear();
         self.inputs.clear();
         self.staged.clear();
         self.awaited.clear();
@@ -1626,5 +1690,37 @@ mod tests {
             count,
             "each commit looks at the one segment it commits, not at every earlier one"
         );
+    }
+
+    #[test]
+    fn committing_the_tentative_segments_visits_only_them() {
+        let (adapter, _) = Adapter::declare(DeclareAdapter {
+            model_id: ModelId::generate(),
+            backend: "no model".to_owned(),
+            contract_revision: CONTRACT_REVISION.to_owned(),
+            execution_form: ExecutionForm::InProcess,
+            locality: Locality::SameProcess,
+            capabilities: vec![Capability::OutputStreaming],
+            max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
+        })
+        .expect("one is positive");
+        let (mut output, _) = GenerationOutput::start(
+            &adapter,
+            &GenerationRequest {
+                run_id: RunId::generate(),
+                node_id: NodeId::generate(),
+                epoch: 1,
+                turn: TurnRequest::new("none", vec![Item::user("Go.")]),
+            },
+        );
+        for _ in 0..1000 {
+            output
+                .emit("x".to_owned())
+                .expect("an Active generation takes a delta");
+            let committed = output.commit_tentative().expect("Tentative commits");
+            assert_eq!(committed.len(), 1);
+        }
+        assert_eq!(output.visited, 1000);
     }
 }
