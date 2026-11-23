@@ -2,12 +2,16 @@
 format: aep.planning-md/3
 id: story:duplex-ledger-correctness
 kind: story
-status: draft
+status: implemented
 title: Duplex ledger keeps the provider's finality, checks frame length and delivers without rescans
 summary: A failed session's running usage is not final, a short PCM frame is refused, and next_event finds its received event directly
 relations:
 - serves: vision:inference
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-23T11:47:39Z", actor: "human:timo", revision: 2, decided_on: {"recorded":{"test_result":1}}}
+- {from: "proposed", to: "active", at: "2026-11-23T11:47:40Z", actor: "human:timo", revision: 3, decided_on: {"recorded":{"test_result":1}}}
+- {from: "active", to: "implemented", at: "2026-11-23T11:47:40Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 

@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-23T11:46:30Z",
+  "actor": "human:timo",
+  "artifact": "story:duplex-ledger-correctness",
+  "kind": "story",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "CARGO_INCREMENTAL=0 cargo test -p inference-audio -p inference-tts -p inference-duplex --no-fail-fast (207 passed, 0 failed) at fff633a2b"
+  }
+}
