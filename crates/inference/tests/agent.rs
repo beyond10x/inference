@@ -253,12 +253,23 @@ async fn close_after_the_models_close_returns_at_once() {
     assert_eq!(names(&seen).last(), Some(&"Closed"));
 }
 
+/// 1,000 rounds at 16 sessions at once (story:live-session-send-after-its-own-turn): each of the
+/// 16 sessions takes the next round until all 1,000 are taken, so 16 run at once until the last.
+/// A round costs about 2 ms of CPU, an agent started and closed; 16 sessions of 1,000 rounds each
+/// cost 33 s of CPU and ran past 60 s on a loaded host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn every_send_of_an_input_the_model_closed_at_is_ok_in_1000_rounds_of_16_sessions() {
+async fn every_send_of_an_input_the_model_closed_at_is_ok_in_1000_rounds_at_16_sessions_at_once() {
+    const ROUNDS: usize = 1000;
+    let next = Arc::new(AtomicUsize::new(0));
     let sessions: Vec<JoinHandle<()>> = (0..16)
         .map(|_| {
-            tokio::spawn(async {
-                for round in 0..1000 {
+            let next = Arc::clone(&next);
+            tokio::spawn(async move {
+                loop {
+                    let round = next.fetch_add(1, Ordering::Relaxed);
+                    if round >= ROUNDS {
+                        break;
+                    }
                     let model = MockSpeechModel::native(vec![turn("hi")]).closes();
                     let agent = Agent::voice_with(speech(model))
                         .start()
@@ -278,6 +289,7 @@ async fn every_send_of_an_input_the_model_closed_at_is_ok_in_1000_rounds_of_16_s
     for session in sessions {
         session.await.expect("every round of the session sent Ok");
     }
+    assert!(next.load(Ordering::Relaxed) >= ROUNDS);
 }
 
 #[tokio::test(flavor = "multi_thread")]
