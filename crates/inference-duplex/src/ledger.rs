@@ -411,6 +411,9 @@ pub struct SessionLedger {
     /// The events the provider sent the open session, in the order received
     /// ([`SessionLedger::received_events`]).
     received: Vec<ReceivedSessionEvent>,
+    /// How many received events delivering them looked at, for the tests that bound it.
+    #[cfg(test)]
+    visited: u64,
 }
 
 /// What the ledger keeps to record one response's usage.
@@ -588,6 +591,8 @@ impl SessionLedger {
             latest: now,
             outbox: VecDeque::new(),
             received: Vec::new(),
+            #[cfg(test)]
+            visited: 0,
         }
     }
 
@@ -717,7 +722,13 @@ impl SessionLedger {
         let slot = self
             .received
             .iter_mut()
-            .find(|received| received.received_id() == received_id)
+            .find(|received| {
+                #[cfg(test)]
+                {
+                    self.visited += 1;
+                }
+                received.received_id() == received_id
+            })
             .ok_or(DeliverSessionEventError::Unknown { received_id })?;
         let (moved, event) = slot.deliver().map_err(DeliverSessionEventError::Conflict)?;
         *slot = moved;
@@ -1812,5 +1823,96 @@ impl SessionLedger {
             .require_in_progress()
             .map_err(SessionError::ResponseNotInProgress)?;
         Ok(index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::{NonZeroU16, NonZeroU32};
+
+    use inference_audio::AudioEncoding;
+    use inference_core::model::{
+        AdapterDescriptor, Capability, DeclareAdapter, ExecutionForm, Locality,
+    };
+
+    use super::*;
+    use crate::{TurnDetection, TurnTuning};
+
+    #[test]
+    fn delivering_each_received_frame_looks_at_that_frame_only() {
+        const FRAMES: u32 = 4_000;
+        let format = AudioFormat {
+            encoding: AudioEncoding::PcmS16le,
+            sample_rate: NonZeroU32::new(16_000).expect("a positive rate"),
+            channels: NonZeroU16::MIN,
+        };
+        let (adapter, _) = Adapter::declare(DeclareAdapter {
+            model_id: ModelId::generate(),
+            backend: "scripted".to_owned(),
+            contract_revision: "1".to_owned(),
+            execution_form: ExecutionForm::HostedService,
+            locality: Locality::ExternalProvider,
+            capabilities: vec![Capability::ConcurrentInputOutput],
+            max_concurrency: 1,
+            descriptor: AdapterDescriptor::default(),
+        })
+        .expect("a positive concurrency");
+        let capabilities = SpeechCapabilities {
+            input_formats: vec![format],
+            output_formats: vec![format],
+            turn_detection: TurnDetection::ALL.to_vec(),
+            turn_tuning: TuningSupport::ALL,
+            manual_commit: true,
+            manual_response: true,
+            manual_interrupt: true,
+            client_cancel: true,
+            truncation: true,
+            tool_calling: true,
+        };
+        let config = SessionConfig {
+            voice: "calm".to_owned(),
+            instructions: String::new(),
+            input_format: format,
+            output_format: format,
+            turn_detection: TurnDetection::Disabled,
+            turn_tuning: TurnTuning::default(),
+            auto_response: false,
+            auto_interrupt: false,
+            tools: Vec::new(),
+            idle_limit: Duration::from_secs(10),
+        };
+        let now = Instant::now();
+        let (mut ledger, _) = SessionLedger::open(
+            SpeechSessionId::generate(),
+            &adapter,
+            &capabilities,
+            config,
+            now,
+        )
+        .expect("the session opens");
+        let response = ResponseId::generate();
+        ledger.response_created(response, now).expect("created");
+        ledger.next_event().expect("ResponseCreated");
+        let samples = 320;
+        for index in 0..FRAMES {
+            let frame = AudioFrame {
+                format,
+                position: SampleClockPosition::new(u64::from(index * samples)).expect("a position"),
+                sample_count: samples,
+                data: vec![0; 640],
+            };
+            ledger
+                .output_audio(response, frame, now)
+                .expect("in progress");
+            assert!(matches!(
+                ledger.next_event(),
+                Some(SessionEvent::OutputAudio(_))
+            ));
+        }
+        assert_eq!(
+            ledger.visited,
+            u64::from(FRAMES),
+            "each delivery looks at the event it delivers, not at every earlier one"
+        );
     }
 }

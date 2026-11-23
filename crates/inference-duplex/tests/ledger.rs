@@ -1375,3 +1375,183 @@ fn kind(event: &SessionEvent) -> &'static str {
         SessionEvent::UsageRecorded(_) => "UsageRecorded",
     }
 }
+
+/// Seven output tokens reported for `response` as `total`.
+fn seven(ledger: &mut SessionLedger, response: ResponseId, total: UsageTotal, now: Instant) {
+    ledger
+        .response_usage_reported(
+            response,
+            None,
+            vec![Quantity::provider_reported(
+                QuantityKind::OutputTextTokens,
+                7,
+            )],
+            total,
+            now,
+        )
+        .expect("a response of the session");
+}
+
+/// The one record of `response` among `events`.
+fn record_of(events: &[SessionEvent], response: ResponseId) -> &UsageRecorded {
+    let found: Vec<&UsageRecorded> = records(events)
+        .into_iter()
+        .filter(|record| record.response_id == Some(response))
+        .collect();
+    assert_eq!(found.len(), 1, "one record of the response: {events:#?}");
+    found[0]
+}
+
+#[test]
+fn a_running_count_settled_by_the_sessions_end_is_not_final() {
+    let ends: [(&str, fn(&mut SessionLedger)); 2] = [
+        ("a failure", |ledger| {
+            ledger
+                .fail(SessionFailure {
+                    kind: SessionFailureKind::ProviderError,
+                    detail: "the provider reported an error".to_owned(),
+                })
+                .expect("open");
+        }),
+        ("a close", |ledger| ledger.close().expect("open")),
+    ];
+    for (name, end) in ends {
+        for completed in [false, true] {
+            let now = Instant::now();
+            let mut ledger = open(&server_turns(), server_config(), now);
+            let response = ResponseId::generate();
+            ledger.response_created(response, now).expect("created");
+            seven(&mut ledger, response, UsageTotal::Running, now);
+            if completed {
+                ledger
+                    .response_completed(response, now)
+                    .expect("in progress");
+            }
+            end(&mut ledger);
+            let events = drain(&mut ledger);
+            let record = record_of(&events, response);
+            assert_eq!(
+                quantity(record, QuantityKind::OutputTextTokens),
+                Quantity::provider_reported(QuantityKind::OutputTextTokens, 7)
+            );
+            assert!(
+                !record.r#final,
+                "a running count settled by {name} (completed first: {completed}) is not the \
+                 provider's final count: {record:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_count_the_provider_confirmed_stays_final_through_the_sessions_end() {
+    let now = Instant::now();
+    let mut ledger = open(&server_turns(), server_config(), now);
+    let response = ResponseId::generate();
+    ledger.response_created(response, now).expect("created");
+    seven(&mut ledger, response, UsageTotal::Final, now);
+    ledger
+        .fail(SessionFailure {
+            kind: SessionFailureKind::ProviderError,
+            detail: "the provider reported an error".to_owned(),
+        })
+        .expect("open");
+    let events = drain(&mut ledger);
+    let record = record_of(&events, response);
+    assert_eq!(
+        quantity(record, QuantityKind::OutputTextTokens),
+        Quantity::provider_reported(QuantityKind::OutputTextTokens, 7)
+    );
+    assert!(record.r#final, "confirmed by the provider: {record:#?}");
+}
+
+#[test]
+fn a_running_count_settled_by_the_providers_next_response_is_final() {
+    let now = Instant::now();
+    let mut ledger = open(&server_turns(), server_config(), now);
+    let first = ResponseId::generate();
+    ledger.response_created(first, now).expect("created");
+    seven(&mut ledger, first, UsageTotal::Running, now);
+    ledger.response_completed(first, now).expect("in progress");
+    ledger
+        .response_created(ResponseId::generate(), now)
+        .expect("created");
+    let events = drain(&mut ledger);
+    assert!(record_of(&events, first).r#final);
+}
+
+#[test]
+fn a_count_settled_because_its_final_frame_was_lost_is_not_final() {
+    let now = Instant::now();
+    let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
+    let response = ResponseId::generate();
+    ledger.response_created(response, now).expect("created");
+    ledger.usage_awaited(response).expect("unrecorded");
+    seven(&mut ledger, response, UsageTotal::Running, now);
+    ledger
+        .response_completed(response, now)
+        .expect("in progress");
+    ledger
+        .response_usage_unknown(response, now)
+        .expect("unrecorded");
+    let events = drain(&mut ledger);
+    let record = record_of(&events, response);
+    assert_eq!(
+        quantity(record, QuantityKind::OutputTextTokens),
+        Quantity::provider_reported(QuantityKind::OutputTextTokens, 7)
+    );
+    assert!(
+        !record.r#final,
+        "the provider never confirmed it: {record:#?}"
+    );
+}
+
+/// A mono `pcm_s16le` frame at 16 kHz declaring two samples, with `bytes` bytes of data.
+fn two_samples(bytes: usize) -> AudioFrame {
+    AudioFrame {
+        format: pcm(16_000),
+        position: SampleClockPosition::new(0).expect("a position"),
+        sample_count: 2,
+        data: vec![0; bytes],
+    }
+}
+
+#[test]
+fn input_whose_data_is_shorter_than_its_samples_is_refused() {
+    let now = Instant::now();
+    let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
+    assert!(
+        ledger.accept_input(two_samples(2)).is_err(),
+        "two samples of pcm_s16le need four bytes"
+    );
+    assert!(drain(&mut ledger).is_empty(), "nothing accepted");
+    ledger.accept_input(two_samples(4)).expect("well formed");
+    assert_eq!(kinds(&drain(&mut ledger)), ["InputAccepted"]);
+}
+
+#[test]
+fn output_whose_data_is_shorter_than_its_samples_is_refused_and_plays_nothing() {
+    let now = Instant::now();
+    let mut ledger = open(&full(), config(TurnDetection::Disabled), now);
+    let response = ResponseId::generate();
+    ledger.response_created(response, now).expect("created");
+    assert!(
+        ledger.output_audio(response, two_samples(2), now).is_err(),
+        "two samples of pcm_s16le need four bytes"
+    );
+    let heard = SampleClockPosition::new(2).expect("a position");
+    assert_eq!(
+        ledger.truncate(response, heard),
+        Err(SessionError::BeyondOutput { heard, emitted: 0 }),
+        "the refused frame advanced nothing"
+    );
+    assert_eq!(kinds(&drain(&mut ledger)), ["ResponseCreated"]);
+    ledger
+        .output_audio(response, two_samples(4), now)
+        .expect("well formed");
+    ledger.truncate(response, heard).expect("emitted");
+    assert_eq!(
+        kinds(&drain(&mut ledger)),
+        ["OutputAudio", "OutputTruncated"]
+    );
+}
