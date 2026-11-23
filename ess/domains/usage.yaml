@@ -153,6 +153,8 @@ entities:
   # The usage of one model call. The contract crate of the call fills its adapter, model, timing
   # and quantities; the node that places it on a run fills the run, node and session. A native
   # speech record names its speech session and, for a response, the response, and no run.
+  # A total counts a record once by its identity, however many edges carry it: a fan-out hands
+  # the one record to each of its outputs, and each output delivers it.
   # read from: docs/design/inference.md:303-320
   # read from: docs/design/inference.md:367
   # read from: docs/design/inference.md:373

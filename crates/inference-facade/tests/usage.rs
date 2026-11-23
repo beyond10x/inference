@@ -847,12 +847,12 @@ fn fan_out_planned(
             for output in 0..outputs {
                 let out = pipeline.output::<modality::Structured>(
                     &split,
-                    &format!("records {output}"),
+                    format!("records {output}"),
                     records,
                 );
                 pipeline.expose(
                     &out,
-                    &fan_out_egress(output),
+                    fan_out_egress(output),
                     capacity,
                     OverloadPolicy::Pause,
                 );
@@ -880,7 +880,7 @@ fn fan_out_turn(outputs: usize) -> (RunId, Vec<SessionEvent>, SessionUsage) {
     let (declaration, planned, (model_id, usage_port, split_id)) =
         fan_out_planned(&generator, outputs);
     let sessions = LiveSessions::new();
-    let (mut session, driver) = block_on(sessions.open(
+    let (session, driver) = block_on(sessions.open(
         &declaration,
         &planned,
         InteractionMode::TurnBased,

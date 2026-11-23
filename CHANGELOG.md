@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `inference-facade`: a usage record that reaches a live session more than once, as a fan-out
+  node hands it to each of its outputs, counts once in the run's total, the session's total and,
+  with the feature `cost`, the session's cost; the session counts distinct `usage_record_id`s.
+  Every output still delivers its `SessionEvent::UsageRecorded`.
+
 ## [0.31.0] — 2026-11-22
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these

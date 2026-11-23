@@ -337,12 +337,18 @@ pub(crate) struct Shared {
 
 impl Shared {
     /// Counts `recorded`, read off an egress or a usage sink of the run `run_id`, in the
-    /// session's usage view and, with the feature `cost`, prices it.
+    /// session's usage view and, with the feature `cost`, prices it; a record of an identity the
+    /// view counted already, read off another end, is neither counted nor priced again
+    /// ([`crate::usage`]).
     fn count_usage(&self, run_id: RunId, recorded: &UsageRecorded) {
         let mut usage = lock(&self.usage);
-        usage.add(run_id, recorded);
+        let counted = usage.add(run_id, recorded);
         #[cfg(feature = "cost")]
-        lock(&self.pricer).read(&mut usage.cost, recorded);
+        if counted {
+            lock(&self.pricer).read(&mut usage.cost, recorded);
+        }
+        #[cfg(not(feature = "cost"))]
+        let _ = counted;
     }
 
     /// Marks the total of the run `run_id`, and the session's, partial, naming each node of
