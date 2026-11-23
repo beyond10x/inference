@@ -2,7 +2,8 @@
 //! the `Tool` a hand-written declaration gives, its executor runs the function on a started call,
 //! its effect reaches the provisional-input barrier and its `confirm` the tool authority; a macro
 //! program's `run` is the seam a test drives with a fake host and a stack of mocks. The `trybuild`
-//! cases under `tests/ui/` show what compiles and what is refused.
+//! cases under `tests/ui/` show what compiles and what is refused; `tests/ui.rs` runs them, in the
+//! slow lane.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -647,15 +648,6 @@ fn a_tool_with_arguments_of_every_common_kind_prepares_under_the_authority_and_b
         json!(65535),
         "{schema}"
     );
-}
-
-#[test]
-fn ui() {
-    let cases = trybuild::TestCases::new();
-    cases.pass("tests/ui/tool_pass_*.rs");
-    cases.compile_fail("tests/ui/tool_argument_not_deserialize.rs");
-    #[cfg(feature = "audio-device")]
-    cases.compile_fail("tests/ui/main_without_stack.rs");
 }
 
 #[cfg(all(feature = "testing", feature = "audio-device"))]

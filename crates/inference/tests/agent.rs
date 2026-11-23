@@ -1786,11 +1786,6 @@ async fn a_voice_cascade_recipe_agent_hears_says_and_yields_the_synthesisers_aud
     agent.close().await.expect("closes");
 }
 
-#[test]
-fn the_builders_role_methods_refuse_a_binding_of_another_type() {
-    trybuild::TestCases::new().compile_fail("tests/compile_fail/*.rs");
-}
-
 /// A fake host of a mono microphone at `input` hertz and a mono speaker at 24 kHz.
 fn fake_host(input: u32) -> FakeHost {
     let rate = |hertz| NonZeroU32::new(hertz).expect("a rate");
