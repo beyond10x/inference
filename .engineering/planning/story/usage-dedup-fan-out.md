@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:usage-dedup-fan-out
 kind: story
-status: draft
+status: active
 title: A usage record a fan-out hands to several outputs counts once in the run and session totals
 summary: Totals count distinct usage_record_id; every output still delivers the record.
 relations:
@@ -19,7 +19,10 @@ scope:
   path: crates/inference-runtime/src/usage_sink.rs
 - confidence: cited
   path: ess/domains/usage.yaml
-revision: 3
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-23T02:01:50Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}, executor: "agent:implementor"}
+- {from: "proposed", to: "active", at: "2026-11-23T02:01:50Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1}}, executor: "agent:implementor"}
 ---
 ## Context
 
