@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-23T02:43:09Z",
+  "actor": "human:timo",
+  "artifact": "story:chat-recipe-usage",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "wave gate on wave/2026-11-23-review-findings: fmt, cargo test of inference-llm, inference-facade, inference-pipeline, inference-runtime (all features) and inference (testing,cost: lib, recipes, stack, agent) 850 passed 0 failed, clippy -D warnings on inference-llm, inference-facade, inference, docs generate --check, ess validate, aep validate: all exit 0",
+    "reference": "wave/2026-11-23-review-findings b90ef12f5"
+  }
+}

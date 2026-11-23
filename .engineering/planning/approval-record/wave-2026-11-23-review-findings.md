@@ -4,7 +4,11 @@ id: approval-record:wave-2026-11-23-review-findings
 kind: approval-record
 status: draft
 title: 'Wave approved: review findings 4, 5, 6, 7 and 13 of release 0.31.0, one pull request (2026-11-23)'
-revision: 1
+relations:
+- decides: story:chat-recipe-usage
+- decides: story:usage-dedup-fan-out
+- decides: story:final-message-commit
+revision: 2
 ---
 ## Decision
 
@@ -57,3 +61,51 @@ of that pull request by this wave's run, no release, no tag, no version bump.
 
 - The voice cascade recipe's usage record (story:cascade-recipe-usage, draft).
 - A message sent whole before a streamed one is committed after it.
+
+## Delivered
+
+Delivered on 2026-11-23 on `wave/2026-11-23-review-findings`:
+
+| unit | story | branch head | merge into the wave branch |
+|---|---|---|---|
+| U3 | story:final-message-commit | 44537e0a | 646bdd44 |
+| U2 | story:usage-dedup-fan-out | 1b6c58f4 | 405becef |
+| U1 | story:chat-recipe-usage | c3e3b246 | b90ef12f |
+
+story:chat-recipe-usage and story:final-message-commit arrived implemented with their branches.
+story:usage-dedup-fan-out arrived active; it moved active -> implemented on its clippy run
+(`cargo clippy -p inference-facade --all-targets --all-features -- -D warnings`, exit 0) and the
+wave gate. Each story has a `test_result` record of the wave gate at b90ef12f.
+
+Conflicts: `CHANGELOG.md` only, in two merges; every unit's line is kept under `### Fixed` of
+`## [Unreleased]`. No code file conflicted. `website/docs/concepts/usage.md` merged cleanly. No
+generated file changed (`inference-docs generate --check` exit 0).
+
+The changed signatures of `BoundRecogniser::node` and `Synthesis::Plain` are `pub(crate)`: no
+`Breaking` section.
+
+Gate at b90ef12f, every step exit 0:
+
+| step | time |
+|---|---|
+| `cargo fmt --all --check` | 23 s |
+| `cargo run -p inference-docs -- generate --check` | 39 s |
+| `ess specify validate --path ess` | 0 s |
+| `aep plan artifact validate` | 1 s |
+| `cargo test --no-fail-fast -p inference-llm --all-features`: 84 passed | 30 s |
+| `cargo test --no-fail-fast -p inference-facade --all-features`: 123 passed | 86 s |
+| `cargo test --no-fail-fast -p inference-pipeline --all-features`: 161 passed | 44 s |
+| `cargo test --no-fail-fast -p inference-runtime --all-features`: 287 passed | 115 s |
+| `cargo test --no-fail-fast -p inference --features testing,cost --lib --test recipes --test stack`: 129 passed | 135 s |
+| `cargo test --no-fail-fast -p inference --features testing,cost --test agent`: 66 passed | 134 s |
+| `cargo clippy -p inference-llm --all-targets --all-features -- -D warnings` | 37 s |
+| `cargo clippy -p inference-facade --all-targets --all-features -- -D warnings` | 62 s |
+| `cargo clippy -p inference --all-targets --features testing,cost -- -D warnings` | 48 s |
+
+Times include compilation. Over the test budget, on the base already and not changed by this wave:
+the `agent` target runs `the_builders_role_methods_refuse_a_binding_of_another_type` (122.5 s) and
+`every_send_of_an_input_the_model_closed_at_is_ok_in_1000_rounds_of_16_sessions` (76.1 s); its
+step ran 134 s, 124 s of it in tests.
+
+Not fixed in this wave: the voice cascade recipe's usage record (story:cascade-recipe-usage,
+draft), and a message sent whole before a streamed one is committed after it.
