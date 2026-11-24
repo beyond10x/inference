@@ -3,6 +3,20 @@
 //! `spawn_blocking`, each delivering every event while a ticker on the same runtime keeps its
 //! largest gap under 50 ms. Each server holds its answer back for longer than that bound, so a
 //! handle that blocks the runtime thread while it waits fails the bound.
+//!
+//! The gap counts what holds the runtime's thread, and leaves out two waits that are the host's
+//! and were measured on a loaded host with many processors:
+//!
+//! - Linux grows a process's descriptor table when descriptor 64, 128, 256 and so on is first
+//!   opened, and the thread that opens it waits there for an RCU grace period: 110 to 140 ms
+//!   each, uninterruptible, in whatever call opened the descriptor, where every other descriptor
+//!   took under 0.1 ms. Twenty sessions hold about 130 descriptors, so two of their first polls
+//!   met that wait and the gap was 250 ms. [`grow_descriptor_table`] grows the table before the
+//!   ticker starts.
+//! - A thread that is ready to run and gets no processor is late, not blocked: up to 18 ms of one
+//!   gap. [`ReadyWait`] reads what the kernel counted of it for the runtime's thread, and the
+//!   ticker takes it out of each gap. A thread that sleeps, parks or waits on a lock or a socket
+//!   is not ready to run, so a handle that blocks the thread is counted in full.
 
 mod stt_support;
 mod support;
@@ -11,7 +25,9 @@ mod support;
 mod fixture;
 
 use std::cell::Cell;
+use std::fs::File;
 use std::future::Future;
+use std::io::{Read, Seek, SeekFrom};
 use std::num::{NonZeroU16, NonZeroU32};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -37,13 +53,58 @@ const HELD: Duration = Duration::from_millis(150);
 /// How long one session may take before the test fails it.
 const SESSION_BOUND: Duration = Duration::from_secs(20);
 
+/// How many descriptors [`grow_descriptor_table`] holds at once: the table then has room for
+/// 512, where the twenty sessions of one test hold about 130.
+const DESCRIPTORS: usize = 300;
+
+/// Grows the process's descriptor table by holding [`DESCRIPTORS`] descriptors at once, fewer
+/// where the process may not hold that many. The table does not shrink when they are closed, so
+/// no descriptor opened afterwards makes its thread wait for the table to grow.
+fn grow_descriptor_table() {
+    let Ok(first) = std::env::current_exe().and_then(File::open) else {
+        return;
+    };
+    let held: Vec<File> = (1..DESCRIPTORS)
+        .map_while(|_| first.try_clone().ok())
+        .collect();
+    drop(held);
+}
+
+/// How long the thread that opened it has been ready to run without a processor, as Linux counts
+/// it in the second field of `/proc/thread-self/schedstat`. The file stays open and is read
+/// again from its start, so a reading opens no descriptor. Where there is no such file every
+/// reading is zero and nothing is taken out of a gap.
+struct ReadyWait(Option<File>);
+
+impl ReadyWait {
+    fn of_this_thread() -> Self {
+        Self(File::open("/proc/thread-self/schedstat").ok())
+    }
+
+    fn so_far(&mut self) -> Duration {
+        let mut text = String::new();
+        let read = self.0.as_mut().is_some_and(|file| {
+            file.seek(SeekFrom::Start(0)).is_ok() && file.read_to_string(&mut text).is_ok()
+        });
+        text.split_whitespace()
+            .nth(1)
+            .filter(|_| read)
+            .and_then(|nanoseconds| nanoseconds.parse().ok())
+            .map_or(Duration::ZERO, Duration::from_nanos)
+    }
+}
+
 /// Runs `sessions` on a current-thread runtime beside a ticker that ticks every [`TICK`] until
-/// they are done; returns what they returned and the ticker's largest gap.
+/// they are done; returns what they returned and the ticker's largest gap, each gap less the
+/// time the runtime's thread was ready to run in it without a processor ([`ReadyWait`]). The
+/// descriptor table is grown first ([`grow_descriptor_table`]).
 fn with_ticker<F, T>(sessions: Vec<F>) -> (Vec<T>, Duration)
 where
     F: Future<Output = T> + 'static,
     T: 'static,
 {
+    grow_descriptor_table();
+    let mut ready = ReadyWait::of_this_thread();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -55,11 +116,12 @@ where
             let done = Rc::clone(&done);
             tokio::task::spawn_local(async move {
                 let mut largest = Duration::ZERO;
-                let mut last = Instant::now();
+                let mut last = (Instant::now(), ready.so_far());
                 while !done.get() {
                     tokio::time::sleep(TICK).await;
-                    let now = Instant::now();
-                    largest = largest.max(now - last);
+                    let now = (Instant::now(), ready.so_far());
+                    let late = now.1.saturating_sub(last.1);
+                    largest = largest.max((now.0 - last.0).saturating_sub(late));
                     last = now;
                 }
                 largest
