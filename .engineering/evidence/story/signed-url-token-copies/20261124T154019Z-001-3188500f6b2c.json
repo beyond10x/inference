@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-24T15:40:19Z",
+  "actor": "human:timo",
+  "artifact": "story:signed-url-token-copies",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-elevenlabs --all-features",
+    "reference": "VERIFIED: baseline <scratch>/wave2/u3/red.log (8 tests run: 2 passed, 6 failed, before the change) vs treatment <scratch>/wave2/u3/gate3-nextest.log at ba1870be0 (184 tests run: 182 passed, 2 failed; the 2 are the ticker tests of story:ticker-tests-hold-on-a-loaded-host)"
+  }
+}
