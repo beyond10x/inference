@@ -38,8 +38,7 @@ use realtime_voice::{Counts, Usage};
 use crate::hosts::{Directive, Host, Line, Role, instructions, turn_config};
 
 /// How long a model that creates its own responses may send no output before its turn is given
-/// up: the turn's liveness bound, which the session's ledger does not run while no response is
-/// awaited.
+/// up, unless [`Settings::silent_turn`] says otherwise.
 const SILENT_TURN: Duration = Duration::from_secs(10);
 
 /// The turns in a row without audio that end the show.
@@ -62,11 +61,16 @@ pub struct Settings {
     pub max_events: usize,
     /// How much audio the speaker queues.
     pub playout: PlayoutConfig,
+    /// How long a model that creates its own responses may send no output before its turn is
+    /// given up: the turn's liveness bound, which the session's ledger does not run while no
+    /// response is awaited.
+    pub silent_turn: Duration,
 }
 
 impl Default for Settings {
     /// Five minutes, reads of 10 ms, 64 events a step, four seconds of playout queue, enough
     /// to bridge the opening of the next turn's session; the meters read the played position.
+    /// A silent turn is given up after ten seconds.
     fn default() -> Self {
         Self {
             limit: Duration::from_secs(300),
@@ -75,6 +79,7 @@ impl Default for Settings {
             playout: PlayoutConfig {
                 buffer: Duration::from_secs(4),
             },
+            silent_turn: SILENT_TURN,
         }
     }
 }
@@ -482,10 +487,14 @@ impl<M: NativeSpeechModel> Show<M> {
                 break;
             }
         }
-        if !done && live.listen && live.heard.elapsed() >= SILENT_TURN {
+        let silent_turn = self.settings.silent_turn;
+        if !done && live.listen && live.heard.elapsed() >= silent_turn {
             self.broken(
                 live.host,
-                format!("nothing from the provider for {} s", SILENT_TURN.as_secs()),
+                format!(
+                    "nothing from the provider for {} s",
+                    silent_turn.as_secs_f64()
+                ),
                 events,
             );
             done = true;

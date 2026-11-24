@@ -54,19 +54,34 @@ impl CredentialSource for UnansweredKeychain {
 /// that never answers holds `talk` before its first line of output, Enter not yet read, forever.
 /// A bound on `block_on` alone does not end it either: dropping the runtime waits for the
 /// blocking read.
+///
+/// `resolves` is `resolves_within` with `KEY_WAIT`, eight seconds, which the first assertion
+/// holds. The check here is given one second in its place, so the test does not wait the eight,
+/// and the two seconds more that it was given before.
 #[test]
 fn a_keychain_that_never_answers_does_not_hold_the_key_check_forever() {
+    assert_eq!(elevenlabs::KEY_WAIT, Duration::from_secs(8));
+    let wait = Duration::from_secs(1);
     let (done, finished) = mpsc::channel();
     let started = Instant::now();
     std::thread::spawn(move || {
-        let _ = done.send(elevenlabs::resolves(&UnansweredKeychain));
+        let _ = done.send(elevenlabs::resolves_within(&UnansweredKeychain, wait));
     });
-    let bound = Duration::from_secs(10);
+    let bound = wait + Duration::from_secs(2);
     let outcome = finished.recv_timeout(bound);
     assert!(
         outcome.is_ok(),
-        "elevenlabs::resolves had not returned {:?} after it was asked, over a keychain read \
-         that does not answer: talk waits before anything opens, printing nothing",
+        "elevenlabs::resolves_within had not returned {:?} after it was asked, over a keychain \
+         read that does not answer: talk waits before anything opens, printing nothing",
+        started.elapsed()
+    );
+    let refused = outcome
+        .expect("it returned")
+        .expect_err("a keychain that does not answer gives no key");
+    assert!(refused.contains("no answer within 1 s"), "{refused}");
+    assert!(
+        started.elapsed() >= wait,
+        "the check gave up before its wait: {:?}",
         started.elapsed()
     );
 }

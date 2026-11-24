@@ -53,7 +53,7 @@ Tools: the rustc `rust-toolchain.toml` pins (the crates' `rust-version` stays 1.
 task check                      # task check-source, then task test-build and task test-run, as CI runs them
 task check-source               # the sherpa-onnx archive, specification and planning store validation, the documentation drift check, then format, lint and the docs build with warnings denied
 task test-build                 # builds the tests, runs none
-task test-run                   # cargo nextest run --workspace --all-features (a test over 60 s is killed and fails; prints the ten slowest), the stack test without default features, the doc tests
+task test-run                   # task test-run-parts under `timeout`: ended at 120 s, as a failure; the parts are cargo nextest run --workspace --all-features (a test over 60 s is killed and fails; prints the ten slowest), the stack test without default features, the doc tests
 task test-slow                  # the slow lane: every trybuild case of crates/inference in one trybuild run; go-task skips it while its sources are unchanged
 task docs-generate              # rewrite the generated files of the site
 npm --prefix website ci --allow-git=root && npm --prefix website run build   # build the site into website/build
@@ -64,7 +64,7 @@ aep plan artifact validate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run -p <crate> --all-features   # one crate's tests under the 60 s kill; --all-features builds the inference-testkit mocks behind its features run, stt, llm, tts and duplex
-cargo test -p inference-testkit --features run --test conform   # the testkit conformance target alone: synthesizes the suite, runs it in process, has `ess verify conform report` write the verdict; prints target/tmp/conform-<run>/, where suite.json, results.json and report.json stay, red or green
+cargo test -p inference-testkit --features run --test conform   # the testkit conformance target alone: reads the synthesized suite, runs it in process, has `ess verify conform report` write the verdict; prints target/tmp/conform-<run>/, where suite.json, results.json and report.json stay, red or green. No test synthesizes the suite itself: `crates/inference-testkit/tests/suite/mod.rs` synthesizes its two suites, the authored one and the one with the witness scenarios of `tests/suite/witness/` added, once each into target/tmp/conformance-suite/<SHA-256 of ess/, the ess version and the added scenarios>/suite.json, under a file lock, and every test reads those files
 git add <paths> && b10x-gates bot -- commit -F <file>   # staging is plain git; the route refuses add
 b10x-gates scan-text --policy <file> <path>...           # release and pull-request bodies before they are sent; no policy found is "not scanned", never "passed"
 ```
