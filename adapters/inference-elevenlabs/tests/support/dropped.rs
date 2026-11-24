@@ -3,6 +3,14 @@
 //! the socket end: it passes every byte on in both directions and reads the frames the client
 //! sent after its handshake request. And [`threads_named`] counts the handle's own thread, which
 //! ends with its runtime.
+//!
+//! How the client's side ended, with a FIN or with a reset, is not told: a server that answers
+//! the client's close with a close frame of its own makes it a reset whenever that frame reaches
+//! the client before the client lets go of its socket.
+//!
+//! The Cartesia adapter's tests include this file by path
+//! (`adapters/inference-cartesia/tests/cancel.rs` and its two `adversary_w2_drop_` files), so a
+//! change here builds and runs the tests of both adapters.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -43,8 +51,6 @@ pub struct ClientSide {
     pub opcodes: Vec<u8>,
     /// How many bytes followed the last whole frame.
     pub unframed: usize,
-    /// The stream ended in order, with the client's FIN, not with an error.
-    pub ended_in_order: bool,
 }
 
 /// A relay to one server, on a loopback port of its own.
@@ -96,19 +102,14 @@ fn pass_on(mut client: TcpStream, mut upstream: TcpStream) -> ClientSide {
     let mut side = ClientSide {
         opcodes: Vec::new(),
         unframed: 0,
-        ended_in_order: false,
     };
     let mut request = true;
     let mut kept = Vec::new();
     let mut chunk = [0; 4096];
     loop {
         let read = match client.read(&mut chunk) {
-            Ok(0) => {
-                side.ended_in_order = true;
-                break;
-            }
+            Ok(0) | Err(_) => break,
             Ok(read) => read,
-            Err(_) => break,
         };
         let _ = upstream.write_all(&chunk[..read]);
         kept.extend_from_slice(&chunk[..read]);

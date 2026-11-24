@@ -154,9 +154,12 @@ async fn drop_idle(mut synthesiser: ElevenLabsSynthesiser) -> (Duration, Option<
     (held, own)
 }
 
-/// The drop of an idle synthesis inside a runtime: it does not hold the runtime's thread, the
-/// server still gets `close_socket` and a close frame, which the relay tells from a socket that
-/// only ended, and the synthesis's own thread ends after them.
+/// The drop of an idle synthesis inside a runtime: it holds the runtime's thread for less than
+/// the ticker's bound, the server gets `close_socket` and a close frame, which the relay tells
+/// from a socket that only ended, and the synthesis's own thread ends after them. How the socket
+/// ends after the close frame is not asserted: the fixture server answers `close_socket` with a
+/// close frame of its own, and when that reaches the client before the client lets go of its
+/// socket, the socket ends with a reset and not in order.
 #[test]
 fn dropping_an_idle_synthesis_does_not_block_the_runtime() {
     let server = support::FixtureServer::start(OutputFormat::Ulaw8000, support::Script::Serve);
@@ -177,7 +180,10 @@ fn dropping_an_idle_synthesis_does_not_block_the_runtime() {
         Some(&[TEXT, CLOSE]),
         "a text message, then a close frame, end what the client sent: {side:?}"
     );
-    assert_eq!((side.unframed, side.ended_in_order), (0, true), "{side:?}");
+    assert_eq!(
+        side.unframed, 0,
+        "nothing follows the close frame: {side:?}"
+    );
     assert_eq!(server.next_client_close(Duration::from_secs(5)), Some(0));
     assert!(
         server.seen()[0].close_socket,

@@ -4,8 +4,8 @@
 //! spoken on the same connection.
 //!
 //! And the drop of the handle: mid-segment it ends the connection, and idle inside an async
-//! runtime it does not hold the runtime's thread, beside the ticker and through the relay of the
-//! ElevenLabs binding's tests, which this file shares.
+//! runtime it holds the runtime's thread for less than the ticker's bound, beside the ticker and
+//! through the relay of the ElevenLabs binding's tests, which this file shares.
 
 mod support;
 
@@ -184,9 +184,12 @@ async fn drop_idle(mut synthesiser: CartesiaSynthesiser) -> (Duration, Option<us
     (held, own)
 }
 
-/// The drop of an idle synthesis inside a runtime: it does not hold the runtime's thread, the
-/// server still gets a close frame, which the relay tells from a socket that only ended, and the
-/// synthesis's own thread ends after it.
+/// The drop of an idle synthesis inside a runtime: it holds the runtime's thread for less than
+/// the ticker's bound, the server gets a close frame, which the relay tells from a socket that
+/// only ended, and the synthesis's own thread ends after it. How the socket ends after the close
+/// frame is not asserted. This fixture server sends no close frame in answer, it stops reading
+/// at the client's and lets its socket go; a server that answers makes the socket end with a
+/// reset when its frame reaches the client before the client lets go of its socket.
 #[test]
 fn dropping_an_idle_synthesis_does_not_block_the_runtime() {
     within(|| {
@@ -208,7 +211,10 @@ fn dropping_an_idle_synthesis_does_not_block_the_runtime() {
             [TEXT, CLOSE],
             "the request, then a close frame, are what the client sent: {side:?}"
         );
-        assert_eq!((side.unframed, side.ended_in_order), (0, true), "{side:?}");
+        assert_eq!(
+            side.unframed, 0,
+            "nothing follows the close frame: {side:?}"
+        );
         assert_eq!(server.next_client_close(Duration::from_secs(5)), Some(0));
         assert_eq!(server.violations(), Vec::<String>::new());
         let left = threads_named(OWN_THREAD, 0, Duration::from_secs(5));

@@ -27,9 +27,11 @@
 //! its read timeout, a cancel's write by [`CLOSE_BOUND`].
 //!
 //! Dropping the handle closes its connection with a close frame, bounded by [`CLOSE_BOUND`].
-//! Outside an async runtime the drop waits for that close. Inside one it does not wait, so it
-//! holds no worker: the close runs to its end on the handle's own thread, and the server still
-//! receives the close frame. A handle dropped while its async form waits for a message to be sent
+//! Outside an async runtime the drop waits for that close. Inside one it waits for it at most
+//! [`CLOSE_GRACE`], and holds a worker no longer: a close that ended within it has been sent when
+//! the drop returns, and a close not written by then runs to its end on the handle's own thread,
+//! bounded by [`CLOSE_BOUND`]. A process that ends while such a close still runs ends the socket
+//! without the close frame. A handle dropped while its async form waits for a message to be sent
 //! or to arrive takes the connection with it: the server gets no close frame and sees the socket
 //! end.
 //!
@@ -88,4 +90,4 @@ pub use credential::{
     CredentialSource, EnvironmentSource,
 };
 pub use error::{CartesiaError, ConfigError, ConnectError, ServerError};
-pub use synthesiser::{BACKEND, CartesiaSynthesis, CartesiaSynthesiser, claims};
+pub use synthesiser::{BACKEND, CLOSE_GRACE, CartesiaSynthesis, CartesiaSynthesiser, claims};

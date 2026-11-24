@@ -3,6 +3,10 @@
 //! descriptors is grown before the ticker starts ([`grow_descriptor_table`]), and each gap is
 //! counted less the time its thread was ready to run without a processor ([`ReadyWait`]).
 //! `tests/async_handles.rs` says what was measured of both.
+//!
+//! The Cartesia adapter's tests include this file by path
+//! (`adapters/inference-cartesia/tests/cancel.rs` and its `adversary_w2_drop_backed_up.rs`), so a
+//! change here builds and runs the tests of both adapters.
 
 use std::cell::Cell;
 use std::fs::File;
