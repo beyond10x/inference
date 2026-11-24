@@ -205,7 +205,7 @@ fn deferred(id: &str) -> bool {
 }
 
 fn synthesized_suite() -> Value {
-    serde_json::from_str(&suite::synthesized(None)).expect("JSON")
+    serde_json::from_str(&suite::synthesized(suite::Product::Authored)).expect("JSON")
 }
 
 #[test]

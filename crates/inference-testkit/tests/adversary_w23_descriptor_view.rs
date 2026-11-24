@@ -7,10 +7,10 @@
 //! - `FirstOnly`: each list of the descriptor keeps its first element only.
 //! - `SwapRate`: each rate limit publishes its `limit` as `window_ms` and the reverse.
 //!
-//! A witness scenario, written here, declares an adapter with two voices, two codecs and two
-//! rate limits whose `limit` and `window_ms` differ, and asserts the row whole; it shows each
-//! rewrite is a departure from the specification. The question is whether the repository's own
-//! scenarios (`ess/scenarios` and what `ess` synthesizes from `ess/`) reject them too.
+//! A witness scenario, a file of `suite/witness`, declares an adapter with two voices, two codecs
+//! and two rate limits whose `limit` and `window_ms` differ, and asserts the row whole; it shows
+//! each rewrite is a departure from the specification. The question is whether the repository's
+//! own scenarios (`ess/scenarios` and what `ess` synthesizes from `ess/`) reject them too.
 //!
 //! Only the scenarios that read `inference.model.Adapters` are run: a rewrite of that view
 //! cannot fail any other. `ess` must be on PATH.
@@ -35,64 +35,9 @@ use serde_json::Value;
 
 const ADAPTERS: &str = "inference.model.Adapters";
 const SYNTHESIZED: &str = "inference.model.DeclareAdapter/outcome/declared";
+/// The witness, `suite/witness/adversary-w23-descriptor-whole.yaml`.
 const WITNESS: &str = "inference.model/authored/adversary-w23-descriptor-whole";
 const DEADLINE: Duration = Duration::from_secs(28);
-
-const WITNESS_YAML: &str = r"type: ess-scenario/1
-domain: inference.model
-scenario: adversary-w23-descriptor-whole
-summary: An adapter declared with two voices, two codecs and two rate limits is published by the Adapters view with that descriptor, whole.
-arrange:
-  - instance: model
-    entity: inference.model.Model
-  - instance: adapter
-    entity: inference.model.Adapter
-timeline:
-  - at: 2026-01-05T09:00:00Z
-    command: inference.model.DeclareModel
-    input:
-      family: speech
-      checkpoint: hosted
-      code_license: none
-      weight_license: none
-      checksum: none
-      input_modalities: [Text]
-      output_modalities: [Audio]
-      provenance: hosted endpoint
-      source_revision: r1
-    outcome: declared
-    capture: {instance: model, event: inference.model.ModelDeclared, field: model_id}
-  - at: 2026-01-05T09:00:01Z
-    command: inference.model.DeclareAdapter
-    input:
-      model_id: {$instance: model}
-      backend: speech
-      contract_revision: r1
-      execution_form: hosted_service
-      locality: external_provider
-      capabilities: [output_streaming]
-      max_concurrency: 1
-      descriptor:
-        voices: [calm, bright]
-        codecs: [pcm16, opus]
-        context_tokens: 32000
-        rate_limits:
-          - {unit: requests, limit: 60, window_ms: 60000}
-          - {unit: characters, limit: 5000, window_ms: 1000}
-    outcome: declared
-    capture: {instance: adapter, event: inference.model.AdapterDeclared, field: adapter_id}
-assert:
-  - view: inference.model.Adapters
-    contains:
-      adapter_id: {$instance: adapter}
-      descriptor:
-        voices: [calm, bright]
-        codecs: [pcm16, opus]
-        context_tokens: 32000
-        rate_limits:
-          - {unit: requests, limit: 60, window_ms: 60000}
-          - {unit: characters, limit: 5000, window_ms: 1000}
-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mutation {
@@ -213,13 +158,10 @@ fn within(name: &str, case: impl FnOnce() + Send + 'static) {
     }
 }
 
-/// The authored scenarios of `ess/scenarios` and the witness, synthesized together, cut to the
-/// scenarios that read the Adapters view.
+/// The authored scenarios of `ess/scenarios` and the witnesses of `suite/witness`, synthesized
+/// together, cut to the scenarios that read the Adapters view.
 fn synthesized() -> AdmittedSuite {
-    let text = suite::synthesized(Some(suite::Added {
-        file: "adversary-w23-descriptor-whole.yaml",
-        yaml: WITNESS_YAML,
-    }));
+    let text = suite::synthesized(suite::Product::Witnessed);
     let mut json: Value = serde_json::from_str(&text).expect("suite.json is JSON");
     let all = json["scenarios"]
         .as_object_mut()

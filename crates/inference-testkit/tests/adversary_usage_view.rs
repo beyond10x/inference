@@ -124,7 +124,8 @@ impl ConformanceTarget for Mutant {
 }
 
 fn synthesized() -> AdmittedSuite {
-    AdmittedSuite::from_json(&suite::synthesized(None)).expect("the synthesized suite is admitted")
+    AdmittedSuite::from_json(&suite::synthesized(suite::Product::Authored))
+        .expect("the synthesized suite is admitted")
 }
 
 /// Every scenario of the suite that does not pass against `target`.

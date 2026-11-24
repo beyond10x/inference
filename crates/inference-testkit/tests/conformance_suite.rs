@@ -93,7 +93,7 @@ fn calls(directory: &Path) -> usize {
     fs::read_to_string(directory.join("calls")).map_or(0, |text| text.lines().count())
 }
 
-fn read(directory: &Path, version: &str, takes: Duration, added: Option<Added<'_>>) -> String {
+fn read(directory: &Path, version: &str, takes: Duration, added: &[Added<'_>]) -> String {
     Cache {
         root: &directory.join("root"),
         directory: &directory.join("cache"),
@@ -113,7 +113,7 @@ fn reader_process() {
         return;
     };
     let directory = PathBuf::from(directory);
-    let text = read(&directory, "1", Duration::from_millis(400), None);
+    let text = read(&directory, "1", Duration::from_millis(400), &[]);
     assert_eq!(
         text,
         stand_in_suite(
@@ -183,41 +183,42 @@ fn a_suite_is_synthesized_again_only_for_another_source_version_or_added_scenari
     let scratch = scratch();
     let directory = scratch.path();
     specification(directory);
-    let suite_of = |version: &str, added| read(directory, version, Duration::ZERO, added);
+    let suite_of =
+        |version: &str, added: &[Added<'_>]| read(directory, version, Duration::ZERO, added);
     let witness = Added {
         file: "witness.yaml",
         yaml: "a witness",
     };
 
-    let plain = suite_of("1", None);
+    let plain = suite_of("1", &[]);
     assert_eq!(calls(directory), 1);
-    assert_eq!(suite_of("1", None), plain);
+    assert_eq!(suite_of("1", &[]), plain);
     assert_eq!(calls(directory), 1, "a second read synthesizes nothing");
 
-    let with_witness = suite_of("1", Some(witness));
+    let with_witness = suite_of("1", &[witness]);
     assert!(
         with_witness.contains("scenario authored.yaml authored\n")
             && with_witness.contains("scenario witness.yaml a witness\n"),
         "the added scenario stands beside the authored one: {with_witness}"
     );
     assert_eq!(calls(directory), 2, "an added scenario is another suite");
-    assert_eq!(suite_of("1", Some(witness)), with_witness);
-    assert_eq!(suite_of("1", None), plain);
+    assert_eq!(suite_of("1", &[witness]), with_witness);
+    assert_eq!(suite_of("1", &[]), plain);
     assert_eq!(calls(directory), 2, "each suite is read again as it was");
 
     let other_text = Added {
         yaml: "another witness",
         ..witness
     };
-    assert!(suite_of("1", Some(other_text)).contains("another witness"));
+    assert!(suite_of("1", &[other_text]).contains("another witness"));
     assert_eq!(calls(directory), 3, "another text under the same name");
 
-    assert!(suite_of("2", None).starts_with("version 2\n"));
+    assert!(suite_of("2", &[]).starts_with("version 2\n"));
     assert_eq!(calls(directory), 4, "another version of the synthesizer");
 
     let system = directory.join("root/ess/system.yaml");
     fs::write(&system, "the system, changed").expect("system.yaml is rewritten");
-    assert!(suite_of("1", None).contains("the system, changed"));
+    assert!(suite_of("1", &[]).contains("the system, changed"));
     assert_eq!(calls(directory), 5, "a changed source");
 
     fs::write(
@@ -225,17 +226,37 @@ fn a_suite_is_synthesized_again_only_for_another_source_version_or_added_scenari
         "a second domain",
     )
     .expect("a domain is added");
-    suite_of("1", None);
+    suite_of("1", &[]);
     assert_eq!(calls(directory), 6, "an added source");
 
     fs::remove_file(directory.join("root/ess/domains/two.yaml")).expect("the domain is removed");
     fs::write(&system, "the system").expect("system.yaml is restored");
-    assert_eq!(suite_of("1", None), plain);
+    assert_eq!(suite_of("1", &[]), plain);
     assert_eq!(
         calls(directory),
         6,
         "the first sources again are the first suite"
     );
+
+    let second = Added {
+        file: "second.yaml",
+        yaml: "a second witness",
+    };
+    let both = suite_of("1", &[witness, second]);
+    assert!(
+        both.contains("scenario authored.yaml authored\n")
+            && both.contains("scenario witness.yaml a witness\n")
+            && both.contains("scenario second.yaml a second witness\n"),
+        "two added scenarios stand beside the authored one: {both}"
+    );
+    assert_eq!(
+        calls(directory),
+        7,
+        "two added scenarios are one suite, synthesized once"
+    );
+    assert_eq!(suite_of("1", &[witness, second]), both);
+    assert_eq!(suite_of("1", &[witness]), with_witness);
+    assert_eq!(calls(directory), 7, "each suite is read again as it was");
 }
 
 /// Every Rust file under `directory`, at any depth.
@@ -279,11 +300,33 @@ fn no_test_of_this_crate_synthesizes_outside_the_shared_cache() {
     );
 }
 
+/// The suite `ess` synthesizes is whole when a machine stops after the rename: its bytes are
+/// written to disk before it. What such a stop can still leave of a file, a name without a
+/// byte, is synthesized again.
+#[test]
+fn a_suite_file_without_a_byte_is_synthesized_again() {
+    let scratch = scratch();
+    let directory = scratch.path();
+    specification(directory);
+    let plain = read(directory, "1", Duration::ZERO, &[]);
+    assert_eq!(calls(directory), 1);
+    let keys: Vec<PathBuf> = fs::read_dir(directory.join("cache"))
+        .expect("the cache is readable")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    assert_eq!(keys.len(), 1, "one key: {keys:?}");
+    fs::write(keys[0].join("suite.json"), "").expect("the suite's file is emptied");
+    assert_eq!(read(directory, "1", Duration::ZERO, &[]), plain);
+    assert_eq!(calls(directory), 2, "the empty file is synthesized over");
+    assert_eq!(read(directory, "1", Duration::ZERO, &[]), plain);
+    assert_eq!(calls(directory), 2, "and read again as it is");
+}
+
 /// The suite of this repository, through `ess`: after a read, no suite the cache holds was
 /// synthesized more than once.
 #[test]
 fn every_suite_of_this_repository_was_synthesized_at_most_once() {
-    let text = suite::synthesized(None);
+    let text = suite::synthesized(suite::Product::Authored);
     assert!(
         text.contains("\"scenarios\""),
         "the suite carries its scenarios"

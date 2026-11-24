@@ -32,7 +32,7 @@ tasks:
   test-run:
     desc: Runs test-run-parts and ends it, as a failure, when it has not finished within 120 s.
     cmds:
-      - timeout --kill-after=10s 120s task test-run-parts || { status=$?; if [ "$status" -eq 124 ]; then echo "task test-run was ended at its bound of 120 s"; fi; exit "$status"; }
+      - timeout --kill-after=10s 120s task test-run-parts || { status=$?; if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then echo "task test-run was ended at its bound of 120 s"; fi; exit "$status"; }
 
   test-run-parts:
     desc: Runs the tests of the workspace with cargo-nextest under .config/nextest.toml, where a test over 60 s is killed and fails, and prints the ten slowest; then the stack test without default features and the doc tests.
@@ -42,16 +42,17 @@ tasks:
       - cargo test --workspace --all-features --doc
 
   test-workspace:
-    desc: Runs the tests of the workspace with cargo-nextest and prints the ten slowest, also when one failed.
+    desc: Runs the tests of the workspace with cargo-nextest and prints the ten slowest of that run, also when one failed.
     cmds:
+      - rm -f target/nextest/default/junit.xml
       - defer: { task: test-slowest }
       - cargo nextest run --workspace --all-features
 
   test-slowest:
-    desc: Prints the ten slowest tests of the last run of the default nextest profile, in seconds.
+    desc: Prints the ten slowest tests the default nextest profile reported, in seconds, or that no test ran when it left no report.
     cmds:
       - echo "the ten slowest tests, in seconds:"
-      - grep '<testcase ' target/nextest/default/junit.xml | sed -E 's/.* name="([^"]*)" classname="([^"]*)".* time="([^"]*)".*/\3 \2 \1/' | sort -rn | head -n 10
+      - if [ -f target/nextest/default/junit.xml ]; then grep '<testcase ' target/nextest/default/junit.xml | sed -E 's/.* name="([^"]*)" classname="([^"]*)".* time="([^"]*)".*/\3 \2 \1/' | sort -rn | head -n 10; else echo "no test ran"; fi
 
   test-slow:
     desc: The slow lane, every trybuild case of the inference crate in one trybuild run, under the slow nextest profile; runs again only when one of its sources changed.

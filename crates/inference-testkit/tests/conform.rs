@@ -678,7 +678,7 @@ fn the_suite_runs_against_the_testkit_target() {
     let results_path = dir.join("results.json");
     let report_path = dir.join("report.json");
 
-    let original = suite::synthesized(None);
+    let original = suite::synthesized(suite::Product::Authored);
     fs::write(&suite_path, &original).expect("suite.json is written");
     let admitted = AdmittedSuite::from_json(&original)
         .unwrap_or_else(|error| panic!("the synthesized suite is admitted: {error:?}"));

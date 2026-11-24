@@ -401,7 +401,7 @@ fn a_new_scenario_starts_from_empty_stores_and_the_first_identity() {
 
 /// The synthesized suite of `ess/`, read through `suite/mod.rs`.
 fn synthesized_suite() -> Value {
-    serde_json::from_str(&suite::synthesized(None)).expect("JSON")
+    serde_json::from_str(&suite::synthesized(suite::Product::Authored)).expect("JSON")
 }
 
 /// Runs one scenario of `suite`, with its first `command` step's input edited by `edit`, and

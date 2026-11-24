@@ -111,7 +111,9 @@ impl ConformanceTarget for Mutant {
 /// The authored scenarios of the rule, cut out of the synthesized suite: the tests read no
 /// other scenario's status.
 fn synthesized() -> AdmittedSuite {
-    let cut = suite::cut(&suite::synthesized(None), |id| AUTHORED.contains(&id));
+    let cut = suite::cut(&suite::synthesized(suite::Product::Authored), |id| {
+        AUTHORED.contains(&id)
+    });
     AdmittedSuite::from_json(&cut).expect("the cut suite is admitted")
 }
 

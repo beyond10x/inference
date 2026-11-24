@@ -15,7 +15,7 @@ use target::Target;
 
 /// The synthesized suite of `ess/`, read through `suite/mod.rs`.
 fn synthesized_suite() -> Value {
-    serde_json::from_str(&suite::synthesized(None)).expect("JSON")
+    serde_json::from_str(&suite::synthesized(suite::Product::Authored)).expect("JSON")
 }
 
 /// Runs the scenario `id` of `suite` with its steps edited by `edit`, and returns the status and

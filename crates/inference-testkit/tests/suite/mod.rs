@@ -4,19 +4,26 @@
 //! each test in a process of its own, so nothing a process holds in memory is shared between
 //! the tests: the suite is a file. It stands at
 //! `CARGO_TARGET_TMPDIR/conformance-suite/<key>/suite.json`, where `<key>` is the SHA-256 of
-//! what synthesis reads: every file under `ess/`, what `ess --version` prints, and the scenario
-//! a test adds to the authored ones. A changed source is another key, so a suite that is there
-//! is never stale, and one whose key no test asks for any more is only disk under `target/`.
+//! what synthesis reads: every file under `ess/`, what `ess --version` prints, and the scenarios
+//! added to the authored ones. A changed source is another key, so a suite that is there is
+//! never stale, and one whose key no test asks for any more is only disk under `target/`.
+//!
+//! `ess` synthesizes two suites for the tests of this crate, the two of [`Product`], and no
+//! other: `Ess` is private to this module and [`synthesized`] is the one way to it. A run of
+//! the tests that starts with no suite kept calls synthesis twice, once for each.
 //!
 //! The first reader of a key takes the lock of the key's directory, synthesizes into
-//! `suite.json.part` and renames the result into place. A reader that comes meanwhile waits on
-//! the lock and then reads the file; a reader that comes later reads it without the lock. A
-//! `suite.json` that is there is whole, because a rename is atomic, and a part a killed reader
-//! left is written over by the next one, which holds the lock. Each synthesis appends one line
-//! to `synthesized.log` beside the suite it wrote, so a log with two lines is a suite that was
-//! synthesized twice.
+//! `suite.json.part`, has the part's bytes written to disk and then renames it into place. A
+//! reader that comes meanwhile waits on the lock and then reads the file; a reader that comes
+//! later reads it without the lock. The rename is atomic, so no reader sees half a suite, and a
+//! part a killed reader left is written over by the next one, which holds the lock. A
+//! `suite.json` without a byte is what a machine that stopped can leave of a file whose bytes
+//! were not on disk yet: it counts as not there, and the next reader synthesizes over it. Each
+//! synthesis appends one line to `synthesized.log` beside the suite it wrote, so a log with two
+//! lines is a suite that was synthesized twice.
 //!
-//! The tests of this module are in `tests/conformance_suite.rs`.
+//! The tests of this module are in `tests/conformance_suite.rs` and
+//! `tests/adversary_w1_test_budget.rs`.
 
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -27,7 +34,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-/// A scenario a test adds to the authored ones of `ess/scenarios`: its file name and its text.
+/// A scenario added to the authored ones of `ess/scenarios`: its file name and its text.
 #[derive(Clone, Copy)]
 pub struct Added<'a> {
     pub file: &'a str,
@@ -44,8 +51,9 @@ pub trait Synthesizer {
     fn synthesize(&self, root: &Path, scenarios: &Path, out: &Path);
 }
 
-/// The `ess` on `PATH`.
-pub struct Ess;
+/// The `ess` on `PATH`. Private: a test reads a suite of `ess` through [`synthesized`], which
+/// keeps it in the one cache of this repository.
+struct Ess;
 
 impl Synthesizer for Ess {
     fn version(&self) -> String {
@@ -89,10 +97,10 @@ pub struct Cache<'a> {
 impl Cache<'_> {
     /// The suite of the specification with its authored scenarios and `added`, as the JSON text
     /// synthesis wrote: read from the cache, and synthesized first when no reader has yet.
-    pub fn suite(&self, added: Option<Added<'_>>) -> String {
+    pub fn suite(&self, added: &[Added<'_>]) -> String {
         let directory = self.directory.join(self.key(added));
         let suite = directory.join("suite.json");
-        if let Ok(text) = fs::read_to_string(&suite) {
+        if let Some(text) = kept(&suite) {
             return text;
         }
         fs::create_dir_all(&directory).expect("the suite's directory is created");
@@ -103,19 +111,27 @@ impl Cache<'_> {
             .expect("the lock file of the suite's directory opens");
         lock.lock()
             .expect("the lock of the suite's directory is taken");
-        if let Ok(text) = fs::read_to_string(&suite) {
+        if let Some(text) = kept(&suite) {
             return text;
         }
         let scenarios = self.scenarios(&directory, added);
         let part = directory.join("suite.json.part");
         self.synthesizer.synthesize(self.root, &scenarios, &part);
+        let written = File::open(&part).expect("the synthesizer wrote the suite's file");
+        assert!(
+            written.metadata().expect("the suite's file is read").len() > 0,
+            "the synthesizer wrote a suite without a byte"
+        );
+        written
+            .sync_all()
+            .expect("the synthesized suite is written to disk");
         fs::rename(&part, &suite).expect("the synthesized suite is moved into place");
         record(&directory);
         fs::read_to_string(&suite).expect("suite.json is readable")
     }
 
     /// The SHA-256, in hex, of everything the suite is synthesized from.
-    fn key(&self, added: Option<Added<'_>>) -> String {
+    fn key(&self, added: &[Added<'_>]) -> String {
         let specification = self.root.join("ess");
         let mut files = Vec::new();
         collect(&specification, &mut files);
@@ -134,13 +150,13 @@ impl Cache<'_> {
             part(name.to_string_lossy().as_bytes());
             part(&fs::read(file).expect("a file under ess/ is readable"));
         }
-        match added {
-            Some(added) => {
-                part(b"added");
-                part(added.file.as_bytes());
-                part(added.yaml.as_bytes());
-            }
-            None => part(b"authored only"),
+        if added.is_empty() {
+            part(b"authored only");
+        }
+        for added in added {
+            part(b"added");
+            part(added.file.as_bytes());
+            part(added.yaml.as_bytes());
         }
         let mut key = String::new();
         for byte in hash.finalize() {
@@ -151,11 +167,11 @@ impl Cache<'_> {
 
     /// The directory of the authored scenarios: `ess/scenarios`, or a copy of it under
     /// `directory` with `added` beside them.
-    fn scenarios(&self, directory: &Path, added: Option<Added<'_>>) -> PathBuf {
+    fn scenarios(&self, directory: &Path, added: &[Added<'_>]) -> PathBuf {
         let authored = self.root.join("ess/scenarios");
-        let Some(added) = added else {
+        if added.is_empty() {
             return authored;
-        };
+        }
         let scenarios = directory.join("scenarios");
         fs::create_dir_all(&scenarios).expect("the scenarios directory is created");
         for entry in fs::read_dir(&authored).expect("ess/scenarios is readable") {
@@ -171,9 +187,19 @@ impl Cache<'_> {
                 .expect("the scenario is copied");
             }
         }
-        fs::write(scenarios.join(added.file), added.yaml).expect("the added scenario is written");
+        for added in added {
+            fs::write(scenarios.join(added.file), added.yaml)
+                .expect("the added scenario is written");
+        }
         scenarios
     }
+}
+
+/// The text of the file `suite`, when it is there and has a byte.
+fn kept(suite: &Path) -> Option<String> {
+    fs::read_to_string(suite)
+        .ok()
+        .filter(|text| !text.is_empty())
 }
 
 /// Every file under `directory`, at any depth.
@@ -200,6 +226,45 @@ fn record(directory: &Path) {
         .open(directory.join("synthesized.log"))
         .expect("the log of the suite's directory opens");
     writeln!(log, "{seconds} process {}", std::process::id()).expect("the log takes a line");
+}
+
+/// The scenarios the tests of this crate add to the authored ones: each shows that the mutants
+/// of one test file depart from the specification. They are synthesized together, into one
+/// suite, and a test cuts the scenarios it reads out of it.
+const WITNESSES: [Added<'static>; 2] = [
+    Added {
+        file: "adversary-close-after-out-of-order-delivery.yaml",
+        yaml: include_str!("witness/adversary-close-after-out-of-order-delivery.yaml"),
+    },
+    Added {
+        file: "adversary-w23-descriptor-whole.yaml",
+        yaml: include_str!("witness/adversary-w23-descriptor-whole.yaml"),
+    },
+];
+
+/// A suite `ess` synthesizes for the tests of this crate. Each is one call of synthesis in a
+/// run that starts with no suite kept, so a product more is seconds more for every such run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "a test file reads one of the two")]
+pub enum Product {
+    /// The suite of `ess/` with the authored scenarios of `ess/scenarios`: the bytes `ess`
+    /// wrote, which `conform.rs` hands back to `ess verify conform report`.
+    Authored,
+    /// The same with the scenarios of `suite/witness` beside the authored ones.
+    Witnessed,
+}
+
+impl Product {
+    /// Every product.
+    #[allow(dead_code, reason = "read by the test that counts the syntheses")]
+    pub const ALL: [Self; 2] = [Self::Authored, Self::Witnessed];
+
+    fn added(self) -> &'static [Added<'static>] {
+        match self {
+            Self::Authored => &[],
+            Self::Witnessed => &WITNESSES,
+        }
+    }
 }
 
 /// The suite `text` with only the scenarios whose id `keep` takes, as JSON text: for a test that
@@ -242,17 +307,27 @@ pub fn cache_directory() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("conformance-suite")
 }
 
-/// The suite `ess` synthesizes from this repository's `ess/`, with `added` beside the authored
-/// scenarios when a test adds one.
-pub fn synthesized(added: Option<Added<'_>>) -> String {
+/// What `read` reads of the cache of this repository: its `ess/`, through `ess`, kept under
+/// [`cache_directory`].
+fn shared<T>(read: impl FnOnce(&Cache<'_>) -> T) -> T {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .expect("the repository root resolves");
-    Cache {
+    read(&Cache {
         root: &root,
         directory: &cache_directory(),
         synthesizer: &Ess,
-    }
-    .suite(added)
+    })
+}
+
+/// The suite `product` names, as `ess` synthesizes it from this repository's `ess/`.
+pub fn synthesized(product: Product) -> String {
+    shared(|cache| cache.suite(product.added()))
+}
+
+/// The directory the suite `product` names is kept in, with its `synthesized.log`.
+#[allow(dead_code, reason = "read by the test that counts the syntheses")]
+pub fn kept_in(product: Product) -> PathBuf {
+    shared(|cache| cache.directory.join(cache.key(product.added())))
 }
