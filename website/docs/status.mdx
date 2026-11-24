@@ -13,7 +13,7 @@ import status from '@site/data/status.json';
 
 # Status
 
-The current release is `0.33.0`, a source release at that Git tag; nothing is on a registry. The [changelog](https://github.com/beyond10x/inference/blob/main/CHANGELOG.md) records every change a consumer can see. **Shipped** means in a release, with a test on `main` that holds it: an item that says "Since" is in that release and every one after it. **Planned** means not built. What is on `main` and in no release yet is not counted as shipped; it is listed under [On main, in the next release](#on-main-in-the-next-release). Checked on 2026-11-12: 44 shipped, 12 planned, and 0 on main for the next release.
+The current release is `0.33.0`, a source release at that Git tag; nothing is on a registry. The [changelog](https://github.com/beyond10x/inference/blob/main/CHANGELOG.md) records every change a consumer can see. **Shipped** means in a release, with a test on `main` that holds it: an item that says "Since" is in that release and every one after it. **Planned** means not built. What is on `main` and in no release yet is not counted as shipped; it is listed under [On main, in the next release](#on-main-in-the-next-release). Checked on 2026-11-12: 44 shipped, 11 planned, and 1 on main for the next release.
 
 <StatusTable data={status} />
 
@@ -21,7 +21,7 @@ The current release is `0.33.0`, a source release at that Git tag; nothing is on
 
 Built and tested on `main`, and in no release yet: a dependency on the `0.33.0` tag does not have these.
 
-Nothing yet: everything on `main` is in `0.33.0`.
+- **[sherpa-onnx TTS](/docs/reference/adapters)** (Adapters). A local text-to-speech adapter over sherpa-onnx and the pinned Kokoro-82M v0.19 checkpoint; the offline cascade speaks through it. Opt-in: its phonemiser, espeak-ng, is GPL-3.0. Test: [`the_record_of_the_measured_machine_loads_and_evidences_exactly_the_claims`](https://github.com/beyond10x/inference/blob/main/adapters/inference-sherpa-onnx-tts/tests/record.rs).
 
 ## The test behind each item
 
@@ -60,6 +60,7 @@ The generator refuses an item whose test is missing or ignored. A live acceptanc
 | whisper.cpp batch STT | [`the_record_of_the_reference_machine_loads_and_names_no_evidence_for_no_claim`](https://github.com/beyond10x/inference/blob/main/adapters/inference-whispercpp/tests/stt_record.rs) |
 | llama-server LLM | [`a_delta_reaches_the_caller_while_the_server_still_holds_the_rest_of_the_stream`](https://github.com/beyond10x/inference/blob/main/adapters/inference-llama-server/tests/offline.rs) |
 | Microphone and speaker | [`the_sink_plays_the_frames_it_receives_and_a_cancel_event_stops_the_speaker_at_once`](https://github.com/beyond10x/inference/blob/main/adapters/inference-audio-device/tests/nodes.rs) |
+| sherpa-onnx TTS | [`the_record_of_the_measured_machine_loads_and_evidences_exactly_the_claims`](https://github.com/beyond10x/inference/blob/main/adapters/inference-sherpa-onnx-tts/tests/record.rs) |
 | Local voice cascade, offline | [`the_cascade_speaks_committed_answers_through_both_gates_and_plays_them_through_receipts`](https://github.com/beyond10x/inference/blob/main/examples/local-voice-cascade/tests/gates.rs) |
 | Barge-in | [`a_second_utterance_supersedes_the_first_answer_stops_the_speaker_and_drops_its_late_frames`](https://github.com/beyond10x/inference/blob/main/examples/local-voice-cascade/tests/barge_in.rs) |
 | Recogniser by configuration | [`the_stt_variable_selects_the_recogniser_and_the_variable_of_its_checkpoint`](https://github.com/beyond10x/inference/blob/main/examples/local-voice-cascade/tests/local_adapters.rs) |

@@ -32,7 +32,7 @@
         {"title": "Offline, egress denied", "description": "offline_strict refuses a remote model before anything opens; on Linux the egress watch fails the run on any other connection.", "status": "shipped", "href": "/docs/concepts/deployment-profiles"},
         {"title": "Usage per model call", "description": "One usage record per STT, LLM, TTS and native speech call; a count the provider leaves out stays unknown.", "status": "shipped", "href": "/docs/concepts/usage"},
         {"title": "Session totals and pricing", "description": "Run and session usage totals, and cost records from a price document you supply.", "status": "shipped", "href": "/docs/concepts/usage"},
-        {"title": "Local text-to-speech", "description": "A local TTS adapter; the offline cascade speaks through a mock until then.", "status": "planned", "href": "/docs/status"}
+        {"title": "Local text-to-speech", "description": "On main for the next release: the offline cascade speaks through a sherpa-onnx adapter; opt-in, its phonemiser is GPL-3.0.", "status": "planned", "href": "/docs/status"}
       ]
     },
     {

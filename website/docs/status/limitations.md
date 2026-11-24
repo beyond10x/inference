@@ -3,21 +3,13 @@ title: Limitations
 sidebar_position: 1
 description: What does not exist yet, what each adapter cannot do, and where the egress watch stops.
 lede: The gaps that shape a product built on inference today, each with its reason.
-source: adapters/*/src (lib.rs, stt.rs, live_duplex.rs, convert.rs), crates/inference-runtime/src/egress.rs, crates/inference-audio, AGENTS.md (licence policy)
+source: adapters/*/src (lib.rs, stt.rs, live_duplex.rs, convert.rs), adapters/inference-sherpa-onnx-tts/README.md, crates/inference-runtime/src/egress.rs, crates/inference-audio, AGENTS.md (licence policy)
 ---
 
 # Limitations
 
 What has shipped and what is planned is on [Status](../status.mdx). This page lists what a product
 built on inference today has to work around.
-
-## No local text-to-speech
-
-The offline cascade binds the mock synthesiser: the answer is printed, and the speaker plays 10 ms
-of silence per word. A local TTS adapter is planned and waits on the licence policy below:
-sherpa-onnx's TTS build links espeak-ng, which is GPL-3.0, and the policy admits Apache-2.0, MIT or
-more permissive backend code. The backend-neutral TTS checks exist, so an adapter that fits the
-policy is held to the same contract.
 
 ## No self-hosted native speech model
 
@@ -53,9 +45,19 @@ The three native speech adapters are hosted services. A self-hosted native speec
 
 ## Local adapters
 
-- **sherpa-onnx** links the release archive built without TTS, so no GPL-licensed phonemiser is
-  linked. The checkpoint is trained on read audiobook speech and does not recognise synthetic
-  speech reliably. The native archive is for Linux x86_64.
+- **sherpa-onnx speech recognition** links the release archive built without TTS, so no
+  GPL-licensed phonemiser is linked. The checkpoint is trained on read audiobook speech and does
+  not recognise synthetic speech reliably. The native archive is for Linux x86_64.
+- **sherpa-onnx text-to-speech** (`inference-sherpa-onnx-tts`, on `main` and in no release yet)
+  speaks only in a process started on the sherpa-onnx library built with TTS, which carries the
+  phonemiser espeak-ng, GPL-3.0; the pinned checkpoint carries espeak-ng's phoneme data. The
+  repository commits and distributes neither: a task fetches them to your machine, and whoever
+  distributes a program with that library distributes GPL-3.0 code. Opening the synthesiser on the
+  library without TTS is refused, naming the library. The pinned checkpoint speaks English at
+  24 kHz, and the archive is for Linux x86_64. Each segment is spoken on its own, and the local
+  cascade makes a segment of each delta of the language model, so an answer is spoken delta by
+  delta, without the prosody of a sentence. A voice of your own in the Piper format is opened
+  unpinned, its licence yours, at its own sample rate.
 - **whisper.cpp** is a batch recogniser: it holds a whole utterance in memory until input ends,
   decodes at most 30 s per window, and claims no streaming capability. It runs on the CPU.
 - **llama-server**: cancelling closes the connection, and the adapter does not claim
@@ -80,7 +82,11 @@ If you need isolation, run the process in a network namespace or behind a firewa
 
 ## Licence policy for local adapters
 
-- Backend code is Apache-2.0 or MIT, or more permissive.
+- Backend code is Apache-2.0 or MIT, or more permissive. One exception is named: espeak-ng,
+  GPL-3.0, is admitted for the sherpa-onnx text-to-speech adapter alone, inside the sherpa-onnx
+  native library built with TTS and the `espeak-ng-data` a voice carries. The adapter is a crate
+  of its own that nothing else depends on, and its record lists espeak-ng as a licence entry of
+  its own.
 - Pinned weights are CC BY 4.0, or more permissive.
 - Each checkpoint's licence, source URL and hash go into the adapter's capability record when it is
   adopted. Any other licence needs an explicit decision for that checkpoint.
