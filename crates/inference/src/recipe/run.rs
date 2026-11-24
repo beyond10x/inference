@@ -6,12 +6,13 @@
 
 use std::fmt;
 use std::future;
-use std::sync::Arc;
-#[cfg(feature = "audio-host")]
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::Poll;
 use std::time::Duration;
 
-use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
+use inference_core::endpoint::{
+    ClosedToSenders, EndpointFuture, InputEndpoint, KnownContents, OutputEndpoint, SendError,
+};
 use inference_core::envelope::{EventEnvelope, EventId, Timebase};
 use inference_core::id::{NodeId, RunId, StreamId};
 #[cfg(feature = "audio-host")]
@@ -28,7 +29,9 @@ use inference_pipeline::nodes::stt::SttPorts;
 use inference_pipeline::nodes::turn_policy::{CompleteTurnRefused, TurnCommands, TurnPolicy};
 #[cfg(feature = "audio-host")]
 use inference_pipeline::nodes::vad::VoiceActivityDetector;
-use inference_pipeline::nodes::{AuthorityHandle, FanOut, ToolAuthority, ToolExecutorNode};
+use inference_pipeline::nodes::{
+    AuthorityHandle, FanOut, ToolAuthority, ToolCallEvent, ToolExecutorNode,
+};
 use inference_pipeline::{
     Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInput,
     NodeOutput, NodeRole, PipelineId, PlannedPipeline, PortId, USAGE_PORT,
@@ -36,7 +39,8 @@ use inference_pipeline::{
 use inference_text::{OpenTurn, Span, Turn, TurnId, TurnOpened};
 #[cfg(feature = "audio-host")]
 use inference_text::{TurnCompleted, TurnNotFound};
-use inference_tools::Tool;
+use inference_tools::{Tool, ToolCallId};
+use tokio::sync::mpsc;
 
 use super::{Recipe, Topology};
 use crate::graph::Implementation;
@@ -66,6 +70,8 @@ pub(super) struct Run<'i> {
     call_ids: Option<CallIds>,
     /// What the run's STT node recognises, once the run built one that is given no turns.
     recognised: Option<Recognised>,
+    /// What the run's model node answers, once the run built one.
+    replies: Option<Replies>,
     #[cfg(feature = "audio-host")]
     speaker: Option<&'i super::speaker::Speaker>,
     #[cfg(feature = "audio-host")]
@@ -87,6 +93,7 @@ impl<'i> Run<'i> {
             handle: None,
             call_ids: None,
             recognised: None,
+            replies: None,
             #[cfg(feature = "audio-host")]
             speaker: instantiation.speaker.as_ref(),
             #[cfg(feature = "audio-host")]
@@ -96,9 +103,9 @@ impl<'i> Run<'i> {
         }
     }
 
-    /// The tool handles of a `native_voice` run: its authority's hook, once the run built its
-    /// authority, and its duplex node's call ids, once the run built its duplex node, each
-    /// without the other; none when it built neither.
+    /// The tool handles of a run with a tool loop, `native_voice`'s or that of `chat` given
+    /// tools: its authority's hook, once the run built its authority, and its duplex node's call
+    /// ids, once the run built a duplex node, each without the other; none when it built neither.
     pub(super) fn take_tools(&mut self) -> Option<super::Tools> {
         let tools = super::Tools {
             authority: self.handle.take(),
@@ -111,6 +118,11 @@ impl<'i> Run<'i> {
     /// `transcribe`'s.
     pub(super) const fn take_recognised(&mut self) -> Option<Recognised> {
         self.recognised.take()
+    }
+
+    /// What the run's model node answers, when the run built one, as `chat`'s.
+    pub(super) fn take_replies(&mut self) -> Option<Replies> {
+        self.replies.take()
     }
 
     /// The handle of the run's speaker sink, once it was built.
@@ -314,7 +326,9 @@ impl<'i> Run<'i> {
     /// The LLM node: the cascade's agent, one generation per turn, which keeps its replies when
     /// the cascade does not cut at a turn's opening; any other recipe's model node. Either sends
     /// the usage record of each model call on the node's port `usage` when the recipe declares
-    /// one.
+    /// one. The model node of `chat` given tools, whose node then declares the ports `tool_call`
+    /// and `tool_result`, is given the recipe's tools and runs the tool loop of its generation.
+    /// What a model node answers is kept for the instantiation ([`Replies`]).
     #[cfg_attr(
         not(feature = "audio-host"),
         allow(
@@ -323,7 +337,7 @@ impl<'i> Run<'i> {
         )
     )]
     fn agent(
-        &self,
+        &mut self,
         run_id: RunId,
         node: &Node,
         generator: inference_llm::Generator,
@@ -343,21 +357,40 @@ impl<'i> Run<'i> {
                 Box::new(agent.keeping_replies())
             });
         }
-        let model = ModelNode::<Payload>::carrying(run_id, generator, reply, self.log.clone())
+        let mut model = ModelNode::<Payload>::carrying(run_id, generator, reply, self.log.clone())
             .with_instructions(self.recipe.instructions.clone().unwrap_or_default());
-        Ok(match self.port(node, USAGE_PORT) {
-            Ok(usage) => Box::new(model.with_usage(usage)),
-            Err(_) => Box::new(model),
-        })
+        let usage = self.port(node, USAGE_PORT).ok();
+        if let Some(usage) = usage {
+            model = model.with_usage(usage);
+        }
+        let tools = if matches!(self.recipe.topology, Topology::Chat) {
+            self.port(node, "tool_call")
+                .ok()
+                .zip(self.port(node, "tool_result").ok())
+        } else {
+            None
+        };
+        if let Some((tool_call, tool_result)) = tools {
+            model = model.with_tools(self.recipe.tools.tools().cloned(), tool_call, tool_result);
+        }
+        let replies = Replies::default();
+        self.replies = Some(replies.clone());
+        Ok(Box::new(Replying {
+            inner: Box::new(model),
+            replies,
+            usage,
+            tool_call: tools.map(|(tool_call, _)| tool_call),
+            tool_result: tools.map(|(_, tool_result)| tool_result),
+        }))
     }
 
-    /// A node no role binds: a fan-out by its role, the cascade's policy nodes and speaker by
-    /// name.
+    /// A node no role binds: a fan-out by its role, the tool nodes of `native_voice` and of
+    /// `chat` given tools, the cascade's policy nodes and speaker by name.
     fn unbound(&mut self, run_id: RunId, node: &Node) -> Result<Implementation, Error> {
         if node.role() == NodeRole::FanOut {
             return Ok(Box::new(FanOut::new()));
         }
-        if matches!(self.recipe.topology, Topology::NativeVoice) {
+        if matches!(self.recipe.topology, Topology::NativeVoice | Topology::Chat) {
             match node.name() {
                 "authority" => {
                     self.authority(run_id)?;
@@ -721,6 +754,262 @@ impl NodeImplementation<Payload> for WholeInput {
             });
         }
         self.inner.start(endpoints)
+    }
+
+    fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        self.inner.drain()
+    }
+
+    fn cancel(&mut self) -> NodeFuture<'_, ()> {
+        self.inner.cancel()
+    }
+
+    fn stop(&mut self) -> NodeFuture<'_, ()> {
+        self.inner.stop()
+    }
+}
+
+/// One step of what a run's model node answers, as a reader beside the session takes it
+/// (`Instantiation::replies`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReplyPart {
+    /// The text of one delta the node sent, as the model streamed it.
+    Delta(String),
+    /// The model refused to answer a turn; the text is its refusal, which is no delta.
+    Refused(String),
+    /// The reply is whole: every input the node took is answered and it awaits no tool call.
+    /// `ended` says the node's generation ended, completed, superseded or cancelled, as when its
+    /// tool calls reached the bound of the tool loop: it answers no later input.
+    End { ended: bool },
+}
+
+/// What the wrapped model node took and sent, as its endpoints saw it.
+#[derive(Default)]
+struct Answering {
+    reader: Option<mpsc::UnboundedSender<ReplyPart>>,
+    /// The calls the node proposed whose outcome it has not taken.
+    awaited: Vec<ToolCallId>,
+    /// How many inputs the node took, and how many of them an [`ReplyPart::End`] covered.
+    taken: u64,
+    answered: u64,
+    ended: bool,
+}
+
+/// What the model node of a run answers, told to one reader as the node's endpoints see it:
+/// clones share one state. The node answers on its own task, one input after another, so the
+/// reader gets the deltas of a reply in order and its end after them.
+#[derive(Clone, Default)]
+pub(super) struct Replies(Arc<Mutex<Answering>>);
+
+impl fmt::Debug for Replies {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Replies").finish_non_exhaustive()
+    }
+}
+
+impl Replies {
+    fn answering(&self) -> std::sync::MutexGuard<'_, Answering> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A reader of what the node answers from now on; it replaces the reader before it.
+    pub(super) fn listen(&self) -> mpsc::UnboundedReceiver<ReplyPart> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.answering().reader = Some(sender);
+        receiver
+    }
+
+    fn tell(answering: &Answering, part: ReplyPart) {
+        if let Some(reader) = &answering.reader {
+            let _ = reader.send(part);
+        }
+    }
+
+    /// The node sends `envelope` on its text port.
+    fn sends(&self, envelope: &EventEnvelope<Payload>) {
+        let Payload::Stream(event) = &envelope.payload else {
+            return;
+        };
+        let mut answering = self.answering();
+        match event {
+            StreamEvent::TextDelta(delta) => {
+                Self::tell(&answering, ReplyPart::Delta(delta.text.clone()));
+            }
+            StreamEvent::GenerationRefused(refused) => {
+                Self::tell(&answering, ReplyPart::Refused(refused.text.clone()));
+            }
+            StreamEvent::GenerationCompleted(_)
+            | StreamEvent::GenerationSuperseded(_)
+            | StreamEvent::GenerationCancelled(_) => answering.ended = true,
+            _ => {}
+        }
+    }
+
+    /// The node sends `envelope` on its port `tool_call`: a proposal is a call it awaits.
+    fn proposes(&self, envelope: &EventEnvelope<Payload>) {
+        if let Payload::Tool(update) = &envelope.payload
+            && matches!(update.event, ToolCallEvent::Proposed(_))
+        {
+            self.answering().awaited.push(update.call.call_id());
+        }
+    }
+
+    /// The node takes `envelope` from an input edge, one into its port `tool_result` when
+    /// `result`: a committed text is an input it answers, and a call's result, failure or
+    /// rejection ends the wait for that call.
+    fn takes(&self, envelope: &EventEnvelope<Payload>, result: bool) {
+        let mut answering = self.answering();
+        match &envelope.payload {
+            Payload::Stream(StreamEvent::TranscriptCommitted(_)) if !result => {
+                answering.taken += 1;
+            }
+            Payload::Tool(update)
+                if result
+                    && matches!(
+                        update.event,
+                        ToolCallEvent::Result(_)
+                            | ToolCallEvent::Failed(_)
+                            | ToolCallEvent::Rejected(_)
+                    ) =>
+            {
+                let call_id = update.call.call_id();
+                answering.awaited.retain(|awaited| *awaited != call_id);
+            }
+            _ => {}
+        }
+    }
+
+    /// The node asks an input edge for its next envelope, which it does only between the steps
+    /// of its exchange: when it awaits no call, every input it took is answered, since an input
+    /// it takes while it awaits one is answered before it asks again. Tells the reader the end
+    /// of the reply once for the inputs taken since the last.
+    fn asks(&self) {
+        let mut answering = self.answering();
+        if answering.awaited.is_empty() && answering.taken > answering.answered {
+            answering.answered = answering.taken;
+            Self::tell(
+                &answering,
+                ReplyPart::End {
+                    ended: answering.ended,
+                },
+            );
+        }
+    }
+}
+
+/// An input edge of the wrapped model node, telling [`Replies`] what the node asks and takes.
+struct Asked {
+    inner: Box<dyn InputEndpoint<Payload>>,
+    replies: Replies,
+    /// Whether the edge arrives at the node's port `tool_result`.
+    result: bool,
+}
+
+impl InputEndpoint<Payload> for Asked {
+    fn recv(&mut self) -> EndpointFuture<'_, Option<EventEnvelope<Payload>>> {
+        let (replies, result) = (self.replies.clone(), self.result);
+        let mut inner = self.inner.recv();
+        Box::pin(future::poll_fn(move |cx| {
+            replies.asks();
+            let received = inner.as_mut().poll(cx);
+            if let Poll::Ready(Some(envelope)) = &received {
+                replies.takes(envelope, result);
+            }
+            received
+        }))
+    }
+
+    fn known_contents(&self) -> KnownContents {
+        self.inner.known_contents()
+    }
+
+    fn close_to_senders(&mut self) -> ClosedToSenders {
+        self.inner.close_to_senders()
+    }
+}
+
+/// An output edge of the wrapped model node, telling [`Replies`] what the node sends on it.
+struct Answered {
+    inner: Box<dyn OutputEndpoint<Payload>>,
+    replies: Replies,
+    /// Whether the edge leaves the node's port `tool_call`, rather than its text port.
+    proposals: bool,
+}
+
+impl OutputEndpoint<Payload> for Answered {
+    fn send(
+        &self,
+        envelope: EventEnvelope<Payload>,
+    ) -> EndpointFuture<'_, Result<(), SendError<Payload>>> {
+        if self.proposals {
+            self.replies.proposes(&envelope);
+        } else {
+            self.replies.sends(&envelope);
+        }
+        self.inner.send(envelope)
+    }
+}
+
+/// A model node whose edges tell [`Replies`] what it answers: every input edge, every edge
+/// leaving its text port and every edge leaving its port `tool_call`; its `usage` port's edges
+/// are handed on as they are.
+struct Replying {
+    inner: Implementation,
+    replies: Replies,
+    usage: Option<PortId>,
+    tool_call: Option<PortId>,
+    tool_result: Option<PortId>,
+}
+
+impl fmt::Debug for Replying {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Replying").finish_non_exhaustive()
+    }
+}
+
+impl NodeImplementation<Payload> for Replying {
+    fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
+        self.inner.describe(node)
+    }
+
+    fn prepare(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        self.inner.prepare()
+    }
+
+    fn start(
+        &mut self,
+        endpoints: NodeEndpoints<Payload>,
+    ) -> NodeFuture<'_, Result<(), NodeError>> {
+        let inputs = endpoints
+            .inputs
+            .into_iter()
+            .map(|input| NodeInput {
+                port_id: input.port_id,
+                endpoint: Box::new(Asked {
+                    inner: input.endpoint,
+                    replies: self.replies.clone(),
+                    result: self.tool_result == Some(input.port_id),
+                }),
+            })
+            .collect();
+        let outputs = endpoints
+            .outputs
+            .into_iter()
+            .map(|output| {
+                if self.usage == Some(output.port_id) {
+                    return output;
+                }
+                NodeOutput {
+                    port_id: output.port_id,
+                    endpoint: Box::new(Answered {
+                        inner: output.endpoint,
+                        replies: self.replies.clone(),
+                        proposals: self.tool_call == Some(output.port_id),
+                    }),
+                }
+            })
+            .collect();
+        self.inner.start(NodeEndpoints { inputs, outputs })
     }
 
     fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {

@@ -9,7 +9,7 @@ use inference_text::Span;
 
 #[cfg(feature = "audio-host")]
 use crate::Voice;
-use crate::{Result, Stack, Transcriber};
+use crate::{Chat, Result, Stack, Transcriber};
 
 /// The text of the WAV file at `path`, over the stack the process names: [`transcribe_with`]
 /// over the stack resolved from the environment and the stack files.
@@ -31,6 +31,32 @@ pub async fn transcribe(path: impl AsRef<Path>) -> Result<String> {
 pub async fn transcribe_with(stack: &Stack, path: impl AsRef<Path>) -> Result<String> {
     let spans = Transcriber::new_with(stack)?.transcribe_file(path).await?;
     Ok(spans.iter().map(Span::text).collect::<Vec<_>>().join(" "))
+}
+
+/// The model's reply to `prompt`, over the stack the process names: [`chat_with`] over the stack
+/// resolved from the environment and the stack files.
+///
+/// # Errors
+///
+/// Those of [`Stack::from_env`] and of [`chat_with`].
+pub async fn chat(prompt: impl Into<String>) -> Result<String> {
+    chat_with(&Stack::from_env()?, prompt).await
+}
+
+/// The model's reply to `prompt` over `stack`'s `llm` binding, whole: one session of the recipe
+/// `chat`, opened and closed, with one turn. To go on with the conversation, to read the reply
+/// as it streams or to give the model tools, build a [`Chat`].
+///
+/// # Errors
+///
+/// Those of [`Chat::new_with`], [`Chat::send`] and [`Chat::close`].
+pub async fn chat_with(stack: &Stack, prompt: impl Into<String>) -> Result<String> {
+    let mut chat = Chat::new_with(stack)?;
+    let reply = chat.send(prompt).await;
+    let closed = chat.close().await;
+    let reply = reply?;
+    closed?;
+    Ok(reply)
 }
 
 /// Says `text` on the default speaker of the default audio host, over the stack the process

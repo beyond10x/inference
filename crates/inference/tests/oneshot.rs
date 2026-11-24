@@ -12,7 +12,8 @@ use inference::audio_device::fake::{FakeDevice, FakeHost};
 use inference::core::model::ModelId;
 use inference::facade::session::{SessionState, SessionsRow};
 use inference::text::{Span, SpanState};
-use inference::{Binding, Stack, Transcriber, Voice};
+use inference::{Binding, Chat, Stack, Transcriber, Voice};
+use inference_testkit::llm::{self, MockGenerator};
 use inference_testkit::mark::{self, Mark, MockId};
 use inference_testkit::stt::synthetic_audio::tone_silence_tone_silence;
 use inference_testkit::stt::{self, MockRecogniser};
@@ -327,6 +328,282 @@ async fn a_voice_without_a_synthesiser_is_refused_when_it_is_built() {
     let _held = SESSIONS.lock().await;
     let before = rows();
     let error = Voice::new_with(&Stack::new()).expect_err("no tts is bound");
+    assert_eq!(error.kind(), inference::ErrorKind::RoleUnbound, "{error}");
+    assert_eq!(rows().len(), before.len(), "nothing opened");
+}
+
+/// The pieces the mock generator streams as the first reply of a conversation.
+const PIECES: [&str; 3] = ["Hello", " from", " the mock"];
+
+/// The first reply of a conversation with [`scripted`]: its pieces, joined.
+const REPLY: &str = "Hello from the mock";
+
+/// A mock generator that streams [`PIECES`] as the first reply of each conversation and answers
+/// every later turn with the user text of that turn.
+fn scripted() -> MockGenerator {
+    MockGenerator::new(
+        llm::MockConfiguration::StreamingAndConcurrentInput,
+        ModelId::generate(),
+        PIECES,
+    )
+}
+
+/// A stack binding `llm` to a clone of `generator`, which records what both are asked.
+fn chatting(generator: &MockGenerator) -> Stack {
+    Stack::new().bind(Binding::llm(generator.clone()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_with_returns_the_scripted_reply_over_one_session() {
+    let _held = SESSIONS.lock().await;
+    let generator = scripted();
+    let stack = chatting(&generator);
+    let before = rows();
+
+    let reply = inference::chat_with(&stack, "say hello")
+        .await
+        .expect("answers");
+
+    assert_eq!(reply, REPLY);
+    assert_eq!(generator.asked(), [["say hello"]]);
+    one_closed_session_since(&before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_streams_the_deltas_whose_concatenation_is_the_reply() {
+    use futures_util::StreamExt;
+
+    let _held = SESSIONS.lock().await;
+    let stack = chatting(&scripted());
+    let mut chat = Chat::new_with(&stack).expect("plans");
+
+    let deltas: Vec<String> = chat
+        .stream("say hello")
+        .map(|delta| delta.expect("a delta"))
+        .collect()
+        .await;
+
+    assert_eq!(deltas, PIECES, "one delta per piece the model streamed");
+    assert_eq!(deltas.concat(), REPLY);
+    chat.close().await.expect("closes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_keeps_history_so_a_second_send_carries_the_first_turn() {
+    let _held = SESSIONS.lock().await;
+    let generator = scripted();
+    let stack = chatting(&generator);
+    let mut chat = Chat::new_with(&stack).expect("plans");
+    let before = rows();
+
+    assert_eq!(chat.send("first").await.expect("answers"), REPLY);
+    assert_eq!(chat.send("second").await.expect("answers"), "second");
+
+    assert_eq!(
+        generator.asked(),
+        [vec!["first"], vec!["first", "second"]],
+        "the second request carries the first turn's user text"
+    );
+    let open = rows();
+    assert_eq!(
+        open.len(),
+        before.len() + 1,
+        "both sends ran on one session"
+    );
+    chat.close().await.expect("closes");
+    one_closed_session_since(&before);
+}
+
+/// A tool executor that keeps the arguments of each call it is given and answers every call
+/// with `answer`.
+struct Recording {
+    answer: inference::tools::Json,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<inference::tools::Json>>>,
+}
+
+impl inference::tools::ToolExecutor for Recording {
+    fn execute<'a>(
+        &'a self,
+        call: &'a inference::tools::ToolCall,
+        _: std::time::Instant,
+        _: &'a inference::tools::CancellationSignal,
+    ) -> inference::tools::ExecutionFuture<'a> {
+        self.calls
+            .lock()
+            .expect("no test panicked holding it")
+            .push(call.arguments().clone());
+        Box::pin(std::future::ready(Ok(self.answer.clone())))
+    }
+}
+
+/// What the scripted generator of [`calling`] calls [`lookup`] with.
+fn berlin() -> inference::tools::Json {
+    inference::__private::serde_json::json!({"city": "Berlin"})
+}
+
+/// A read-only tool whose schema requires a string `city`, declared by hand.
+fn lookup() -> inference::tools::Tool {
+    use inference::tools::{DeclareTool, SideEffectClass, Tool};
+
+    Tool::declare(DeclareTool {
+        name: "lookup".to_owned(),
+        description: "The weather of a city".to_owned(),
+        schema: inference::__private::serde_json::json!({
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+            "additionalProperties": false
+        }),
+        schema_revision: "1".to_owned(),
+        side_effect: SideEffectClass::ReadOnly,
+        requires_confirmation: false,
+    })
+    .0
+}
+
+/// A mock generator with no script, which answers each turn with the texts it was given since
+/// its last answer and ends each of its first `proposals` model requests with a call of `tool`
+/// with [`berlin`].
+fn calling(tool: &inference::tools::Tool, proposals: usize) -> MockGenerator {
+    MockGenerator::new(
+        llm::MockConfiguration::StreamingAndConcurrentInput,
+        ModelId::generate(),
+        Vec::<String>::new(),
+    )
+    .proposing(tool.tool_id(), berlin(), proposals)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_tool_is_given_the_scripted_call_and_the_reply_carries_its_answer() {
+    use inference::__private::serde_json::json;
+    use inference::tools::ToolExecutor;
+
+    let _held = SESSIONS.lock().await;
+    let tool = lookup();
+    let answer = json!({"temperature": 21});
+    let generator = calling(&tool, 1);
+    let stack = chatting(&generator);
+    let calls = std::sync::Arc::default();
+    let executor: Box<dyn ToolExecutor> = Box::new(Recording {
+        answer: answer.clone(),
+        calls: std::sync::Arc::clone(&calls),
+    });
+    let before = rows();
+    let mut chat = Chat::new_with(&stack)
+        .expect("plans")
+        .tool((tool, executor))
+        .expect("plans with the tool");
+
+    let reply = chat.send("the weather in Berlin").await.expect("answers");
+
+    assert_eq!(
+        *calls.lock().expect("no test panicked holding it"),
+        [berlin()],
+        "the executor was given the scripted call once"
+    );
+    assert!(
+        reply.contains(&answer.to_string()),
+        "the reply carries the executor's answer: {reply}"
+    );
+    assert_eq!(
+        generator.offered().len(),
+        1,
+        "the model was offered the tool"
+    );
+    chat.close().await.expect("closes");
+    one_closed_session_since(&before);
+}
+
+/// The tool loop of `chat` returns a call to the model four times. A model that calls a fifth
+/// time is answered as exhausted, which ends its generation: the reply never becomes whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_whose_tool_calls_reach_the_loops_bound_ends_its_session_with_an_error() {
+    use inference::__private::serde_json::json;
+    use inference::tools::ToolExecutor;
+
+    let _held = SESSIONS.lock().await;
+    let tool = lookup();
+    let stack = chatting(&calling(&tool, 5));
+    let calls = std::sync::Arc::default();
+    let executor: Box<dyn ToolExecutor> = Box::new(Recording {
+        answer: json!({"temperature": 21}),
+        calls: std::sync::Arc::clone(&calls),
+    });
+    let before = rows();
+    let mut chat = Chat::new_with(&stack)
+        .expect("plans")
+        .tool((tool, executor))
+        .expect("plans with the tool");
+
+    let error = chat
+        .send("the weather in Berlin")
+        .await
+        .expect_err("the fifth call is past the bound");
+
+    assert_eq!(error.kind(), inference::ErrorKind::Closed, "{error}");
+    assert_eq!(
+        calls.lock().expect("no test panicked holding it").len(),
+        4,
+        "the executor ran the calls within the bound"
+    );
+    one_closed_session_since(&before);
+    chat.close().await.expect("nothing is left to close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_is_an_error_of_its_send_and_the_conversation_goes_on() {
+    let _held = SESSIONS.lock().await;
+    let generator = scripted().refusing("I will not say that");
+    let stack = chatting(&generator);
+    let mut chat = Chat::new_with(&stack).expect("plans");
+    let before = rows();
+
+    let error = chat.send("say it").await.expect_err("the model refuses");
+
+    assert_eq!(error.kind(), inference::ErrorKind::Provider, "{error}");
+    assert!(error.to_string().contains("I will not say that"), "{error}");
+    assert_eq!(chat.send("say hello").await.expect("answers"), REPLY);
+    assert_eq!(rows().len(), before.len() + 1, "one session took both");
+    chat.close().await.expect("closes");
+    one_closed_session_since(&before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_describes_chat_and_reaches_its_session_and_pipeline() {
+    let _held = SESSIONS.lock().await;
+    let stack = chatting(&scripted());
+    let mut chat = Chat::new_with(&stack).expect("plans");
+
+    assert_eq!(chat.describe().recipe, "chat");
+    let planned = chat.pipeline().pipeline_id();
+    assert!(
+        chat.describe().pipeline.is_some(),
+        "the pipeline {planned} is described"
+    );
+    assert!(chat.session().is_none(), "no send opened a session yet");
+
+    chat.send("say hello").await.expect("answers");
+    let session_id = chat.session().expect("the open session").session_id();
+    assert!(
+        rows()
+            .iter()
+            .any(|row| row.session_id == session_id && row.state == SessionState::Ready),
+        "the chat's session stays open between sends"
+    );
+    chat.close().await.expect("closes");
+    assert!(
+        rows()
+            .iter()
+            .any(|row| row.session_id == session_id && row.state == SessionState::Closed),
+        "the closed session is still the chat's"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_without_a_generator_is_refused_when_it_is_built() {
+    let _held = SESSIONS.lock().await;
+    let before = rows();
+    let error = Chat::new_with(&Stack::new()).expect_err("no llm is bound");
     assert_eq!(error.kind(), inference::ErrorKind::RoleUnbound, "{error}");
     assert_eq!(rows().len(), before.len(), "nothing opened");
 }

@@ -4,13 +4,14 @@
 //! `transcribe` and `speak` declares a port [`USAGE_PORT`], exposed as the egress `usage`, on
 //! which it sends the usage record of each model call; each of `voice_cascade`'s three model
 //! nodes declares one too, exposed as `stt_usage`, `agent_usage` and `tts_usage`, as egress
-//! names are unique in a pipeline; `native_voice`'s records travel on its `events`.
+//! names are unique in a pipeline; `native_voice`'s records travel on its `events`. `chat` given
+//! tools declares the tool loop `native_voice` declares, around its model node.
 
 use std::num::NonZeroUsize;
 
 use inference_core::model::Capability;
 use inference_pipeline::{
-    Delivery, Essentiality, NodeRole, OverloadPolicy, PortTraits, USAGE_PORT, modality,
+    Delivery, Essentiality, NodeHandle, NodeRole, OverloadPolicy, PortTraits, USAGE_PORT, modality,
 };
 
 use super::MAX_TOOL_ITERATIONS;
@@ -43,22 +44,63 @@ const USAGE: PortTraits = PortTraits {
 
 const PAUSE: OverloadPolicy = OverloadPolicy::Pause;
 
+/// `chat`'s topology. With `tools`, the recipe was given tools: its model node then requires
+/// `tool_calling` beside streaming and is wired to the runtime's tool nodes by [`tool_loop`].
 pub(super) fn chat(
     pipeline: &mut Builder<'_, '_>,
     capacity: NonZeroUsize,
     requirement: &Requirement<'_>,
+    tools: bool,
 ) {
-    let agent = pipeline.node(
-        "agent",
-        NodeRole::Model,
-        requirement(Role::Llm, &[Capability::OutputStreaming]),
-    );
+    let streaming: &[Capability] = if tools {
+        &[Capability::OutputStreaming, Capability::ToolCalling]
+    } else {
+        &[Capability::OutputStreaming]
+    };
+    let agent = pipeline.node("agent", NodeRole::Model, requirement(Role::Llm, streaming));
     let input = pipeline.input::<modality::Text>(&agent, "user_input", STREAM);
     let output = pipeline.output::<modality::Text>(&agent, "committed_text", STREAM);
     let usage = pipeline.output::<modality::Structured>(&agent, USAGE_PORT, USAGE);
+    if tools {
+        tool_loop(pipeline, &agent);
+    }
     pipeline.expose(&input, "user_input", capacity, PAUSE);
     pipeline.expose(&output, "assistant_text", capacity, PAUSE);
     pipeline.expose(&usage, USAGE_PORT, capacity, PAUSE);
+}
+
+/// The runtime's tool nodes around `model`, wired as
+/// `crates/inference-runtime/tests/tool_feedback_loop.rs` wires them around a model: the model's
+/// `tool_call` output reaches the `authority` node's `proposed` input through a feedback edge
+/// bounded at [`MAX_TOOL_ITERATIONS`], the authority's `authorized` output reaches the `executor`
+/// node, and the executor's `outcomes` and the authority's `rejected` both return to the model's
+/// `tool_result` input.
+fn tool_loop<'b>(pipeline: &mut Builder<'_, 'b>, model: &NodeHandle<'b>) {
+    let structured = PortTraits {
+        essentiality: Essentiality::Optional,
+        incremental: false,
+        ..STREAM
+    };
+    let fail = OverloadPolicy::Fail;
+    let authority = pipeline.node("authority", NodeRole::Policy, Vec::new());
+    let executor = pipeline.node("executor", NodeRole::Tool, Vec::new());
+    let tool_call = pipeline.output::<modality::Structured>(model, "tool_call", structured);
+    let tool_result = pipeline.input::<modality::Structured>(model, "tool_result", structured);
+    let proposed = pipeline.input::<modality::Structured>(&authority, "proposed", structured);
+    let authorized = pipeline.output::<modality::Structured>(&authority, "authorized", structured);
+    let rejected = pipeline.output::<modality::Structured>(&authority, "rejected", structured);
+    let calls = pipeline.input::<modality::Structured>(&executor, "authorized", structured);
+    let outcomes = pipeline.output::<modality::Structured>(&executor, "outcomes", structured);
+    pipeline.connect_feedback(
+        &tool_call,
+        &proposed,
+        TOOL_CAPACITY,
+        fail,
+        MAX_TOOL_ITERATIONS,
+    );
+    pipeline.connect(&authorized, &calls, TOOL_CAPACITY, fail);
+    pipeline.connect(&outcomes, &tool_result, TOOL_CAPACITY, fail);
+    pipeline.connect(&rejected, &tool_result, TOOL_CAPACITY, fail);
 }
 
 pub(super) fn transcribe(
@@ -187,8 +229,7 @@ pub(super) fn voice_cascade(
     }
 }
 
-/// The native speech model's node and the runtime's tool nodes, wired as
-/// `crates/inference-runtime/tests/tool_feedback_loop.rs` wires them around a model.
+/// The native speech model's node and the runtime's tool nodes, wired by [`tool_loop`].
 pub(super) fn native_voice(
     pipeline: &mut Builder<'_, '_>,
     capacity: NonZeroUsize,
@@ -199,39 +240,15 @@ pub(super) fn native_voice(
         incremental: false,
         ..STREAM
     };
-    let structured = PortTraits {
-        essentiality: Essentiality::Optional,
-        incremental: false,
-        ..STREAM
-    };
-    let fail = OverloadPolicy::Fail;
     let speech = pipeline.node(
         "speech",
         NodeRole::Model,
         requirement(Role::Speech, &[Capability::ConcurrentInputOutput]),
     );
-    let authority = pipeline.node("authority", NodeRole::Policy, Vec::new());
-    let executor = pipeline.node("executor", NodeRole::Tool, Vec::new());
     let audio = pipeline.input::<modality::Audio>(&speech, "audio", STREAM);
     let control_in = pipeline.input::<modality::Control>(&speech, "control", control);
     let events = pipeline.output::<modality::Structured>(&speech, "events", STREAM);
-    let tool_call = pipeline.output::<modality::Structured>(&speech, "tool_call", structured);
-    let tool_result = pipeline.input::<modality::Structured>(&speech, "tool_result", structured);
-    let proposed = pipeline.input::<modality::Structured>(&authority, "proposed", structured);
-    let authorized = pipeline.output::<modality::Structured>(&authority, "authorized", structured);
-    let rejected = pipeline.output::<modality::Structured>(&authority, "rejected", structured);
-    let calls = pipeline.input::<modality::Structured>(&executor, "authorized", structured);
-    let outcomes = pipeline.output::<modality::Structured>(&executor, "outcomes", structured);
-    pipeline.connect_feedback(
-        &tool_call,
-        &proposed,
-        TOOL_CAPACITY,
-        fail,
-        MAX_TOOL_ITERATIONS,
-    );
-    pipeline.connect(&authorized, &calls, TOOL_CAPACITY, fail);
-    pipeline.connect(&outcomes, &tool_result, TOOL_CAPACITY, fail);
-    pipeline.connect(&rejected, &tool_result, TOOL_CAPACITY, fail);
+    tool_loop(pipeline, &speech);
     pipeline.expose(&audio, "audio", capacity, PAUSE);
     pipeline.expose(&control_in, "control", capacity, PAUSE);
     pipeline.expose(&events, "events", capacity, PAUSE);

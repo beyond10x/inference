@@ -1520,6 +1520,19 @@ impl Agent {
         self.inner.instantiation.spans()
     }
 
+    /// A reader of what the session's model node answers from now on, over a recipe whose run
+    /// builds one, as `chat`'s: each text delta, and the end of each reply. None over any other.
+    pub(crate) fn replies(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::recipe::ReplyPart>> {
+        self.inner.instantiation.replies()
+    }
+
+    /// Denies every call the session's tool authority holds for confirmation.
+    pub(crate) fn deny_held(&self) {
+        self.inner.reject_held();
+    }
+
     /// The live session, shared with the agent's pump.
     #[must_use]
     pub fn session(&self) -> &LiveSession<Payload> {
@@ -1610,6 +1623,18 @@ impl Handle {
         })
     }
 
+    /// Gives the sessions the handle opens from now on `tool` and its executor, and plans the
+    /// handle's recipe again with it; a refused plan leaves the handle as it was.
+    pub(crate) fn give(&mut self, tool: Tool, executor: Box<dyn ToolExecutor>) -> Result<()> {
+        let mut tools = self.tools.clone();
+        tools.push((tool, Arc::from(executor)));
+        let (instantiation, description) = Self::planned(&self.recipe, &self.stack, &tools)?;
+        self.tools = tools;
+        self.instantiation = instantiation;
+        self.description = description;
+        Ok(())
+    }
+
     /// Opens a new session over the handle's recipe and keeps its agent as the handle's last; the
     /// agent of the session before it is dropped.
     pub(crate) async fn open(&mut self) -> Result<&Agent> {
@@ -1617,6 +1642,11 @@ impl Handle {
             .start()
             .await?;
         Ok(self.agent.insert(agent))
+    }
+
+    /// The agent of the handle's last session; none before the first.
+    pub(crate) const fn agent(&self) -> Option<&Agent> {
+        self.agent.as_ref()
     }
 
     /// The live session of the handle's last call; none before the first.
