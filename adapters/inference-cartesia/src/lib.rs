@@ -21,11 +21,17 @@
 //! A cancel is a discard of the segment being spoken, as a barge-in makes it: the binding sends
 //! the protocol's cancel for its context, emits nothing more of it, and drops every later message
 //! of that context, which the server may go on sending; the next segment goes out at once on the
-//! same connection. Dropping the handle closes its connection. A connection that closes, stalls
-//! or sends something outside the protocol fails the synthesis with a [`CartesiaError`]
-//! ([`CartesiaSynthesis::failure`]), never a panic or a hang: the handshake is bounded by the
-//! endpoint's connect timeout, every read and write by its read timeout, a cancel's write by
-//! [`CLOSE_BOUND`].
+//! same connection. A connection that closes, stalls or sends something outside the protocol
+//! fails the synthesis with a [`CartesiaError`] ([`CartesiaSynthesis::failure`]), never a panic or
+//! a hang: the handshake is bounded by the endpoint's connect timeout, every read and write by
+//! its read timeout, a cancel's write by [`CLOSE_BOUND`].
+//!
+//! Dropping the handle closes its connection with a close frame, bounded by [`CLOSE_BOUND`].
+//! Outside an async runtime the drop waits for that close. Inside one it does not wait, so it
+//! holds no worker: the close runs to its end on the handle's own thread, and the server still
+//! receives the close frame. A handle dropped while its async form waits for a message to be sent
+//! or to arrive takes the connection with it: the server gets no close frame and sees the socket
+//! end.
 //!
 //! The handle drives its connection on a runtime of its own, with one thread. Iterated, as the
 //! contract defines it, it blocks the calling thread while it waits for the server, on any

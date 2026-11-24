@@ -753,9 +753,23 @@ impl Iterator for ElevenLabsSynthesis {
     }
 }
 
+/// A runtime that ends without a wait wherever it is dropped, a thread of its own included.
+struct EndsInBackground(Option<tokio::runtime::Runtime>);
+
+impl Drop for EndsInBackground {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 impl Drop for ElevenLabsSynthesis {
-    /// Closes the connection with a close frame, waiting at most
-    /// [`CLOSE_BOUND`]; an exchange in flight other than a close is dropped with its connection.
+    /// Closes the connection with `close_socket` and a close frame, bounded by [`CLOSE_BOUND`];
+    /// an exchange in flight other than a close is dropped with its connection, which then ends
+    /// without a close frame. Outside an async runtime the drop waits for the close. Inside one
+    /// it does not wait, so it holds no worker: the close runs to its end on the synthesis's own
+    /// thread, which then ends its runtime.
     fn drop(&mut self) {
         let closing = match self.exchange.take() {
             Some(Exchange::Close(task)) => Some(task),
@@ -769,12 +783,24 @@ impl Drop for ElevenLabsSynthesis {
             let connection = self.connection.take()?;
             self.start(connection.close(Some(CLOSE_SOCKET))).ok()
         });
-        if let Some(task) = closing {
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        let runtime = EndsInBackground(Some(runtime));
+        let Some(task) = closing else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
             let _ = wake::block_on_until(task, std::time::Instant::now().checked_add(CLOSE_BOUND));
+            return;
         }
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
-        }
+        let Some(own) = runtime.0.as_ref().map(|runtime| runtime.handle().clone()) else {
+            return;
+        };
+        own.spawn(async move {
+            let _ = tokio::time::timeout(CLOSE_BOUND, task).await;
+            drop(runtime);
+        });
     }
 }
 

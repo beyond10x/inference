@@ -38,7 +38,14 @@
 //! all of it generated within 0.8 s of the text. A flush alone brought the context's final message
 //! only after the endpoint's 20 s inactivity timeout, so the close goes with the text, the one
 //! prompt way to end the segment, and a cancel sends no second one. A barge-in saves playback,
-//! not generation or cost. Dropping the handle closes the connection.
+//! not generation or cost.
+//!
+//! Dropping the handle closes the connection with `close_socket` and a close frame, bounded by
+//! [`CLOSE_BOUND`]. Outside an async runtime the drop waits for that close. Inside one it does
+//! not wait, so it holds no worker: the close runs to its end on the handle's own thread, and the
+//! server still receives `close_socket` and the close frame. A handle dropped while its async
+//! form waits for a message to be sent or to arrive takes the connection with it: the server
+//! gets no close frame and sees the socket end.
 //!
 //! A connection that ends between segments, as the endpoint's inactivity timeout may end it, is
 //! reopened once for the next segment: when sending its context fails because the connection
