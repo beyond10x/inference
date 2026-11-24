@@ -47,7 +47,9 @@
 //! One more ignored case needs the synthesiser alone, no recogniser checkpoint and no server: the
 //! mock recogniser commits two spans, the mock generator answers each with its text, and the
 //! synthesiser speaks both answers into the fake host's recorded speaker, under the egress watch.
-//! It prints the frames the speaker took, their rate and their duration.
+//! It prints the frames the speaker took, their rate and their duration. A second such case is a
+//! measurement: it supersedes an answer of three sentences while the synthesiser generates and
+//! prints how long the thread that drives the run was held and when the supersede took effect.
 //!
 //! The watch reads every socket of the process and the server answers one request at a time, so
 //! the cases that run the cascade hold one lock and never overlap.
@@ -113,8 +115,36 @@ const STREAMING: [Capability; 2] = [Capability::IncrementalInput, Capability::Ou
 /// The word of the clip the committed span is to contain.
 const HEARD: &str = "nightfall";
 
-/// How long a run with the real adapters may take on CPU before the case gives up.
-const PATIENCE: Duration = Duration::from_secs(180);
+/// The answer length the three cases on the server ask it for, in tokens. The example's own
+/// default, [`local_voice_cascade::local::MAX_OUTPUT_TOKENS`], is 64; the cases ask for fewer so
+/// that an answer played at the real-time rate ends within the 60 s after which the runner kills
+/// a test. The sum for the longest of the three, the question said twice, from what was measured
+/// on CPU:
+///
+/// * the models load before the run: the recogniser in 4.9 s (sherpa-onnx; whisper.cpp 0.6 s)
+///   and the synthesiser in 8.1 s, by their capability records: 13.0 s;
+/// * two questions of at most [`CLIP_SECONDS`] are heard at a real-time factor of 0.202
+///   (whisper.cpp; sherpa-onnx 0.131): 4.0 s;
+/// * the first answer plays until its first segment is acknowledged, and the cascade offers one
+///   segment per delta of the server: 0.84 s of audio, the longest of the thirteen deltas of one
+///   word measured, generated at a real-time factor of 0.553: 1.3 s;
+/// * the second answer plays whole: 24 segments of at most 0.84 s are 20.2 s at the real-time
+///   rate, after the first of them is generated, 0.5 s. Generation is faster than playout, so
+///   the rest adds nothing;
+/// * that is 39.0 s, which leaves 21.0 s for the server to generate two answers of 24 tokens:
+///   2.3 tokens a second.
+///
+/// The other two cases say the question once and are shorter by a question and an answer. With
+/// 64 tokens the second answer alone is 53.8 s of audio.
+const ANSWER_TOKENS: u64 = 24;
+
+/// The longest clip [`Microphone::say`] takes, in seconds: the length the sum at
+/// [`ANSWER_TOKENS`] counts for a question.
+const CLIP_SECONDS: usize = 10;
+
+/// How long one wait of a case may last before the case gives up naming what it waited for: 60 s,
+/// after which the runner kills the test, less the 13.0 s in which the models load and a margin.
+const PATIENCE: Duration = Duration::from_secs(45);
 
 /// Device frames of the fake laptop's speaker, at 48 kHz: 10 ms, half of one 20 ms frame of the
 /// synthesiser, or one frame of the mock synthesiser, 160 samples at 16 kHz.
@@ -150,10 +180,94 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
-/// The configuration the variables name; a missing one fails the case, naming it.
+/// The interval of the [`Ticker`].
+const TICK: Duration = Duration::from_millis(10);
+
+/// How long the thread that opened it has been ready to run without a processor, as Linux counts
+/// it in the second field of `/proc/thread-self/schedstat`. The file stays open and is read again
+/// from its start. Where there is no such file every reading is zero.
+struct ReadyWait(Option<std::fs::File>);
+
+impl ReadyWait {
+    fn of_this_thread() -> Self {
+        Self(std::fs::File::open("/proc/thread-self/schedstat").ok())
+    }
+
+    fn so_far(&mut self) -> Duration {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut text = String::new();
+        let read = self.0.as_mut().is_some_and(|file| {
+            file.seek(SeekFrom::Start(0)).is_ok() && file.read_to_string(&mut text).is_ok()
+        });
+        text.split_whitespace()
+            .nth(1)
+            .filter(|_| read)
+            .and_then(|nanoseconds| nanoseconds.parse().ok())
+            .map_or(Duration::ZERO, Duration::from_nanos)
+    }
+}
+
+/// A ticker beside a run on the thread that drives it. The run commits to no executor, so its
+/// runtime is the loop that polls its drive future: the ticker is a second task of that loop,
+/// due every [`TICK`], and it can tick only between two polls of the run. A gap between two ticks
+/// far over [`TICK`] is a poll of the run that held the thread that long. Each gap is counted
+/// less the time the thread was ready to run without a processor ([`ReadyWait`]), which is the
+/// host's and not the run's. A node that runs its exchange on a thread of its own, as the speech
+/// node does, is not seen by the ticker.
+#[derive(Default)]
+struct Ticker {
+    /// When each tick came and the gap since the tick before it.
+    ticks: Mutex<Vec<(Instant, Duration)>>,
+}
+
+impl Ticker {
+    /// Polls `future` on this thread until it completes, ticking beside it.
+    fn block_on<F: Future>(&self, future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(Unpark(thread::current())));
+        let mut future = pin!(future);
+        let mut ready = ReadyWait::of_this_thread();
+        let mut last = (Instant::now(), ready.so_far());
+        loop {
+            let now = Instant::now();
+            if now.duration_since(last.0) >= TICK {
+                let waited = ready.so_far();
+                let gap = now
+                    .duration_since(last.0)
+                    .saturating_sub(waited.saturating_sub(last.1));
+                self.ticks
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((now, gap));
+                last = (now, waited);
+            }
+            if let Poll::Ready(output) = future.as_mut().poll(&mut Context::from_waker(&waker)) {
+                return output;
+            }
+            thread::park_timeout(TICK.saturating_sub(last.0.elapsed()));
+        }
+    }
+
+    /// The ticks from `from` on that came before `until`.
+    fn between(&self, from: Instant, until: Instant) -> Vec<(Instant, Duration)> {
+        self.ticks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(at, _)| *at >= from && *at < until)
+            .copied()
+            .collect()
+    }
+}
+
+/// The configuration the variables name, with answers of [`ANSWER_TOKENS`]; a missing variable
+/// fails the case, naming it.
 fn configured() -> LocalConfig {
-    let config = LocalConfig::from_env().unwrap_or_else(|refused| panic!("{refused}"));
-    println!("recogniser: {}", config.stt.backend());
+    let mut config = LocalConfig::from_env().unwrap_or_else(|refused| panic!("{refused}"));
+    config.max_output_tokens = ANSWER_TOKENS;
+    println!(
+        "recogniser: {}; answers of at most {ANSWER_TOKENS} tokens",
+        config.stt.backend()
+    );
     config
 }
 
@@ -283,6 +397,11 @@ impl Microphone {
     /// The clip at `path` in 10 ms frames, then a second of silence, on the microphone's clock.
     fn say(&mut self, path: &Path) -> Vec<EventEnvelope<VoicePayload>> {
         let (format, mut data) = pcm16_mono(path);
+        assert!(
+            data.len() <= CLIP_SECONDS * 16_000 * 2,
+            "the clip is at most {CLIP_SECONDS} s: {} samples at 16 kHz",
+            data.len() / 2
+        );
         data.extend(std::iter::repeat_n(0, 16_000 * 2));
         data.chunks(160 * 2)
             .map(|chunk| {
@@ -650,7 +769,18 @@ impl Running {
         run_id: RunId,
         cascade: &LocalCascade,
         declaration: &Declaration,
+        implementations: HashMap<NodeId, Box<dyn NodeImplementation<VoicePayload>>>,
+    ) -> Self {
+        Self::start_beside(run_id, cascade, declaration, implementations, None)
+    }
+
+    /// [`Running::start`], the thread that drives the run ticking `ticker` beside it.
+    fn start_beside(
+        run_id: RunId,
+        cascade: &LocalCascade,
+        declaration: &Declaration,
         mut implementations: HashMap<NodeId, Box<dyn NodeImplementation<VoicePayload>>>,
+        ticker: Option<Arc<Ticker>>,
     ) -> Self {
         let mut controller = RunController::create_as(
             run_id,
@@ -679,7 +809,10 @@ impl Running {
             .expect("the watch thread starts")
             .expect("a denied egress is watched");
         let drive = thread::spawn(move || {
-            let result = block_on(controller.drive());
+            let result = match ticker {
+                Some(ticker) => ticker.block_on(controller.drive()),
+                None => block_on(controller.drive()),
+            };
             (controller, result)
         });
         let deadline = Instant::now() + PATIENCE;
@@ -796,7 +929,7 @@ fn print_measures(handles: &CascadeHandles) {
 }
 
 #[test]
-#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL at 3 tokens a second or more; asks for answers of 24 tokens so that the run ends within the 60 s of the runner"]
 fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
     let _serial = serial();
     let config = configured();
@@ -900,7 +1033,7 @@ fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
 }
 
 #[test]
-#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL at 3 tokens a second or more; asks for answers of 24 tokens so that the run ends within the 60 s of the runner"]
 fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_the_gates() {
     let _serial = serial();
     let config = configured();
@@ -1029,7 +1162,7 @@ fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_t
 }
 
 #[test]
-#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL at 3 tokens a second or more; asks for answers of 24 tokens so that the run ends within the 60 s of the runner"]
 #[allow(clippy::too_many_lines)]
 fn the_clip_said_again_while_the_answer_plays_stops_it_and_supersedes_its_generation() {
     let _serial = serial();
@@ -1732,4 +1865,270 @@ fn a_reply_is_spoken_through_the_synthesiser_into_the_recorded_speaker_with_no_s
         "two phrases last longer than a second: {samples} samples"
     );
     assert!(peak > 1_000, "the speaker took speech, not silence: {peak}");
+}
+
+/// What the user says in each utterance of the measurement below: three spans in one turn. The
+/// scripted generator answers each span with the span's text, so the answer is three segments of
+/// one sentence each.
+const SENTENCES: [&str; 3] = [
+    "Tell me how warm it is outside this afternoon.",
+    "And tell me whether it will rain before the evening.",
+    "And say when the sun goes down behind the hills.",
+];
+
+/// The fake speaker played at the real-time rate, and when the frames the sink pushed to it or
+/// dropped as stale were seen to change, read every millisecond.
+struct Playing<'a> {
+    host: &'a FakeHost,
+    handles: &'a CascadeHandles,
+    pulled: Instant,
+    seen: (u64, usize),
+    /// When a change was seen, and the frames pushed and the stale frames dropped by then.
+    arrivals: Vec<(Instant, u64, usize)>,
+}
+
+impl<'a> Playing<'a> {
+    fn new(host: &'a FakeHost, handles: &'a CascadeHandles) -> Self {
+        Self {
+            host,
+            handles,
+            pulled: Instant::now(),
+            seen: (0, 0),
+            arrivals: Vec::new(),
+        }
+    }
+
+    /// Plays until `done` holds; fails the case naming `what` after [`PATIENCE`].
+    fn until(&mut self, what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let now = (
+                self.handles.sink.pushed(),
+                self.handles.sink.stale_frames().len(),
+            );
+            if now != self.seen {
+                self.seen = now;
+                self.arrivals.push((Instant::now(), now.0, now.1));
+            }
+            if done() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{what}: llm {:?}, tts {:?}, sink pushed {}",
+                self.handles.llm.failure(),
+                self.handles.tts.failure(),
+                self.handles.sink.pushed()
+            );
+            if self.pulled.elapsed() >= DEVICE_TICK {
+                let _ = self.host.pull(DEVICE_FRAME);
+                self.pulled = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+/// Milliseconds from `from` to `to`, negative when `to` came first.
+fn millis_between(from: Instant, to: Instant) -> i128 {
+    let forward = i128::try_from(to.saturating_duration_since(from).as_millis()).unwrap_or(0);
+    let backward = i128::try_from(from.saturating_duration_since(to).as_millis()).unwrap_or(0);
+    forward - backward
+}
+
+/// A measurement, not a rule: what the thread that drives the run and a supersede see while the
+/// synthesiser of `inference-sherpa-onnx-tts` generates. The scripted recogniser commits three spans, the scripted
+/// generator answers them with three segments of one sentence, and the same utterance is said
+/// again as soon as the three segments are committed, which supersedes the answer. The case
+/// prints
+///
+/// * the time from the supersede to the last frame of the superseded generation that reached
+///   the sink,
+/// * the time from the second utterance to the supersede,
+/// * the largest gap of a 10 ms ticker on the thread that drives the run ([`Ticker`]), over the
+///   whole run and while the supersede was pending,
+///
+/// and asserts only that the run ends as a superseded and a completed generation.
+///
+/// What two runs at adoption printed, on a shared machine: the ticker's largest gap was 10.7 ms
+/// over 1145 ticks and 12.0 ms over 1491, so the thread that drives the run is not held. The speech node of `inference-pipeline` runs its
+/// exchange on a thread of its own and, after it offers a committed segment, reads the synthesis
+/// with the blocking iterator until that segment is generated; it takes the next event on its
+/// text port only then. The generation was superseded within 3 ms of the commit of its three
+/// segments, and the speaker stopped then; the node still generated all three sentences, 399
+/// frames that the speaker dropped as stale, the last of them 2275 ms and 5671 ms after the
+/// supersede, and the first frame of the next answer came 760 ms and 1072 ms after that. The
+/// limitations page states this limit.
+#[test]
+#[ignore = "a measurement: needs the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech"]
+#[allow(clippy::too_many_lines)]
+fn three_committed_segments_superseded_while_the_synthesiser_generates_measured() {
+    let speaking = synthesiser(&tts_dir()).unwrap_or_else(|refused| panic!("{refused}"));
+    let mocks = streaming_only_mocks(SttConfiguration::Incremental, SENTENCES.to_vec());
+    let host = FakeHost::laptop();
+    let mut declaration = Declaration::new();
+    let cascade = declare_local_adapters(
+        &mut declaration,
+        [
+            mocks.recogniser.adapter().clone(),
+            mocks.generator.adapter().clone(),
+            speaking.adapter().clone(),
+        ],
+    )
+    .expect("the cascade validates and plans over the synthesiser's adapter");
+    let run_id = RunId::generate();
+    let log = RunLog::new();
+    let run = cascade
+        .nodes_with(
+            run_id,
+            mocks,
+            move |_mock| speaking,
+            TurnStore::default(),
+            &log,
+            &host,
+            PlayoutConfig::default(),
+        )
+        .expect("the fake speaker opens");
+    let handles = run.handles.clone();
+    let _serial = serial();
+    let ticker = Arc::new(Ticker::default());
+    let running = Running::start_beside(
+        run_id,
+        &cascade,
+        &declaration,
+        run.implementations,
+        Some(Arc::clone(&ticker)),
+    );
+    let mut microphone = Microphone::new(running.run_id);
+    let utterance = || {
+        synthesize(&[
+            Stretch::Tone {
+                frames: 30,
+                hertz: 440,
+                amplitude: 0.5,
+            },
+            Stretch::Silence { frames: 80 },
+        ])
+    };
+    let mut playing = Playing::new(&host, &handles);
+
+    let started = Instant::now();
+    running.send(microphone.say_frames(utterance()));
+    playing.until(
+        "the three segments of the first answer are committed",
+        || {
+            handles
+                .llm
+                .generations()
+                .first()
+                .is_some_and(|generation| generation.segments.len() == SENTENCES.len())
+        },
+    );
+    let committed = Instant::now();
+    running.send(microphone.say_frames(utterance()));
+    let said = Instant::now();
+    playing.until(
+        "the first answer is superseded and the speaker stopped",
+        || !handles.llm.superseded().is_empty() && !handles.sink.interruptions().is_empty(),
+    );
+    running.send(vec![microphone.stop()]);
+    playing.until("the run ends", || running.drive.is_finished());
+    let ended = Instant::now();
+    let arrivals = std::mem::take(&mut playing.arrivals);
+    let finished = running.finish(&host, &handles);
+
+    finished.assert_completed(&cascade.ids, &handles);
+    let generations = handles.llm.generations();
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| generation.state)
+            .collect::<Vec<_>>(),
+        [GenerationState::Superseded, GenerationState::Completed],
+        "the first answer is superseded and the second completed"
+    );
+    let old: Vec<SegmentId> = generations[0]
+        .segments
+        .iter()
+        .map(|segment| segment.segment_id())
+        .collect();
+    let superseded = handles.llm.superseded()[0].delivery;
+    let interruption = handles.sink.interruptions()[0];
+
+    let first_frames = handles.sink.first_frames();
+    let old_first_frames: Vec<i128> = first_frames
+        .iter()
+        .filter(|frame| old.contains(&frame.segment_id))
+        .map(|frame| millis_between(started, frame.at))
+        .collect();
+    let new_first_frames: Vec<i128> = first_frames
+        .iter()
+        .filter(|frame| !old.contains(&frame.segment_id))
+        .map(|frame| millis_between(started, frame.at))
+        .collect();
+    // A frame of the superseded generation is one pushed before the speaker stopped, or one
+    // dropped as stale after it.
+    let last_old_frame = arrivals
+        .iter()
+        .scan((0, 0), |seen, (at, pushed, stale)| {
+            let old_frame = *stale > seen.1 || (*pushed > seen.0 && *at < interruption.at);
+            *seen = (*pushed, *stale);
+            Some(old_frame.then_some(*at))
+        })
+        .flatten()
+        .last();
+    let largest = |from: Instant, until: Instant| {
+        ticker
+            .between(from, until)
+            .into_iter()
+            .max_by_key(|(_, gap)| *gap)
+            .map(|(at, gap)| (gap, millis_between(started, at)))
+    };
+    let over_50: Vec<(i128, u128)> = ticker
+        .between(started, ended)
+        .into_iter()
+        .filter(|(_, gap)| *gap > Duration::from_millis(50))
+        .map(|(at, gap)| (millis_between(started, at), gap.as_millis()))
+        .collect();
+
+    println!(
+        "measured, in ms after the first utterance was said: the three segments committed at {}; \
+         the second utterance said at {}; the generation superseded at {}; the speaker stopped \
+         at {}; the last frame of the superseded generation at the sink at {:?}; the run ended \
+         at {}",
+        millis_between(started, committed),
+        millis_between(started, said),
+        millis_between(started, superseded),
+        millis_between(started, interruption.at),
+        last_old_frame.map(|at| millis_between(started, at)),
+        millis_between(started, ended),
+    );
+    println!(
+        "from the supersede to the last frame of the superseded generation: {:?} ms; from the \
+         second utterance to the supersede: {} ms; segments of the superseded answer: {} \
+         discarded, {} played, {} stale frames dropped; first frames of its segments at {:?}, of \
+         the second answer's at {:?}",
+        last_old_frame.map(|at| millis_between(superseded, at)),
+        millis_between(said, superseded),
+        handles.tts.discarded().len(),
+        handles
+            .tts
+            .played()
+            .iter()
+            .filter(|segment| old.contains(&segment.segment_id()))
+            .count(),
+        handles.sink.stale_frames().len(),
+        old_first_frames,
+        new_first_frames,
+    );
+    println!(
+        "the 10 ms ticker on the thread that drives the run: {} ticks; largest gap {:?} (gap, \
+         ms after the start); while the supersede was pending {:?}; after the supersede {:?}; \
+         gaps over 50 ms as (ms after the start, ms): {:?}",
+        ticker.between(started, ended).len(),
+        largest(started, ended),
+        largest(said, superseded),
+        largest(superseded, ended),
+        over_50,
+    );
 }
