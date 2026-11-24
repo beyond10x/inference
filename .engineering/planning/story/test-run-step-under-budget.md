@@ -2,9 +2,14 @@
 format: aep.planning-md/3
 id: story:test-run-step-under-budget
 kind: story
-status: draft
+status: active
 title: The test-run step ends within 120 s and synthesises the conformance suite once per run
-revision: 2
+relations:
+- serves: vision:inference
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-24T12:32:05Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-11-24T12:32:05Z", actor: "human:timo", revision: 4}
 ---
 ## Context
 
