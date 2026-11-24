@@ -53,7 +53,7 @@ Tools: the rustc `rust-toolchain.toml` pins (the crates' `rust-version` stays 1.
 task check                      # task check-source, then task test-build and task test-run, as CI runs them
 task check-source               # the sherpa-onnx archive, specification and planning store validation, the documentation drift check, then format, lint and the docs build with warnings denied
 task test-build                 # builds the tests, runs none
-task test-run                   # cargo nextest run --workspace --all-features (a test over 60 s is killed and fails; prints the ten slowest), the stack test without default features, the doc tests
+task test-run                   # task test-run-parts under `timeout`: ended at 120 s, as a failure; the parts are cargo nextest run --workspace --all-features (a test over 60 s is killed and fails; prints the ten slowest), the stack test without default features, the doc tests
 task test-slow                  # the slow lane: every trybuild case of crates/inference in one trybuild run; go-task skips it while its sources are unchanged
 task docs-generate              # rewrite the generated files of the site
 npm --prefix website ci --allow-git=root && npm --prefix website run build   # build the site into website/build

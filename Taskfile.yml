@@ -30,6 +30,11 @@ tasks:
       - cargo nextest run -p inference --no-default-features --test stack --no-run
 
   test-run:
+    desc: Runs test-run-parts and ends it, as a failure, when it has not finished within 120 s.
+    cmds:
+      - timeout --kill-after=10s 120s task test-run-parts || { status=$?; if [ "$status" -eq 124 ]; then echo "task test-run was ended at its bound of 120 s"; fi; exit "$status"; }
+
+  test-run-parts:
     desc: Runs the tests of the workspace with cargo-nextest under .config/nextest.toml, where a test over 60 s is killed and fails, and prints the ten slowest; then the stack test without default features and the doc tests.
     cmds:
       - task: test-workspace

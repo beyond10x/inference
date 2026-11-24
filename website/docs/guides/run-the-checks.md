@@ -34,10 +34,12 @@ It runs, in order, and stops at the first failure:
 | lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
 | the API documentation | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` |
 | the build of the tests | `task test-build`, which runs no test |
-| tests | `task test-run`: `cargo nextest run --workspace --all-features`, then the stack test without default features and the doc tests |
+| tests | `task test-run`, which runs `task test-run-parts` under `timeout`: `cargo nextest run --workspace --all-features`, then the stack test without default features and the doc tests |
 
 The first seven steps are `task check-source`. Under `.config/nextest.toml` a test that runs over 60
 seconds is killed and fails, and the test step prints its ten slowest tests, also when one failed.
+The test step itself is ended after 120 seconds and fails then, with exit status 124 and the line
+`task test-run was ended at its bound of 120 s`.
 
 CI runs the same three tasks, `task check-source`, `task test-build` and `task test-run`, as
 separate steps of the required check `inference / task check`. A pull request whose changed files
@@ -56,11 +58,17 @@ task: [check-source] cargo clippy --workspace --all-targets --all-features -- -D
 task: [check-source] RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 task: [test-build] cargo nextest run --workspace --all-features --no-run
 task: [test-build] cargo nextest run -p inference --no-default-features --test stack --no-run
+task: [test-run] timeout --kill-after=10s 120s task test-run-parts || { status=$?; if [ "$status" -eq 124 ]; then echo "task test-run was ended at its bound of 120 s"; fi; exit "$status"; }
+```
+
+And the parts of the test step, as `task --dry test-run-parts` lists them:
+
+```text
 task: [test-workspace] cargo nextest run --workspace --all-features
 task: [test-slowest] echo "the ten slowest tests, in seconds:"
 task: [test-slowest] grep '<testcase ' target/nextest/default/junit.xml | sed -E 's/.* name="([^"]*)" classname="([^"]*)".* time="([^"]*)".*/\3 \2 \1/' | sort -rn | head -n 10
-task: [test-run] cargo nextest run -p inference --no-default-features --test stack
-task: [test-run] cargo test --workspace --all-features --doc
+task: [test-run-parts] cargo nextest run -p inference --no-default-features --test stack
+task: [test-run-parts] cargo test --workspace --all-features --doc
 ```
 
 ## The slow lane
