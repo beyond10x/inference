@@ -43,6 +43,14 @@ fails then: `task test-run` exits 201, as it does when a test fails, and prints 
 `task test-run was ended at its bound of 120 s`, which a run that only has a failing test does not
 print.
 
+The bound is two signals. After 120 seconds `timeout` sends the step a first signal: the tests are
+ended, and the step prints the list of its slowest tests and the line. A part that is still running
+10 seconds later is killed by a second signal: the step then ends 130 seconds after it started, and
+prints the line but not the list of its slowest tests. The `timeout` of GNU coreutils kills its
+whole process group at the second signal. One that kills only its own child there, as the `timeout`
+of uutils coreutils on the image of the CI runner does, can leave a part that ignored the first
+signal running until the job ends.
+
 CI runs the same three tasks, `task check-source`, `task test-build` and `task test-run`, as
 separate steps of the required check `inference / task check`. A pull request whose changed files
 are all under `.engineering/` or are `*.md` files outside `website/` and `ess/`, other than
