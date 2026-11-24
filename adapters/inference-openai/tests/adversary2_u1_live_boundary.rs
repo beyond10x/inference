@@ -230,6 +230,11 @@ fn cut_sentence_outruns_the_speech(second: u64) -> Server {
 /// Every event of the session, through its close. It closes when three responses completed, or
 /// when the binding read [`script_end`] and has no event left: every message of the script was
 /// read then. Without that message, when two seconds pass with no event.
+///
+/// [`script_end`] is the last message of the script. A message the server sends after it and
+/// before the close is not read here: the read ends within one wait of 100 ms after it, where
+/// the read of two seconds went on. `adversary2_w1_script_end.rs` holds that for the same read
+/// over the Realtime binding.
 fn run(server: Server) -> Vec<SessionEvent> {
     let mut model = server.model();
     let mut session = model.open(config()).expect("the session opens");

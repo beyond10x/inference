@@ -281,6 +281,11 @@ fn until(
 /// Events until `read` says the binding read the last message of the script and no event is left:
 /// every message of the script was read then, and the server sends no more before the close.
 /// While `read` does not say so, until twenty waits in a row deliver nothing.
+///
+/// The message `read` waits for is the last of the script. A message the server sends after it
+/// and before the close is not read here: the read ends within one wait of 100 ms after it,
+/// where the read of two seconds went on. `adversary2_w1_script_end.rs` holds that for the same
+/// read over the Realtime binding.
 fn until_read(
     session: &mut OpenAiLiveSession,
     read: impl Fn(&OpenAiLiveSession) -> bool,

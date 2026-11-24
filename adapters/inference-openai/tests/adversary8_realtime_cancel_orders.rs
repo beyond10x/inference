@@ -225,6 +225,10 @@ fn script_end() -> Value {
 /// Events until the binding read [`script_end`] and has none left: every message of the script
 /// was read then, and the server sends no more before the close. Without that message, until
 /// two seconds pass with no event.
+///
+/// [`script_end`] is the last message of a script. A message the server sends after it is not
+/// read here: the read ends within one wait of 100 ms after it, where the read of two seconds
+/// went on. `adversary2_w1_script_end.rs` holds that.
 fn to_the_script_end(session: &mut OpenAiRealtimeSession) -> Vec<SessionEvent> {
     let mut events = Vec::new();
     let mut idle = 0;
