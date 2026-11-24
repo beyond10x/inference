@@ -23,8 +23,8 @@ scope:
   path: website/docs/guides/run-the-checks.md
 revision: 12
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-24T12:32:05Z", actor: "human:timo", revision: 3}
-- {from: "proposed", to: "active", at: "2026-11-24T12:32:05Z", actor: "human:timo", revision: 4}
+- {from: "draft", to: "proposed", at: "2026-11-24T12:32:05Z", actor: "human:operator", revision: 3}
+- {from: "proposed", to: "active", at: "2026-11-24T12:32:05Z", actor: "human:operator", revision: 4}
 ---
 ## Context
 
