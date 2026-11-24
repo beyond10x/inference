@@ -14,16 +14,13 @@
 //! rule: the unmutated target passes it and each mutant fails it. The case under test is
 //! whether the authored scenarios of the rule reject them too.
 //!
-//! The suite is synthesized with `ess` from `ess/`; `ess` must be on PATH.
+//! The suite is the one `ess` synthesizes from `ess/` and the witness, read through
+//! `suite/mod.rs`; `ess` must be on PATH.
 
 #![allow(clippy::duplicate_mod)]
 
+mod suite;
 mod target;
-
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ess_conformance::target::{
     ConformanceTarget, EventObservationRequest, ExternalOutcomeControl, ImplementationIdentity,
@@ -276,60 +273,12 @@ impl ConformanceTarget for Mutant {
     }
 }
 
-fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the repository root resolves")
-}
-
 /// The authored scenarios of `ess/scenarios` and the witness, synthesized together.
 fn synthesized() -> AdmittedSuite {
-    let root = repository_root();
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock is past the epoch")
-        .as_millis();
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "adversary12-close-witness-{millis}-{}",
-        std::process::id()
-    ));
-    let scenarios = dir.join("scenarios");
-    fs::create_dir_all(&scenarios).expect("the run directory is created");
-    for entry in fs::read_dir(root.join("ess/scenarios")).expect("ess/scenarios is readable") {
-        let path = entry.expect("an entry").path();
-        if path.extension().is_some_and(|ext| ext == "yaml") {
-            fs::copy(&path, scenarios.join(path.file_name().expect("a name")))
-                .expect("the scenario is copied");
-        }
-    }
-    fs::write(
-        scenarios.join("adversary-close-after-out-of-order-delivery.yaml"),
-        WITNESS_YAML,
-    )
-    .expect("the witness is written");
-    let suite = dir.join("suite.json");
-    let output = Command::new("ess")
-        .args([
-            "verify",
-            "conform",
-            "synthesize",
-            "--path",
-            "ess",
-            "--scenarios",
-        ])
-        .arg(&scenarios)
-        .arg("--out")
-        .arg(&suite)
-        .current_dir(&root)
-        .output()
-        .expect("`ess` runs; it must be on PATH");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let text = fs::read_to_string(&suite).expect("suite.json is readable");
+    let text = suite::synthesized(Some(suite::Added {
+        file: "adversary-close-after-out-of-order-delivery.yaml",
+        yaml: WITNESS_YAML,
+    }));
     AdmittedSuite::from_json(&text).expect("the synthesized suite is admitted")
 }
 

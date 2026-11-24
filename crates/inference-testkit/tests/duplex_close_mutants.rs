@@ -16,16 +16,13 @@
 //! - `CrossSession`: the end also delivers what another open session still holds, as an end that
 //!   does not filter the received events by session would.
 //!
-//! The suite is synthesized with `ess` from `ess/`, as `conform.rs` does; `ess` must be on PATH.
+//! The suite is the one `ess` synthesizes from `ess/`, read through `suite/mod.rs` as `conform.rs`
+//! reads it; `ess` must be on PATH.
 
 #![allow(clippy::duplicate_mod)]
 
+mod suite;
 mod target;
-
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ess_conformance::target::{
     ConformanceTarget, EventObservationRequest, ExternalOutcomeControl, ImplementationIdentity,
@@ -198,47 +195,8 @@ impl ConformanceTarget for Mutant {
     }
 }
 
-fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the repository root resolves")
-}
-
 fn synthesized() -> AdmittedSuite {
-    let root = repository_root();
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock is past the epoch")
-        .as_millis();
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "duplex-close-mutants-{millis}-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).expect("the run directory is created");
-    let suite = dir.join("suite.json");
-    let output = Command::new("ess")
-        .args([
-            "verify",
-            "conform",
-            "synthesize",
-            "--path",
-            "ess",
-            "--scenarios",
-            "ess/scenarios",
-            "--out",
-            suite.to_str().expect("UTF-8"),
-        ])
-        .current_dir(&root)
-        .output()
-        .expect("`ess` runs; it must be on PATH");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let text = fs::read_to_string(&suite).expect("suite.json is readable");
-    AdmittedSuite::from_json(&text).expect("the synthesized suite is admitted")
+    AdmittedSuite::from_json(&suite::synthesized(None)).expect("the synthesized suite is admitted")
 }
 
 /// The status of each authored scenario of the rule against the target `mutation` gives.

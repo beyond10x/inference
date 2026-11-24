@@ -107,7 +107,7 @@ The last lines of the test run:
 ```text
 test the_suite_runs_against_the_testkit_target ... ok
 
-test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.72s
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.28s
 ```
 
 ## Tests that need a model, a server or a key

@@ -3,13 +3,10 @@
 //! unreached consistency tokens), the values the suite only ever sends one way (a refusal of `0`,
 //! one capability, a concurrency of `1`), and the event observation no model scenario reaches.
 
+mod suite;
 mod target;
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ess_conformance::scenario::{CommandRef, ErrorRef, EventRef, OutcomeRef, ViewRef};
 use ess_conformance::target::{
@@ -402,37 +399,9 @@ fn a_new_scenario_starts_from_empty_stores_and_the_first_identity() {
     );
 }
 
-/// The synthesized suite of `ess/`, synthesized into a fresh directory of this test.
+/// The synthesized suite of `ess/`, read through `suite/mod.rs`.
 fn synthesized_suite() -> Value {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the repository root resolves");
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock is past the epoch")
-        .as_millis();
-    let dir: PathBuf = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("adversary1-{millis}-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("the directory is created");
-    let suite = dir.join("suite.json");
-    let output = Command::new("ess")
-        .args([
-            "verify",
-            "conform",
-            "synthesize",
-            "--path",
-            "ess",
-            "--scenarios",
-            "ess/scenarios",
-            "--out",
-            suite.to_str().expect("UTF-8"),
-        ])
-        .current_dir(&root)
-        .output()
-        .expect("`ess` runs");
-    assert!(output.status.success(), "ess synthesize: {output:?}");
-    serde_json::from_str(&fs::read_to_string(&suite).expect("suite.json")).expect("JSON")
+    serde_json::from_str(&suite::synthesized(None)).expect("JSON")
 }
 
 /// Runs one scenario of `suite`, with its first `command` step's input edited by `edit`, and

@@ -17,14 +17,12 @@
 
 #![allow(clippy::duplicate_mod)]
 
+mod suite;
 mod target;
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use ess_conformance::target::{
     ConformanceTarget, EventObservationRequest, ExternalOutcomeControl, ImplementationIdentity,
@@ -215,63 +213,14 @@ fn within(name: &str, case: impl FnOnce() + Send + 'static) {
     }
 }
 
-fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the repository root resolves")
-}
-
 /// The authored scenarios of `ess/scenarios` and the witness, synthesized together, cut to the
 /// scenarios that read the Adapters view.
-fn synthesized(tag: &str) -> AdmittedSuite {
-    let root = repository_root();
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock is past the epoch")
-        .as_millis();
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "adversary-w23-descriptor-{tag}-{millis}-{}",
-        std::process::id()
-    ));
-    let scenarios = dir.join("scenarios");
-    fs::create_dir_all(&scenarios).expect("the run directory is created");
-    for entry in fs::read_dir(root.join("ess/scenarios")).expect("ess/scenarios is readable") {
-        let path = entry.expect("an entry").path();
-        if path.extension().is_some_and(|ext| ext == "yaml") {
-            fs::copy(&path, scenarios.join(path.file_name().expect("a name")))
-                .expect("the scenario is copied");
-        }
-    }
-    fs::write(
-        scenarios.join("adversary-w23-descriptor-whole.yaml"),
-        WITNESS_YAML,
-    )
-    .expect("the witness is written");
-    let suite = dir.join("suite.json");
-    let output = Command::new("ess")
-        .args([
-            "verify",
-            "conform",
-            "synthesize",
-            "--path",
-            "ess",
-            "--scenarios",
-        ])
-        .arg(&scenarios)
-        .arg("--out")
-        .arg(&suite)
-        .current_dir(&root)
-        .output()
-        .expect("`ess` runs; it must be on PATH");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let mut json: Value =
-        serde_json::from_str(&fs::read_to_string(&suite).expect("suite.json is readable"))
-            .expect("suite.json is JSON");
+fn synthesized() -> AdmittedSuite {
+    let text = suite::synthesized(Some(suite::Added {
+        file: "adversary-w23-descriptor-whole.yaml",
+        yaml: WITNESS_YAML,
+    }));
+    let mut json: Value = serde_json::from_str(&text).expect("suite.json is JSON");
     let all = json["scenarios"]
         .as_object_mut()
         .expect("the suite's scenarios are a map");
@@ -307,7 +256,7 @@ fn status_of(statuses: &[(String, Status)], id: &str) -> Status {
 #[test]
 fn adversary_w23_the_witness_rejects_every_rewrite_and_the_suite_rejects_a_dropped_descriptor() {
     within("witness", || {
-        let admitted = synthesized("witness");
+        let admitted = synthesized();
         let control = statuses(&admitted, Mutation::None);
         assert!(
             control.iter().all(|(_, status)| *status == Status::Passed),
@@ -333,7 +282,7 @@ fn adversary_w23_the_witness_rejects_every_rewrite_and_the_suite_rejects_a_dropp
 #[test]
 fn adversary_w23_the_repository_scenarios_reject_a_truncated_or_swapped_descriptor() {
     within("repository scenarios", || {
-        let admitted = synthesized("repository");
+        let admitted = synthesized();
         let mut survivors = Vec::new();
         for mutation in [Mutation::FirstOnly, Mutation::SwapRate] {
             let run = statuses(&admitted, mutation);

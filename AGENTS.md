@@ -64,7 +64,7 @@ aep plan artifact validate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo nextest run -p <crate> --all-features   # one crate's tests under the 60 s kill; --all-features builds the inference-testkit mocks behind its features run, stt, llm, tts and duplex
-cargo test -p inference-testkit --features run --test conform   # the testkit conformance target alone: synthesizes the suite, runs it in process, has `ess verify conform report` write the verdict; prints target/tmp/conform-<run>/, where suite.json, results.json and report.json stay, red or green
+cargo test -p inference-testkit --features run --test conform   # the testkit conformance target alone: reads the synthesized suite, runs it in process, has `ess verify conform report` write the verdict; prints target/tmp/conform-<run>/, where suite.json, results.json and report.json stay, red or green. No test synthesizes the suite itself: `crates/inference-testkit/tests/suite/mod.rs` synthesizes it once into target/tmp/conformance-suite/<SHA-256 of ess/, the ess version and the scenario a test adds>/suite.json, under a file lock, and every test reads that file
 git add <paths> && b10x-gates bot -- commit -F <file>   # staging is plain git; the route refuses add
 b10x-gates scan-text --policy <file> <path>...           # release and pull-request bodies before they are sent; no policy found is "not scanned", never "passed"
 ```
