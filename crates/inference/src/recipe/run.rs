@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use inference_core::id::RunId;
+use inference_core::endpoint::{EndpointFuture, InputEndpoint, OutputEndpoint, SendError};
+use inference_core::envelope::{EventEnvelope, EventId, Timebase};
+use inference_core::id::{NodeId, RunId, StreamId};
 #[cfg(feature = "audio-host")]
 use inference_pipeline::nodes::agent::AgentNode;
 #[cfg(feature = "audio-host")]
@@ -19,7 +21,7 @@ use inference_pipeline::nodes::commit_gate::{CommitGate, GateLane};
 use inference_pipeline::nodes::duplex::CallIds;
 use inference_pipeline::nodes::duplex::DuplexPorts;
 use inference_pipeline::nodes::llm::ModelNode;
-use inference_pipeline::nodes::log::RunLog;
+use inference_pipeline::nodes::log::{RunLog, StreamEvent};
 use inference_pipeline::nodes::speech::SpeechPorts;
 use inference_pipeline::nodes::stt::SttPorts;
 #[cfg(feature = "audio-host")]
@@ -28,16 +30,17 @@ use inference_pipeline::nodes::turn_policy::{CompleteTurnRefused, TurnCommands, 
 use inference_pipeline::nodes::vad::VoiceActivityDetector;
 use inference_pipeline::nodes::{AuthorityHandle, FanOut, ToolAuthority, ToolExecutorNode};
 use inference_pipeline::{
-    Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeRole,
-    PipelineId, PlannedPipeline, PortId, USAGE_PORT,
+    Declaration, Node, NodeEndpoints, NodeError, NodeFuture, NodeImplementation, NodeInput,
+    NodeOutput, NodeRole, PipelineId, PlannedPipeline, PortId, USAGE_PORT,
 };
+use inference_text::{OpenTurn, Span, Turn, TurnId, TurnOpened};
 #[cfg(feature = "audio-host")]
-use inference_text::{OpenTurn, Turn, TurnCompleted, TurnId, TurnNotFound, TurnOpened};
+use inference_text::{TurnCompleted, TurnNotFound};
 use inference_tools::Tool;
 
 use super::{Recipe, Topology};
 use crate::graph::Implementation;
-use crate::stack::{Synthesis, default_session_config};
+use crate::stack::{BoundRecogniser, Synthesis, default_session_config};
 use crate::{Error, Payload, Role, Stack};
 
 /// How long `native_voice`'s executor gives each tool call from its start.
@@ -61,6 +64,8 @@ pub(super) struct Run<'i> {
     authority: Option<ToolAuthority>,
     handle: Option<AuthorityHandle>,
     call_ids: Option<CallIds>,
+    /// What the run's STT node recognises, once the run built one that is given no turns.
+    recognised: Option<Recognised>,
     #[cfg(feature = "audio-host")]
     speaker: Option<&'i super::speaker::Speaker>,
     #[cfg(feature = "audio-host")]
@@ -81,6 +86,7 @@ impl<'i> Run<'i> {
             authority: None,
             handle: None,
             call_ids: None,
+            recognised: None,
             #[cfg(feature = "audio-host")]
             speaker: instantiation.speaker.as_ref(),
             #[cfg(feature = "audio-host")]
@@ -99,6 +105,12 @@ impl<'i> Run<'i> {
             call_ids: self.call_ids.take(),
         };
         (tools.authority.is_some() || tools.call_ids.is_some()).then_some(tools)
+    }
+
+    /// What the run's STT node recognises, when the run built one that is given no turns, as
+    /// `transcribe`'s.
+    pub(super) const fn take_recognised(&mut self) -> Option<Recognised> {
+        self.recognised.take()
     }
 
     /// The handle of the run's speaker sink, once it was built.
@@ -183,19 +195,18 @@ impl<'i> Run<'i> {
                 self.agent(run_id, node, generator)
             }
             Role::Stt => {
+                let recogniser = binding.recogniser().ok_or_else(missing)?;
+                let Ok(turns) = self.port(node, "turns") else {
+                    return self.whole_input(run_id, node, recogniser);
+                };
                 let ports = SttPorts {
                     audio: self.port(node, "audio")?,
-                    turns: self.port(node, "turns")?,
+                    turns,
                     committed_text: self.port(node, "committed_text")?,
                     turns_out: self.port(node, "turns_out")?,
                     transcript: self.port(node, "transcript").ok(),
                 };
-                binding.recogniser().ok_or_else(missing)?.node(
-                    run_id,
-                    ports,
-                    self.port(node, USAGE_PORT).ok(),
-                    log,
-                )
+                recogniser.node(run_id, ports, self.port(node, USAGE_PORT).ok(), log)
             }
             Role::Tts => {
                 let synthesis = if matches!(self.recipe.topology, Topology::VoiceCascade) {
@@ -256,6 +267,48 @@ impl<'i> Run<'i> {
                 Ok(implementation)
             }
         }
+    }
+
+    /// The STT node of a pipeline that declares no port `turns` for it, as `transcribe`'s, where
+    /// no node opens a turn: the node is given one turn of the run's own, opened as it starts and
+    /// never completed, so it recognises the whole of its audio as that turn and ends the
+    /// recognition at the end of the audio. A port `turns_out` the pipeline does not declare
+    /// either is given an edge that keeps nothing.
+    fn whole_input(
+        &mut self,
+        run_id: RunId,
+        node: &Node,
+        recogniser: &dyn BoundRecogniser,
+    ) -> Result<Implementation, Error> {
+        let turns = PortId::generate();
+        let declared = self.port(node, "turns_out").ok();
+        let turns_out = declared.unwrap_or_else(PortId::generate);
+        let ports = SttPorts {
+            audio: self.port(node, "audio")?,
+            turns,
+            committed_text: self.port(node, "committed_text")?,
+            turns_out,
+            transcript: self.port(node, "transcript").ok(),
+        };
+        let inner = recogniser.node(
+            run_id,
+            ports,
+            self.port(node, USAGE_PORT).ok(),
+            self.log.clone(),
+        )?;
+        let (turn, opened) = Turn::open_as(TurnId::generate(), OpenTurn { run_id });
+        self.recognised = Some(Recognised {
+            log: self.log.clone(),
+            turn,
+        });
+        Ok(Box::new(WholeInput {
+            inner,
+            run_id,
+            node_id: node.node_id(),
+            turns,
+            turns_out: declared.is_none().then_some(turns_out),
+            opened: Some(opened),
+        }))
     }
 
     /// The LLM node: the cascade's agent, one generation per turn, which keeps its replies when
@@ -519,6 +572,158 @@ impl NodeImplementation<Payload> for Closing {
 
     fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
         self.authority.close();
+        self.inner.drain()
+    }
+
+    fn cancel(&mut self) -> NodeFuture<'_, ()> {
+        self.inner.cancel()
+    }
+
+    fn stop(&mut self) -> NodeFuture<'_, ()> {
+        self.inner.stop()
+    }
+}
+
+/// What the STT node of a run recognises when no node gives it turns: the run's log, which holds
+/// every transcript event the node emitted in its envelope, and the one turn the node was given.
+#[derive(Debug, Clone)]
+pub(super) struct Recognised {
+    log: RunLog,
+    turn: Turn,
+}
+
+impl Recognised {
+    /// The spans the node committed so far, in the order it committed them: each rebuilt from
+    /// the events the run's log holds of it, by the steps the recogniser took, so it carries the
+    /// identity, turn, stream, sequence and text the recogniser gave it. A commit whose
+    /// hypothesis the log does not hold yields its span at the commit's own sequence.
+    pub(super) fn spans(&self) -> Vec<Span> {
+        let mut open: Vec<Span> = Vec::new();
+        let mut committed = Vec::new();
+        for envelope in self.log.envelopes() {
+            let (run_id, stream_id) = (envelope.run_id, envelope.stream_id);
+            let emit = |span_id, sequence, text| {
+                Span::emit_as(span_id, &self.turn, run_id, stream_id, sequence, text)
+                    .ok()
+                    .map(|(span, _)| span)
+            };
+            match envelope.payload {
+                StreamEvent::TranscriptHypothesis(heard) => {
+                    open.extend(emit(heard.span_id, heard.sequence, heard.text));
+                }
+                StreamEvent::TranscriptRevision(revised) => {
+                    if let Some(span) = open
+                        .iter_mut()
+                        .find(|span| span.span_id() == revised.span_id)
+                        && let Ok((moved, _)) = span.revise(revised.text)
+                    {
+                        *span = moved;
+                    }
+                }
+                StreamEvent::TranscriptCommitted(heard) => {
+                    let known = open
+                        .iter()
+                        .position(|span| span.span_id() == heard.span_id)
+                        .map(|at| open.remove(at));
+                    let span = known.or_else(|| emit(heard.span_id, envelope.sequence, heard.text));
+                    committed.extend(
+                        span.and_then(|span| span.commit().ok())
+                            .map(|(span, _)| span),
+                    );
+                }
+                _ => {}
+            }
+        }
+        committed
+    }
+}
+
+/// An STT node that is given no turns by its pipeline: started, it hands the node it wraps an
+/// edge at its port `turns` that holds one `TurnOpened` and then ends, and, when the pipeline
+/// declares no `turns_out` either, an edge at that port that keeps nothing.
+struct WholeInput {
+    inner: Implementation,
+    run_id: RunId,
+    node_id: NodeId,
+    turns: PortId,
+    /// The port `turns_out` when the pipeline declares none.
+    turns_out: Option<PortId>,
+    opened: Option<TurnOpened>,
+}
+
+impl fmt::Debug for WholeInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WholeInput").finish_non_exhaustive()
+    }
+}
+
+/// An input edge that holds one envelope and then ends.
+struct Once(Option<EventEnvelope<Payload>>);
+
+impl InputEndpoint<Payload> for Once {
+    fn recv(&mut self) -> EndpointFuture<'_, Option<EventEnvelope<Payload>>> {
+        Box::pin(future::ready(self.0.take()))
+    }
+}
+
+/// An output edge that takes every envelope and keeps none.
+struct Unread;
+
+impl OutputEndpoint<Payload> for Unread {
+    fn send(
+        &self,
+        _: EventEnvelope<Payload>,
+    ) -> EndpointFuture<'_, Result<(), SendError<Payload>>> {
+        Box::pin(future::ready(Ok(())))
+    }
+}
+
+impl NodeImplementation<Payload> for WholeInput {
+    fn describe(&mut self, node: &Node) -> NodeFuture<'_, ()> {
+        self.inner.describe(node)
+    }
+
+    fn prepare(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
+        self.inner.prepare()
+    }
+
+    fn start(
+        &mut self,
+        mut endpoints: NodeEndpoints<Payload>,
+    ) -> NodeFuture<'_, Result<(), NodeError>> {
+        let opened = self.opened.take().map(|opened| {
+            let event = StreamEvent::TurnOpened(opened);
+            EventEnvelope {
+                schema_version: 1,
+                event_id: EventId::generate(),
+                run_id: self.run_id,
+                session_id: None,
+                stream_id: StreamId::generate(),
+                sequence: 1,
+                producer: self.node_id,
+                port: "turns".to_owned(),
+                kind: event.name().to_owned(),
+                generation_id: None,
+                timestamp: 0,
+                timebase: Timebase::WallTime,
+                causation_id: None,
+                payload: Payload::Stream(event),
+            }
+        });
+        endpoints.inputs.push(NodeInput {
+            port_id: self.turns,
+            endpoint: Box::new(Once(opened)),
+        });
+        if let Some(turns_out) = self.turns_out {
+            endpoints.outputs.push(NodeOutput {
+                port_id: turns_out,
+                endpoint: Box::new(Unread),
+            });
+        }
+        self.inner.start(endpoints)
+    }
+
+    fn drain(&mut self) -> NodeFuture<'_, Result<(), NodeError>> {
         self.inner.drain()
     }
 

@@ -1514,6 +1514,12 @@ impl Agent {
             .map(|config| config.input_format)
     }
 
+    /// The spans the session's recognition committed so far, in order, over a recipe whose STT
+    /// node is given no turns, as `transcribe`'s; empty over any other.
+    pub(crate) fn spans(&self) -> Vec<inference_text::Span> {
+        self.inner.instantiation.spans()
+    }
+
     /// The live session, shared with the agent's pump.
     #[must_use]
     pub fn session(&self) -> &LiveSession<Payload> {

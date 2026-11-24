@@ -56,6 +56,7 @@ use inference_pipeline::{
     Node, OverloadPolicy, PipelineId, PipelineSpec, PlanPipelineError, PlannedPipeline,
     PortDirection,
 };
+use inference_text::Span;
 use inference_tools::ToolExecutor;
 
 use self::dispatch::Dispatch;
@@ -174,7 +175,9 @@ impl Recipe {
     }
 
     /// Audio in, the `stt` node, committed text out: ingress `audio`, egresses
-    /// `transcript` and `usage`, the usage record of each recognition.
+    /// `transcript` and `usage`, the usage record of each recognition. No node opens a turn, so
+    /// the `stt` node recognises the whole of its audio as one turn and commits what is left at
+    /// the end of the audio.
     #[must_use]
     pub fn transcribe() -> Self {
         Self::built_in(
@@ -556,6 +559,7 @@ impl Recipe {
             #[cfg(feature = "audio-host")]
             sink: None,
             tools: None,
+            recognised: None,
         })
     }
 
@@ -683,6 +687,8 @@ pub struct Instantiation {
     #[cfg(feature = "audio-host")]
     sink: Option<inference_audio_device::acknowledging::AcknowledgingHandle>,
     tools: Option<Tools>,
+    /// What the STT node of the run opened last recognises, when no node gives it turns.
+    recognised: Option<run::Recognised>,
 }
 
 /// Where an agent's typed text enters an instantiated recipe ([`Instantiation::text_ingress`]).
@@ -778,11 +784,10 @@ impl Instantiation {
     /// [`Recipe::with_node`] replaced that node.
     /// [`Error::Layer`] when a role-bound node's binding in `stack` is not the adapter the recipe
     /// was planned with, when the recipe builds no implementation for one of its nodes (an
-    /// application recipe's nodes no role binds and `with_node` did not give, `transcribe`, whose
-    /// topology has no turn ports,
-    /// and `voice_cascade` instantiated without an audio route), or when the session does not open (its source the facade's `OpenError`); the
-    /// refusal of a binding that builds no node, such as a deferred recogniser whose checkpoint
-    /// did not open. No session is left open.
+    /// application recipe's nodes no role binds and `with_node` did not give, and
+    /// `voice_cascade` instantiated without an audio route), or when the session does not open
+    /// (its source the facade's `OpenError`); the refusal of a binding that builds no node, such
+    /// as a deferred recogniser whose checkpoint did not open. No session is left open.
     pub async fn open(
         &mut self,
         stack: &Stack,
@@ -793,6 +798,7 @@ impl Instantiation {
             self.sink = None;
         }
         self.tools = None;
+        self.recognised = None;
         self.claims_concurrency(stack)?;
         let mut refused: Option<Error> = None;
         let mut nodes = run::Run::new(self, stack);
@@ -812,6 +818,7 @@ impl Instantiation {
             )
             .await;
         let tools = nodes.take_tools();
+        let recognised = nodes.take_recognised();
         #[cfg(feature = "audio-host")]
         let sink = nodes.into_sink();
         #[cfg(not(feature = "audio-host"))]
@@ -831,7 +838,19 @@ impl Instantiation {
             self.sink = sink;
         }
         self.tools = tools;
+        self.recognised = recognised;
         Ok(opened)
+    }
+
+    /// The spans the STT node of the run opened last committed so far, in the order it committed
+    /// them, when no node gives that node turns, as in `transcribe`: it recognises the whole of
+    /// its audio as one turn. Empty before a run opened and for a recipe whose STT node is given
+    /// turns, as `voice_cascade`'s.
+    pub(crate) fn spans(&self) -> Vec<Span> {
+        self.recognised
+            .as_ref()
+            .map(run::Recognised::spans)
+            .unwrap_or_default()
     }
 
     /// Refuses an `llm` binding of `stack` whose adapter does not claim
@@ -931,6 +950,7 @@ impl Instantiation {
             self.sink = None;
         }
         self.tools = None;
+        self.recognised = None;
         let mut refused: Option<Error> = None;
         let mut nodes = run::Run::new(self, stack);
         let switched = session
@@ -949,6 +969,7 @@ impl Instantiation {
             )
             .await;
         let tools = nodes.take_tools();
+        let recognised = nodes.take_recognised();
         #[cfg(feature = "audio-host")]
         let sink = nodes.into_sink();
         #[cfg(not(feature = "audio-host"))]
@@ -974,6 +995,7 @@ impl Instantiation {
             self.sink = sink;
         }
         self.tools = tools;
+        self.recognised = recognised;
         Ok(driver)
     }
 }
