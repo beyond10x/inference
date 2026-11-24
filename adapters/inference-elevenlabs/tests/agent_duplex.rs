@@ -551,6 +551,112 @@ fn the_signed_url_token_is_in_no_error_and_no_debug() {
     }
 }
 
+/// A signed URL of the fixture server, carrying `token`, which no provider issued.
+fn signed(server: &AgentServer, token: &str) -> SignedUrl {
+    SignedUrl::new(format!(
+        "{}/v1/convai/conversation?agent_id={AGENT}&token={token}",
+        server.url
+    ))
+    .expect("a signed URL the binding takes")
+}
+
+#[test]
+fn a_signed_url_opens_one_session_and_a_second_open_is_refused_without_connecting() {
+    const TOKEN: &str = "sYnThEtIcToKeN9876543210";
+    let server = AgentServer::start(Script::new(vec![Step::Pause(Duration::from_secs(10))]));
+    let mut model = ElevenLabsAgent::signed(signed(&server, TOKEN), endpoint(&server));
+    let mut session = model.open(config()).expect("the first session opens");
+    let seen = server.wait(0, Duration::from_secs(1), |seen| !seen.query.is_empty());
+    assert!(
+        seen.query.contains(TOKEN),
+        "the token did not reach the server"
+    );
+    assert_eq!(model.open_error(), None);
+
+    let refused = model
+        .open(config())
+        .expect_err("a second open of a model built with a signed URL");
+    assert_eq!(model.open_error(), Some(&AgentError::SignedUrlSpent));
+    assert!(
+        matches!(&refused, OpenError::Failed(failure) if failure.kind == SessionFailureKind::Rejected),
+        "{refused:?}"
+    );
+    let host = server.url.trim_start_matches("ws://");
+    let refusal = [
+        format!("{refused}"),
+        format!("{refused:?}"),
+        format!("{:?}", model.open_error()),
+        AgentError::SignedUrlSpent.to_string(),
+    ];
+    for rendered in &refusal {
+        for part in [TOKEN, host, "/v1/convai", "agent_id", AGENT] {
+            assert!(
+                !rendered.contains(part),
+                "the refusal names {part}: {rendered}"
+            );
+        }
+    }
+    for rendered in [format!("{model:?}"), format!("{session:?}")] {
+        assert!(!rendered.contains(TOKEN), "{rendered}");
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(server.connections(), 1, "the refused open connected");
+    session
+        .close()
+        .expect("the first session outlives the refusal");
+}
+
+#[test]
+fn an_open_refused_before_it_connects_leaves_the_signed_url_for_the_next() {
+    let server = AgentServer::start(Script::new(Vec::new()));
+    let mut model = ElevenLabsAgent::signed(
+        signed(&server, "sYnThEtIcToKeN1357924680"),
+        endpoint(&server),
+    );
+    let unsupported = SessionConfig {
+        auto_response: false,
+        ..config()
+    };
+    assert!(matches!(
+        model.open(unsupported),
+        Err(OpenError::Unsupported(_))
+    ));
+    assert_eq!(server.connections(), 0);
+    model
+        .open(config())
+        .expect("the open that connects first has the signed URL");
+    assert!(matches!(
+        model.open(config()),
+        Err(OpenError::Failed(failure)) if failure.kind == SessionFailureKind::Rejected
+    ));
+    assert_eq!(model.open_error(), Some(&AgentError::SignedUrlSpent));
+}
+
+#[test]
+fn a_failed_handshake_spends_the_signed_url_too() {
+    let server = {
+        let mut script = Script::new(Vec::new());
+        script.handshake = Handshake::Refuse(403);
+        AgentServer::start(script)
+    };
+    let mut model = ElevenLabsAgent::signed(
+        signed(&server, "sYnThEtIcToKeN2468013579"),
+        endpoint(&server),
+    );
+    model.open(config()).expect_err("the handshake is refused");
+    assert!(matches!(
+        model.open_error(),
+        Some(AgentError::Connect {
+            status: Some(403),
+            ..
+        })
+    ));
+    model.open(config()).expect_err("the signed URL is spent");
+    assert_eq!(model.open_error(), Some(&AgentError::SignedUrlSpent));
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(server.connections(), 1, "the refused open connected");
+}
+
 #[test]
 fn plaintext_is_refused_to_a_non_loopback_host() {
     for url in [

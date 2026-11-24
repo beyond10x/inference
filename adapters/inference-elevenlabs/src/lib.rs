@@ -84,8 +84,29 @@
 //!   keeps is ciphertext;
 //! - the trace-level log record named above, when a logger lets it through.
 //!
-//! The Agents Platform binding takes no key: a private agent's signed URL carries a token of its
-//! own, held as `agent::SignedUrl` (feature `duplex`) describes.
+//! The Agents Platform binding (feature `duplex`) takes no key: a private agent's signed URL
+//! carries a token of its own, and the binding holds the URL as it holds a key. A model built
+//! with `ElevenLabsAgent::signed` keeps the URL in the one buffer it came in until the first
+//! open whose configuration the binding takes. That open gives the buffer to its handshake, and
+//! when the handshake ends, whether it connected, was refused, timed out or was cancelled, the
+//! buffer is zeroized: from then on no field of the model, the session or an error holds the
+//! URL or its token, and the model keeps only the URL's host. So a signed URL opens one
+//! session: a later open of that model fails as `agent::AgentError::SignedUrlSpent` before
+//! anything connects, and the caller fetches a new URL and builds a new model. Every copy of the
+//! token:
+//!
+//! - the `agent::SignedUrl` the caller hands over, zeroized on drop. `SignedUrl::new` takes a
+//!   `String` as it is, and the URI of the handshake request is that same buffer, not a copy of
+//!   it; only the host is copied out of it, for the `Host` header, the connection and `Debug`.
+//!   What the caller read the URL from, an environment variable or the response of
+//!   `get-signed-url`, is the caller's to clear;
+//! - the request line: tungstenite writes the URL's path and query, token included, at the
+//!   start of the request bytes of the list above, with the same end. That buffer and the
+//!   smaller ones it outgrew are freed without zeroizing once the request is sent, out of the
+//!   binding's reach, and the binding accepts that as it does for the key;
+//! - for `wss://`, the TLS record those bytes are encrypted in, which keeps ciphertext;
+//! - the trace-level log record named above, when a logger lets it through: it holds the
+//!   request line.
 //!
 //! The live check is an example, never a test: with a key with text-to-speech access in
 //! `ELEVENLABS_API_KEY` (or the keychain) and a voice in `ELEVENLABS_VOICE_ID`,

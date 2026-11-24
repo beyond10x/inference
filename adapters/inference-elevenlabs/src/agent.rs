@@ -41,9 +41,11 @@
 //! - **Initiation before audio.** Not stated; the guide streams audio without waiting. The
 //!   binding sends the initiation first and sends no audio before the metadata: a session opens
 //!   only once the metadata arrived and its formats are the session's.
-//! - **Signed URL lifetime and reuse.** Not stated. A [`SignedUrl`] is used as given, for each
-//!   session opened with it; it carries a token, so it is held as a credential: zeroized on drop,
-//!   only its host in `Debug`, in no error.
+//! - **Signed URL lifetime and reuse.** Not stated. A [`SignedUrl`] is used as given, for one
+//!   session: it carries a token, so it is held as a credential (zeroized on drop, only its host
+//!   in `Debug`, in no error), and a model gives it to the handshake of its first open and keeps
+//!   none of it. A later open of that model fails as [`AgentError::SignedUrlSpent`]
+//!   (`agent_duplex`).
 //! - **`ping_ms`.** One page reads it as a delay before the pong, another as estimated latency.
 //!   The binding answers every `ping` at once with its `event_id` and does not wait.
 //! - **Interruption and `event_id`.** Whether an interruption's `event_id` orders against the
@@ -228,7 +230,8 @@ fn is_loopback(rest: &str) -> bool {
 
 /// A signed URL of a private agent, as `get-signed-url` returns it. It carries a token, so it is
 /// held like a credential: zeroized on drop, never in `Debug`, `Display` or an error; only its
-/// host is shown.
+/// host is shown. [`SignedUrl::new`] takes a `String` as it is, without copying it, and the
+/// handshake request reads that buffer; the crate documentation lists every copy of the token.
 pub struct SignedUrl {
     url: Zeroizing<String>,
     host: String,
@@ -521,6 +524,9 @@ pub enum AgentError {
     InvalidSignedUrl(&'static str),
     /// The base URL was refused, with why.
     InvalidUrl(String),
+    /// The model was built with a signed URL and an earlier open gave it to its handshake: a
+    /// signed URL opens one session, and nothing connects for this one.
+    SignedUrlSpent,
     /// The caller cancelled the open.
     Cancelled,
     /// The handshake failed: refused by the server, with its HTTP status, not answered within
@@ -556,6 +562,10 @@ impl fmt::Display for AgentError {
             }
             Self::InvalidSignedUrl(reason) => write!(f, "invalid signed URL: {reason}"),
             Self::InvalidUrl(reason) => write!(f, "invalid base URL: {reason}"),
+            Self::SignedUrlSpent => f.write_str(
+                "the signed URL went to an earlier open of this model and opens one session; \
+                 build a model with a new one",
+            ),
             Self::Cancelled => f.write_str("the caller cancelled the open"),
             Self::Connect { status, detail } => match status {
                 Some(status) => write!(f, "the handshake was refused with HTTP {status}: {detail}"),

@@ -23,6 +23,16 @@
 //! [`ElevenLabsAgent::open_error`]. The voice and instructions of the configuration are not
 //! sent: the agent's own apply.
 //!
+//! A signed URL opens one session. The model holds it, in the buffer it came in, until the
+//! first open whose configuration the binding takes; that open gives it to its handshake, and
+//! it is zeroized when the handshake ends, whether it connected, was refused, timed out or was
+//! cancelled. From then on the model keeps the URL's host and nothing else of it, and neither
+//! the session nor an error ever holds it. Every later open of that model fails as
+//! [`AgentError::SignedUrlSpent`], a [`SessionFailureKind::Rejected`] like a credential the
+//! provider refused, before anything connects: the caller fetches a new signed URL and builds
+//! a new model. An open refused for its configuration leaves the URL with the model. A public
+//! agent's model opens any number of sessions.
+//!
 //! # The connection
 //!
 //! Each session runs a runtime of one worker thread, on which one task owns the socket: it
@@ -94,6 +104,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use inference_duplex::conformance::{NativeDuplexEvidence, NoNativeDuplex};
 use inference_duplex::inference_audio::{
@@ -113,6 +124,8 @@ use tokio::runtime::Runtime;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Request;
+use tokio_tungstenite::tungstenite::http::Uri;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
@@ -255,21 +268,19 @@ impl CancelState {
     }
 }
 
-/// What a session connects to.
+/// What a model's sessions connect to.
 enum Target {
     /// A public agent: the URL naming it.
     Public(String),
-    Signed(SignedUrl),
+    /// A private agent: the host its signed URL names, and the URL until an open gives it to
+    /// its handshake. Nothing else holds the URL, so it is zeroized when that handshake ends.
+    Signed {
+        host: String,
+        url: Option<Arc<SignedUrl>>,
+    },
 }
 
 impl Target {
-    fn url(&self) -> &str {
-        match self {
-            Self::Public(url) => url,
-            Self::Signed(signed) => signed.expose(),
-        }
-    }
-
     fn host(&self) -> &str {
         match self {
             Self::Public(url) => url
@@ -278,7 +289,48 @@ impl Target {
                 .split(['/', '?'])
                 .next()
                 .unwrap_or_default(),
-            Self::Signed(signed) => signed.host(),
+            Self::Signed { host, .. } => host,
+        }
+    }
+
+    /// What the next handshake connects to. A signed URL leaves the model here.
+    ///
+    /// # Errors
+    /// [`AgentError::SignedUrlSpent`] when an earlier open took the signed URL.
+    fn dial(&mut self) -> Result<Dial<'_>, AgentError> {
+        match self {
+            Self::Public(url) => Ok(Dial::Public(url)),
+            Self::Signed { url, .. } => url
+                .take()
+                .map(Dial::Signed)
+                .ok_or(AgentError::SignedUrlSpent),
+        }
+    }
+}
+
+/// What one handshake connects to.
+enum Dial<'a> {
+    /// A public agent's URL, the model's.
+    Public(&'a str),
+    /// A private agent's signed URL, which the handshake owns: it drops when the handshake ends,
+    /// however it ends, and is zeroized then.
+    Signed(Arc<SignedUrl>),
+}
+
+impl Dial<'_> {
+    fn tls(&self) -> bool {
+        match self {
+            Self::Public(url) => url,
+            Self::Signed(signed) => signed.expose(),
+        }
+        .starts_with("wss://")
+    }
+
+    /// The handshake request.
+    fn request(&self) -> Result<Request, tungstenite::Error> {
+        match self {
+            Self::Public(url) => url.into_client_request(),
+            Self::Signed(signed) => signed_request(signed),
         }
     }
 
@@ -289,6 +341,22 @@ impl Target {
             Self::Signed(signed) => signed.redact(detail),
         }
     }
+}
+
+/// A signed URL as the owner of the bytes a request's URI is made over.
+struct UrlBytes(Arc<SignedUrl>);
+
+impl AsRef<[u8]> for UrlBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.expose().as_bytes()
+    }
+}
+
+/// The handshake request of a signed URL. Its URI is the signed URL's own buffer, not a copy of
+/// it, and holds the URL until the request drops, which is when tungstenite has turned it into
+/// bytes. Only the host is copied out, into the `Host` header.
+fn signed_request(signed: &Arc<SignedUrl>) -> Result<Request, tungstenite::Error> {
+    Uri::from_maybe_shared(Bytes::from_owner(UrlBytes(Arc::clone(signed))))?.into_client_request()
 }
 
 /// An ElevenLabs agent as a native speech model.
@@ -307,7 +375,7 @@ impl std::fmt::Debug for ElevenLabsAgent {
         f.debug_struct("ElevenLabsAgent")
             .field("adapter", &self.adapter.adapter_id())
             .field("host", &self.target.host())
-            .field("signed", &matches!(self.target, Target::Signed(_)))
+            .field("signed", &matches!(self.target, Target::Signed { .. }))
             .field("open_error", &self.open_error)
             .finish_non_exhaustive()
     }
@@ -329,8 +397,15 @@ impl ElevenLabsAgent {
     }
 
     /// The private agent `signed` names, with the bounds of `endpoint`; its URL is ignored.
+    /// The model opens one session: the first open that connects gives `signed` to its
+    /// handshake, which zeroizes it, and each later open fails as
+    /// [`AgentError::SignedUrlSpent`].
     pub fn signed(signed: SignedUrl, endpoint: AgentEndpoint) -> Self {
-        Self::of(Target::Signed(signed), endpoint)
+        let target = Target::Signed {
+            host: signed.host().to_owned(),
+            url: Some(Arc::new(signed)),
+        };
+        Self::of(target, endpoint)
     }
 
     fn of(target: Target, endpoint: AgentEndpoint) -> Self {
@@ -379,7 +454,8 @@ impl ElevenLabsAgent {
             AgentError::Connect {
                 status: Some(401 | 403),
                 ..
-            } => SessionFailureKind::Rejected,
+            }
+            | AgentError::SignedUrlSpent => SessionFailureKind::Rejected,
             AgentError::Stalled(_) => SessionFailureKind::Stalled,
             AgentError::Client { .. } | AgentError::Oversize(_) => {
                 SessionFailureKind::ProviderError
@@ -424,16 +500,18 @@ impl NativeSpeechModel for ElevenLabsAgent {
             Ok(runtime) => runtime,
             Err(error) => return Err(self.failed(AgentError::Runtime(error.to_string()))),
         };
+        let dial = match self.target.dial() {
+            Ok(dial) => dial,
+            Err(error) => {
+                runtime.shutdown_background();
+                return Err(self.failed(error));
+            }
+        };
         self.generation += 1;
         self.cancel.begin(self.generation);
         let opened = {
             let _entered = runtime.enter();
-            wake::block_on(connect(
-                &self.target,
-                &self.endpoint,
-                &self.cancel,
-                self.generation,
-            ))
+            wake::block_on(connect(dial, &self.endpoint, &self.cancel, self.generation))
         };
         self.cancel.end();
         let (socket, metadata, early) = match opened {
@@ -524,11 +602,13 @@ fn socket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_MESSAGE_BYTES))
 }
 
-/// Connects to `target`, sends the initiation and waits for the metadata, each wait bounded by
+/// Connects to `dial`, sends the initiation and waits for the metadata, each wait bounded by
 /// `endpoint` and raced against `cancel`. What arrived before the metadata, pings aside, is
 /// returned with it. A connection that fails after the handshake is closed before this returns.
+/// `dial` goes to the handshake and drops with it, a cancelled one included, before the wait
+/// for the metadata begins.
 async fn connect(
-    target: &Target,
+    dial: Dial<'_>,
     endpoint: &AgentEndpoint,
     cancel: &CancelState,
     generation: u64,
@@ -536,7 +616,7 @@ async fn connect(
     let mut socket = tokio::select! {
         biased;
         () = cancel.cancelled(generation) => return Err(AgentError::Cancelled),
-        connected = handshake(target, endpoint) => connected?,
+        connected = handshake(dial, endpoint) => connected?,
     };
     let metadata_timeout = endpoint.metadata_timeout;
     let waited = tokio::select! {
@@ -556,15 +636,12 @@ async fn connect(
 }
 
 /// The TCP connection, TLS for `wss://` and the WebSocket handshake, within the connect timeout.
-async fn handshake(target: &Target, endpoint: &AgentEndpoint) -> Result<Socket, AgentError> {
-    let request = target
-        .url()
-        .into_client_request()
-        .map_err(|error| AgentError::Connect {
-            status: None,
-            detail: target.redact(&error.to_string()),
-        })?;
-    let connector = if target.url().starts_with("wss://") {
+async fn handshake(dial: Dial<'_>, endpoint: &AgentEndpoint) -> Result<Socket, AgentError> {
+    let request = dial.request().map_err(|error| AgentError::Connect {
+        status: None,
+        detail: dial.redact(&error.to_string()),
+    })?;
+    let connector = if dial.tls() {
         let tls = tls_config().map_err(|error| AgentError::Connect {
             status: None,
             detail: error.to_string(),
@@ -584,7 +661,7 @@ async fn handshake(target: &Target, endpoint: &AgentEndpoint) -> Result<Socket, 
             status: None,
             detail: format!("no handshake within {:?}", endpoint.connect_timeout),
         }),
-        Ok(Err(error)) => Err(handshake_error(&error, target)),
+        Ok(Err(error)) => Err(handshake_error(&error, &dial)),
         Ok(Ok((socket, _))) => Ok(socket),
     }
 }
@@ -642,14 +719,14 @@ async fn await_metadata(socket: &mut Socket) -> Result<(Metadata, Vec<ServerMess
 
 /// The handshake failure of `error`, with the HTTP status when the server answered the upgrade
 /// with one, and nothing of a signed URL.
-fn handshake_error(error: &tungstenite::Error, target: &Target) -> AgentError {
+fn handshake_error(error: &tungstenite::Error, dial: &Dial<'_>) -> AgentError {
     let status = match error {
         tungstenite::Error::Http(response) => Some(response.status().as_u16()),
         _ => None,
     };
     AgentError::Connect {
         status,
-        detail: target.redact(&error.to_string()),
+        detail: dial.redact(&error.to_string()),
     }
 }
 
@@ -1394,5 +1471,152 @@ impl SpeechSessionHandle for ElevenLabsAgentSession {
                 return Poll::Pending;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::{NonZeroU16, NonZeroU32};
+    use std::sync::Weak;
+
+    use inference_duplex::TurnTuning;
+
+    use super::*;
+
+    /// Synthetic: no provider issued it.
+    const TOKEN: &str = "synthetic-token-0123456789";
+
+    const METADATA: &str = r#"{"type":"conversation_initiation_metadata","conversation_initiation_metadata_event":{"conversation_id":"c","agent_output_audio_format":"pcm_16000","user_input_audio_format":"pcm_16000"}}"#;
+
+    fn signed(base: &str) -> SignedUrl {
+        SignedUrl::new(format!(
+            "{base}{}?agent_id=agent&conversation_signature={TOKEN}",
+            agent::PATH
+        ))
+        .expect("a signed URL the binding takes")
+    }
+
+    fn config() -> SessionConfig {
+        let pcm = AudioFormat {
+            encoding: AudioEncoding::PcmS16le,
+            sample_rate: NonZeroU32::new(16_000).expect("a rate"),
+            channels: NonZeroU16::MIN,
+        };
+        SessionConfig {
+            voice: String::new(),
+            instructions: String::new(),
+            input_format: pcm,
+            output_format: pcm,
+            turn_detection: TurnDetection::ServerVad,
+            turn_tuning: TurnTuning::default(),
+            auto_response: true,
+            auto_interrupt: true,
+            tools: Vec::new(),
+            idle_limit: Duration::from_secs(5),
+        }
+    }
+
+    fn endpoint() -> AgentEndpoint {
+        AgentEndpoint::new()
+            .with_connect_timeout(Duration::from_secs(3))
+            .with_metadata_timeout(Duration::from_secs(3))
+            .with_read_timeout(Duration::from_secs(3))
+    }
+
+    /// A loopback server that answers one handshake, reads the initiation, sends the metadata
+    /// and reads until the client is gone; its base URL and its thread.
+    fn answering() -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let base = format!("ws://{}", listener.local_addr().expect("an address"));
+        let thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("a connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("a read timeout");
+            let mut socket = tungstenite::accept(stream).expect("a handshake");
+            socket.read().expect("the initiation");
+            socket.send(Message::text(METADATA)).expect("the metadata");
+            while socket.read().is_ok() {}
+        });
+        (base, thread)
+    }
+
+    /// A handle that counts who holds the signed URL of `model`, without holding it.
+    fn holders(model: &ElevenLabsAgent) -> Weak<SignedUrl> {
+        match &model.target {
+            Target::Signed { url: Some(url), .. } => Arc::downgrade(url),
+            _ => panic!("the model holds no signed URL"),
+        }
+    }
+
+    #[test]
+    fn the_request_of_a_signed_url_is_its_own_buffer_and_no_copy() {
+        let signed = Arc::new(signed("wss://agent.invalid"));
+        let buffer = signed.expose().as_bytes().as_ptr_range();
+        let request = signed_request(&signed).expect("a request");
+        let sent = request
+            .uri()
+            .path_and_query()
+            .expect("a path and a query")
+            .as_str();
+        assert!(sent.ends_with(TOKEN), "the request line lost the token");
+        assert!(
+            buffer.contains(&sent.as_ptr()),
+            "the request holds a copy of the signed URL"
+        );
+        for (name, value) in request.headers() {
+            assert!(
+                !String::from_utf8_lossy(value.as_bytes()).contains(TOKEN),
+                "the header {name} holds the token"
+            );
+        }
+        let holders = Arc::downgrade(&signed);
+        drop(signed);
+        assert_eq!(
+            holders.strong_count(),
+            1,
+            "the request reads a buffer it does not hold"
+        );
+        drop(request);
+        assert_eq!(holders.strong_count(), 0);
+    }
+
+    #[test]
+    fn nothing_holds_the_signed_url_past_a_handshake_that_connected() {
+        let (base, server) = answering();
+        let mut model = ElevenLabsAgent::signed(signed(&base), endpoint());
+        let holders = holders(&model);
+        assert_eq!(holders.strong_count(), 1);
+        let session = model.open(config()).expect("the session opens");
+        assert_eq!(
+            holders.strong_count(),
+            0,
+            "the signed URL is still held after the handshake, by the model, the session or \
+             the connection"
+        );
+        assert!(matches!(model.target, Target::Signed { url: None, .. }));
+        assert_eq!(model.open_error(), None);
+        drop(session);
+        server.join().expect("the server ends");
+    }
+
+    #[test]
+    fn nothing_holds_the_signed_url_past_a_handshake_that_failed() {
+        let closed_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+            format!("ws://{}", listener.local_addr().expect("an address"))
+        };
+        let mut model = ElevenLabsAgent::signed(signed(&closed_port), endpoint());
+        let holders = holders(&model);
+        model.open(config()).expect_err("nothing listens there");
+        assert!(matches!(
+            model.open_error(),
+            Some(AgentError::Connect { status: None, .. })
+        ));
+        assert_eq!(
+            holders.strong_count(),
+            0,
+            "the signed URL is still held after the failed handshake"
+        );
     }
 }
