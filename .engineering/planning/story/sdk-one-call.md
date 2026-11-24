@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-one-call
 kind: story
-status: draft
+status: active
 title: transcribe, chat, speak and talk work in one call, with Chat, Transcriber and Voice handles
 relations:
 - decomposes: epic:sdk
@@ -10,16 +10,29 @@ relations:
 - depends_on: story:sdk-agent
 scope:
 - confidence: inferred
+  path: crates/inference-docs/src/status.rs
+- confidence: inferred
+  path: crates/inference/src/agent.rs
+- confidence: cited
   path: crates/inference/src/chat.rs
 - confidence: inferred
+  path: crates/inference/src/devices.rs
+- confidence: cited
   path: crates/inference/src/oneshot.rs
 - confidence: inferred
+  path: crates/inference/src/recipe/run.rs
+- confidence: inferred
+  path: crates/inference/src/recipe/topology.rs
+- confidence: cited
   path: crates/inference/src/transcriber.rs
-- confidence: inferred
+- confidence: cited
   path: crates/inference/src/voice.rs
-- confidence: inferred
+- confidence: cited
   path: crates/inference/tests/oneshot.rs
-revision: 11
+revision: 23
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-24T13:08:07Z", actor: "human:timo", revision: 12}
+- {from: "proposed", to: "active", at: "2026-11-24T13:08:07Z", actor: "human:timo", revision: 13}
 ---
 ## Context
 

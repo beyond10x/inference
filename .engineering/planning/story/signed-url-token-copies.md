@@ -12,6 +12,8 @@ relations:
 - serves: vision:inference
 scope:
 - confidence: inferred
+  path: CHANGELOG.md
+- confidence: inferred
   path: adapters/inference-elevenlabs/src/agent.rs
 - confidence: cited
   path: adapters/inference-elevenlabs/src/agent_duplex.rs
@@ -19,11 +21,7 @@ scope:
   path: adapters/inference-elevenlabs/src/lib.rs
 - confidence: inferred
   path: adapters/inference-elevenlabs/tests/agent_duplex.rs
-- confidence: inferred
-  path: adapters/inference-elevenlabs/tests/agent_duplex_live.rs
-- confidence: inferred
-  path: examples/realtime-voice/examples/compare.rs
-revision: 6
+revision: 9
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-10T00:17:27Z", actor: "human:operator", revision: 5}
 - {from: "proposed", to: "active", at: "2026-11-10T00:17:28Z", actor: "human:operator", revision: 6}

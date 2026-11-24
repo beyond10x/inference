@@ -2,9 +2,29 @@
 format: aep.planning-md/3
 id: story:synthesiser-drop-inside-runtime
 kind: story
-status: draft
+status: active
 title: Dropping an idle synthesis inside a runtime does not block the worker
-revision: 1
+relations:
+- serves: vision:inference
+scope:
+- confidence: inferred
+  path: CHANGELOG.md
+- confidence: cited
+  path: adapters/inference-cartesia/src/lib.rs
+- confidence: cited
+  path: adapters/inference-cartesia/src/synthesiser.rs
+- confidence: inferred
+  path: adapters/inference-cartesia/tests/cancel.rs
+- confidence: cited
+  path: adapters/inference-elevenlabs/src/lib.rs
+- confidence: cited
+  path: adapters/inference-elevenlabs/src/synthesiser.rs
+- confidence: inferred
+  path: adapters/inference-elevenlabs/tests/async_handles.rs
+revision: 10
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-24T13:08:07Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-24T13:08:07Z", actor: "human:timo", revision: 3}
 ---
 ## Context
 
