@@ -482,12 +482,14 @@ impl<T: NativeSpeechModel> NativeSpeechModel for SharedSpeech<T> {
     }
 }
 
-/// A typed adapter instance, one variant per role.
+/// A typed adapter instance, one variant per role. A clone reaches the same instance, so a stack
+/// made by [`Stack::shared`] runs its sessions over the models of the stack it was made from.
+#[derive(Clone)]
 pub(crate) enum Value {
-    Stt(Box<dyn BoundRecogniser>),
+    Stt(Arc<dyn BoundRecogniser>),
     Llm(Box<Generator>),
-    Tts(Box<dyn BoundSynthesiser>),
-    Speech(Box<dyn BoundSpeechModel>),
+    Tts(Arc<dyn BoundSynthesiser>),
+    Speech(Arc<dyn BoundSpeechModel>),
 }
 
 impl Value {
@@ -510,6 +512,7 @@ impl Value {
     }
 }
 
+#[derive(Clone)]
 enum Target {
     Named {
         adapter: String,
@@ -566,7 +569,7 @@ impl Binding {
         R::Handle: Send + 'static,
     {
         let adapter = recogniser.adapter().clone();
-        Bound::of(Value::Stt(Box::new(Shared::new(recogniser, adapter))))
+        Bound::of(Value::Stt(Arc::new(Shared::new(recogniser, adapter))))
     }
 
     /// The `stt` role bound to a recogniser a registration declared without opening it; its
@@ -579,7 +582,7 @@ impl Binding {
         )
     )]
     pub(crate) fn deferred_stt(recogniser: impl BoundRecogniser + 'static) -> Bound<role::Stt> {
-        Bound::of(Value::Stt(Box::new(recogniser)))
+        Bound::of(Value::Stt(Arc::new(recogniser)))
     }
 
     /// The `llm` role bound to `generator`, such as an adapter's `Generator` or a testkit
@@ -598,7 +601,7 @@ impl Binding {
         S::Handle: Send + 'static,
     {
         let adapter = synthesiser.adapter().clone();
-        Bound::of(Value::Tts(Box::new(Shared::new(synthesiser, adapter))))
+        Bound::of(Value::Tts(Arc::new(Shared::new(synthesiser, adapter))))
     }
 
     /// The `speech` role bound to `model`; it opens with [`default_session_config`]. The binding
@@ -611,7 +614,7 @@ impl Binding {
     {
         let adapter = model.adapter().clone();
         let capabilities = model.capabilities().clone();
-        Bound::of(Value::Speech(Box::new(SharedSpeech {
+        Bound::of(Value::Speech(Arc::new(SharedSpeech {
             shared: Shared::new(model, adapter),
             capabilities,
         })))
@@ -1464,6 +1467,38 @@ impl Stack {
         self.session_config.as_ref()
     }
 
+    /// A stack over the same models: every binding of this stack, resolved or still pending, its
+    /// profile and the session its `speech` binding opens with. A typed adapter instance is
+    /// shared, never copied, so the sessions of both stacks reach one model and its concurrency
+    /// limit counts them together. A binding by name that is still pending is constructed again
+    /// when the copy resolves; a resolved one is shared.
+    pub(crate) fn shared(&self) -> Self {
+        Self {
+            pending: self
+                .pending
+                .iter()
+                .map(|binding| Binding {
+                    role: binding.role,
+                    target: binding.target.clone(),
+                    model: binding.model.clone(),
+                })
+                .collect(),
+            bindings: std::array::from_fn(|index| {
+                self.bindings[index].as_ref().map(|binding| StackBinding {
+                    role: binding.role,
+                    name: binding.name.clone(),
+                    source: binding.source,
+                    model: binding.model.clone(),
+                    value: binding.value.clone(),
+                    admitted: binding.admitted,
+                })
+            }),
+            profile: self.profile.clone(),
+            profile_source: self.profile_source,
+            session_config: self.session_config.clone(),
+        }
+    }
+
     /// Replaces the session the `speech` binding opens with: an agent's merged config.
     pub(crate) fn set_session_config(&mut self, config: Option<SessionConfig>) {
         self.session_config = config;
@@ -1588,6 +1623,7 @@ mod tests {
             let Value::Stt(recogniser) = &mut binding.value else {
                 panic!("stt holds a recogniser");
             };
+            let recogniser = Arc::get_mut(recogniser).expect("no other stack shares it");
             recogniser.open().expect("opens");
             recogniser.open().expect("opens again as a no-op");
             assert_eq!(opens.load(Ordering::SeqCst), 1);

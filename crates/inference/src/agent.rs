@@ -1550,5 +1550,135 @@ impl Drop for Agent {
     }
 }
 
+/// What the handles `Chat`, `Transcriber` and `Voice` are built on: a resolved stack that shares
+/// the models of the stack the handle was given, the handle's recipe planned over it, and the
+/// agent of the handle's last session.
+pub(crate) struct Handle {
+    stack: Stack,
+    recipe: Recipe,
+    tools: Vec<(Tool, Arc<dyn ToolExecutor>)>,
+    instantiation: Instantiation,
+    description: Description,
+    agent: Option<Agent>,
+}
+
+impl Handle {
+    /// Resolves a copy of `stack` over no environment but its own bindings, as
+    /// [`AgentBuilder::stack`] does, and plans `recipe` over it. No session is opened.
+    pub(crate) fn plan(recipe: Recipe, stack: &Stack) -> Result<Self> {
+        let stack = stack.shared().resolve_with(&Env::new())?;
+        let (instantiation, description) = Self::planned(&recipe, &stack, &[])?;
+        Ok(Self {
+            stack,
+            recipe,
+            tools: Vec::new(),
+            instantiation,
+            description,
+            agent: None,
+        })
+    }
+
+    /// The builder of a session of this handle: its recipe over a stack sharing its models.
+    fn builder(
+        recipe: &Recipe,
+        stack: &Stack,
+        tools: &[(Tool, Arc<dyn ToolExecutor>)],
+    ) -> AgentBuilder {
+        let mut builder = Agent::from_recipe(recipe.clone()).stack(stack.shared());
+        builder.given.tools = tools.to_vec();
+        builder
+    }
+
+    /// What a session of this handle runs, planned as its builder plans it.
+    fn planned(
+        recipe: &Recipe,
+        stack: &Stack,
+        tools: &[(Tool, Arc<dyn ToolExecutor>)],
+    ) -> Result<(Instantiation, Description)> {
+        let builder = Self::builder(recipe, stack, tools);
+        builder.with_stack(|stack| {
+            let plan = builder.plan(stack);
+            let instantiation = plan.recipe.instantiate(stack)?;
+            let description = describe(stack, &instantiation, plan.config);
+            Ok((instantiation, description))
+        })
+    }
+
+    /// Opens a new session over the handle's recipe and keeps its agent as the handle's last; the
+    /// agent of the session before it is dropped.
+    pub(crate) async fn open(&mut self) -> Result<&Agent> {
+        let agent = Self::builder(&self.recipe, &self.stack, &self.tools)
+            .start()
+            .await?;
+        Ok(self.agent.insert(agent))
+    }
+
+    /// The live session of the handle's last call; none before the first.
+    pub(crate) fn session(&self) -> Option<&LiveSession<Payload>> {
+        self.agent.as_ref().map(Agent::session)
+    }
+
+    /// The planned pipeline of the handle's last session, or, before the first, the one planned
+    /// when the handle was built.
+    pub(crate) fn pipeline(&self) -> &PlannedPipeline {
+        self.agent
+            .as_ref()
+            .map_or_else(|| self.instantiation.planned(), Agent::pipeline)
+    }
+
+    /// The recipe, bindings and pipeline planned when the handle was built.
+    pub(crate) fn describe(&self) -> Description {
+        self.description.clone()
+    }
+}
+
+/// The error an [`Event::Error`] carries, as one a call can return: an [`Error::Provider`] stays
+/// one, with its adapter and message; any other becomes an [`Error::Layer`] with the same
+/// message. The event's error is the source of either.
+pub(crate) fn failure(error: &Arc<Error>) -> Error {
+    let source: Option<Box<dyn std::error::Error + Send + Sync>> =
+        Some(Box::new(Arc::clone(error)));
+    match error.as_ref() {
+        Error::Provider {
+            adapter, message, ..
+        } => Error::Provider {
+            adapter: adapter.clone(),
+            message: message.clone(),
+            source,
+        },
+        other => Error::Layer {
+            message: other.to_string(),
+            source,
+        },
+    }
+}
+
+/// Reads `events` to their end, giving each to `take`. The first [`Event::Error`] is the error
+/// returned, once the stream has ended; an [`Event::Lagged`] is an [`Error::Layer`], since the
+/// call would return less than the session produced.
+pub(crate) async fn read_to_end(mut events: Events, mut take: impl FnMut(Event)) -> Result<()> {
+    use futures_util::StreamExt as _;
+
+    let mut failed = None;
+    while let Some(event) = events.next().await {
+        match event? {
+            Event::Error { error, .. } => {
+                failed.get_or_insert_with(|| failure(&error));
+            }
+            Event::Lagged(missed) => {
+                failed.get_or_insert_with(|| Error::Layer {
+                    message: format!(
+                        "the call fell {missed} events behind its session and cannot return all \
+                         of them"
+                    ),
+                    source: None,
+                });
+            }
+            event => take(event),
+        }
+    }
+    failed.map_or(Ok(()), Err)
+}
+
 #[cfg(test)]
 mod tests;
