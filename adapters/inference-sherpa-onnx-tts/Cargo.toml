@@ -1,0 +1,24 @@
+[package]
+name = "inference-sherpa-onnx-tts"
+description = "Local text-to-speech adapter of the inference framework over the sherpa-onnx runtime: a synthesiser over the pinned Kokoro checkpoint or a caller's own Piper voice. Opt-in, because the native library that speaks carries espeak-ng (GPL-3.0)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+autotests = false
+
+[dependencies]
+inference-tts = { path = "../../crates/inference-tts" }
+sha2 = "0.11"
+sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"] }
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+[dev-dependencies]
+inference-testkit = { path = "../../crates/inference-testkit", features = ["tts"] }
+
+[lints]
+workspace = true

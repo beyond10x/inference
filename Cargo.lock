@@ -2453,6 +2453,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-sherpa-onnx-tts"
+version = "0.33.0"
+dependencies = [
+ "inference-testkit",
+ "inference-tts",
+ "sha2",
+ "sherpa-onnx",
+]
+
+[[package]]
 name = "inference-stt"
 version = "0.33.0"
 dependencies = [
