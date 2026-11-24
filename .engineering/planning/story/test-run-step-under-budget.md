@@ -21,7 +21,7 @@ scope:
   path: crates/inference-testkit/tests
 - confidence: inferred
   path: website/docs/guides/run-the-checks.md
-revision: 12
+revision: 13
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-24T12:32:05Z", actor: "human:operator", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-24T12:32:05Z", actor: "human:operator", revision: 4}
@@ -51,10 +51,18 @@ own process, so an in-process global does not share it.
 
 - The `task test-run` step ends within 120 s of wall time in CI, measured on a pull request that
   changes code, and prints its ten slowest tests.
-- The conformance suite is synthesised at most once per test run, not once per test: a run of the
-  testkit's tests calls synthesis once, or never when the committed file's digest matches.
+- The conformance suite is synthesised at most once per distinct suite per test run, not once per
+  test: a run of the testkit's tests calls synthesis once for the authored suite and once for the
+  witnessed suite, or never for a suite whose file on disk matches the digest of its sources.
 - No test of `inference-testkit` runs over 60 s locally at a load average above 120, and none is
   killed by the 60 s limit.
+
+Corrected on 2026-11-24: the second line read "calls synthesis once, or never when the committed
+file's digest matches". The testkit's tests read two suites, the authored one and the witnessed
+one; each is synthesised once per run and kept in a cache keyed by the digest of its sources
+(review-result:test-run-step-under-budget-adversary-1 finding 3, carried in
+review-result:test-run-step-under-budget-adversary-2). Measured on the forge's runner at the
+unit's head: the step took 90 s.
 
 ## Scope
 
