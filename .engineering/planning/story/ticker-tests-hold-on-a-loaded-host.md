@@ -12,7 +12,7 @@ relations:
 scope:
 - confidence: cited
   path: adapters/inference-elevenlabs/tests/async_handles.rs
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-24T13:41:12Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-24T13:41:12Z", actor: "human:timo", revision: 3}
@@ -56,6 +56,16 @@ ticker and the same bound.
 Corrected on 2026-11-24: the first line read `... --all-features async_handles`, which selects no
 test (the filter matches test names, not the binary; the unit's implementor ran it on the base:
 "Starting 0 tests across 32 binaries (168 tests skipped)", exit 4).
+
+Limit of the second line, recorded on 2026-11-24 from
+review-result:ticker-tests-hold-on-a-loaded-host-adversary-1: a thread held while it stays ready to
+run (a loop of `yield_now`, a spin that the kernel preempts) is taken out of the gap when another
+thread is ready on its processor, because the tests subtract the kernel's run-queue wait. The
+adversary measured it red in 1 of 17 runs on the node and in 1 of 1 confined to one processor; no
+file under `adapters/inference-elevenlabs/src` waits that way. A thread that sleeps, parks, waits
+for a lock, reads a socket or computes for 200 ms fails both tests (gaps of 182 to 211 ms). The
+tests' module comment states the limit, and the adversary's cases are committed as controls, the
+yield case ignored with that reason.
 
 ## Out of scope
 
