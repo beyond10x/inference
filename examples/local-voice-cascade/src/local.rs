@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | `stt` | the recogniser [`STT_VARIABLE`] selects ([`SttBackend`]): `inference-sherpa-onnx`'s streaming recogniser over its pinned checkpoint, the default, or `inference-whispercpp`'s batch recogniser over its pinned checkpoint | `same_process` |
 //! | `agent` | `inference-llama-server`'s generator over a `llama-server` on loopback | `local_worker` |
-//! | `tts` | the testkit's mock synthesiser, until a local TTS adapter exists | `same_process` |
+//! | `tts` | `inference-sherpa-onnx-tts`'s synthesiser over its pinned checkpoint, Kokoro-82M v0.19 at 24 kHz | `same_process` |
 //!
 //! under the `offline_strict` profile with egress denied admitting [`ADMITTED`], both localities.
 //! The connection to the server is compute on the machine, not egress: [`LocalModels::open`]
@@ -25,10 +25,18 @@
 //! with whisper.cpp none.
 //!
 //! [`LocalConfig::from_env`] reads the backend from [`STT_VARIABLE`], its checkpoint from
-//! [`STT_DIR_VARIABLE`] or [`WHISPERCPP_MODEL_VARIABLE`], and the server from
-//! [`SERVER_URL_VARIABLE`] and [`SERVER_MODEL_VARIABLE`], naming the first that is missing. The
-//! mock synthesiser speaks one 10 ms frame of silence per word, so `talk` plays silence where the
-//! answer will be heard once the TTS adapter replaces it at the same binding.
+//! [`STT_DIR_VARIABLE`] or [`WHISPERCPP_MODEL_VARIABLE`], the server from
+//! [`SERVER_URL_VARIABLE`] and [`SERVER_MODEL_VARIABLE`], and the synthesiser's checkpoint from
+//! [`TTS_DIR_VARIABLE`], naming the first that is missing.
+//!
+//! The synthesiser speaks only in a process started on the sherpa-onnx native library built with
+//! text-to-speech, which carries espeak-ng (GPL-3.0); the workspace builds against the one
+//! without, and [`LocalModels::open`] on that one is refused with
+//! [`LocalRefused::SherpaOnnxTts`], naming the library. The README of `inference-sherpa-onnx-tts`
+//! says how the process is started. The synthesiser speaks each segment on its own, and each
+//! delta of the server is a segment: an answer is spoken delta by delta, each with the prosody
+//! of a text of its own, a segment of punctuation alone without audio. The speaker resamples the
+//! synthesiser's 24 kHz to the device's rate.
 //!
 //! The LLM node is `inference-pipeline`'s `AgentNode`, which answers a turn's committed spans
 //! with the generator's answer to their text ([`identity`]). The server's adapter claims output
@@ -44,28 +52,27 @@
 
 use std::error::Error;
 use std::fmt;
-use std::num::{NonZeroU16, NonZeroU32};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use inference_audio::{AudioEncoding, AudioFormat, AudioFrame};
+use inference_audio::AudioFrame;
 use inference_audio_device::{AudioHost, DeviceError, DeviceSelector, PlayoutConfig};
 use inference_core::envelope::EventEnvelope;
 use inference_core::id::RunId;
-use inference_core::model::{Adapter, Locality, Model, ModelId};
+use inference_core::model::{Adapter, Locality, Model};
 use inference_llama_server::{Config, LlamaServer, declare_adapter, declare_model};
 use inference_llm::Generator;
 use inference_pipeline::Declaration;
 use inference_pipeline::nodes::vad::VadConfig;
 use inference_sherpa_onnx::stt::{SherpaOnnxRecogniser, SherpaOnnxRecognition};
+use inference_sherpa_onnx_tts::SherpaOnnxSynthesiser;
 use inference_testkit::cascade::{CascadeRefused, TurnStore};
 use inference_testkit::graph::RunLog;
 use inference_testkit::stt::inference_stt::{
     ConcurrencyLimitReached, InputEnded, Recogniser, RecognitionHandle, RecognitionRequest,
     RevisionRefused, TranscriptEvent, TranscriptOutput,
 };
-use inference_testkit::tts::{MockConfiguration, MockSynthesiser};
 use inference_text::ReviseSpan;
 use inference_tts::Synthesiser;
 use inference_whispercpp::stt::{WhisperCppRecogniser, WhisperCppRecognition};
@@ -83,6 +90,10 @@ pub const STT_DIR_VARIABLE: &str = "INFERENCE_SHERPA_ONNX_STT_DIR";
 /// The variable naming the pinned checkpoint file of the whisper.cpp recogniser,
 /// `ggml-base.en.bin`.
 pub const WHISPERCPP_MODEL_VARIABLE: &str = "INFERENCE_WHISPERCPP_STT_MODEL";
+
+/// The variable naming the directory of the unpacked pinned checkpoint of the sherpa-onnx
+/// synthesiser, `kokoro-en-v0_19`.
+pub const TTS_DIR_VARIABLE: &str = "INFERENCE_SHERPA_ONNX_TTS_DIR";
 
 /// The variable naming the base URL of the server's OpenAI-compatible API, such as
 /// `http://127.0.0.1:8080/v1`.
@@ -229,11 +240,13 @@ impl SttConfig {
     }
 }
 
-/// Where the local adapters are: the recogniser and its checkpoint, and the server, its served
-/// model and the most tokens of one answer.
+/// Where the local adapters are: the recogniser and its checkpoint, the directory of the
+/// synthesiser's unpacked checkpoint, and the server, its served model and the most tokens of
+/// one answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalConfig {
     pub stt: SttConfig,
+    pub tts_dir: PathBuf,
     pub server_url: String,
     pub server_model: String,
     pub max_output_tokens: u64,
@@ -251,22 +264,28 @@ impl LocalConfig {
 
     /// The configuration `lookup` answers for each variable, with [`MAX_OUTPUT_TOKENS`]: the
     /// backend [`STT_VARIABLE`] selects, [`SttBackend::SherpaOnnx`] when it answers none, the
-    /// backend's checkpoint, [`SttBackend::variable`], and the server.
+    /// backend's checkpoint, [`SttBackend::variable`], the server, and the synthesiser's
+    /// checkpoint, [`TTS_DIR_VARIABLE`].
     ///
     /// # Errors
     ///
     /// [`LocalRefused::UnknownBackend`] when [`STT_VARIABLE`] names no backend, and
     /// [`LocalRefused::Missing`] naming the first of the backend's variable,
-    /// [`SERVER_URL_VARIABLE`] and [`SERVER_MODEL_VARIABLE`] that `lookup` answers none for.
+    /// [`SERVER_URL_VARIABLE`], [`SERVER_MODEL_VARIABLE`] and [`TTS_DIR_VARIABLE`] that `lookup`
+    /// answers none for.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, LocalRefused> {
         let read = |name: &'static str| lookup(name).ok_or(LocalRefused::Missing(name));
         let backend = lookup(STT_VARIABLE).map_or(Ok(SttBackend::SherpaOnnx), |value| {
             value.parse::<SttBackend>()
         })?;
+        let stt = SttConfig::new(backend, PathBuf::from(read(backend.variable())?));
+        let server_url = read(SERVER_URL_VARIABLE)?;
+        let server_model = read(SERVER_MODEL_VARIABLE)?;
         Ok(Self {
-            stt: SttConfig::new(backend, PathBuf::from(read(backend.variable())?)),
-            server_url: read(SERVER_URL_VARIABLE)?,
-            server_model: read(SERVER_MODEL_VARIABLE)?,
+            stt,
+            tts_dir: PathBuf::from(read(TTS_DIR_VARIABLE)?),
+            server_url,
+            server_model,
             max_output_tokens: MAX_OUTPUT_TOKENS,
         })
     }
@@ -295,6 +314,10 @@ pub enum LocalRefused {
     SherpaOnnx(inference_sherpa_onnx::stt::OpenRefused),
     /// The checkpoint file is not the whisper.cpp recogniser's pinned checkpoint.
     WhisperCpp(inference_whispercpp::stt::OpenRefused),
+    /// The synthesiser was not opened: the checkpoint directory does not hold its pinned
+    /// checkpoint, or the process loaded the sherpa-onnx native library built without
+    /// text-to-speech.
+    SherpaOnnxTts(inference_sherpa_onnx_tts::OpenRefused),
     /// The server's adapter was not made: `llm` refused the binding or the client, or the adapter
     /// was not declared.
     Server { detail: String },
@@ -316,6 +339,7 @@ impl fmt::Display for LocalRefused {
             ),
             Self::SherpaOnnx(refused) => fmt::Display::fmt(refused, f),
             Self::WhisperCpp(refused) => fmt::Display::fmt(refused, f),
+            Self::SherpaOnnxTts(refused) => fmt::Display::fmt(refused, f),
             Self::Server { detail } => write!(f, "the llama-server adapter: {detail}"),
         }
     }
@@ -326,6 +350,7 @@ impl Error for LocalRefused {
         match self {
             Self::SherpaOnnx(refused) => Some(refused),
             Self::WhisperCpp(refused) => Some(refused),
+            Self::SherpaOnnxTts(refused) => Some(refused),
             Self::Missing(_)
             | Self::UnknownBackend { .. }
             | Self::NotLoopback { .. }
@@ -348,19 +373,34 @@ pub fn loopback(url: &str) -> Result<(), LocalRefused> {
     })
 }
 
-/// The mock synthesiser bound at `tts`: streaming each segment as it takes it, in 16 kHz mono
-/// `pcm_s16le`.
+/// The synthesiser bound at `tts`: `inference-sherpa-onnx-tts`'s over its pinned checkpoint
+/// unpacked in `dir`, streaming each segment as it takes it, in 24 kHz mono `pcm_s16le`.
+///
+/// # Errors
+///
+/// [`LocalRefused::SherpaOnnxTts`], the adapter's refusal to open the checkpoint: a file that is
+/// missing or differs from its pin, or a process that loaded the sherpa-onnx native library built
+/// without text-to-speech.
+pub fn synthesiser(dir: &Path) -> Result<SherpaOnnxSynthesiser, LocalRefused> {
+    SherpaOnnxSynthesiser::open(dir).map_err(LocalRefused::SherpaOnnxTts)
+}
+
+/// The adapter record the synthesiser declares when it opens its checkpoint, at its default
+/// maximum concurrency, declared without the checkpoint: its capabilities, execution form and
+/// locality are the opened synthesiser's, its model and adapter ids its own.
+///
+/// # Panics
+///
+/// Never: the default maximum concurrency of the adapter is positive.
 #[must_use]
-pub fn synthesiser() -> MockSynthesiser {
-    MockSynthesiser::new(
-        MockConfiguration::IncrementalStreaming,
-        ModelId::generate(),
-        AudioFormat {
-            encoding: AudioEncoding::PcmS16le,
-            sample_rate: NonZeroU32::new(16_000).unwrap_or(NonZeroU32::MIN),
-            channels: NonZeroU16::MIN,
-        },
+pub fn synthesiser_adapter() -> Adapter {
+    let (model, _) = inference_sherpa_onnx_tts::declare_model();
+    inference_sherpa_onnx_tts::declare_adapter(
+        model.model_id(),
+        inference_sherpa_onnx_tts::DEFAULT_MAX_CONCURRENCY,
     )
+    .expect("a positive default concurrency")
+    .0
 }
 
 /// The adapter of the server `server` configures, declared without a request to it.
@@ -498,22 +538,23 @@ impl RecognitionHandle for LocalRecognition {
 pub struct LocalModels {
     pub recogniser: LocalRecogniser,
     pub generator: Generator,
-    pub synthesiser: MockSynthesiser,
+    pub synthesiser: SherpaOnnxSynthesiser,
 }
 
 impl LocalModels {
-    /// Opens the recogniser `config.stt` selects on its checkpoint and the generator of the
-    /// server `config` names, once its URL is found loopback, and makes the mock synthesiser.
-    /// Nothing is sent to the server before the first turn.
+    /// Opens the recogniser `config.stt` selects on its checkpoint, the synthesiser on its
+    /// checkpoint in `config.tts_dir` and the generator of the server `config` names, once its
+    /// URL is found loopback. Nothing is sent to the server before the first turn.
     ///
     /// # Errors
     ///
     /// [`LocalRefused::NotLoopback`] before anything is opened, the recogniser's
-    /// [`LocalRefused::SherpaOnnx`] or [`LocalRefused::WhisperCpp`], or
-    /// [`LocalRefused::Server`].
+    /// [`LocalRefused::SherpaOnnx`] or [`LocalRefused::WhisperCpp`], the synthesiser's
+    /// [`LocalRefused::SherpaOnnxTts`], or [`LocalRefused::Server`].
     pub fn open(config: &LocalConfig) -> Result<Self, LocalRefused> {
         loopback(&config.server_url)?;
         let recogniser = LocalRecogniser::open(&config.stt)?;
+        let synthesiser = synthesiser(&config.tts_dir)?;
         let server = config.server();
         let server_refused = |detail: String| LocalRefused::Server { detail };
         let adapter = server_adapter(&server)?;
@@ -524,7 +565,7 @@ impl LocalModels {
         Ok(Self {
             recogniser,
             generator,
-            synthesiser: synthesiser(),
+            synthesiser,
         })
     }
 }

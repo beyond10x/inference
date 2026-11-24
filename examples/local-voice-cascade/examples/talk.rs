@@ -1,16 +1,27 @@
 //! Talk to the local voice cascade from a laptop, offline: the microphone, a local recogniser,
-//! sherpa-onnx's streaming one or whisper.cpp's batch one, a `llama-server` on loopback, the mock
-//! synthesiser and the speaker. Use a headset: there is no echo cancellation, and a laptop's own
-//! speaker feeds back into its microphone.
+//! sherpa-onnx's streaming one or whisper.cpp's batch one, a `llama-server` on loopback,
+//! sherpa-onnx's synthesiser and the speaker. Use a headset: there is no echo cancellation, and a
+//! laptop's own speaker feeds back into its microphone.
 //!
 //! ```text
 //! llama-server --host 127.0.0.1 --port 8080 -m qwen2.5-1.5b-instruct-q4_k_m.gguf \
 //!     --alias qwen2.5-1.5b-instruct -c 4096 -np 1 -ngl 0
+//! task sherpa-onnx-tts
+//! tts="$PWD/target/sherpa-onnx-tts"
+//! CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="env LD_LIBRARY_PATH=$tts/native/sherpa-onnx-v1.13.8-linux-x64-shared-lib/lib" \
 //! INFERENCE_SHERPA_ONNX_STT_DIR=<checkpoint dir> \
+//! INFERENCE_SHERPA_ONNX_TTS_DIR="$tts/checkpoint/kokoro-en-v0_19" \
 //! INFERENCE_LLAMA_SERVER_URL=http://127.0.0.1:8080/v1 \
 //! INFERENCE_LLAMA_SERVER_MODEL=qwen2.5-1.5b-instruct \
 //!     cargo run -p local-voice-cascade --features local --example talk
 //! ```
+//!
+//! The answer is spoken by `inference-sherpa-onnx-tts` over its pinned checkpoint, whose directory
+//! `--tts-dir` or `INFERENCE_SHERPA_ONNX_TTS_DIR` names. It speaks only in a process started on
+//! the sherpa-onnx native library built with text-to-speech, which carries espeak-ng (GPL-3.0):
+//! the task fetches that library and the checkpoint under `target/`, and the target runner starts
+//! the example on it. Started on the library the workspace builds against, the example ends with
+//! the refusal naming that library.
 //!
 //! `--stt whispercpp`, or `INFERENCE_CASCADE_STT=whispercpp`, binds the whisper.cpp recogniser
 //! over the checkpoint file `--whispercpp-model` or `INFERENCE_WHISPERCPP_STT_MODEL` names
@@ -20,9 +31,8 @@
 //! default device otherwise. A server URL whose host is not loopback is refused before anything
 //! opens, and the run fails if a socket of the process connects anywhere but loopback.
 //!
-//! Until a local TTS adapter exists, the mock synthesiser speaks each word of the answer as 10 ms
-//! of silence: the answer is printed, the speaker plays silence for it, and speaking over it stops
-//! that playback. Each turn prints the committed input to first playable audio, and each
+//! The answer is printed and spoken, each delta of the server on its own, and speaking over it
+//! stops that playback. Each turn prints the committed input to first playable audio, and each
 //! interruption the interruption to playback stop. Ctrl-C ends the conversation.
 
 use std::collections::HashMap;
@@ -52,7 +62,7 @@ use inference_testkit::graph::RunLog;
 use inference_testkit::stream::StreamEvent;
 use local_voice_cascade::local::{
     LocalConfig, LocalModels, LocalRefused, MAX_OUTPUT_TOKENS, SERVER_MODEL_VARIABLE,
-    SERVER_URL_VARIABLE, STT_DIR_VARIABLE, STT_VARIABLE, SttBackend, SttConfig,
+    SERVER_URL_VARIABLE, STT_DIR_VARIABLE, STT_VARIABLE, SttBackend, SttConfig, TTS_DIR_VARIABLE,
     WHISPERCPP_MODEL_VARIABLE, declare_local,
 };
 use local_voice_cascade::{
@@ -73,6 +83,9 @@ struct Args {
     /// The pinned checkpoint file of the whisper.cpp recogniser, for --stt whispercpp.
     #[arg(long, env = WHISPERCPP_MODEL_VARIABLE, value_parser = clap::value_parser!(OsString))]
     whispercpp_model: Option<OsString>,
+    /// The directory of the unpacked pinned checkpoint of the sherpa-onnx synthesiser.
+    #[arg(long, env = TTS_DIR_VARIABLE)]
+    tts_dir: PathBuf,
     /// The base URL of the llama-server's API, on loopback.
     #[arg(long, env = SERVER_URL_VARIABLE)]
     server_url: String,
@@ -136,6 +149,7 @@ fn talk(args: Args) -> Result<(), Box<dyn Error>> {
     .ok_or(LocalRefused::Missing(args.stt.variable()))?;
     let config = LocalConfig {
         stt: SttConfig::new(args.stt, checkpoint),
+        tts_dir: args.tts_dir,
         server_url: args.server_url,
         server_model: args.server_model,
         max_output_tokens: args.max_output_tokens,

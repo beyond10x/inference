@@ -17,11 +17,10 @@ use inference_testkit::stt::inference_stt::{
     Recogniser, RecognitionHandle, RecognitionRequest, TranscriptEvent,
 };
 use inference_text::TurnId;
-use inference_tts::Synthesiser;
 use local_voice_cascade::local::{
     LocalConfig, LocalModels, LocalRecogniser, LocalRefused, SERVER_MODEL_VARIABLE,
     SERVER_URL_VARIABLE, STT_DIR_VARIABLE, STT_VARIABLE, SttBackend, SttConfig,
-    declare_local_adapters, server_adapter, synthesiser,
+    declare_local_adapters, server_adapter, synthesiser_adapter,
 };
 
 /// A loopback server; nothing is sent to it before the first turn.
@@ -123,6 +122,7 @@ fn under_whispercpp_a_server_off_loopback_is_refused_before_the_checkpoint_is_re
         stt: SttConfig::WhisperCpp {
             model: "no such checkpoint".into(),
         },
+        tts_dir: PathBuf::new(),
         server_url: "http://192.0.2.1:8080/v1".to_owned(),
         server_model: "qwen".to_owned(),
         max_output_tokens: 32,
@@ -161,6 +161,7 @@ fn each_backend_refuses_the_other_backend_s_checkpoint_as_its_own_adapter_s_refu
     ] {
         let config = LocalConfig {
             stt: stt.clone(),
+            tts_dir: PathBuf::new(),
             server_url: LOOPBACK.to_owned(),
             server_model: "qwen".to_owned(),
             max_output_tokens: 32,
@@ -207,6 +208,7 @@ fn the_lowered_stt_node_still_refuses_a_recogniser_at_a_locality_the_profile_doe
             stt: SttConfig::WhisperCpp {
                 model: PathBuf::new(),
             },
+            tts_dir: PathBuf::new(),
             server_url: LOOPBACK.to_owned(),
             server_model: "qwen".to_owned(),
             max_output_tokens: 32,
@@ -222,7 +224,7 @@ fn the_lowered_stt_node_still_refuses_a_recogniser_at_a_locality_the_profile_doe
                 [
                     relocated(backend, locality),
                     server.clone(),
-                    synthesiser().adapter().clone(),
+                    synthesiser_adapter(),
                 ],
             )
             .expect_err("offline_strict admits neither");
@@ -246,7 +248,7 @@ fn the_lowered_stt_node_still_refuses_a_recogniser_at_a_locality_the_profile_doe
                 [
                     relocated(backend, locality),
                     server.clone(),
-                    synthesiser().adapter().clone(),
+                    synthesiser_adapter(),
                 ],
             )
             .unwrap_or_else(|refused| panic!("{backend} at {locality:?}: {refused}"));

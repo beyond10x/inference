@@ -1,15 +1,19 @@
 //! The local voice cascade over the local adapters: the recogniser `INFERENCE_CASCADE_STT`
 //! selects, sherpa-onnx's streaming one or whisper.cpp's batch one, the generator of a loopback
-//! `llama-server` and the testkit's mock synthesiser, behind the TTS binding until a local TTS
-//! adapter exists (`story:local-voice-cascade-example`, `story:stt-swap-by-configuration`; P2's
+//! `llama-server` and the synthesiser of `inference-sherpa-onnx-tts` over its pinned checkpoint
+//! (`story:local-voice-cascade-example`, `story:stt-swap-by-configuration`,
+//! `story:local-tts-adapter-under-licence-policy`; P2's
 //! exit at `docs/design/inference.md` 1160, A-04, A-05, A-08 and A-10 at 1140-1146, demonstrator
 //! step 6 at 1175, the measures at 1022-1023).
 //!
 //! The three cases that need the adapters are ignored, and the same three run under either
 //! recogniser: run them once with `INFERENCE_CASCADE_STT` unset or `sherpa-onnx` and once with
 //! it `whispercpp`. They read the recogniser's checkpoint from `INFERENCE_SHERPA_ONNX_STT_DIR` or
-//! `INFERENCE_WHISPERCPP_STT_MODEL` and the server from `INFERENCE_LLAMA_SERVER_URL` and
-//! `INFERENCE_LLAMA_SERVER_MODEL`, and with `--ignored` fail naming the variable that is missing.
+//! `INFERENCE_WHISPERCPP_STT_MODEL`, the server from `INFERENCE_LLAMA_SERVER_URL` and
+//! `INFERENCE_LLAMA_SERVER_MODEL` and the synthesiser's checkpoint from
+//! `INFERENCE_SHERPA_ONNX_TTS_DIR`, and with `--ignored` fail naming the variable that is missing.
+//! The synthesiser speaks only in a process started on the sherpa-onnx native library built with
+//! text-to-speech; the README of `inference-sherpa-onnx-tts` says how.
 //! The spoken question is the sherpa-onnx checkpoint's own LibriSpeech clip `test_wavs/0.wav`
 //! ("after early nightfall the yellow lamps would light up here and there the squalid quarter of
 //! the brothels"), read from `INFERENCE_SHERPA_ONNX_STT_DIR` under either recogniser, followed by
@@ -39,6 +43,11 @@
 //! whisper.cpp record naming the node, and the cascade answers on a mock generator that, as the
 //! server's adapter, claims output streaming only, over the mock recogniser claiming both
 //! capabilities and over the one claiming neither.
+//!
+//! One more ignored case needs the synthesiser alone, no recogniser checkpoint and no server: the
+//! mock recogniser commits two spans, the mock generator answers each with its text, and the
+//! synthesiser speaks both answers into the fake host's recorded speaker, under the egress watch.
+//! It prints the frames the speaker took, their rate and their duration.
 //!
 //! The watch reads every socket of the process and the server answers one request at a time, so
 //! the cases that run the cascade hold one lock and never overlap.
@@ -75,6 +84,7 @@ use inference_testkit::cascade::{CascadeRefused, Mocks, TurnStore};
 use inference_testkit::graph::RunLog;
 use inference_testkit::llm::{MockConfiguration as LlmConfiguration, MockGenerator};
 use inference_testkit::stream::StreamEvent;
+use inference_testkit::stt::inference_stt::Recogniser;
 use inference_testkit::stt::synthetic_audio::{Stretch, synthesize};
 use inference_testkit::stt::{
     Cue, MockConfiguration as SttConfiguration, MockRecogniser, ScriptStep,
@@ -84,8 +94,9 @@ use inference_text::{SegmentId, SegmentState, SpanId, TextDelta, TranscriptRevis
 use inference_tts::Synthesiser;
 use local_voice_cascade::local::{
     ADMITTED, LocalConfig, LocalModels, LocalRefused, SERVER_MODEL_VARIABLE, SERVER_URL_VARIABLE,
-    STT_DIR_VARIABLE, STT_VARIABLE, SttBackend, SttConfig, WHISPERCPP_MODEL_VARIABLE,
-    declare_local, declare_local_adapters, loopback, server_adapter, synthesiser,
+    STT_DIR_VARIABLE, STT_VARIABLE, SttBackend, SttConfig, TTS_DIR_VARIABLE,
+    WHISPERCPP_MODEL_VARIABLE, declare_local, declare_local_adapters, loopback, server_adapter,
+    synthesiser, synthesiser_adapter,
 };
 use local_voice_cascade::{
     AUDIO_INGRESS, CascadeHandles, CascadeIds, LocalCascade, STREAMING_STT_REQUIRES, TEXT_EGRESS,
@@ -105,8 +116,8 @@ const HEARD: &str = "nightfall";
 /// How long a run with the real adapters may take on CPU before the case gives up.
 const PATIENCE: Duration = Duration::from_secs(180);
 
-/// Device frames of the fake laptop's speaker, at 48 kHz: 10 ms, which play one frame of the
-/// mock synthesiser, 160 samples at 16 kHz.
+/// Device frames of the fake laptop's speaker, at 48 kHz: 10 ms, half of one 20 ms frame of the
+/// synthesiser, or one frame of the mock synthesiser, 160 samples at 16 kHz.
 const DEVICE_FRAME: usize = 480;
 
 /// The real-time interval of one [`DEVICE_FRAME`].
@@ -164,7 +175,7 @@ fn effective(declaration: &Declaration, cascade: &LocalCascade) -> Vec<Capabilit
 }
 
 /// The effective capabilities of the local cascade with `backend` bound at `stt`: what the
-/// recogniser, the server's generator and the mock synthesiser all claim.
+/// recogniser, the server's generator and the synthesiser all claim.
 fn expected_effective(backend: SttBackend) -> Vec<Capability> {
     match backend {
         SttBackend::SherpaOnnx => vec![Capability::OutputStreaming],
@@ -785,7 +796,7 @@ fn print_measures(handles: &CascadeHandles) {
 }
 
 #[test]
-#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
 fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
     let _serial = serial();
     let config = configured();
@@ -887,7 +898,7 @@ fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
 }
 
 #[test]
-#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
 fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_the_gates() {
     let _serial = serial();
     let config = configured();
@@ -1014,7 +1025,7 @@ fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_t
 }
 
 #[test]
-#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL"]
 #[allow(clippy::too_many_lines)]
 fn the_clip_said_again_while_the_answer_plays_stops_it_and_supersedes_its_generation() {
     let _serial = serial();
@@ -1222,6 +1233,7 @@ fn a_server_whose_host_is_not_loopback_is_refused_before_anything_opens() {
             stt: SttConfig::SherpaOnnx {
                 dir: "no such directory".into(),
             },
+            tts_dir: "no such directory".into(),
             server_url: url.to_owned(),
             server_model: "qwen".to_owned(),
             max_output_tokens: 32,
@@ -1256,6 +1268,7 @@ fn a_refused_server_url_is_printed_without_its_userinfo() {
         stt: SttConfig::SherpaOnnx {
             dir: "no such directory".into(),
         },
+        tts_dir: "no such directory".into(),
         server_url: url.to_owned(),
         server_model: "qwen".to_owned(),
         max_output_tokens: 32,
@@ -1292,7 +1305,16 @@ fn a_missing_variable_is_named() {
     );
     assert_eq!(config.server_url, "value of INFERENCE_LLAMA_SERVER_URL");
     assert_eq!(config.server_model, "value of INFERENCE_LLAMA_SERVER_MODEL");
-    for missing in [STT_DIR_VARIABLE, SERVER_URL_VARIABLE, SERVER_MODEL_VARIABLE] {
+    assert_eq!(
+        config.tts_dir,
+        PathBuf::from("value of INFERENCE_SHERPA_ONNX_TTS_DIR")
+    );
+    for missing in [
+        STT_DIR_VARIABLE,
+        SERVER_URL_VARIABLE,
+        SERVER_MODEL_VARIABLE,
+        TTS_DIR_VARIABLE,
+    ] {
         let refused =
             LocalConfig::from_lookup(|name: &str| (name != missing).then(|| unset(name))?)
                 .expect_err("a variable is missing");
@@ -1357,8 +1379,7 @@ fn the_stt_variable_selects_the_recogniser_and_the_variable_of_its_checkpoint() 
 }
 
 /// The cascade planned with the adapter records of the configuration `lookup` answers: the
-/// recogniser's, the server's and the mock synthesiser's; no checkpoint is opened and no request
-/// sent.
+/// recogniser's, the server's and the synthesiser's; no checkpoint is opened and no request sent.
 fn planned_records(lookup: impl Fn(&str) -> Option<String>) -> (SttBackend, Vec<Capability>) {
     let config = LocalConfig::from_lookup(lookup).expect("every variable is set");
     let backend = config.stt.backend();
@@ -1368,7 +1389,7 @@ fn planned_records(lookup: impl Fn(&str) -> Option<String>) -> (SttBackend, Vec<
         [
             backend.adapter(),
             server_adapter(&config.server()).expect("the server's adapter is declared"),
-            synthesiser().adapter().clone(),
+            synthesiser_adapter(),
         ],
     )
     .unwrap_or_else(|refused| panic!("the cascade plans over {backend}: {refused}"));
@@ -1421,6 +1442,7 @@ fn an_stt_node_requiring_streaming_refuses_the_whispercpp_recogniser_naming_the_
             stt: SttConfig::WhisperCpp {
                 model: PathBuf::new(),
             },
+            tts_dir: PathBuf::new(),
             server_url: "http://127.0.0.1:8080/v1".to_owned(),
             server_model: "qwen".to_owned(),
             max_output_tokens: 32,
@@ -1431,11 +1453,7 @@ fn an_stt_node_requiring_streaming_refuses_the_whispercpp_recogniser_naming_the_
     let strict = |backend: SttBackend, declaration: &mut Declaration| {
         declare_requiring(
             declaration,
-            [
-                backend.adapter(),
-                server.clone(),
-                synthesiser().adapter().clone(),
-            ],
+            [backend.adapter(), server.clone(), synthesiser_adapter()],
             ADMITTED.to_vec(),
             &STREAMING_STT_REQUIRES,
         )
@@ -1564,4 +1582,151 @@ fn answers_each_turn_over(recogniser: SttConfiguration) {
         questions.len(),
         "each answer segment was played"
     );
+}
+
+#[test]
+fn the_synthesiser_refuses_a_directory_without_its_checkpoint_naming_the_file() {
+    let dir = Path::new("no such directory");
+    let refused = synthesiser(dir).expect_err("the directory holds no checkpoint");
+    assert!(
+        matches!(
+            &refused,
+            LocalRefused::SherpaOnnxTts(inference_sherpa_onnx_tts::OpenRefused::FileMissing {
+                path,
+                ..
+            }) if path.starts_with(dir)
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        refused.to_string().contains("no such directory"),
+        "{refused}"
+    );
+    assert!(
+        std::error::Error::source(&refused).is_some(),
+        "the adapter's refusal is the source"
+    );
+}
+
+#[test]
+fn the_record_of_the_synthesiser_claims_what_the_tts_node_requires_in_the_process() {
+    let record = synthesiser_adapter();
+    assert_eq!(record.capabilities(), STREAMING);
+    assert_eq!(record.locality(), Locality::SameProcess);
+}
+
+/// The directory `INFERENCE_SHERPA_ONNX_TTS_DIR` names; a missing variable fails the case,
+/// naming it.
+fn tts_dir() -> PathBuf {
+    std::env::var_os(TTS_DIR_VARIABLE)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("{TTS_DIR_VARIABLE} is not set"))
+}
+
+#[test]
+#[ignore = "needs the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech"]
+fn a_reply_is_spoken_through_the_synthesiser_into_the_recorded_speaker_with_no_socket_opened() {
+    let questions = ["how warm is it outside", "and will it rain"];
+    let speaking = synthesiser(&tts_dir()).unwrap_or_else(|refused| panic!("{refused}"));
+    let format = speaking.format();
+    let mocks = streaming_only_mocks(SttConfiguration::Incremental, questions.to_vec());
+    let host = FakeHost::laptop();
+    let mut declaration = Declaration::new();
+    let cascade = declare_local_adapters(
+        &mut declaration,
+        [
+            mocks.recogniser.adapter().clone(),
+            mocks.generator.adapter().clone(),
+            speaking.adapter().clone(),
+        ],
+    )
+    .expect("the cascade validates and plans over the synthesiser's adapter");
+    let run_id = RunId::generate();
+    let log = RunLog::new();
+    let run = cascade
+        .nodes_with(
+            run_id,
+            mocks,
+            move |_mock| speaking,
+            TurnStore::default(),
+            &log,
+            &host,
+            PlayoutConfig::default(),
+        )
+        .expect("the fake speaker opens");
+    let handles = run.handles.clone();
+    let _serial = serial();
+    let running = Running::start(run_id, &cascade, &declaration, run.implementations);
+    let mut microphone = Microphone::new(running.run_id);
+    running.send(microphone.say_frames(synthesize(&[
+        Stretch::Tone {
+            frames: 30,
+            hertz: 440,
+            amplitude: 0.5,
+        },
+        Stretch::Silence { frames: 80 },
+    ])));
+    running.send(vec![microphone.stop()]);
+    let finished = running.finish(&host, &handles);
+
+    finished.assert_completed(&cascade.ids, &handles);
+    let answers: Vec<String> = committed_segments(&finished.text)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(answers, questions, "one segment per span, the span's text");
+    assert_eq!(
+        handles
+            .tts
+            .played()
+            .iter()
+            .map(|segment| segment.state())
+            .collect::<Vec<_>>(),
+        [SegmentState::Played, SegmentState::Played],
+        "each answer segment was played"
+    );
+    let receipts = handles.sink.receipts();
+    assert_eq!(receipts.len(), questions.len());
+
+    let frames = host.played_frames();
+    assert!(
+        frames.iter().all(|frame| frame.format == format),
+        "every frame the speaker took is the synthesiser's {format:?}"
+    );
+    let samples: u64 = frames
+        .iter()
+        .map(|frame| u64::from(frame.sample_count))
+        .sum();
+    let rate = u64::from(format.sample_rate.get());
+    let peak = frames
+        .iter()
+        .flat_map(|frame| frame.data.as_chunks::<2>().0.iter())
+        .map(|sample| i16::from_le_bytes(*sample).unsigned_abs())
+        .max()
+        .unwrap_or_default();
+    println!(
+        "spoken: {answers:?}; the speaker took {} frames, {samples} samples of {:?} at {rate} Hz, \
+         {} channel, {} ms; peak {peak} of 32767; receipts of {:?} frames; sockets outside \
+         loopback: {:?} over {} polls of the egress watch",
+        frames.len(),
+        format.encoding,
+        format.channels,
+        samples * 1_000 / rate,
+        receipts
+            .iter()
+            .map(|receipt| receipt.frames)
+            .collect::<Vec<_>>(),
+        finished.tripped,
+        finished.polls,
+    );
+    assert_eq!(
+        receipts.iter().map(|receipt| receipt.frames).sum::<usize>(),
+        frames.len(),
+        "every frame the speaker took is in a receipt"
+    );
+    assert!(
+        samples > rate,
+        "two phrases last longer than a second: {samples} samples"
+    );
+    assert!(peak > 1_000, "the speaker took speech, not silence: {peak}");
 }
