@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:test-run-step-under-budget
 kind: story
-status: active
+status: implemented
 title: The test-run step ends within 120 s and synthesises the conformance suite once per run
 relations:
 - serves: vision:inference
@@ -37,10 +37,11 @@ scope:
   path: examples/repo-podcast/tests/adversary1_show.rs
 - confidence: inferred
   path: website/docs/guides/run-the-checks.md
-revision: 28
+revision: 29
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-24T12:32:05Z", actor: "human:operator", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-24T12:32:05Z", actor: "human:operator", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-24T19:11:03Z", actor: "human:operator", revision: 29, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 ## Context
 

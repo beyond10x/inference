@@ -6,7 +6,7 @@ status: draft
 title: 'Wave approved: the test-run step under its 120 s budget, one pull request (2026-11-24)'
 relations:
 - decides: story:test-run-step-under-budget
-revision: 1
+revision: 2
 ---
 ## Decision
 
@@ -62,8 +62,46 @@ operator when the checks are green. No tag, no version bump, no release.
 
 ## Integration
 
-Branch `wave/2026-11-24-test-budget`, from `origin/main` at `745fe77b6`.
+Branch `wave/2026-11-24-test-budget`, from `origin/main` at `745fe77b6`, with `origin/main` at
+`21cab7876` merged in.
 
 | unit | branch | worktree id | build directory | scratch | stage |
 |---|---|---|---|---|---|
-| U1 | `impl/test-run-step-under-budget` | `inference-u1-test-budget` | `target/` inside the unit's worktree | the unit's directory under the session scratch | planned |
+| U1 | `impl/test-run-step-under-budget` | `inference-u1-test-budget` | `target/` inside the unit's worktree | the unit's directory under the session scratch | merged at `7f43e7dd9`; story implemented |
+
+Result, measured on the forge's runner (workflow `check`, pull request 65):
+
+| head | `task test-run` | nextest summary |
+|---|---|---|
+| `34e8ac136` (first round) | failure, ended at its bound of 120 s | 3824 of 4043 tests run |
+| `8f900506f` | failure, ended at its bound in the doc tests | 114.187 s, 4056 passed |
+| `7ce339d92` | success, 90 s | 84.048 s, 3055 passed |
+| `7f43e7dd9` (merged) | success, 111 s | 102.142 s, 3059 passed |
+
+The last run was on a slower runner: its `task check-source` took 241 s against 179 s in the run
+before it. The step has 9 s to its bound on such a runner.
+
+Local gate on the integration branch at `1b9e7817f`: `task check-source` exit 0, `task test-build`
+exit 0, `task test-run` exit 201 with `3059 tests run: 3057 passed, 2 failed`. The two are
+`inference-elevenlabs::async_handles` `twenty_syntheses_wait_for_the_server_without_blocking_the_runtime`
+and `twenty_recognitions_wait_for_the_server_without_blocking_the_runtime`, which fail on the
+loaded build node at the base too and pass on the forge's runner; a story of the next wave fixes
+them.
+
+Reviews: two adversary passes, 6 and 4 findings, all introduced by the unit; the outcome of each
+is recorded as fixed. The story's second acceptance line was reworded to "once per distinct suite"
+after the second pass. The coordinator read the last correction's diff: additions only.
+
+Cost per agent (tokens as the harness reported them, tool uses, wall time):
+
+| agent | tokens | tool uses | wall |
+|---|---|---|---|
+| implementor, round 1 | 80,492 | 167 | 3,181,715 ms |
+| implementor, round 2 | 219,057 | 202 | 8,150,408 ms |
+| implementor, round 3 | 160,702 | 108 | 6,748,210 ms |
+| implementor, round 4 | 226,474 | 28 | 399,409 ms |
+| adversary, pass 1 | 158,781 | 41 | 6,612,288 ms |
+| adversary, pass 2 | 93,401 | 117 | 1,404,990 ms |
+| adversary, pass 2, report sent again | 102,196 | 0 | 60,200 ms |
+
+Left open by the wave: the two ticker tests above; the step's margin on a slow runner.
