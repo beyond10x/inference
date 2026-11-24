@@ -8,20 +8,36 @@ relations:
 - serves: vision:inference
 scope:
 - confidence: inferred
-  path: .github/workflows/check.yml
-- confidence: inferred
-  path: .github/workflows/slow.yml
-- confidence: inferred
   path: AGENTS.md
 - confidence: cited
+  path: CHANGELOG.md
+- confidence: cited
+  path: Cargo.lock
+- confidence: cited
   path: Taskfile.yml
-- confidence: inferred
-  path: crates/inference-docs/tests/workflows.rs
+- confidence: cited
+  path: adapters/inference-deepgram/tests/security2_agent_release.rs
+- confidence: cited
+  path: adapters/inference-openai/src/live.rs
+- confidence: cited
+  path: adapters/inference-openai/src/live_duplex.rs
+- confidence: cited
+  path: adapters/inference-openai/tests
+- confidence: cited
+  path: crates/inference-testkit/Cargo.toml
 - confidence: cited
   path: crates/inference-testkit/tests
+- confidence: cited
+  path: examples/realtime-voice/src/elevenlabs.rs
+- confidence: cited
+  path: examples/realtime-voice/tests
+- confidence: cited
+  path: examples/repo-podcast/src/show.rs
+- confidence: cited
+  path: examples/repo-podcast/tests/adversary1_show.rs
 - confidence: inferred
   path: website/docs/guides/run-the-checks.md
-revision: 13
+revision: 28
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-24T12:32:05Z", actor: "human:operator", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-24T12:32:05Z", actor: "human:operator", revision: 4}
@@ -66,33 +82,38 @@ unit's head: the step took 90 s.
 
 ## Scope
 
-Derived 2026-11-24 by `story-scoper` at `745fe77b6`; nothing was built or run. Every line is
-**cited** (read from the story or the tree) or **inferred** (a reading that could be wrong).
+Rewritten 2026-11-24 from the built unit (`impl/test-run-step-under-budget` at `7f43e7dd9`, base
+`0fe11ff08`): 51 files, read from `git diff --name-status`. The scoper's section of the same day
+named the testkit tests and `Taskfile.yml`; it did not foresee the adapters and the examples.
 
-- **Primary surface:** `crates/inference-testkit/tests` — cited (the story names the crate; all 13
-  synthesising tests are there)
-- **Files:** `conform.rs`, `adversary11_duplex_close_mutants.rs`,
-  `adversary12_duplex_close_witness.rs`, `adversary1_target.rs`, `adversary1_tools_target.rs`,
-  `adversary2_stream_deferred.rs`, `adversary_usage_view.rs`, `adversary_w23_descriptor_view.rs`,
-  `duplex_close_mutants.rs` under `crates/inference-testkit/tests/` — cited
-- **Files:** `Taskfile.yml:32-64` (`test-run`, `test-workspace`, `test-slowest`, `test-slow`) — cited
-- **Symbols:** nine private copies of `synthesized()` / `synthesized_suite()` / `ess()`, each
-  `Command::new("ess")` — cited
-- **Also likely:** `.github/workflows/slow.yml` (installs no `ess`, has no `ess/**` path) and
-  `.github/workflows/check.yml:143-145` — inferred, the slow-lane regeneration and a 120 s step bound
-- **Also likely:** `crates/inference-docs/tests/workflows.rs` — inferred, it pins the content of
-  `check.yml` and `slow.yml`
-- **Also likely:** a new shared module and a committed suite file under
-  `crates/inference-testkit/tests/` — inferred
-- **Documents:** `AGENTS.md:54-58`, `website/docs/guides/run-the-checks.md:36-77` — inferred, they
-  quote the task commands
-- **Confidence:** high for the testkit tests and `Taskfile.yml` (read in the tree); medium for the
-  workflow and document lines (they depend on which of the two accepted forms is built)
-- **Would collide with:** any unit touching `crates/inference-testkit/tests`, `Taskfile.yml`,
-  `.github/workflows/` or the `ess/` tree — cited
-- **Safety fact:** 10 of the 13 calls pass the same arguments (`--path ess --scenarios
-  ess/scenarios`) and every test edits only an in-memory copy of the suite
-  (`adversary1_target.rs:446`, `adversary2_stream_deferred.rs:244-256`), so one read-only file
-  serves them — cited, unproven for all nine files
-- **Safety fact:** whether `ess verify conform synthesize` writes the same bytes for the same
-  inputs was not checked; a byte comparison in the slow lane depends on it — inferred
+- **Primary surface:** `crates/inference-testkit/tests` (30 files) and
+  `crates/inference-testkit/Cargo.toml`
+  - `suite/mod.rs` and `conformance_suite.rs`: the shared suite, synthesised once per distinct
+    suite per run and kept under `target/` by the digest of its sources; two witness scenarios
+    under `suite/witness/`
+  - `target_self.rs` and `target_self/`: the 65 `target::` tests, run in one binary; `target/*.rs`
+    keep the code the other binaries use
+  - nine tests that synthesised on their own now read the shared suite: `conform.rs`,
+    `adversary11_duplex_close_mutants.rs`, `adversary12_duplex_close_witness.rs`,
+    `adversary1_target.rs`, `adversary1_tools_target.rs`, `adversary2_stream_deferred.rs`,
+    `adversary_usage_view.rs`, `adversary_w23_descriptor_view.rs`, `duplex_close_mutants.rs`; and
+    `adversary3_target_sequence.rs`
+  - `adversary_w1_test_budget.rs`: the first adversary pass's cases
+- **`Taskfile.yml`:** `test-run` ends at its bound of 120 s with a line naming it and exit 201,
+  and prints the ten slowest tests of the run that just ended
+- **`adapters/inference-openai`:** `src/live.rs`, `src/live_duplex.rs` (the close timeout as a
+  value) and eight test files (bounds as values, reads that end at a marker,
+  `adversary2_w1_script_end.rs`)
+- **`adapters/inference-deepgram/tests/security2_agent_release.rs`:** stalled openings wait 200 ms
+- **`examples/repo-podcast`:** `src/show.rs` (`Settings::silent_turn`), `tests/adversary1_show.rs`
+- **`examples/realtime-voice`:** `src/elevenlabs.rs` (`resolves_within`),
+  `tests/adversary2_u3_talk.rs`, `tests/adversary2_w1_key_check.rs`
+- **Documents:** `website/docs/guides/run-the-checks.md`, `AGENTS.md`; `Cargo.lock`
+- **Not touched, though the scoper thought it likely:** `.github/workflows/check.yml`,
+  `.github/workflows/slow.yml`, `crates/inference-docs/tests/workflows.rs`. The unit took the
+  cache-on-disk form, so no committed suite file and no slow lane were added.
+- **Known limits:** on the forge's runner image `timeout` is uutils coreutils, which kills only
+  its own child at the second signal; a part that ignored the first signal can run on until the
+  job ends (the guide says so). The local step fails on two ticker tests of
+  `inference-elevenlabs` when the build node is loaded; a story
+  of the next wave fixes them, and the forge's runner passes them.
