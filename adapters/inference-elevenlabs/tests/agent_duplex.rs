@@ -624,7 +624,7 @@ fn an_open_refused_before_it_connects_leaves_the_signed_url_for_the_next() {
     assert_eq!(server.connections(), 0);
     model
         .open(config())
-        .expect("the first open that dials has the signed URL");
+        .expect("the first open that gets past its configuration has the signed URL");
     assert!(matches!(
         model.open(config()),
         Err(OpenError::Failed(failure)) if failure.kind == SessionFailureKind::Rejected

@@ -43,8 +43,9 @@
 //!   only once the metadata arrived and its formats are the session's.
 //! - **Signed URL lifetime and reuse.** Not stated. A [`SignedUrl`] is used as given, for one
 //!   handshake: it carries a token, so it is held as a credential (zeroized on drop, only its
-//!   host in `Debug`, in no error), and a model gives it to the first open that dials and keeps
-//!   none of it, whether or not a session opened. A later open of that model fails as
+//!   host in `Debug`, in no error), and a model gives it to the first open that gets past its
+//!   configuration and its runtime and keeps none of it, whether or not a session opened or
+//!   anything connected. A later open that gets past them fails as
 //!   [`AgentError::SignedUrlSpent`] (`agent_duplex`).
 //! - **`ping_ms`.** One page reads it as a delay before the pong, another as estimated latency.
 //!   The binding answers every `ping` at once with its `event_id` and does not wait.

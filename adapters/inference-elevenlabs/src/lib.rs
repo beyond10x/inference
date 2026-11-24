@@ -87,16 +87,19 @@
 //! The Agents Platform binding (feature `duplex`) takes no key: a private agent's signed URL
 //! carries a token of its own, and the binding holds the URL as it holds a key. A model built
 //! with `ElevenLabsAgent::signed` keeps the URL in the one buffer it came in until the first
-//! open that dials, that is, starts the handshake. That open gives the buffer to its handshake,
-//! and when the handshake ends the buffer is zeroized, whatever happens next: the session
-//! opened, the connection could not be made, the server refused the upgrade, the handshake
-//! timed out or was cancelled, or the open was refused afterwards because the agent's formats
-//! are not the session's. From then on no field of the model, the session or an error holds the
-//! URL or its token, and the model keeps only the URL's host. So a signed URL opens at most one
-//! session: a later open of that model fails as `agent::AgentError::SignedUrlSpent` before
+//! open that gets past its configuration and its runtime: the binding takes the configuration
+//! and the runtime of the session was built. That open takes the buffer out of the model for
+//! its handshake, and when the open's handshake ends or is dropped the buffer is zeroized,
+//! whatever happens next: the session opened, no request could be built from the URL, the open
+//! was cancelled before the handshake was first polled, the connection could not be made, the
+//! server refused the upgrade, the handshake timed out or was cancelled, or the open was
+//! refused afterwards because the agent's formats are not the session's. From then on no field
+//! of the model, the session or an error holds the URL or its token, and the model keeps only
+//! the URL's host. So a signed URL opens at most one session: every later open that gets past
+//! its configuration and its runtime fails as `agent::AgentError::SignedUrlSpent` before
 //! anything connects, and the caller fetches a new URL and builds a new model, also for the
-//! open that corrects the formats an agent refused. Only an open refused before it dials leaves
-//! the URL with the model. Every copy of the token:
+//! open that corrects the formats an agent refused. Only an open refused for its configuration,
+//! or whose runtime could not be built, leaves the URL with the model. Every copy of the token:
 //!
 //! - the `agent::SignedUrl` the caller hands over, zeroized on drop. `SignedUrl::new` takes a
 //!   `String` as it is, and the URI of the handshake request is that same buffer, not a copy of

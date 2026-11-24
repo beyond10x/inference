@@ -1,12 +1,13 @@
 //! Adversary cases on the one-session signed URL of the agent binding, each driving the binding
 //! from the rule its documentation states: a model built with `ElevenLabsAgent::signed` gives
-//! its URL up to the first open that dials, whatever happens next, and only an open refused
-//! before it dials leaves the URL with the model.
+//! its URL up to the first open that gets past its configuration and its runtime, whatever
+//! happens next, and only an open refused for its configuration, or whose runtime could not be
+//! built, leaves the URL with the model.
 //!
-//! - An open the agent refuses for its formats has dialled: `ElevenLabsAgent::open_error` names
-//!   what the agent reported, and the open with the corrected configuration fails as
+//! - An open the agent refuses for its formats got past both: `ElevenLabsAgent::open_error`
+//!   names what the agent reported, and the open with the corrected configuration fails as
 //!   `AgentError::SignedUrlSpent`.
-//! - An open that met a closed port has dialled: the next open fails as
+//! - An open that met a closed port got past both: the next open fails as
 //!   `AgentError::SignedUrlSpent` and connects to nothing, though a server listens there by then.
 //!
 //! Every token here is synthetic: no provider issued it.
@@ -120,13 +121,14 @@ fn assert_spent(model: &mut ElevenLabsAgent, config: SessionConfig) {
             &second,
             Err(OpenError::Failed(failure)) if failure.kind == SessionFailureKind::Rejected
         ),
-        "the open after one that dialled was not refused as spent: {second:?}"
+        "the open after one that took the URL was not refused as spent: {second:?}"
     );
     assert_eq!(model.open_error(), Some(&AgentError::SignedUrlSpent));
 }
 
-/// An open the agent refuses for its formats has dialled, so it spends the URL: the error names
-/// the agent's formats, and the corrected open needs a model built with a new signed URL.
+/// An open the agent refuses for its formats got past its configuration and its runtime, so it
+/// spends the URL: the error names the agent's formats, and the corrected open needs a model
+/// built with a new signed URL.
 #[test]
 fn a_signed_model_refused_for_the_agents_formats_has_spent_its_url_for_the_corrected_open() {
     let server = agent_giving_24k();
@@ -146,8 +148,9 @@ fn a_signed_model_refused_for_the_agents_formats_has_spent_its_url_for_the_corre
     assert_eq!(server.connections(), 1, "the spent open connected");
 }
 
-/// An open that met a closed port has dialled, so it spends the URL, though it connected to
-/// nothing: the next open is refused and connects to no server that listens there by then.
+/// An open that met a closed port got past its configuration and its runtime, so it spends the
+/// URL, though it connected to nothing: the next open is refused and connects to no server that
+/// listens there by then.
 #[test]
 fn a_signed_model_whose_open_met_a_closed_port_has_spent_its_url_and_dials_no_later_listener() {
     let address = {
