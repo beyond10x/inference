@@ -202,6 +202,41 @@ fn record(directory: &Path) {
     writeln!(log, "{seconds} process {}", std::process::id()).expect("the log takes a line");
 }
 
+/// The suite `text` with only the scenarios whose id `keep` takes, as JSON text: for a test that
+/// reads the statuses of a few scenarios, which then admits and runs those and not the whole
+/// suite. Admitting the whole suite takes seconds, a run of it runs every scenario, and neither
+/// tells such a test anything: a scenario starts from empty stores and its status does not
+/// depend on another's.
+///
+/// The suite writes its event catalog, `events`, once for the scenarios that refer to it by
+/// `absent_events` or `unpublished_events`, and admission refuses a catalog no scenario refers
+/// to: the cut leaves it out when no scenario it keeps does.
+///
+/// # Panics
+/// When `text` is not a suite, or `keep` takes no scenario of it.
+#[allow(
+    dead_code,
+    reason = "a test file that runs the whole suite does not cut it"
+)]
+pub fn cut(text: &str, keep: impl Fn(&str) -> bool) -> String {
+    let mut suite: serde_json::Value = serde_json::from_str(text).expect("the suite is JSON");
+    let scenarios = suite["scenarios"]
+        .as_object_mut()
+        .expect("the suite's scenarios are a map");
+    scenarios.retain(|id, _| keep(id));
+    assert!(!scenarios.is_empty(), "the cut keeps a scenario");
+    let refers = scenarios.values().any(|scenario| {
+        scenario.get("absent_events").is_some() || scenario.get("unpublished_events").is_some()
+    });
+    if !refers {
+        suite
+            .as_object_mut()
+            .expect("the suite is a map")
+            .remove("events");
+    }
+    suite.to_string()
+}
+
 /// Where the suites of this repository are kept: under the target directory.
 pub fn cache_directory() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("conformance-suite")

@@ -273,13 +273,15 @@ impl ConformanceTarget for Mutant {
     }
 }
 
-/// The authored scenarios of `ess/scenarios` and the witness, synthesized together.
+/// The authored scenarios of the rule and the witness, synthesized with every scenario of
+/// `ess/scenarios` and cut out of that suite: the test reads no other scenario's status.
 fn synthesized() -> AdmittedSuite {
     let text = suite::synthesized(Some(suite::Added {
         file: "adversary-close-after-out-of-order-delivery.yaml",
         yaml: WITNESS_YAML,
     }));
-    AdmittedSuite::from_json(&text).expect("the synthesized suite is admitted")
+    let cut = suite::cut(&text, |id| AUTHORED.contains(&id) || id == WITNESS);
+    AdmittedSuite::from_json(&cut).expect("the cut suite is admitted")
 }
 
 fn statuses(admitted: &AdmittedSuite, mutation: Mutation, ids: &[&str]) -> Vec<(String, Status)> {
