@@ -9,4 +9,6 @@
 mod conformance;
 mod licence;
 mod open;
+mod record;
+mod resources;
 mod support;
