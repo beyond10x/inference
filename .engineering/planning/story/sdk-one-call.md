@@ -29,8 +29,8 @@ scope:
   path: crates/inference/tests/oneshot.rs
 revision: 24
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-24T13:08:07Z", actor: "human:timo", revision: 12}
-- {from: "proposed", to: "active", at: "2026-11-24T13:08:07Z", actor: "human:timo", revision: 13}
+- {from: "draft", to: "proposed", at: "2026-11-24T13:08:07Z", actor: "human:operator", revision: 12}
+- {from: "proposed", to: "active", at: "2026-11-24T13:08:07Z", actor: "human:operator", revision: 13}
 ---
 ## Context
 

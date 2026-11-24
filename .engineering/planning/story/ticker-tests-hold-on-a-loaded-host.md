@@ -14,8 +14,8 @@ scope:
   path: adapters/inference-elevenlabs/tests/async_handles.rs
 revision: 7
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-24T13:41:12Z", actor: "human:timo", revision: 2}
-- {from: "proposed", to: "active", at: "2026-11-24T13:41:12Z", actor: "human:timo", revision: 3}
+- {from: "draft", to: "proposed", at: "2026-11-24T13:41:12Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-24T13:41:12Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 

@@ -12,8 +12,8 @@ relations:
 - depends_on: story:sdk-one-call
 revision: 3
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-24T13:16:54Z", actor: "human:timo", revision: 2}
-- {from: "proposed", to: "active", at: "2026-11-24T13:16:54Z", actor: "human:timo", revision: 3}
+- {from: "draft", to: "proposed", at: "2026-11-24T13:16:54Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-24T13:16:54Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 
