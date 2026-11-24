@@ -9,7 +9,7 @@ relations:
 - decides: story:synthesiser-drop-inside-runtime
 - decides: story:local-tts-adapter-under-licence-policy
 - decides: story:signed-url-token-copies
-revision: 4
+revision: 6
 ---
 ## Decision
 
@@ -54,8 +54,9 @@ wave of the trajectory once the operator accepts them.
 
 ## Check
 
-`aep plan artifact waves --kind story --status active` on the wave's branch, run again after the
-scope of story:local-tts-adapter-under-licence-policy was written, printed:
+`aep plan artifact waves --kind story --status active` on the wave's branch, run again after
+story:ticker-tests-hold-on-a-loaded-host was accepted
+(approval-record:ticker-tests-accepted-2026-11-24), printed:
 
 ```
 wave 1
@@ -64,20 +65,26 @@ wave 1
   story:local-tts-adapter-under-licence-policy (inferred)
   story:sdk-one-call (inferred)
   story:signed-url-token-copies (inferred)
+  story:ticker-tests-hold-on-a-loaded-host
 wave 2
   story:realtime-voice-demo (inferred)
   story:synthesiser-drop-inside-runtime (inferred)
 collision: story:signed-url-token-copies story:synthesiser-drop-inside-runtime CHANGELOG.md (inferred)
 collision: story:signed-url-token-copies story:synthesiser-drop-inside-runtime adapters/inference-elevenlabs/src/lib.rs
+collision: story:synthesiser-drop-inside-runtime story:ticker-tests-hold-on-a-loaded-host adapters/inference-elevenlabs/tests/async_handles.rs (inferred)
 unassessed: story:sentence-clips-with-durations
 unassessed: story:speak-text-file-to-audio-file
-2 wave(s), 2 collision(s), 2 unassessed
+2 wave(s), 3 collision(s), 2 unassessed
 ```
 
 - U2 and U3 collide on `adapters/inference-elevenlabs/src/lib.rs` (U2 lines 41 and 52-55, U3 lines
-  71-88) and on `CHANGELOG.md`. They do not run at once: U3 runs first, and U2 is forked from the
-  integration branch after U3 has merged into it.
-- U4 is placed beside U1 and U3 and starts now.
+  71-88) and on `CHANGELOG.md`. They do not run at once in that file: U3 runs first, and the
+  integration branch is merged into U2's branch after U3 has merged, before U2 touches `src`.
+- story:ticker-tests-hold-on-a-loaded-host and story:synthesiser-drop-inside-runtime collide on
+  `adapters/inference-elevenlabs/tests/async_handles.rs`. One unit, U2, builds both, one after the
+  other: the ticker story first (it edits only that test file, so it runs beside U3), then the drop
+  story.
+- U4 is placed beside U1 and U3.
 - `CHANGELOG.md` is the coordinator's: each unit hands its lines over in its report.
 - `website/docs/reference/environment.md` is held for the coordinator where U4 needs it: U3 edits
   one sentence there, U4 hands its text over.
@@ -118,9 +125,9 @@ release.
 
 Branch `wave/2026-11-24-dub-voice`, from `origin/main` at `21cab7876`.
 
-| unit | branch | worktree id | build directory | scratch | stage |
-|---|---|---|---|---|---|
-| U1 | `impl/sdk-one-call` | `inference-w2-u1-one-call` | `target/` in the unit's worktree | `wave2/u1` under the session scratch | implementor running |
-| U2 | `impl/synthesiser-drop-inside-runtime` | `inference-w2-u2-drop` | `target/` in the unit's worktree | `wave2/u2` under the session scratch | waits for U3's merge |
-| U3 | `impl/signed-url-token-copies` | `inference-w2-u3-token` | `target/` in the unit's worktree | `wave2/u3` under the session scratch | implementor running |
-| U4 | `impl/local-tts-adapter` | `inference-w2-u4-local-tts` | `target/` in the unit's worktree | `wave2/u4` under the session scratch | scope written, implementor dispatched |
+| unit | stories | branch | worktree id | build directory | scratch | stage |
+|---|---|---|---|---|---|---|
+| U1 | story:sdk-one-call | `impl/sdk-one-call` | `inference-w2-u1-one-call` | `target/` in the unit's worktree | `wave2/u1` under the session scratch | green at `54d2130d5`, adversary pass 1 running |
+| U2 | story:ticker-tests-hold-on-a-loaded-host, then story:synthesiser-drop-inside-runtime | `impl/synthesiser-drop-inside-runtime` | `inference-w2-u2-drop` | `target/` in the unit's worktree | `wave2/u2` under the session scratch | ticker story green at `c825c01bc`, adversary pass 1 running; the drop story waits for U3's merge |
+| U3 | story:signed-url-token-copies | `impl/signed-url-token-copies` | `inference-w2-u3-token` | `target/` in the unit's worktree | `wave2/u3` under the session scratch | two adversary passes recorded, last correction running |
+| U4 | story:local-tts-adapter-under-licence-policy | `impl/local-tts-adapter` | `inference-w2-u4-local-tts` | `target/` in the unit's worktree | `wave2/u4` under the session scratch | implementor running |
