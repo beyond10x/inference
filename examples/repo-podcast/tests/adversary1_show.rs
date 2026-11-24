@@ -413,19 +413,25 @@ fn a_turn_that_stalls_before_its_end_still_leaves_the_show_a_closing_turn() {
     );
 }
 
+/// The bound is ten seconds unless the settings say otherwise, which the first assertion holds.
+/// The show here is given one second in its place, so the test does not wait the ten; it is
+/// given up within half a second of that bound and not before it.
 #[test]
 fn a_model_that_creates_its_own_responses_and_stays_silent_is_given_up_within_ten_seconds() {
+    assert_eq!(Settings::default().silent_turn, Duration::from_secs(10));
+    let silent_turn = Duration::from_secs(1);
     let (mut show, host) = open(
         MockSpeechModel::server_turns(Vec::new()),
         Settings {
             limit: Duration::from_secs(60),
             wait: Duration::from_millis(10),
+            silent_turn,
             ..Settings::default()
         },
     );
     let started = Instant::now();
     let mut problem = None;
-    while started.elapsed() < Duration::from_millis(11_000) {
+    while started.elapsed() < silent_turn + Duration::from_secs(1) {
         for event in show.step() {
             if let Event::Problem { detail, .. } = event {
                 problem.get_or_insert((started.elapsed(), detail));
@@ -438,13 +444,18 @@ fn a_model_that_creates_its_own_responses_and_stays_silent_is_given_up_within_te
         std::thread::sleep(Duration::from_millis(20));
     }
     let (after, detail) = problem.expect(
-        "the turn's liveness bound is ten seconds (turn_config, the commit message); after 11 s \
-         of dead air the silent turn is still not given up",
+        "the turn's liveness bound is ten seconds (turn_config, the commit message), one second \
+         here; a second after it of dead air the silent turn is still not given up",
     );
     assert!(
-        after <= Duration::from_millis(10_500),
+        after <= silent_turn + Duration::from_millis(500),
         "{after:?}: {detail}"
     );
+    assert!(
+        after >= silent_turn - Duration::from_millis(500),
+        "given up before the bound, {after:?}: {detail}"
+    );
+    assert!(detail.contains("for 1 s"), "{detail}");
 }
 
 #[test]
