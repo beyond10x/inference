@@ -42,6 +42,7 @@ use inference_text::{TurnCompleted, TurnNotFound};
 use inference_tools::{Tool, ToolCallId};
 use tokio::sync::mpsc;
 
+use super::topology::TOOL_EVENTS;
 use super::{Recipe, Topology};
 use crate::graph::Implementation;
 use crate::stack::{BoundRecogniser, Synthesis, default_session_config};
@@ -143,10 +144,12 @@ impl<'i> Run<'i> {
     /// binding's factory, such as a deferred recogniser that did not open.
     pub(super) fn node(&mut self, run_id: RunId, node: &Node) -> Result<Implementation, Error> {
         let implementation = self.built(run_id, node)?;
-        if matches!(self.recipe.topology, Topology::NativeVoice)
-            && node.name() == "speech"
-            && self.recipe.factory("authority").is_none()
-        {
+        let model = match self.recipe.topology {
+            Topology::NativeVoice => node.name() == "speech",
+            Topology::Chat => node.name() == "agent" && self.port(node, "tool_call").is_ok(),
+            _ => false,
+        };
+        if model && self.recipe.factory("authority").is_none() {
             let authority = self.authority(run_id)?;
             return Ok(Box::new(Closing {
                 inner: implementation,
@@ -156,8 +159,9 @@ impl<'i> Run<'i> {
         Ok(implementation)
     }
 
-    /// The implementation of `node` as given or bound, before `native_voice`'s speech node is
-    /// made to close its authority's hook.
+    /// The implementation of `node` as given or bound, before the model node of a tool loop,
+    /// `native_voice`'s speech node or the agent of `chat` given tools, is made to close its
+    /// authority's hook.
     fn built(&mut self, run_id: RunId, node: &Node) -> Result<Implementation, Error> {
         if let Some(factory) = self.recipe.factory(node.name()) {
             return Ok(factory(run_id, node));
@@ -381,6 +385,7 @@ impl<'i> Run<'i> {
             usage,
             tool_call: tools.map(|(tool_call, _)| tool_call),
             tool_result: tools.map(|(_, tool_result)| tool_result),
+            tool_events: tools.and_then(|_| self.port(node, TOOL_EVENTS).ok()),
         }))
     }
 
@@ -458,7 +463,7 @@ impl<'i> Run<'i> {
         })
     }
 
-    /// The handle of `native_voice`'s authority in the run `run_id`, building the authority
+    /// The handle of the run `run_id`'s tool authority, building the authority
     /// first if no node of the run built it yet: deciding calls of the recipe's tools, bounded
     /// by the feedback loop into its node, and sending every rejection on its port `rejected`.
     fn authority(&mut self, run_id: RunId) -> Result<AuthorityHandle, Error> {
@@ -574,8 +579,9 @@ impl TurnCommands for Turns {
     }
 }
 
-/// `native_voice`'s speech node, which closes its authority's hook as the run drains it, so
-/// that a call held for confirmation is denied and the session ends with no host answering it.
+/// The model node of a tool loop, `native_voice`'s speech node or the agent of `chat` given
+/// tools, which closes its authority's hook as the run drains it, so that a call held for
+/// confirmation is denied and the session ends with no host answering it.
 struct Closing {
     inner: Implementation,
     authority: AuthorityHandle,
@@ -934,6 +940,10 @@ struct Answered {
     replies: Replies,
     /// Whether the edge leaves the node's port `tool_call`, rather than its text port.
     proposals: bool,
+    /// The edge leaving the node's port [`TOOL_EVENTS`], held by an edge that leaves its port
+    /// `tool_call`: what the node sends on `tool_call`, a proposed call or the end of its
+    /// calls, is sent there first, so the session tells a call before the authority takes it.
+    events: Option<Arc<dyn OutputEndpoint<Payload>>>,
 }
 
 impl OutputEndpoint<Payload> for Answered {
@@ -946,19 +956,34 @@ impl OutputEndpoint<Payload> for Answered {
         } else {
             self.replies.sends(&envelope);
         }
-        self.inner.send(envelope)
+        let Some(events) = &self.events else {
+            return self.inner.send(envelope);
+        };
+        let told = EventEnvelope {
+            event_id: EventId::generate(),
+            port: TOOL_EVENTS.to_owned(),
+            causation_id: None,
+            ..envelope.clone()
+        };
+        Box::pin(async move {
+            // A session that no longer takes its events does not keep the call from its tool.
+            let _ = events.send(told).await;
+            self.inner.send(envelope).await
+        })
     }
 }
 
 /// A model node whose edges tell [`Replies`] what it answers: every input edge, every edge
 /// leaving its text port and every edge leaving its port `tool_call`; its `usage` port's edges
-/// are handed on as they are.
+/// are handed on as they are. The edges leaving its port [`TOOL_EVENTS`], which the node itself
+/// does not know, are kept from it and given to the edges leaving `tool_call`.
 struct Replying {
     inner: Implementation,
     replies: Replies,
     usage: Option<PortId>,
     tool_call: Option<PortId>,
     tool_result: Option<PortId>,
+    tool_events: Option<PortId>,
 }
 
 impl fmt::Debug for Replying {
@@ -992,19 +1017,28 @@ impl NodeImplementation<Payload> for Replying {
                 }),
             })
             .collect();
-        let outputs = endpoints
+        let (told, outputs): (Vec<_>, Vec<_>) = endpoints
             .outputs
+            .into_iter()
+            .partition(|output| self.tool_events == Some(output.port_id));
+        let events: Option<Arc<dyn OutputEndpoint<Payload>>> = told
+            .into_iter()
+            .next()
+            .map(|output| Arc::from(output.endpoint));
+        let outputs = outputs
             .into_iter()
             .map(|output| {
                 if self.usage == Some(output.port_id) {
                     return output;
                 }
+                let proposals = self.tool_call == Some(output.port_id);
                 NodeOutput {
                     port_id: output.port_id,
                     endpoint: Box::new(Answered {
                         inner: output.endpoint,
                         replies: self.replies.clone(),
-                        proposals: self.tool_call == Some(output.port_id),
+                        proposals,
+                        events: events.clone().filter(|_| proposals),
                     }),
                 }
             })

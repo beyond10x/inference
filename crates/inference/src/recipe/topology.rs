@@ -5,7 +5,8 @@
 //! which it sends the usage record of each model call; each of `voice_cascade`'s three model
 //! nodes declares one too, exposed as `stt_usage`, `agent_usage` and `tts_usage`, as egress
 //! names are unique in a pipeline; `native_voice`'s records travel on its `events`. `chat` given
-//! tools declares the tool loop `native_voice` declares, around its model node.
+//! tools declares the tool loop `native_voice` declares, around its model node, and one more
+//! egress, [`TOOL_EVENTS`], which carries each call its model proposes.
 
 use std::num::NonZeroUsize;
 
@@ -42,10 +43,24 @@ const USAGE: PortTraits = PortTraits {
     ..STREAM
 };
 
+/// A port of the tool loop: one event per step of a call, optional to its node.
+const TOOL: PortTraits = PortTraits {
+    essentiality: Essentiality::Optional,
+    incremental: false,
+    ..STREAM
+};
+
 const PAUSE: OverloadPolicy = OverloadPolicy::Pause;
 
+/// The port of `chat`'s model node, given tools, on which the run sends each call the model
+/// proposes, and the egress of the same name it is exposed as.
+pub(super) const TOOL_EVENTS: &str = "tool_events";
+
 /// `chat`'s topology. With `tools`, the recipe was given tools: its model node then requires
-/// `tool_calling` beside streaming and is wired to the runtime's tool nodes by [`tool_loop`].
+/// `tool_calling` beside streaming, is wired to the runtime's tool nodes by [`tool_loop`], and
+/// declares the port [`TOOL_EVENTS`], exposed as the egress of that name: each call the model
+/// proposes is sent on it before it reaches the authority, as `native_voice`'s speech node sends
+/// its calls on `events`, so the session tells a call before it is held, run or answered.
 pub(super) fn chat(
     pipeline: &mut Builder<'_, '_>,
     capacity: NonZeroUsize,
@@ -61,12 +76,16 @@ pub(super) fn chat(
     let input = pipeline.input::<modality::Text>(&agent, "user_input", STREAM);
     let output = pipeline.output::<modality::Text>(&agent, "committed_text", STREAM);
     let usage = pipeline.output::<modality::Structured>(&agent, USAGE_PORT, USAGE);
-    if tools {
+    let events = tools.then(|| {
         tool_loop(pipeline, &agent);
-    }
+        pipeline.output::<modality::Structured>(&agent, TOOL_EVENTS, TOOL)
+    });
     pipeline.expose(&input, "user_input", capacity, PAUSE);
     pipeline.expose(&output, "assistant_text", capacity, PAUSE);
     pipeline.expose(&usage, USAGE_PORT, capacity, PAUSE);
+    if let Some(events) = events {
+        pipeline.expose(&events, TOOL_EVENTS, capacity, PAUSE);
+    }
 }
 
 /// The runtime's tool nodes around `model`, wired as
@@ -76,11 +95,7 @@ pub(super) fn chat(
 /// node, and the executor's `outcomes` and the authority's `rejected` both return to the model's
 /// `tool_result` input.
 fn tool_loop<'b>(pipeline: &mut Builder<'_, 'b>, model: &NodeHandle<'b>) {
-    let structured = PortTraits {
-        essentiality: Essentiality::Optional,
-        incremental: false,
-        ..STREAM
-    };
+    let structured = TOOL;
     let fail = OverloadPolicy::Fail;
     let authority = pipeline.node("authority", NodeRole::Policy, Vec::new());
     let executor = pipeline.node("executor", NodeRole::Tool, Vec::new());

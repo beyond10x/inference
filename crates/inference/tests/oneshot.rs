@@ -550,6 +550,84 @@ async fn a_chat_whose_tool_calls_reach_the_loops_bound_ends_its_session_with_an_
     chat.close().await.expect("nothing is left to close");
 }
 
+/// A tool executor whose tool has a defect: every call of it panics.
+struct Defective;
+
+impl inference::tools::ToolExecutor for Defective {
+    fn execute<'a>(
+        &'a self,
+        _: &'a inference::tools::ToolCall,
+        _: std::time::Instant,
+        _: &'a inference::tools::CancellationSignal,
+    ) -> inference::tools::ExecutionFuture<'a> {
+        panic!("the tool has a defect")
+    }
+}
+
+/// A tool that panics fails its call and nothing else: the model is given the failure as the
+/// call's result and answers it, `send` returns that reply, and the conversation goes on over
+/// the same session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_whose_tool_panics_returns_the_models_reply_to_the_failed_call() {
+    use inference::tools::ToolExecutor;
+
+    let _held = SESSIONS.lock().await;
+    let tool = lookup();
+    let stack = chatting(&calling(&tool, 1));
+    let before = rows();
+    let mut chat = Chat::new_with(&stack)
+        .expect("plans")
+        .tool((tool, Box::new(Defective) as Box<dyn ToolExecutor>))
+        .expect("plans with the tool");
+
+    let reply = chat
+        .send("the weather in Berlin")
+        .await
+        .expect("the model answers the failed call");
+
+    assert!(
+        reply.contains("the tool has a defect"),
+        "the reply carries the failure the model was given: {reply}"
+    );
+    assert_eq!(chat.send("and now").await.expect("answers"), "and now");
+    assert_eq!(rows().len(), before.len() + 1, "one session took both");
+    chat.close().await.expect("closes");
+    one_closed_session_since(&before);
+}
+
+/// `chat` given tools has one exposure more than without them, the egress `tool_events`, on
+/// which its session is told each call the model proposes.
+#[tokio::test]
+async fn chat_given_tools_exposes_the_egress_tool_events() {
+    use inference::__private::serde_json::json;
+    use inference::Recipe;
+    use inference::tools::ToolExecutor;
+
+    let _held = SESSIONS.lock().await;
+    let exposures = |recipe: Recipe| -> Vec<String> {
+        let declaration = recipe.declaration();
+        let mut names: Vec<String> = declaration
+            .exposures()
+            .map(|exposure| exposure.name().to_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let executor: Box<dyn ToolExecutor> = Box::new(Recording {
+        answer: json!({}),
+        calls: std::sync::Arc::default(),
+    });
+
+    assert_eq!(
+        exposures(Recipe::chat()),
+        ["assistant_text", "usage", "user_input"]
+    );
+    assert_eq!(
+        exposures(Recipe::chat().tools([(lookup(), executor)])),
+        ["assistant_text", "tool_events", "usage", "user_input"]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refusal_is_an_error_of_its_send_and_the_conversation_goes_on() {
     let _held = SESSIONS.lock().await;

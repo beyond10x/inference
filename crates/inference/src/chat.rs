@@ -111,6 +111,11 @@ impl Chat {
     /// `tool_calling` of the `llm` binding. Give every tool before the first text: a session
     /// already open keeps the tools it was opened with.
     ///
+    /// A tool that fails, whether its function returns an error, panics or runs past the
+    /// executor's deadline, fails its call and nothing else: the model is given the failure as
+    /// that call's result and answers it, and [`Chat::send`] returns that reply. No error of the
+    /// tool is an error of the `send`.
+    ///
     /// # Errors
     ///
     /// Those of [`Recipe::instantiate`], such as an `llm` binding that does not claim

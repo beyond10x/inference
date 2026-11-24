@@ -167,7 +167,9 @@ impl Recipe {
 
     /// Text in, the `agent` LLM node, text out: ingress `user_input`, egresses `assistant_text`
     /// and `usage`, the usage record of each model call. Given tools ([`Recipe::tools`]), the
-    /// runtime's tool `authority` and `executor` nodes beside it, as in `native_voice`.
+    /// runtime's tool `authority` and `executor` nodes beside it, as in `native_voice`, and one
+    /// more egress, `tool_events`, which carries each call the model proposes, before the
+    /// authority takes it.
     #[must_use]
     pub fn chat() -> Self {
         Self::built_in(
@@ -324,8 +326,11 @@ impl Recipe {
     /// around its `agent` node, the nodes `authority` and `executor` bounded at
     /// [`MAX_TOOL_ITERATIONS`], requires `tool_calling` of its `llm` binding and offers the
     /// tools on the request its generation starts with; without tools it declares its one node
-    /// and offers none. A tool of a name given earlier is replaced. Every other recipe keeps
-    /// them unused.
+    /// and offers none. Its session tells each call the model proposes, on the egress
+    /// `tool_events`, and a call held for confirmation when the session closes is denied, both
+    /// as in `native_voice`. A tool whose executor fails or panics fails its call, and the model
+    /// is given the failure as the call's result. A tool of a name given earlier is replaced.
+    /// Every other recipe keeps them unused.
     #[must_use]
     pub fn tools(
         mut self,
