@@ -34,6 +34,7 @@ ess-conformance = { git = "https://github.com/beyond10x/ess", tag = "0.98.0" }
 ess-primitives = { git = "https://github.com/beyond10x/ess", tag = "0.98.0" }
 inference = { path = "../inference", features = ["testing"] }
 serde.workspace = true
+sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "time"] }
 
@@ -71,6 +72,10 @@ required-features = ["run"]
 
 [[test]]
 name = "adversary8_graph_views"
+required-features = ["run"]
+
+[[test]]
+name = "target_self"
 required-features = ["run"]
 
 [lints]

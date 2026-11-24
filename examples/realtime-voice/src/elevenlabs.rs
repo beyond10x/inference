@@ -167,7 +167,17 @@ pub fn generator() -> Result<inference_llm::Generator, Refused> {
 pub const KEY_WAIT: Duration = Duration::from_secs(8);
 
 /// Whether the ElevenLabs key resolves through `source` under `ELEVENLABS_KEY_NAME` within
-/// [`KEY_WAIT`]. The source's future is driven on a Tokio runtime of its own, on a thread of its
+/// [`KEY_WAIT`]: [`resolves_within`] with that wait.
+///
+/// # Errors
+///
+/// As [`resolves_within`].
+pub fn resolves(source: &dyn CredentialSource) -> Result<(), String> {
+    resolves_within(source, KEY_WAIT)
+}
+
+/// Whether the ElevenLabs key resolves through `source` under `ELEVENLABS_KEY_NAME` within
+/// `wait`. The source's future is driven on a Tokio runtime of its own, on a thread of its
 /// own, since a source such as the keychain's reads on Tokio's blocking pool, and the caller may
 /// be on a thread with no runtime or inside one. When the wait passes, the runtime is shut down
 /// without waiting for a read still blocked, which is left to end on its own. The wait bounds a
@@ -176,9 +186,9 @@ pub const KEY_WAIT: Duration = Duration::from_secs(8);
 ///
 /// # Errors
 ///
-/// Why it did not: the source's refusal, which never holds the key, no answer within
-/// [`KEY_WAIT`], no runtime to drive it on, or a panic of the source.
-pub fn resolves(source: &dyn CredentialSource) -> Result<(), String> {
+/// Why it did not: the source's refusal, which never holds the key, no answer within `wait`, no
+/// runtime to drive it on, or a panic of the source.
+pub fn resolves_within(source: &dyn CredentialSource, wait: Duration) -> Result<(), String> {
     thread::scope(|scope| {
         scope
             .spawn(|| {
@@ -189,14 +199,14 @@ pub fn resolves(source: &dyn CredentialSource) -> Result<(), String> {
                         format!("no runtime to resolve the ElevenLabs key on: {error}")
                     })?;
                 let answered = runtime.block_on(async {
-                    tokio::time::timeout(KEY_WAIT, source.resolve(ELEVENLABS_KEY_NAME)).await
+                    tokio::time::timeout(wait, source.resolve(ELEVENLABS_KEY_NAME)).await
                 });
                 runtime.shutdown_background();
                 answered
                     .map_err(|_| {
                         format!(
                             "the key source gave no answer within {} s",
-                            KEY_WAIT.as_secs()
+                            wait.as_secs_f64()
                         )
                     })?
                     .map(drop)

@@ -278,6 +278,34 @@ fn until(
     events
 }
 
+/// Events until `read` says the binding read the last message of the script and no event is left:
+/// every message of the script was read then, and the server sends no more before the close.
+/// While `read` does not say so, until twenty waits in a row deliver nothing.
+///
+/// The message `read` waits for is the last of the script. A message the server sends after it
+/// and before the close is not read here: the read ends within one wait of 100 ms after it,
+/// where the read of two seconds went on. `adversary2_w1_script_end.rs` holds that for the same
+/// read over the Realtime binding.
+fn until_read(
+    session: &mut OpenAiLiveSession,
+    read: impl Fn(&OpenAiLiveSession) -> bool,
+) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+    let mut idle = 0;
+    while idle < 20 {
+        let ended = read(session);
+        match session.next_event(if ended { Duration::ZERO } else { WAIT }) {
+            Some(event) => {
+                idle = 0;
+                events.push(event);
+            }
+            None if ended => break,
+            None => idle += 1,
+        }
+    }
+    events
+}
+
 /// Events until `count` responses completed.
 fn completed(session: &mut impl SpeechSessionHandle, count: usize) -> Vec<SessionEvent> {
     let seen = std::cell::Cell::new(0);
@@ -1286,7 +1314,9 @@ fn an_undecodable_message_does_not_end_the_session() {
         matches!(event, SessionEvent::OutputTranscriptDelta(_))
     });
     let response = created(&events)[0];
-    events.extend(until(&mut session, |_| false));
+    events.extend(until_read(&mut session, |session| {
+        !session.backend_usage().is_empty()
+    }));
     assert_eq!(session.backend_usage().len(), 1, "{events:#?}");
     assert_eq!(
         session.ledger().session().state(),
@@ -1350,7 +1380,7 @@ fn an_undecodable_message_is_counted_on_the_session() {
     let server = spoke_over_an_undecodable_message();
     let mut model = server.model();
     let mut session = model.open(config()).expect("the session opens");
-    let events = until(&mut session, |_| false);
+    let events = until_read(&mut session, |session| !session.backend_usage().is_empty());
     assert_eq!(session.ledger().unreadable_frames(), 1, "{events:#?}");
     let last = session.ledger().last_unreadable().unwrap_or_default();
     assert!(last.contains("not json"), "{last}");
@@ -1422,12 +1452,27 @@ fn a_session_closed_without_reason_or_usage_still_ends_the_session() {
     assert_eq!(session.ledger().unreadable_frames(), 1);
 }
 
+/// The close timeout of the sessions a model opens is the documented 15 seconds unless the model
+/// is given another.
+#[test]
+fn a_model_keeps_the_documented_close_timeout_unless_given_another() {
+    assert_eq!(CLOSE_TIMEOUT, Duration::from_secs(15));
+    let model = OpenAiLive::hosted(Box::new(FixedSource), OPENAI_KEY_NAME);
+    assert_eq!(model.close_timeout(), CLOSE_TIMEOUT);
+    let model = model.with_close_timeout(Duration::from_secs(2));
+    assert_eq!(model.close_timeout(), Duration::from_secs(2));
+}
+
 /// The close of a session whose server answers only with a running total and then messages the
-/// binding cannot read returns at `CLOSE_TIMEOUT`, the session closed, with the voice seconds it
-/// saw recorded as the session's usage, unconfirmed.
+/// binding cannot read returns at the model's close timeout, the session closed, with the voice
+/// seconds it saw recorded as the session's usage, unconfirmed. The close timeout here is 2 s in
+/// place of `CLOSE_TIMEOUT`, over a read timeout of 1 s, so the test does not wait the 15 s; the
+/// server sends for three times as long as the close is given.
 #[test]
 fn a_close_that_reaches_its_bound_keeps_the_usage_seen() {
-    let server = Server::start(|mut socket| async move {
+    let close_timeout = Duration::from_secs(2);
+    let limit = close_timeout + Duration::from_secs(3);
+    let server = Server::start(move |mut socket| async move {
         accept_start(&mut socket).await;
         let close = receive(&mut socket).await;
         assert_eq!(close["type"], "session.close");
@@ -1436,7 +1481,7 @@ fn a_close_that_reaches_its_bound_keeps_the_usage_seen() {
             json!({"type": "session.usage.updated", "event_id": "evt_u", "usage": {"seconds": 2.5}}),
         )
         .await;
-        let until = tokio::time::Instant::now() + CLOSE_TIMEOUT * 3;
+        let until = tokio::time::Instant::now() + limit * 3;
         while tokio::time::Instant::now() < until {
             if socket.send(Message::text("not json")).await.is_err() {
                 return;
@@ -1444,13 +1489,22 @@ fn a_close_that_reaches_its_bound_keeps_the_usage_seen() {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
-    let mut model = server.model();
+    let mut model = OpenAiLive::new(
+        server
+            .endpoint
+            .clone()
+            .with_read_timeout(Duration::from_secs(1)),
+        Box::new(FixedSource),
+        OPENAI_KEY_NAME,
+    )
+    .with_close_timeout(close_timeout);
     let mut session = model.open(config()).expect("the session opens");
     let started = std::time::Instant::now();
     session.close().expect("open");
+    assert!(started.elapsed() < limit, "{:?}", started.elapsed());
     assert!(
-        started.elapsed() < CLOSE_TIMEOUT + Duration::from_secs(3),
-        "{:?}",
+        started.elapsed() >= close_timeout - Duration::from_millis(100),
+        "the close returned before its bound: {:?}",
         started.elapsed()
     );
     assert_eq!(

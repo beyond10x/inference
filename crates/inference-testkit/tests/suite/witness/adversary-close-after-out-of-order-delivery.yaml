@@ -1,0 +1,116 @@
+type: ess-scenario/1
+domain: inference.duplex
+scenario: adversary-close-after-out-of-order-delivery
+summary: An event the caller had out of order before the close stays as it was, and the close of one session leaves what another holds.
+arrange:
+  - instance: model
+    entity: inference.model.Model
+  - instance: adapter
+    entity: inference.model.Adapter
+  - instance: a
+    entity: inference.duplex.SpeechSession
+  - instance: b
+    entity: inference.duplex.SpeechSession
+  - instance: a1
+    entity: inference.duplex.ReceivedSessionEvent
+  - instance: a2
+    entity: inference.duplex.ReceivedSessionEvent
+  - instance: a3
+    entity: inference.duplex.ReceivedSessionEvent
+  - instance: b1
+    entity: inference.duplex.ReceivedSessionEvent
+timeline:
+  - at: 2026-01-05T09:00:00Z
+    command: inference.model.DeclareModel
+    input:
+      family: speech
+      checkpoint: hosted
+      code_license: none
+      weight_license: none
+      checksum: none
+      input_modalities: [Audio]
+      output_modalities: [Audio, Text]
+      provenance: hosted endpoint
+      source_revision: r1
+    outcome: declared
+    capture: {instance: model, event: inference.model.ModelDeclared, field: model_id}
+  - at: 2026-01-05T09:00:01Z
+    command: inference.model.DeclareAdapter
+    input:
+      model_id: {$instance: model}
+      backend: realtime
+      contract_revision: r1
+      execution_form: hosted_service
+      locality: external_provider
+      capabilities: [output_streaming, incremental_input, concurrent_input_output, interruptible]
+      max_concurrency: 2
+      descriptor: {voices: [], codecs: [], rate_limits: []}
+    outcome: declared
+    capture: {instance: adapter, event: inference.model.AdapterDeclared, field: adapter_id}
+  - at: 2026-01-05T09:00:02Z
+    command: inference.duplex.OpenSpeechSession
+    input:
+      adapter_id: {$instance: adapter}
+      voice: calm
+      instructions: answer briefly
+      input_format: {encoding: pcm_s16le, sample_rate: 16000, channels: 1}
+      output_format: {encoding: pcm_s16le, sample_rate: 16000, channels: 1}
+      turn_detection: server_vad
+      auto_response: true
+      auto_interrupt: false
+      tools: []
+      idle_limit_ms: 15000
+    outcome: opened
+    capture: {instance: a, event: inference.duplex.SpeechSessionOpened, field: session_id}
+  - at: 2026-01-05T09:00:03Z
+    command: inference.duplex.OpenSpeechSession
+    input:
+      adapter_id: {$instance: adapter}
+      voice: calm
+      instructions: answer briefly
+      input_format: {encoding: pcm_s16le, sample_rate: 16000, channels: 1}
+      output_format: {encoding: pcm_s16le, sample_rate: 16000, channels: 1}
+      turn_detection: server_vad
+      auto_response: true
+      auto_interrupt: false
+      tools: []
+      idle_limit_ms: 15000
+    outcome: opened
+    capture: {instance: b, event: inference.duplex.SpeechSessionOpened, field: session_id}
+  - at: 2026-01-05T09:00:04Z
+    command: inference.duplex.ReceiveSessionEvent
+    input: {session_id: {$instance: a}, kind: output_transcript, sequence: 1}
+    outcome: received
+    capture: {instance: a1, event: inference.duplex.SessionEventReceived, field: received_id}
+  - at: 2026-01-05T09:00:05Z
+    command: inference.duplex.ReceiveSessionEvent
+    input: {session_id: {$instance: a}, kind: usage, sequence: 2}
+    outcome: received
+    capture: {instance: a2, event: inference.duplex.SessionEventReceived, field: received_id}
+  - at: 2026-01-05T09:00:06Z
+    command: inference.duplex.ReceiveSessionEvent
+    input: {session_id: {$instance: a}, kind: response_end, sequence: 3}
+    outcome: received
+    capture: {instance: a3, event: inference.duplex.SessionEventReceived, field: received_id}
+  - at: 2026-01-05T09:00:07Z
+    command: inference.duplex.ReceiveSessionEvent
+    input: {session_id: {$instance: b}, kind: usage, sequence: 1}
+    outcome: received
+    capture: {instance: b1, event: inference.duplex.SessionEventReceived, field: received_id}
+  - at: 2026-01-05T09:00:08Z
+    command: inference.duplex.DeliverSessionEvent
+    input: {received_id: {$instance: a3}}
+    outcome: delivered
+  - at: 2026-01-05T09:00:09Z
+    command: inference.duplex.CloseSpeechSession
+    input: {session_id: {$instance: a}}
+    outcome: closed
+assert:
+  - view: inference.duplex.ReceivedSessionEvents
+    contains: {received_id: {$instance: a1}, session_id: {$instance: a}, kind: output_transcript, sequence: 1, delivered_before: closed, state: Delivered}
+  - view: inference.duplex.ReceivedSessionEvents
+    contains: {received_id: {$instance: a2}, session_id: {$instance: a}, kind: usage, sequence: 2, delivered_before: closed, state: Delivered}
+  - view: inference.duplex.ReceivedSessionEvents
+    contains: {received_id: {$instance: a3}, session_id: {$instance: a}, kind: response_end, sequence: 3, delivered_before: null, state: Delivered}
+  - view: inference.duplex.ReceivedSessionEvents
+    contains: {received_id: {$instance: b1}, session_id: {$instance: b}, kind: usage, sequence: 1, delivered_before: null, state: Received}
