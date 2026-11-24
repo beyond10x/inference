@@ -801,11 +801,12 @@ fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
     let _serial = serial();
     let config = configured();
     let models = LocalModels::open(&config).unwrap_or_else(|refused| panic!("{refused}"));
+    let speaking = synthesiser(&tts_dir()).unwrap_or_else(|refused| panic!("{refused}"));
     assert_eq!(models.recogniser.backend(), config.stt.backend());
     let host = FakeHost::laptop();
     let mut declaration = Declaration::new();
-    let cascade =
-        declare_local(&mut declaration, &models).expect("the cascade validates and plans");
+    let cascade = declare_local(&mut declaration, &models, &speaking)
+        .expect("the cascade validates and plans");
     let effective = effective(&declaration, &cascade);
     println!("effective capabilities: {effective:?}");
     assert_eq!(effective, expected_effective(config.stt.backend()));
@@ -816,6 +817,7 @@ fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
         .local_nodes(
             run_id,
             models,
+            speaking,
             turns.clone(),
             &log,
             &host,
@@ -903,10 +905,11 @@ fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_t
     let _serial = serial();
     let config = configured();
     let models = LocalModels::open(&config).unwrap_or_else(|refused| panic!("{refused}"));
+    let speaking = synthesiser(&tts_dir()).unwrap_or_else(|refused| panic!("{refused}"));
     let host = FakeHost::laptop();
     let mut declaration = Declaration::new();
-    let cascade =
-        declare_local(&mut declaration, &models).expect("the cascade validates and plans");
+    let cascade = declare_local(&mut declaration, &models, &speaking)
+        .expect("the cascade validates and plans");
     let ids = cascade.ids;
     let run_id = RunId::generate();
     let log = RunLog::new();
@@ -914,6 +917,7 @@ fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_t
         .local_nodes(
             run_id,
             models,
+            speaking,
             TurnStore::default(),
             &log,
             &host,
@@ -1031,10 +1035,11 @@ fn the_clip_said_again_while_the_answer_plays_stops_it_and_supersedes_its_genera
     let _serial = serial();
     let config = configured();
     let models = LocalModels::open(&config).unwrap_or_else(|refused| panic!("{refused}"));
+    let speaking = synthesiser(&tts_dir()).unwrap_or_else(|refused| panic!("{refused}"));
     let host = FakeHost::laptop();
     let mut declaration = Declaration::new();
-    let cascade =
-        declare_local(&mut declaration, &models).expect("the cascade validates and plans");
+    let cascade = declare_local(&mut declaration, &models, &speaking)
+        .expect("the cascade validates and plans");
     let run_id = RunId::generate();
     let turns = TurnStore::default();
     let log = RunLog::new();
@@ -1042,6 +1047,7 @@ fn the_clip_said_again_while_the_answer_plays_stops_it_and_supersedes_its_genera
         .local_nodes(
             run_id,
             models,
+            speaking,
             turns.clone(),
             &log,
             &host,
@@ -1233,7 +1239,6 @@ fn a_server_whose_host_is_not_loopback_is_refused_before_anything_opens() {
             stt: SttConfig::SherpaOnnx {
                 dir: "no such directory".into(),
             },
-            tts_dir: "no such directory".into(),
             server_url: url.to_owned(),
             server_model: "qwen".to_owned(),
             max_output_tokens: 32,
@@ -1268,7 +1273,6 @@ fn a_refused_server_url_is_printed_without_its_userinfo() {
         stt: SttConfig::SherpaOnnx {
             dir: "no such directory".into(),
         },
-        tts_dir: "no such directory".into(),
         server_url: url.to_owned(),
         server_model: "qwen".to_owned(),
         max_output_tokens: 32,
@@ -1305,22 +1309,28 @@ fn a_missing_variable_is_named() {
     );
     assert_eq!(config.server_url, "value of INFERENCE_LLAMA_SERVER_URL");
     assert_eq!(config.server_model, "value of INFERENCE_LLAMA_SERVER_MODEL");
-    assert_eq!(
-        config.tts_dir,
-        PathBuf::from("value of INFERENCE_SHERPA_ONNX_TTS_DIR")
-    );
-    for missing in [
-        STT_DIR_VARIABLE,
-        SERVER_URL_VARIABLE,
-        SERVER_MODEL_VARIABLE,
-        TTS_DIR_VARIABLE,
-    ] {
+    for missing in [STT_DIR_VARIABLE, SERVER_URL_VARIABLE, SERVER_MODEL_VARIABLE] {
         let refused =
             LocalConfig::from_lookup(|name: &str| (name != missing).then(|| unset(name))?)
                 .expect_err("a variable is missing");
         assert_eq!(refused, LocalRefused::Missing(missing));
         assert!(refused.to_string().contains(missing), "{refused}");
     }
+}
+
+#[test]
+fn the_configuration_of_the_listening_models_does_not_ask_for_the_synthesisers_checkpoint() {
+    let asked = std::cell::RefCell::new(Vec::new());
+    let config = LocalConfig::from_lookup(|name: &str| {
+        asked.borrow_mut().push(name.to_owned());
+        (name != STT_VARIABLE && name != TTS_DIR_VARIABLE).then(|| format!("value of {name}"))
+    })
+    .expect("the recogniser's and the server's variables are set");
+    assert_eq!(config.server_url, "value of INFERENCE_LLAMA_SERVER_URL");
+    assert!(
+        !asked.borrow().iter().any(|name| name == TTS_DIR_VARIABLE),
+        "{asked:?}"
+    );
 }
 
 /// `lookup` answering `value` for [`STT_VARIABLE`] and every other variable but `unset`.
@@ -1442,7 +1452,6 @@ fn an_stt_node_requiring_streaming_refuses_the_whispercpp_recogniser_naming_the_
             stt: SttConfig::WhisperCpp {
                 model: PathBuf::new(),
             },
-            tts_dir: PathBuf::new(),
             server_url: "http://127.0.0.1:8080/v1".to_owned(),
             server_model: "qwen".to_owned(),
             max_output_tokens: 32,
@@ -1591,20 +1600,14 @@ fn the_synthesiser_refuses_a_directory_without_its_checkpoint_naming_the_file() 
     assert!(
         matches!(
             &refused,
-            LocalRefused::SherpaOnnxTts(inference_sherpa_onnx_tts::OpenRefused::FileMissing {
-                path,
-                ..
-            }) if path.starts_with(dir)
+            inference_sherpa_onnx_tts::OpenRefused::FileMissing { path, .. }
+                if path.starts_with(dir)
         ),
         "{refused:?}"
     );
     assert!(
         refused.to_string().contains("no such directory"),
         "{refused}"
-    );
-    assert!(
-        std::error::Error::source(&refused).is_some(),
-        "the adapter's refusal is the source"
     );
 }
 

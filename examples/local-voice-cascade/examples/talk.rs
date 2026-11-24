@@ -63,7 +63,7 @@ use inference_testkit::stream::StreamEvent;
 use local_voice_cascade::local::{
     LocalConfig, LocalModels, LocalRefused, MAX_OUTPUT_TOKENS, SERVER_MODEL_VARIABLE,
     SERVER_URL_VARIABLE, STT_DIR_VARIABLE, STT_VARIABLE, SttBackend, SttConfig, TTS_DIR_VARIABLE,
-    WHISPERCPP_MODEL_VARIABLE, declare_local,
+    WHISPERCPP_MODEL_VARIABLE, declare_local, synthesiser,
 };
 use local_voice_cascade::{
     AUDIO_INGRESS, CascadeHandles, TEXT_EGRESS, TRANSCRIPT_EGRESS, VoicePayload,
@@ -149,19 +149,20 @@ fn talk(args: Args) -> Result<(), Box<dyn Error>> {
     .ok_or(LocalRefused::Missing(args.stt.variable()))?;
     let config = LocalConfig {
         stt: SttConfig::new(args.stt, checkpoint),
-        tts_dir: args.tts_dir,
         server_url: args.server_url,
         server_model: args.server_model,
         max_output_tokens: args.max_output_tokens,
     };
     let models = LocalModels::open(&config)?;
+    let synthesiser = synthesiser(&args.tts_dir)?;
     let host = CpalHost::new();
     let mut declaration = Declaration::new();
-    let cascade = declare_local(&mut declaration, &models)?;
+    let cascade = declare_local(&mut declaration, &models, &synthesiser)?;
     let run_id = RunId::generate();
     let mut run = cascade.local_nodes(
         run_id,
         models,
+        synthesiser,
         TurnStore::default(),
         &RunLog::new(),
         &host,
