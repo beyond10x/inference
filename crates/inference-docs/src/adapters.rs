@@ -246,14 +246,14 @@ const BINDINGS: &[Binding] = &[
     Binding {
         name: "sherpa-onnx TTS",
         package: "inference-sherpa-onnx-tts",
-        runs: "TTS, streaming; in process, native library built with text-to-speech",
+        runs: "TTS, streaming by sentence: a segment of one sentence is delivered whole, after it is generated, and every segment of the local cascade is one; in process, native library built with text-to-speech",
         features: &[],
         record: Record::Capability(
             "records/tts-xeon-8375c-cpu.json",
             "Kokoro-82M v0.19, English",
         ),
         environment: "`INFERENCE_SHERPA_ONNX_TTS_DIR`",
-        licence: "code Apache-2.0 (sherpa-onnx 1.13.8), MIT (onnxruntime), MIT (piper-phonemize), GPL-3.0 (espeak-ng, admitted for this adapter alone by the owner's exception); weights and voices Apache-2.0; the checkpoint carries espeak-ng's phoneme data, GPL-3.0",
+        licence: "code Apache-2.0 (sherpa-onnx 1.13.8), MIT (onnxruntime), MIT (piper-phonemize), GPL-3.0 (espeak-ng, admitted for this adapter alone by the owner's exception), the four components whose licence was read, with eight further libraries of the native build not read; weights and voices Apache-2.0; the checkpoint carries espeak-ng's phoneme data, GPL-3.0",
         release: Release::Next,
     },
 ];

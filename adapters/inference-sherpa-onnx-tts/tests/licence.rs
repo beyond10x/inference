@@ -1,11 +1,14 @@
 //! The constraints of the owner's exception for espeak-ng, each held here: espeak-ng is a
 //! code-licence entry of its own beside sherpa-onnx's, in the model the adapter declares and in
-//! the crate's README; nothing of espeak-ng or of the native library is in the repository; and
-//! the adapter is opt-in, a dependency of no contract crate and of no other adapter. What the
-//! adapter declares about itself is held here too. Needs no weights.
+//! the crate's README, among the components whose licence was read at adoption, which are not
+//! every library of the native build; nothing of espeak-ng or of the native library is in the
+//! repository; and the adapter is opt-in, a dependency of no contract crate and of no other
+//! adapter, as Cargo reads the manifests. What the adapter declares about itself is held here
+//! too. Needs no weights.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use inference_sherpa_onnx_tts::inference_tts::CONTRACT_REVISION;
 use inference_sherpa_onnx_tts::inference_tts::inference_core::model::{
@@ -57,7 +60,7 @@ fn tree(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn espeak_ng_is_a_code_licence_entry_of_its_own_beside_sherpa_onnx() {
+fn of_the_licences_read_at_adoption_espeak_ng_is_an_entry_of_its_own_and_the_one_under_the_gpl() {
     let license_of = |component: &str| {
         let mut entries = CODE_LICENSES
             .iter()
@@ -76,7 +79,7 @@ fn espeak_ng_is_a_code_licence_entry_of_its_own_beside_sherpa_onnx() {
             .map(|entry| entry.component)
             .collect::<Vec<_>>(),
         ["espeak-ng"],
-        "espeak-ng is the one component under the GPL"
+        "of the components whose licence was read, espeak-ng is the one under the GPL"
     );
 }
 
@@ -202,38 +205,128 @@ fn nothing_of_espeak_ng_or_of_the_native_library_is_in_the_repository() {
     );
 }
 
+/// The packages of the workspace as Cargo itself reads their manifests: `cargo metadata
+/// --no-deps`, which resolves nothing and reaches no network. A dependency is seen there
+/// whatever form its line has: a table, a renamed, an inherited, an unspaced or a quoted key.
+fn workspace_packages() -> Vec<serde_json::Value> {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--offline",
+        ])
+        .current_dir(repository())
+        .output()
+        .expect("cargo is run");
+    assert!(
+        output.status.success(),
+        "cargo metadata: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("cargo metadata prints JSON");
+    metadata["packages"]
+        .as_array()
+        .expect("the metadata lists the packages")
+        .clone()
+}
+
 #[test]
 fn the_adapter_is_opt_in_a_dependency_of_the_offline_cascade_example_alone() {
     let repository = repository();
-    let dependents: Vec<PathBuf> = tree(&repository)
+    let packages = workspace_packages();
+
+    let read_by_cargo: Vec<PathBuf> = packages
+        .iter()
+        .filter_map(|package| package["manifest_path"].as_str())
+        .map(PathBuf::from)
+        .collect();
+    let unread: Vec<PathBuf> = tree(&repository)
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "Cargo.toml"))
-        .filter(|path| {
-            read(path)
-                .lines()
-                .any(|line| line.trim_start().starts_with(&format!("{CRATE} ")))
-        })
-        .map(|path| {
-            path.strip_prefix(&repository)
-                .expect("the manifest is in the repository")
-                .to_path_buf()
-        })
+        .filter(|path| *path != repository.join("Cargo.toml") && !read_by_cargo.contains(path))
+        .filter(|path| read(path).contains(CRATE))
         .collect();
     assert!(
-        dependents
-            .iter()
-            .all(|path| path == Path::new("examples/local-voice-cascade/Cargo.toml")),
-        "no contract crate, no other adapter and not the inference crate depends on {CRATE}: \
-         {dependents:?}"
+        unread.is_empty(),
+        "every manifest that names {CRATE} is one of a package of the workspace, so Cargo's \
+         reading covers it: {unread:?}"
     );
-    let cascade = read(&repository.join("examples/local-voice-cascade/Cargo.toml"));
-    if let Some(line) = cascade
-        .lines()
-        .find(|line| line.trim_start().starts_with(&format!("{CRATE} ")))
-    {
-        assert!(
-            line.contains("optional = true"),
-            "the example depends on {CRATE} behind its feature `local` only: {line}"
-        );
+
+    let mut dependents = Vec::new();
+    for package in &packages {
+        let name = package["name"].as_str().expect("a package has a name");
+        let dependencies = package["dependencies"]
+            .as_array()
+            .expect("a package lists its dependencies");
+        for dependency in dependencies {
+            if dependency["name"].as_str() == Some(CRATE) {
+                dependents.push((name.to_owned(), dependency.clone()));
+            }
+        }
     }
+    let [(dependent, dependency)] = dependents.as_slice() else {
+        panic!(
+            "one package depends on {CRATE}, the offline cascade example, and no contract crate, \
+             no other adapter and not the inference crate: {dependents:?}"
+        );
+    };
+    assert_eq!(dependent, "local-voice-cascade");
+    assert_eq!(
+        (
+            dependency["optional"].as_bool(),
+            dependency["kind"].as_str()
+        ),
+        (Some(true), None),
+        "the example takes {CRATE} as an optional dependency of its library: {dependency}"
+    );
+
+    let cascade = packages
+        .iter()
+        .find(|package| package["name"].as_str() == Some("local-voice-cascade"))
+        .expect("the example is a package of the workspace");
+    let features = cascade["features"]
+        .as_object()
+        .expect("a package lists its features");
+    let turned_on_by: Vec<&str> = features
+        .iter()
+        .filter(|(_, parts)| {
+            parts.as_array().is_some_and(|parts| {
+                parts
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|part| {
+                        let part = part.strip_prefix("dep:").unwrap_or(part);
+                        part.split(['/', '?']).next() == Some(CRATE)
+                    })
+            })
+        })
+        .map(|(feature, _)| feature.as_str())
+        .collect();
+    assert_eq!(
+        turned_on_by,
+        ["local"],
+        "only the example's feature `local` turns {CRATE} on"
+    );
+    let on_by_default = |feature: &str| {
+        let mut reached = vec!["default".to_owned()];
+        let mut at = 0;
+        while let Some(current) = reached.get(at).cloned() {
+            at += 1;
+            let parts = features.get(&current).and_then(serde_json::Value::as_array);
+            for part in parts.into_iter().flatten().filter_map(|part| part.as_str()) {
+                if !reached.iter().any(|reached| reached == part) {
+                    reached.push(part.to_owned());
+                }
+            }
+        }
+        reached.iter().any(|reached| reached == feature)
+    };
+    assert!(
+        !on_by_default("local"),
+        "the example's default features do not turn `local` on: {features:?}"
+    );
 }

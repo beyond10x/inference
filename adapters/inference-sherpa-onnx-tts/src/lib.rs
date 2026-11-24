@@ -26,9 +26,10 @@
 //! admits it by a named exception of its owner, only as part of the sherpa-onnx native library
 //! built with text-to-speech and of the `espeak-ng-data` directory a voice carries; neither is
 //! committed to or distributed by this repository. [`CODE_LICENSES`] lists it as an entry of its
-//! own beside sherpa-onnx's Apache-2.0. That is why this adapter is a crate of its own that no
-//! contract crate and no other adapter depends on: a build that does not name it links none of
-//! it.
+//! own beside sherpa-onnx's Apache-2.0; that list holds the four components whose licence was
+//! read at adoption and names the libraries of the native build it does not cover. That is why
+//! this adapter is a crate of its own that no contract crate and no other adapter depends on: a
+//! build that does not name it links none of it.
 //!
 //! sherpa-onnx publishes its shared library in two builds with one file name and one set of
 //! exported symbols, with and without text-to-speech. This crate links against either; which one
@@ -45,7 +46,14 @@
 //! [`SherpaOnnxSynthesis`]. A text with a NUL byte is not given to sherpa-onnx: the synthesis
 //! fails with [`SynthesisFailed::NulInText`], and [`speakable`] checks a text beforehand.
 //! Discarding the segment being generated, or dropping the synthesis, stops the generation at
-//! sherpa-onnx's next part.
+//! sherpa-onnx's next part, the end of the sentence it is generating.
+//!
+//! Neither waits for that, and no drop joins a thread. So one thread per generation in flight,
+//! and the native engine it holds, can outlive the synthesis and the last
+//! [`SherpaOnnxSynthesiser`] until the part in flight ends; the thread then releases the engine
+//! and ends. A segment of one sentence is one part: its frames are delivered together once the
+//! sentence is generated, and only a segment of several sentences delivers frames while later
+//! sentences are still generated.
 //!
 //! The synthesis's usage record is the contract's: the characters taken, the audio emitted and
 //! one request, with `local_compute_ms` `measured`, the time sherpa-onnx spent generating the
@@ -114,11 +122,20 @@ pub struct CodeLicense {
     pub source: &'static str,
 }
 
-/// The licences of the code that runs a voice, one entry per component of the sherpa-onnx native
-/// library built with text-to-speech: sherpa-onnx itself, onnxruntime, and the two phonemiser
-/// sources sherpa-onnx 1.13.8 builds in at the revisions its build files pin. espeak-ng is
-/// GPL-3.0 and is admitted by the repository owner's named exception only there and as the
-/// `espeak-ng-data` a voice carries.
+/// The licences of the code that runs a voice that were read when this adapter was adopted, one
+/// entry per component read: sherpa-onnx itself, onnxruntime, and the two phonemiser sources
+/// sherpa-onnx 1.13.8 builds in at the revisions its build files pin. espeak-ng is GPL-3.0 and is
+/// admitted by the repository owner's named exception only as part of the native library built
+/// with text-to-speech and as the `espeak-ng-data` a voice carries.
+///
+/// The list is not every component of that library. The build script of `sherpa-onnx-sys` 1.13.8
+/// names thirteen libraries (`build.rs:16-30`). The four entries here cover five of them:
+/// `sherpa-onnx-c-api` and `sherpa-onnx-core` are sherpa-onnx itself, and `onnxruntime`,
+/// `piper_phonemize` and `espeak-ng` have an entry each. The licences of the other eight were
+/// not read and have no entry: `kaldi-decoder-core`, `sherpa-onnx-kaldifst-core`,
+/// `sherpa-onnx-fstfar`, `sherpa-onnx-fst`, `kaldi-native-fbank-core`, `kissfft-float`, `ucd`
+/// and `ssentencepiece_core`. So [`code_license`] says which licences were read, not that no
+/// other licence applies.
 pub const CODE_LICENSES: [CodeLicense; 4] = [
     CodeLicense {
         component: "sherpa-onnx 1.13.8",
@@ -385,8 +402,11 @@ pub enum OpenRefused {
     /// The maximum concurrency is below 1.
     NonPositiveConcurrency(NonPositiveConcurrency),
     /// The file or directory at `path`, which the voice needs, is not there, is not readable or
-    /// is not of that kind.
+    /// is not of that kind: `kind` is [`NOT_REGULAR`] for a FIFO, a socket or a device where a
+    /// file is needed, which is not opened.
     FileMissing { path: PathBuf, kind: io::ErrorKind },
+    /// The file at `path` of a caller's own voice holds no byte. sherpa-onnx was not called.
+    FileEmpty { path: PathBuf },
     /// The file or tree at `path` is not the pinned one: its sha256 is `actual`, the pin
     /// `expected`.
     ChecksumMismatch {
@@ -413,6 +433,9 @@ impl fmt::Display for OpenRefused {
             Self::NonPositiveConcurrency(error) => fmt::Display::fmt(error, f),
             Self::FileMissing { path, kind } => {
                 write!(f, "the voice's {} is missing: {kind}", path.display())
+            }
+            Self::FileEmpty { path } => {
+                write!(f, "the voice's {} is empty", path.display())
             }
             Self::ChecksumMismatch {
                 path,
@@ -478,6 +501,10 @@ impl fmt::Display for SpeakerOutOfRange {
 
 impl Error for SpeakerOutOfRange {}
 
+/// The kind of the refusal of a path that is neither a regular file nor a directory, a FIFO, a
+/// socket or a device: reading one can block without end, so it is never opened.
+pub const NOT_REGULAR: io::ErrorKind = io::ErrorKind::Unsupported;
+
 fn hex(digest: impl AsRef<[u8]>) -> String {
     digest
         .as_ref()
@@ -508,7 +535,9 @@ fn sha256_of(path: &Path) -> io::Result<String> {
 ///
 /// # Errors
 ///
-/// The error of reading a directory or a file of the tree.
+/// The error of reading a directory or a file of the tree, and [`NOT_REGULAR`] for an entry that
+/// is neither a regular file nor a directory, which is not opened; what a symbolic link points to
+/// counts.
 pub fn tree_sha256(dir: &Path) -> io::Result<(usize, String)> {
     let mut files = Vec::new();
     let mut directories = vec![(dir.to_path_buf(), String::new())];
@@ -516,10 +545,16 @@ pub fn tree_sha256(dir: &Path) -> io::Result<(usize, String)> {
         for entry in fs::read_dir(&directory)? {
             let entry = entry?;
             let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
-            if entry.path().metadata()?.is_dir() {
+            let metadata = entry.path().metadata()?;
+            if metadata.is_dir() {
                 directories.push((entry.path(), format!("{name}/")));
-            } else {
+            } else if metadata.is_file() {
                 files.push((name, entry.path()));
+            } else {
+                return Err(io::Error::new(
+                    NOT_REGULAR,
+                    format!("{name} is neither a regular file nor a directory"),
+                ));
             }
         }
     }
@@ -531,15 +566,33 @@ pub fn tree_sha256(dir: &Path) -> io::Result<(usize, String)> {
     Ok((files.len(), hex(hasher.finalize())))
 }
 
-/// Refuses `path` unless it is a file, or a directory when `directory`.
+/// Refuses `path` unless it is a directory when `directory` and a regular file otherwise, by its
+/// metadata alone: nothing is opened. What a symbolic link points to counts; a FIFO, a socket or
+/// a device is neither and is refused with [`NOT_REGULAR`].
 fn present(path: PathBuf, directory: bool) -> Result<PathBuf, OpenRefused> {
     let kind = match path.metadata() {
-        Ok(metadata) if metadata.is_dir() == directory => return Ok(path),
+        Ok(metadata) if directory && metadata.is_dir() => return Ok(path),
+        Ok(metadata) if !directory && metadata.is_file() => return Ok(path),
         Ok(_) if directory => io::ErrorKind::NotADirectory,
-        Ok(_) => io::ErrorKind::IsADirectory,
+        Ok(metadata) if metadata.is_dir() => io::ErrorKind::IsADirectory,
+        Ok(_) => NOT_REGULAR,
         Err(error) => error.kind(),
     };
     Err(OpenRefused::FileMissing { path, kind })
+}
+
+/// Refuses the file at `path` of a caller's own voice unless it is a regular file that holds at
+/// least one byte, by its metadata alone.
+fn filled(path: PathBuf) -> Result<PathBuf, OpenRefused> {
+    let path = present(path, false)?;
+    match path.metadata() {
+        Ok(metadata) if metadata.len() > 0 => Ok(path),
+        Ok(_) => Err(OpenRefused::FileEmpty { path }),
+        Err(error) => Err(OpenRefused::FileMissing {
+            path,
+            kind: error.kind(),
+        }),
+    }
 }
 
 /// `path` as sherpa-onnx's configuration takes it.
@@ -637,8 +690,10 @@ impl SherpaOnnxSynthesiser {
     /// # Errors
     ///
     /// [`OpenRefused::NonPositiveConcurrency`] when `max_concurrency` is below 1, before any file
-    /// is read; [`OpenRefused::FileMissing`] naming the first of [`FILES`] that is not a file in
-    /// `dir`, or [`ESPEAK_NG_DATA`] when it is not a directory there;
+    /// is read; [`OpenRefused::FileMissing`] naming the first of [`FILES`] that is not a regular file
+    /// in `dir`, or [`ESPEAK_NG_DATA`] when it is not a directory there or holds an entry that is
+    /// neither a regular file nor a directory: such a path is refused by its metadata and never
+    /// opened, and what a symbolic link points to counts;
     /// [`OpenRefused::ChecksumMismatch`] naming the first whose sha256 differs from its pin;
     /// [`OpenRefused::PathNotUnicode`] when a path is not Unicode;
     /// [`OpenRefused::LibraryWithoutTts`] when the native library the process loaded was built
@@ -738,15 +793,31 @@ impl SherpaOnnxSynthesiser {
     /// and its codec at the voice's own sample rate. Nothing is checked against a pin. The
     /// synthesiser speaks in the voice at speaker id 0.
     ///
+    /// # A voice sherpa-onnx cannot load ends the process
+    ///
+    /// This adapter cannot make sherpa-onnx's own load of a file safe, and no refusal is returned
+    /// from inside it. A model file that is not an ONNX model aborts the process (`SIGABRT`: an
+    /// exception of the native library reaches the FFI boundary). A model sherpa-onnx can load
+    /// that is of another family than the VITS form it reads, a Kokoro model for one, ends the
+    /// process with exit status 255 and sherpa-onnx's message on standard error. Before
+    /// sherpa-onnx is called, only what costs a good voice nothing is checked: the model and the
+    /// tokens are regular files that hold at least one byte, and the phoneme data is a directory.
+    /// So open a voice only from a directory whose files are trusted, and in a child process when
+    /// the calling process has to outlive a voice that does not load. The pinned checkpoint is not
+    /// reached this way: [`SherpaOnnxSynthesiser::open`] checks each of its files against its
+    /// sha256 before sherpa-onnx reads any.
+    ///
     /// # Errors
     ///
     /// [`OpenRefused::NonPositiveConcurrency`] when `max_concurrency` is below 1, before any file
-    /// is read; [`OpenRefused::FileMissing`] naming `dir` when it cannot be listed, or
-    /// [`TOKENS`] or `espeak-ng-data` when it is not there; [`OpenRefused::VoiceModelNotSingle`]
-    /// when `dir` holds no `*.onnx` file or more than one; [`OpenRefused::PathNotUnicode`];
-    /// [`OpenRefused::LibraryWithoutTts`] when the native library the process loaded was built
-    /// without text-to-speech; and [`OpenRefused::BackendRefused`] when sherpa-onnx does not
-    /// create the synthesiser. No synthesiser is returned then.
+    /// is read; [`OpenRefused::FileMissing`] naming `dir` when it cannot be listed, or the model,
+    /// [`TOKENS`] or `espeak-ng-data` when it is not there or not a regular file or a directory
+    /// as needed; [`OpenRefused::VoiceModelNotSingle`] when `dir` holds no `*.onnx` file or more
+    /// than one; [`OpenRefused::FileEmpty`] naming the model or the tokens when it holds no byte;
+    /// [`OpenRefused::PathNotUnicode`]; [`OpenRefused::LibraryWithoutTts`] when the native
+    /// library the process loaded was built without text-to-speech; and
+    /// [`OpenRefused::BackendRefused`] when sherpa-onnx returns without a synthesiser, which it
+    /// does not do for every file it cannot load: see above. No synthesiser is returned then.
     pub fn open_voice_with(
         dir: impl AsRef<Path>,
         max_concurrency: i64,
@@ -763,7 +834,7 @@ impl SherpaOnnxSynthesiser {
             if path
                 .extension()
                 .is_some_and(|extension| extension == "onnx")
-                && path.is_file()
+                && !path.is_dir()
             {
                 models.push(path);
             }
@@ -774,7 +845,8 @@ impl SherpaOnnxSynthesiser {
                 found: models.len(),
             });
         };
-        let tokens = present(dir.join(TOKENS), false)?;
+        filled(model_path.clone())?;
+        let tokens = filled(dir.join(TOKENS))?;
         let data = present(dir.join("espeak-ng-data"), true)?;
         let created = create(
             dir,

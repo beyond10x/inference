@@ -114,16 +114,32 @@ fn the_record_lists_the_one_format_the_checkpoint_speaks() {
     let _: &[AudioFormat] = &record.audio_formats;
 }
 
+/// The peak resident memory a record of this checkpoint on a CPU of the measured class holds, in
+/// MiB: above the 82 million parameters as 32-bit floats, 313 MiB, and below four times the 483
+/// MiB measured.
+const MEMORY_MIB: std::ops::Range<i64> = 313..1_932;
+
+/// The load time such a record holds, in ms: hashing and loading the checkpoint takes more than
+/// 100 ms, and less than the 60 s a test may run; 8050 ms were measured.
+const LOAD_MS: std::ops::Range<i64> = 100..60_000;
+
 #[test]
 fn the_resource_profile_is_a_measured_cpu_profile() {
     let profile = load(&adapter()).resource_profile;
-    assert!(profile.peak_resident_memory_mib > 0, "{profile:?}");
-    assert!(profile.load_time_ms > 0, "{profile:?}");
+    assert!(
+        MEMORY_MIB.contains(&profile.peak_resident_memory_mib),
+        "the process that loaded the checkpoint and spoke peaked within {MEMORY_MIB:?} MiB: \
+         {profile:?}"
+    );
+    assert!(
+        LOAD_MS.contains(&profile.load_time_ms),
+        "checking and loading the checkpoint took within {LOAD_MS:?} ms: {profile:?}"
+    );
     assert!(
         profile
             .cpu_real_time_factor_milli
-            .is_some_and(|milli| milli > 0),
-        "the real-time factor of the one measured run is recorded: {profile:?}"
+            .is_some_and(|milli| (1..1_000).contains(&milli)),
+        "the synthesiser generates faster than real time on CPU: {profile:?}"
     );
     assert_eq!(profile.gpu_memory_mib, None, "no GPU is used: {profile:?}");
 }

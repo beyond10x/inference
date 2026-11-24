@@ -135,7 +135,10 @@ INFERENCE_LLAMA_SERVER_MODEL=qwen2.5-1.5b-instruct \
 ```
 
 The answer is printed and spoken. The synthesiser speaks each segment on its own and each delta of
-the server is a segment, so an answer is spoken delta by delta, without the prosody of a sentence.
+the server is a segment, so an answer is spoken delta by delta, without the prosody of a sentence,
+and it lasts longer than the sentence spoken whole. Measured with this synthesiser: a 12-word
+sentence offered as 13 word deltas came to 7133 ms of audio, against 3186 ms offered as one
+segment. Each such segment is delivered whole, once it is generated.
 
 Each variable is also an option:
 

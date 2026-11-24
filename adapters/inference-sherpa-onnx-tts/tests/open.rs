@@ -1,15 +1,22 @@
 //! The constructors' refusals against temporary directories of missing or wrong files, and
-//! against the native library built without text-to-speech: each names its cause, none panics,
-//! and nothing is declared. Needs no weights.
+//! against the native library built without text-to-speech: each names its cause, and nothing is
+//! declared. Each of them comes before sherpa-onnx is called, so none ends the process. A voice
+//! file that passes these checks and that sherpa-onnx cannot load does end it, inside the native
+//! load: `open_voice_with` documents that, and the boundary cases of the offline cascade example
+//! show it in a child process. Needs no weights.
 
 use std::fs;
 use std::io;
+use std::os::unix::fs::symlink;
 use std::path::Path;
+use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use inference_sherpa_onnx_tts::inference_tts::inference_core::model::NonPositiveConcurrency;
 use inference_sherpa_onnx_tts::{
-    ESPEAK_NG_DATA, FILES, FileRole, NATIVE_LIBRARY, NativeTts, OpenRefused, SherpaOnnxSynthesiser,
-    TOKENS, native_tts, tree_sha256,
+    ESPEAK_NG_DATA, FILES, FileRole, NATIVE_LIBRARY, NOT_REGULAR, NativeTts, OpenRefused,
+    SherpaOnnxSynthesiser, TOKENS, native_tts, tree_sha256,
 };
 
 use crate::support::scratch;
@@ -300,4 +307,147 @@ fn the_pinned_checkpoint_opens_and_its_phoneme_data_is_the_pinned_tree() {
     assert_eq!(synthesiser.format().sample_rate.get(), 24_000);
     assert!(synthesiser.clone().with_speaker(10).is_ok());
     assert!(synthesiser.with_speaker(11).is_err());
+}
+
+/// Makes a FIFO at `path`: a path that is neither a regular file nor a directory, and whose open
+/// for reading waits until something writes.
+fn fifo(path: &Path) {
+    let made = Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("mkfifo is run");
+    assert!(made.success(), "mkfifo {}", path.display());
+}
+
+/// What `open` answers, on a thread of its own: a constructor that opened a FIFO would wait
+/// there, and the case fails after 10 s instead of waiting with it.
+fn answered<T: Send + 'static>(open: impl FnOnce() -> T + Send + 'static) -> T {
+    let (answer, answers) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = answer.send(open());
+    });
+    answers
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the constructor answers at once: it opens no path that is not a regular file")
+}
+
+#[test]
+fn a_pinned_file_that_is_not_a_regular_file_is_refused_by_its_metadata_without_being_opened() {
+    for role in [FileRole::Model, FileRole::Voices, FileRole::Tokens] {
+        let dir = scratch(&format!("fifo-{role:?}"));
+        write_all_but(&dir, Some(role));
+        let path = dir.join(file_name(role));
+        fifo(&path);
+        let refused = answered(move || refusal(SherpaOnnxSynthesiser::open(&dir)));
+        assert_eq!(
+            refused,
+            OpenRefused::FileMissing {
+                path,
+                kind: NOT_REGULAR,
+            },
+            "{role:?} as a FIFO"
+        );
+    }
+}
+
+#[test]
+fn a_pinned_file_reached_through_a_symbolic_link_counts_as_the_file_it_points_to() {
+    let dir = scratch("linked");
+    write_all_but(&dir, Some(FileRole::Model));
+    let elsewhere = scratch("linked-to").join("a-model");
+    fs::write(&elsewhere, b"not the pinned file").expect("the file is written");
+    let model = dir.join(file_name(FileRole::Model));
+    symlink(&elsewhere, &model).expect("the link is made");
+    assert_eq!(
+        refusal(SherpaOnnxSynthesiser::open(&dir)),
+        OpenRefused::ChecksumMismatch {
+            path: model.clone(),
+            expected: FILES[0].sha256,
+            actual: WRONG_SHA256.to_owned(),
+        },
+        "the link to a regular file is read and hashed"
+    );
+    fs::remove_file(&elsewhere).expect("the file is removed");
+    assert_eq!(
+        refusal(SherpaOnnxSynthesiser::open(&dir)),
+        OpenRefused::FileMissing {
+            path: model,
+            kind: io::ErrorKind::NotFound,
+        },
+        "a link to nothing is a missing file"
+    );
+}
+
+#[test]
+fn a_tree_entry_that_is_neither_a_regular_file_nor_a_directory_is_refused_without_being_opened() {
+    let dir = scratch("tree-with-fifo");
+    fs::create_dir_all(dir.join("a")).expect("the directory is created");
+    fs::write(dir.join("b"), b"first").expect("the file is written");
+    let linked = scratch("tree-linked-to").join("c");
+    fs::write(&linked, b"second").expect("the file is written");
+    symlink(&linked, dir.join("a").join("c")).expect("the link is made");
+    let (files, _) = {
+        let dir = dir.clone();
+        answered(move || tree_sha256(&dir)).expect("a tree of files and links to files is read")
+    };
+    assert_eq!(files, 2, "the link to a regular file counts as a file");
+
+    fifo(&dir.join("a").join("pipe"));
+    let refused = answered(move || tree_sha256(&dir)).expect_err("the tree is refused");
+    assert_eq!(refused.kind(), NOT_REGULAR);
+    assert!(refused.to_string().contains("a/pipe"), "{refused}");
+}
+
+#[test]
+fn a_voice_file_that_is_empty_or_not_a_regular_file_is_refused_before_sherpa_onnx_is_called() {
+    // The library these cases run on has no text-to-speech: each refusal below comes before the
+    // one that names the library, so before any call into sherpa-onnx.
+    library_without_tts();
+
+    let dir = voice("voice-empty-model");
+    let model = dir.join("voice.onnx");
+    fs::write(&model, b"").expect("the file is written");
+    let refused = refusal(SherpaOnnxSynthesiser::open_voice(&dir));
+    assert_eq!(
+        refused,
+        OpenRefused::FileEmpty {
+            path: model.clone()
+        }
+    );
+    assert!(refused.to_string().contains("is empty"), "{refused}");
+
+    let dir = voice("voice-empty-tokens");
+    fs::write(dir.join(TOKENS), b"").expect("the file is written");
+    assert_eq!(
+        refusal(SherpaOnnxSynthesiser::open_voice(&dir)),
+        OpenRefused::FileEmpty {
+            path: dir.join(TOKENS)
+        }
+    );
+
+    let dir = voice("voice-fifo-model");
+    let model = dir.join("voice.onnx");
+    fs::remove_file(&model).expect("the file is removed");
+    fifo(&model);
+    let refused = answered(move || refusal(SherpaOnnxSynthesiser::open_voice(&dir)));
+    assert_eq!(
+        refused,
+        OpenRefused::FileMissing {
+            path: model,
+            kind: NOT_REGULAR,
+        }
+    );
+
+    let dir = voice("voice-fifo-tokens");
+    let tokens = dir.join(TOKENS);
+    fs::remove_file(&tokens).expect("the file is removed");
+    fifo(&tokens);
+    let refused = answered(move || refusal(SherpaOnnxSynthesiser::open_voice(&dir)));
+    assert_eq!(
+        refused,
+        OpenRefused::FileMissing {
+            path: tokens,
+            kind: NOT_REGULAR,
+        }
+    );
 }

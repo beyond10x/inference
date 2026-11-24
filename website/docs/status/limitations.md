@@ -54,10 +54,30 @@ The three native speech adapters are hosted services. A self-hosted native speec
   repository commits and distributes neither: a task fetches them to your machine, and whoever
   distributes a program with that library distributes GPL-3.0 code. Opening the synthesiser on the
   library without TTS is refused, naming the library. The pinned checkpoint speaks English at
-  24 kHz, and the archive is for Linux x86_64. Each segment is spoken on its own, and the local
-  cascade makes a segment of each delta of the language model, so an answer is spoken delta by
-  delta, without the prosody of a sentence. A voice of your own in the Piper format is opened
-  unpinned, its licence yours, at its own sample rate.
+  24 kHz, and the archive is for Linux x86_64.
+  - It streams output sentence by sentence. A segment of one sentence is delivered whole, after
+    it is generated; only a segment of several sentences delivers the frames of a sentence while
+    the next is generated. Every segment of the local cascade is a segment of one part.
+  - Each segment is spoken on its own, and the local cascade makes a segment of each delta of the
+    language model, so an answer is spoken delta by delta, without the prosody of a sentence and
+    longer than the sentence is. Measured: a 12-word sentence offered as 13 word deltas came to
+    7133 ms of audio, against 3186 ms offered as one segment.
+  - A discard or a drop stops a generation at the end of the sentence being generated. No drop
+    waits for that: one thread and the native engine can outlive the synthesiser until the
+    sentence is generated.
+  - In the local cascade a superseded answer is not cut at the synthesiser. The TTS node takes the
+    next event on its text input only once the segment it offered last is generated, so every
+    segment committed before the supersede is generated to its end. Measured twice with an answer of
+    three one-sentence segments, superseded within 3 ms of their commit: the speaker stopped at
+    once and dropped the 399 frames that still came, the last of them 2275 ms and 5671 ms after
+    the supersede on a shared machine, and the first frame of the next answer followed 760 ms and
+    1072 ms later.
+  - A voice of your own in the Piper format is opened unpinned, its licence yours, at its own
+    sample rate. A voice file that sherpa-onnx cannot load ends the process inside the native
+    load: an abort for a file that is not a model, exit status 255 for a model of another family.
+    The adapter checks beforehand only that the model and the tokens are regular files that are
+    not empty. The pinned checkpoint is not reached this way: its files are checked against their
+    sha256 before sherpa-onnx reads any.
 - **whisper.cpp** is a batch recogniser: it holds a whole utterance in memory until input ends,
   decodes at most 30 s per window, and claims no streaming capability. It runs on the CPU.
 - **llama-server**: cancelling closes the connection, and the adapter does not claim
@@ -85,8 +105,12 @@ If you need isolation, run the process in a network namespace or behind a firewa
 - Backend code is Apache-2.0 or MIT, or more permissive. One exception is named: espeak-ng,
   GPL-3.0, is admitted for the sherpa-onnx text-to-speech adapter alone, inside the sherpa-onnx
   native library built with TTS and the `espeak-ng-data` a voice carries. The adapter is a crate
-  of its own that nothing else depends on, and its record lists espeak-ng as a licence entry of
-  its own.
+  of its own that only the offline cascade example depends on, behind its feature `local`.
+  espeak-ng is a licence entry of its own in three places: the `code_license` of the `Model` the
+  adapter declares, the README of the crate, and the adapter's line on
+  [Adapters](../reference/adapters.md). The capability record file has no licence field. The
+  entries are the four components whose licence was read at adoption; the README names the eight
+  further libraries of the native build whose licence was not read.
 - Pinned weights are CC BY 4.0, or more permissive.
 - Each checkpoint's licence, source URL and hash go into the adapter's capability record when it is
   adopted. Any other licence needs an explicit decision for that checkpoint.

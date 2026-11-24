@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use inference_tts::inference_audio::{AudioFormat, AudioFrame, SampleClockPosition};
@@ -169,27 +168,53 @@ impl Drop for Place {
     }
 }
 
-/// The threads generating for one synthesiser, its clones and their syntheses. The last of those
-/// to be dropped waits for the threads still running, each of which was told to stop by then and
-/// ends when its native call returns, so no thread is inside sherpa-onnx once the synthesiser and
-/// its syntheses are gone.
+/// The threads generating for one synthesiser, its clones and their syntheses, as a count: no
+/// thread is joined. Dropping the last of those handles returns at once. A thread still inside
+/// sherpa-onnx was told to stop by then; it keeps the engine alive, ends when the engine asks at
+/// its next part whether to go on, and releases the engine then. So one thread per generation in
+/// flight, and the engine with it, can outlive the synthesiser and its syntheses until that part
+/// ends.
 #[derive(Debug, Default)]
-pub struct Workers(Mutex<Vec<JoinHandle<()>>>);
+pub struct Workers {
+    running: Mutex<usize>,
+    ended: Condvar,
+}
 
 impl Workers {
-    fn add(&self, worker: JoinHandle<()>) {
-        let mut workers = lock(&self.0);
-        workers.retain(|worker| !worker.is_finished());
-        workers.push(worker);
+    /// Counts one more thread; the thread holds what is returned until it has released the
+    /// engine.
+    fn enter(self: &Arc<Self>) -> Working {
+        *lock(&self.running) += 1;
+        Working(Arc::clone(self))
+    }
+
+    /// The threads that have not released the engine yet.
+    #[cfg(test)]
+    pub(crate) fn running(&self) -> usize {
+        *lock(&self.running)
+    }
+
+    /// Waits until no thread is left, at most `within`; whether none is left.
+    #[cfg(test)]
+    pub(crate) fn wait_idle(&self, within: Duration) -> bool {
+        let (running, _) = self
+            .ended
+            .wait_timeout_while(lock(&self.running), within, |running| *running > 0)
+            .unwrap_or_else(PoisonError::into_inner);
+        *running == 0
     }
 }
 
-impl Drop for Workers {
+/// One generating thread among [`Workers`], counted out when it is dropped.
+struct Working(Arc<Workers>);
+
+impl Drop for Working {
     fn drop(&mut self) {
-        let workers = std::mem::take(&mut *lock(&self.0));
-        for worker in workers {
-            let _ = worker.join();
+        {
+            let mut running = lock(&self.0.running);
+            *running = running.saturating_sub(1);
         }
+        self.0.ended.notify_all();
     }
 }
 
@@ -339,6 +364,7 @@ impl SherpaOnnxSynthesis {
         let worker = {
             let engine = Arc::clone(&self.voice.engine);
             let gate = Arc::clone(&self.voice.gate);
+            let working = self.voice.workers.enter();
             let (limit, speaker) = (self.limit, self.voice.speaker);
             let (stop, wake) = (Arc::clone(&stop), Arc::clone(&wake));
             std::thread::Builder::new()
@@ -366,11 +392,15 @@ impl SherpaOnnxSynthesis {
                     drop(place);
                     let _ = sender.send(Part::Ended { spent, spoken });
                     wake.wake();
+                    // The engine is released before the thread is counted out: whoever waits
+                    // for the count then finds the engine gone when no handle holds it.
+                    drop(engine);
+                    drop(working);
                 })
         };
         match worker {
-            Ok(worker) => {
-                self.voice.workers.add(worker);
+            // The thread is not joined: it ends by itself, see [`Workers`].
+            Ok(_) => {
                 self.live = Some(Live {
                     segment_id,
                     parts,
@@ -545,8 +575,12 @@ impl Iterator for SherpaOnnxSynthesis {
 }
 
 impl Drop for SherpaOnnxSynthesis {
-    /// Tells the generation in flight to stop at the engine's next part. It does not wait for
-    /// it.
+    /// Tells the generation in flight to stop at the engine's next part and returns without
+    /// waiting for it, also when this is the last handle of its synthesiser. The thread of that
+    /// generation, and the engine it holds, live on until the part in flight ends: sherpa-onnx
+    /// asks after each part, one sentence, whether to go on. A process that returns from `main`
+    /// before that ends the thread with it, and exits with the status `main` gave: the case
+    /// `process_end` of the crate's tests runs such a process.
     fn drop(&mut self) {
         self.stop_live();
     }

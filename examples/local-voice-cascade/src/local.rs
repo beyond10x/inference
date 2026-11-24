@@ -39,7 +39,9 @@
 //!
 //! The synthesiser speaks each segment on its own, and each delta of the server is a segment: an
 //! answer is spoken delta by delta, each with the prosody of a text of its own, a segment of
-//! punctuation alone without audio. The speaker resamples the synthesiser's 24 kHz to the
+//! punctuation alone without audio. A reply spoken that way lasts longer than the reply spoken
+//! whole (measured: 7133 ms against 3186 ms for a 12-word sentence in 13 deltas), and each such
+//! segment is delivered whole, once it is generated. The speaker resamples the synthesiser's 24 kHz to the
 //! device's rate.
 //!
 //! The LLM node is `inference-pipeline`'s `AgentNode`, which answers a turn's committed spans

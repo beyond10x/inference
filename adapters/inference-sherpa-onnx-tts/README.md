@@ -10,7 +10,8 @@ below.
 
 ## Licences of the code
 
-A voice is spoken by the sherpa-onnx native library built with text-to-speech. Its components:
+A voice is spoken by the sherpa-onnx native library built with text-to-speech. The components
+whose licence was read when this adapter was adopted:
 
 | Component | Licence | Source |
 |---|---|---|
@@ -18,6 +19,12 @@ A voice is spoken by the sherpa-onnx native library built with text-to-speech. I
 | onnxruntime | MIT | https://github.com/microsoft/onnxruntime |
 | piper-phonemize | MIT | https://github.com/csukuangfj/piper-phonemize/blob/f3ff95afc03640bc1399e113e83361192a2fafb4/LICENSE.md |
 | espeak-ng | GPL-3.0 | https://github.com/csukuangfj/espeak-ng/blob/ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING |
+
+The table is not every component of that library. The build script of `sherpa-onnx-sys` 1.13.8
+names thirteen libraries (`build.rs:16-30`). The four rows cover five of them: `sherpa-onnx-c-api`
+and `sherpa-onnx-core` are sherpa-onnx itself. The licences of the other eight were not read and
+have no row: `kaldi-decoder-core`, `sherpa-onnx-kaldifst-core`, `sherpa-onnx-fstfar`,
+`sherpa-onnx-fst`, `kaldi-native-fbank-core`, `kissfft-float`, `ucd` and `ssentencepiece_core`.
 
 espeak-ng turns text into phonemes for both kinds of voice this adapter opens. It is GPL-3.0, which
 the repository's licence rule for local adapters does not admit. The repository's owner made one
@@ -28,7 +35,8 @@ named exception, approval-record:sherpa-tts-gpl-phonemiser, with these bounds:
 - Nothing of it is committed to or distributed by this repository: no library, no archive, no data
   file. A test of this crate walks the repository for such files.
 - It is recorded as a code-licence entry of its own, here and in `CODE_LICENSES`, which fills the
-  `code_license` of the model the synthesiser declares.
+  `code_license` of the model the synthesiser declares. That field names the licences read, the
+  four rows above.
 
 Who builds a program on this adapter and distributes it with that library distributes GPL-3.0 code
 and decides for themselves what follows from it.
@@ -52,7 +60,9 @@ and decides for themselves what follows from it.
 
 The tree digest is the sha256 of one line `<sha256 of the file>  <path below the directory>` per
 file, in byte order of the paths (`tree_sha256`). `open` checks the three files and the tree before
-it calls sherpa-onnx and refuses a directory that differs, naming the file.
+it calls sherpa-onnx and refuses a directory that differs, naming the file. A path that is neither
+a regular file nor a directory, a FIFO for one, is refused by its metadata and never opened; what
+a symbolic link points to counts.
 
 ## A caller's own voice
 
@@ -63,6 +73,34 @@ model it declares for such a voice says so.
 
 The voice speaks at its own sample rate, for example 22.05 kHz. The synthesiser reports that rate
 in `format()` and in the `codecs` of its adapter's descriptor, and resamples nothing.
+
+A voice file that sherpa-onnx cannot load ends the process. The adapter cannot make sherpa-onnx's
+own load of a file safe, and no refusal comes back from inside it:
+
+- a model file that is not an ONNX model aborts the process (`SIGABRT`);
+- a model sherpa-onnx can load that is of another family than the VITS form it reads, a Kokoro
+  model for one, ends the process with exit status 255 and sherpa-onnx's message on standard error.
+
+Before sherpa-onnx is called, `open_voice` checks only what costs a good voice nothing: the model
+and `tokens.txt` are regular files that hold at least one byte (`OpenRefused::FileMissing`,
+`OpenRefused::FileEmpty`), and `espeak-ng-data` is a directory. So open a voice only from a
+directory whose files are trusted, and in a child process when the calling process has to outlive
+a voice that does not load. The pinned checkpoint is not reached this way: `open` checks each of
+its files against its sha256 before sherpa-onnx reads any.
+
+## A synthesis and its end
+
+A segment is generated on a thread of its own, and sherpa-onnx hands its audio over one part per
+sentence of the segment's text. A segment of one sentence is one part: its frames are delivered
+together once the sentence is generated. Only a segment of several sentences delivers the frames of
+a sentence while the next is generated.
+
+Discarding the segment being generated, or dropping the synthesis, tells sherpa-onnx to stop at its
+next part, the end of the sentence it is generating. Neither waits for that, and dropping the
+synthesis and the last synthesiser does not either: no drop joins a thread. So one thread per
+generation in flight, and the native engine it holds, can outlive every handle until that sentence
+is generated; the thread then releases the engine and ends. A process that returns from `main`
+while such a thread still generates ends with it, with the exit status `main` gave.
 
 ## The native library
 
@@ -95,10 +133,26 @@ The task checks both archives against their pinned sha256 before it unpacks them
 No test and no other task runs it.
 
 Outside this workspace nothing sets `SHERPA_ONNX_LIB_DIR`, so the build script of `sherpa-onnx-sys`
-downloads sherpa-onnx's shared archive for the target, which is the build with text-to-speech, and
-`cargo run` and `cargo test` start on it. A caller who wants a library of their own choosing sets
-`SHERPA_ONNX_LIB_DIR` to its directory at build time. A program started without `cargo` finds the
-library through the loader's search path, `LD_LIBRARY_PATH` or the system's.
+1.13.8 downloads sherpa-onnx's shared archive for the target, which is the build with
+text-to-speech and espeak-ng, and `cargo run` and `cargo test` start on it. That download is
+checked against no hash. For x86-64 Linux the archive and its pin are:
+
+| What | Value |
+|---|---|
+| Archive | https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-linux-x64-shared-lib.tar.bz2 |
+| Archive sha256 | `3892d184be41027e18165e67f549cd4e4cdd8dcd73ac5579e97afd55e14e30b6` |
+
+A caller outside this workspace who wants the library checked takes one of two routes:
+
+- Fetch the archive, compare its sha256 with the pin, and set `SHERPA_ONNX_ARCHIVE_DIR` at build
+  time to the directory that holds it. The build script then takes the archive from there and
+  downloads nothing; it does not check it either.
+- Unpack the checked archive and set `SHERPA_ONNX_LIB_DIR` at build time to its `lib` directory.
+  `task sherpa-onnx-tts` of this repository does the fetch, the check against that pin and the
+  unpacking, into `target/sherpa-onnx-tts/native/`.
+
+A program started without `cargo` finds the library through the loader's search path,
+`LD_LIBRARY_PATH` or the system's.
 
 ## Tests
 

@@ -2458,6 +2458,7 @@ version = "0.33.0"
 dependencies = [
  "inference-testkit",
  "inference-tts",
+ "serde_json",
  "sha2",
  "sherpa-onnx",
 ]

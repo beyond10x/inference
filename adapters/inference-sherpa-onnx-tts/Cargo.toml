@@ -19,6 +19,7 @@ path = "tests/main.rs"
 
 [dev-dependencies]
 inference-testkit = { path = "../../crates/inference-testkit", features = ["tts"] }
+serde_json.workspace = true
 
 [lints]
 workspace = true

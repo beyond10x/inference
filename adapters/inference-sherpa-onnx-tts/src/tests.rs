@@ -93,6 +93,9 @@ impl Engine for Scripted {
     }
 }
 
+/// How long a case waits for a thread of the scripted engine to end before it fails.
+const PATIENCE: Duration = Duration::from_secs(10);
+
 fn rate(sample_rate: u32) -> NonZeroU32 {
     NonZeroU32::new(sample_rate).expect("the rate is not zero")
 }
@@ -388,8 +391,10 @@ fn discarding_the_segment_being_generated_stops_the_engine_at_its_next_part() {
         .expect("a Queued segment is discarded");
     drop(permit);
     let rest: Vec<SynthesisEvent> = synthesis.by_ref().collect();
+    let workers = Arc::clone(&synthesiser.voice.workers);
     drop(synthesis);
     drop(synthesiser);
+    assert!(workers.wait_idle(PATIENCE), "every generation ends");
 
     assert!(
         rest.iter().all(|event| event.segment_id() != Some(ids[0])),
@@ -424,12 +429,64 @@ fn dropping_the_synthesis_stops_the_engine_at_its_next_part() {
         "the dropped synthesis gave its slot back at once"
     );
     drop(permit);
+    let workers = Arc::clone(&synthesiser.voice.workers);
     drop(synthesiser);
+    assert!(workers.wait_idle(PATIENCE), "the generation ends");
 
     assert_eq!(
         engine.handed(),
         2,
         "the part delivered and the part the engine was stopped at"
+    );
+}
+
+#[test]
+fn dropping_the_last_handle_does_not_wait_for_the_part_being_generated() {
+    let (engine, permit) = Scripted::speaking(1_000, 480).permitted(false);
+    let engine = Arc::new(engine);
+    let mut synthesiser = synthesiser(&engine, 1);
+    let mut synthesis = synthesiser.start().expect("one synthesis runs");
+    offer(&mut synthesis, &["A long text."]);
+    assert!(synthesis.next().is_some(), "the first part is delivered");
+    // The engine now waits for its permit inside the second part. From here on the handles and
+    // the thread generating are all that hold it.
+    let workers = Arc::clone(&synthesiser.voice.workers);
+    let held = Arc::downgrade(&engine);
+    drop(engine);
+
+    let (dropped, done) = mpsc::channel();
+    let dropping = std::thread::spawn(move || {
+        let before = Instant::now();
+        drop(synthesis);
+        drop(synthesiser);
+        let _ = dropped.send(before.elapsed());
+    });
+    let within = done.recv_timeout(Duration::from_millis(50));
+    let (running, handed) = (
+        workers.running(),
+        held.upgrade().map(|engine| engine.handed()),
+    );
+    // The permit lets the engine end its part and ask whether to go on.
+    drop(permit);
+    dropping.join().expect("the dropping thread ends");
+
+    assert!(
+        within.is_ok(),
+        "dropping the synthesis and the synthesiser while the engine generates a part returns \
+         within 50 ms, without waiting for the part"
+    );
+    assert_eq!(
+        (running, handed),
+        (1, Some(1)),
+        "after the drop the thread still generates the second part and keeps the engine alive"
+    );
+    assert!(
+        workers.wait_idle(PATIENCE),
+        "the thread ends once the part in flight has ended"
+    );
+    assert!(
+        held.upgrade().is_none(),
+        "the thread released the engine before it ended, and no handle holds it"
     );
 }
 
