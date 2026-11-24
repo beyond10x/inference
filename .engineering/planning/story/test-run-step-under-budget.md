@@ -6,7 +6,22 @@ status: active
 title: The test-run step ends within 120 s and synthesises the conformance suite once per run
 relations:
 - serves: vision:inference
-revision: 4
+scope:
+- confidence: inferred
+  path: .github/workflows/check.yml
+- confidence: inferred
+  path: .github/workflows/slow.yml
+- confidence: inferred
+  path: AGENTS.md
+- confidence: cited
+  path: Taskfile.yml
+- confidence: inferred
+  path: crates/inference-docs/tests/workflows.rs
+- confidence: cited
+  path: crates/inference-testkit/tests
+- confidence: inferred
+  path: website/docs/guides/run-the-checks.md
+revision: 12
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-24T12:32:05Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-24T12:32:05Z", actor: "human:timo", revision: 4}
@@ -40,3 +55,36 @@ own process, so an in-process global does not share it.
   testkit's tests calls synthesis once, or never when the committed file's digest matches.
 - No test of `inference-testkit` runs over 60 s locally at a load average above 120, and none is
   killed by the 60 s limit.
+
+## Scope
+
+Derived 2026-11-24 by `story-scoper` at `745fe77b6`; nothing was built or run. Every line is
+**cited** (read from the story or the tree) or **inferred** (a reading that could be wrong).
+
+- **Primary surface:** `crates/inference-testkit/tests` — cited (the story names the crate; all 13
+  synthesising tests are there)
+- **Files:** `conform.rs`, `adversary11_duplex_close_mutants.rs`,
+  `adversary12_duplex_close_witness.rs`, `adversary1_target.rs`, `adversary1_tools_target.rs`,
+  `adversary2_stream_deferred.rs`, `adversary_usage_view.rs`, `adversary_w23_descriptor_view.rs`,
+  `duplex_close_mutants.rs` under `crates/inference-testkit/tests/` — cited
+- **Files:** `Taskfile.yml:32-64` (`test-run`, `test-workspace`, `test-slowest`, `test-slow`) — cited
+- **Symbols:** nine private copies of `synthesized()` / `synthesized_suite()` / `ess()`, each
+  `Command::new("ess")` — cited
+- **Also likely:** `.github/workflows/slow.yml` (installs no `ess`, has no `ess/**` path) and
+  `.github/workflows/check.yml:143-145` — inferred, the slow-lane regeneration and a 120 s step bound
+- **Also likely:** `crates/inference-docs/tests/workflows.rs` — inferred, it pins the content of
+  `check.yml` and `slow.yml`
+- **Also likely:** a new shared module and a committed suite file under
+  `crates/inference-testkit/tests/` — inferred
+- **Documents:** `AGENTS.md:54-58`, `website/docs/guides/run-the-checks.md:36-77` — inferred, they
+  quote the task commands
+- **Confidence:** high for the testkit tests and `Taskfile.yml` (read in the tree); medium for the
+  workflow and document lines (they depend on which of the two accepted forms is built)
+- **Would collide with:** any unit touching `crates/inference-testkit/tests`, `Taskfile.yml`,
+  `.github/workflows/` or the `ess/` tree — cited
+- **Safety fact:** 10 of the 13 calls pass the same arguments (`--path ess --scenarios
+  ess/scenarios`) and every test edits only an in-memory copy of the suite
+  (`adversary1_target.rs:446`, `adversary2_stream_deferred.rs:244-256`), so one read-only file
+  serves them — cited, unproven for all nine files
+- **Safety fact:** whether `ess verify conform synthesize` writes the same bytes for the same
+  inputs was not checked; a byte comparison in the slow lane depends on it — inferred
