@@ -14,7 +14,7 @@ use inference_duplex::{
     NativeSpeechModel, SessionConfig, SessionEvent, SpeechSessionHandle, TurnDetection, TurnTuning,
 };
 use inference_openai::live::LIVE_MODEL;
-use inference_openai::live_duplex::OpenAiLive;
+use inference_openai::live_duplex::{OpenAiLive, OpenAiLiveSession};
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Endpoint, OPENAI_KEY_NAME,
 };
@@ -178,28 +178,6 @@ fn config() -> SessionConfig {
     }
 }
 
-fn until(
-    session: &mut impl SpeechSessionHandle,
-    stop: impl Fn(&SessionEvent) -> bool,
-) -> Vec<SessionEvent> {
-    let mut events = Vec::new();
-    let mut idle = 0;
-    while idle < 20 {
-        match session.next_event(WAIT) {
-            Some(event) => {
-                idle = 0;
-                let done = stop(&event);
-                events.push(event);
-                if done {
-                    break;
-                }
-            }
-            None => idle += 1,
-        }
-    }
-    events
-}
-
 /// The close of a GPT-Live session ends whatever the server sends. A server that answers
 /// `session.close` with undecodable text every 100 ms and never `session.closed` holds
 /// `LiveClient::close`, and with it `SpeechSessionHandle::close`, for as long as it keeps
@@ -244,6 +222,29 @@ fn a_close_answered_only_by_undecodable_messages_returns() {
     );
 }
 
+/// Events until `read` says the binding read the last message of the script and no event is left:
+/// every message of the script was read then, and the server sends no more before the close.
+/// While `read` does not say so, until twenty waits in a row deliver nothing.
+fn until_read(
+    session: &mut OpenAiLiveSession,
+    read: impl Fn(&OpenAiLiveSession) -> bool,
+) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+    let mut idle = 0;
+    while idle < 20 {
+        let ended = read(session);
+        match session.next_event(if ended { Duration::ZERO } else { WAIT }) {
+            Some(event) => {
+                idle = 0;
+                events.push(event);
+            }
+            None if ended => break,
+            None => idle += 1,
+        }
+    }
+    events
+}
+
 /// The usage a backend `response.completed` reports is billable, and the binding needs nothing
 /// else from it: it sums usage onto its own response. One without `response.id` is dropped whole,
 /// so its tokens are never counted and nothing says so.
@@ -269,7 +270,7 @@ fn backend_usage_of_a_completed_event_without_an_id_is_counted() {
     });
     let mut model = server.model();
     let mut session = model.open(config()).expect("the session opens");
-    let events = until(&mut session, |_| false);
+    let events = until_read(&mut session, |session| session.backend_usage().len() >= 2);
     assert_eq!(
         session.backend_usage().len(),
         2,

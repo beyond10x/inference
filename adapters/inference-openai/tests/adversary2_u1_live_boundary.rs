@@ -183,6 +183,14 @@ fn config() -> SessionConfig {
     }
 }
 
+/// The message the script sends after its last frame: an `error` event. The binding counts it on
+/// the session, records nothing for it and ends nothing by it.
+fn script_end() -> Value {
+    json!({"type": "error", "event_id": "evt_end", "error": {
+        "type": "invalid_request_error", "message": "the script ended"
+    }})
+}
+
 /// The server: an answer, the caller's speech over it in two input fragments, the cut sentence
 /// going on (" a ship", " today") while the second input fragment is still to come, then the
 /// next words after the speech ended. `second` is where the second input fragment starts.
@@ -207,6 +215,7 @@ fn cut_sentence_outruns_the_speech(second: u64) -> Server {
         for _ in 0..10 {
             send(&mut socket, silent()).await;
         }
+        send(&mut socket, script_end()).await;
         let close = receive(&mut socket).await;
         assert_eq!(close["type"], "session.close");
         send(
@@ -218,7 +227,9 @@ fn cut_sentence_outruns_the_speech(second: u64) -> Server {
     })
 }
 
-/// Every event of the session, through its close.
+/// Every event of the session, through its close. It closes when three responses completed, or
+/// when the binding read [`script_end`] and has no event left: every message of the script was
+/// read then. Without that message, when two seconds pass with no event.
 fn run(server: Server) -> Vec<SessionEvent> {
     let mut model = server.model();
     let mut session = model.open(config()).expect("the session opens");
@@ -226,7 +237,8 @@ fn run(server: Server) -> Vec<SessionEvent> {
     let mut idle = 0;
     let mut completed = 0;
     while idle < 20 && completed < 3 {
-        match session.next_event(WAIT) {
+        let ended = session.server_error_count() > 0;
+        match session.next_event(if ended { Duration::ZERO } else { WAIT }) {
             Some(event) => {
                 idle = 0;
                 if matches!(event, SessionEvent::ResponseCompleted(_)) {
@@ -234,6 +246,7 @@ fn run(server: Server) -> Vec<SessionEvent> {
                 }
                 events.push(event);
             }
+            None if ended => break,
             None => idle += 1,
         }
     }

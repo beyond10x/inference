@@ -278,6 +278,29 @@ fn until(
     events
 }
 
+/// Events until `read` says the binding read the last message of the script and no event is left:
+/// every message of the script was read then, and the server sends no more before the close.
+/// While `read` does not say so, until twenty waits in a row deliver nothing.
+fn until_read(
+    session: &mut OpenAiLiveSession,
+    read: impl Fn(&OpenAiLiveSession) -> bool,
+) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+    let mut idle = 0;
+    while idle < 20 {
+        let ended = read(session);
+        match session.next_event(if ended { Duration::ZERO } else { WAIT }) {
+            Some(event) => {
+                idle = 0;
+                events.push(event);
+            }
+            None if ended => break,
+            None => idle += 1,
+        }
+    }
+    events
+}
+
 /// Events until `count` responses completed.
 fn completed(session: &mut impl SpeechSessionHandle, count: usize) -> Vec<SessionEvent> {
     let seen = std::cell::Cell::new(0);
@@ -1286,7 +1309,9 @@ fn an_undecodable_message_does_not_end_the_session() {
         matches!(event, SessionEvent::OutputTranscriptDelta(_))
     });
     let response = created(&events)[0];
-    events.extend(until(&mut session, |_| false));
+    events.extend(until_read(&mut session, |session| {
+        !session.backend_usage().is_empty()
+    }));
     assert_eq!(session.backend_usage().len(), 1, "{events:#?}");
     assert_eq!(
         session.ledger().session().state(),
@@ -1350,7 +1375,7 @@ fn an_undecodable_message_is_counted_on_the_session() {
     let server = spoke_over_an_undecodable_message();
     let mut model = server.model();
     let mut session = model.open(config()).expect("the session opens");
-    let events = until(&mut session, |_| false);
+    let events = until_read(&mut session, |session| !session.backend_usage().is_empty());
     assert_eq!(session.ledger().unreadable_frames(), 1, "{events:#?}");
     let last = session.ledger().last_unreadable().unwrap_or_default();
     assert!(last.contains("not json"), "{last}");

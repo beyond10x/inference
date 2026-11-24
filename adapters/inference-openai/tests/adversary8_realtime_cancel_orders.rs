@@ -19,7 +19,7 @@ use inference_duplex::{
     NativeSpeechModel, QuantityKind, ResponseId, SessionConfig, SessionEvent, SpeechSessionHandle,
     TurnDetection, TurnTuning,
 };
-use inference_openai::duplex::OpenAiRealtime;
+use inference_openai::duplex::{OpenAiRealtime, OpenAiRealtimeSession};
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Endpoint, OPENAI_KEY_NAME,
 };
@@ -213,6 +213,35 @@ fn until(
     events
 }
 
+/// The message a script sends after its last: an `error` event. The binding counts it on the
+/// session, records nothing for it and ends nothing by it, and its `type` is readable, so it is
+/// no message that could have been a `response.done`.
+fn script_end() -> Value {
+    json!({"type": "error", "event_id": "event_end", "error": {
+        "type": "invalid_request_error", "message": "the script ended"
+    }})
+}
+
+/// Events until the binding read [`script_end`] and has none left: every message of the script
+/// was read then, and the server sends no more before the close. Without that message, until
+/// two seconds pass with no event.
+fn to_the_script_end(session: &mut OpenAiRealtimeSession) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+    let mut idle = 0;
+    while idle < 20 {
+        let ended = session.server_error_count() > 0;
+        match session.next_event(if ended { Duration::ZERO } else { WAIT }) {
+            Some(event) => {
+                idle = 0;
+                events.push(event);
+            }
+            None if ended => break,
+            None => idle += 1,
+        }
+    }
+    events
+}
+
 fn created(events: &[SessionEvent]) -> Vec<ResponseId> {
     events
         .iter()
@@ -240,7 +269,7 @@ fn output_audio_of(events: &[SessionEvent], response: ResponseId) -> Vec<Option<
 }
 
 /// Runs `script`; the caller cancels the first response once its transcript delta arrived,
-/// then the session reads until two seconds pass with nothing and closes.
+/// then the session reads to the end of the script and closes.
 fn cancel_first<F, Fut>(script: F) -> (Vec<SessionEvent>, u64)
 where
     F: FnOnce(Socket) -> Fut + Send + 'static,
@@ -254,7 +283,7 @@ where
     });
     let first = created(&events)[0];
     session.cancel_response(first).expect("in progress");
-    events.extend(until(&mut session, |_| false));
+    events.extend(to_the_script_end(&mut session));
     session.close().expect("open");
     events.extend(until(&mut session, |event| {
         matches!(event, SessionEvent::SpeechSessionClosed(_))
@@ -284,6 +313,7 @@ fn a_cancel_is_judged_once_at_the_next_response_created() {
         send(&mut socket, transcript_delta("resp_3", "Again")).await;
         send(&mut socket, id_less_done(16)).await;
         send(&mut socket, done("resp_3", 8)).await;
+        send(&mut socket, script_end()).await;
         while let Some(Ok(_)) = socket.next().await {}
     });
     let ids = created(&events);
@@ -318,6 +348,7 @@ fn a_cancel_without_an_unreadable_message_keeps_the_id_less_done() {
         send(&mut socket, transcript_delta("resp_2", "World")).await;
         send(&mut socket, id_less_done(16)).await;
         send(&mut socket, done("resp_2", 8)).await;
+        send(&mut socket, script_end()).await;
         while let Some(Ok(_)) = socket.next().await {}
     });
     let ids = created(&events);
@@ -351,6 +382,7 @@ fn an_unreadable_message_before_creation_does_not_mark_a_cancelled_response() {
         send(&mut socket, transcript_delta("resp_2", "World")).await;
         send(&mut socket, id_less_done(16)).await;
         send(&mut socket, done("resp_2", 8)).await;
+        send(&mut socket, script_end()).await;
         while let Some(Ok(_)) = socket.next().await {}
     });
     let ids = created(&events);
@@ -388,6 +420,7 @@ fn of_two_cancelled_responses_only_the_one_an_unreadable_message_followed_is_mar
         send(&mut socket, id_less_done(16)).await;
         send(&mut socket, done("resp_2", 4)).await;
         send(&mut socket, done("resp_3", 8)).await;
+        send(&mut socket, script_end()).await;
         while let Some(Ok(_)) = socket.next().await {}
     });
     let mut model = server.model();
@@ -404,7 +437,7 @@ fn of_two_cancelled_responses_only_the_one_an_unreadable_message_followed_is_mar
     session
         .cancel_response(created(&events)[1])
         .expect("in progress");
-    events.extend(until(&mut session, |_| false));
+    events.extend(to_the_script_end(&mut session));
     session.close().expect("open");
     events.extend(until(&mut session, |event| {
         matches!(event, SessionEvent::SpeechSessionClosed(_))
