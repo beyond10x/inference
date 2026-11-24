@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:speak-text-file-to-audio-file
 kind: story
-status: draft
+status: active
 title: A text file becomes an audio file in one call, with the voice as configuration
 tags:
 - from-consumer-gap
@@ -11,7 +11,10 @@ relations:
 - serves: vision:inference
 - depends_on: story:sdk-one-call
 - depends_on: story:local-tts-adapter-under-licence-policy
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-24T13:16:54Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-24T13:16:54Z", actor: "human:timo", revision: 3}
 ---
 ## Context
 
