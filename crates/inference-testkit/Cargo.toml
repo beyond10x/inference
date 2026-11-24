@@ -74,5 +74,9 @@ required-features = ["run"]
 name = "adversary8_graph_views"
 required-features = ["run"]
 
+[[test]]
+name = "target_self"
+required-features = ["run"]
+
 [lints]
 workspace = true
