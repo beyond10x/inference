@@ -607,3 +607,64 @@ async fn a_chat_without_a_generator_is_refused_when_it_is_built() {
     assert_eq!(error.kind(), inference::ErrorKind::RoleUnbound, "{error}");
     assert_eq!(rows().len(), before.len(), "nothing opened");
 }
+
+/// `talk_with` over a native speech model scripted with one turn, which closes the session once
+/// its script is spent: the microphone hears one utterance, the speaker plays the reply, and the
+/// call returns with both devices let go and its one session closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn talk_with_returns_once_the_model_closed_and_lets_go_of_both_devices() {
+    use std::time::{Duration, Instant};
+
+    use inference::audio_device::convert::decode;
+    use inference_testkit::duplex::mock::{
+        AUDIO_FRAMES, MockSpeechModel, Reply, ScriptedTurn, pcm, utterance,
+    };
+
+    const LIMIT: Duration = Duration::from_secs(5);
+
+    let _held = SESSIONS.lock().await;
+    let model = MockSpeechModel::native(vec![ScriptedTurn {
+        heard: "hello".to_owned(),
+        reply: Reply::Say("hi there".to_owned()),
+    }])
+    .closes();
+    let stack = Stack::new().bind(Binding::speech(model));
+    let rate = NonZeroU32::new(24_000).expect("a rate");
+    let host = FakeHost::new(vec![
+        FakeDevice::input("test microphone", rate, NonZeroU16::MIN, true),
+        FakeDevice::output("test speaker", rate, NonZeroU16::MIN, true),
+    ]);
+    let before = rows();
+
+    let speaking = async {
+        let started = Instant::now();
+        while !host.input_open() {
+            assert!(started.elapsed() < LIMIT, "the call opens the microphone");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        for frame in utterance(pcm(24_000), 0).frames() {
+            assert!(host.feed(&decode(&frame).expect("a well-formed frame")));
+        }
+    };
+    let (talked, ()) = tokio::time::timeout(LIMIT, async {
+        tokio::join!(inference::talk_with(&stack, host.clone()), speaking)
+    })
+    .await
+    .expect("the call returns within 5 s");
+
+    talked.expect("the conversation ran to the model's close");
+    assert!(!host.input_open(), "the microphone is let go");
+    assert!(!host.output_open(), "the speaker is let go");
+    let played: Vec<Option<Mark>> = host.played_frames().iter().map(mark::decode).collect();
+    let reply: Vec<Option<Mark>> = (0..AUDIO_FRAMES)
+        .map(|frame| {
+            Some(Mark {
+                mock: MockId::Speech,
+                reply: 0,
+                frame,
+            })
+        })
+        .collect();
+    assert_eq!(played, reply, "{:#?}", host.played());
+    one_closed_session_since(&before);
+}

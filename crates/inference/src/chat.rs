@@ -97,7 +97,7 @@ impl Chat {
     /// # Errors
     ///
     /// Those of [`Stack::resolve_with`] over no environment and of [`Recipe::instantiate`]:
-    /// [`Error::RoleUnbound`] when the stack binds no `llm`.
+    /// the error of an unbound role when the stack binds no `llm`.
     pub fn new_with(stack: &Stack) -> Result<Self> {
         Ok(Self {
             handle: Handle::plan(Recipe::chat(), stack)?,
