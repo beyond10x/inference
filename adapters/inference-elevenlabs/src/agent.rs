@@ -42,10 +42,10 @@
 //!   binding sends the initiation first and sends no audio before the metadata: a session opens
 //!   only once the metadata arrived and its formats are the session's.
 //! - **Signed URL lifetime and reuse.** Not stated. A [`SignedUrl`] is used as given, for one
-//!   session: it carries a token, so it is held as a credential (zeroized on drop, only its host
-//!   in `Debug`, in no error), and a model gives it to the handshake of its first open and keeps
-//!   none of it. A later open of that model fails as [`AgentError::SignedUrlSpent`]
-//!   (`agent_duplex`).
+//!   handshake: it carries a token, so it is held as a credential (zeroized on drop, only its
+//!   host in `Debug`, in no error), and a model gives it to the first open that dials and keeps
+//!   none of it, whether or not a session opened. A later open of that model fails as
+//!   [`AgentError::SignedUrlSpent`] (`agent_duplex`).
 //! - **`ping_ms`.** One page reads it as a delay before the pong, another as estimated latency.
 //!   The binding answers every `ping` at once with its `event_id` and does not wait.
 //! - **Interruption and `event_id`.** Whether an interruption's `event_id` orders against the
@@ -524,8 +524,9 @@ pub enum AgentError {
     InvalidSignedUrl(&'static str),
     /// The base URL was refused, with why.
     InvalidUrl(String),
-    /// The model was built with a signed URL and an earlier open gave it to its handshake: a
-    /// signed URL opens one session, and nothing connects for this one.
+    /// The model was built with a signed URL and an earlier open gave it to its handshake,
+    /// whether or not that open succeeded: a signed URL goes to one handshake, and nothing
+    /// connects for this open.
     SignedUrlSpent,
     /// The caller cancelled the open.
     Cancelled,
@@ -563,8 +564,8 @@ impl fmt::Display for AgentError {
             Self::InvalidSignedUrl(reason) => write!(f, "invalid signed URL: {reason}"),
             Self::InvalidUrl(reason) => write!(f, "invalid base URL: {reason}"),
             Self::SignedUrlSpent => f.write_str(
-                "the signed URL went to an earlier open of this model and opens one session; \
-                 build a model with a new one",
+                "the signed URL went to the handshake of an earlier open of this model, whether \
+                 or not that open succeeded; build a model with a new one",
             ),
             Self::Cancelled => f.write_str("the caller cancelled the open"),
             Self::Connect { status, detail } => match status {

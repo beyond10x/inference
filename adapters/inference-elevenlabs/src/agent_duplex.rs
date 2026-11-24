@@ -18,20 +18,25 @@
 //! it is issued; one issued while none is does nothing. The agent's configuration chooses its audio
 //! formats and a session cannot; the session configuration states the formats it expects, and
 //! an agent reporting others fails the open as [`Unsupported::InputFormat`] or
-//! [`Unsupported::OutputFormat`], [`ElevenLabsAgent::open_error`] naming what it reported. No
+//! [`Unsupported::OutputFormat`], [`ElevenLabsAgent::open_error`] naming what it reported. With
+//! a signed URL that refusal comes after the handshake and so spends the URL, as below: the
+//! open with the formats it named needs a model built with a new signed URL. No
 //! audio is resampled. Every way an open fails leaves the reason in
 //! [`ElevenLabsAgent::open_error`]. The voice and instructions of the configuration are not
 //! sent: the agent's own apply.
 //!
-//! A signed URL opens one session. The model holds it, in the buffer it came in, until the
-//! first open whose configuration the binding takes; that open gives it to its handshake, and
-//! it is zeroized when the handshake ends, whether it connected, was refused, timed out or was
-//! cancelled. From then on the model keeps the URL's host and nothing else of it, and neither
-//! the session nor an error ever holds it. Every later open of that model fails as
-//! [`AgentError::SignedUrlSpent`], a [`SessionFailureKind::Rejected`] like a credential the
-//! provider refused, before anything connects: the caller fetches a new signed URL and builds
-//! a new model. An open refused for its configuration leaves the URL with the model. A public
-//! agent's model opens any number of sessions.
+//! A signed URL opens at most one session. The model holds it, in the buffer it came in, until
+//! the first open that dials, that is, starts the handshake. That open gives the URL to its
+//! handshake, and the URL is zeroized when the handshake ends, whatever happens next: the
+//! session opened, the connection could not be made, the server refused the upgrade, the
+//! handshake timed out or was cancelled, or the open was refused afterwards because the agent's
+//! formats are not the session's. From then on the model keeps the URL's host and nothing else
+//! of it, and neither the session nor an error ever holds it. Every later open of that model
+//! fails as [`AgentError::SignedUrlSpent`], a [`SessionFailureKind::Rejected`] like a
+//! credential the provider refused, before anything connects: the caller fetches a new signed
+//! URL and builds a new model. Only an open refused before it dials leaves the URL with the
+//! model: one whose configuration the binding itself does not take, or whose runtime could not
+//! be built. A public agent's model opens any number of sessions.
 //!
 //! # The connection
 //!
@@ -397,9 +402,13 @@ impl ElevenLabsAgent {
     }
 
     /// The private agent `signed` names, with the bounds of `endpoint`; its URL is ignored.
-    /// The model opens one session: the first open that connects gives `signed` to its
-    /// handshake, which zeroizes it, and each later open fails as
-    /// [`AgentError::SignedUrlSpent`].
+    /// The model opens at most one session: the first open that dials, that is, starts the
+    /// handshake, gives `signed` to it, and `signed` is zeroized when the handshake ends,
+    /// whether or not anything connected. Each later open fails as
+    /// [`AgentError::SignedUrlSpent`], also the one that corrects the formats an agent refused
+    /// the first for: that refusal comes after the handshake, so the corrected open needs a
+    /// model built with a new signed URL. Only an open refused before it dials leaves `signed`
+    /// with the model.
     pub fn signed(signed: SignedUrl, endpoint: AgentEndpoint) -> Self {
         let target = Target::Signed {
             host: signed.host().to_owned(),

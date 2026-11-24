@@ -624,7 +624,7 @@ fn an_open_refused_before_it_connects_leaves_the_signed_url_for_the_next() {
     assert_eq!(server.connections(), 0);
     model
         .open(config())
-        .expect("the open that connects first has the signed URL");
+        .expect("the first open that dials has the signed URL");
     assert!(matches!(
         model.open(config()),
         Err(OpenError::Failed(failure)) if failure.kind == SessionFailureKind::Rejected
@@ -655,6 +655,54 @@ fn a_failed_handshake_spends_the_signed_url_too() {
     assert_eq!(model.open_error(), Some(&AgentError::SignedUrlSpent));
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(server.connections(), 1, "the refused open connected");
+}
+
+#[test]
+fn a_handshake_that_timed_out_or_was_cancelled_spends_the_signed_url_too() {
+    let stalling = || {
+        let mut script = Script::new(Vec::new());
+        script.handshake = Handshake::Stall;
+        AgentServer::start(script)
+    };
+
+    let server = stalling();
+    let mut model = ElevenLabsAgent::signed(
+        signed(&server, "sYnThEtIcToKeN1029384756"),
+        endpoint(&server).with_connect_timeout(Duration::from_millis(200)),
+    );
+    model
+        .open(config())
+        .expect_err("no handshake within the connect timeout");
+    assert!(matches!(
+        model.open_error(),
+        Some(AgentError::Connect { status: None, .. })
+    ));
+    model.open(config()).expect_err("the signed URL is spent");
+    assert_eq!(model.open_error(), Some(&AgentError::SignedUrlSpent));
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        server.connections(),
+        1,
+        "the open after a timeout connected"
+    );
+
+    let server = stalling();
+    let mut model = ElevenLabsAgent::signed(
+        signed(&server, "sYnThEtIcToKeN5647382910"),
+        endpoint(&server),
+    );
+    let canceller = model.canceller();
+    let cancelling = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        canceller.cancel();
+    });
+    model.open(config()).expect_err("the open is cancelled");
+    cancelling.join().unwrap();
+    assert_eq!(model.open_error(), Some(&AgentError::Cancelled));
+    model.open(config()).expect_err("the signed URL is spent");
+    assert_eq!(model.open_error(), Some(&AgentError::SignedUrlSpent));
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(server.connections(), 1, "the open after a cancel connected");
 }
 
 #[test]
