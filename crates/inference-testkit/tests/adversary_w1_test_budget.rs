@@ -37,6 +37,13 @@ fn taskfile() -> String {
 
 /// Runs the command line of the repository's `task test-run`, its bound cut to one second and
 /// its kill one second later, over parts whose first is `part` under the deferred slowest list.
+///
+/// What it prints goes to two files and is read when `task` has ended, not through a pipe to its
+/// end. A pipe ends when the last process that holds it ends, and a part can outlive the step:
+/// the `timeout` of GNU coreutils kills its process group when the kill follows the first signal,
+/// the `timeout` of uutils coreutils 0.10.0 kills its own child only, so there a part that
+/// ignored the first signal lives on. Read through a pipe, the case of such a part waited for
+/// the part's whole sleep, 30 s, where the step had ended after 2 s.
 fn test_run_over(part: &str) -> Output {
     let taskfile = taskfile();
     let line = taskfile
@@ -57,11 +64,22 @@ fn test_run_over(part: &str) -> Output {
         ),
     )
     .expect("the Taskfile is written");
-    Command::new("task")
+    let printed = |name: &str| directory.path().join(name);
+    let file =
+        |name: &str| fs::File::create(printed(name)).expect("a file for what the step prints");
+    let status = Command::new("task")
         .arg("test-run")
         .current_dir(directory.path())
-        .output()
-        .expect("`task` runs; it must be on PATH")
+        .stdout(file("stdout.txt"))
+        .stderr(file("stderr.txt"))
+        .status()
+        .expect("`task` runs; it must be on PATH");
+    let read = |name: &str| fs::read(printed(name)).expect("what the step printed is read");
+    Output {
+        status,
+        stdout: read("stdout.txt"),
+        stderr: read("stderr.txt"),
+    }
 }
 
 fn text(output: &Output) -> String {
@@ -134,6 +152,10 @@ fn adversary_w1_the_test_run_task_names_its_bound_when_a_part_outlives_the_first
     assert!(
         said.contains("task test-run was ended at its bound of 120 s\n"),
         "the line of the bound is printed when the kill ends the step:\n{said}"
+    );
+    assert!(
+        said.contains("exit status 137"),
+        "the kill ended the step, not the first signal:\n{said}"
     );
     assert_eq!(output.status.code(), Some(201), "the step fails:\n{said}");
 }
