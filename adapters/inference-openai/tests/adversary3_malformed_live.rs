@@ -13,7 +13,7 @@ use inference_audio::{AudioEncoding, AudioFormat};
 use inference_duplex::{
     NativeSpeechModel, SessionConfig, SessionEvent, SpeechSessionHandle, TurnDetection, TurnTuning,
 };
-use inference_openai::live::{CLOSE_TIMEOUT, LIVE_MODEL};
+use inference_openai::live::LIVE_MODEL;
 use inference_openai::live_duplex::OpenAiLive;
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Endpoint, OPENAI_KEY_NAME,
@@ -204,14 +204,18 @@ fn until(
 /// `session.close` with undecodable text every 100 ms and never `session.closed` holds
 /// `LiveClient::close`, and with it `SpeechSessionHandle::close`, for as long as it keeps
 /// sending: the read timeout is per read, and each message resets it. A silent server is given
-/// up after `CLOSE_TIMEOUT`; the close is given that bound and five seconds more here.
+/// up after the model's close timeout; the close is given that bound and five seconds more here.
+/// The close timeout is 2 s in place of `CLOSE_TIMEOUT`, over a read timeout of 1 s, so the test
+/// does not wait the 15 s; the server sends for three times as long as the close is given.
 #[test]
 fn a_close_answered_only_by_undecodable_messages_returns() {
-    let server = Server::start(|mut socket| async move {
+    let close_timeout = Duration::from_secs(2);
+    let bound = close_timeout + Duration::from_secs(5);
+    let server = Server::start(move |mut socket| async move {
         accept_start(&mut socket).await;
         let close = receive(&mut socket).await;
         assert_eq!(close["type"], "session.close");
-        let until = tokio::time::Instant::now() + CLOSE_TIMEOUT * 3;
+        let until = tokio::time::Instant::now() + bound * 3;
         while tokio::time::Instant::now() < until {
             if socket.send(Message::text("not json")).await.is_err() {
                 return;
@@ -219,14 +223,21 @@ fn a_close_answered_only_by_undecodable_messages_returns() {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
-    let mut model = server.model();
+    let mut model = OpenAiLive::new(
+        server
+            .endpoint
+            .clone()
+            .with_read_timeout(Duration::from_secs(1)),
+        Box::new(FixedSource),
+        OPENAI_KEY_NAME,
+    )
+    .with_close_timeout(close_timeout);
     let mut session = model.open(config()).expect("the session opens");
     let (done, returned) = mpsc::channel();
     std::thread::spawn(move || {
         let closed = session.close();
         let _ = done.send(closed.is_ok());
     });
-    let bound = CLOSE_TIMEOUT + Duration::from_secs(5);
     assert!(
         returned.recv_timeout(bound).is_ok(),
         "close() had not returned after {bound:?} of undecodable messages"
