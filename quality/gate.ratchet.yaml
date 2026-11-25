@@ -1,0 +1,385 @@
+format: ratchet/1
+project: inference
+
+subjects:
+  source-tree:
+    kind: codebase
+    audiences: [library-user, developer, coding-agent]
+  test-suite:
+    kind: codebase
+    audiences: [library-user, developer, coding-agent]
+  specification:
+    kind: specification
+    audiences: [library-user, developer, coding-agent]
+  native-archive:
+    kind: dependency
+    audiences: [library-user, developer]
+  gate:
+    kind: development-workflow
+    audiences: [developer, coding-agent]
+
+assessments:
+  formatting:
+    subject: source-tree
+    assessor: command-run@1
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: cargo fmt --all --check
+      conditions:
+        all:
+          tools: {rustc: {pin: rust-toolchain.toml}}
+    measurements:
+      clean: {kind: exact, output: exit_zero, scope: run}
+
+  lint:
+    subject: source-tree
+    assessor: command-run@1
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      conditions:
+        all:
+          tools: {rustc: {pin: rust-toolchain.toml}}
+    measurements:
+      clean: {kind: exact, output: exit_zero, scope: run}
+
+  doc-build:
+    subject: source-tree
+    assessor: command-run@1
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+      conditions:
+        all:
+          tools: {rustc: {pin: rust-toolchain.toml}}
+    measurements:
+      clean: {kind: exact, output: exit_zero, scope: run}
+
+  generated-docs:
+    subject: source-tree
+    assessor: generated-files@1
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task docs-check
+    measurements:
+      current: {kind: exact, output: current, scope: file}
+
+  planning-store:
+    subject: source-tree
+    assessor: command-run@1
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: aep plan artifact validate
+      conditions:
+        ci:
+          tools: {aep: {version: "0.80.0"}}
+    measurements:
+      valid: {kind: exact, output: exit_zero, scope: run}
+
+  ess-specification:
+    subject: specification
+    assessor: ess-specification@1
+    inputs: {path: ess}
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: ess specify validate --path ess
+      conditions:
+        ci:
+          tools: {ess: {version: "0.98.0"}}
+    measurements:
+      valid: {kind: exact, output: valid, scope: run}
+      scenarios: {kind: exact, output: scenarios, scope: run, unit: scenarios, better: higher}
+
+  conformance:
+    subject: specification
+    assessor: ess-conformance@1
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: cargo test -p inference-testkit --features run --test conform
+      conditions:
+        ci:
+          tools: {ess: {version: "0.98.0"}}
+    measurements:
+      passing-scenarios:
+        kind: exact
+        output: passing_scenarios
+        scope: run
+        identity: [scenario]
+
+  native-archive:
+    subject: native-archive
+    assessor: command-run@1
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task sherpa-onnx-archive
+    measurements:
+      checksum-matches: {kind: exact, output: exit_zero, scope: run}
+
+  workspace-tests:
+    subject: test-suite
+    assessor: nextest-run@1
+    inputs: {profile: default}
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: controlled_run
+      command: task test-run
+      runs: 1
+      conditions:
+        all:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+            cargo-nextest: {pin: .config/nextest.toml}
+    measurements:
+      slowest-test:
+        {kind: sampled, output: slowest_test, scope: run, unit: s, better: lower}
+
+  slow-lane:
+    subject: test-suite
+    assessor: nextest-run@1
+    inputs: {profile: slow}
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: controlled_run
+      command: task test-slow
+      runs: 1
+      conditions:
+        all:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+            cargo-nextest: {pin: .config/nextest.toml}
+    measurements:
+      slowest-test:
+        {kind: sampled, output: slowest_test, scope: run, unit: s, better: lower}
+
+  slow-lane-step:
+    subject: gate
+    assessor: command-run@1
+    target: {kind: revision, environments: [ci], selection: candidate}
+    observation:
+      kind: controlled_run
+      command: task test-slow
+      runs: 1
+      conditions:
+        ci: {runner: ubuntu-latest}
+    measurements:
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
+
+  slow-workflow:
+    subject: gate
+    assessor: forge-job@1
+    inputs: {workflow: slow.yml, job: inference / task test-slow}
+    target: {kind: workflow_run, environments: [ci], selection: candidate}
+    observation:
+      kind: snapshot
+      conditions:
+        ci: {runner: ubuntu-latest}
+    measurements:
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
+
+  check-source-step:
+    subject: gate
+    assessor: command-run@1
+    target: {kind: revision, environments: [ci], selection: candidate}
+    observation:
+      kind: controlled_run
+      command: task check-source
+      runs: 1
+      conditions:
+        ci: {runner: ubuntu-latest}
+    measurements:
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
+
+  test-build-step:
+    subject: gate
+    assessor: command-run@1
+    target: {kind: revision, environments: [ci], selection: candidate}
+    observation:
+      kind: controlled_run
+      command: task test-build
+      runs: 1
+      conditions:
+        ci: {runner: ubuntu-latest}
+    measurements:
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
+
+  test-run-step:
+    subject: gate
+    assessor: command-run@1
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: controlled_run
+      command: task test-run
+      runs: 1
+      conditions:
+        ci: {runner: ubuntu-latest}
+    measurements:
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
+
+  check-workflow:
+    subject: gate
+    assessor: forge-job@1
+    inputs: {workflow: check.yml, job: inference / task check}
+    target: {kind: workflow_run, environments: [ci], selection: candidate}
+    observation:
+      kind: snapshot
+      conditions:
+        ci: {runner: ubuntu-latest}
+    measurements:
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
+      queue-wait:
+        {kind: sampled, output: duration, boundary: queue_wait, scope: run, unit: s, better: lower}
+
+  source-scan:
+    subject: source-tree
+    assessor: forge-job@1
+    inputs: {workflow: shared-gates.yml, job: common / Security and privacy}
+    target: {kind: workflow_run, environments: [ci], selection: candidate}
+    observation:
+      kind: snapshot
+    measurements:
+      passed: {kind: exact, output: succeeded, scope: run}
+
+requirements:
+  formatted:
+    meaning: Every Rust file is formatted as rustfmt writes it.
+    assessment: formatting
+    measurement: clean
+    condition: {operator: holds}
+  no-lint-warnings:
+    meaning: Clippy reports no warning on any target with every feature.
+    assessment: lint
+    measurement: clean
+    condition: {operator: holds}
+  no-doc-warnings:
+    meaning: The API documentation builds without a warning, so no link in it is broken.
+    assessment: doc-build
+    measurement: clean
+    condition: {operator: holds}
+  generated-docs-current:
+    meaning: Every generated page and data file of the documentation site equals what the generator writes from the tree.
+    assessment: generated-docs
+    measurement: current
+    condition: {operator: holds}
+  planning-store-valid:
+    meaning: The planning store under .engineering/ is valid.
+    assessment: planning-store
+    measurement: valid
+    condition: {operator: holds}
+  specification-valid:
+    meaning: The specification under ess/ is valid.
+    assessment: ess-specification
+    measurement: valid
+    condition: {operator: holds}
+  conformance-keeps-passing:
+    meaning: No scenario of the conformance suite that passed stops passing.
+    assessment: conformance
+    measurement: passing-scenarios
+    condition: {operator: no_lost_items}
+    reference: {kind: accepted_value}
+  native-archive-checksum:
+    meaning: The native archive that is linked is the one whose sha256 the Taskfile pins.
+    assessment: native-archive
+    measurement: checksum-matches
+    condition: {operator: holds}
+  test-budget:
+    meaning: No test of the test step runs 60 s.
+    assessment: workspace-tests
+    measurement: slowest-test
+    condition: {operator: lt, value: 60, unit: s}
+  slow-test-budget:
+    meaning: No test of the slow lane runs 600 s.
+    assessment: slow-lane
+    measurement: slowest-test
+    condition: {operator: lt, value: 600, unit: s}
+  test-step-budget:
+    meaning: The test step of the gate ends before 120 s.
+    assessment: test-run-step
+    measurement: run-time
+    condition: {operator: lt, value: 120, unit: s}
+  check-job-within-timeout:
+    meaning: The job of the check workflow ends before its timeout of 45 minutes.
+    assessment: check-workflow
+    measurement: run-time
+    condition: {operator: lt, value: 2700, unit: s}
+  slow-job-within-timeout:
+    meaning: The job of the slow workflow ends before its timeout of 30 minutes.
+    assessment: slow-workflow
+    measurement: run-time
+    condition: {operator: lt, value: 1800, unit: s}
+  source-scan-passes:
+    meaning: The security and privacy scan of the shared source gates passes.
+    assessment: source-scan
+    measurement: passed
+    condition: {operator: holds}
+
+gates:
+  check:
+    stage: pre-merge
+    qualifying_environments: [local, ci]
+    requires:
+      - native-archive-checksum
+      - specification-valid
+      - planning-store-valid
+      - generated-docs-current
+      - formatted
+      - no-lint-warnings
+      - no-doc-warnings
+      - test-step-budget
+      - test-budget
+      - conformance-keeps-passing
+      - sherpa-onnx-stt-record-keeps-up
+      - whispercpp-stt-record-keeps-up
+      - sherpa-onnx-stt-record-is-measured
+      - whispercpp-stt-record-is-measured
+  slow:
+    stage: pre-merge
+    qualifying_environments: [ci]
+    requires:
+      - requirement: slow-job-within-timeout
+        when:
+          changed:
+            - crates/inference-macros/**
+            - crates/inference/src/**
+            - crates/inference-tools/src/**
+            - crates/inference/tests/ui.rs
+            - crates/inference/tests/ui/**
+            - crates/inference/tests/compile_fail/**
+            - Cargo.lock
+            - rust-toolchain.toml
+            - .config/nextest.toml
+            - Taskfile.yml
+            - .github/workflows/slow.yml
+      - requirement: slow-test-budget
+        when:
+          changed:
+            - crates/inference-macros/**
+            - crates/inference/src/**
+            - crates/inference-tools/src/**
+            - crates/inference/tests/ui.rs
+            - crates/inference/tests/ui/**
+            - crates/inference/tests/compile_fail/**
+            - Cargo.lock
+            - rust-toolchain.toml
+            - .config/nextest.toml
+            - Taskfile.yml
+            - .github/workflows/slow.yml
+  forge:
+    stage: post-workflow
+    qualifying_environments: [ci]
+    requires:
+      - check-job-within-timeout
+      - source-scan-passes

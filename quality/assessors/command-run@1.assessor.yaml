@@ -1,0 +1,11 @@
+format: ratchet-assessor/1
+name: command-run
+version: "1"
+targets: [revision]
+coverage_unit: command
+coverage: [executed, passed, failed]
+outputs:
+  exit_zero:
+    {value_type: assertion, kind: exact, scopes: []}
+  duration:
+    {value_type: number, kind: sampled, scopes: [], unit: s, boundaries: [run_time]}

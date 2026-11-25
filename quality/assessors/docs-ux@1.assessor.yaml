@@ -1,0 +1,37 @@
+format: ratchet-assessor/1
+name: docs-ux
+version: "1"
+targets: [revision]
+inputs:
+  rows: {type: path, required: true}
+coverage_unit: test
+coverage: [executed, skipped, passed, failed]
+outputs:
+  layout.h_scroll:
+    {value_type: number, kind: exact, scopes: [view], unit: pages}
+  layout.overflow_elements:
+    {value_type: number, kind: exact, scopes: [view], unit: elements}
+  always_visible.misses:
+    {value_type: number, kind: exact, scopes: [view], unit: misses}
+  axe.serious_critical:
+    {value_type: number, kind: exact, scopes: [view], unit: nodes}
+  keyboard.unreachable:
+    {value_type: number, kind: exact, scopes: [view], unit: elements}
+  completion_miss:
+    {value_type: number, kind: exact, scopes: [view], unit: misses}
+  screen_only.actions:
+    {value_type: number, kind: exact, scopes: [view], unit: actions}
+  screen_only.looks:
+    {value_type: number, kind: exact, scopes: [view], unit: looks}
+  screen_only.steers:
+    {value_type: number, kind: exact, scopes: [view], unit: steers}
+  screen_only.time_to_act_steps.max:
+    {value_type: number, kind: exact, scopes: [view], unit: steps}
+  glance_cost.median:
+    {value_type: number, kind: exact, scopes: [view], unit: level}
+  glance_cost.p95:
+    {value_type: number, kind: exact, scopes: [view], unit: level}
+  duration:
+    {value_type: number, kind: sampled, scopes: [], unit: s, boundaries: [run_time]}
+  slowest_test:
+    {value_type: number, kind: sampled, scopes: [], unit: s}

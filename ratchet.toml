@@ -1,0 +1,11 @@
+[spec]
+paths = [
+  "quality/adapters.ratchet.yaml",
+  "quality/docs-site.ratchet.yaml",
+  "quality/gate.ratchet.yaml",
+]
+
+[catalog]
+sources = [
+  { path = "quality/assessors" },
+]
