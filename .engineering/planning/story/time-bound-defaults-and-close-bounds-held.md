@@ -39,7 +39,7 @@ scope:
   path: adapters/inference-phonic/tests/duplex.rs
 - confidence: cited
   path: quality/not-measured.md
-revision: 13
+revision: 14
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-25T09:03:47Z", actor: "human:operator", revision: 8}
 - {from: "proposed", to: "active", at: "2026-11-25T09:03:47Z", actor: "human:operator", revision: 9}
@@ -174,3 +174,15 @@ Not built, as planned: the entries of `quality/adapters.md`, the lists of
 first `check` run on `main` that ran these tests. Until then three lines of `quality/adapters.md`
 say that no test fixes a default that a test now fixes: the close of ElevenLabs text to speech,
 the default limits of llama-server, and the connect and write defaults of OpenAI.
+
+Added on the same day, after `main` took the wave of 2026-11-24 and this branch took it in
+(merge `8c240e3ee`, commit `cdfa965b1`): the wave brought one new time-bound constant,
+`CLOSE_GRACE`, 5 ms, in `inference-cartesia` and `inference-elevenlabs`. The two tests
+`the_time_bound_defaults_are_the_stated_numbers` of
+`adapters/inference-cartesia/tests/errors.rs` and
+`adapters/inference-elevenlabs/tests/closed_stream.rs` compare it with the literal 5 ms, and the
+list "The value of each time-bound default" of `quality/not-measured.md` names it. With the
+constant at 6 ms each of the two tests fails and names it with both values. The page conflict of
+the merge was resolved so that each sentence is true on the merged tree: the entries about the
+wave's tests that fire a close bound and a connect timeout stay, and "no test asserts its value"
+is gone where a test of this unit asserts it.

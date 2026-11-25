@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T12:46:30Z",
+  "actor": "human:operator",
+  "artifact": "story:time-bound-defaults-and-close-bounds-held",
+  "kind": "story",
+  "revision": 14,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source, task test-build, task test-run at cdfa965b1 on the build node, tree clean",
+    "reference": "check-source exit 0 (13 s); test-build exit 0 (12 s); test-run exit 0 (52 s): 3162 tests run: 3162 passed, 73 skipped, and 23 tests run: 23 passed in the part after the workspace run. The branch holds main with the wave of 2026-11-24, so the two ticker tests of inference-elevenlabs::async_handles that failed in the gate at 12d77e8e3 are the corrected ones and pass"
+  }
+}
