@@ -35,10 +35,10 @@ tasks:
       - timeout --kill-after=10s 120s task test-run-parts || { status=$?; if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then echo "task test-run was ended at its bound of 120 s"; fi; exit "$status"; }
 
   test-run-parts:
-    desc: Runs the tests of the workspace with cargo-nextest under .config/nextest.toml, where a test over 60 s is killed and fails, and prints the ten slowest; then the stack test without default features and the doc tests.
+    desc: Runs the tests of the workspace with cargo-nextest under .config/nextest.toml, where a test over 60 s is killed and fails, and prints the ten slowest; then the stack test without default features, under the nextest profile stack so that target/nextest/default/junit.xml stays the report of the workspace run, and the doc tests.
     cmds:
       - task: test-workspace
-      - cargo nextest run -p inference --no-default-features --test stack
+      - cargo nextest run -p inference --no-default-features --test stack --profile stack
       - cargo test --workspace --all-features --doc
 
   test-workspace:
