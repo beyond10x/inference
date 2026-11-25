@@ -139,13 +139,43 @@ async fn stop_reading(socket: Socket) {
     drop(socket);
 }
 
+/// The deadlines a caller gets from `Deadlines::default()` and their constants, each compared
+/// with its number written out: a changed default fails here. Outside the source,
+/// `quality/adapters.md`, entry `openai-time-bounds/held`, states both: the connect timeout
+/// (10 s) and the write timeout (10 s).
 #[test]
 fn the_deadlines_are_stated_and_settable() {
     let deadlines = Deadlines::default();
-    assert_eq!(deadlines.connect_timeout(), DEFAULT_CONNECT_TIMEOUT);
-    assert_eq!(deadlines.write_timeout(), DEFAULT_WRITE_TIMEOUT);
-    assert!(DEFAULT_CONNECT_TIMEOUT > Duration::ZERO && DEFAULT_CONNECT_TIMEOUT < HANG * 10);
-    assert!(DEFAULT_WRITE_TIMEOUT > Duration::ZERO && DEFAULT_WRITE_TIMEOUT < HANG * 10);
+    let defaults = [
+        (
+            "DEFAULT_CONNECT_TIMEOUT",
+            DEFAULT_CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "Deadlines::default().connect_timeout()",
+            deadlines.connect_timeout(),
+            Duration::from_secs(10),
+        ),
+        (
+            "DEFAULT_WRITE_TIMEOUT",
+            DEFAULT_WRITE_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "Deadlines::default().write_timeout()",
+            deadlines.write_timeout(),
+            Duration::from_secs(10),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
     let set = deadlines
         .with_connect_timeout(DEADLINE)
         .with_write_timeout(DEADLINE * 2);

@@ -22,7 +22,8 @@ use inference_duplex::{
     Unsupported, UsageRecorded,
 };
 use inference_openai::duplex::{
-    OpenAiRealtime, OpenAiRealtimeSession, capabilities, claims, wire_format,
+    OpenAiRealtime, OpenAiRealtimeSession, capabilities, claims, default_session_config,
+    wire_format,
 };
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Eagerness, Endpoint,
@@ -936,6 +937,20 @@ fn a_silent_provider_fails_the_session_as_stalled_at_the_bound() {
         "{events:#?}"
     );
     assert!(waited >= Duration::from_millis(400), "{waited:?}");
+}
+
+/// The idle limit of the session configuration a caller gets from
+/// `duplex::default_session_config()`, compared with its number written out: a changed default
+/// fails here. It has no constant. Outside the source the number is stated in
+/// `quality/adapters.md`, entry `openai-time-bounds/held`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    assert_eq!(
+        default_session_config().idle_limit,
+        Duration::from_secs(30),
+        "duplex::default_session_config().idle_limit, the default (left), is not its stated \
+         number (right)"
+    );
 }
 
 #[test]

@@ -27,8 +27,9 @@ use inference_deepgram::inference_duplex::{
     SessionFailureKind, SpeechSessionHandle, TurnDetection, TurnTuning,
 };
 use inference_deepgram::{
-    AgentEndpoint, CLOSE_BOUND, ConfigError, CredentialError, CredentialSource, DeepgramAgent,
-    DeepgramAgentSession, DeepgramError, agent_claims, agent_native_duplex_verdict,
+    AgentEndpoint, CLOSE_BOUND, ConfigError, CredentialError, CredentialSource,
+    DEFAULT_AGENT_OPEN_TIMEOUT, DEFAULT_AGENT_READ_TIMEOUT, DeepgramAgent, DeepgramAgentSession,
+    DeepgramError, agent_claims, agent_native_duplex_verdict,
 };
 
 const WAIT: Duration = Duration::from_millis(20);
@@ -479,6 +480,48 @@ fn settings_applied_not_arriving_within_the_deadline_fails_the_open_and_closes()
     ));
     let seen = server.wait(0, CLOSE_BOUND, |seen| seen.closed.is_some());
     assert!(seen.closed.is_some());
+}
+
+/// The bound on the opening and the read timeout of the endpoint a caller gets from
+/// `AgentEndpoint::new()`, and their constants, each compared with its number written out: a
+/// changed default fails here. Outside the source, `quality/adapters.md`, entry
+/// `deepgram-time-bounds/held`, states the bound on the opening (15 s). No document states the
+/// read timeout: for it the number below is the reference. The keep-alive interval of the
+/// endpoint has its comparison in a unit test of `src/config.rs`, and the close bound in
+/// `tests/errors.rs`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let endpoint = AgentEndpoint::new();
+    let defaults = [
+        (
+            "DEFAULT_AGENT_OPEN_TIMEOUT",
+            DEFAULT_AGENT_OPEN_TIMEOUT,
+            Duration::from_secs(15),
+        ),
+        (
+            "AgentEndpoint::new().open_timeout",
+            endpoint.open_timeout,
+            Duration::from_secs(15),
+        ),
+        (
+            "DEFAULT_AGENT_READ_TIMEOUT",
+            DEFAULT_AGENT_READ_TIMEOUT,
+            Duration::from_secs(30),
+        ),
+        (
+            "AgentEndpoint::new().read_timeout",
+            endpoint.read_timeout,
+            Duration::from_secs(30),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
 }
 
 #[test]

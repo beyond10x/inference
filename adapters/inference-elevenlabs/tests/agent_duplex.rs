@@ -11,7 +11,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use fixture::{AGENT, AgentServer, Handshake, Script, Step};
-use inference_elevenlabs::agent::{AgentEndpoint, AgentError, SignedUrl};
+use inference_elevenlabs::agent::{
+    AgentEndpoint, AgentError, DEFAULT_CONNECT_TIMEOUT, DEFAULT_METADATA_TIMEOUT,
+    DEFAULT_READ_TIMEOUT, SignedUrl,
+};
 use inference_elevenlabs::inference_duplex::conformance::{
     NativeDuplexProbe, NoNativeDuplex, native_duplex_evidence,
 };
@@ -479,6 +482,57 @@ fn no_metadata_within_the_deadline_fails_the_open_and_closes() {
     assert!(matches!(model.open_error(), Some(AgentError::Stalled(_))));
     let seen = server.wait(0, CLOSE_BOUND, |seen| seen.closed.is_some());
     assert!(seen.closed.is_some());
+}
+
+/// The bounds of the endpoint a caller gets from `AgentEndpoint::new()`, and their constants in
+/// `inference_elevenlabs::agent`, each compared with its number written out: a changed default
+/// fails here. Outside the source, `quality/adapters.md`, entry `elevenlabs-time-bounds/held`,
+/// states the bound on the metadata (10 s) and the read timeout (30 s). No document states the
+/// agent's connect timeout: for it the number below is the reference. The close bound has its
+/// comparison in `tests/closed_stream.rs`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let endpoint = AgentEndpoint::new();
+    let defaults = [
+        (
+            "agent::DEFAULT_CONNECT_TIMEOUT",
+            DEFAULT_CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "AgentEndpoint::new().connect_timeout",
+            endpoint.connect_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "agent::DEFAULT_METADATA_TIMEOUT",
+            DEFAULT_METADATA_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "AgentEndpoint::new().metadata_timeout",
+            endpoint.metadata_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "agent::DEFAULT_READ_TIMEOUT",
+            DEFAULT_READ_TIMEOUT,
+            Duration::from_secs(30),
+        ),
+        (
+            "AgentEndpoint::new().read_timeout",
+            endpoint.read_timeout,
+            Duration::from_secs(30),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
 }
 
 #[test]

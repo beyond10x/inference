@@ -1026,6 +1026,20 @@ fn a_speaker_whose_callback_stopped_fails_the_drain_within_the_stated_patience()
     assert!(!run.host.output_open(), "the speaker is closed");
 }
 
+/// The patience a sink starts with, compared with its number written out: a changed default
+/// fails here. A sink gives its patience back only in the fault of a drain that stalled, so the
+/// constant is what is read. Outside the source the number is stated in `CHANGELOG.md`, under
+/// 0.19.0 (`PLAYBACK_PATIENCE` (2 s)), and in `quality/adapters.md`, entry
+/// `audio-device-time-bounds/held`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    assert_eq!(
+        PLAYBACK_PATIENCE,
+        Duration::from_secs(2),
+        "PLAYBACK_PATIENCE, the default (left), is not its stated number (right)"
+    );
+}
+
 #[test]
 fn a_stream_error_fails_the_drain_at_once() {
     let host = FakeHost::laptop();

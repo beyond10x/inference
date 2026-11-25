@@ -10,8 +10,9 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use inference_cartesia::{
-    CartesiaError, CartesiaSynthesiser, ConnectError, CredentialError, Endpoint, OutputFormat,
-    ServerError, VoiceConfig,
+    CLOSE_BOUND, CartesiaError, CartesiaSynthesiser, ConnectError, CredentialError,
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT, Endpoint, OutputFormat, ServerError,
+    VoiceConfig,
 };
 use inference_tts::inference_text::SegmentState;
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
@@ -254,6 +255,47 @@ fn a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout() {
     assert!(
         took < LATEST,
         "the synthesis failed after {took:?}, at twice its connect timeout or later"
+    );
+}
+
+/// The bounds of the endpoint a caller gets from `Endpoint::new()`, their constants and the close
+/// bound, each compared with its number written out: a changed default fails here. Outside the
+/// source, `quality/adapters.md`, entry `cartesia-time-bounds/held`, states the read timeout
+/// (10 s) and the close bound (1 s). No document states the connect timeout: for it the number
+/// below is the reference.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let endpoint = Endpoint::new();
+    let defaults = [
+        (
+            "DEFAULT_READ_TIMEOUT",
+            DEFAULT_READ_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "Endpoint::new().read_timeout",
+            endpoint.read_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "DEFAULT_CONNECT_TIMEOUT",
+            DEFAULT_CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "Endpoint::new().connect_timeout",
+            endpoint.connect_timeout,
+            Duration::from_secs(10),
+        ),
+        ("CLOSE_BOUND", CLOSE_BOUND, Duration::from_secs(1)),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
     );
 }
 

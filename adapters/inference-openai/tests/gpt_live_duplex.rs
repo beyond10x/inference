@@ -26,7 +26,7 @@ use inference_duplex::{
 use inference_openai::live::{CLOSE_TIMEOUT, LIVE_MODEL, LiveClosed, LiveFormat};
 use inference_openai::live_duplex::{
     DEFAULT_BACKEND_MODEL, OpenAiLive, OpenAiLiveSession, Segmentation, capabilities, claims,
-    live_format, native_duplex_verdict,
+    default_session_config, live_format, native_duplex_verdict,
 };
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Endpoint, OPENAI_KEY_NAME,
@@ -1461,6 +1461,20 @@ fn a_model_keeps_the_documented_close_timeout_unless_given_another() {
     assert_eq!(model.close_timeout(), CLOSE_TIMEOUT);
     let model = model.with_close_timeout(Duration::from_secs(2));
     assert_eq!(model.close_timeout(), Duration::from_secs(2));
+}
+
+/// The idle limit of the session configuration a caller gets from
+/// `live_duplex::default_session_config()`, compared with its number written out: a changed
+/// default fails here. It has no constant, and no document outside the source states it: the
+/// number below is the reference.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    assert_eq!(
+        default_session_config().idle_limit,
+        Duration::from_secs(30),
+        "live_duplex::default_session_config().idle_limit, the default (left), is not its \
+         stated number (right)"
+    );
 }
 
 /// The close of a session whose server answers only with a running total and then messages the
