@@ -1,17 +1,23 @@
 //! The quality documents of the repository (`ratchet.toml`, `quality/`) agree with each other,
-//! with `Taskfile.yml` and with the page that describes them, `quality/README.md`.
+//! with `Taskfile.yml`, with the tree and with the pages that describe them, `quality/README.md`
+//! and `quality/adapters.md`.
 //!
 //! This is not `ratchet validate`: no Ratchet command works at the commit the documents are
-//! written against (the page names it). It holds what would make the documents or the page untrue
-//! without anyone noticing, and the page lists it under "The test that keeps the documents true":
-//! that list and `problems` say the same.
+//! written against (the page names it). It holds what would make the documents or the pages
+//! untrue without anyone noticing, and `quality/README.md` lists it under "The test that keeps
+//! the documents true": that list and `problems` say the same.
 //!
-//! The page is read as it is written for a person. An entry is the text under a heading
-//! `### \`<assessment>/<measurement>\``; its lines are the bullets `- <name>: <text>`; a run is a
+//! A page is read as it is written for a person. An entry is the text under a heading
+//! `### \`<assessment>/<measurement>\``, up to the next heading; its lines are the bullets
+//! `- <name>: <text>`, and what else stands under the heading is kept whole; a run is a
 //! row of the table whose last cell links a run by its number; a table inside an entry holds one
-//! row per scenario and one column per viewport.
+//! row per scenario and one column per viewport. A section is the text under a heading
+//! `## \`<name>\``: `adapters.rs` holds the sections of `quality/adapters.md` against the
+//! directories under `adapters/`.
 
+mod adapters;
 mod adversary_q1;
+mod adversary_q2;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -26,6 +32,20 @@ const ASSESSOR_FORMAT: &str = "ratchet-assessor/1";
 const EVIDENCE_FORMAT: &str = "ratchet-evidence/1";
 const ENTITY_MAPS: [&str; 4] = ["subjects", "assessments", "requirements", "gates"];
 const PAGE: &str = "quality/README.md";
+const ADAPTERS_PAGE: &str = "quality/adapters.md";
+const NOT_MEASURED: &str = "quality/not-measured.md";
+/// The counts of a coverage. An assessor declares the ones it reports; the others are 0 in its
+/// records (`spec/domains/assessor.yaml` of the pinned commit, the field `coverage`).
+const COVERAGE_COUNTS: [&str; 6] = [
+    "executed",
+    "skipped",
+    "not_run",
+    "unsupported",
+    "passed",
+    "failed",
+];
+/// The whole baseline of a measure that no run has produced a value for.
+const UNOBSERVED: &str = "none. No run of this command is kept.";
 
 /// The files the check reads, each as its path from the repository root and its text.
 #[derive(Clone)]
@@ -33,13 +53,61 @@ struct Documents {
     config: String,
     taskfile: String,
     readme: String,
+    /// `quality/adapters.md`.
+    adapters_page: String,
+    /// `quality/not-measured.md`.
+    not_measured: String,
     specifications: BTreeMap<String, String>,
     assessors: BTreeMap<String, String>,
     records: BTreeMap<String, String>,
+    /// The directories under `adapters/` that hold a `Cargo.toml`, by name.
+    adapter_crates: BTreeSet<String>,
+    /// The files under `adapters/*/records/` and `adapters/*/capability/`, by path.
+    adapter_records: BTreeSet<String>,
+    /// Files of the tree by path, in place of what the tree holds: `None` is a file that is not
+    /// there. A test plants a defect of the tree here.
+    replaced: BTreeMap<String, Option<String>>,
+}
+
+impl Documents {
+    /// The text of a file of the tree by its path from the root, or `None` when the path leaves
+    /// the tree or names no file.
+    fn file(&self, path: &str) -> Option<String> {
+        if path.starts_with('/') || path.contains("..") {
+            return None;
+        }
+        match self.replaced.get(path) {
+            Some(replaced) => replaced.clone(),
+            None => fs::read_to_string(root().join(path)).ok(),
+        }
+    }
+
+    /// The pages and the list of what is not measured, each with its path.
+    fn pages(&self) -> [(&'static str, &str); 3] {
+        [
+            (PAGE, &self.readme),
+            (ADAPTERS_PAGE, &self.adapters_page),
+            (NOT_MEASURED, &self.not_measured),
+        ]
+    }
 }
 
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
+}
+
+/// The names in `directory`, sorted: the directories when `directories`, else the files.
+fn names(directory: &str, directories: bool) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(root().join(directory)) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir() == directories)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort_unstable();
+    names
 }
 
 /// The files of `directory` whose names end in `suffix`, keyed by their path from the root.
@@ -60,13 +128,31 @@ fn files(directory: &str, suffix: &str) -> BTreeMap<String, String> {
 }
 
 fn load() -> Documents {
+    let adapter_crates: BTreeSet<String> = names("adapters", true)
+        .into_iter()
+        .filter(|name| root().join(format!("adapters/{name}/Cargo.toml")).is_file())
+        .collect();
+    let adapter_records = adapter_crates
+        .iter()
+        .flat_map(|name| ["records", "capability"].map(|kept| format!("adapters/{name}/{kept}")))
+        .flat_map(|directory| {
+            names(&directory, false)
+                .into_iter()
+                .map(move |file| format!("{directory}/{file}"))
+        })
+        .collect();
     Documents {
         config: read(&root().join("ratchet.toml")),
         taskfile: read(&root().join("Taskfile.yml")),
         readme: read(&root().join(PAGE)),
+        adapters_page: read(&root().join(ADAPTERS_PAGE)),
+        not_measured: read(&root().join(NOT_MEASURED)),
         specifications: files("quality", ".ratchet.yaml"),
         assessors: files("quality/assessors", ".assessor.yaml"),
         records: files("quality/records", ".json"),
+        adapter_crates,
+        adapter_records,
+        replaced: BTreeMap::new(),
     }
 }
 
@@ -220,14 +306,30 @@ fn check_config(documents: &Documents, problems: &mut Vec<String>) {
     }
 }
 
-/// One entry of the page: its bullets `- <name>: <text>` by name, and the rows of its table.
+/// One entry of a page: its bullets `- <name>: <text>` by name, and the rows of its table.
 #[derive(Default)]
 struct Entry {
+    /// The page the entry stands on.
+    page: &'static str,
     lines: BTreeMap<String, String>,
+    /// Every bullet of the entry, whole.
+    bullets: Vec<String>,
+    /// Every other line under the heading of the entry, up to the next heading: a bullet
+    /// without a name, a line of a paragraph, a row of a table.
+    loose: Vec<String>,
     table: Vec<Vec<String>>,
 }
 
-/// What the check reads from the page.
+/// One section of a page, the text under a heading `## \`<name>\``.
+#[derive(Default)]
+struct Section {
+    /// Every line of the section, its entries included, joined by one space.
+    text: String,
+    /// The rows of the tables that stand in the section and in no entry.
+    rows: Vec<Vec<String>>,
+}
+
+/// What the check reads from the pages.
 #[derive(Default)]
 struct Page {
     /// By `<assessment>/<measurement>`.
@@ -236,10 +338,19 @@ struct Page {
     runs: BTreeMap<String, String>,
     /// The bullets that are one code span and nothing else: the commands the check cannot hold.
     commands: BTreeSet<String>,
+    /// The sections of `quality/adapters.md`, in the order of the page.
+    sections: Vec<(String, Section)>,
 }
 
 impl Page {
-    fn bullet(&mut self, entry: Option<&str>, bullet: &str) {
+    fn section(&self, name: &str) -> Option<&Section> {
+        self.sections
+            .iter()
+            .find(|(section, _)| section == name)
+            .map(|(_, section)| section)
+    }
+
+    fn bullet(&mut self, entry: Option<&str>, bullet: &str, problems: &mut Vec<String>) {
         if let Some(command) = bullet
             .strip_prefix('`')
             .and_then(|rest| rest.strip_suffix('`'))
@@ -247,18 +358,31 @@ impl Page {
         {
             self.commands.insert(command.to_owned());
         }
-        if let (Some(entry), Some((name, rest))) = (entry, bullet.split_once(": "))
-            && !name.contains('`')
+        let Some(key) = entry else {
+            return;
+        };
+        let entry = self.entries.entry(key.to_owned()).or_default();
+        entry.bullets.push(bullet.to_owned());
+        let named = bullet
+            .split_once(": ")
+            .filter(|(name, _)| !name.contains('`'));
+        let Some((name, rest)) = named else {
+            entry.loose.push(bullet.to_owned());
+            return;
+        };
+        if entry
+            .lines
+            .insert(name.to_owned(), rest.to_owned())
+            .is_some()
         {
-            self.entries
-                .entry(entry.to_owned())
-                .or_default()
-                .lines
-                .insert(name.to_owned(), rest.to_owned());
+            problems.push(format!(
+                "{}: the entry `{key}` has two lines `{name}:`",
+                entry.page
+            ));
         }
     }
 
-    fn row(&mut self, entry: Option<&str>, cells: Vec<String>) {
+    fn row(&mut self, entry: Option<&str>, in_section: bool, cells: Vec<String>) {
         if let [name, _, run] = cells.as_slice()
             && let Some((number, _)) = run.strip_prefix('[').and_then(|rest| rest.split_once("]("))
             && !number.is_empty()
@@ -269,53 +393,89 @@ impl Page {
         let separator = cells
             .iter()
             .all(|cell| cell.chars().all(|character| character == '-'));
-        if let Some(entry) = entry
-            && !separator
-        {
+        if separator {
+            return;
+        }
+        if let Some(entry) = entry {
             self.entries
                 .entry(entry.to_owned())
                 .or_default()
                 .table
                 .push(cells);
+        } else if in_section && let Some((_, section)) = self.sections.last_mut() {
+            section.rows.push(cells);
+        }
+    }
+
+    /// Reads the page at `path` into what the pages before it gave.
+    fn read(&mut self, path: &'static str, source: &str, problems: &mut Vec<String>) {
+        let mut entry: Option<String> = None;
+        let mut in_section = false;
+        let mut bullet: Option<String> = None;
+        for line in source.lines().chain([""]) {
+            if in_section && let Some((_, section)) = self.sections.last_mut() {
+                section.text.push(' ');
+                section.text.push_str(line.trim());
+            }
+            if let Some(open) = &mut bullet {
+                if line.starts_with("  ") && !line.trim().is_empty() {
+                    open.push(' ');
+                    open.push_str(line.trim());
+                    continue;
+                }
+                let done = bullet.take().unwrap_or_default();
+                self.bullet(entry.as_deref(), &done, problems);
+            }
+            if line.starts_with('#') {
+                if !line.starts_with("###") {
+                    let section = line
+                        .strip_prefix("## `")
+                        .and_then(|rest| rest.strip_suffix('`'))
+                        .filter(|_| path == ADAPTERS_PAGE);
+                    in_section = section.is_some();
+                    if let Some(name) = section {
+                        self.sections.push((name.to_owned(), Section::default()));
+                    }
+                }
+                entry = line
+                    .strip_prefix("### `")
+                    .and_then(|rest| rest.strip_suffix('`'))
+                    .filter(|id| id.contains('/'))
+                    .map(str::to_owned);
+                if let Some(id) = &entry {
+                    if self.entries.contains_key(id) {
+                        problems.push(format!("{path}: the entry `{id}` stands twice"));
+                    }
+                    self.entries.entry(id.clone()).or_default().page = path;
+                }
+            } else if let Some(text) = line.strip_prefix("- ") {
+                bullet = Some(text.trim().to_owned());
+            } else {
+                if line.starts_with('|') {
+                    let cells = line
+                        .trim()
+                        .trim_matches('|')
+                        .split('|')
+                        .map(|cell| cell.trim().to_owned())
+                        .collect();
+                    self.row(entry.as_deref(), in_section, cells);
+                }
+                if let Some(id) = &entry
+                    && !line.trim().is_empty()
+                {
+                    let open = self.entries.entry(id.clone()).or_default();
+                    open.loose.push(line.trim().to_owned());
+                }
+            }
         }
     }
 }
 
-fn page(readme: &str) -> Page {
+/// The two pages as one: the entries, runs and commands of both, and the sections.
+fn pages(documents: &Documents, problems: &mut Vec<String>) -> Page {
     let mut page = Page::default();
-    let mut entry: Option<String> = None;
-    let mut bullet: Option<String> = None;
-    for line in readme.lines().chain([""]) {
-        if let Some(open) = &mut bullet {
-            if line.starts_with("  ") && !line.trim().is_empty() {
-                open.push(' ');
-                open.push_str(line.trim());
-                continue;
-            }
-            let done = bullet.take().unwrap_or_default();
-            page.bullet(entry.as_deref(), &done);
-        }
-        if line.starts_with('#') {
-            entry = line
-                .strip_prefix("### `")
-                .and_then(|rest| rest.strip_suffix('`'))
-                .filter(|id| id.contains('/'))
-                .map(str::to_owned);
-            if let Some(id) = &entry {
-                page.entries.entry(id.clone()).or_default();
-            }
-        } else if let Some(text) = line.strip_prefix("- ") {
-            bullet = Some(text.trim().to_owned());
-        } else if line.starts_with('|') {
-            let cells = line
-                .trim()
-                .trim_matches('|')
-                .split('|')
-                .map(|cell| cell.trim().to_owned())
-                .collect();
-            page.row(entry.as_deref(), cells);
-        }
-    }
+    page.read(PAGE, &documents.readme, problems);
+    page.read(ADAPTERS_PAGE, &documents.adapters_page, problems);
     page
 }
 
@@ -437,6 +597,7 @@ fn check_baseline(
     results: &[&Value],
     problems: &mut Vec<String>,
 ) {
+    let at = entry.page;
     let assertion = results.iter().any(|result| result.get("holds").is_some());
     let by_item: BTreeMap<String, String> = results
         .iter()
@@ -449,14 +610,14 @@ fn check_baseline(
         for (item, value) in &by_item {
             if table.get(item) != Some(value) {
                 problems.push(format!(
-                    "{PAGE}: the table of `{key}` has {:?} for {item}, the record has {value}",
+                    "{at}: the table of `{key}` has {:?} for {item}, the record has {value}",
                     table.get(item)
                 ));
             }
         }
         for item in table.keys().filter(|item| !by_item.contains_key(*item)) {
             problems.push(format!(
-                "{PAGE}: the table of `{key}` has {item}, the record has no such item"
+                "{at}: the table of `{key}` has {item}, the record has no such item"
             ));
         }
         None
@@ -467,7 +628,7 @@ fn check_baseline(
         let values: BTreeSet<&String> = by_item.values().collect();
         if values.len() > 1 {
             problems.push(format!(
-                "{PAGE}: the record has more than one value for `{key}`, and the entry has no table"
+                "{at}: the record has more than one value for `{key}`, and the entry has no table"
             ));
         }
         values.first().map(|value| (*value).clone())
@@ -482,7 +643,7 @@ fn check_baseline(
     };
     if !equal {
         problems.push(format!(
-            "{PAGE}: the baseline of `{key}` is {baseline:?}, the record has {expected:?}"
+            "{at}: the baseline of `{key}` is {baseline:?}, the record has {expected:?}"
         ));
     }
 }
@@ -497,13 +658,20 @@ fn check_entry(
 ) {
     let key = format!("{id}/{name}");
     let Some(entry) = model.page.entries.get(&key) else {
-        problems.push(format!("{PAGE}: no entry for the measure `{key}`"));
+        problems.push(format!(
+            "{PAGE}, {ADAPTERS_PAGE}: no entry for the measure `{key}`"
+        ));
         return;
     };
+    let at = entry.page;
     let Some(baseline) = entry.lines.get("Baseline") else {
-        problems.push(format!("{PAGE}: the entry `{key}` has no `Baseline:` line"));
+        problems.push(format!("{at}: the entry `{key}` has no `Baseline:` line"));
         return;
     };
+    if baseline.starts_with("none.") {
+        check_unobserved(model, id, name, measurement, problems);
+        return;
+    }
     let lower = baseline.to_lowercase();
     let runs: Vec<&String> = model
         .page
@@ -514,7 +682,7 @@ fn check_entry(
         .collect();
     if runs.is_empty() && !names_a_file(baseline) {
         problems.push(format!(
-            "{PAGE}: the baseline of `{key}` names no run of the table and no file of the tree"
+            "{at}: the baseline of `{key}` names no run of the table and no file of the tree"
         ));
     }
     let record = model.record(id);
@@ -524,7 +692,7 @@ fn check_entry(
     for run in runs {
         let Some(record) = record else {
             problems.push(format!(
-                "{PAGE}: the entry `{key}` names the run {run}, and quality/records/{id}.evidence.json does not exist"
+                "{at}: the entry `{key}` names the run {run}, and quality/records/{id}.evidence.json does not exist"
             ));
             continue;
         };
@@ -534,17 +702,75 @@ fn check_entry(
             .unwrap_or_default();
         if !location.ends_with(&format!("/{run}")) {
             problems.push(format!(
-                "{PAGE}: the entry `{key}` names the run {run}, the record is of {location:?}"
+                "{at}: the entry `{key}` names the run {run}, the record is of {location:?}"
             ));
         }
         if results.is_empty() {
             problems.push(format!(
-                "{PAGE}: the entry `{key}` names the run {run}, the record of {id} has no value for the measure"
+                "{at}: the entry `{key}` names the run {run}, the record of {id} has no value for the measure"
             ));
         }
     }
-    if !results.is_empty() {
+    if !results.is_empty() && !adapters::per_crate(measurement) {
         check_baseline(&key, entry, baseline, &results, problems);
+    }
+}
+
+/// An entry whose baseline starts with `none.`: the baseline is that one sentence, no record
+/// holds a value for the measure, no requirement names it, and nothing under its heading but
+/// the lines `Command` and `Needs` holds a digit, so no number stands where a baseline would.
+/// Every line up to the next heading is read: a paragraph, a bullet without a name, a table.
+fn check_unobserved(
+    model: &Model,
+    id: &str,
+    name: &str,
+    measurement: &Value,
+    problems: &mut Vec<String>,
+) {
+    let key = format!("{id}/{name}");
+    let Some(entry) = model.page.entries.get(&key) else {
+        return;
+    };
+    let at = entry.page;
+    for (line, said) in &entry.lines {
+        let free = line == "Command" || line == "Needs";
+        if line == "Baseline" && said != UNOBSERVED {
+            problems.push(format!(
+                "{at}: the baseline of `{key}` is {said:?}; a baseline that starts with `none.` is {UNOBSERVED:?} and nothing else"
+            ));
+        } else if !free && said.contains(|character: char| character.is_ascii_digit()) {
+            problems.push(format!(
+                "{at}: the entry `{key}` says `Baseline: none.` and its line `{line}:` holds a number"
+            ));
+        }
+    }
+    for line in &entry.loose {
+        if line.contains(|character: char| character.is_ascii_digit()) {
+            problems.push(format!(
+                "{at}: the entry `{key}` says `Baseline: none.` and a line under it holds a number: {line:?}"
+            ));
+        }
+    }
+    let held = model
+        .record(id)
+        .is_some_and(|record| !results(record, measurement).is_empty());
+    if held {
+        problems.push(format!(
+            "{at}: the entry `{key}` says `Baseline: none.`, and quality/records/{id}.evidence.json holds a value for the measure"
+        ));
+    }
+    let measurements = model
+        .one("assessments", id)
+        .map_or(0, |assessment| entries(assessment, "measurements").count());
+    for (requirement, declared) in model.all("requirements") {
+        let named = text(declared, "measurement");
+        if text(declared, "assessment") == Some(id)
+            && (named == Some(name) || (named.is_none() && measurements == 1))
+        {
+            problems.push(format!(
+                "{at}: the entry `{key}` says `Baseline: none.`, and requirements.{requirement} bounds the measure"
+            ));
+        }
     }
 }
 
@@ -582,7 +808,10 @@ fn check_assessments(model: &Model, problems: &mut Vec<String>) {
                     ));
                 }
             }
-            if called.is_empty() && !model.task_commands.contains(command) {
+            if called.is_empty()
+                && !model.task_commands.contains(command)
+                && adapters::target(command).is_none()
+            {
                 unheld.insert(command, id);
             }
         }
@@ -606,25 +835,38 @@ fn check_assessments(model: &Model, problems: &mut Vec<String>) {
                     text(output, "unit")
                 ));
             }
+            if let Some(boundary) = text(measurement, "boundary")
+                && !output
+                    .get("boundaries")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|declared| declared.as_str() == Some(boundary))
+            {
+                problems.push(format!(
+                    "assessments.{id}.measurements.{name}: {assessor} declares no boundary {boundary:?} for the output {:?}",
+                    text(measurement, "output").unwrap_or_default()
+                ));
+            }
         }
     }
     for (command, id) in &unheld {
         if !model.page.commands.contains(*command) {
             problems.push(format!(
-                "assessments.{id}: the command `{command}` calls no task, stands in no `cmds` list of Taskfile.yml and is not in the list of {PAGE}"
+                "assessments.{id}: the command `{command}` calls no task, stands in no `cmds` list of Taskfile.yml, names no test or example of a package and is not in the list of {PAGE}"
             ));
         }
     }
     for command in &model.page.commands {
         if !unheld.contains_key(command.as_str()) {
             problems.push(format!(
-                "{PAGE}: lists the command `{command}`, which is no command of an assessment that Taskfile.yml does not hold"
+                "{PAGE}: lists the command `{command}`, which is no command of an assessment that neither Taskfile.yml nor a test or example holds"
             ));
         }
     }
-    for key in model.page.entries.keys() {
+    for (key, entry) in &model.page.entries {
         if !measures.contains(key) {
-            problems.push(format!("{PAGE}: the entry `{key}` has no measure"));
+            problems.push(format!("{}: the entry `{key}` has no measure", entry.page));
         }
     }
 }
@@ -691,14 +933,12 @@ fn check_requirements(model: &Model, problems: &mut Vec<String>) {
             continue;
         };
         let key = format!("{name}/{measurement}");
-        let bound = model
-            .page
-            .entries
-            .get(&key)
-            .and_then(|entry| entry.lines.get("Bound"));
+        let entry = model.page.entries.get(&key);
+        let at = entry.map_or(PAGE, |entry| entry.page);
+        let bound = entry.and_then(|entry| entry.lines.get("Bound"));
         if !bound.is_some_and(|bound| says(bound, &format!("{word} {value}"))) {
             problems.push(format!(
-                "{PAGE}: the bound of `{key}` is {bound:?}, requirements.{id} says `{word} {value}`"
+                "{at}: the bound of `{key}` is {bound:?}, requirements.{id} says `{word} {value}`"
             ));
         }
     }
@@ -762,6 +1002,24 @@ fn check_records(model: &Model, problems: &mut Vec<String>) {
             ));
             continue;
         };
+        let reported: BTreeSet<&str> = declaration
+            .get("coverage")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        for count in COVERAGE_COUNTS {
+            let counted = evidence
+                .get("coverage")
+                .and_then(|coverage| coverage.get(count))
+                .and_then(Value::as_u64);
+            if !reported.contains(count) && counted != Some(0) {
+                problems.push(format!(
+                    "{path}: the coverage has {counted:?} for `{count}`, a count {assessor} does not report; such a count is 0"
+                ));
+            }
+        }
         for result in evidence
             .get("results")
             .and_then(Value::as_array)
@@ -800,19 +1058,21 @@ fn problems(documents: &Documents) -> Vec<String> {
             Err(error) => problems.push(format!("{path}: is not valid JSON: {error}")),
         }
     }
+    let page = pages(documents, &mut problems);
     let model = Model {
         maps,
         project,
         declared,
         tasks,
         task_commands,
-        page: page(&documents.readme),
+        page,
         records,
     };
     check_assessments(&model, &mut problems);
     check_requirements(&model, &mut problems);
     check_gates(&model, &mut problems);
     check_records(&model, &mut problems);
+    adapters::check(documents, &model, &mut problems);
     problems
 }
 

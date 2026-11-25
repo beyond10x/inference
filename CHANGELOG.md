@@ -30,11 +30,23 @@
   check with its wait as an argument; `elevenlabs::resolves` calls it with `KEY_WAIT`, 8 seconds,
   as before.
 - `quality/` and `ratchet.toml`: the quality of the repository, written in the formats of Ratchet
-  at its commit `f139eccc17a548444f0f4e1dc06520120c28739f`: 43 measures with their command, unit,
+  at its commit `f139eccc17a548444f0f4e1dc06520120c28739f`: 44 measures with their command, unit,
   direction, bound and baseline (`quality/README.md`), what is not measured
   (`quality/not-measured.md`), and a test in `task test-run` that fails when the documents stop
   agreeing with each other, with `Taskfile.yml` or with that page. No Ratchet command works at
   that commit; the documents add no gate and change none. No crate's API changes.
+- `quality/adapters.md`: the quality definition per adapter crate, one section per directory under
+  `adapters/`: the tests run and passed and the slowest test in the check run, the time bounds its
+  tests hold (nine adapters), the records its tests hold (eight adapters), and 26 measures of
+  latency and connect time that name their command, clock, unit and direction and carry no
+  baseline, because no run of those commands is kept. `quality/README.md` gains what a release
+  holds; `quality/not-measured.md` gains what no test fires, per binding. The test of the quality
+  documents now also fails when a section and an adapter directory disagree, when a named test is
+  no function of its file, when a `cargo test` or `cargo run` command names a package, a target or
+  a feature that does not exist, when a measurement names a boundary its assessor does not
+  declare, when the coverage of a record counts something else than its plan and its assessor
+  name, and when an entry without a baseline carries a number, a record or a requirement. The
+  documents add no gate and change none. No crate's API changes.
 
 ### Changed
 
