@@ -91,10 +91,15 @@ with its number. What is left, per binding:
   a close outside an async runtime bounds the write of the close frame and the wait for the
   connection task with the same constant, and the test of each binding passes with either of
   the two removed. A Deepgram transcription handle adds the constant to the read timeout for
-  its deadline after the end of input (`adapters/inference-deepgram/src/recogniser.rs`), and
-  by reading the tests none aims at that deadline. A test asserts the value of each of the
-  five constants, 1 s; these tests are in the list "The value of each time-bound default".
-  They fix the number and fire nothing.
+  its deadline after the end of input (`adapters/inference-deepgram/src/recogniser.rs`). No
+  test fires that deadline: the test
+  `messages_trickling_in_after_close_stream_do_not_stretch_the_summary_deadline` of
+  `adapters/inference-deepgram/tests/bounds.rs` and the test
+  `a_server_silent_after_close_stream_stalls_within_the_read_timeout` of
+  `adapters/inference-deepgram/tests/errors.rs` pass with the constant at 3 s, so the
+  connection thread's own deadline ends both. A test asserts the value of each of the five
+  constants, 1 s; these tests are in the list "The value of each time-bound default". They fix
+  the number and fire nothing.
 - Cartesia: a cancel waits for its send up to twice `CLOSE_BOUND`
   (`adapters/inference-cartesia/src/synthesiser.rs`). The test asserts once the constant and
   does not reach the longer wait.
@@ -314,11 +319,13 @@ flood of WebSocket pings and reads nothing more. The binding answers each ping w
 pongs fill the socket buffers, and the close frame behind them cannot be written: the bound is
 what ends the close. Each test compares the time with two limits of its own, written out as
 numbers and not read from the constant: no sooner than 1 s, and before 2 s. So it fails with a
-constant of 3 s. Whether the connection was backed up is the fixture's to tell: reading again
-when the test lets it, it counts the pongs and looks for a close frame, and the limits are
-asserted of a run with fewer pongs than pings and no close frame. A flood whose pongs all
-arrived is doubled, up to sixteen times the first, and the test fails when the largest arrived
-whole too. No record of a run holds the result of any of the six yet:
+constant of 3 s. Whether the connection was backed up is the fixture's to tell. It says how
+many pongs it had read when the test let it read again; reading again, it counts the pongs and
+looks for a close frame. The limits are asserted of a run in which it had read no pong until
+then, counted fewer pongs than pings at the end and found no close frame. A flood whose pongs
+all arrived is doubled, up to the largest the binding reads within the test's own wait: between
+72,000 and 288,000 pings, by the test. The test fails when the largest arrived whole too. No
+record of a run holds the result of any of the six yet:
 
 - Phonic: the test `a_close_on_a_backed_up_connection_ends_at_the_close_bound` of
   `adapters/inference-phonic/tests/duplex.rs`.
@@ -346,8 +353,11 @@ What these tests do not tell apart:
   they run on Linux only and rely on cargo-nextest, which runs each test in a process of its
   own. They fire the bound through a cancel and not through a dropped handle or the end of
   input.
-- The limits pass any bound from 1 s to under 2 s. The number itself is fixed by the tests of
-  the list "The value of each time-bound default".
+- The limits are on the time measured, which is the bound and what a close takes besides it.
+  So they pass a bound a little under 1 s and any bound from there to a little under 2 s: with
+  a constant of 999 ms the close of the Phonic test held 1.000308908 s and the test passed, and
+  all six passed with 1,500 ms and with 1,900 ms. They failed with 500 ms and with 3 s. The
+  number itself is fixed by the tests of the list "The value of each time-bound default".
 - Deepgram has one constant for its two bindings and ElevenLabs one for its three, so the two
   tests of a crate follow the same constant.
 
