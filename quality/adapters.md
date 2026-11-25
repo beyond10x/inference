@@ -60,13 +60,15 @@ test. It says one of two things about the test:
   the default does not fail it.
 
 A test that compares a time with the constant itself, such as `CLOSE_BOUND`, follows the
-constant. It does not fix the number. The close tests of this kind do not fire the bound
+constant. It does not fix the number. The close tests the entries name do not fire the bound
 either. Each closes against a local fixture that takes the close at once; in the Deepgram
 transcription test the socket is dropped before a close frame is due. So the wait never reaches
 the constant, and by reading the code each of these tests passes with the bound enlarged and
 with the bound removed. What they hold is that a close or a cancel returns soon against a peer
-that answers. No test closes against a peer that does not take the write, which is the case
-the bound is for. See [not-measured.md](not-measured.md).
+that answers. Tests of `inference-cartesia` and of `inference-elevenlabs` drop a synthesis
+against a peer that does not take the write, which is the case the bound is for. They fire the
+bound and follow the constant, and no entry of this page names them yet. See
+[not-measured.md](not-measured.md).
 
 ## `inference-audio-device`
 
@@ -172,8 +174,10 @@ Turns text into speech with Cartesia Sonic, streamed over a WebSocket.
 - Close: `CLOSE_BOUND` is 1 s (`adapters/inference-cartesia/src/connection.rs`). The test
   `a_cancel_does_not_wait_for_the_server` of `adapters/inference-cartesia/tests/cancel.rs`
   compares the time of a cancel with the constant itself. The fixture takes the cancel at once,
-  so the bound is not fired. The cancel waits for its send up to twice the constant
+  so this test does not fire the bound. The cancel waits for its send up to twice the constant
   (`adapters/inference-cartesia/src/synthesiser.rs`), and the test asserts once the constant.
+  Tests that no entry of this page names yet fire the bound where a synthesis is dropped
+  against a peer that does not take the write. See [not-measured.md](not-measured.md).
 
 ### `cartesia-records/held`
 
@@ -364,9 +368,10 @@ with `duplex` it talks to an ElevenLabs agent.
   `a_silent_server_is_a_stall_within_the_read_timeout` of
   `adapters/inference-elevenlabs/tests/closed_stream.rs` holds the mechanism, at 300 ms.
 - Close, text to speech: not held. `CLOSE_BOUND` is 1 s
-  (`adapters/inference-elevenlabs/src/connection.rs`), and no test of the gate fires it or
-  asserts it. The cancel of a segment does no I/O, so a test of a cancel does not reach the
-  bound. See [not-measured.md](not-measured.md).
+  (`adapters/inference-elevenlabs/src/connection.rs`), and no test of the gate asserts it.
+  Tests that no entry of this page names yet fire it where a synthesis is dropped against a
+  peer that does not take the write. The cancel of a segment does no I/O, so a test of a
+  cancel does not reach the bound. See [not-measured.md](not-measured.md).
 - Connect, speech to text: `DEFAULT_CONNECT_TIMEOUT` is 10 s
   (`adapters/inference-elevenlabs/src/config.rs`). The test
   `a_handshake_never_answered_fails_within_the_connect_timeout` of
@@ -812,7 +817,9 @@ Two examples measure a whole turn across adapters. Their measures have no adapte
   `examples/realtime-voice/examples/compare.rs` lists them. OpenAI: the key in the OS keychain,
   or `INFERENCE_OPENAI_KEY_SOURCE` set to `env` and `OPENAI_API_KEY`. AWS: credentials and a
   region from the default chain of the AWS SDK, such as `AWS_REGION` or a profile. ElevenLabs:
-  `ELEVENLABS_AGENT_ID` or `ELEVENLABS_AGENT_SIGNED_URL`. Deepgram: `DEEPGRAM_API_KEY`. Phonic:
+  `ELEVENLABS_AGENT_ID`, or `ELEVENLABS_AGENT_SIGNED_URL`, which opens one session: with it
+  the arm measures its first run and records each later run as refused. Deepgram:
+  `DEEPGRAM_API_KEY`. Phonic:
   `PHONIC_API_KEY`. Deepslate: `DEEPSLATE_API_KEY`, `DEEPSLATE_VENDOR_ID`,
   `DEEPSLATE_ORGANIZATION_ID` and `DEEPSLATE_VOICE_ID`. Optional, each for another model:
   `INFERENCE_OPENAI_REALTIME_MODEL`, `INFERENCE_NOVA_SONIC_MODEL`, `DEEPSLATE_MODEL`.

@@ -73,38 +73,86 @@ user:
 
 [adapters.md](adapters.md) names the tests that hold a bound. Two lists further down name what
 a test does and no record of a run holds yet: "The connect timeout of five bindings" has the
-tests that fire that timeout, and "The value of each time-bound default" has the tests that
-compare each default with its number. What is left, per binding:
+tests that fire that timeout and time the failure, and "The value of each time-bound default"
+has the tests that compare each default with its number. What is left, per binding:
 
+- ElevenLabs agent: beside the test listed further down, two tests fire the connect timeout, at
+  200 ms against a handshake that is never answered, and assert no time: the test
+  `a_handshake_that_timed_out_or_was_cancelled_spends_the_signed_url_too` of
+  `adapters/inference-elevenlabs/tests/agent_duplex.rs` and the test
+  `no_memory_holds_the_url_after_a_handshake_that_timed_out` of
+  `adapters/inference-elevenlabs/tests/adversary2_w2_u3_signed_url_memory.rs`. With the
+  timeout not applied both pass, 30 s later, when the fixture ends the connection.
 - Amazon Nova Sonic: the adapter has no bound on its close, so there is none to fire. The close
   sends a command to the task of the session and does not wait for it, and the task ends the
   session on the stream without a timeout (`adapters/inference-aws/src/duplex.rs`).
-- Every `CLOSE_BOUND`: no test fires it. The tests that compare a time with the constant close
+- `CLOSE_BOUND` of Phonic, of Deepgram, of Deepslate, of the ElevenLabs agent and of ElevenLabs
+  speech to text: no test fires it. The tests that compare a time with the constant close
   against a local fixture that takes the close at once. So they pass with a larger constant
   and, by reading the code, with the bound removed. A test now asserts the value of each of the
-  five constants, 1 s; these tests are in the list "The value of each time-bound default". They
-  fix the number and fire nothing.
+  five constants, 1 s: one per crate, of Cartesia, Deepgram, Deepslate, ElevenLabs and Phonic.
+  These tests are in the list "The value of each time-bound default". They fix the number and
+  fire nothing.
+- Cartesia: a drop fires `CLOSE_BOUND`, against a peer that reads nothing
+  (`adapters/inference-cartesia/tests/support/deaf.rs`), and no test of a drop asserts its
+  value. Outside a runtime the test
+  `dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound`
+  of `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs` compares the wait of
+  the drop with the constant itself. Inside a Tokio runtime the test
+  `dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime` of
+  `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs` waits for the close the
+  drop handed off, the constant and 3 s more at most. Both pass with a larger constant. The code
+  of a drop has the bound three times: on the wait outside a runtime, on the close handed off
+  inside one (`adapters/inference-cartesia/src/synthesiser.rs`) and on the close of the
+  connection (`adapters/inference-cartesia/src/connection.rs`). Every test passes with one of
+  the three removed. With the first and the third removed the first test fails, at a limit of
+  its fixture, 25 s. With the second and the third removed the second test fails. No entry of
+  [adapters.md](adapters.md) names these tests.
 - Cartesia: a cancel waits for its send up to twice `CLOSE_BOUND`
   (`adapters/inference-cartesia/src/synthesiser.rs`). The test asserts once the constant and
   does not reach the longer wait.
-- ElevenLabs text to speech: no test fires `CLOSE_BOUND`. The adapter reads it where a handle
+- ElevenLabs text to speech: a drop fires `CLOSE_BOUND`. The adapter reads it where a handle
   is dropped (`adapters/inference-elevenlabs/src/synthesiser.rs`) and where a connection closes
   (`adapters/inference-elevenlabs/src/connection.rs`). The cancel of a segment does no I/O and
-  does not wait for the server, so a test of a cancel does not reach the bound. Two tests drop
+  does not wait for the server, so a test of a cancel does not reach the bound. A drop reaches
+  it against a peer that reads nothing (`adapters/inference-elevenlabs/tests/support/deaf.rs`),
+  and no test of a drop asserts its value. Outside a runtime the test
+  `dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound`
+  of `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs` compares the wait of
+  the drop with the constant itself, and so does the test
+  `a_drop_inside_an_executor_that_is_not_tokio_waits_close_bound_and_not_the_grace` of
+  `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs` inside an executor that
+  is not Tokio. Inside a Tokio runtime the test
+  `dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime` of
+  `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs` waits for the close the
+  drop handed off, the constant and 3 s more at most. All three pass with a larger constant. The
+  code of a drop has the bound three times, as in Cartesia, and every test passes with one of
+  the three removed. With the wait outside a runtime and the close of the connection unbounded
+  the first test runs until the runner ends it at 60 s and the second fails at a limit of its
+  own, 30 s. With the close handed off and the close of the connection unbounded the third
+  fails. No entry of [adapters.md](adapters.md) names these tests. Other tests drop
   a handle, against a fixture that takes the close at once. The test
   `dropping_the_handle_mid_segment_closes_the_socket` of
   `adapters/inference-elevenlabs/tests/cancel.rs` asserts no time. The test
   `adversary_rf1_a_handle_dropped_after_a_cancel_while_the_context_streams_closes_the_socket`
   of `adapters/inference-elevenlabs/tests/adversary_rf1_multi_context.rs` asserts a limit of
   its own, 2 s, and by reading the code passes with the bound removed.
+- `CLOSE_GRACE` of Cartesia and of ElevenLabs text to speech, the most a drop inside a Tokio
+  runtime waits for its close: no test asserts its value. The test
+  `a_drop_whose_close_cannot_be_written_holds_the_runtime_for_the_grace_and_no_longer` of
+  `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs`, and the one of that name
+  of `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs`, holds it under the
+  limit of its ticker, 50 ms, and fails with the constant at ten times that limit.
 - llama-server: no test fires the bound on establishing a connection. The adapter does not set
   it: it builds its HTTP client with `HttpClient::new` of `llm`
   (`adapters/inference-llama-server/src/lib.rs`), which takes `CONNECT_TIMEOUT` of `llm-http`,
   15 s at the tag `Cargo.lock` pins. The adapter's configuration has no field for it, so a
   caller cannot set it.
 
-A close against a peer that stops reading, timed against the constant, would fire a close
-bound.
+A close against a peer that stops reading, as Cartesia and ElevenLabs text to speech have it,
+would fire the close bound of another binding. A comparison of the wait with a number would
+assert the value of a close bound in a test that fires it. A comparison of `CLOSE_GRACE` with
+its number would assert the value of that default.
 
 ### Real-time factor and latency of the hosted speech-to-text bindings
 
@@ -272,9 +320,10 @@ checked out the merge of a pull request into `main`; the tree of that merge is t
 
 ### The connect timeout of five bindings
 
-`task test-run` runs one test per binding that fires the connect timeout: the test opens against
-a local listener that never answers the handshake, with a value of its own in place of the
-binding's `DEFAULT_CONNECT_TIMEOUT`. No record of a run holds the result of any of the five yet:
+`task test-run` runs one test per binding that fires the connect timeout and times the failure:
+the test opens against a local listener that never answers the handshake, with a value of its own
+in place of the binding's `DEFAULT_CONNECT_TIMEOUT`. No record of a run holds the result of any
+of the five yet:
 
 - Cartesia text to speech: the test
   `a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout` of
