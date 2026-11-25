@@ -2,14 +2,42 @@
 format: aep.planning-md/3
 id: story:quality-per-adapter-and-latency-defined
 kind: story
-status: active
+status: implemented
 title: Quality is defined per adapter, with latency and connect time
 relations:
 - serves: vision:inference
-revision: 3
+scope:
+- confidence: cited
+  path: CHANGELOG.md
+- confidence: cited
+  path: crates/inference-docs/tests/quality/adapters.rs
+- confidence: cited
+  path: crates/inference-docs/tests/quality/adversary_q2.rs
+- confidence: cited
+  path: crates/inference-docs/tests/quality/mod.rs
+- confidence: cited
+  path: quality/README.md
+- confidence: cited
+  path: quality/adapters.md
+- confidence: cited
+  path: quality/adapters.ratchet.yaml
+- confidence: cited
+  path: quality/assessors/named-tests@1.assessor.yaml
+- confidence: cited
+  path: quality/assessors/package-tests@1.assessor.yaml
+- confidence: cited
+  path: quality/assessors/printed-duration@1.assessor.yaml
+- confidence: cited
+  path: quality/gate.ratchet.yaml
+- confidence: cited
+  path: quality/not-measured.md
+- confidence: cited
+  path: quality/records
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-25T03:05:18Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-25T03:05:18Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-25T07:26:01Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 
@@ -68,3 +96,37 @@ A read of the eleven crates on that day found:
   that test is no longer in the file the measure names (state transition: the test is renamed).
 - No latency or connect-time number stands in `quality/` that a named run or a file of the tree
   does not hold (state transition: the documents are added).
+
+## Scope
+
+As built, 2026-11-25. Commits `864f27355` (the unit) and `5117842f0` (what the adversary pass
+found). No file under `adapters/` changed.
+
+- `quality/adapters.md` with its plan `quality/adapters.ratchet.yaml`: 46 entries. Per adapter
+  crate the tests run, the tests passed and the slowest test, read from the `check` run the page
+  names; the time bounds a test of `task test-run` holds, each naming the test; the committed
+  records, each naming the test that holds it. 26 entries are measures of latency or connect time
+  and say `Baseline: none.`: each has its command, its unit, its direction and what the clock
+  covers, and no number. None of these commands was run.
+- `quality/README.md`: the format rules the page follows, among them that a named test is a
+  function item and that no digit stands under an entry without a baseline.
+- `quality/not-measured.md`: what the read found held by nothing, per binding: the connect
+  timeouts no test fires, the defaults no test asserts, every `CLOSE_BOUND`, and connect time
+  printed by one command only.
+- `quality/assessors/`: three new declarations, `named-tests@1`, `package-tests@1` and
+  `printed-duration@1` with 21 boundaries.
+- `quality/records/`: 19 new records, 40 in all. `adapter-tests` counts 1166 tests executed and
+  1166 passed over the eleven adapter crates.
+- `quality/gate.ratchet.yaml`: 18 new requirements in gate `check`; 54 requirements in 5 gates.
+- `crates/inference-docs/tests/quality/adapters.rs`, `mod.rs` and `adversary_q2.rs`: the check
+  of `quality/`. It goes red when a crate under `adapters/` has no entry, when a named test is no
+  longer a function item of the file its measure names, when a digit stands under an entry
+  without a baseline, and when a measurement uses a boundary its assessor does not declare.
+- `CHANGELOG.md`: one `Added` entry.
+
+Not built: the gate for a release. Ratchet's formats cannot name the commit a tag points at, so
+no such gate is declared; the finding went to Ratchet, which filed it as a draft. The assertions
+that tie the documentation statuses to the version are in `quality/records/release-statuses`.
+
+Follow-ups filed as drafts: story:connect-time-printed-per-binding,
+story:connect-timeouts-fired-by-a-test, story:time-bound-defaults-and-close-bounds-held.
