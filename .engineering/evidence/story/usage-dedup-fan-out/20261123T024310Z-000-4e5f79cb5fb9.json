@@ -1,6 +1,6 @@
 {
   "at": "2026-11-23T02:43:10Z",
-  "actor": "human:timo",
+  "actor": "human:operator",
   "artifact": "story:usage-dedup-fan-out",
   "kind": "story",
   "revision": 5,
