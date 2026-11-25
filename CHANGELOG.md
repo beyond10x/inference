@@ -26,6 +26,13 @@
 - `repo-podcast` (example, not published): `Settings::silent_turn`, how long a model that creates
   its own responses may send nothing before its turn is given up; 10 seconds by default, as before.
   A `Settings` written as a struct literal without `..Settings::default()` has to name the field.
+- `inference-docs` (not published): the command `assess` writes the record of one assessment of
+  `quality/` from a file a run left behind, a JUnit report of cargo-nextest or the captured output
+  of a command that prints a duration, in the form Ratchet's specification gives a record. It runs
+  no measure. It exits 1 and writes nothing when the file does not hold what the assessment
+  reads: a named test that did not run, a failed run, counts that disagree with the report's own.
+  `quality/README.md` says which assessments it reads and how it is called. The committed records
+  are still the ones written by hand. No crate's API changes.
 - `realtime-voice` (example, not published): `elevenlabs::resolves_within(source, wait)`, the key
   check with its wait as an argument; `elevenlabs::resolves` calls it with `KEY_WAIT`, 8 seconds,
   as before.
@@ -53,6 +60,8 @@
 - `task test-run` prints `task test-run was ended at its bound of 120 s` also when a part outlived
   the first signal and was killed, and its list of the ten slowest tests is of the run that just
   ended: `no test ran` when that run left no report. `task` exits 201 when the bound ends the step.
+- `task test-run` runs the stack test under the cargo-nextest profile `stack`, so that
+  `target/nextest/default/junit.xml` stays the report of the workspace run after the step.
 - The `check` workflow runs the full gate for a pull request that changes a file under
   `quality/`, also a `*.md` file: the test of the quality documents reads them.
 - `realtime-voice`, example `compare`: with `ELEVENLABS_AGENT_SIGNED_URL` the ElevenLabs arm measures
