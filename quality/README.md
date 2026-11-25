@@ -1,27 +1,34 @@
 # The quality of this repository
 
 This directory says what counts as the quality of `inference`, what each value is today, and
-where the value comes from. What has no command that produces it is in
-[not-measured.md](not-measured.md).
+where the value comes from. The measures of each adapter crate are on
+[adapters.md](adapters.md): its tests, its time bounds, its records and the commands that print
+a latency. What has no command that produces it is in [not-measured.md](not-measured.md).
 
 The documents are written in the formats of Ratchet (`beyond10x/ratchet`), against its
 specification at commit `f139eccc17a548444f0f4e1dc06520120c28739f`.
 
 - No Ratchet command works at that commit. Nothing here is run by Ratchet.
 - Every field name is a proposal of that specification. A release of Ratchet can change it.
-- The documents add no gate and change none. They describe what `task check`, `task test-slow`
-  and the workflows under `.github/workflows/` already enforce.
+- The documents add no gate to the repository and change none. They describe what `task check`,
+  `task test-slow` and the workflows under `.github/workflows/` already enforce.
+- A measure can be defined and have no value. The latency measures on
+  [adapters.md](adapters.md) are such: each names its command and its clock, and says
+  `Baseline: none.`
 
 ## The files
 
 | File | Format | Holds |
 | --- | --- | --- |
 | `../ratchet.toml` | local config | the specification files and the assessor directory |
-| `gate.ratchet.yaml` | `ratchet/1` | the gate, the tests, the specification, turnaround |
+| `gate.ratchet.yaml` | `ratchet/1` | the gate, the tests, the specification, turnaround, the release statuses |
 | `docs-site.ratchet.yaml` | `ratchet/1` | the documentation site and the turnaround of its workflow |
-| `adapters.ratchet.yaml` | `ratchet/1` | the resource profile of the local speech-to-text adapters |
+| `adapters.ratchet.yaml` | `ratchet/1` | per adapter crate: tests, time bounds, records, latency; the resource profile of the local speech-to-text adapters |
 | `assessors/<name>@<version>.assessor.yaml` | `ratchet-assessor/1` | what each assessor reports |
-| `records/<assessment>.evidence.json` | `ratchet-evidence/1` | one baseline per assessment, read from a CI run |
+| `records/<assessment>.evidence.json` | `ratchet-evidence/1` | one baseline per assessment that has one, read from a CI run |
+
+Three pages say the same for a reader: this one, [adapters.md](adapters.md) and
+[not-measured.md](not-measured.md).
 
 No assessor has a program. Each declaration is without `command`: it names the outputs, units
 and scopes that a program would report. The records were written by hand from the CI runs named
@@ -29,8 +36,8 @@ below.
 
 ## The test that keeps the documents true
 
-`crates/inference-docs/tests/quality/mod.rs`, part of `task test-run`. It is not
-`ratchet validate`. It fails when:
+`crates/inference-docs/tests/quality/`, part of `task test-run`: `mod.rs` and, for the rules
+about adapters, tests and commands, `adapters.rs`. It is not `ratchet validate`. It fails when:
 
 - a file stops parsing, has another format or names another project, a name is declared in two
   files, an assessor declaration or a record is not in the file named after it, or
@@ -42,29 +49,51 @@ below.
   assessment, or an output that assessor does not declare;
 - the unit of a measurement, of the condition of a requirement or of a result in a record
   differs from the unit the assessor declares for the output;
-- a command calls a task `Taskfile.yml` does not have, or calls no task and stands in no `cmds`
-  list of `Taskfile.yml`, unless it is one of the four commands below, or that list names a
-  command that is none of those;
-- a measure has no entry on this page, an entry has no measure, or an entry has no `Baseline:`
-  line that names a run of the table below or a file of the tree;
+- a command calls a task `Taskfile.yml` does not have;
+- a command calls no task, stands in no `cmds` list of `Taskfile.yml` and names no test or
+  example of a package, unless it is the one command below, or that list names a command that
+  is not such a one;
+- a `cargo test` command that names a package with `-p` and a test with `--test`, or a
+  `cargo run` command that names a package and an example with `--example`, in the YAML or in a
+  code span of one of the three pages, names a package that is no member of the workspace, a
+  test or example whose file does not exist, or a feature the `Cargo.toml` of the package does
+  not declare, or it leaves out a feature the target requires;
+- a measure has no entry on this page or on [adapters.md](adapters.md), an entry has no measure
+  or stands twice, or an entry has no `Baseline:` line that names a run of the table below or a
+  file of the tree;
 - an entry names a run, and `records/` has no record of that run for its assessment with a value
   for the measure;
-- a baseline or a table on this page differs from the values in the record, or a bound on this
-  page differs from the number in the requirement.
+- a baseline or a table differs from the values in the record, or a bound differs from the
+  number in the requirement;
+- an entry says `Baseline: none.` in other words than `none. No run of this command is kept.`,
+  or a line of it other than `Command:` and `Needs:` holds a digit, or a record holds a value
+  for its measure, or a requirement bounds its measure;
+- a directory under `adapters/` with a `Cargo.toml` has no section on
+  [adapters.md](adapters.md), a section names no such directory or stands twice, or the sections
+  are not in the order of the directories;
+- a section does not name a file committed under `records/` or `capability/` of its adapter;
+- the table of a section lacks a row for a measure with one value per package, or a row differs
+  from the record: the value, the unit, the test, or the run it was read from;
+- one of the three pages names a test, by its function and its file, and the file does not
+  exist or holds no function of that name;
+- an assessment lists tests as its input, and one is not in its file, the entry of the measure
+  names another set of tests, or the record has another set of results;
+- an entry on [adapters.md](adapters.md) does not give the command of its assessment, whole, in
+  its `Command:` line.
 
-Four commands stand in no `cmds` list of `Taskfile.yml`, so the test holds them against nothing.
-A change of the test target or of the workflow step they name goes unnoticed here:
+One command stands in no `cmds` list of `Taskfile.yml` and names no test or example of a
+package, so the test holds it against nothing. A change of the workflow step that runs it goes
+unnoticed here:
 
-- `cargo test -p inference-testkit --features run --test conform`
 - `npx playwright test --workers=2`
-- `cargo test --release -p inference-sherpa-onnx --all-features --test stt_resources --
-  --ignored --nocapture`
-- `cargo test --release -p inference-whispercpp --test stt_resources -- --ignored --nocapture`
 
 The test reads no CI run. That a record equals its run was checked by hand. A baseline without
 a record is held only to name a file that exists: the test does not read the number in that
-file. A bound without a number ("must hold", "recorded, no bound") and the other lines of an
-entry are not held against anything.
+file. A bound without a number ("must hold", "recorded, no bound") is not held against
+anything. Of the other lines of an entry, the test holds the tests and the commands they name,
+and nothing else: not the sentence for a user, not the value of a constant, not what a line
+says a test compares, not the clock of a latency, not whether a command is billed. That a named
+test is ignored, or runs in `task test-run`, is not held either.
 
 ## The runs the baselines were read from
 
@@ -84,6 +113,19 @@ the commit `1ed5587d63ab46006e85cc0164e7e0ecd70ec18c`. The tree of that commit i
 `59b8f4a8`: `17ea6f2eb4d9601ed4d3bd6c5e33c966dfe225f0`. The records of the docs run name the
 head as the candidate and the merge commit as the revision, with the selection `merge_result`.
 
+The values per adapter crate on [adapters.md](adapters.md) were counted in the log of the step
+`task test-run` of the check run. That log has one line per test, with the result, the time in
+brackets and the name of the package. This counts the tests of one package, here
+`inference-aws`, in a log saved as the file `$log`:
+
+```sh
+sed -E 's/(\x1b|\^\[)\[[0-9;]*m//g' "$log" |
+  grep -cE '\( *[0-9]+/3059\) +inference-aws(::[^ ]+)? '
+```
+
+The same lines that say `PASS` are the tests that passed, and the longest time on them is the
+slowest test.
+
 ## How to read an entry
 
 The heading is the measure: `<assessment>/<measurement>`, as the YAML names it. "Holds" means
@@ -91,6 +133,9 @@ the measure is an assertion: it has no unit, and its direction is that it must h
 no bound" means nothing fails when the value gets worse. The baseline ends with its source: a
 run of the table above, or a file of the tree.
 
+A test is named by the word "test", its function in a code span, the word "of", and its file
+in a code span, as a path from the root of the repository. An entry that says
+`Baseline: none. No run of this command is kept.` defines a measure that has no value yet.
 ## Source
 
 ### `formatting/clean`
@@ -201,6 +246,9 @@ The same run gives the coverage of this assessment, which the record holds: 3059
 3059 passed, 72 skipped. Recorded, no bound. `task test-run` has two more parts that this
 assessment does not cover: the stack test (23 tests run, 23 passed) and the doc tests (38
 passed). Check run.
+
+The tests run and passed and the slowest test of each adapter crate, from the same part of the
+same run, are on [adapters.md](adapters.md).
 
 ### `slow-lane/slowest-test`
 
@@ -547,6 +595,61 @@ It is the value as committed, and every `task test-run` holds its bound.
 - Bound: recorded, no bound.
 - Baseline: 337 MiB. `adapters/inference-whispercpp/records/stt-i9-10900k-cpu.json`.
 
+## Adapters
+
+The measures of each adapter crate are on [adapters.md](adapters.md), one section per crate:
+tests run and passed, the slowest test, the time bounds its tests hold, the records its tests
+hold, and the commands that print a latency. The latency measures are defined and have no
+baseline. The measures of the two local speech-to-text adapters stay on this page, in the
+section above.
+
+## A release
+
+A release is a version tag on `main`. The commit the tag points at holds the changelog entry of
+the version, the version in `Cargo.toml`, and that version as the `adapter_revision` of every
+record under `adapters/`. `AGENTS.md` has the rule.
+
+No release has a gate of its own in the YAML. A gate of the formats cannot say that it judges
+the commit a tag points at, so a gate `release` is left out: see
+[not-measured.md](not-measured.md). What a release has to hold is what every commit on `main`
+has to hold:
+
+- everything the gate `check` requires, and, for the paths they name, the gates `slow` and
+  `docs-ux`;
+- the records of each adapter fit the code and carry the version of the workspace: the eight
+  `<adapter>-records/held` measures on [adapters.md](adapters.md), the tests the sections of
+  the two local speech-to-text adapters name there, and `generated-docs/current`, whose command
+  refuses a record of another version;
+- the statuses of the documentation agree with the changelog: the measure below.
+
+The gate `check` requires the last two already. Of the workflows, only
+`.github/workflows/shared-gates.yml` runs for a tag. Every other check ran on the commit before
+it was tagged.
+
+### `release-statuses/held`
+
+- For a user: a page that says "Since" a version names the release that shipped the thing, and
+  a page that says "On main" names something no release has yet.
+- Command: `task test-run`.
+- Unit and direction: none; holds, once per test.
+- Bound: must hold for every test. `task test-run` fails otherwise.
+- Baseline: holds for 4 of 4 tests. Check run.
+- Bindings against the changelog: the test
+  `every_binding_is_since_the_release_whose_changelog_section_introduced_it` of
+  `crates/inference-docs/src/adapters.rs` holds that each binding of the adapters page names
+  the release whose section of `CHANGELOG.md` first has its introducing phrase.
+- On main: the test `a_binding_is_on_main_only_while_its_entry_is_unreleased` of
+  `crates/inference-docs/src/adapters.rs` holds, on a changelog of its own, that the rule
+  refuses a binding marked for the next release whose phrase is in a released section.
+- Status items: the test
+  `every_hosted_binding_is_a_shipped_item_since_the_release_of_its_adapter_row` of
+  `crates/inference-docs/src/status.rs` holds that each hosted binding since a release has a
+  shipped item of the status page that names that release.
+- Next items: the test
+  `a_hosted_binding_on_main_is_a_next_item_and_one_since_a_release_a_shipped_item` of
+  `crates/inference-docs/src/status.rs` holds the same rule on items of its own, in both
+  directions.
+
 ## What Ratchet's first working release could judge
 
 That release does not gate sampled measurements and does not read conditions such as the runner,
@@ -561,7 +664,13 @@ It could judge the requirements on exact measurements:
 - the twelve requirements of the documentation site, `docs-...-not-worse`;
 - the four on the committed capability records: `sherpa-onnx-stt-record-keeps-up`,
   `sherpa-onnx-stt-record-is-measured`, `whispercpp-stt-record-keeps-up`,
-  `whispercpp-stt-record-is-measured`.
+  `whispercpp-stt-record-is-measured`;
+- the nine on the time bounds of the adapters, `<adapter>-time-bounds-held`, and the eight on
+  their records, `<adapter>-records-held`;
+- `release-statuses-held`.
+
+It would have nothing to judge for the latency measures of [adapters.md](adapters.md): they are
+sampled, and no requirement names them.
 
 It would only record the requirements on sampled measurements, every one of them a duration or
 a ratio of durations:

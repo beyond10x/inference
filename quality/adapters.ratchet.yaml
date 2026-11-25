@@ -5,6 +5,12 @@ subjects:
   local-speech-to-text:
     kind: adapter
     audiences: [library-user]
+  adapter-crates:
+    kind: adapter
+    audiences: [library-user, developer]
+  voice-examples:
+    kind: example
+    audiences: [library-user, developer]
 
 assessments:
   sherpa-onnx-stt-resources:
@@ -74,6 +80,548 @@ assessments:
       real-time-factor:
         {kind: exact, output: cpu_real_time_factor, scope: run, unit: thousandths, better: lower}
 
+  adapter-tests:
+    subject: adapter-crates
+    assessor: package-tests@1
+    inputs:
+      profile: default
+      packages:
+        - inference-audio-device
+        - inference-aws
+        - inference-cartesia
+        - inference-deepgram
+        - inference-deepslate
+        - inference-elevenlabs
+        - inference-llama-server
+        - inference-openai
+        - inference-phonic
+        - inference-sherpa-onnx
+        - inference-whispercpp
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: controlled_run
+      command: task test-run
+      runs: 1
+      conditions:
+        all:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+            cargo-nextest: {pin: .config/nextest.toml}
+    measurements:
+      tests-run:
+        {kind: exact, output: tests_run, scope: package, unit: tests, better: higher}
+      tests-passed:
+        {kind: exact, output: tests_passed, scope: package, unit: tests, better: higher}
+      slowest-test:
+        {kind: sampled, output: slowest_test, scope: package, unit: s, better: lower}
+
+  audio-device-time-bounds:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-audio-device
+      tests:
+        - adapters/inference-audio-device/tests/acknowledging.rs::a_speaker_whose_callback_stopped_fails_the_drain_within_the_stated_patience
+        - adapters/inference-audio-device/tests/adversary_rf1_acknowledging.rs::a_speaker_that_stops_while_a_frame_waits_for_room_fails_the_drain_within_the_patience
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  aws-time-bounds:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-aws
+      tests:
+        - adapters/inference-aws/tests/nova_sonic_stall_and_bounds.rs::the_open_deadline_is_stated
+        - adapters/inference-aws/tests/nova_sonic_stall_and_bounds.rs::start_against_a_server_that_never_answers_fails_within_its_deadline
+        - adapters/inference-aws/tests/nova_sonic_session.rs::a_silent_service_is_a_stall_after_the_read_timeout
+        - adapters/inference-aws/tests/nova_sonic_duplex.rs::a_silent_provider_yields_a_stall_failure_at_the_bound
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  cartesia-time-bounds:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-cartesia
+      tests:
+        - adapters/inference-cartesia/tests/errors.rs::silence_fails_the_synthesis_as_stalled_within_the_read_timeout
+        - adapters/inference-cartesia/tests/cancel.rs::a_cancel_does_not_wait_for_the_server
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  deepgram-time-bounds:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-deepgram
+      tests:
+        - adapters/inference-deepgram/tests/audio.rs::a_keep_alive_is_sent_after_silence
+        - adapters/inference-deepgram/tests/errors.rs::a_server_silent_after_close_stream_stalls_within_the_read_timeout
+        - adapters/inference-deepgram/tests/security1_boundaries.rs::a_cancel_during_the_opening_handshake_closes_the_connection_within_the_close_bound
+        - adapters/inference-deepgram/tests/agent_duplex.rs::settings_applied_not_arriving_within_the_deadline_fails_the_open_and_closes
+        - adapters/inference-deepgram/tests/agent_duplex.rs::a_keepalive_goes_out_after_silence_and_not_while_audio_flows
+        - adapters/inference-deepgram/src/config.rs::the_agent_endpoint_takes_a_plain_scheme_and_a_checked_url
+        - adapters/inference-deepgram/tests/agent_duplex.rs::dropping_a_session_mid_reply_closes_the_connection_within_the_close_bound
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  deepslate-time-bounds:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-deepslate
+      tests:
+        - adapters/inference-deepslate/tests/opal_duplex.rs::a_refused_or_failed_opening_opens_nothing
+        - adapters/inference-deepslate/tests/opal_duplex.rs::a_ping_goes_out_at_the_interval_and_a_pong_is_no_answer_from_the_model
+        - adapters/inference-deepslate/tests/opal_duplex.rs::closing_cancels_the_response_in_progress_and_closes_the_connection
+        - adapters/inference-deepslate/src/config.rs::a_read_timeout_not_past_the_ping_interval_is_refused
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  elevenlabs-time-bounds:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-elevenlabs
+      tests:
+        - adapters/inference-elevenlabs/tests/closed_stream.rs::a_silent_server_is_a_stall_within_the_read_timeout
+        - adapters/inference-elevenlabs/tests/cancel.rs::a_cancel_does_not_wait_for_the_server
+        - adapters/inference-elevenlabs/tests/stt.rs::a_handshake_never_answered_fails_within_the_connect_timeout
+        - adapters/inference-elevenlabs/tests/stt.rs::a_server_silent_after_the_end_of_input_with_a_span_open_fails_as_stalled_within_the_bound
+        - adapters/inference-elevenlabs/tests/agent_duplex.rs::no_metadata_within_the_deadline_fails_the_open_and_closes
+        - adapters/inference-elevenlabs/tests/agent_duplex.rs::a_silent_connection_fails_the_session_at_its_read_deadline
+        - adapters/inference-elevenlabs/tests/agent_duplex.rs::dropping_a_session_mid_stream_closes_the_connection_within_the_close_bound
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  llama-server-time-bounds:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-llama-server
+      tests:
+        - adapters/inference-llama-server/tests/cancellation.rs::a_server_silent_past_the_idle_limit_cancels_the_generation_with_the_deadline_error
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  openai-time-bounds:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-openai
+      tests:
+        - adapters/inference-openai/tests/transport_deadlines.rs::the_deadlines_are_stated_and_settable
+        - adapters/inference-openai/tests/transport_deadlines.rs::a_server_that_never_answers_the_upgrade_fails_connect_within_the_deadline
+        - adapters/inference-openai/tests/transport_deadlines.rs::a_server_that_never_answers_the_upgrade_fails_live_connect_within_the_deadline
+        - adapters/inference-openai/tests/transport_deadlines.rs::a_peer_that_stops_reading_fails_a_write_within_the_deadline
+        - adapters/inference-openai/tests/endpoint_literal.rs::endpoint_is_built_and_destructured_with_its_0_16_0_fields
+        - adapters/inference-openai/tests/stall_bound.rs::realtime_stall_bound_holds_across_dropped_reads
+        - adapters/inference-openai/tests/gpt_live_stall_bound.rs::live_stall_bound_holds_across_dropped_reads
+        - adapters/inference-openai/tests/duplex.rs::a_silent_provider_fails_the_session_as_stalled_at_the_bound
+        - adapters/inference-openai/tests/gpt_live.rs::a_client_keeps_the_documented_close_timeout_unless_given_another
+        - adapters/inference-openai/tests/gpt_live.rs::close_gives_up_at_its_bound_across_every_read
+        - adapters/inference-openai/tests/adversary_rf1_speech_transport.rs::a_server_that_never_answers_stalls_within_the_read_timeout
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  phonic-time-bounds:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-phonic
+      tests:
+        - adapters/inference-phonic/tests/duplex.rs::no_ready_within_the_deadline_fails_the_open_and_closes_the_connection
+        - adapters/inference-phonic/tests/duplex.rs::a_quiet_server_that_answers_pings_stays_open_and_a_deaf_one_stalls
+        - adapters/inference-phonic/tests/duplex.rs::dropping_a_session_mid_stream_closes_the_connection_within_the_close_bound
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  aws-records:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-aws
+      tests:
+        - adapters/inference-aws/tests/claims_record.rs::the_nova_sonic_record_holds_the_claims_of_the_binding
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  cartesia-records:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-cartesia
+      tests:
+        - adapters/inference-cartesia/tests/claims_record.rs::the_tts_record_holds_the_claims_of_the_binding
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  deepgram-records:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-deepgram
+      tests:
+        - adapters/inference-deepgram/tests/claims_record.rs::the_stt_record_holds_the_claims_of_the_binding
+        - adapters/inference-deepgram/tests/claims_record.rs::the_voice_agent_record_holds_the_claims_of_the_binding
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  deepslate-records:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-deepslate
+      tests:
+        - adapters/inference-deepslate/tests/claims_record.rs::the_opal_record_holds_the_claims_of_the_binding
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  elevenlabs-records:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-elevenlabs
+      tests:
+        - adapters/inference-elevenlabs/tests/claims_record.rs::the_tts_record_holds_the_claims_of_the_binding
+        - adapters/inference-elevenlabs/tests/claims_record.rs::the_stt_record_holds_the_claims_of_the_binding
+        - adapters/inference-elevenlabs/tests/claims_record.rs::the_agent_record_holds_the_claims_of_the_binding
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  llama-server-records:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-llama-server
+      tests:
+        - adapters/inference-llama-server/tests/offline.rs::each_committed_capability_record_checks_against_the_declaration_of_its_adapter
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  openai-records:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-openai
+      tests:
+        - adapters/inference-openai/tests/claims_record.rs::the_realtime_record_holds_the_claims_of_the_binding
+        - adapters/inference-openai/tests/claims_record.rs::the_gpt_live_record_holds_the_claims_of_the_binding
+        - adapters/inference-openai/tests/speech_claims_record.rs::the_speech_record_holds_the_claims_of_the_binding
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  phonic-records:
+    subject: adapter-crates
+    assessor: named-tests@1
+    inputs:
+      package: inference-phonic
+      tests:
+        - adapters/inference-phonic/tests/claims_record.rs::the_duplex_record_holds_the_claims_of_the_binding
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
+  cartesia-live:
+    subject: adapter-crates
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test -p inference-cartesia --features live --test live -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      first-audio:
+        {kind: sampled, output: duration, boundary: end_of_utterance_to_first_audio, scope: run, unit: ms, better: lower}
+
+  deepgram-live:
+    subject: adapter-crates
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test -p inference-deepgram --features live --test live -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      first-event:
+        {kind: sampled, output: duration, boundary: start_to_first_event, scope: run, unit: ms, better: lower}
+
+  elevenlabs-cancel-probe:
+    subject: adapter-crates
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test -p inference-elevenlabs --features live --test tts_cancel_live -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      first-audio:
+        {kind: sampled, output: duration, boundary: text_sent_to_first_audio, scope: run, unit: ms, better: lower}
+
+  elevenlabs-live-example:
+    subject: adapter-crates
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo run -p inference-elevenlabs --features live --example live
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      first-audio:
+        {kind: sampled, output: duration, boundary: start_to_first_audio, scope: run, unit: ms, better: lower}
+
+  llama-server-live:
+    subject: adapter-crates
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test -p inference-llama-server --features live --test live -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      first-token:
+        {kind: sampled, output: duration, boundary: start_to_first_delta, scope: run, unit: ms, better: lower}
+      generation:
+        {kind: sampled, output: duration, boundary: start_to_completed, scope: run, unit: ms, better: lower}
+
+  llama-server-live-cancellation:
+    subject: adapter-crates
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test -p inference-llama-server --features live --test live_cancellation -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      first-token:
+        {kind: sampled, output: duration, boundary: start_to_first_delta, scope: run, unit: ms, better: lower}
+      slots-idle:
+        {kind: sampled, output: duration, boundary: cancel_to_idle_slots, scope: run, unit: ms, better: lower}
+
+  llama-server-live-tools:
+    subject: adapter-crates
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test -p inference-llama-server --features live,tools --test live_tools -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      tool-proposal:
+        {kind: sampled, output: duration, boundary: start_to_tool_proposal, scope: run, unit: ms, better: lower}
+      generation:
+        {kind: sampled, output: duration, boundary: start_to_completed, scope: run, unit: ms, better: lower}
+
+  openai-gpt-live:
+    subject: adapter-crates
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test -p inference-openai --features live,gpt-live --test live_gpt -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      session-start:
+        {kind: sampled, output: duration, boundary: connect_call, scope: run, unit: ms, better: lower}
+      session-close:
+        {kind: sampled, output: duration, boundary: close_call, scope: run, unit: ms, better: lower}
+
+  openai-speech-live:
+    subject: adapter-crates
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test -p inference-openai --features live,speech --test speech_live -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      first-audio:
+        {kind: sampled, output: duration, boundary: start_to_first_audio, scope: run, unit: ms, better: lower}
+
+  compare:
+    subject: voice-examples
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo run -p realtime-voice --example compare -- --providers openai,openai-live,nova,elevenlabs,deepgram,phonic,deepslate --runs 2 --runs-out runs.jsonl
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      first-audio:
+        {kind: sampled, output: duration, boundary: end_of_input_speech_to_first_audio, scope: provider, unit: ms, better: lower}
+      first-transcript:
+        {kind: sampled, output: duration, boundary: end_of_input_speech_to_first_transcript, scope: provider, unit: ms, better: lower}
+      response-end:
+        {kind: sampled, output: duration, boundary: end_of_input_speech_to_response_end, scope: provider, unit: ms, better: lower}
+      barge-in-stop:
+        {kind: sampled, output: duration, boundary: barge_in_sent_to_playout_end, scope: provider, unit: ms, better: lower}
+
+  compare-cascade:
+    subject: voice-examples
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo run -p realtime-voice --features local --example compare -- --providers cascade --runs 2 --runs-out runs.jsonl
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      final-transcript:
+        {kind: sampled, output: duration, boundary: end_of_input_speech_to_final_transcript, scope: run, unit: ms, better: lower}
+      first-token:
+        {kind: sampled, output: duration, boundary: end_of_input_speech_to_first_token, scope: run, unit: ms, better: lower}
+      tts-first-audio:
+        {kind: sampled, output: duration, boundary: end_of_input_speech_to_tts_first_audio, scope: run, unit: ms, better: lower}
+      tts-segment-first-audio:
+        {kind: sampled, output: duration, boundary: segment_offer_to_first_frame, scope: run, unit: ms, better: lower}
+
+  cascade-talk:
+    subject: voice-examples
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo run -p local-voice-cascade --features local --example talk
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      first-audio:
+        {kind: sampled, output: duration, boundary: turn_completion_to_first_playable_audio, scope: run, unit: ms, better: lower}
+      interruption-stop:
+        {kind: sampled, output: duration, boundary: interruption_to_playback_stop, scope: run, unit: ms, better: lower}
+
+  cascade-local-adapters:
+    subject: voice-examples
+    assessor: printed-duration@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test -p local-voice-cascade --features local --test local_adapters -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          tools:
+            rustc: {pin: rust-toolchain.toml}
+    measurements:
+      first-audio:
+        {kind: sampled, output: duration, boundary: turn_completion_to_first_playable_audio, scope: run, unit: ms, better: lower}
+      interruption-stop:
+        {kind: sampled, output: duration, boundary: interruption_to_playback_stop, scope: run, unit: ms, better: lower}
+
 requirements:
   sherpa-onnx-stt-keeps-up:
     meaning: Streaming recognition on the CPU of the reference machine is faster than real time, when it is measured.
@@ -105,6 +653,91 @@ requirements:
     assessment: whispercpp-stt-record
     measurement: real-time-factor
     condition: {operator: gte, value: 1, unit: thousandths}
+  audio-device-time-bounds-held:
+    meaning: Every test that the time bounds of inference-audio-device are held by passes.
+    assessment: audio-device-time-bounds
+    measurement: held
+    condition: {operator: holds}
+  aws-time-bounds-held:
+    meaning: Every test that the time bounds of inference-aws are held by passes.
+    assessment: aws-time-bounds
+    measurement: held
+    condition: {operator: holds}
+  cartesia-time-bounds-held:
+    meaning: Every test that the time bounds of inference-cartesia are held by passes.
+    assessment: cartesia-time-bounds
+    measurement: held
+    condition: {operator: holds}
+  deepgram-time-bounds-held:
+    meaning: Every test that the time bounds of inference-deepgram are held by passes.
+    assessment: deepgram-time-bounds
+    measurement: held
+    condition: {operator: holds}
+  deepslate-time-bounds-held:
+    meaning: Every test that the time bounds of inference-deepslate are held by passes.
+    assessment: deepslate-time-bounds
+    measurement: held
+    condition: {operator: holds}
+  elevenlabs-time-bounds-held:
+    meaning: Every test that the time bounds of inference-elevenlabs are held by passes.
+    assessment: elevenlabs-time-bounds
+    measurement: held
+    condition: {operator: holds}
+  llama-server-time-bounds-held:
+    meaning: Every test that the time bounds of inference-llama-server are held by passes.
+    assessment: llama-server-time-bounds
+    measurement: held
+    condition: {operator: holds}
+  openai-time-bounds-held:
+    meaning: Every test that the time bounds of inference-openai are held by passes.
+    assessment: openai-time-bounds
+    measurement: held
+    condition: {operator: holds}
+  phonic-time-bounds-held:
+    meaning: Every test that the time bounds of inference-phonic are held by passes.
+    assessment: phonic-time-bounds
+    measurement: held
+    condition: {operator: holds}
+  aws-records-held:
+    meaning: Every test that holds a committed record of inference-aws passes.
+    assessment: aws-records
+    measurement: held
+    condition: {operator: holds}
+  cartesia-records-held:
+    meaning: Every test that holds a committed record of inference-cartesia passes.
+    assessment: cartesia-records
+    measurement: held
+    condition: {operator: holds}
+  deepgram-records-held:
+    meaning: Every test that holds a committed record of inference-deepgram passes.
+    assessment: deepgram-records
+    measurement: held
+    condition: {operator: holds}
+  deepslate-records-held:
+    meaning: Every test that holds a committed record of inference-deepslate passes.
+    assessment: deepslate-records
+    measurement: held
+    condition: {operator: holds}
+  elevenlabs-records-held:
+    meaning: Every test that holds a committed record of inference-elevenlabs passes.
+    assessment: elevenlabs-records
+    measurement: held
+    condition: {operator: holds}
+  llama-server-records-held:
+    meaning: Every test that holds a committed record of inference-llama-server passes.
+    assessment: llama-server-records
+    measurement: held
+    condition: {operator: holds}
+  openai-records-held:
+    meaning: Every test that holds a committed record of inference-openai passes.
+    assessment: openai-records
+    measurement: held
+    condition: {operator: holds}
+  phonic-records-held:
+    meaning: Every test that holds a committed record of inference-phonic passes.
+    assessment: phonic-records
+    measurement: held
+    condition: {operator: holds}
 
 gates:
   capability-record:

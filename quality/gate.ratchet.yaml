@@ -253,6 +253,23 @@ assessments:
     measurements:
       passed: {kind: exact, output: succeeded, scope: run}
 
+  release-statuses:
+    subject: source-tree
+    assessor: named-tests@1
+    inputs:
+      package: inference-docs
+      tests:
+        - crates/inference-docs/src/adapters.rs::every_binding_is_since_the_release_whose_changelog_section_introduced_it
+        - crates/inference-docs/src/adapters.rs::a_binding_is_on_main_only_while_its_entry_is_unreleased
+        - crates/inference-docs/src/status.rs::every_hosted_binding_is_a_shipped_item_since_the_release_of_its_adapter_row
+        - crates/inference-docs/src/status.rs::a_hosted_binding_on_main_is_a_next_item_and_one_since_a_release_a_shipped_item
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      held: {kind: exact, output: passed, scope: test}
+
 requirements:
   formatted:
     meaning: Every Rust file is formatted as rustfmt writes it.
@@ -326,6 +343,12 @@ requirements:
     measurement: passed
     condition: {operator: holds}
 
+  release-statuses-held:
+    meaning: The statuses of the documentation agree with the sections of the changelog.
+    assessment: release-statuses
+    measurement: held
+    condition: {operator: holds}
+
 gates:
   check:
     stage: pre-merge
@@ -345,6 +368,24 @@ gates:
       - whispercpp-stt-record-keeps-up
       - sherpa-onnx-stt-record-is-measured
       - whispercpp-stt-record-is-measured
+      - audio-device-time-bounds-held
+      - aws-time-bounds-held
+      - cartesia-time-bounds-held
+      - deepgram-time-bounds-held
+      - deepslate-time-bounds-held
+      - elevenlabs-time-bounds-held
+      - llama-server-time-bounds-held
+      - openai-time-bounds-held
+      - phonic-time-bounds-held
+      - aws-records-held
+      - cartesia-records-held
+      - deepgram-records-held
+      - deepslate-records-held
+      - elevenlabs-records-held
+      - llama-server-records-held
+      - openai-records-held
+      - phonic-records-held
+      - release-statuses-held
   slow:
     stage: pre-merge
     qualifying_environments: [ci]
