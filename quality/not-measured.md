@@ -87,7 +87,7 @@ compare each default with its number. What is left, per binding:
 - Cartesia: a cancel waits for its send up to twice `CLOSE_BOUND`
   (`adapters/inference-cartesia/src/synthesiser.rs`). The test asserts once the constant and
   does not reach the longer wait.
-- ElevenLabs text to speech: no test holds `CLOSE_BOUND`. The adapter reads it where a handle
+- ElevenLabs text to speech: no test fires `CLOSE_BOUND`. The adapter reads it where a handle
   is dropped (`adapters/inference-elevenlabs/src/synthesiser.rs`) and where a connection closes
   (`adapters/inference-elevenlabs/src/connection.rs`). The cancel of a segment does no I/O and
   does not wait for the server, so a test of a cancel does not reach the bound. Two tests drop
@@ -97,6 +97,11 @@ compare each default with its number. What is left, per binding:
   `adversary_rf1_a_handle_dropped_after_a_cancel_while_the_context_streams_closes_the_socket`
   of `adapters/inference-elevenlabs/tests/adversary_rf1_multi_context.rs` asserts a limit of
   its own, 2 s, and by reading the code passes with the bound removed.
+- llama-server: no test fires the bound on establishing a connection. The adapter does not set
+  it: it builds its HTTP client with `HttpClient::new` of `llm`
+  (`adapters/inference-llama-server/src/lib.rs`), which takes `CONNECT_TIMEOUT` of `llm-http`,
+  15 s at the tag `Cargo.lock` pins. The adapter's configuration has no field for it, so a
+  caller cannot set it.
 
 A close against a peer that stops reading, timed against the constant, would fire a close
 bound.
@@ -290,13 +295,31 @@ A record of a run of the workflow `check` that ran these five tests would hold t
 
 ### The value of each time-bound default
 
-`task test-run` runs one test per binding that compares each time-bound default with its number
-written out in the test. The test reads the public constant, and the field of the default
-endpoint or configuration a caller gets where there is one. A default changed in the source
-fails its test. No record of a run holds a result of any of these comparisons yet:
+`task test-run` runs the tests below. Each compares time-bound defaults of one binding with
+their numbers written out in the test. A test reads the public constant where there is one. It
+also reads the value from what a caller gets without setting it, where that can be read without
+a connection: the field of a new endpoint or configuration, and the reader of a new model. A
+constant or a literal changed in the source fails its test, and so does an endpoint,
+configuration or model read this way that starts with another value. A test does not read the
+places where an adapter uses the value later. Two defaults a caller gets are read by no test:
+
+- OpenAI Realtime and GPT-Live, the clients: `RealtimeClient::connect` and `LiveClient::connect`
+  start with the connect deadline and the write deadline of `Deadlines::default()`
+  (`adapters/inference-openai/src/client.rs`, `adapters/inference-openai/src/live.rs`). A
+  client gives no reader of them before its connection is open, and no test opens a client this
+  way and reads them. A client that starts with other deadlines fails no test.
+- llama-server, the bound on establishing a connection: the test reads the constant of
+  `llm-http` and a client built as the adapter builds its own. The adapter gives no reader of
+  its client. An adapter that builds its client with another bound fails no test.
+
+No record of a run holds a result of any of these comparisons yet:
 
 - Audio device: the test `the_time_bound_defaults_are_the_stated_numbers` of
-  `adapters/inference-audio-device/tests/acknowledging.rs`, for `PLAYBACK_PATIENCE`.
+  `adapters/inference-audio-device/tests/acknowledging.rs`, for `PLAYBACK_PATIENCE`, and the
+  test `a_sink_given_no_patience_waits_the_stated_two_seconds_for_a_stalled_speaker` of
+  `adapters/inference-audio-device/tests/acknowledging.rs`, for the patience of a sink that was
+  given none. The second reads it from the fault of a drain on a speaker that stopped, and
+  waits about 2 s for that fault.
 - Amazon Nova Sonic: the test `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-aws/tests/nova_sonic_stall_and_bounds.rs`, for the read timeout a session
   configuration starts with and the idle limit of the default session configuration.
@@ -324,16 +347,20 @@ fails its test. No record of a run holds a result of any of these comparisons ye
   configuration: 60 s to the response headers, 180 s idle and 600 s in total. The adapter has
   no time constant of its own. Its configuration takes the default limits of the HTTP client of
   `llm`, at the tag `Cargo.lock` pins, and their values are not in the adapter's source. A move
-  of that pin that changes a limit fails the test.
+  of that pin that changes a limit fails the test. The same test compares the bound on
+  establishing a connection with 15 s. It is `CONNECT_TIMEOUT` of `llm-http` at the same tag,
+  and a move of the pin that changes it fails the test.
 - OpenAI Realtime: the test `the_deadlines_are_stated_and_settable` of
   `adapters/inference-openai/tests/transport_deadlines.rs`, for `DEFAULT_CONNECT_TIMEOUT` and
   `DEFAULT_WRITE_TIMEOUT`, and the test `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-openai/tests/duplex.rs`, for the idle limit of the default session
-  configuration. The first of the two is older than its comparison: the record of
+  configuration and for the connect deadline and the write deadline of a model built with
+  `OpenAiRealtime::new`. The first of the two is older than its comparison: the record of
   `openai-time-bounds` holds a result of it from a run before it compared the numbers.
 - OpenAI GPT-Live: the test `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-openai/tests/gpt_live_duplex.rs`, for the idle limit of the default
-  session configuration.
+  session configuration, the read timeout of the endpoint `Endpoint::live` gives, and the
+  connect deadline and the write deadline of a model built with `OpenAiLive::new`.
 - OpenAI speech: the test `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-openai/tests/speech_request.rs`, for the connect timeout and the read
   timeout of the default endpoint. The binding has no constant of its own: the two are
