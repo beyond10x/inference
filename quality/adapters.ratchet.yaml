@@ -1,0 +1,115 @@
+format: ratchet/1
+project: inference
+
+subjects:
+  local-speech-to-text:
+    kind: adapter
+    audiences: [library-user]
+
+assessments:
+  sherpa-onnx-stt-resources:
+    subject: local-speech-to-text
+    assessor: stt-resource-profile@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test --release -p inference-sherpa-onnx --all-features --test stt_resources -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          runner: reference-machine-i9-10900k
+          execution: cpu
+          threads: "1"
+    measurements:
+      load-time:
+        {kind: sampled, output: load_time, scope: run, unit: ms, better: lower}
+      real-time-factor:
+        {kind: sampled, output: cpu_real_time_factor, scope: run, unit: thousandths, better: lower}
+      peak-memory:
+        {kind: sampled, output: peak_resident_memory, scope: run, unit: MiB, better: lower}
+
+  whispercpp-stt-resources:
+    subject: local-speech-to-text
+    assessor: stt-resource-profile@1
+    target: {kind: build, environments: [local]}
+    observation:
+      kind: controlled_run
+      command: cargo test --release -p inference-whispercpp --test stt_resources -- --ignored --nocapture
+      runs: 1
+      conditions:
+        local:
+          runner: reference-machine-i9-10900k
+          tools: {whisper.cpp: {version: "1.8.3"}}
+          execution: cpu
+          threads: "4"
+    measurements:
+      load-time:
+        {kind: sampled, output: load_time, scope: run, unit: ms, better: lower}
+      real-time-factor:
+        {kind: sampled, output: cpu_real_time_factor, scope: run, unit: thousandths, better: lower}
+      peak-memory:
+        {kind: sampled, output: peak_resident_memory, scope: run, unit: MiB, better: lower}
+
+  sherpa-onnx-stt-record:
+    subject: local-speech-to-text
+    assessor: capability-record@1
+    inputs: {record: adapters/inference-sherpa-onnx/records/stt-i9-10900k-cpu.json}
+    target: {kind: document, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      real-time-factor:
+        {kind: exact, output: cpu_real_time_factor, scope: run, unit: thousandths, better: lower}
+
+  whispercpp-stt-record:
+    subject: local-speech-to-text
+    assessor: capability-record@1
+    inputs: {record: adapters/inference-whispercpp/records/stt-i9-10900k-cpu.json}
+    target: {kind: document, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: task test-run
+    measurements:
+      real-time-factor:
+        {kind: exact, output: cpu_real_time_factor, scope: run, unit: thousandths, better: lower}
+
+requirements:
+  sherpa-onnx-stt-keeps-up:
+    meaning: Streaming recognition on the CPU of the reference machine is faster than real time, when it is measured.
+    assessment: sherpa-onnx-stt-resources
+    measurement: real-time-factor
+    condition: {operator: lt, value: 1000, unit: thousandths}
+  whispercpp-stt-keeps-up:
+    meaning: Recognition on the CPU of the reference machine is faster than real time, when it is measured.
+    assessment: whispercpp-stt-resources
+    measurement: real-time-factor
+    condition: {operator: lt, value: 1000, unit: thousandths}
+  sherpa-onnx-stt-record-keeps-up:
+    meaning: The committed capability record states a real-time factor that is faster than real time.
+    assessment: sherpa-onnx-stt-record
+    measurement: real-time-factor
+    condition: {operator: lt, value: 1000, unit: thousandths}
+  whispercpp-stt-record-keeps-up:
+    meaning: The committed capability record states a real-time factor that is faster than real time.
+    assessment: whispercpp-stt-record
+    measurement: real-time-factor
+    condition: {operator: lt, value: 1000, unit: thousandths}
+  sherpa-onnx-stt-record-is-measured:
+    meaning: The committed capability record states a real-time factor that is not 0.
+    assessment: sherpa-onnx-stt-record
+    measurement: real-time-factor
+    condition: {operator: gte, value: 1, unit: thousandths}
+  whispercpp-stt-record-is-measured:
+    meaning: The committed capability record states a real-time factor that is not 0.
+    assessment: whispercpp-stt-record
+    measurement: real-time-factor
+    condition: {operator: gte, value: 1, unit: thousandths}
+
+gates:
+  capability-record:
+    stage: record-update
+    qualifying_environments: [local]
+    requires:
+      - sherpa-onnx-stt-keeps-up
+      - whispercpp-stt-keeps-up

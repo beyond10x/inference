@@ -1,0 +1,71 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "check-workflow",
+    "assessor": "forge-job@1",
+    "candidate": "59b8f4a858ab9c4eef94bc21de8e7bb85f90ddad",
+    "target": {
+      "kind": "workflow_run",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "59b8f4a858ab9c4eef94bc21de8e7bb85f90ddad"
+    },
+    "inputs": {
+      "workflow": {
+        "value": "check.yml"
+      },
+      "job": {
+        "value": "inference / task check"
+      }
+    },
+    "completion": "completed",
+    "conditions": {
+      "runner": "ubuntu-latest",
+      "other": {
+        "runner_image": "ubuntu-26.04 20261116.202.1"
+      }
+    },
+    "coverage": {
+      "unit": "job",
+      "executed": 1,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "duration",
+        "kind": "sampled",
+        "scope": "run",
+        "boundary": "run_time",
+        "value_type": "number",
+        "value": "589",
+        "unit": "s",
+        "samples": 1
+      },
+      {
+        "output": "duration",
+        "kind": "sampled",
+        "scope": "run",
+        "boundary": "queue_wait",
+        "value_type": "number",
+        "value": "284",
+        "unit": "s",
+        "samples": 1
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/45474241015"
+    }
+  },
+  "run": {
+    "started_at": "2026-11-24T19:54:00Z",
+    "ended_at": "2026-11-24T20:03:49Z",
+    "queue_wait": "284",
+    "run_time": "589"
+  }
+}

@@ -1,0 +1,785 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "docs-ux",
+    "assessor": "docs-ux@1",
+    "candidate": "adf479ee2707962b93a2c8ce6509bb53775024bb",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "merge_result",
+      "revision": "1ed5587d63ab46006e85cc0164e7e0ecd70ec18c"
+    },
+    "inputs": {
+      "rows": {
+        "value": "ux/.out/rows"
+      }
+    },
+    "completion": "completed",
+    "conditions": {
+      "runner": "ubuntu-latest",
+      "other": {
+        "runner_image": "ubuntu-26.04 20261116.202.1"
+      }
+    },
+    "coverage": {
+      "unit": "test",
+      "executed": 45,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 45,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "layout.h_scroll",
+        "kind": "exact",
+        "scope": "view",
+        "item": "sitemap/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "pages"
+      },
+      {
+        "output": "layout.overflow_elements",
+        "kind": "exact",
+        "scope": "view",
+        "item": "sitemap/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "elements"
+      },
+      {
+        "output": "always_visible.misses",
+        "kind": "exact",
+        "scope": "view",
+        "item": "sitemap/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "axe.serious_critical",
+        "kind": "exact",
+        "scope": "view",
+        "item": "sitemap/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "nodes"
+      },
+      {
+        "output": "layout.h_scroll",
+        "kind": "exact",
+        "scope": "view",
+        "item": "sitemap/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "pages"
+      },
+      {
+        "output": "layout.overflow_elements",
+        "kind": "exact",
+        "scope": "view",
+        "item": "sitemap/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "elements"
+      },
+      {
+        "output": "always_visible.misses",
+        "kind": "exact",
+        "scope": "view",
+        "item": "sitemap/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "axe.serious_critical",
+        "kind": "exact",
+        "scope": "view",
+        "item": "sitemap/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "nodes"
+      },
+      {
+        "output": "keyboard.unreachable",
+        "kind": "exact",
+        "scope": "view",
+        "item": "sitemap/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "elements"
+      },
+      {
+        "output": "keyboard.unreachable",
+        "kind": "exact",
+        "scope": "view",
+        "item": "sitemap/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "elements"
+      },
+      {
+        "output": "completion_miss",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "screen_only.actions",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "actions"
+      },
+      {
+        "output": "screen_only.looks",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "looks"
+      },
+      {
+        "output": "screen_only.steers",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "steers"
+      },
+      {
+        "output": "screen_only.time_to_act_steps.max",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "steps"
+      },
+      {
+        "output": "glance_cost.median",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "glance_cost.p95",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "completion_miss",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "screen_only.actions",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/390x844",
+        "value_type": "number",
+        "value": "2",
+        "unit": "actions"
+      },
+      {
+        "output": "screen_only.looks",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "looks"
+      },
+      {
+        "output": "screen_only.steers",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "steers"
+      },
+      {
+        "output": "screen_only.time_to_act_steps.max",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "steps"
+      },
+      {
+        "output": "glance_cost.median",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "glance_cost.p95",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-dependency-lines/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "completion_miss",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "screen_only.actions",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/1440x900",
+        "value_type": "number",
+        "value": "2",
+        "unit": "actions"
+      },
+      {
+        "output": "screen_only.looks",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "looks"
+      },
+      {
+        "output": "screen_only.steers",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "steers"
+      },
+      {
+        "output": "screen_only.time_to_act_steps.max",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/1440x900",
+        "value_type": "number",
+        "value": "2",
+        "unit": "steps"
+      },
+      {
+        "output": "glance_cost.median",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "glance_cost.p95",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/1440x900",
+        "value_type": "number",
+        "value": "3",
+        "unit": "level"
+      },
+      {
+        "output": "completion_miss",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "screen_only.actions",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/390x844",
+        "value_type": "number",
+        "value": "4",
+        "unit": "actions"
+      },
+      {
+        "output": "screen_only.looks",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "looks"
+      },
+      {
+        "output": "screen_only.steers",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "steers"
+      },
+      {
+        "output": "screen_only.time_to_act_steps.max",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/390x844",
+        "value_type": "number",
+        "value": "2",
+        "unit": "steps"
+      },
+      {
+        "output": "glance_cost.median",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "glance_cost.p95",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-error-kinds/390x844",
+        "value_type": "number",
+        "value": "3",
+        "unit": "level"
+      },
+      {
+        "output": "completion_miss",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "screen_only.actions",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/1440x900",
+        "value_type": "number",
+        "value": "2",
+        "unit": "actions"
+      },
+      {
+        "output": "screen_only.looks",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "looks"
+      },
+      {
+        "output": "screen_only.steers",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "steers"
+      },
+      {
+        "output": "screen_only.time_to_act_steps.max",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/1440x900",
+        "value_type": "number",
+        "value": "2",
+        "unit": "steps"
+      },
+      {
+        "output": "glance_cost.median",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "glance_cost.p95",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/1440x900",
+        "value_type": "number",
+        "value": "3",
+        "unit": "level"
+      },
+      {
+        "output": "completion_miss",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "screen_only.actions",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/390x844",
+        "value_type": "number",
+        "value": "4",
+        "unit": "actions"
+      },
+      {
+        "output": "screen_only.looks",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "looks"
+      },
+      {
+        "output": "screen_only.steers",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "steers"
+      },
+      {
+        "output": "screen_only.time_to_act_steps.max",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/390x844",
+        "value_type": "number",
+        "value": "2",
+        "unit": "steps"
+      },
+      {
+        "output": "glance_cost.median",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "glance_cost.p95",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-limitations/390x844",
+        "value_type": "number",
+        "value": "3",
+        "unit": "level"
+      },
+      {
+        "output": "completion_miss",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "screen_only.actions",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "actions"
+      },
+      {
+        "output": "screen_only.looks",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "looks"
+      },
+      {
+        "output": "screen_only.steers",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "steers"
+      },
+      {
+        "output": "screen_only.time_to_act_steps.max",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "steps"
+      },
+      {
+        "output": "glance_cost.median",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "glance_cost.p95",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "completion_miss",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "screen_only.actions",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/390x844",
+        "value_type": "number",
+        "value": "2",
+        "unit": "actions"
+      },
+      {
+        "output": "screen_only.looks",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "looks"
+      },
+      {
+        "output": "screen_only.steers",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "steers"
+      },
+      {
+        "output": "screen_only.time_to_act_steps.max",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "steps"
+      },
+      {
+        "output": "glance_cost.median",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "glance_cost.p95",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-provider-comparison/390x844",
+        "value_type": "number",
+        "value": "3",
+        "unit": "level"
+      },
+      {
+        "output": "completion_miss",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "screen_only.actions",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "actions"
+      },
+      {
+        "output": "screen_only.looks",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "looks"
+      },
+      {
+        "output": "screen_only.steers",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/1440x900",
+        "value_type": "number",
+        "value": "0",
+        "unit": "steers"
+      },
+      {
+        "output": "screen_only.time_to_act_steps.max",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/1440x900",
+        "value_type": "number",
+        "value": "1",
+        "unit": "steps"
+      },
+      {
+        "output": "glance_cost.median",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/1440x900",
+        "value_type": "number",
+        "value": "3",
+        "unit": "level"
+      },
+      {
+        "output": "glance_cost.p95",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/1440x900",
+        "value_type": "number",
+        "value": "3",
+        "unit": "level"
+      },
+      {
+        "output": "completion_miss",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "misses"
+      },
+      {
+        "output": "screen_only.actions",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/390x844",
+        "value_type": "number",
+        "value": "2",
+        "unit": "actions"
+      },
+      {
+        "output": "screen_only.looks",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "looks"
+      },
+      {
+        "output": "screen_only.steers",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/390x844",
+        "value_type": "number",
+        "value": "0",
+        "unit": "steers"
+      },
+      {
+        "output": "screen_only.time_to_act_steps.max",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "steps"
+      },
+      {
+        "output": "glance_cost.median",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/390x844",
+        "value_type": "number",
+        "value": "1",
+        "unit": "level"
+      },
+      {
+        "output": "glance_cost.p95",
+        "kind": "exact",
+        "scope": "view",
+        "item": "find-realtime-model-variable/390x844",
+        "value_type": "number",
+        "value": "3",
+        "unit": "level"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "run",
+        "value_type": "number",
+        "value": "4.3",
+        "unit": "s",
+        "samples": 1
+      },
+      {
+        "output": "duration",
+        "kind": "sampled",
+        "scope": "run",
+        "boundary": "run_time",
+        "value_type": "number",
+        "value": "48.0",
+        "unit": "s",
+        "samples": 1
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/45467764733"
+    }
+  },
+  "run": {
+    "started_at": "2026-11-24T19:14:30Z",
+    "ended_at": "2026-11-24T19:15:19Z"
+  }
+}

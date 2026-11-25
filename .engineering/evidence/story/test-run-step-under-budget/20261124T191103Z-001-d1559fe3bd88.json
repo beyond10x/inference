@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-24T19:11:03Z",
+  "actor": "human:operator",
+  "artifact": "story:test-run-step-under-budget",
+  "kind": "story",
+  "revision": 28,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "https://github.com/beyond10x/inference/actions/runs/45460993606",
+    "reference": "workflow check at 7f43e7dd9: task check-source success 241 s, task test-build success 268 s, task test-run success 111 s; 3059 tests run: 3059 passed, 72 skipped"
+  }
+}

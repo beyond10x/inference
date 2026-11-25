@@ -134,8 +134,8 @@ use crate::duplex::{block, failure, kept_push, milliseconds, poll_read, without_
 use crate::error::RealtimeError;
 use crate::event::ServerError;
 use crate::live::{
-    BackendEvent, BackendUsage, Delegation, LIVE_MODEL, LiveClient, LiveClosed, LiveEvent,
-    LiveFormat, LiveSessionConfig, ResponsesBackend,
+    BackendEvent, BackendUsage, CLOSE_TIMEOUT, Delegation, LIVE_MODEL, LiveClient, LiveClosed,
+    LiveEvent, LiveFormat, LiveSessionConfig, ResponsesBackend,
 };
 
 /// The Responses backend model the binding delegates to unless told otherwise, the one the
@@ -316,6 +316,7 @@ pub struct OpenAiLive {
     adapter: Adapter,
     endpoint: Endpoint,
     deadlines: Deadlines,
+    close_timeout: Duration,
     source: Box<dyn CredentialSource>,
     credential: String,
     backend: ResponsesBackend,
@@ -358,6 +359,7 @@ impl OpenAiLive {
             adapter,
             endpoint,
             deadlines: Deadlines::default(),
+            close_timeout: CLOSE_TIMEOUT,
             source,
             credential: credential.into(),
             backend: ResponsesBackend::new(DEFAULT_BACKEND_MODEL),
@@ -396,6 +398,20 @@ impl OpenAiLive {
     /// The deadline of each write, [`crate::DEFAULT_WRITE_TIMEOUT`] unless set.
     pub fn write_timeout(&self) -> Duration {
         self.deadlines.write_timeout()
+    }
+
+    /// This model with another close timeout for the sessions it opens
+    /// ([`LiveClient::with_close_timeout`]): how long the close of a session waits for
+    /// `session.closed`, in all, when the endpoint's read timeout is shorter.
+    #[must_use]
+    pub fn with_close_timeout(mut self, close_timeout: Duration) -> Self {
+        self.close_timeout = close_timeout;
+        self
+    }
+
+    /// The close timeout of the sessions this model opens, [`CLOSE_TIMEOUT`] unless set.
+    pub fn close_timeout(&self) -> Duration {
+        self.close_timeout
     }
 
     /// This model under an adapter record declared elsewhere, such as a model store's.
@@ -485,7 +501,8 @@ impl NativeSpeechModel for OpenAiLive {
                 &client_config,
             ),
         )
-        .map_err(|error| OpenError::Failed(failure(&error)))?;
+        .map_err(|error| OpenError::Failed(failure(&error)))?
+        .with_close_timeout(self.close_timeout);
         let rate = u64::from(client_config.format.sample_rate());
         let gap_samples = u64::try_from(self.segmentation.gap.as_millis())
             .unwrap_or(u64::MAX)
@@ -1217,11 +1234,12 @@ impl SpeechSessionHandle for OpenAiLiveSession {
     /// usage, and from it or a read that fails nothing is recorded, so an open session closes
     /// rather than fails. A message that is not a GPT-Live event is no failed read: it is
     /// counted, the client reads on, and what follows it is recorded too. Otherwise the close asks
-    /// the server for `session.closed` and awaits it, for [`crate::live::CLOSE_TIMEOUT`] at most
-    /// in all when the endpoint's read timeout is shorter; the seconds it carries are recorded
-    /// just before `SpeechSessionClosed`. Of what the server sends meanwhile only its usage is
-    /// recorded and nothing is delivered; without `session.closed` the session still closes, with
-    /// the usage seen so far, unconfirmed.
+    /// the server for `session.closed` and awaits it, for the model's close timeout
+    /// ([`OpenAiLive::close_timeout`], [`crate::live::CLOSE_TIMEOUT`] unless set) at most in all
+    /// when the endpoint's read timeout is shorter; the seconds it carries are recorded just
+    /// before `SpeechSessionClosed`. Of what the server sends meanwhile only its usage is recorded
+    /// and nothing is delivered; without `session.closed` the session still closes, with the
+    /// usage seen so far, unconfirmed.
     fn close(&mut self) -> Result<(), SessionError> {
         if self.ledger.session().require_open().is_ok() {
             match self.record_arrived() {

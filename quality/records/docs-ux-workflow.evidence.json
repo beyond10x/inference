@@ -1,0 +1,60 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "docs-ux-workflow",
+    "assessor": "forge-job@1",
+    "candidate": "adf479ee2707962b93a2c8ce6509bb53775024bb",
+    "target": {
+      "kind": "workflow_run",
+      "class": "ci",
+      "selection": "merge_result",
+      "revision": "1ed5587d63ab46006e85cc0164e7e0ecd70ec18c"
+    },
+    "inputs": {
+      "workflow": {
+        "value": "docs-ux.yml"
+      },
+      "job": {
+        "value": "Docs UX gates"
+      }
+    },
+    "completion": "completed",
+    "conditions": {
+      "runner": "ubuntu-latest",
+      "other": {
+        "runner_image": "ubuntu-26.04 20261116.202.1"
+      }
+    },
+    "coverage": {
+      "unit": "job",
+      "executed": 1,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "duration",
+        "kind": "sampled",
+        "scope": "run",
+        "boundary": "run_time",
+        "value_type": "number",
+        "value": "133",
+        "unit": "s",
+        "samples": 1
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/45467764733"
+    }
+  },
+  "run": {
+    "started_at": "2026-11-24T19:13:11Z",
+    "ended_at": "2026-11-24T19:15:24Z",
+    "run_time": "133"
+  }
+}

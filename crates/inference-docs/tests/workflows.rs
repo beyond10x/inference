@@ -5,6 +5,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod quality;
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -137,6 +139,7 @@ fn a_pull_request_of_planning_and_prose_files_only_skips_the_build() {
             ".engineering/planning/epic/b.md",
         ],
         &["adapters/inference-openai/README.md"],
+        &["docs/quality/README.md"],
     ] {
         assert_eq!(gate("pull_request", changed), "planning", "{changed:?}");
     }
@@ -153,6 +156,11 @@ fn any_other_changed_path_runs_the_full_gate() {
         &["CHANGELOG.md"],
         &["ess/SKIPPED.md"],
         &["ess/domains/session.yaml"],
+        &["quality/README.md"],
+        &[
+            "quality/not-measured.md",
+            ".engineering/planning/story/a.md",
+        ],
         &["rust-toolchain.toml"],
         &[".config/nextest.toml"],
         &[".github/workflows/check.yml"],

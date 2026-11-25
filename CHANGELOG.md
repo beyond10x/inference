@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Added
+
+- `inference-openai`: `LiveClient::with_close_timeout` and `LiveClient::close_timeout`, and
+  `OpenAiLive::with_close_timeout` and `OpenAiLive::close_timeout`: the most a graceful close of a
+  GPT-Live session waits for the provider's last messages. Unset, it is `CLOSE_TIMEOUT`, 15
+  seconds, as before; a close takes at most the longer of it and the endpoint's read timeout.
+- `repo-podcast` (example, not published): `Settings::silent_turn`, how long a model that creates
+  its own responses may send nothing before its turn is given up; 10 seconds by default, as before.
+  A `Settings` written as a struct literal without `..Settings::default()` has to name the field.
+- `realtime-voice` (example, not published): `elevenlabs::resolves_within(source, wait)`, the key
+  check with its wait as an argument; `elevenlabs::resolves` calls it with `KEY_WAIT`, 8 seconds,
+  as before.
+- `quality/` and `ratchet.toml`: the quality of the repository, written in the formats of Ratchet
+  at its commit `f139eccc17a548444f0f4e1dc06520120c28739f`: 43 measures with their command, unit,
+  direction, bound and baseline (`quality/README.md`), what is not measured
+  (`quality/not-measured.md`), and a test in `task test-run` that fails when the documents stop
+  agreeing with each other, with `Taskfile.yml` or with that page. No Ratchet command works at
+  that commit; the documents add no gate and change none. No crate's API changes.
+
+### Changed
+
+- `task test-run` prints `task test-run was ended at its bound of 120 s` also when a part outlived
+  the first signal and was killed, and its list of the ten slowest tests is of the run that just
+  ended: `no test ran` when that run left no report. `task` exits 201 when the bound ends the step.
+- The `check` workflow runs the full gate for a pull request that changes a file under
+  `quality/`, also a `*.md` file: the test of the quality documents reads them.
+
 ## [0.33.0] — 2026-11-23
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these

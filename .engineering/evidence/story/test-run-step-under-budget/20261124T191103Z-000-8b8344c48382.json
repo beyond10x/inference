@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-24T19:11:03Z",
+  "actor": "human:operator",
+  "artifact": "story:test-run-step-under-budget",
+  "kind": "story",
+  "revision": 28,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "task test-run on the forge's runner (workflow check, pull request 65)",
+    "reference": "VERIFIED: baseline run 45404264062 at 34e8ac136 (task test-run failure, ended at its bound of 120 s with 3824 of 4043 tests run) vs treatment run 45451445968 at 7ce339d92 (success 90 s; Summary 84.048 s, 3055 passed) and run 45460993606 at 7f43e7dd9 (success 111 s; Summary 102.142 s, 3059 passed; the same run took 241 s for check-source against 179 s in the run before, so the runner was slower)"
+  }
+}

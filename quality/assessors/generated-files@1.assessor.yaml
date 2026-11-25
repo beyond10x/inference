@@ -1,0 +1,9 @@
+format: ratchet-assessor/1
+name: generated-files
+version: "1"
+targets: [revision]
+coverage_unit: file
+coverage: [executed, passed, failed]
+outputs:
+  current:
+    {value_type: assertion, kind: exact, scopes: [file]}

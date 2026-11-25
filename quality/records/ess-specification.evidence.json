@@ -1,0 +1,56 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "ess-specification",
+    "assessor": "ess-specification@1",
+    "candidate": "59b8f4a858ab9c4eef94bc21de8e7bb85f90ddad",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "59b8f4a858ab9c4eef94bc21de8e7bb85f90ddad"
+    },
+    "inputs": {
+      "path": {
+        "value": "ess"
+      }
+    },
+    "completion": "completed",
+    "conditions": {
+      "tools": {
+        "ess": "0.98.0"
+      }
+    },
+    "coverage": {
+      "unit": "file",
+      "executed": 11,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 11,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "valid",
+        "kind": "exact",
+        "scope": "run",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "scenarios",
+        "kind": "exact",
+        "scope": "run",
+        "value_type": "number",
+        "value": "10",
+        "unit": "scenarios"
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/45474241015"
+    }
+  }
+}

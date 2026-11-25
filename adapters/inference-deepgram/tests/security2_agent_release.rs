@@ -108,16 +108,23 @@ fn no_agent_session_leaves_its_thread_or_connection_behind() {
     }
     let rounds = scripts.len();
     let server = AgentServer::scripted(scripts);
-    let mut model = DeepgramAgent::new(
-        AgentEndpoint::new()
-            .with_url(&server.url)
-            .with_open_timeout(Duration::from_secs(2))
-            .with_read_timeout(Duration::from_secs(3)),
-        AgentConfig::new(),
-        Arc::new(FixedKey(KEY)),
-        "deepgram-api-key",
-    )
-    .expect("the fixture configuration is valid");
+    let model_opening_within = |open_timeout: Duration| {
+        DeepgramAgent::new(
+            AgentEndpoint::new()
+                .with_url(&server.url)
+                .with_open_timeout(open_timeout)
+                .with_read_timeout(Duration::from_secs(3)),
+            AgentConfig::new(),
+            Arc::new(FixedKey(KEY)),
+            "deepgram-api-key",
+        )
+        .expect("the fixture configuration is valid")
+    };
+    let mut model = model_opening_within(Duration::from_secs(2));
+    // The opening that stalls is given up at the open timeout, so the model that opens it has a
+    // short one: the test waits it four times, and a longer bound proves nothing more.
+    let stalled_open = Duration::from_millis(200);
+    let mut stalling_model = model_opening_within(stalled_open);
     let mut peak = 0;
     for round in 0..rounds {
         match round % 5 {
@@ -147,8 +154,17 @@ fn no_agent_session_leaves_its_thread_or_connection_behind() {
                 );
                 drop(session);
             }
-            _ => {
+            3 => {
                 assert!(model.open(config()).is_err(), "round {round}");
+            }
+            _ => {
+                let asked = Instant::now();
+                assert!(stalling_model.open(config()).is_err(), "round {round}");
+                assert!(
+                    asked.elapsed() >= stalled_open,
+                    "round {round}: the stalled opening was refused after {:?}, before its bound",
+                    asked.elapsed()
+                );
             }
         }
     }
