@@ -13,11 +13,11 @@ clap = { version = "4", default-features = false, features = ["derive", "error-c
 inference-core = { path = "../inference-core" }
 serde.workspace = true
 serde_json.workspace = true
-stt-only = { path = "../../examples/stt-only" }
-
-[dev-dependencies]
 serde_norway = "0.9"
+sha2 = "0.11"
+stt-only = { path = "../../examples/stt-only" }
 toml = "1"
+xmlparser = "0.13"
 
 [lints]
 workspace = true

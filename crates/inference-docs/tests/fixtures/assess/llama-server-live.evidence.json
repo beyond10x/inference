@@ -1,0 +1,57 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "llama-server-live",
+    "assessor": "printed-duration@1",
+    "target": {
+      "kind": "build",
+      "class": "local"
+    },
+    "completion": "completed",
+    "conditions": {
+      "tools": {
+        "rustc": "1.100.0"
+      }
+    },
+    "coverage": {
+      "unit": "run",
+      "executed": 1,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 0,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "duration",
+        "kind": "sampled",
+        "scope": "run",
+        "boundary": "start_to_first_delta",
+        "value_type": "number",
+        "value": "212.5",
+        "unit": "ms",
+        "samples": 1
+      },
+      {
+        "output": "duration",
+        "kind": "sampled",
+        "scope": "run",
+        "boundary": "start_to_completed",
+        "value_type": "number",
+        "value": "1304",
+        "unit": "ms",
+        "samples": 1
+      }
+    ],
+    "source": {
+      "kind": "build_pool_log",
+      "location": "target/llama-server-live.out"
+    }
+  },
+  "run": {
+    "started_at": "2026-11-25T10:00:00Z",
+    "ended_at": "2026-11-25T10:00:09Z"
+  }
+}
