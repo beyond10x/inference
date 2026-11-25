@@ -30,14 +30,39 @@ specification at commit `f139eccc17a548444f0f4e1dc06520120c28739f`.
 Three pages say the same for a reader: this one, [adapters.md](adapters.md) and
 [not-measured.md](not-measured.md).
 
-No assessor has a program. Each declaration is without `command`: it names the outputs, units
-and scopes that a program would report. The records were written by hand from the CI runs named
-below.
+Five assessors have a program, `inference-docs assess` (`crates/inference-docs/src/assess.rs`).
+It reads a file a run left behind and writes the record of one assessment. It runs no measure.
+`nextest-run@1`, `package-tests@1`, `named-tests@1` and `capability-record@1` read the JUnit
+report of cargo-nextest; `capability-record@1` reads its value from the record and whether the
+record's test passed from the report. `printed-duration@1` reads the output that a live test or
+an example printed. The other seven declarations have no program: they name the outputs, units
+and scopes that a program would report. No declaration has a `command`.
+
+The program takes the arguments Ratchet gives an assessor and two of its own: `--from`, the file
+the run left, and `--source`, what the record names as its origin, a URL of a forge run or a
+path from the root. `--started-at` and `--ended-at` give the times of a printed output, which
+holds none. The call for the record of `workspace-tests`:
+
+```sh
+cargo run -q -p inference-docs -- assess --project inference --assessment workspace-tests \
+  --root . --class ci --out workspace-tests.evidence.json --revision <commit> \
+  --from target/nextest/default/junit.xml --source <URL of the check run>
+```
+
+It exits 0 with the record at `--out`. It exits 1 and writes no record when the file does not
+hold what the assessment reads, with one line on stderr for each thing it lacks. It exits 2 for
+a wrong call, and 3 when it cannot read a plan file or a declaration, or cannot write the
+record. `task test-run` keeps the report of its workspace part at
+`target/nextest/default/junit.xml`: the stack test after it runs under the nextest profile
+`stack`.
+
+The records under `records/` are still the ones written by hand from the CI runs named below.
 
 ## The test that keeps the documents true
 
-`crates/inference-docs/tests/quality/`, part of `task test-run`: `mod.rs` and, for the rules
-about adapters, tests and commands, `adapters.rs`. It is not `ratchet validate`. It fails when:
+`crates/inference-docs/tests/quality/`, part of `task test-run`: `mod.rs`, for the rules about
+adapters, tests and commands `adapters.rs`, and for the program `assess.rs`. It is not
+`ratchet validate`. It fails when:
 
 - a file stops parsing, has another format or names another project, a name is declared in two
   files, an assessor declaration or a record is not in the file named after it, or
@@ -89,7 +114,12 @@ about adapters, tests and commands, `adapters.rs`. It is not `ratchet validate`.
 - an assessment lists tests as its input, and one is not in its file, the entry of the measure
   names another set of tests, or the record has another set of results;
 - an entry on [adapters.md](adapters.md) does not give the command of its assessment, whole, in
-  its `Command:` line.
+  its `Command:` line;
+- `inference-docs assess`, run on the fixtures under
+  `crates/inference-docs/tests/fixtures/assess/`, writes another record than the expected file,
+  writes a record that the rules above refuse in the place of a committed one, reads a printed
+  measure by a text the source of its command does not print, or writes a record from a file
+  that lacks what the assessment reads.
 
 One command stands in no `cmds` list of `Taskfile.yml` and names no test or example of a
 package, so the test holds it against nothing. A change of the workflow step that runs it goes
