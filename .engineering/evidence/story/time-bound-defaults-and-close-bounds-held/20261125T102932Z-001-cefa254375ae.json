@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T10:29:32Z",
+  "actor": "human:operator",
+  "artifact": "story:time-bound-defaults-and-close-bounds-held",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source, task test-build, task test-run at 12d77e8e3 on the build node, tree clean",
+    "reference": "check-source exit 0 (102 s); test-build exit 0 (111 s); test-run exit 201 (53 s): 3116 tests run: 3114 passed, 2 failed, 72 skipped. The two failures are twenty_recognitions_wait_for_the_server_without_blocking_the_runtime and twenty_syntheses_wait_for_the_server_without_blocking_the_runtime of inference-elevenlabs::async_handles (the ticker's largest gap 144 ms and 155 ms): they are not of this unit, fail on its base under load and are corrected on the branch of the wave of 2026-11-24. The part of test-run after the workspace run did not start. The 13 tests the_time_bound_defaults_are_the_stated_numbers and the_deadlines_are_stated_and_settable passed at 0.005 s each; a_sink_given_no_patience_waits_the_stated_two_seconds_for_a_stalled_speaker passed at 2.007 s"
+  }
+}
