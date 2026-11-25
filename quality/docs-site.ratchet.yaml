@@ -5,16 +5,22 @@ subjects:
   docs-site:
     kind: documentation-site
     audiences: [docs-reader]
+  docs-gate:
+    kind: development-workflow
+    audiences: [developer, coding-agent]
 
 assessments:
   docs-ux:
     subject: docs-site
     assessor: docs-ux@1
     inputs: {rows: ux/.out/rows}
-    target: {kind: revision, environments: [local, ci], selection: candidate}
+    target: {kind: revision, environments: [local, ci], selection: merge_result}
     observation:
-      kind: snapshot
+      kind: controlled_run
       command: npx playwright test --workers=2
+      runs: 1
+      conditions:
+        ci: {runner: ubuntu-latest}
       scenarios:
         - sitemap
         - find-dependency-lines
@@ -47,8 +53,59 @@ assessments:
         {kind: exact, output: glance_cost.median, scope: view, unit: level, better: lower}
       glance-cost-p95:
         {kind: exact, output: glance_cost.p95, scope: view, unit: level, better: lower}
+      slowest-test:
+        {kind: sampled, output: slowest_test, scope: run, unit: s, better: lower}
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
+
+  docs-ux-step:
+    subject: docs-gate
+    assessor: command-run@1
+    target: {kind: revision, environments: [ci], selection: merge_result}
+    observation:
+      kind: controlled_run
+      command: npx playwright test --workers=2
+      runs: 1
+      conditions:
+        ci: {runner: ubuntu-latest}
+    measurements:
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
+
+  docs-ux-workflow:
+    subject: docs-gate
+    assessor: forge-job@1
+    inputs: {workflow: docs-ux.yml, job: Docs UX gates}
+    target: {kind: workflow_run, environments: [ci], selection: merge_result}
+    observation:
+      kind: snapshot
+      conditions:
+        ci: {runner: ubuntu-latest}
+    measurements:
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
 
 requirements:
+  docs-test-budget:
+    meaning: No test of the documentation site runs 60 s.
+    assessment: docs-ux
+    measurement: slowest-test
+    condition: {operator: lt, value: 60, unit: s}
+  docs-run-budget:
+    meaning: The tests of the documentation site end before 120 s.
+    assessment: docs-ux
+    measurement: run-time
+    condition: {operator: lt, value: 120, unit: s}
+  docs-step-within-limit:
+    meaning: The step of the workflow that runs those tests ends before its limit of 2 minutes.
+    assessment: docs-ux-step
+    measurement: run-time
+    condition: {operator: lt, value: 120, unit: s}
+  docs-job-within-timeout:
+    meaning: The job of the Docs UX workflow ends before its timeout of 20 minutes.
+    assessment: docs-ux-workflow
+    measurement: run-time
+    condition: {operator: lt, value: 1200, unit: s}
   docs-horizontal-scroll-not-worse:
     assessment: docs-ux
     measurement: horizontal-scroll
@@ -103,6 +160,14 @@ gates:
     stage: pre-merge
     qualifying_environments: [ci]
     requires:
+      - requirement: docs-test-budget
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-run-budget
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-step-within-limit
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-job-within-timeout
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
       - requirement: docs-horizontal-scroll-not-worse
         when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
       - requirement: docs-overflowing-elements-not-worse

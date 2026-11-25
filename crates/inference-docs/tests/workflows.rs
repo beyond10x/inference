@@ -139,6 +139,7 @@ fn a_pull_request_of_planning_and_prose_files_only_skips_the_build() {
             ".engineering/planning/epic/b.md",
         ],
         &["adapters/inference-openai/README.md"],
+        &["docs/quality/README.md"],
     ] {
         assert_eq!(gate("pull_request", changed), "planning", "{changed:?}");
     }
@@ -155,6 +156,11 @@ fn any_other_changed_path_runs_the_full_gate() {
         &["CHANGELOG.md"],
         &["ess/SKIPPED.md"],
         &["ess/domains/session.yaml"],
+        &["quality/README.md"],
+        &[
+            "quality/not-measured.md",
+            ".engineering/planning/story/a.md",
+        ],
         &["rust-toolchain.toml"],
         &[".config/nextest.toml"],
         &[".github/workflows/check.yml"],

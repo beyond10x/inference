@@ -159,6 +159,33 @@ assessments:
       slowest-test:
         {kind: sampled, output: slowest_test, scope: run, unit: s, better: lower}
 
+  slow-lane-step:
+    subject: gate
+    assessor: command-run@1
+    target: {kind: revision, environments: [ci], selection: candidate}
+    observation:
+      kind: controlled_run
+      command: task test-slow
+      runs: 1
+      conditions:
+        ci: {runner: ubuntu-latest}
+    measurements:
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
+
+  slow-workflow:
+    subject: gate
+    assessor: forge-job@1
+    inputs: {workflow: slow.yml, job: inference / task test-slow}
+    target: {kind: workflow_run, environments: [ci], selection: candidate}
+    observation:
+      kind: snapshot
+      conditions:
+        ci: {runner: ubuntu-latest}
+    measurements:
+      run-time:
+        {kind: sampled, output: duration, boundary: run_time, scope: run, unit: s, better: lower}
+
   check-source-step:
     subject: gate
     assessor: command-run@1
@@ -288,6 +315,11 @@ requirements:
     assessment: check-workflow
     measurement: run-time
     condition: {operator: lt, value: 2700, unit: s}
+  slow-job-within-timeout:
+    meaning: The job of the slow workflow ends before its timeout of 30 minutes.
+    assessment: slow-workflow
+    measurement: run-time
+    condition: {operator: lt, value: 1800, unit: s}
   source-scan-passes:
     meaning: The security and privacy scan of the shared source gates passes.
     assessment: source-scan
@@ -309,10 +341,28 @@ gates:
       - test-step-budget
       - test-budget
       - conformance-keeps-passing
+      - sherpa-onnx-stt-record-keeps-up
+      - whispercpp-stt-record-keeps-up
+      - sherpa-onnx-stt-record-is-measured
+      - whispercpp-stt-record-is-measured
   slow:
     stage: pre-merge
-    qualifying_environments: [local, ci]
+    qualifying_environments: [ci]
     requires:
+      - requirement: slow-job-within-timeout
+        when:
+          changed:
+            - crates/inference-macros/**
+            - crates/inference/src/**
+            - crates/inference-tools/src/**
+            - crates/inference/tests/ui.rs
+            - crates/inference/tests/ui/**
+            - crates/inference/tests/compile_fail/**
+            - Cargo.lock
+            - rust-toolchain.toml
+            - .config/nextest.toml
+            - Taskfile.yml
+            - .github/workflows/slow.yml
       - requirement: slow-test-budget
         when:
           changed:

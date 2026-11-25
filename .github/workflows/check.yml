@@ -44,7 +44,7 @@ jobs:
             fi
             while IFS= read -r path; do
               case "$path" in
-                website/* | ess/* | CHANGELOG.md) gate=full ;;
+                website/* | ess/* | quality/* | CHANGELOG.md) gate=full ;;
                 .engineering/* | *.md) ;;
                 *) gate=full ;;
               esac

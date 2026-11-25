@@ -2,6 +2,7 @@ format: ratchet-assessor/1
 name: stt-resource-profile
 version: "1"
 targets: [build]
+conditions: [execution, threads]
 coverage_unit: run
 coverage: [executed, passed, failed]
 outputs:

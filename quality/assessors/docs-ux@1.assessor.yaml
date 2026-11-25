@@ -31,3 +31,7 @@ outputs:
     {value_type: number, kind: exact, scopes: [view], unit: level}
   glance_cost.p95:
     {value_type: number, kind: exact, scopes: [view], unit: level}
+  duration:
+    {value_type: number, kind: sampled, scopes: [], unit: s, boundaries: [run_time]}
+  slowest_test:
+    {value_type: number, kind: sampled, scopes: [], unit: s}

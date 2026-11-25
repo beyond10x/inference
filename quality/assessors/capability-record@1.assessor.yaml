@@ -1,0 +1,12 @@
+format: ratchet-assessor/1
+name: capability-record
+version: "1"
+targets: [document]
+target_input: record
+inputs:
+  record: {type: path, required: true}
+coverage_unit: record
+coverage: [executed, passed, failed]
+outputs:
+  cpu_real_time_factor:
+    {value_type: number, kind: exact, scopes: [], unit: thousandths}

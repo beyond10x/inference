@@ -39,9 +39,16 @@ against a list. `cargo deny check` with a `deny.toml` would produce both as sets
 
 ### The licence of each library a native archive links
 
-`task sherpa-onnx-archive` pins the archive by its sha256 and checks nothing inside it. No file
-lists the shared libraries of the archive and their licences. A manifest of the archive, written
-when the pin changes and compared in the gate, would produce it.
+One thing about it is tested. `no_gpl_phonemiser_is_linked` in
+`adapters/inference-sherpa-onnx/tests/licence.rs`, part of `task test-run`, scans the test binary
+and every sherpa-onnx and onnxruntime library that binary loaded for the symbols of espeak-ng and
+piper-phonemize, the two GPL phonemisers, and fails when it finds one. The archive is the build
+without TTS, and `task sherpa-onnx-archive` pins it by its sha256.
+
+Still not read: the licence text of each library that is linked. No file lists the shared
+libraries of the archive and their licences, and the test knows two libraries by their symbols
+and no other. A manifest of the archive, written when the pin changes and compared in the gate,
+would produce it.
 
 ### Every model call counted once in usage, per recipe
 
@@ -123,9 +130,9 @@ check, would produce it.
 
 ### The documentation site on `main`
 
-The `Docs UX` workflow runs on pull requests only. The baseline in the README is from the pull
-request head whose tree is the tree of `main`. A run of the workflow on `main` would give a
-baseline at the commit itself.
+The `Docs UX` workflow runs on pull requests only. The baseline in the README is from a run that
+checked out the merge of a pull request into `main`; the tree of that merge is the tree of
+`main`. A run of the workflow on `main` would give a baseline at the commit itself.
 
 ## Measured, but not expressible in the formats at the pin
 
@@ -160,6 +167,26 @@ that a person writes after a run on the reference machine. An evidence document 
 imported run came from with one of three kinds: a forge run, a job log of the build pool, a
 JUnit file. A committed file of results is none of them, and the three samples behind each
 median are not kept. These two assessments have measures in the YAML and no record.
+
+What is expressible is the committed file as a document that a test reads:
+`sherpa-onnx-stt-record` and `whispercpp-stt-record` have the real-time factor as an exact value
+of the file, with a record from the check run. The load time and the peak memory are not
+repeated there, because no bound is held on them.
+
+### The machine a resource profile was measured on
+
+The capability records name the machine in one sentence: the CPU, the memory, the unused GPU.
+The conditions of a plan have a text `runner`, a map of tools and a load bound. The plans name
+the machine as the runner `reference-machine-i9-10900k` and state the execution on the CPU and
+the thread count as conditions the assessor declares. The memory of the machine and the unused
+GPU have no key and are not in the YAML. The build profile is `--release` in the command; the
+capability records do not state it, so it is no condition either.
+
+### A sampled measurement and an exact one in one plan
+
+The plan `docs-ux` holds twelve exact values and two durations. The observation has one kind for
+the whole plan. It is written as a controlled run with one run, which is true for the durations
+and says nothing for the twelve.
 
 ### The conformance run as evidence
 
