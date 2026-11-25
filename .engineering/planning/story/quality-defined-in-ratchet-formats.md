@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:quality-defined-in-ratchet-formats
 kind: story
-status: active
+status: implemented
 title: The quality of the repository is defined in Ratchet's formats
 relations:
 - serves: vision:inference
@@ -25,10 +25,11 @@ scope:
   path: quality
 - confidence: cited
   path: ratchet.toml
-revision: 13
+revision: 14
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-25T00:31:07Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-25T00:31:08Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-25T01:48:04Z", actor: "human:operator", revision: 14, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 

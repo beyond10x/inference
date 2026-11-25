@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T01:48:04Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-defined-in-ratchet-formats",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source, task test-build and task test-run on the build node at d7c0a5948",
+    "reference": "check-source exit 0 in 165 s; test-build exit 0 in 188 s; test-run ended at its bound of 120 s on a loaded node with 1326 of 3081 tests run: 1322 passed, 2 failed, 2 ended by the bound; the 2 failures are twenty_recognitions_wait_for_the_server_without_blocking_the_runtime and twenty_syntheses_wait_for_the_server_without_blocking_the_runtime of inference-elevenlabs::async_handles, which failed on the loaded node also before this change; all 58 tests of inference-docs passed"
+  }
+}
