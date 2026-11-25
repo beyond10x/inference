@@ -69,21 +69,39 @@ user:
 - The example `talk` of `realtime-voice` and its ignored test `live_usage`: the time of the
   whole run.
 
-### Time bounds no test fires, and defaults no test asserts
+### Time bounds no test fires or no record holds, and defaults no test asserts
 
-[adapters.md](adapters.md) names the tests that hold a bound. The rest, per binding:
+[adapters.md](adapters.md) names the tests that hold a bound and whose result a record of a run
+holds. The rest, per binding:
 
-- Cartesia: no test fires the connect timeout, `DEFAULT_CONNECT_TIMEOUT` in
-  `adapters/inference-cartesia/src/config.rs`. No test asserts the value of that default or of
+- Cartesia: the test
+  `a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout` of
+  `adapters/inference-cartesia/tests/errors.rs` fires the connect timeout, with a value of its
+  own in place of `DEFAULT_CONNECT_TIMEOUT` in `adapters/inference-cartesia/src/config.rs`. No
+  record of a run holds its result yet. No test asserts the value of that default or of
   `DEFAULT_READ_TIMEOUT`.
-- Phonic: no test fires the connect timeout, `DEFAULT_CONNECT_TIMEOUT` in
-  `adapters/inference-phonic/src/protocol.rs`. No test asserts the value of any of its four
+- Phonic: the test `a_handshake_never_answered_fails_the_open_at_the_connect_timeout` of
+  `adapters/inference-phonic/tests/duplex.rs` fires the connect timeout, with a value of its
+  own in place of `DEFAULT_CONNECT_TIMEOUT` in `adapters/inference-phonic/src/protocol.rs`. No
+  record of a run holds its result yet. No test asserts the value of any of its four
   defaults.
-- ElevenLabs agent: no test fires the connect timeout, `DEFAULT_CONNECT_TIMEOUT` in
-  `adapters/inference-elevenlabs/src/agent.rs`. No test asserts the value of that default, of
-  `DEFAULT_METADATA_TIMEOUT` or of the agent's `DEFAULT_READ_TIMEOUT`.
+- ElevenLabs agent: the test
+  `a_handshake_never_answered_fails_the_open_at_the_connect_timeout` of
+  `adapters/inference-elevenlabs/tests/agent_duplex.rs` fires the connect timeout, with a value
+  of its own in place of `DEFAULT_CONNECT_TIMEOUT` in
+  `adapters/inference-elevenlabs/src/agent.rs`. No record of a run holds its result yet. No
+  test asserts the value of that default, of `DEFAULT_METADATA_TIMEOUT` or of the agent's
+  `DEFAULT_READ_TIMEOUT`.
+- ElevenLabs text to speech: the test
+  `a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout` of
+  `adapters/inference-elevenlabs/tests/closed_stream.rs` fires the connect timeout, with a
+  value of its own. No record of a run holds its result yet.
 - ElevenLabs text to speech and speech to text: no test asserts the value of
   `DEFAULT_READ_TIMEOUT` or `DEFAULT_CONNECT_TIMEOUT`.
+- Deepgram transcription: the test
+  `a_handshake_never_answered_fails_the_recognition_at_the_connect_timeout` of
+  `adapters/inference-deepgram/tests/errors.rs` fires the connect timeout, with a value of its
+  own. No record of a run holds its result yet.
 - Deepgram transcription: no test asserts the value of `DEFAULT_CONNECT_TIMEOUT`,
   `DEFAULT_READ_TIMEOUT` or `DEFAULT_KEEPALIVE_INTERVAL`.
 - Deepgram Voice Agent: no test asserts the value of `DEFAULT_AGENT_OPEN_TIMEOUT` or
@@ -113,9 +131,10 @@ user:
   of `adapters/inference-elevenlabs/tests/adversary_rf1_multi_context.rs` asserts a limit of
   its own, 2 s, and by reading the code passes with the bound removed.
 
-A test per binding that compares each default with its number, and one that starts a session
-against a listener that never answers the handshake, would produce them. A close against a
-peer that stops reading, timed against the constant, would fire a close bound.
+A test per binding that compares each default with its number would produce them. A record of
+a run of the workflow `check` that ran the connect tests named above would hold their results.
+A close against a peer that stops reading, timed against the constant, would fire a close
+bound.
 
 ### The default limits of the HTTP transport of llama-server
 
