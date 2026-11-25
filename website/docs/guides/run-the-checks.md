@@ -78,7 +78,7 @@ task: [test-workspace] rm -f target/nextest/default/junit.xml
 task: [test-workspace] cargo nextest run --workspace --all-features
 task: [test-slowest] echo "the ten slowest tests, in seconds:"
 task: [test-slowest] if [ -f target/nextest/default/junit.xml ]; then grep '<testcase ' target/nextest/default/junit.xml | sed -E 's/.* name="([^"]*)" classname="([^"]*)".* time="([^"]*)".*/\3 \2 \1/' | sort -rn | head -n 10; else echo "no test ran"; fi
-task: [test-run-parts] cargo nextest run -p inference --no-default-features --test stack
+task: [test-run-parts] cargo nextest run -p inference --no-default-features --test stack --profile stack
 task: [test-run-parts] cargo test --workspace --all-features --doc
 ```
 
