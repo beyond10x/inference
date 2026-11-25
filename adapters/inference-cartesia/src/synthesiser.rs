@@ -30,7 +30,7 @@ use crate::wake;
 /// The backend name of the adapter record.
 pub const BACKEND: &str = "cartesia-tts-websocket";
 
-/// The most a drop inside an async runtime waits for its close on the dropping thread; a close
+/// The most a drop inside a Tokio runtime waits for its close on the dropping thread; a close
 /// not written by then goes on without that thread. The close of an idle handle to a server
 /// that reads took 0.1 to 1.1 ms over 300 drops, a quarter of this at most; and this is half of
 /// a 10 ms audio tick, so a drop whose close cannot be written holds a runtime's thread for
@@ -634,10 +634,11 @@ impl Drop for EndsInBackground {
 impl Drop for CartesiaSynthesis {
     /// Closes the connection with a close frame, bounded by [`CLOSE_BOUND`]; an exchange in
     /// flight other than a close is dropped with its connection, which then ends without a close
-    /// frame. Outside an async runtime the drop waits for the close. Inside one it waits at most
-    /// [`CLOSE_GRACE`]: a close that ended within it has been sent when the drop returns, and
-    /// one that did not runs to its end on the synthesis's own thread, which then ends its
-    /// runtime. A process that ends first ends the socket without the close frame.
+    /// frame. Inside a Tokio runtime the drop waits for the close at most [`CLOSE_GRACE`]: a
+    /// close that ended within it has been sent when the drop returns, and one that did not runs
+    /// to its end on the synthesis's own thread, which then ends its runtime. A process that
+    /// ends first ends the socket without the close frame. Anywhere else, inside another
+    /// executor too, the drop waits for the close.
     fn drop(&mut self) {
         let closing = match self.exchange.take() {
             Some(Exchange::Close(task)) => Some(task),

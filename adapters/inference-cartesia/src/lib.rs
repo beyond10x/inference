@@ -27,13 +27,14 @@
 //! its read timeout, a cancel's write by [`CLOSE_BOUND`].
 //!
 //! Dropping the handle closes its connection with a close frame, bounded by [`CLOSE_BOUND`].
-//! Outside an async runtime the drop waits for that close. Inside one it waits for it at most
+//! Outside a Tokio runtime the drop waits for that close. Inside one it waits for it at most
 //! [`CLOSE_GRACE`], and holds a worker no longer: a close that ended within it has been sent when
 //! the drop returns, and a close not written by then runs to its end on the handle's own thread,
 //! bounded by [`CLOSE_BOUND`]. A process that ends while such a close still runs ends the socket
-//! without the close frame. A handle dropped while its async form waits for a message to be sent
-//! or to arrive takes the connection with it: the server gets no close frame and sees the socket
-//! end.
+//! without the close frame. The drop asks Tokio: inside another executor it waits as it does
+//! outside a runtime, at most [`CLOSE_BOUND`]. A handle dropped while its async form waits for a
+//! message to be sent or to arrive takes the connection with it: the server gets no close frame
+//! and sees the socket end.
 //!
 //! The handle drives its connection on a runtime of its own, with one thread. Iterated, as the
 //! contract defines it, it blocks the calling thread while it waits for the server, on any

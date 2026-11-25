@@ -6,128 +6,66 @@
 //! 50 ms." The unit's own test of it meets a server whose buffer has room, where the close is one
 //! small write, and so it passes with the drop that waits for its close as well.
 //!
-//! Here nothing can be written. The server reads the generation request and nothing after it,
-//! sends [`PINGS`] pings and then the segment. The client answers each ping with a pong while it
-//! reads; the pongs fill the socket's buffers and then wait in the client's WebSocket buffer, in
-//! front of everything written later: the close frame of a drop.
+//! Here nothing can be written. The server of `support/deaf.rs` reads the generation request and
+//! nothing after it, sends a flood of pings and then the segment. The segment completes, the
+//! synthesis is idle with its connection open, and its close frame waits behind the pongs until
+//! `CLOSE_BOUND` has passed. The server tells each case whether its flood backed the connection
+//! up, and a flood that did not is doubled, so no case depends on how much the host's socket
+//! buffers hold.
 //!
-//! A drop that waits for its close holds the runtime's thread for `CLOSE_BOUND` there and fails
-//! the ticker's bound. The case also asserts that the close was still waiting 300 ms after the
-//! drop, and that the synthesis's own thread ends once `CLOSE_BOUND` has passed.
+//! - A drop that waits for its close holds the runtime's thread for `CLOSE_BOUND` there and
+//!   fails the ticker's bound. The first case also asserts that the close was still waiting
+//!   300 ms after the drop, and that the synthesis's own thread ends once `CLOSE_BOUND` has
+//!   passed.
+//! - Outside a Tokio runtime the drop waits `CLOSE_BOUND` and no longer.
+//! - The hold of the drop inside a Tokio runtime is bounded on both sides: at least
+//!   `CLOSE_GRACE`, because the close cannot end sooner, and at most [`HOLD_SLACK`] more.
+//! - The server reads again after a drop handed its close off, while the synthesis's own thread
+//!   still waits to write it: `src/lib.rs` says such a close "runs to its end on the handle's
+//!   own thread".
 
 mod support;
 
+#[path = "support/deaf.rs"]
+mod deaf;
 #[allow(dead_code)]
 #[path = "../../inference-elevenlabs/tests/support/dropped.rs"]
 mod dropped;
 #[path = "../../inference-elevenlabs/tests/support/ticker.rs"]
 mod ticker;
 
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use base64::Engine;
-use dropped::threads_named;
-use inference_cartesia::{CLOSE_BOUND, CartesiaSynthesiser, Endpoint, OutputFormat, VoiceConfig};
+use deaf::{Deaf, FIXED, OWN_THREAD, on_a_backed_up_connection};
+use dropped::{CLOSE, threads_named};
+use inference_cartesia::{
+    CLOSE_BOUND, CLOSE_GRACE, CartesiaSynthesis, CartesiaSynthesiser, Endpoint, OutputFormat,
+    VoiceConfig,
+};
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
-use serde_json::{Value, json};
 use support::{committed, within};
 use ticker::{GAP_BOUND, with_ticker};
-use tokio_tungstenite::tungstenite::{self, Bytes, Message};
 
 const FORMAT: OutputFormat = OutputFormat::MULAW_8000;
 
-/// How many pings the server sends: 36,000 pongs of 131 bytes are 4.7 MB, more than the socket
-/// buffers of both ends hold. The client's send buffer grows to the kernel's largest
-/// (`net.ipv4.tcp_wmem`, 4 MiB where this was measured and by Linux's default), and the server
-/// that reads nothing holds about 64 kB more: 32,400 pings did not back the close up and 32,600
-/// did. This is a tenth above that and no more, because the flood loads a processor beside the
-/// suite's other ticker tests. A host with a larger send buffer needs more.
-const PINGS: usize = 36_000;
+/// The first flood of the case that compares descriptors: a quarter of [`FIXED`], so that a
+/// session whose close was written runs before the one whose close is backed up.
+const FIRST: usize = FIXED / 4;
 
-/// What a session awaits before it drops or discards, so the ticker runs before it.
+/// How long past `CLOSE_GRACE` the drop may hold the runtime's thread: what a parked thread may
+/// take to run again on a busy host.
+const HOLD_SLACK: Duration = Duration::from_millis(15);
+
+/// What a session awaits before it drops its handle, so the ticker runs before the drop.
 const LEAD: Duration = Duration::from_millis(35);
 
 /// How long after the drop the session looks whether the close is still waiting.
 const LOOK: Duration = Duration::from_millis(300);
 
-/// The kernel's name of a synthesis's own thread: the first 15 bytes of `inference-cartesia`.
-const OWN_THREAD: &str = "inference-carte";
-
-/// A server that reads one generation request and nothing after it; it holds its connection
-/// open until it is dropped.
-struct Deaf {
-    url: String,
-    release: Option<mpsc::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Deaf {
-    /// A server that, after its pings, sends one chunk of the segment and the context's `done`.
-    fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
-        let url = format!("ws://{}", listener.local_addr().expect("an address"));
-        let (release, released) = mpsc::channel::<()>();
-        let thread = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("a client");
-            let mut socket = tungstenite::accept(stream).expect("the handshake");
-            let context = loop {
-                let Message::Text(text) = socket.read().expect("the generation request") else {
-                    continue;
-                };
-                let request: Value = serde_json::from_str(text.as_str()).expect("JSON");
-                break request["context_id"]
-                    .as_str()
-                    .expect("the request names its context")
-                    .to_owned();
-            };
-            let payload = Bytes::from(vec![0x2a_u8; 125]);
-            for _ in 0..PINGS {
-                socket
-                    .write(Message::Ping(payload.clone()))
-                    .expect("a ping is written");
-            }
-            socket.flush().expect("the pings are flushed");
-            let chunk = json!({
-                "type": "chunk",
-                "data": base64::engine::general_purpose::STANDARD.encode([0xff_u8; 400]),
-                "done": false,
-                "status_code": 206,
-                "step_time": 12.5,
-                "context_id": context,
-            });
-            socket
-                .send(Message::text(chunk.to_string()))
-                .expect("the chunk is sent");
-            let done = json!({
-                "type": "done",
-                "done": true,
-                "status_code": 206,
-                "context_id": context,
-            });
-            socket
-                .send(Message::text(done.to_string()))
-                .expect("`done` is sent");
-            let _ = released.recv_timeout(Duration::from_secs(30));
-        });
-        Self {
-            url,
-            release: Some(release),
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for Deaf {
-    fn drop(&mut self) {
-        drop(self.release.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
+/// How long after the drop the server of the last case reads again.
+const AGAIN: Duration = Duration::from_millis(100);
 
 /// A synthesiser of the fixture voice at `url`.
 fn at(url: &str) -> CartesiaSynthesiser {
@@ -155,10 +93,10 @@ struct Seen {
     waiting: Option<usize>,
 }
 
-/// One synthesis at `url` that speaks a segment and is then idle, its utterance open and its
-/// connection with it, and is dropped there on the runtime's thread.
-async fn drop_idle(url: String) -> Seen {
-    let mut synthesiser = at(&url);
+/// One synthesis at `url` that speaks a segment through the async form and is then idle, its
+/// utterance open and its connection with it.
+async fn idle(url: &str) -> CartesiaSynthesis {
+    let mut synthesiser = at(url);
     let mut handle = synthesiser
         .start()
         .expect("a fresh synthesiser runs nothing");
@@ -171,6 +109,12 @@ async fn drop_idle(url: String) -> Seen {
     }
     assert!(completed, "the segment completes");
     assert!(handle.failure().is_none(), "{:?}", handle.failure());
+    handle
+}
+
+/// The idle synthesis at `url`, dropped on the thread of a Tokio runtime.
+async fn drop_idle(url: String) -> Seen {
+    let handle = idle(&url).await;
     let before = threads_named(OWN_THREAD, 1, Duration::ZERO);
     tokio::time::sleep(LEAD).await;
     let dropped = Instant::now();
@@ -193,13 +137,17 @@ async fn drop_idle(url: String) -> Seen {
 fn dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime() {
     within(|| {
         let started = Instant::now();
-        let server = Deaf::start();
-        let (seen, largest) = with_ticker(vec![drop_idle(server.url.clone())]);
+        let ((seen, largest, left, ended), flood) = on_a_backed_up_connection(FIXED, |url| {
+            let (seen, largest) = with_ticker(vec![drop_idle(url)]);
+            let left = threads_named(OWN_THREAD, 0, CLOSE_BOUND + Duration::from_secs(3));
+            let ended = seen[0].dropped.elapsed();
+            (seen, largest, left, ended)
+        });
         let seen = &seen[0];
         println!(
-            "the drop held the thread {:?}, the ticker's largest gap is {largest:?}, own threads \
-             before the drop {:?} and {LOOK:?} after it {:?}",
-            seen.held, seen.before, seen.waiting
+            "backed up by {} pings: the drop held the thread {:?}, the ticker's largest gap is \
+             {largest:?}, own threads before the drop {:?} and {LOOK:?} after it {:?}",
+            flood.pings, seen.held, seen.before, seen.waiting
         );
         assert!(
             largest < GAP_BOUND,
@@ -216,8 +164,6 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_r
             Some(1),
             "the close still waits {LOOK:?} after the drop: the server reads nothing"
         );
-        let left = threads_named(OWN_THREAD, 0, CLOSE_BOUND + Duration::from_secs(3));
-        let ended = seen.dropped.elapsed();
         println!(
             "the synthesis's own thread ended within {ended:?} of the drop; the case took {:?}",
             started.elapsed()
@@ -230,32 +176,36 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_r
     });
 }
 
-/// The other half of what `src/lib.rs` says of the drop: "Outside an async runtime the drop
+/// The other half of what `src/lib.rs` says of the drop: "Outside a Tokio runtime the drop
 /// waits for that close", "bounded by `CLOSE_BOUND`". On a thread with no runtime, where the
 /// close cannot be written, the drop of the idle synthesis waits `CLOSE_BOUND` and no longer.
 #[test]
 fn dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound() {
     within(|| {
-        let server = Deaf::start();
-        let mut synthesiser = at(&server.url);
-        let mut handle = synthesiser
-            .start()
-            .expect("a fresh synthesiser runs nothing");
-        handle
-            .offer_segment(committed(&["Speak, then idle."]).remove(0))
-            .expect("the utterance is open");
-        let events: Vec<SynthesisEvent> = handle.by_ref().collect();
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, SynthesisEvent::Completed(_))),
-            "the segment completes"
+        let (held, flood) = on_a_backed_up_connection(FIXED, |url| {
+            let mut synthesiser = at(&url);
+            let mut handle = synthesiser
+                .start()
+                .expect("a fresh synthesiser runs nothing");
+            handle
+                .offer_segment(committed(&["Speak, then idle."]).remove(0))
+                .expect("the utterance is open");
+            let events: Vec<SynthesisEvent> = handle.by_ref().collect();
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, SynthesisEvent::Completed(_))),
+                "the segment completes"
+            );
+            assert!(handle.failure().is_none(), "{:?}", handle.failure());
+            let started = Instant::now();
+            drop(handle);
+            started.elapsed()
+        });
+        println!(
+            "backed up by {} pings: outside a runtime the drop held its thread {held:?}",
+            flood.pings
         );
-        assert!(handle.failure().is_none(), "{:?}", handle.failure());
-        let started = Instant::now();
-        drop(handle);
-        let held = started.elapsed();
-        println!("outside a runtime the drop held its thread {held:?}");
         assert!(
             held + Duration::from_millis(100) >= CLOSE_BOUND,
             "outside a runtime the drop waits for its close, which cannot be written: {held:?}"
@@ -264,5 +214,159 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_wa
             held <= CLOSE_BOUND + Duration::from_millis(500),
             "the drop waits at most CLOSE_BOUND: {held:?}"
         );
+    });
+}
+
+/// The story's acceptance on a connection the case knows to be backed up, on any host: the
+/// ticker's bound, and the hold of the drop bounded by `CLOSE_GRACE` from below and by
+/// `CLOSE_GRACE` and [`HOLD_SLACK`] from above. Its flood starts at [`FIRST`], so that the
+/// descriptors a handed-off drop leaves are compared with those of a drop whose close was
+/// written.
+#[test]
+fn a_drop_whose_close_cannot_be_written_holds_the_runtime_for_the_grace_and_no_longer() {
+    within(|| {
+        let started = Instant::now();
+        let ((seen, largest), flood) =
+            on_a_backed_up_connection(FIRST, |url| with_ticker(vec![drop_idle(url)]));
+        let seen = &seen[0];
+        println!(
+            "backed up by {} pings: the drop held the thread {:?}, the ticker's largest gap is \
+             {largest:?}, own threads {LOOK:?} after the drop {:?}; the case took {:?}",
+            flood.pings,
+            seen.held,
+            seen.waiting,
+            started.elapsed()
+        );
+        assert_eq!(
+            flood.drained.others,
+            Vec::<u8>::new(),
+            "a close that could not be written did not arrive: {:?}",
+            flood.drained
+        );
+        assert!(
+            largest < GAP_BOUND,
+            "the ticker's largest gap {largest:?}; the drop held the runtime's thread {:?}",
+            seen.held
+        );
+        assert_eq!(
+            seen.waiting,
+            Some(1),
+            "the close still waits {LOOK:?} after the drop"
+        );
+        if let Some((first, last)) = flood.descriptors {
+            assert_eq!(
+                last, first,
+                "a drop that handed its close off leaves no descriptor: the process held \
+                 {first} after a session whose close was written and {last} after this one"
+            );
+        }
+        assert!(
+            seen.held >= CLOSE_GRACE,
+            "the drop waits `CLOSE_GRACE` for a close that cannot be written, and held its \
+             thread {:?}",
+            seen.held
+        );
+        assert!(
+            seen.held < CLOSE_GRACE + HOLD_SLACK,
+            "inside a runtime the drop waits at most `CLOSE_GRACE`, {CLOSE_GRACE:?}, and held \
+             its thread {:?}",
+            seen.held
+        );
+    });
+}
+
+/// What a session saw of a drop whose server reads again after it.
+struct Handed {
+    /// How long the drop held the runtime's thread.
+    held: Duration,
+    /// The synthesis's own threads [`AGAIN`] after the drop, before the server reads again.
+    waiting: Option<usize>,
+    /// How long after the drop the synthesis's own thread had ended.
+    ended: Duration,
+}
+
+/// The idle synthesis at `url`, dropped on the thread of a Tokio runtime; [`AGAIN`] later the
+/// server is told to read again through `release`, and the session waits for the synthesis's
+/// own thread to end.
+async fn drop_idle_then_read_again(url: String, release: mpsc::Sender<()>) -> Handed {
+    let handle = idle(&url).await;
+    let dropped = Instant::now();
+    drop(handle);
+    let held = dropped.elapsed();
+    tokio::time::sleep(AGAIN).await;
+    let waiting = threads_named(OWN_THREAD, 1, Duration::ZERO);
+    let _ = release.send(());
+    while threads_named(OWN_THREAD, 0, Duration::ZERO) != Some(0)
+        && dropped.elapsed() < CLOSE_BOUND + Duration::from_secs(3)
+    {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    Handed {
+        held,
+        waiting,
+        ended: dropped.elapsed(),
+    }
+}
+
+/// `src/lib.rs`: "a close not written by then runs to its end on the handle's own thread,
+/// bounded by [`CLOSE_BOUND`]". The close of the drop cannot be written and is handed off; the
+/// server reads again [`AGAIN`] later, inside `CLOSE_BOUND`. It then reads every pong, one close
+/// frame after them and nothing else, and the synthesis's own thread ends before `CLOSE_BOUND`
+/// has passed.
+///
+/// The case knows its close was handed off by the synthesis's own thread still being there
+/// [`AGAIN`] after the drop; where it is not, the flood is doubled, twice at most.
+#[test]
+fn a_close_handed_off_is_written_once_when_the_server_reads_again() {
+    within(|| {
+        let mut pings = FIXED;
+        loop {
+            let server = Deaf::start(pings);
+            let release = server.release.clone();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime");
+            let handed = runtime.block_on(drop_idle_then_read_again(server.url.clone(), release));
+            drop(runtime);
+            let drained = server.finish();
+            println!(
+                "a flood of {pings} pings: the drop held the thread {:?}, own threads {AGAIN:?} \
+                 after it {:?}, the own thread ended {:?} after the drop; the server then read \
+                 {drained:?}",
+                handed.held, handed.waiting, handed.ended
+            );
+            if handed.waiting != Some(1) {
+                assert!(
+                    pings < 4 * FIXED,
+                    "the precondition of this case does not hold: {AGAIN:?} after the drop no \
+                     thread of the synthesis waited to write its close, after a flood of {pings} \
+                     pings. Either the socket buffers of this host took every pong, or the drop \
+                     left no close waiting"
+                );
+                pings *= 2;
+                continue;
+            }
+            assert_eq!(
+                (drained.pongs, drained.late_pongs),
+                (pings, 0),
+                "every pong arrives, in front of the close: {drained:?}"
+            );
+            assert_eq!(
+                drained.others,
+                [CLOSE],
+                "one close frame follows the pongs: {drained:?}"
+            );
+            assert_eq!(
+                drained.unframed, 0,
+                "nothing follows the close frame: {drained:?}"
+            );
+            assert!(
+                handed.ended < CLOSE_BOUND,
+                "the synthesis's own thread ends when its close is written, {:?} after the drop",
+                handed.ended
+            );
+            return;
+        }
     });
 }

@@ -2,7 +2,7 @@
 //! runtime is current in other ways than the unit's test has it, in a process that goes on
 //! living, and many such drops in a row.
 //!
-//! `src/lib.rs` says of a drop inside an async runtime that its close has been sent when the
+//! `src/lib.rs` says of a drop inside a Tokio runtime that its close has been sent when the
 //! drop returns, or else runs to its end on the handle's own thread. In a process that goes on
 //! living the server so receives `close_socket` and the close frame either way. Each case
 //! asserts that through a relay to the fixture server, or for every connection of forty, and

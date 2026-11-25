@@ -1,5 +1,5 @@
 //! Adversary, story:synthesiser-drop-inside-runtime: what the crate documentation says of a drop
-//! inside an async runtime, against a process that ends right after the drop.
+//! inside a Tokio runtime, against a process that ends right after the drop.
 //!
 //! `src/lib.rs` says of it: the drop waits for its close at most `CLOSE_GRACE`, and "a close
 //! that ended within it has been sent when the drop returns"; a close not written by then goes
