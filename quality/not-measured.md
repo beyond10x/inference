@@ -69,36 +69,21 @@ user:
 - The example `talk` of `realtime-voice` and its ignored test `live_usage`: the time of the
   whole run.
 
-### Time bounds no test fires, and defaults no test asserts
+### Time bounds no test fires
 
-[adapters.md](adapters.md) names the tests that hold a bound. The tests that fire the connect
-timeout of five bindings are listed further down, under "The connect timeout of five bindings".
-The rest, per binding:
+[adapters.md](adapters.md) names the tests that hold a bound. Two lists further down name what
+a test does and no record of a run holds yet: "The connect timeout of five bindings" has the
+tests that fire that timeout, and "The value of each time-bound default" has the tests that
+compare each default with its number. What is left, per binding:
 
-- Cartesia: no test asserts the value of `DEFAULT_CONNECT_TIMEOUT` in
-  `adapters/inference-cartesia/src/config.rs` or of `DEFAULT_READ_TIMEOUT`.
-- Phonic: no test asserts the value of any of the four defaults in
-  `adapters/inference-phonic/src/protocol.rs`.
-- ElevenLabs agent: no test asserts the value of `DEFAULT_CONNECT_TIMEOUT` in
-  `adapters/inference-elevenlabs/src/agent.rs`, of `DEFAULT_METADATA_TIMEOUT` or of the agent's
-  `DEFAULT_READ_TIMEOUT`.
-- ElevenLabs text to speech and speech to text: no test asserts the value of
-  `DEFAULT_READ_TIMEOUT` or `DEFAULT_CONNECT_TIMEOUT`.
-- Deepgram transcription: no test asserts the value of `DEFAULT_CONNECT_TIMEOUT`,
-  `DEFAULT_READ_TIMEOUT` or `DEFAULT_KEEPALIVE_INTERVAL`.
-- Deepgram Voice Agent: no test asserts the value of `DEFAULT_AGENT_OPEN_TIMEOUT` or
-  `DEFAULT_AGENT_READ_TIMEOUT`. The keep-alive interval is asserted.
-- Deepslate Opal: no test asserts the value of `DEFAULT_OPEN_TIMEOUT`, `DEFAULT_READ_TIMEOUT`
-  or `DEFAULT_PING_INTERVAL`.
-- OpenAI: the connect and write defaults are held only to be the constants and to lie between
-  zero and a wide upper limit. No test asserts the idle limit of the default session
-  configuration.
-- Amazon Nova Sonic: no test asserts the default read timeout or the default idle limit. No
-  test names the wait of the close for its task.
-- Audio device: no test asserts the value of `PLAYBACK_PATIENCE`.
+- Amazon Nova Sonic: the adapter has no bound on its close, so there is none to fire. The close
+  sends a command to the task of the session and does not wait for it, and the task ends the
+  session on the stream without a timeout (`adapters/inference-aws/src/duplex.rs`).
 - Every `CLOSE_BOUND`: no test fires it. The tests that compare a time with the constant close
   against a local fixture that takes the close at once. So they pass with a larger constant
-  and, by reading the code, with the bound removed.
+  and, by reading the code, with the bound removed. A test now asserts the value of each of the
+  five constants, 1 s; these tests are in the list "The value of each time-bound default". They
+  fix the number and fire nothing.
 - Cartesia: a cancel waits for its send up to twice `CLOSE_BOUND`
   (`adapters/inference-cartesia/src/synthesiser.rs`). The test asserts once the constant and
   does not reach the longer wait.
@@ -113,15 +98,8 @@ The rest, per binding:
   of `adapters/inference-elevenlabs/tests/adversary_rf1_multi_context.rs` asserts a limit of
   its own, 2 s, and by reading the code passes with the bound removed.
 
-A test per binding that compares each default with its number would produce them. A close
-against a peer that stops reading, timed against the constant, would fire a close bound.
-
-### The default limits of the HTTP transport of llama-server
-
-The adapter has no time constant of its own. Its configuration takes the default limits of the
-HTTP client of `llm`, at the tag `Cargo.lock` pins. Their values are not in this tree, and no
-test of the adapter holds them: the one test of a limit sets its own. A test that asserts the
-three default limits of the configuration would produce it.
+A close against a peer that stops reading, timed against the constant, would fire a close
+bound.
 
 ### Real-time factor and latency of the hosted speech-to-text bindings
 
@@ -309,6 +287,64 @@ binding's `DEFAULT_CONNECT_TIMEOUT`. No record of a run holds the result of any 
   `adapters/inference-deepgram/tests/errors.rs`.
 
 A record of a run of the workflow `check` that ran these five tests would hold their results.
+
+### The value of each time-bound default
+
+`task test-run` runs one test per binding that compares each time-bound default with its number
+written out in the test. The test reads the public constant, and the field of the default
+endpoint or configuration a caller gets where there is one. A default changed in the source
+fails its test. No record of a run holds a result of any of these comparisons yet:
+
+- Audio device: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-audio-device/tests/acknowledging.rs`, for `PLAYBACK_PATIENCE`.
+- Amazon Nova Sonic: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-aws/tests/nova_sonic_stall_and_bounds.rs`, for the read timeout a session
+  configuration starts with and the idle limit of the default session configuration.
+- Cartesia text to speech: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-cartesia/tests/errors.rs`, for `DEFAULT_READ_TIMEOUT`,
+  `DEFAULT_CONNECT_TIMEOUT` and `CLOSE_BOUND`.
+- Deepgram transcription: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-deepgram/tests/errors.rs`, for `DEFAULT_CONNECT_TIMEOUT`,
+  `DEFAULT_READ_TIMEOUT`, `DEFAULT_KEEPALIVE_INTERVAL` and `CLOSE_BOUND`.
+- Deepgram Voice Agent: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-deepgram/tests/agent_duplex.rs`, for `DEFAULT_AGENT_OPEN_TIMEOUT` and
+  `DEFAULT_AGENT_READ_TIMEOUT`.
+- Deepslate Opal: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-deepslate/tests/opal_duplex.rs`, for `DEFAULT_OPEN_TIMEOUT`,
+  `DEFAULT_READ_TIMEOUT`, `DEFAULT_PING_INTERVAL` and `CLOSE_BOUND`.
+- ElevenLabs text to speech and speech to text: the test
+  `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-elevenlabs/tests/closed_stream.rs`, for `DEFAULT_READ_TIMEOUT`,
+  `DEFAULT_CONNECT_TIMEOUT` and `CLOSE_BOUND`.
+- ElevenLabs agent: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-elevenlabs/tests/agent_duplex.rs`, for the agent's
+  `DEFAULT_CONNECT_TIMEOUT`, `DEFAULT_METADATA_TIMEOUT` and `DEFAULT_READ_TIMEOUT`.
+- llama-server: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-llama-server/tests/offline.rs`, for the three limits of a new
+  configuration: 60 s to the response headers, 180 s idle and 600 s in total. The adapter has
+  no time constant of its own. Its configuration takes the default limits of the HTTP client of
+  `llm`, at the tag `Cargo.lock` pins, and their values are not in the adapter's source. A move
+  of that pin that changes a limit fails the test.
+- OpenAI Realtime: the test `the_deadlines_are_stated_and_settable` of
+  `adapters/inference-openai/tests/transport_deadlines.rs`, for `DEFAULT_CONNECT_TIMEOUT` and
+  `DEFAULT_WRITE_TIMEOUT`, and the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-openai/tests/duplex.rs`, for the idle limit of the default session
+  configuration. The first of the two is older than its comparison: the record of
+  `openai-time-bounds` holds a result of it from a run before it compared the numbers.
+- OpenAI GPT-Live: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-openai/tests/gpt_live_duplex.rs`, for the idle limit of the default
+  session configuration.
+- OpenAI speech: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-openai/tests/speech_request.rs`, for the connect timeout and the read
+  timeout of the default endpoint. The binding has no constant of its own: the two are
+  `DEFAULT_CONNECT_TIMEOUT` and `DEFAULT_READ_TIMEOUT` of the Realtime binding.
+- Phonic: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-phonic/tests/duplex.rs`, for the four defaults of
+  `adapters/inference-phonic/src/protocol.rs` and `CLOSE_BOUND`.
+
+A record of a run of the workflow `check` that ran these tests would hold their results. Until
+[adapters.md](adapters.md) is written from such a run, it does not name the new tests, and its
+lines that say no test fixes or asserts one of these defaults are older than the tests.
 
 ## Measured, but not expressible in the formats at the pin
 
