@@ -121,35 +121,40 @@ const HEARD: &str = "nightfall";
 /// one segment per delta of the server, and the synthesiser speaks a delta of one word no faster
 /// than it plays: the thirteen deltas measured came to 7.13 s of audio, 0.55 s each on average
 /// and 0.84 s the longest, generated in 6.94 s to 8.23 s, a ratio of 0.97 to 1.15. The record's
-/// real-time factor of 0.553 is of whole sentences and does not hold here. The sum for the
-/// longest of the three cases, the question said twice, from what was measured on CPU, at the
-/// slower end of that ratio:
+/// real-time factor of 0.553 is of whole sentences and does not hold here.
+///
+/// The answer length is the one at which the longest of the three cases, the question said
+/// twice, ends at least 5 s before the 60 s even when every delta is as long as the longest
+/// measured, 0.84 s, generated in 0.97 s at the slower end of that ratio. The sum, from what was
+/// measured on CPU:
 ///
 /// * the models load before the run: the recogniser in 4.9 s (sherpa-onnx; whisper.cpp 0.6 s)
 ///   and the synthesiser in 8.1 s, by their capability records: 13.0 s;
 /// * two questions of at most [`CLIP_SECONDS`] are heard at a real-time factor of 0.202
 ///   (whisper.cpp; sherpa-onnx 0.131): 4.0 s;
-/// * the first answer plays until its first segment is acknowledged: a delta of at most 0.84 s
-///   is generated in 0.97 s and played: 1.8 s;
+/// * the first answer plays until its first segment is acknowledged: a delta of 0.84 s is
+///   generated in 0.97 s and played: 1.8 s;
 /// * the first answer is superseded, but not cut at the synthesiser: every delta committed
 ///   before the supersede is generated to its end before the supersede is read. With a server
-///   faster than the synthesiser that is every other delta of the answer, 23. About 3 of them
-///   are generated while the second question is heard, which is counted above; the other 20, of
-///   0.55 s each, take 12.7 s;
-/// * the second answer plays whole: 24 deltas are 13.2 s of audio, generated in 15.2 s, and the
-///   last of them is played after it is generated, at most 0.84 s: 16.0 s;
-/// * that is 47.5 s, which leaves 12.5 s, in which the server gives the first token of each
+///   faster than the synthesiser that is every other delta of the answer, 17. About 2 of them
+///   are generated while the second question is heard, which is counted above; the other 15
+///   take 14.6 s;
+/// * the second answer plays whole: 18 deltas are generated in 17.5 s, and the last of them is
+///   played after it is generated, 0.84 s: 18.3 s;
+/// * that is 51.7 s, which leaves 8.3 s, in which the server gives the first token of each
 ///   answer; its later tokens come while the synthesiser works. A slower server commits fewer
 ///   deltas before the supersede, which shortens the fourth term.
 ///
-/// The sum rests on the average delta of that one measurement. Were every delta as long as the
-/// longest measured, 0.84 s, the fourth term would be 20.4 s and the fifth 24.1 s, and the sum
-/// 63.3 s: an answer of 24 deltas that are all long words does not fit, and the runner would
-/// end the case.
+/// With deltas of the average measured, 0.55 s each and generated in 0.63 s, about 3 deltas are
+/// generated while the second question is heard, the fourth term is the other 14 in 8.9 s, the
+/// fifth 18 deltas of 9.9 s of audio generated in 11.4 s and the last played, 12.2 s, and the
+/// sum 39.9 s, which leaves 20.1 s.
 ///
-/// The other two cases say the question once and are shorter by a question and an answer. With
-/// 64 tokens the two answers alone are 70 s of audio at 0.55 s a delta.
-const ANSWER_TOKENS: u64 = 24;
+/// At 24 tokens, which the cases asked for before, the sum is 47.5 s with average deltas and
+/// 63.3 s with the longest, over the bound. The other two cases say the question once and are
+/// shorter by a question and an answer. With 64 tokens the two answers alone are 70 s of audio
+/// at 0.55 s a delta.
+const ANSWER_TOKENS: u64 = 18;
 
 /// The longest clip [`Microphone::say`] takes, in seconds: the length the sum at
 /// [`ANSWER_TOKENS`] counts for a question.
@@ -942,7 +947,7 @@ fn print_measures(handles: &CascadeHandles) {
 }
 
 #[test]
-#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL at 3 tokens a second or more; asks for answers of 24 tokens so that the run ends within the 60 s of the runner"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL at 3 tokens a second or more; asks for answers of 18 tokens so that the run ends within the 60 s of the runner"]
 fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
     let _serial = serial();
     let config = configured();
@@ -1046,7 +1051,7 @@ fn the_clip_is_answered_offline_and_every_segment_is_played_through_receipts() {
 }
 
 #[test]
-#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL at 3 tokens a second or more; asks for answers of 24 tokens so that the run ends within the 60 s of the runner"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL at 3 tokens a second or more; asks for answers of 18 tokens so that the run ends within the 60 s of the runner"]
 fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_the_gates() {
     let _serial = serial();
     let config = configured();
@@ -1175,7 +1180,7 @@ fn a_revised_committed_span_and_a_tentative_delta_of_the_server_are_stopped_at_t
 }
 
 #[test]
-#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL at 3 tokens a second or more; asks for answers of 24 tokens so that the run ends within the 60 s of the runner"]
+#[ignore = "needs the clip in INFERENCE_SHERPA_ONNX_STT_DIR, the checkpoint of the recogniser INFERENCE_CASCADE_STT selects, the synthesiser's checkpoint in INFERENCE_SHERPA_ONNX_TTS_DIR in a process started on the sherpa-onnx library built with text-to-speech, and a loopback llama-server at INFERENCE_LLAMA_SERVER_URL serving INFERENCE_LLAMA_SERVER_MODEL at 3 tokens a second or more; asks for answers of 18 tokens so that the run ends within the 60 s of the runner"]
 #[allow(clippy::too_many_lines)]
 fn the_clip_said_again_while_the_answer_plays_stops_it_and_supersedes_its_generation() {
     let _serial = serial();
