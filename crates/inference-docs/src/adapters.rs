@@ -15,11 +15,17 @@
 //! - a note on a binding the page does not list, and a second note on one binding;
 //! - a constant listed in the note's `constants` that the file named beside it does not define
 //!   exactly once as whole seconds or milliseconds ([`Note::constants`] names the forms read), or
-//!   that the text does not give at least once as "`NAME` (value)" with that value;
+//!   that the text does not give at least once as "`NAME` (value)" with that value; a definition
+//!   that does more than call `from_secs` or `from_millis` once on a path, such as a sum of two
+//!   durations, a product or a method called on the duration, is refused, not read as one of its
+//!   parts;
 //! - a code span that is a path of identifiers, `a` or `a::b`, one of whose parts is no whole
 //!   word of the package's sources, comments and strings included;
 //! - a code span `a::b` whose last part no source of the package or of a crate under `crates/`
 //!   defines as a function, a constant, a type, a module or an enum variant.
+//!
+//! Each refusal of a note starts with its binding and the place to change it, `NOTES` in this
+//! file.
 //!
 //! That is all it holds. Other numbers of the text, other mentions of a listed constant, and the
 //! prose are not checked. Of `a::b` only the last part is held to a definition: that `b` belongs
@@ -273,8 +279,10 @@ struct Note {
     release: Release,
     /// The constants the text gives with their value, each as its name and the file that defines
     /// it, a path under the package's `src/`. Generation reads the value from that file only,
-    /// which must define it exactly once as `pub const NAME: <type> = <…>from_secs(n);` or
-    /// `from_millis(n)`, on one line or wrapped after `=`, `n` in digits with or without `_`; the
+    /// which must define it exactly once as `pub const NAME: <type> = <path>from_secs(n);` or
+    /// `from_millis(n)`, on one line or wrapped after `=`, `n` in digits with or without `_`. The
+    /// `<path>` is identifiers and `::` only, such as `Duration::`, and only `;` follows the
+    /// call's `)`; any other definition, such as `from_secs(1) + from_millis(5)`, is refused. The
     /// text gives it at least once as "`NAME` (n s)" or "`NAME` (n ms)".
     constants: &'static [(&'static str, &'static str)],
     text: &'static str,
@@ -297,11 +305,12 @@ const NOTES: &[Note] = &[
                `LiveClient::into_split` and `LiveClient::reunite`. \
                `OpenAiLive::with_close_timeout` and `OpenAiLive::close_timeout` do the same for \
                the sessions the model opens. Unset, it is `CLOSE_TIMEOUT` (15 s), as before. A \
-               graceful close waits for `session.closed` at most the longer of the close timeout \
-               and the endpoint's read timeout, `DEFAULT_READ_TIMEOUT` (30 s) unless \
-               `Endpoint::with_read_timeout` set another. With that default, a close timeout of \
-               30 s or less changes nothing; a shorter close needs a shorter read timeout, which \
-               also bounds every read of the session. Without `session.closed` by then, \
+               graceful close waits for the server's closing event, `session.closed`, at most \
+               the longer of the close timeout and the endpoint's read timeout, \
+               `DEFAULT_READ_TIMEOUT` (30 s) unless `Endpoint::with_read_timeout` set another. \
+               With that default, a close timeout of 30 s or less changes nothing; a shorter \
+               close needs a shorter read timeout, which also bounds every read of the session. \
+               Without `session.closed` by then, \
                `LiveClient::close` returns `RealtimeError::Stalled`, and an `OpenAiLive` session \
                closes with the usage seen so far, unconfirmed.",
     },
@@ -393,21 +402,38 @@ fn duration_constant(text: &str, name: &str) -> std::result::Result<String, &'st
         .and_then(|(_, after)| after.split_once(';'))
         .map(|(expression, _)| expression)
         .ok_or("has no value `= …;` for")?;
-    let number = |call: &str| -> Option<u64> {
-        let (digits, tail) = expression.split_once(call)?.1.split_once(')')?;
-        let digits = digits.trim();
-        if digits.is_empty()
-            || !tail.trim().is_empty()
-            || !digits.chars().all(|c| c.is_ascii_digit() || c == '_')
-        {
-            return None;
-        }
-        digits.replace('_', "").parse().ok()
+    duration(expression).ok_or("gives no whole seconds or milliseconds in digits for")
+}
+
+/// The value of a constant's `expression`, the text between `=` and `;`, written `n s` or
+/// `n ms`: one call of `from_secs(n)` or `from_millis(n)`, only a path of identifiers and `::`
+/// before it and nothing after it. A sum, a product or a method called on the duration is `None`,
+/// so it is refused rather than read as one of its parts.
+fn duration(expression: &str) -> Option<String> {
+    let calls: Vec<(usize, &str)> = ["from_secs(", "from_millis("]
+        .into_iter()
+        .flat_map(|call| expression.match_indices(call))
+        .collect();
+    let [(at, call)] = calls[..] else {
+        return None;
     };
-    number("from_secs(")
-        .map(|n| format!("{n} s"))
-        .or_else(|| number("from_millis(").map(|n| format!("{n} ms")))
-        .ok_or("gives no whole seconds or milliseconds in digits for")
+    let path = expression[..at].trim();
+    let (digits, tail) = expression[at + call.len()..].split_once(')')?;
+    let digits = digits.trim();
+    if !path
+        .split("::")
+        .all(|part| part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        || !tail.trim().is_empty()
+        || digits.is_empty()
+        || !digits.chars().all(|c| c.is_ascii_digit() || c == '_')
+    {
+        return None;
+    }
+    let n: u64 = digits.replace('_', "").parse().ok()?;
+    Some(match call {
+        "from_secs(" => format!("{n} s"),
+        _ => format!("{n} ms"),
+    })
 }
 
 /// Whether `span` is a path of identifiers, `a` or `a::b`.
@@ -450,6 +476,14 @@ fn defines(text: &str, item: &str) -> bool {
         })
 }
 
+/// Where the notes are written, the file each refusal of a note names.
+const NOTES_FILE: &str = "crates/inference-docs/src/adapters.rs";
+
+/// A refusal of the note on `binding`: first where to change it, then `problem`.
+fn refusal(binding: &str, problem: impl std::fmt::Display) -> String {
+    format!("the note on {binding}, `NOTES` in {NOTES_FILE}: {problem}")
+}
+
 /// The section of the notes, each binding given as its name and its package's directory, the
 /// sources as `errors::sources` reads them; empty without a note.
 fn notes_section(
@@ -459,7 +493,10 @@ fn notes_section(
 ) -> Result<String> {
     for note in notes {
         if !bindings.iter().any(|(name, _)| *name == note.binding) {
-            return Err(format!("a note is on no binding {}", note.binding));
+            return Err(refusal(
+                note.binding,
+                format_args!("{} is no binding the page lists", note.binding),
+            ));
         }
     }
     if notes.is_empty() {
@@ -481,7 +518,12 @@ fn notes_section(
         let note = match mine[..] {
             [] => continue,
             [note] => note,
-            _ => return Err(format!("{name} has two notes; a binding has one at most")),
+            _ => {
+                return Err(refusal(
+                    name,
+                    format_args!("{name} has two notes; a binding has one at most"),
+                ));
+            }
         };
         let prefix = format!("{directory}/src/");
         let own: Vec<&str> = sources
@@ -495,12 +537,20 @@ fn notes_section(
                 .iter()
                 .find(|(source, _)| *source == path)
                 .map(|(_, text)| text.as_str())
-                .ok_or_else(|| format!("{name}: {constant} is in {path}, which does not exist"))?;
+                .ok_or_else(|| {
+                    refusal(
+                        name,
+                        format_args!("{constant} is in {path}, which does not exist"),
+                    )
+                })?;
             let value = duration_constant(text, constant)
-                .map_err(|problem| format!("{name}: {path} {problem} {constant}"))?;
+                .map_err(|problem| refusal(name, format_args!("{path} {problem} {constant}")))?;
             let written = format!("`{constant}` ({value})");
             if !note.text.contains(&written) {
-                return Err(format!("{name}: the note does not say {written}"));
+                return Err(refusal(
+                    name,
+                    format_args!("the note does not say {written}"),
+                ));
             }
         }
         let items: Vec<&str> = note
@@ -519,9 +569,9 @@ fn notes_section(
             .map(|span| format!("`{span}`"))
             .collect();
         if !unnamed.is_empty() {
-            return Err(format!(
-                "{name}: no source of {directory} names {}",
-                unnamed.join(", ")
+            return Err(refusal(
+                name,
+                format_args!("no source of {directory} names {}", unnamed.join(", ")),
             ));
         }
         let undefined: Vec<String> = items
@@ -535,9 +585,12 @@ fn notes_section(
             .map(|(span, _)| format!("`{span}`"))
             .collect();
         if !undefined.is_empty() {
-            return Err(format!(
-                "{name}: no source of {directory} or of crates/ defines the last part of {}",
-                undefined.join(", ")
+            return Err(refusal(
+                name,
+                format_args!(
+                    "no source of {directory} or of crates/ defines the last part of {}",
+                    undefined.join(", ")
+                ),
             ));
         }
         out.push_str(&format!(
@@ -1280,6 +1333,7 @@ mod tests {
             "`CLOSE_TIMEOUT` (15 s)",
             "`DEFAULT_READ_TIMEOUT` (30 s)",
             "With that default, a close timeout of 30 s or less changes nothing",
+            "A graceful close waits for the server's closing event, `session.closed`, at most",
             "- **ElevenLabs streaming TTS** (On main, in the next release). Dropping an \
              `ElevenLabsSynthesis`",
             "- **Cartesia Sonic streaming TTS** (On main, in the next release). Dropping a \
@@ -1352,7 +1406,25 @@ mod tests {
             ),
             "{held}"
         );
-        let refused = |notes: &[Note]| notes_section(&bindings, notes, &sources).err().unwrap();
+        let refused = |notes: &[Note]| {
+            let error = notes_section(&bindings, notes, &sources).err().unwrap();
+            let binding = notes[0].binding;
+            assert!(
+                error.starts_with(&format!(
+                    "the note on {binding}, `NOTES` in crates/inference-docs/src/adapters.rs: "
+                )),
+                "{error}"
+            );
+            error
+        };
+        assert!(
+            fs::read_to_string(
+                crate::repository_root().join("crates/inference-docs/src/adapters.rs")
+            )
+            .unwrap()
+            .contains("\nconst NOTES: &[Note] = &["),
+            "the refusals name a file that does not define NOTES"
+        );
         let error = refused(&[note("B", &[("GRACE", "lib.rs")], "`GRACE` (5 s)")]);
         assert!(error.contains("`GRACE` (5 ms)"), "{error}");
         let error = refused(&[note("B", &[("OTHER", "lib.rs")], "`OTHER` (2 s)")]);
@@ -1378,7 +1450,7 @@ mod tests {
             "{error}"
         );
         let error = refused(&[note("C", &[], "text")]);
-        assert!(error.contains("no binding C"), "{error}");
+        assert!(error.contains("C is no binding the page lists"), "{error}");
         let error = refused(&[note("B", &[], "one"), note("B", &[], "two")]);
         assert!(error.contains("B has two notes"), "{error}");
     }
@@ -1416,22 +1488,91 @@ mod tests {
         let section = |constants: &'static [(&'static str, &'static str)], text: &'static str| {
             notes_section(&bindings, &[note(constants, text)], &sources)
         };
+        let refused = |constants: &'static [(&'static str, &'static str)], text: &'static str| {
+            refused_on_b(&sources, constants, text)
+        };
         assert!(section(&[("READ", "config.rs")], "`READ` (10 s)").is_ok());
-        let error = section(&[("READ", "agent.rs")], "`READ` (10 s)").unwrap_err();
+        let error = refused(&[("READ", "agent.rs")], "`READ` (10 s)");
         assert!(error.contains("does not say `READ` (30 s)"), "{error}");
         assert!(section(&[("WIDE", "config.rs")], "`WIDE` (1000 ms)").is_ok());
         assert!(section(&[("WRAPPED", "config.rs")], "`WRAPPED` (15 s)").is_ok());
-        let error = section(&[("EXPR", "config.rs")], "`EXPR` (300 s)").unwrap_err();
+        let error = refused(&[("EXPR", "config.rs")], "`EXPR` (300 s)");
         assert!(
             error.contains(
                 "adapters/b/src/config.rs gives no whole seconds or milliseconds in digits for EXPR"
             ),
             "{error}"
         );
-        let error = section(&[("BOTH", "twice.rs")], "`BOTH` (1 s)").unwrap_err();
+        let error = refused(&[("BOTH", "twice.rs")], "`BOTH` (1 s)");
         assert!(
             error.contains("adapters/b/src/twice.rs defines more than once BOTH"),
             "{error}"
+        );
+    }
+
+    /// The refusal of the note on `B`, a binding of `adapters/b`, held to start with where a
+    /// note is changed.
+    fn refused_on_b(
+        sources: &[(String, String)],
+        constants: &'static [(&'static str, &'static str)],
+        text: &'static str,
+    ) -> String {
+        let note = Note {
+            binding: "B",
+            release: Release::Next,
+            constants,
+            text,
+        };
+        let error = notes_section(&[("B", "adapters/b")], &[note], sources).unwrap_err();
+        assert!(
+            error.starts_with("the note on B, `NOTES` in crates/inference-docs/src/adapters.rs: "),
+            "{error}"
+        );
+        error
+    }
+
+    #[test]
+    fn a_constant_that_adds_two_durations_is_refused_not_read_as_one_of_them() {
+        let sources = vec![(
+            "adapters/b/src/lib.rs".to_owned(),
+            "pub const SUM: Duration = Duration::from_secs(1) + Duration::from_millis(5);\n\
+             pub const SWAPPED: Duration = Duration::from_millis(5) + Duration::from_secs(1);\n\
+             pub const ZERO_PLUS: Duration = Duration::ZERO + Duration::from_millis(5);\n\
+             pub const TWICE: Duration = Duration::from_secs(1) * 2;\n\
+             pub const ADDED: Duration =\n    \
+             Duration::from_millis(5).saturating_add(Duration::from_secs(1));\n\
+             pub const PLAIN: Duration = core::time::Duration::from_millis(5);\n"
+                .to_owned(),
+        )];
+        for (constants, text) in [
+            (&[("SUM", "lib.rs")], "`SUM` (5 ms)"),
+            (&[("SWAPPED", "lib.rs")], "`SWAPPED` (1 s)"),
+            (&[("ZERO_PLUS", "lib.rs")], "`ZERO_PLUS` (5 ms)"),
+            (&[("TWICE", "lib.rs")], "`TWICE` (1 s)"),
+            (&[("ADDED", "lib.rs")], "`ADDED` (5 ms)"),
+        ] {
+            let name = constants[0].0;
+            let error = refused_on_b(&sources, constants, text);
+            assert!(
+                error.ends_with(&format!(
+                    "adapters/b/src/lib.rs gives no whole seconds or milliseconds in digits for \
+                     {name}"
+                )),
+                "{error}"
+            );
+        }
+        assert!(
+            notes_section(
+                &[("B", "adapters/b")],
+                &[Note {
+                    binding: "B",
+                    release: Release::Next,
+                    constants: &[("PLAIN", "lib.rs")],
+                    text: "`PLAIN` (5 ms)",
+                }],
+                &sources,
+            )
+            .is_ok()
         );
     }
 
