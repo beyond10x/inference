@@ -1,16 +1,47 @@
 //! Errors: an `Error` message, each documented close code, a malformed text message, a close
-//! before the summary `Metadata` and a server silent after `CloseStream` each fail the
-//! recognition with a typed error, never a panic or a hang, and the usage record that ends it is
-//! not final.
+//! before the summary `Metadata`, a server silent after `CloseStream` and a handshake never
+//! answered each fail the recognition with a typed error, never a panic or a hang, and the usage
+//! record that ends it is not final.
 
 mod support;
 
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use inference_deepgram::{CloseCause, DeepgramError, DeepgramRecognition};
+use inference_deepgram::{
+    CloseCause, ConnectError, DeepgramError, DeepgramRecogniser, DeepgramRecognition, Endpoint,
+    ListenConfig,
+};
 use inference_stt::TranscriptEvent;
 use inference_stt::inference_core::envelope::EventEnvelope;
-use support::{FixtureServer, Script, describe, recognise, tone};
+use support::{FixedKey, FixtureServer, KEY, Script, describe, recognise, tone};
+
+/// The connect timeout given to the open whose handshake is never answered.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// That open must end before twice its connect timeout: a bound doubled or more fails the test,
+/// a bound multiplied by less than two still passes. The 500 ms past the bound are room for a
+/// loaded machine: over repeated runs on one, such an open ended at most 51 ms after its bound,
+/// and tests that measure stalls saw one of 204 ms there.
+const LATEST: Duration = CONNECT_TIMEOUT.saturating_mul(2);
+
+/// The test's own deadline for an open that nothing ends: past it the test fails instead of
+/// waiting.
+const DEADLINE: Duration = Duration::from_secs(4);
+
+/// How many connections wait in the queue of `listener`, which nothing accepted before. An
+/// attempt is there from the moment its TCP connect completed, so the count needs no wait.
+fn attempts(listener: &std::net::TcpListener) -> usize {
+    listener.set_nonblocking(true).unwrap();
+    let mut count = 0;
+    loop {
+        match listener.accept() {
+            Ok(_) => count += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return count,
+            Err(error) => panic!("the listener failed: {error}"),
+        }
+    }
+}
 
 fn failed(script: Script) -> (DeepgramRecognition, Vec<EventEnvelope<TranscriptEvent>>) {
     let server = FixtureServer::start(script);
@@ -135,5 +166,56 @@ fn a_server_silent_after_close_stream_stalls_within_the_read_timeout() {
     assert_eq!(
         handle.failure(),
         Some(&DeepgramError::Stalled(Duration::from_secs(3)))
+    );
+}
+
+/// The listener takes the TCP connection into its queue and nothing reads it or answers the
+/// upgrade, so only the connect timeout ends the open. A refused connection is the same variant
+/// with no status: the detail and the time tell the two apart. The open connects once: a second
+/// attempt after the timeout is a second connection in the listener's queue. The read timeout
+/// stays at its default, so the handle's own wait for the summary ends later than [`DEADLINE`].
+/// The wait is the test's own, so an open that no connect timeout ends fails here at
+/// [`DEADLINE`].
+#[test]
+fn a_handshake_never_answered_fails_the_recognition_at_the_connect_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint::new()
+        .with_url(format!("ws://{}", listener.local_addr().unwrap()))
+        .with_connect_timeout(CONNECT_TIMEOUT);
+    let (done, waited) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut recogniser = DeepgramRecogniser::new(
+            endpoint,
+            ListenConfig::new(),
+            Arc::new(FixedKey(KEY)),
+            "deepgram-api-key",
+        )
+        .unwrap();
+        let started = Instant::now();
+        let (handle, _) = recognise(&mut recogniser, tone(2));
+        let _ = done.send((handle.failure().cloned(), started.elapsed()));
+    });
+    let (failure, took) = waited
+        .recv_timeout(DEADLINE)
+        .unwrap_or_else(|error| panic!("the recognition did not end within {DEADLINE:?}: {error}"));
+    assert_eq!(
+        failure,
+        Some(DeepgramError::Connect(ConnectError {
+            status: None,
+            detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
+        }))
+    );
+    assert_eq!(
+        attempts(&listener),
+        1,
+        "the connections the recognition made"
+    );
+    assert!(
+        took >= CONNECT_TIMEOUT,
+        "the recognition failed after {took:?}, before its connect timeout"
+    );
+    assert!(
+        took < LATEST,
+        "the recognition failed after {took:?}, at twice its connect timeout or later"
     );
 }

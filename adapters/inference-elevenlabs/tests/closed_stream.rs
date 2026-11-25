@@ -1,19 +1,47 @@
 //! A closed or failed stream: the server closes mid-segment, sends text that is not JSON, JSON
-//! that is not a message, audio that is not base64, an error, or nothing at all. Each ends the
-//! synthesis with a typed failure, no panic and no hang, and its usage record is not final.
+//! that is not a message, audio that is not base64, an error or nothing at all, or never
+//! answers the handshake. Each ends the synthesis with a typed failure, no panic and no hang,
+//! and its usage record is not final.
 
 mod support;
 
 use std::time::{Duration, Instant};
 
 use inference_elevenlabs::{
-    ElevenLabsError, ElevenLabsSynthesis, ElevenLabsSynthesiser, Endpoint, OutputFormat,
-    VoiceConfig,
+    ConnectError, ElevenLabsError, ElevenLabsSynthesis, ElevenLabsSynthesiser, Endpoint,
+    OutputFormat, VoiceConfig,
 };
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
-use support::{FixedKey, FixtureServer, KEY, Script, VOICE, committed};
+use support::{FixedKey, FixtureServer, KEY, Script, VOICE, committed, within};
 
 const FORMAT: OutputFormat = OutputFormat::Ulaw8000;
+
+/// The connect timeout given to the open whose handshake is never answered.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// That open must end before twice its connect timeout: a bound doubled or more fails the test,
+/// a bound multiplied by less than two still passes. The 500 ms past the bound are room for a
+/// loaded machine: over repeated runs on one, such an open ended at most 51 ms after its bound,
+/// and tests that measure stalls saw one of 204 ms there.
+const LATEST: Duration = CONNECT_TIMEOUT.saturating_mul(2);
+
+/// The test's own deadline for an open that nothing ends: past it the test fails instead of
+/// waiting.
+const DEADLINE: Duration = Duration::from_secs(4);
+
+/// How many connections wait in the queue of `listener`, which nothing accepted before. An
+/// attempt is there from the moment its TCP connect completed, so the count needs no wait.
+fn attempts(listener: &std::net::TcpListener) -> usize {
+    listener.set_nonblocking(true).unwrap();
+    let mut count = 0;
+    loop {
+        match listener.accept() {
+            Ok(_) => count += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return count,
+            Err(error) => panic!("the listener failed: {error}"),
+        }
+    }
+}
 
 /// Speaks one segment against `script`, ends the utterance, drains the handle and returns it
 /// with its events.
@@ -227,6 +255,48 @@ fn no_server_at_all_is_a_connect_failure() {
         other => panic!("{other:?}"),
     }
     assert_failed_and_ended(&mut handle, &events);
+}
+
+/// The listener takes the TCP connection into its queue and nothing reads it or answers the
+/// upgrade, so only the connect timeout ends the open. A refused connection is the same variant
+/// with no status, as the test above holds: the detail and the time tell the two apart. The
+/// synthesis connects once: a second attempt after the timeout, by the open or by a reopen, is
+/// a second connection in the listener's queue. The wait is the test's own, so an open that no
+/// timeout ends fails here at [`DEADLINE`] instead of hanging.
+#[test]
+fn a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint::new()
+        .with_url(format!("ws://{}", listener.local_addr().unwrap()))
+        .with_connect_timeout(CONNECT_TIMEOUT);
+    let (failure, took) = within(DEADLINE, move || {
+        let mut synthesiser = ElevenLabsSynthesiser::new(
+            endpoint,
+            VoiceConfig::new(VOICE, FORMAT),
+            std::sync::Arc::new(FixedKey(KEY)),
+            "elevenlabs-api-key",
+        )
+        .unwrap();
+        let started = Instant::now();
+        let (handle, _) = drain(&mut synthesiser);
+        (handle.failure().cloned(), started.elapsed())
+    });
+    assert_eq!(
+        failure,
+        Some(ElevenLabsError::Connect(ConnectError {
+            status: None,
+            detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
+        }))
+    );
+    assert_eq!(attempts(&listener), 1, "the connections the synthesis made");
+    assert!(
+        took >= CONNECT_TIMEOUT,
+        "the synthesis failed after {took:?}, before its connect timeout"
+    );
+    assert!(
+        took < LATEST,
+        "the synthesis failed after {took:?}, at twice its connect timeout or later"
+    );
 }
 
 #[test]

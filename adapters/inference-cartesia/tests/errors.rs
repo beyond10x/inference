@@ -1,21 +1,50 @@
 //! How a synthesis ends when the server or the credential does not cooperate: an `error`
 //! message, a close mid-segment, silence, a context the binding never opened, a refused
-//! handshake and a missing key each fail the synthesis with their own error, never a panic or a
-//! hang; a final chunk with `done` true completes its segment without a `done` message.
+//! handshake, a handshake never answered and a missing key each fail the synthesis with their
+//! own error, never a panic or a hang; a final chunk with `done` true completes its segment
+//! without a `done` message.
 
 mod support;
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use inference_cartesia::{
-    CartesiaError, CartesiaSynthesiser, CredentialError, OutputFormat, ServerError, VoiceConfig,
+    CartesiaError, CartesiaSynthesiser, ConnectError, CredentialError, Endpoint, OutputFormat,
+    ServerError, VoiceConfig,
 };
 use inference_tts::inference_text::SegmentState;
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
-use support::{FixtureServer, NoKey, Script, VOICE, committed, within};
+use support::{FixedKey, FixtureServer, KEY, NoKey, Script, VOICE, committed, within};
 
 const FORMAT: OutputFormat = OutputFormat::MULAW_8000;
+
+/// The connect timeout given to the open whose handshake is never answered.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// That open must end before twice its connect timeout: a bound doubled or more fails the test,
+/// a bound multiplied by less than two still passes. The 500 ms past the bound are room for a
+/// loaded machine: over repeated runs on one, such an open ended at most 51 ms after its bound,
+/// and tests that measure stalls saw one of 204 ms there.
+const LATEST: Duration = CONNECT_TIMEOUT.saturating_mul(2);
+
+/// The test's own deadline for an open that nothing ends: past it the test fails instead of
+/// waiting.
+const DEADLINE: Duration = Duration::from_secs(4);
+
+/// How many connections wait in the queue of `listener`, which nothing accepted before. An
+/// attempt is there from the moment its TCP connect completed, so the count needs no wait.
+fn attempts(listener: &std::net::TcpListener) -> usize {
+    listener.set_nonblocking(true).unwrap();
+    let mut count = 0;
+    loop {
+        match listener.accept() {
+            Ok(_) => count += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return count,
+            Err(error) => panic!("the listener failed: {error}"),
+        }
+    }
+}
 
 /// Speaks one segment with `synthesiser` and returns its events and its failure.
 fn run(mut synthesiser: CartesiaSynthesiser) -> (Vec<SynthesisEvent>, Option<CartesiaError>) {
@@ -181,6 +210,51 @@ fn a_refused_handshake_is_a_refusal_and_a_missing_key_connects_nowhere() {
         );
         assert!(server.seen().is_empty(), "nothing connected without a key");
     });
+}
+
+/// The listener takes the TCP connection into its queue and nothing reads it or answers the
+/// upgrade, so only the connect timeout ends the open. A refused connection is the same variant
+/// with no status: the detail and the time tell the two apart. The open connects once: a second
+/// attempt after the timeout is a second connection in the listener's queue. The wait is the
+/// test's own, so an open that no timeout ends fails here at [`DEADLINE`] instead of hanging.
+#[test]
+fn a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint::new()
+        .with_url(format!("ws://{}", listener.local_addr().unwrap()))
+        .with_connect_timeout(CONNECT_TIMEOUT);
+    let (done, waited) = mpsc::channel();
+    std::thread::spawn(move || {
+        let synthesiser = CartesiaSynthesiser::new(
+            endpoint,
+            VoiceConfig::new(VOICE, FORMAT),
+            Arc::new(FixedKey(KEY)),
+            "cartesia-api-key",
+        )
+        .unwrap();
+        let started = Instant::now();
+        let (_, failure) = run(synthesiser);
+        let _ = done.send((failure, started.elapsed()));
+    });
+    let (failure, took) = waited
+        .recv_timeout(DEADLINE)
+        .unwrap_or_else(|error| panic!("the synthesis did not end within {DEADLINE:?}: {error}"));
+    assert_eq!(
+        failure,
+        Some(CartesiaError::Connect(ConnectError {
+            status: None,
+            detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
+        }))
+    );
+    assert_eq!(attempts(&listener), 1, "the connections the synthesis made");
+    assert!(
+        took >= CONNECT_TIMEOUT,
+        "the synthesis failed after {took:?}, before its connect timeout"
+    );
+    assert!(
+        took < LATEST,
+        "the synthesis failed after {took:?}, at twice its connect timeout or later"
+    );
 }
 
 #[test]

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T08:42:41Z",
+  "actor": "human:operator",
+  "artifact": "story:connect-timeouts-fired-by-a-test",
+  "kind": "story",
+  "revision": 11,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-cartesia -p inference-phonic -p inference-elevenlabs -p inference-deepgram --all-features --no-fail-fast -E 'test(/^a_handshake_never_answered_fails_the_(synthesis|open|recognition)_at_the_connect_timeout$/)'",
+    "reference": "VERIFIED: baseline with the connect timeout taken out of each binding's open at d75990f20 on the build node (5 tests run: 0 passed, 5 failed, each ended by its own deadline of 4 s) vs treatment at d75990f20 (ten runs, each 5 tests run: 5 passed, 368 skipped, every test between 0.506 s and 0.537 s). Nine further planted changes end red: the bound on the TCP connect only, the default used in place of the configured value, the bound halved, doubled and multiplied by ten, a second connect attempt, the error mapped to another variant, the duration dropped from the detail (each 0 of 5 passed), and a reopen after a connect failure in the ElevenLabs synthesiser (4 of 5 passed, the text-to-speech test failed). A listener that refuses fails each of the five tests. At 473046a3b the doubled bound, the tenfold bound and the second attempt left 5 of 5 passed"
+  }
+}
