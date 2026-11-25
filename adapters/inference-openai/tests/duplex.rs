@@ -940,16 +940,42 @@ fn a_silent_provider_fails_the_session_as_stalled_at_the_bound() {
 }
 
 /// The idle limit of the session configuration a caller gets from
-/// `duplex::default_session_config()`, compared with its number written out: a changed default
-/// fails here. It has no constant. Outside the source the number is stated in
-/// `quality/adapters.md`, entry `openai-time-bounds/held`.
+/// `duplex::default_session_config()`, and the two deadlines of a model built with
+/// `OpenAiRealtime::new(..)` and given none, each compared with its number written out: a
+/// changed default fails here, and so does a model that starts with other deadlines than
+/// `Deadlines::default()`. The idle limit has no constant. Outside the source the numbers are
+/// stated in `quality/adapters.md`, entry `openai-time-bounds/held`.
 #[test]
 fn the_time_bound_defaults_are_the_stated_numbers() {
-    assert_eq!(
-        default_session_config().idle_limit,
-        Duration::from_secs(30),
-        "duplex::default_session_config().idle_limit, the default (left), is not its stated \
-         number (right)"
+    let model = OpenAiRealtime::new(
+        Endpoint::new("gpt-realtime-2.1"),
+        Box::new(FixedSource),
+        OPENAI_KEY_NAME,
+    );
+    let defaults = [
+        (
+            "duplex::default_session_config().idle_limit",
+            default_session_config().idle_limit,
+            Duration::from_secs(30),
+        ),
+        (
+            "OpenAiRealtime::new(..).connect_timeout()",
+            model.connect_timeout(),
+            Duration::from_secs(10),
+        ),
+        (
+            "OpenAiRealtime::new(..).write_timeout()",
+            model.write_timeout(),
+            Duration::from_secs(10),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
     );
 }
 

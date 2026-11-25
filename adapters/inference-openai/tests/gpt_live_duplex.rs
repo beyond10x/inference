@@ -1464,16 +1464,49 @@ fn a_model_keeps_the_documented_close_timeout_unless_given_another() {
 }
 
 /// The idle limit of the session configuration a caller gets from
-/// `live_duplex::default_session_config()`, compared with its number written out: a changed
-/// default fails here. It has no constant, and no document outside the source states it: the
-/// number below is the reference.
+/// `live_duplex::default_session_config()`, the read timeout of the endpoint a caller gets from
+/// `Endpoint::live(..)`, and the two deadlines of a model built with `OpenAiLive::new(..)` and
+/// given none, each compared with its number written out: a changed default fails here, and so
+/// does an endpoint or a model that starts with another value than its constant. The idle limit
+/// has no constant, and no document outside the source states it: its number below is the
+/// reference. The read timeout and the two deadlines are stated in `quality/adapters.md`, entry
+/// `openai-time-bounds/held`.
 #[test]
 fn the_time_bound_defaults_are_the_stated_numbers() {
-    assert_eq!(
-        default_session_config().idle_limit,
-        Duration::from_secs(30),
-        "live_duplex::default_session_config().idle_limit, the default (left), is not its \
-         stated number (right)"
+    let model = OpenAiLive::new(
+        Endpoint::live(LIVE_MODEL),
+        Box::new(FixedSource),
+        OPENAI_KEY_NAME,
+    );
+    let defaults = [
+        (
+            "live_duplex::default_session_config().idle_limit",
+            default_session_config().idle_limit,
+            Duration::from_secs(30),
+        ),
+        (
+            "Endpoint::live(..).read_timeout",
+            Endpoint::live(LIVE_MODEL).read_timeout,
+            Duration::from_secs(30),
+        ),
+        (
+            "OpenAiLive::new(..).connect_timeout()",
+            model.connect_timeout(),
+            Duration::from_secs(10),
+        ),
+        (
+            "OpenAiLive::new(..).write_timeout()",
+            model.write_timeout(),
+            Duration::from_secs(10),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
     );
 }
 

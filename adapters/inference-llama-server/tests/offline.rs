@@ -252,10 +252,28 @@ fn the_model_declaration_names_the_pinned_checkpoint_its_licences_and_checksum()
 /// `Cargo.toml` pins. A move of that pin that changes one of them changes what a caller of this
 /// adapter gets, and is meant to fail here. The numbers below are the reference: outside this
 /// test only the line of `quality/not-measured.md` that names it states them.
+///
+/// The last two rows are the bound on establishing a connection. `Config` has no field for it:
+/// the adapter builds its client with `llm_http::HttpClient::new(config.limits)`, which takes
+/// `llm_http::CONNECT_TIMEOUT`. The rows read that constant, and a client built the same way
+/// from the limits of a new configuration. They fail on a move of the pin that changes the
+/// bound. They do not fail when the adapter builds its client with another bound: the adapter
+/// gives no reader of its client.
 #[test]
 fn the_time_bound_defaults_are_the_stated_numbers() {
     let limits = Config::new("http://127.0.0.1:8080/v1", SERVED_MODEL).limits;
+    let client = llm_http::HttpClient::new(limits).expect("an HTTP client");
     let defaults = [
+        (
+            "llm_http::CONNECT_TIMEOUT",
+            llm_http::CONNECT_TIMEOUT,
+            Duration::from_secs(15),
+        ),
+        (
+            "llm_http::HttpClient::new(Config::new(..).limits).connect_timeout()",
+            client.connect_timeout(),
+            Duration::from_secs(15),
+        ),
         (
             "Config::new(..).limits.response_headers",
             limits.response_headers,
