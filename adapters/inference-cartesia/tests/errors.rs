@@ -10,7 +10,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use inference_cartesia::{
-    CLOSE_BOUND, CartesiaError, CartesiaSynthesiser, ConnectError, CredentialError,
+    CLOSE_BOUND, CLOSE_GRACE, CartesiaError, CartesiaSynthesiser, ConnectError, CredentialError,
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT, Endpoint, OutputFormat, ServerError,
     VoiceConfig,
 };
@@ -288,6 +288,7 @@ fn the_time_bound_defaults_are_the_stated_numbers() {
             Duration::from_secs(10),
         ),
         ("CLOSE_BOUND", CLOSE_BOUND, Duration::from_secs(1)),
+        ("CLOSE_GRACE", CLOSE_GRACE, Duration::from_millis(5)),
     ];
     let changed: Vec<_> = defaults
         .iter()

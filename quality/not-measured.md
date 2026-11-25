@@ -138,11 +138,13 @@ has the tests that compare each default with its number. What is left, per bindi
   of `adapters/inference-elevenlabs/tests/adversary_rf1_multi_context.rs` asserts a limit of
   its own, 2 s, and by reading the code passes with the bound removed.
 - `CLOSE_GRACE` of Cartesia and of ElevenLabs text to speech, the most a drop inside a Tokio
-  runtime waits for its close: no test asserts its value. The test
+  runtime waits for its close: no test of a drop asserts its value. The test
   `a_drop_whose_close_cannot_be_written_holds_the_runtime_for_the_grace_and_no_longer` of
   `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs`, and the one of that name
   of `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs`, holds it under the
-  limit of its ticker, 50 ms, and fails with the constant at ten times that limit.
+  limit of its ticker, 50 ms, and fails with the constant at ten times that limit. A test
+  asserts the value of each of the two constants, 5 ms; these tests are in the list "The value
+  of each time-bound default".
 - llama-server: no test fires the bound on establishing a connection. The adapter does not set
   it: it builds its HTTP client with `HttpClient::new` of `llm`
   (`adapters/inference-llama-server/src/lib.rs`), which takes `CONNECT_TIMEOUT` of `llm-http`,
@@ -151,8 +153,7 @@ has the tests that compare each default with its number. What is left, per bindi
 
 A close against a peer that stops reading, as Cartesia and ElevenLabs text to speech have it,
 would fire the close bound of another binding. A comparison of the wait with a number would
-assert the value of a close bound in a test that fires it. A comparison of `CLOSE_GRACE` with
-its number would assert the value of that default.
+assert the value of a close bound in a test that fires it.
 
 ### Real-time factor and latency of the hosted speech-to-text bindings
 
@@ -374,7 +375,7 @@ No record of a run holds a result of any of these comparisons yet:
   configuration starts with and the idle limit of the default session configuration.
 - Cartesia text to speech: the test `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-cartesia/tests/errors.rs`, for `DEFAULT_READ_TIMEOUT`,
-  `DEFAULT_CONNECT_TIMEOUT` and `CLOSE_BOUND`.
+  `DEFAULT_CONNECT_TIMEOUT`, `CLOSE_BOUND` and `CLOSE_GRACE`.
 - Deepgram transcription: the test `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-deepgram/tests/errors.rs`, for `DEFAULT_CONNECT_TIMEOUT`,
   `DEFAULT_READ_TIMEOUT`, `DEFAULT_KEEPALIVE_INTERVAL` and `CLOSE_BOUND`.
@@ -387,7 +388,7 @@ No record of a run holds a result of any of these comparisons yet:
 - ElevenLabs text to speech and speech to text: the test
   `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-elevenlabs/tests/closed_stream.rs`, for `DEFAULT_READ_TIMEOUT`,
-  `DEFAULT_CONNECT_TIMEOUT` and `CLOSE_BOUND`.
+  `DEFAULT_CONNECT_TIMEOUT`, `CLOSE_BOUND` and, of text to speech alone, `CLOSE_GRACE`.
 - ElevenLabs agent: the test `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-elevenlabs/tests/agent_duplex.rs`, for the agent's
   `DEFAULT_CONNECT_TIMEOUT`, `DEFAULT_METADATA_TIMEOUT` and `DEFAULT_READ_TIMEOUT`.

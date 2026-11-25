@@ -8,8 +8,9 @@ mod support;
 use std::time::{Duration, Instant};
 
 use inference_elevenlabs::{
-    CLOSE_BOUND, ConnectError, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT, ElevenLabsError,
-    ElevenLabsSynthesis, ElevenLabsSynthesiser, Endpoint, OutputFormat, VoiceConfig,
+    CLOSE_BOUND, CLOSE_GRACE, ConnectError, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT,
+    ElevenLabsError, ElevenLabsSynthesis, ElevenLabsSynthesiser, Endpoint, OutputFormat,
+    VoiceConfig,
 };
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
 use support::{FixedKey, FixtureServer, KEY, Script, VOICE, committed, within};
@@ -330,6 +331,7 @@ fn the_time_bound_defaults_are_the_stated_numbers() {
             Duration::from_secs(10),
         ),
         ("CLOSE_BOUND", CLOSE_BOUND, Duration::from_secs(1)),
+        ("CLOSE_GRACE", CLOSE_GRACE, Duration::from_millis(5)),
     ];
     let changed: Vec<_> = defaults
         .iter()
