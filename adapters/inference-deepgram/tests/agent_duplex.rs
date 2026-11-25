@@ -7,7 +7,7 @@
 mod fixture;
 
 use std::num::{NonZeroU16, NonZeroU32};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use fixture::{AgentServer, Applied, FixedKey, Handshake, KEY, NoKey, Script, Step};
@@ -656,6 +656,125 @@ fn a_session_closed_mid_reply_takes_nothing_more_and_closes_its_connection() {
     ));
     let seen = server.wait(0, CLOSE_BOUND, |seen| seen.closed.is_some());
     assert!(seen.closed.is_some());
+}
+
+/// The pings of the first flood of the backed-up close. The session answers each with a pong of
+/// 131 bytes; 36,000 of them are 4.7 MB, more than the socket buffers hold where the kernel's
+/// largest send buffer is 4 MiB.
+const FLOOD: usize = 36_000;
+
+/// The largest flood: a host whose buffers took every pong gets the flood doubled up to here.
+/// It is one the session reads well within the five seconds of `events_until`, and one of twice
+/// that took most of them, so a host that took this one too fails on that and not on the wait
+/// for the audio behind it.
+const LARGEST_FLOOD: usize = 2 * FLOOD;
+
+/// The test's own deadline for a close that nothing ends: past it the test lets the server read
+/// again, which ends the close, and fails.
+const CLOSE_DEADLINE: Duration = Duration::from_secs(4);
+
+/// How long the test waits, past that deadline, for the close to end once the server reads
+/// again. A close that has not ended by then is left behind with its thread, and the test fails
+/// without joining it.
+const RELEASE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The server reads `Settings` and nothing after it, sends a flood of pings and then the start
+/// of a reply. The session answers each ping with a pong as it reads; the pongs fill the socket
+/// buffers and then wait in the session's WebSocket buffer, in front of the close frame, so that
+/// frame cannot be written and only the close bound ends the close. Whether the connection was
+/// backed up is the server's to tell: it had read no pong when the test told it to read again,
+/// and reading again after the close, it counts fewer pongs than it sent pings. A flood whose
+/// pongs all arrived is doubled and the session run again. The keep-alive interval and the read
+/// timeout are set long, so neither ends the session first.
+///
+/// The close must hold its caller no shorter than one second and less than two. Both numbers
+/// are written out and not taken from `CLOSE_BOUND`: limits that moved with the constant would
+/// pass with any value of it. The bound is applied twice here, on the write of the close frame
+/// and on the caller's wait for the connection task, both against the same blocked write; this
+/// test does not tell the two apart.
+#[test]
+fn a_close_on_a_backed_up_connection_ends_at_the_close_bound() {
+    let mut pings = FLOOD;
+    loop {
+        let mut script = Script::new(vec![
+            Step::Pings(pings),
+            Step::Send(fixture::agent_started_speaking()),
+            Step::Binary(vec![1; 640]),
+        ]);
+        script.deaf = true;
+        let server = AgentServer::start(script);
+        let patient = endpoint(&server)
+            .with_read_timeout(Duration::from_secs(30))
+            .with_keepalive_interval(Duration::from_secs(30));
+        let opened = Instant::now();
+        let mut session = agent_with(patient, Arc::new(FixedKey(KEY)))
+            .open(config())
+            .expect("the session opens");
+        let events = events_until(&mut session, |event| {
+            matches!(event, SessionEvent::OutputAudio(_))
+        });
+        assert!(
+            matches!(events.last(), Some(SessionEvent::OutputAudio(_))),
+            "the audio behind a flood of {pings} pings did not arrive: {events:#?}"
+        );
+        let flooded = opened.elapsed();
+        let (done, finished) = mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            let closing = Instant::now();
+            let closed = session.close();
+            let _ = done.send((closing.elapsed(), closed));
+        });
+        let outcome = finished.recv_timeout(CLOSE_DEADLINE);
+        server.read_again(0);
+        let Ok((held, closed)) = outcome else {
+            let ended = finished.recv_timeout(RELEASE_DEADLINE).is_ok();
+            panic!(
+                "the close did not end within {CLOSE_DEADLINE:?}; that it ended within \
+                 {RELEASE_DEADLINE:?} of the server reading again: {ended}"
+            );
+        };
+        closer.join().expect("the close returned");
+        closed.expect("an open session closes");
+        let seen = server.wait(0, Duration::from_secs(5), |seen| seen.closed.is_some());
+        assert!(
+            seen.closed.is_some(),
+            "the server read no end of the stream"
+        );
+        println!(
+            "a flood of {pings} pings, read within {flooded:?}: the close held {held:?}; the \
+             server had read {} pongs when it was told to read again and {} at the end, close \
+             frame: {}",
+            seen.early_pongs, seen.pongs, seen.close_frame
+        );
+        if seen.pongs < pings {
+            assert_eq!(
+                seen.early_pongs, 0,
+                "the server read pongs before it was told to read again, so fewer pongs than \
+                 pings does not say that the connection was backed up"
+            );
+            assert!(
+                !seen.close_frame,
+                "a close frame behind pongs never written"
+            );
+            assert!(
+                held >= Duration::from_secs(1),
+                "the close on a backed-up connection returned after {held:?}, before its bound"
+            );
+            assert!(
+                held < Duration::from_secs(2),
+                "the close on a backed-up connection held {held:?}, twice its bound or longer"
+            );
+            return;
+        }
+        assert!(
+            pings < LARGEST_FLOOD,
+            "the socket buffers of this host took every pong of a flood of {pings} pings, {} of \
+             them before the server was told to read again, so no close was backed up and \
+             nothing was asserted of its bound",
+            seen.early_pongs
+        );
+        pings *= 2;
+    }
 }
 
 #[test]
