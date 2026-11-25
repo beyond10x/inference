@@ -6,7 +6,7 @@ status: active
 title: A program writes the record of an assessment from what a run left behind
 relations:
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-25T14:04:59Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-25T14:04:59Z", actor: "human:operator", revision: 3}
@@ -74,3 +74,32 @@ when the file does not hold what the declaration names, it writes no document an
   `compare` example.
 - A call to a hosted provider, a local model run, a benchmark.
 - A new crate.
+
+## Scope as built
+
+Built on the branch `quality/record-program`, in `crates/inference-docs` (not published):
+
+- The command `inference-docs assess`: Ratchet's six arguments of an assessor call and five of
+  its own (`--from`, `--source`, `--started-at`, `--ended-at`, `--exit-status`). It writes one
+  `ratchet-evidence/1` document or refuses; `quality/README.md` says the exit codes and the call.
+  Files: `src/assess.rs`, `src/assess/junit.rs`, `src/assess/printed.rs`, `src/main.rs`.
+- Readers of a JUnit report of cargo-nextest for the assessors `nextest-run@1`, `package-tests@1`,
+  `named-tests@1` and `capability-record@1`. A named test is found by the module path of its
+  file, the inline modules around its function and its name; the counts read are compared with
+  the report's own.
+- A reader of the captured output of a test command for `printed-duration@1`, 12 printed labels.
+  A pass is taken only from the closing line of the tests that printed the measures.
+- Not read, exit 2 with the reason: `compare`, `elevenlabs-live-example`,
+  `cascade-local-adapters` (more than one value per run) and `cascade-talk` (its exit status does
+  not tell a completed run from a failed one).
+- `quality/assessors/nextest-run@1.assessor.yaml` no longer lists `skipped`, and the record of
+  `workspace-tests` holds 0 there: the JUnit report of cargo-nextest 0.9.143 holds no ignored
+  test.
+- `Taskfile.yml` and `.config/nextest.toml`: the stack test runs under the profile `stack`, so the
+  default report stays the one of the workspace run.
+- Tests: `crates/inference-docs/tests/quality/assess.rs` with fixtures under
+  `tests/fixtures/assess/`; the package runs 106 tests.
+
+Left open, each named in `quality/README.md`: a call through Ratchet as its specification stands
+cannot pass the five own arguments; the document cannot know the cargo-nextest profile of the
+report it is given; the committed records are still the ones written by hand.
