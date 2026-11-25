@@ -91,7 +91,7 @@ fn compile(root: &Path) -> Result<Compiled> {
 
 /// Every `.rs` file under `src/` of each package in `crates/` and `adapters/`, sorted, with its
 /// text; this generator is left out.
-fn sources(root: &Path) -> Result<Vec<(String, String)>> {
+pub(crate) fn sources(root: &Path) -> Result<Vec<(String, String)>> {
     fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
         let entries =
             fs::read_dir(dir).map_err(|error| format!("reading {}: {error}", dir.display()))?;
@@ -137,7 +137,7 @@ fn sources(root: &Path) -> Result<Vec<(String, String)>> {
 }
 
 /// Whether `text` holds `word` as a whole identifier.
-fn names(text: &str, word: &str) -> bool {
+pub(crate) fn names(text: &str, word: &str) -> bool {
     let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_';
     text.match_indices(word).any(|(at, _)| {
         let before = text[..at].chars().next_back();
@@ -146,7 +146,9 @@ fn names(text: &str, word: &str) -> bool {
     })
 }
 
-fn render(compiled: &Compiled, sources: &[(String, String)]) -> Result<String> {
+/// The page; with `agent_note`, the adapter reference has a note on the ElevenLabs agent that
+/// names `SignedUrlSpent`, and the page links it.
+fn render(compiled: &Compiled, sources: &[(String, String)], agent_note: bool) -> Result<String> {
     let mut by_domain: BTreeMap<&str, Vec<(&str, &ErrorKind, &str)>> = BTreeMap::new();
     let mut unnamed = Vec::new();
     for kind in compiled.errors.values() {
@@ -176,9 +178,11 @@ fn render(compiled: &Compiled, sources: &[(String, String)]) -> Result<String> {
          (`ess specify compile --path ess --format json`). There are {} error kinds in {} domains. \
          Each is a refusal: the command it answers changed nothing. The code names each one, as an \
          enum variant or a type, in the file the last column links; the generator refuses a kind \
-         no source file names.\n",
+         no source file names. An adapter's own error types are not kinds of the specification \
+         and are not on this page: each adapter's crate documentation has them.{}\n",
         compiled.errors.len(),
         by_domain.len(),
+        if agent_note { AGENT_POINTER } else { "" },
     ));
     for (domain, kinds) in &by_domain {
         out.push_str(&format!(
@@ -204,9 +208,20 @@ fn render(compiled: &Compiled, sources: &[(String, String)]) -> Result<String> {
     Ok(out)
 }
 
+/// The sentence that links the note on the ElevenLabs agent of the adapter reference.
+const AGENT_POINTER: &str = " [Adapters](adapters.md#opens-closes-and-drops) says what a later \
+                             open of an ElevenLabs agent model built with a signed URL returns.";
+
+/// Whether the adapter reference has the note [`AGENT_POINTER`] links: one on the ElevenLabs
+/// agent that names `agent::AgentError::SignedUrlSpent`.
+fn agent_note() -> bool {
+    crate::adapters::note(crate::adapters::AGENT_CONVERSATION)
+        .is_some_and(|text| text.contains("`agent::AgentError::SignedUrlSpent`"))
+}
+
 /// The error reference for the repository at `root`.
 pub fn page(root: &Path) -> Result<String> {
-    render(&compile(root)?, &sources(root)?)
+    render(&compile(root)?, &sources(root)?, agent_note())
 }
 
 #[cfg(test)]
@@ -233,6 +248,38 @@ mod tests {
     }
 
     #[test]
+    fn the_page_sends_a_reader_of_an_adapters_own_errors_to_the_adapter_reference() {
+        let sources = vec![(
+            "crates/b/src/run.rs".to_owned(),
+            "RunNotFound Gone".to_owned(),
+        )];
+        let intro = |agent_note| {
+            render(&compiled(), &sources, agent_note)
+                .unwrap()
+                .split_once("\n## ")
+                .unwrap()
+                .0
+                .to_owned()
+        };
+        let own = "An adapter's own error types are not kinds of the specification and are not \
+                   on this page: each adapter's crate documentation has them.";
+        let link = "[Adapters](adapters.md#opens-closes-and-drops) says what a later open of an \
+                    ElevenLabs agent model built with a signed URL returns.";
+        let with = intro(true);
+        assert!(with.contains(&format!("{own} {link}")), "{with}");
+        let without = intro(false);
+        assert!(
+            without.contains(own) && !without.contains("adapters.md#"),
+            "{without}"
+        );
+        assert!(
+            agent_note(),
+            "the adapter reference has no note on the ElevenLabs agent naming SignedUrlSpent, \
+             which the error reference links"
+        );
+    }
+
+    #[test]
     fn a_kind_is_found_by_its_whole_name_and_one_nothing_names_is_refused() {
         let sources = vec![
             (
@@ -244,11 +291,11 @@ mod tests {
                 "Error::RunNotFound { run_id }".to_owned(),
             ),
         ];
-        let error = render(&compiled(), &sources).err().unwrap();
+        let error = render(&compiled(), &sources, false).err().unwrap();
         assert!(error.ends_with(": a.y.Gone"), "{error}");
         let mut sources = sources;
         sources.push(("crates/c/src/lib.rs".to_owned(), "struct Gone;".to_owned()));
-        let page = render(&compiled(), &sources).unwrap();
+        let page = render(&compiled(), &sources, false).unwrap();
         assert!(page.contains("There are 2 error kinds in 2 domains."));
         assert!(page.contains(
             "| `RunNotFound` | No run. | `run_id`: `RunId`, `state`: `Run.State`, `at`: `Optional<integer>` | [run.rs](https://github.com/beyond10x/inference/blob/main/crates/b/src/run.rs) |"
