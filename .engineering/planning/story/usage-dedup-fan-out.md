@@ -21,9 +21,9 @@ scope:
   path: ess/domains/usage.yaml
 revision: 6
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-23T02:01:50Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}, executor: "agent:implementor"}
-- {from: "proposed", to: "active", at: "2026-11-23T02:01:50Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1}}, executor: "agent:implementor"}
-- {from: "active", to: "implemented", at: "2026-11-23T02:43:10Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":3},"asserted":{"test_result":1}}, executor: "agent:wave-coordinator", correlation: "wave-2026-11-23-review-findings"}
+- {from: "draft", to: "proposed", at: "2026-11-23T02:01:50Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":1}}, executor: "agent:implementor"}
+- {from: "proposed", to: "active", at: "2026-11-23T02:01:50Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":1}}, executor: "agent:implementor"}
+- {from: "active", to: "implemented", at: "2026-11-23T02:43:10Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":3},"asserted":{"test_result":1}}, executor: "agent:wave-coordinator", correlation: "wave-2026-11-23-review-findings"}
 ---
 ## Context
 
