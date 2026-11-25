@@ -55,16 +55,21 @@ The three native speech adapters are hosted services. A self-hosted native speec
   distributes a program with that library distributes GPL-3.0 code. Opening the synthesiser on the
   library without TTS is refused, naming the library. The pinned checkpoint speaks English at
   24 kHz, and the archive is for Linux x86_64.
-  - It streams output sentence by sentence. A segment of one sentence is delivered whole, after
-    it is generated; only a segment of several sentences delivers the frames of a sentence while
-    the next is generated. Every segment of the local cascade is a segment of one part.
+  - It streams output part by part: one part per sentence, and a further part within a sentence
+    each time its phonemes have filled one, about 510 tokens (sherpa-onnx's `max_token_len`, the
+    first number of the model's `style_dim` metadata, 511 for the pinned checkpoint; no field of
+    its configuration). Measured: one sentence of 139 characters arrived as one part, one of 679
+    characters in 2 parts, 4.35 s and 5.74 s apart in two runs. So a segment of one short sentence
+    is delivered whole, after it is generated; frames arrive while more is generated only for a
+    segment of several sentences or of one sentence long enough to be split. Every segment of
+    the local cascade is a segment of one part.
   - Each segment is spoken on its own, and the local cascade makes a segment of each delta of the
     language model, so an answer is spoken delta by delta, without the prosody of a sentence and
     longer than the sentence is. Measured: a 12-word sentence offered as 13 word deltas came to
     7133 ms of audio, against 3186 ms offered as one segment.
-  - A discard or a drop stops a generation at the end of the sentence being generated. No drop
+  - A discard or a drop stops a generation at the end of the part being generated. No drop
     waits for that: one thread and the native engine can outlive the synthesiser until the
-    sentence is generated.
+    part is generated.
   - In the local cascade a superseded answer is not cut at the synthesiser. The TTS node takes the
     next event on its text input only once the segment it offered last is generated, so every
     segment committed before the supersede is generated to its end. Measured twice with an answer of
@@ -75,8 +80,9 @@ The three native speech adapters are hosted services. A self-hosted native speec
   - A voice of your own in the Piper format is opened unpinned, its licence yours, at its own
     sample rate. A voice file that sherpa-onnx cannot load ends the process inside the native
     load: an abort for a file that is not a model, exit status 255 for a model of another family.
-    The adapter checks beforehand only that the model and the tokens are regular files that are
-    not empty. The pinned checkpoint is not reached this way: its files are checked against their
+    The adapter checks beforehand only that the model and the tokens are regular files that the
+    process may open and that are not empty, and that the phoneme data is a directory it may
+    list. The pinned checkpoint is not reached this way: its files are checked against their
     sha256 before sherpa-onnx reads any.
 - **whisper.cpp** is a batch recogniser: it holds a whole utterance in memory until input ends,
   decodes at most 30 s per window, and claims no streaming capability. It runs on the CPU.

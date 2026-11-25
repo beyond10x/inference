@@ -6,6 +6,7 @@
 //! process started on the native library built with text-to-speech. Nothing here downloads
 //! either.
 
+mod adversary2_w2u4_files;
 mod conformance;
 mod licence;
 mod open;

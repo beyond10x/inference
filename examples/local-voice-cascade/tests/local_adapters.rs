@@ -117,25 +117,38 @@ const HEARD: &str = "nightfall";
 
 /// The answer length the three cases on the server ask it for, in tokens. The example's own
 /// default, [`local_voice_cascade::local::MAX_OUTPUT_TOKENS`], is 64; the cases ask for fewer so
-/// that an answer played at the real-time rate ends within the 60 s after which the runner kills
-/// a test. The sum for the longest of the three, the question said twice, from what was measured
-/// on CPU:
+/// that the answers end within the 60 s after which the runner kills a test. The cascade offers
+/// one segment per delta of the server, and the synthesiser speaks a delta of one word no faster
+/// than it plays: the thirteen deltas measured came to 7.13 s of audio, 0.55 s each on average
+/// and 0.84 s the longest, generated in 6.94 s to 8.23 s, a ratio of 0.97 to 1.15. The record's
+/// real-time factor of 0.553 is of whole sentences and does not hold here. The sum for the
+/// longest of the three cases, the question said twice, from what was measured on CPU, at the
+/// slower end of that ratio:
 ///
 /// * the models load before the run: the recogniser in 4.9 s (sherpa-onnx; whisper.cpp 0.6 s)
 ///   and the synthesiser in 8.1 s, by their capability records: 13.0 s;
 /// * two questions of at most [`CLIP_SECONDS`] are heard at a real-time factor of 0.202
 ///   (whisper.cpp; sherpa-onnx 0.131): 4.0 s;
-/// * the first answer plays until its first segment is acknowledged, and the cascade offers one
-///   segment per delta of the server: 0.84 s of audio, the longest of the thirteen deltas of one
-///   word measured, generated at a real-time factor of 0.553: 1.3 s;
-/// * the second answer plays whole: 24 segments of at most 0.84 s are 20.2 s at the real-time
-///   rate, after the first of them is generated, 0.5 s. Generation is faster than playout, so
-///   the rest adds nothing;
-/// * that is 39.0 s, which leaves 21.0 s for the server to generate two answers of 24 tokens:
-///   2.3 tokens a second.
+/// * the first answer plays until its first segment is acknowledged: a delta of at most 0.84 s
+///   is generated in 0.97 s and played: 1.8 s;
+/// * the first answer is superseded, but not cut at the synthesiser: every delta committed
+///   before the supersede is generated to its end before the supersede is read. With a server
+///   faster than the synthesiser that is every other delta of the answer, 23. About 3 of them
+///   are generated while the second question is heard, which is counted above; the other 20, of
+///   0.55 s each, take 12.7 s;
+/// * the second answer plays whole: 24 deltas are 13.2 s of audio, generated in 15.2 s, and the
+///   last of them is played after it is generated, at most 0.84 s: 16.0 s;
+/// * that is 47.5 s, which leaves 12.5 s, in which the server gives the first token of each
+///   answer; its later tokens come while the synthesiser works. A slower server commits fewer
+///   deltas before the supersede, which shortens the fourth term.
+///
+/// The sum rests on the average delta of that one measurement. Were every delta as long as the
+/// longest measured, 0.84 s, the fourth term would be 20.4 s and the fifth 24.1 s, and the sum
+/// 63.3 s: an answer of 24 deltas that are all long words does not fit, and the runner would
+/// end the case.
 ///
 /// The other two cases say the question once and are shorter by a question and an answer. With
-/// 64 tokens the second answer alone is 53.8 s of audio.
+/// 64 tokens the two answers alone are 70 s of audio at 0.55 s a delta.
 const ANSWER_TOKENS: u64 = 24;
 
 /// The longest clip [`Microphone::say`] takes, in seconds: the length the sum at

@@ -13,10 +13,17 @@
 //! pinned checkpoint from `INFERENCE_SHERPA_ONNX_TTS_DIR` and needs a process started on the
 //! sherpa-onnx native library built with text-to-speech, as the README of
 //! `inference-sherpa-onnx-tts` shows. Run without the variable, each fails naming it.
+//!
+//! The last three cases are of adversary pass 2, on what the correction after pass 1 wrote about
+//! the synthesiser: that no drop waits for the generation in flight, and which voice files end
+//! the process. They are ignored like the others.
 
 #![cfg(all(target_os = "linux", feature = "local"))]
 
+use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
@@ -25,7 +32,8 @@ use std::time::{Duration, Instant};
 use inference_core::generation::{Generation, StartGeneration};
 use inference_core::id::{NodeId, RunId};
 use inference_sherpa_onnx_tts::{
-    OpenRefused, SherpaOnnxSynthesis, SherpaOnnxSynthesiser, SpeakerOutOfRange,
+    ESPEAK_NG_DATA, OpenRefused, SherpaOnnxSynthesis, SherpaOnnxSynthesiser, SpeakerOutOfRange,
+    TOKENS,
 };
 use inference_text::{OutputSegment, SegmentId};
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
@@ -33,7 +41,7 @@ use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
 /// The variable naming the directory of the unpacked pinned checkpoint.
 const TTS_DIR: &str = "INFERENCE_SHERPA_ONNX_TTS_DIR";
 
-/// One sentence of 24 words with no sentence end before its last character.
+/// One sentence of 24 words and 139 characters with no sentence end before its last character.
 const ONE_SENTENCE: &str = "The weather in the valley stayed mild and bright through the whole of \
      the afternoon while the river ran quietly under the old stone bridge.";
 
@@ -41,14 +49,17 @@ const ONE_SENTENCE: &str = "The weather in the valley stayed mild and bright thr
 const SIXTEEN_WORDS: &str = "one two three four five six seven eight nine ten eleven twelve \
      thirteen fourteen fifteen sixteen";
 
-/// Opens the pinned checkpoint of [`TTS_DIR`] at most `max_concurrency` syntheses at once.
-fn open(max_concurrency: i64) -> SherpaOnnxSynthesiser {
-    let dir = std::env::var_os(TTS_DIR)
+fn checkpoint_dir() -> PathBuf {
+    std::env::var_os(TTS_DIR)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             panic!("set {TTS_DIR} to the directory of the unpacked pinned checkpoint")
-        });
-    SherpaOnnxSynthesiser::open_with(dir, max_concurrency)
+        })
+}
+
+/// Opens the pinned checkpoint of [`TTS_DIR`] at most `max_concurrency` syntheses at once.
+fn open(max_concurrency: i64) -> SherpaOnnxSynthesiser {
+    SherpaOnnxSynthesiser::open_with(checkpoint_dir(), max_concurrency)
         .unwrap_or_else(|refused| panic!("{TTS_DIR} holds the pinned checkpoint: {refused}"))
 }
 
@@ -147,12 +158,23 @@ fn a_directory_whose_path_holds_a_nul_byte_is_refused_naming_it_and_nothing_pani
 }
 
 /// The grain of the adapter's `output_streaming`, as the limitations page and the adapters
-/// reference state it: sherpa-onnx hands audio over one part per sentence. A segment of one
-/// sentence is delivered once, whole, after it is generated; a segment of two sentences delivers
-/// the frames of its first sentence before the second is generated.
+/// reference state it: sherpa-onnx hands audio over part by part, one part per sentence. A
+/// segment of one sentence of 139 characters is delivered once, whole, after it is generated; a
+/// segment of two such sentences delivers the frames of its first sentence before the second is
+/// generated.
+///
+/// The case holds that at 139 characters and no further. A longer sentence is split by
+/// sherpa-onnx into several parts, each time its phonemes have filled about 510 tokens: one of
+/// 679 characters was measured in 2 parts. No case holds where that split falls: it is
+/// upstream's, and the crate documentation states it.
 #[test]
 #[ignore = "needs the pinned checkpoint unpacked in the directory INFERENCE_SHERPA_ONNX_TTS_DIR and the sherpa-onnx library built with text-to-speech"]
 fn a_one_sentence_segment_is_delivered_once_and_two_sentences_part_by_part() {
+    assert_eq!(
+        ONE_SENTENCE.len(),
+        139,
+        "the length this case holds the grain at"
+    );
     let mut synthesiser = open(1);
 
     let mut synthesis = synthesiser.start().expect("one synthesis runs");
@@ -174,8 +196,8 @@ fn a_one_sentence_segment_is_delivered_once_and_two_sentences_part_by_part() {
     );
     assert!(
         (last - first) * 10 < last,
-        "a segment of one sentence is one part, delivered once after it is generated: its first \
-         frame came {first:?} after the offer and its last {last:?} after it"
+        "a segment of one sentence of 139 characters is one part, delivered once after it is \
+         generated: its first frame came {first:?} after the offer and its last {last:?} after it"
     );
     drop(synthesis);
 
@@ -590,8 +612,15 @@ fn a_text_of_100_000_characters_is_stopped_at_its_next_sentence_by_a_discard() {
 /// delta of the language model, the synthesiser speaks each segment on its own, and a reply
 /// spoken that way lasts more than half as long again as the reply spoken whole. The limitations
 /// page and the guide of the offline cascade state it with the numbers this case prints (7133 ms
-/// against 3186 ms). The draft story on speaking whole sentences is to remove the limit; when this
-/// case turns red, the limit is gone and the pages and this case are rewritten.
+/// against 3186 ms).
+///
+/// What the case guards is the adapter: the ratio between a reply offered to it as thirteen
+/// segments and as one, and so the two numbers on the pages. It offers its segments straight to
+/// the adapter and does not see what the cascade offers. The draft story on speaking whole
+/// sentences changes what the cascade offers, not the adapter: when the cascade offers whole
+/// sentences the limit is gone from the cascade, and this case stays green. It turns red only
+/// when the adapter itself speaks a reply offered word by word otherwise than it did here, and
+/// the two numbers on the pages are then measured again.
 #[test]
 #[ignore = "needs the pinned checkpoint unpacked in the directory INFERENCE_SHERPA_ONNX_TTS_DIR and the sherpa-onnx library built with text-to-speech"]
 fn known_limit_a_reply_spoken_delta_by_delta_lasts_more_than_half_as_long_again_as_spoken_whole() {
@@ -645,5 +674,296 @@ fn known_limit_a_reply_spoken_delta_by_delta_lasts_more_than_half_as_long_again_
          {} ms spoken whole, so the limit no longer holds as the limitations page states it",
         delta_samples * 1_000 / 24_000,
         whole_samples * 1_000 / 24_000,
+    );
+}
+
+// --- Adversary pass 2 ---------------------------------------------------------------------
+
+/// One sentence the engine needs more than a second for on a CPU: 70 characters.
+const LONG: &str = "The keeper of the bridge walked home slowly through the quiet streets.";
+
+/// A short reply.
+const SHORT: &str = "Yes, of course.";
+
+/// When each frame of a segment came, since the iteration started, and its samples.
+struct Spoken {
+    frames: Vec<(Duration, u64)>,
+    /// Whether every event that names a segment names this one.
+    own: bool,
+}
+
+impl Spoken {
+    fn samples(&self) -> u64 {
+        self.frames.iter().map(|(_, samples)| samples).sum()
+    }
+}
+
+/// Starts a synthesis of `synthesiser`, offers `text` and iterates until nothing more comes.
+fn speak(synthesiser: &mut SherpaOnnxSynthesiser, text: &str) -> Spoken {
+    let mut synthesis = synthesiser
+        .start()
+        .expect("the synthesis before gave its slot back");
+    let segment_id = offer(&mut synthesis, &generation(), 1, text);
+    let started = Instant::now();
+    let mut spoken = Spoken {
+        frames: Vec::new(),
+        own: true,
+    };
+    for event in synthesis.by_ref() {
+        spoken.own &= event.segment_id().is_none_or(|id| id == segment_id);
+        if let SynthesisEvent::Audio(audio) = &event {
+            spoken
+                .frames
+                .push((started.elapsed(), u64::from(audio.frame().sample_count)));
+        }
+    }
+    assert_eq!(synthesis.failure(), None, "{text:?} is spoken");
+    spoken
+}
+
+/// Starts a synthesis of `synthesiser`, offers [`LONG`] and returns it 300 ms later with the
+/// sentence still being generated.
+fn generating(synthesiser: &mut SherpaOnnxSynthesiser) -> SherpaOnnxSynthesis {
+    let mut synthesis = synthesiser
+        .start()
+        .expect("the synthesis before gave its slot back");
+    offer(&mut synthesis, &generation(), 1, LONG);
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(synthesis.poll_event(&mut cx).is_pending());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        synthesis.poll_event(&mut cx).is_pending(),
+        "the sentence is still being generated 300 ms after it was offered"
+    );
+    synthesis
+}
+
+/// No drop joins the thread of the generation in flight, so that thread outlives its synthesis.
+/// What is started next beside it speaks its own text, whole: a synthesis of the same
+/// synthesiser, which waits for the sentence in flight to end, and a synthesis of a second
+/// synthesiser opened from the same directory, while the last handle of the first is gone and its
+/// thread still generates.
+#[test]
+#[ignore = "needs the pinned checkpoint unpacked in the directory INFERENCE_SHERPA_ONNX_TTS_DIR and the sherpa-onnx library built with text-to-speech"]
+fn what_is_started_beside_the_thread_of_a_dropped_synthesis_speaks_its_own_text_whole() {
+    // The two synthesisers are opened at once, each on a thread of its own: an open reads and
+    // hashes the whole checkpoint, and the case is about what follows the two opens.
+    let (mut first, mut second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| open(1));
+        let first = open(1);
+        (first, second.join().expect("the second synthesiser opens"))
+    });
+    let alone = speak(&mut first, SHORT).samples();
+    assert!(alone > 0, "{SHORT:?} is spoken");
+    let like_alone = |samples: u64| samples * 10 >= alone * 9 && samples * 10 <= alone * 11;
+
+    let synthesis = generating(&mut first);
+    let before = Instant::now();
+    drop(synthesis);
+    let dropped = before.elapsed();
+    let same = speak(&mut first, SHORT);
+    eprintln!(
+        "alone: {alone} samples. After a synthesis dropped mid-sentence in {dropped:?}, the same \
+         synthesiser: {} samples, the first frame {:?} after the offer",
+        same.samples(),
+        same.frames.first().map(|(at, _)| *at),
+    );
+    assert!(
+        dropped < Duration::from_millis(500),
+        "the drop took {dropped:?}"
+    );
+    assert!(
+        same.own && like_alone(same.samples()),
+        "the synthesis started on the same synthesiser while the thread of the dropped one still \
+         generates speaks {SHORT:?} as it is spoken alone, {alone} samples, and nothing else: {} \
+         samples, only its own events {}",
+        same.samples(),
+        same.own,
+    );
+
+    let synthesis = generating(&mut first);
+    let before = Instant::now();
+    drop(synthesis);
+    drop(first);
+    let dropped = before.elapsed();
+    let other = speak(&mut second, SHORT);
+    eprintln!(
+        "after the last handle of the first synthesiser was dropped mid-sentence in {dropped:?}, \
+         the second synthesiser: {} samples, the first frame {:?} after the offer",
+        other.samples(),
+        other.frames.first().map(|(at, _)| *at),
+    );
+    assert!(
+        dropped < Duration::from_millis(500),
+        "the drop of the last handle took {dropped:?}"
+    );
+    assert!(
+        other.own && like_alone(other.samples()),
+        "a second synthesiser speaks {SHORT:?} as it is spoken alone, {alone} samples, while the \
+         thread of the first still generates: {} samples, only its own events {}",
+        other.samples(),
+        other.own,
+    );
+}
+
+/// Set in the child process a case starts of itself: how many milliseconds after the moment the
+/// thread of its dropped synthesis is due to end the child returns; may be negative.
+const CHILD_ENDS: &str = "ADVERSARY2_W2U4_CHILD_ENDS";
+
+/// What the child writes to standard error just before it returns.
+const RETURNS: &str = "the child returns";
+
+/// The child: speaks [`LONG`] twice to its end and takes the time of the second, then offers it
+/// again, drops the synthesis and the synthesiser 300 ms later and returns `offset_ms` after the
+/// time the sentence took before, which is about when the thread left behind has generated the
+/// sentence and frees the engine.
+fn drop_and_return_near_the_end_of_the_thread(offset_ms: i64) {
+    let mut synthesiser = open(1);
+    speak(&mut synthesiser, LONG);
+    let before = Instant::now();
+    speak(&mut synthesiser, LONG);
+    let whole = before.elapsed();
+
+    let offered = Instant::now();
+    let synthesis = generating(&mut synthesiser);
+    drop(synthesis);
+    drop(synthesiser);
+    let due = i64::try_from(whole.as_millis()).expect("a sentence takes seconds") + offset_ms;
+    let due = Duration::from_millis(u64::try_from(due).unwrap_or(0));
+    std::thread::sleep(due.saturating_sub(offered.elapsed()));
+    eprintln!(
+        "{RETURNS} {:?} after the offer; the sentence took {whole:?} before",
+        offered.elapsed()
+    );
+}
+
+/// The crate's `Drop` documentation and its README say that a process which returns from `main`
+/// while the thread of a dropped synthesis still generates "exits with the status `main` gave".
+/// The unit's own case returns about 300 ms into a sentence. This one starts six processes that
+/// return around the moment that thread has generated its sentence and frees the engine, the one
+/// moment at which the thread and the end of the process both take sherpa-onnx down.
+#[test]
+#[ignore = "needs the pinned checkpoint unpacked in the directory INFERENCE_SHERPA_ONNX_TTS_DIR and the sherpa-onnx library built with text-to-speech"]
+fn a_process_that_ends_as_the_thread_of_a_dropped_synthesis_ends_exits_with_status_0() {
+    const CASE: &str =
+        "a_process_that_ends_as_the_thread_of_a_dropped_synthesis_ends_exits_with_status_0";
+    if let Some(offset) = std::env::var_os(CHILD_ENDS) {
+        let offset = offset
+            .to_str()
+            .and_then(|offset| offset.parse().ok())
+            .expect("the offset is a number of milliseconds");
+        drop_and_return_near_the_end_of_the_thread(offset);
+        return;
+    }
+    checkpoint_dir();
+    let children: Vec<_> = [-60_i64, -20, 0, 20, 60, 150]
+        .into_iter()
+        .map(|offset| {
+            let child = Command::new(std::env::current_exe().expect("the test binary has a path"))
+                .args(["--exact", CASE, "--ignored", "--nocapture"])
+                .env(CHILD_ENDS, offset.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("the test binary is run again");
+            (offset, child)
+        })
+        .collect();
+    let mut ended = Vec::new();
+    for (offset, child) in children {
+        let output = child.wait_with_output().expect("the child ends");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let returned = stderr.lines().find(|line| line.contains(RETURNS));
+        eprintln!(
+            "offset {offset} ms: the child ended with {}; {returned:?}",
+            output.status
+        );
+        if returned.is_none() || output.status.code() != Some(0) {
+            ended.push(format!(
+                "offset {offset} ms: the child ended with {} and wrote:\n{stderr}",
+                output.status
+            ));
+        }
+    }
+    assert!(
+        ended.is_empty(),
+        "a process that returns from `main` while the thread of a dropped synthesis ends exits \
+         with the status `main` gave, 0, but:\n{}",
+        ended.join("\n")
+    );
+}
+
+/// Set in the child process a case starts of itself: the voice directory the child opens.
+const CHILD_OPENS: &str = "ADVERSARY2_W2U4_CHILD_OPENS";
+
+/// What the child writes to standard error when `open_voice` returned to it.
+const RETURNED: &str = "open_voice returned:";
+
+/// A fresh, empty directory under Cargo's temporary directory for this test target.
+fn scratch(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("adversary2-w2u4-synthesis")
+        .join(name);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).expect("the previous run's directory is removed");
+    }
+    fs::create_dir_all(&dir).expect("the directory is created");
+    dir
+}
+
+/// `OpenRefused::FileMissing` is documented for a file that "is not there, is not readable or is
+/// not of that kind", and `open_voice` names two voice files that end the process: one that is
+/// not a model and a model of another family. A model that may not be read is neither: the
+/// process that opens such a voice gets a refusal and lives. The model here is a file of a few
+/// bytes, which no reader of it gets to see: the case first shows that this process cannot open
+/// it, so what the child does follows from the permission and not from the bytes. The tokens are
+/// left out: with no model of the VITS form at hand, a voice whose tokens may not be read ends at
+/// the model's family before its tokens count.
+#[test]
+#[ignore = "needs the pinned checkpoint unpacked in the directory INFERENCE_SHERPA_ONNX_TTS_DIR and the sherpa-onnx library built with text-to-speech"]
+fn a_voice_model_that_may_not_be_read_is_refused_and_the_process_that_opens_it_lives() {
+    const CASE: &str =
+        "a_voice_model_that_may_not_be_read_is_refused_and_the_process_that_opens_it_lives";
+    if let Some(dir) = std::env::var_os(CHILD_OPENS) {
+        let opened = SherpaOnnxSynthesiser::open_voice(PathBuf::from(dir)).map(|_| ());
+        eprintln!("{RETURNED} {opened:?}");
+        return;
+    }
+    let checkpoint = checkpoint_dir();
+    let dir = scratch("unreadable-model");
+    let model = dir.join("voice.onnx");
+    fs::write(&model, b"not a model").expect("the file is written");
+    fs::copy(checkpoint.join(TOKENS), dir.join(TOKENS)).expect("the tokens are copied");
+    symlink(
+        checkpoint.join(ESPEAK_NG_DATA.name),
+        dir.join("espeak-ng-data"),
+    )
+    .expect("the phoneme data is linked");
+    fs::set_permissions(&model, fs::Permissions::from_mode(0o000))
+        .expect("the permissions are set");
+    assert!(
+        fs::File::open(&model).is_err(),
+        "this process reads a file of mode 000, so the case cannot make a file that may not be \
+         read: run it as another user"
+    );
+
+    let output = Command::new(std::env::current_exe().expect("the test binary has a path"))
+        .args(["--exact", CASE, "--ignored", "--nocapture"])
+        .env(CHILD_OPENS, &dir)
+        .output()
+        .expect("the test binary is run again");
+    fs::set_permissions(&model, fs::Permissions::from_mode(0o600))
+        .expect("the permissions are set back");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let returned = stderr.lines().find(|line| line.contains(RETURNED));
+    eprintln!(
+        "the model may not be read: the child ended with {}; it wrote {returned:?}",
+        output.status
+    );
+    assert!(
+        returned.is_some_and(|line| line.contains("Err(")) && output.status.code() == Some(0),
+        "a voice whose model may not be read is refused and the process that opens it lives, but \
+         the child ended with {} and wrote:\n{stderr}",
+        output.status
     );
 }

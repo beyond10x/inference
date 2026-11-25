@@ -454,31 +454,24 @@ fn dropping_the_last_handle_does_not_wait_for_the_part_being_generated() {
     let held = Arc::downgrade(&engine);
     drop(engine);
 
-    let (dropped, done) = mpsc::channel();
-    let dropping = std::thread::spawn(move || {
-        let before = Instant::now();
-        drop(synthesis);
-        drop(synthesiser);
-        let _ = dropped.send(before.elapsed());
-    });
-    let within = done.recv_timeout(Duration::from_millis(50));
+    // The gate is the permit, which this test holds and has not given: the part cannot end
+    // before the two drops below have returned. No clock decides the case. A drop that waited
+    // for the part would wait for a permit that is given only after it, and the case would not
+    // return: the runner then ends it at its bound.
+    drop(synthesis);
+    drop(synthesiser);
     let (running, handed) = (
         workers.running(),
         held.upgrade().map(|engine| engine.handed()),
     );
-    // The permit lets the engine end its part and ask whether to go on.
+    // The gate opens: the engine ends its part and asks whether to go on.
     drop(permit);
-    dropping.join().expect("the dropping thread ends");
 
-    assert!(
-        within.is_ok(),
-        "dropping the synthesis and the synthesiser while the engine generates a part returns \
-         within 50 ms, without waiting for the part"
-    );
     assert_eq!(
         (running, handed),
         (1, Some(1)),
-        "after the drop the thread still generates the second part and keeps the engine alive"
+        "the two drops returned while the thread was held inside the second part: it still \
+         generates and keeps the engine alive"
     );
     assert!(
         workers.wait_idle(PATIENCE),

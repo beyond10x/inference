@@ -273,8 +273,9 @@ struct Live {
 /// is dropped.
 ///
 /// Each segment is generated on a thread of its own, one segment at a time in the order offered,
-/// and its samples come back part by part as sherpa-onnx hands them over, one part per sentence
-/// of the segment's text. Iterating the synthesis blocks while it waits for the next part; its
+/// and its samples come back part by part as sherpa-onnx hands them over: one part per sentence
+/// of the segment's text, and more than one for a sentence long enough that sherpa-onnx splits
+/// it (the crate documentation gives the length). Iterating the synthesis blocks while it waits for the next part; its
 /// async form, [`SynthesisHandle::poll_event`], returns `Pending` there instead and is woken when
 /// the part arrives. Frames hold [`FRAME_MS`] of mono `pcm_s16le` at the voice's own rate, the
 /// last of a segment what is left, at consecutive positions of the synthesis's sample clock.
@@ -578,7 +579,7 @@ impl Drop for SherpaOnnxSynthesis {
     /// Tells the generation in flight to stop at the engine's next part and returns without
     /// waiting for it, also when this is the last handle of its synthesiser. The thread of that
     /// generation, and the engine it holds, live on until the part in flight ends: sherpa-onnx
-    /// asks after each part, one sentence, whether to go on. A process that returns from `main`
+    /// asks after each part, a sentence or a piece of a long one, whether to go on. A process that returns from `main`
     /// before that ends the thread with it, and exits with the status `main` gave: the case
     /// `process_end` of the crate's tests runs such a process.
     fn drop(&mut self) {

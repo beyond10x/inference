@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc;
@@ -15,14 +15,17 @@ use std::time::Duration;
 
 use inference_sherpa_onnx_tts::inference_tts::inference_core::model::NonPositiveConcurrency;
 use inference_sherpa_onnx_tts::{
-    ESPEAK_NG_DATA, FILES, FileRole, NATIVE_LIBRARY, NOT_REGULAR, NativeTts, OpenRefused,
-    SherpaOnnxSynthesiser, TOKENS, native_tts, tree_sha256,
+    CheckpointFile, CheckpointTree, ESPEAK_NG_DATA, FILES, FileRole, NATIVE_LIBRARY, NOT_REGULAR,
+    NativeTts, OpenRefused, SherpaOnnxSynthesiser, TOKENS, native_tts, tree_sha256,
 };
 
 use crate::support::scratch;
 
 /// The sha256 of `not the pinned file`.
 const WRONG_SHA256: &str = "a08d9e349848bd89daff2c27d89e8eb3529dc848e2c9db433a674b629dc65d71";
+
+/// The length of `not the pinned file` in bytes.
+const WRONG_LEN: u64 = 19;
 
 fn file_name(role: FileRole) -> &'static str {
     FILES
@@ -115,11 +118,37 @@ fn the_phoneme_data_directory_is_required_and_is_a_directory() {
 }
 
 #[test]
-fn a_file_that_is_not_the_pinned_one_is_refused_with_both_checksums() {
-    let dir = scratch("wrong");
+fn a_file_of_another_length_than_its_pin_is_refused_with_both_lengths() {
+    let dir = scratch("wrong-length");
     write_all_but(&dir, None);
     let refused = refusal(SherpaOnnxSynthesiser::open(&dir));
     let model = FILES[0];
+    assert_eq!(
+        refused,
+        OpenRefused::LengthMismatch {
+            path: dir.join(model.name),
+            expected: model.len,
+            actual: WRONG_LEN,
+        },
+        "the length is compared before the sha256: the file is not read"
+    );
+    let message = refused.to_string();
+    assert!(
+        message.contains(&model.len.to_string()) && message.contains("19 bytes"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_file_of_the_pinned_length_that_is_not_the_pinned_one_is_refused_with_both_checksums() {
+    let dir = scratch("wrong");
+    write_all_but(&dir, None);
+    // The pin of the model at the length of the file written here: only the sha256 differs.
+    let model = CheckpointFile {
+        len: WRONG_LEN,
+        ..FILES[0]
+    };
+    let refused = model.check(&dir).expect_err("the file is refused");
     assert_eq!(
         refused,
         OpenRefused::ChecksumMismatch {
@@ -132,6 +161,80 @@ fn a_file_that_is_not_the_pinned_one_is_refused_with_both_checksums() {
     assert!(
         message.contains(model.sha256) && message.contains(WRONG_SHA256),
         "{message}"
+    );
+
+    let pinned = CheckpointFile {
+        sha256: WRONG_SHA256,
+        ..model
+    };
+    assert_eq!(
+        pinned.check(&dir),
+        Ok(dir.join(model.name)),
+        "a file of the pinned length and sha256 passes"
+    );
+}
+
+/// Whether this process opens a file of mode 000, as a process of the superuser does: a case on
+/// a file that may not be read has nothing to assert then, and says so.
+fn reads_what_may_not_be_read(dir: &Path) -> bool {
+    let probe = dir.join("probe");
+    fs::write(&probe, b"probe").expect("the file is written");
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o000))
+        .expect("the permissions are set");
+    let read = fs::File::open(&probe).is_ok();
+    fs::remove_file(&probe).expect("the file is removed");
+    if read {
+        eprintln!("this process reads a file of mode 000: the case has nothing to assert");
+    }
+    read
+}
+
+/// The pinned count of the phoneme data is the bound of the walk: one file more, behind a link
+/// that leads out of the tree, ends the walk before any file is read. Every file here has mode
+/// 000, so a walk that went on to hash them would be refused with a permission error instead,
+/// which is what the tree of exactly the pinned count gets.
+#[test]
+fn a_tree_of_one_file_more_than_the_pinned_count_ends_the_walk_before_any_file_is_read() {
+    let outside = scratch("too-many-outside");
+    if reads_what_may_not_be_read(&outside) {
+        return;
+    }
+    for index in 0..=ESPEAK_NG_DATA.files {
+        let file = outside.join(format!("file-{index:03}"));
+        fs::write(&file, b"not phoneme data").expect("the file is written");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000))
+            .expect("the permissions are set");
+    }
+    let dir = scratch("too-many");
+    let data = dir.join(ESPEAK_NG_DATA.name);
+    fs::create_dir_all(&data).expect("the directory is created");
+    symlink(&outside, data.join("more")).expect("the link is made");
+
+    let refused = {
+        let dir = dir.clone();
+        answered(move || ESPEAK_NG_DATA.check(&dir))
+    };
+    assert_eq!(
+        refused,
+        Err(OpenRefused::TooManyFiles {
+            path: data.clone(),
+            pinned: ESPEAK_NG_DATA.files,
+        }),
+        "{} files behind a link out of the tree, the pin {}",
+        ESPEAK_NG_DATA.files + 1,
+        ESPEAK_NG_DATA.files
+    );
+    let message = refused.expect_err("the tree is refused").to_string();
+    assert!(message.contains("more than the 355 files"), "{message}");
+
+    fs::remove_file(outside.join("file-000")).expect("the file is removed");
+    assert_eq!(
+        answered(move || ESPEAK_NG_DATA.check(&dir)),
+        Err(OpenRefused::FileMissing {
+            path: data,
+            kind: io::ErrorKind::PermissionDenied,
+        }),
+        "a tree of exactly the pinned count is walked to its end and then read"
     );
 }
 
@@ -166,10 +269,37 @@ fn the_digest_of_a_tree_is_that_of_its_sorted_sha256sum_lines() {
             "c2c5bb37285e04c2a71102631b41416538af5b1c42a8a7cd5f01a1a6ce4aa99d".to_owned()
         )
     );
+
+    // The same tree against a pin of its own: the directory `tree` of its parent.
+    let parent = dir.parent().expect("the tree has a parent");
+    let pin = CheckpointTree {
+        name: "tree",
+        files: 3,
+        sha256: "c2c5bb37285e04c2a71102631b41416538af5b1c42a8a7cd5f01a1a6ce4aa99d",
+    };
+    assert_eq!(pin.check(parent), Ok(dir.clone()));
+    assert_eq!(
+        CheckpointTree { files: 2, ..pin }.check(parent),
+        Err(OpenRefused::TooManyFiles {
+            path: dir.clone(),
+            pinned: 2,
+        }),
+        "a tree of three files against a pin of two"
+    );
+
     fs::write(dir.join("a").join("B"), b"changed").expect("the file is written");
+    let (_, changed) = tree_sha256(&dir).expect("the tree is read");
     assert_ne!(
-        tree_sha256(&dir).expect("the tree is read").1,
+        changed,
         "c2c5bb37285e04c2a71102631b41416538af5b1c42a8a7cd5f01a1a6ce4aa99d"
+    );
+    assert_eq!(
+        pin.check(parent),
+        Err(OpenRefused::ChecksumMismatch {
+            path: dir,
+            expected: pin.sha256,
+            actual: changed,
+        })
     );
 }
 
@@ -360,12 +490,25 @@ fn a_pinned_file_reached_through_a_symbolic_link_counts_as_the_file_it_points_to
     symlink(&elsewhere, &model).expect("the link is made");
     assert_eq!(
         refusal(SherpaOnnxSynthesiser::open(&dir)),
-        OpenRefused::ChecksumMismatch {
+        OpenRefused::LengthMismatch {
+            path: model.clone(),
+            expected: FILES[0].len,
+            actual: WRONG_LEN,
+        },
+        "the link to a regular file is opened, and the length is that of the file it points to"
+    );
+    assert_eq!(
+        CheckpointFile {
+            len: WRONG_LEN,
+            ..FILES[0]
+        }
+        .check(&dir),
+        Err(OpenRefused::ChecksumMismatch {
             path: model.clone(),
             expected: FILES[0].sha256,
             actual: WRONG_SHA256.to_owned(),
-        },
-        "the link to a regular file is read and hashed"
+        }),
+        "the link to a regular file of the pinned length is read and hashed"
     );
     fs::remove_file(&elsewhere).expect("the file is removed");
     assert_eq!(
@@ -449,5 +592,63 @@ fn a_voice_file_that_is_empty_or_not_a_regular_file_is_refused_before_sherpa_onn
             path: tokens,
             kind: NOT_REGULAR,
         }
+    );
+}
+
+/// What `open_voice` answers for the voice in `dir` while `path` in it has mode 000; the mode is
+/// set back before the answer is returned, so the next run can remove the directory.
+fn refusal_while_unreadable(dir: &Path, path: &Path, mode_back: u32) -> OpenRefused {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("the permissions are set");
+    let refused = refusal(SherpaOnnxSynthesiser::open_voice(dir));
+    fs::set_permissions(path, fs::Permissions::from_mode(mode_back))
+        .expect("the permissions are set back");
+    refused
+}
+
+/// The tokens of a voice are handed to sherpa-onnx as the model is. With a model that holds a
+/// byte and can be read beside them, tokens the process may not read are refused by the check,
+/// which opens them: the refusal comes before the one that names the library without
+/// text-to-speech, so before any call into sherpa-onnx, and needs no voice.
+#[test]
+fn a_voice_whose_tokens_may_not_be_read_is_refused_before_sherpa_onnx_is_called() {
+    library_without_tts();
+    let dir = voice("voice-unreadable-tokens");
+    if reads_what_may_not_be_read(&dir) {
+        return;
+    }
+    let tokens = dir.join(TOKENS);
+    assert_eq!(
+        refusal_while_unreadable(&dir, &tokens, 0o600),
+        OpenRefused::FileMissing {
+            path: tokens,
+            kind: io::ErrorKind::PermissionDenied,
+        }
+    );
+}
+
+#[test]
+fn a_voice_whose_model_or_phoneme_data_may_not_be_read_is_refused_before_sherpa_onnx_is_called() {
+    library_without_tts();
+    let dir = voice("voice-unreadable-model");
+    if reads_what_may_not_be_read(&dir) {
+        return;
+    }
+    let model = dir.join("voice.onnx");
+    assert_eq!(
+        refusal_while_unreadable(&dir, &model, 0o600),
+        OpenRefused::FileMissing {
+            path: model,
+            kind: io::ErrorKind::PermissionDenied,
+        }
+    );
+
+    let data = dir.join("espeak-ng-data");
+    assert_eq!(
+        refusal_while_unreadable(&dir, &data, 0o700),
+        OpenRefused::FileMissing {
+            path: data,
+            kind: io::ErrorKind::PermissionDenied,
+        },
+        "the phoneme data is a directory the process may not list"
     );
 }

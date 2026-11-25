@@ -50,9 +50,9 @@ and decides for themselves what follows from it.
 |---|---|
 | Archive | https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2 |
 | Archive sha256 | `912804855a04745fa77a30be545b3f9a5d15c4d66db00b88cbcd4921df605ac7` |
-| `model.onnx` sha256 | `10ff414106a038ce7e9e0126c6461e4dc8a86efaa89dc91d2009d69fe635e339` |
-| `voices.bin` sha256 | `a372c67b056ef0b695c375d39b99630d23fb07ad4c8d87aa32a19a62fca523ad` |
-| `tokens.txt` sha256 | `4f31c71282d14af4e926cd12462078fe9d20d00c589e63fe2750a8f56d6d7f7b` |
+| `model.onnx` | 345555491 bytes, sha256 `10ff414106a038ce7e9e0126c6461e4dc8a86efaa89dc91d2009d69fe635e339` |
+| `voices.bin` | 5755904 bytes, sha256 `a372c67b056ef0b695c375d39b99630d23fb07ad4c8d87aa32a19a62fca523ad` |
+| `tokens.txt` | 1078 bytes, sha256 `4f31c71282d14af4e926cd12462078fe9d20d00c589e63fe2750a8f56d6d7f7b` |
 | `espeak-ng-data/` | 355 files, tree digest `71a159a95ee8e26c4110582ec69093f0e39eb453c3a33882f6e971510ff5c47a`, GPL-3.0 |
 | `LICENSE` sha256 | `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30` (the text of the Apache License 2.0) |
 | Licence of weights, voices and tokens | Apache-2.0 |
@@ -62,7 +62,14 @@ The tree digest is the sha256 of one line `<sha256 of the file>  <path below the
 file, in byte order of the paths (`tree_sha256`). `open` checks the three files and the tree before
 it calls sherpa-onnx and refuses a directory that differs, naming the file. A path that is neither
 a regular file nor a directory, a FIFO for one, is refused by its metadata and never opened; what
-a symbolic link points to counts.
+a symbolic link points to counts. A file the process may not open is refused with the kind of that
+error.
+
+What is read is bounded by the pin. A file whose length is not the pinned one is refused without
+being read (`OpenRefused::LengthMismatch`), and a file of the pinned length is read to that length.
+The walk of `espeak-ng-data` ends at the first file over the pinned count of 355, before any file
+of the tree is read (`OpenRefused::TooManyFiles`). The length of a file inside that tree is not
+pinned: a tree of at most 355 files is read whole for its digest.
 
 ## A caller's own voice
 
@@ -82,23 +89,32 @@ own load of a file safe, and no refusal comes back from inside it:
   model for one, ends the process with exit status 255 and sherpa-onnx's message on standard error.
 
 Before sherpa-onnx is called, `open_voice` checks only what costs a good voice nothing: the model
-and `tokens.txt` are regular files that hold at least one byte (`OpenRefused::FileMissing`,
-`OpenRefused::FileEmpty`), and `espeak-ng-data` is a directory. So open a voice only from a
-directory whose files are trusted, and in a child process when the calling process has to outlive
-a voice that does not load. The pinned checkpoint is not reached this way: `open` checks each of
+and `tokens.txt` are regular files that the process may open and that hold at least one byte
+(`OpenRefused::FileMissing`, `OpenRefused::FileEmpty`), and `espeak-ng-data` is a directory the
+process may list. Each of the two files is opened for that, so one of mode 000 is refused with
+`FileMissing` and the kind permission denied; the files inside `espeak-ng-data` are not opened. So
+open a voice only from a directory whose files are trusted, and in a child process when the
+calling process has to outlive a voice that does not load. The pinned checkpoint is not reached this way: `open` checks each of
 its files against its sha256 before sherpa-onnx reads any.
 
 ## A synthesis and its end
 
-A segment is generated on a thread of its own, and sherpa-onnx hands its audio over one part per
-sentence of the segment's text. A segment of one sentence is one part: its frames are delivered
-together once the sentence is generated. Only a segment of several sentences delivers the frames of
-a sentence while the next is generated.
+A segment is generated on a thread of its own, and sherpa-onnx hands its audio over part by part. A
+part is what it generates in one run of the model. It makes one part per sentence, as espeak-ng
+divides the text, and starts a further part within a sentence each time its phonemes have filled
+one: about 510 tokens. That bound is sherpa-onnx's `max_token_len` for a Kokoro model, no field of
+its configuration: it is the first number of the model's `style_dim` metadata, 511 for the pinned
+checkpoint. Measured on a CPU: one sentence of 139 characters arrived as one part; one sentence of
+679 characters arrived in 2 parts, 4.35 s apart in one run and 5.74 s in another.
+
+So the frames of a segment of one short sentence are delivered together once the sentence is
+generated. Frames arrive while more is generated only for a segment of several sentences, or of one
+sentence long enough to be split.
 
 Discarding the segment being generated, or dropping the synthesis, tells sherpa-onnx to stop at its
-next part, the end of the sentence it is generating. Neither waits for that, and dropping the
+next part, the end of the part it is generating. Neither waits for that, and dropping the
 synthesis and the last synthesiser does not either: no drop joins a thread. So one thread per
-generation in flight, and the native engine it holds, can outlive every handle until that sentence
+generation in flight, and the native engine it holds, can outlive every handle until that part
 is generated; the thread then releases the engine and ends. A process that returns from `main`
 while such a thread still generates ends with it, with the exit status `main` gave.
 

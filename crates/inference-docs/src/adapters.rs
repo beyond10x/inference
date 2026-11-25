@@ -246,7 +246,7 @@ const BINDINGS: &[Binding] = &[
     Binding {
         name: "sherpa-onnx TTS",
         package: "inference-sherpa-onnx-tts",
-        runs: "TTS, streaming by sentence: a segment of one sentence is delivered whole, after it is generated, and every segment of the local cascade is one; in process, native library built with text-to-speech",
+        runs: "TTS, streaming part by part: one part per sentence, and a sentence of more than about 510 phoneme tokens in several (139 characters arrived as one part, 679 characters as 2); a segment of one part is delivered whole, after it is generated, and every segment of the local cascade is one; in process, native library built with text-to-speech",
         features: &[],
         record: Record::Capability(
             "records/tts-xeon-8375c-cpu.json",

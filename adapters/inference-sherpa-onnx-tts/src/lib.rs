@@ -7,9 +7,11 @@
 //!
 //! * the pinned checkpoint [`CHECKPOINT`], Kokoro-82M v0.19 for English at 24 kHz with the 11
 //!   voices [`VOICES`], opened with [`SherpaOnnxSynthesiser::open`] from the unpacked archive
-//!   [`ARCHIVE_URL`]. [`FILES`] names the three files it loads, each with its sha256, and
-//!   [`ESPEAK_NG_DATA`] the phoneme data directory with the digest of its tree; a directory whose
-//!   files are missing or differ from the pin is refused with [`OpenRefused`], naming the file.
+//!   [`ARCHIVE_URL`]. [`FILES`] names the three files it loads, each with its length and its
+//!   sha256, and [`ESPEAK_NG_DATA`] the phoneme data directory with the count of its files and
+//!   the digest of its tree; a directory whose files are missing or differ from the pin is
+//!   refused with [`OpenRefused`], naming the file. A file of another length than its pin is
+//!   refused without being read, and so is a tree of more files than its pin.
 //!   Its licences, source and revision are constants of this crate and fill the [`Model`] the
 //!   synthesiser declares ([`declare_model`]).
 //! * a caller's own voice, a directory holding one VITS model in the Piper format as sherpa-onnx
@@ -42,18 +44,26 @@
 //! The adapter claims [`Capability::IncrementalInput`] and [`Capability::OutputStreaming`]: a
 //! segment is generated as soon as the synthesis is iterated after its offer, without waiting for
 //! the end of the utterance, and its frames are emitted while it is still Queued, as sherpa-onnx
-//! hands its samples over, one part per sentence of the segment's text. See
+//! hands its samples over, part by part. See
 //! [`SherpaOnnxSynthesis`]. A text with a NUL byte is not given to sherpa-onnx: the synthesis
 //! fails with [`SynthesisFailed::NulInText`], and [`speakable`] checks a text beforehand.
 //! Discarding the segment being generated, or dropping the synthesis, stops the generation at
-//! sherpa-onnx's next part, the end of the sentence it is generating.
+//! sherpa-onnx's next part, the end of the part it is generating.
 //!
 //! Neither waits for that, and no drop joins a thread. So one thread per generation in flight,
 //! and the native engine it holds, can outlive the synthesis and the last
 //! [`SherpaOnnxSynthesiser`] until the part in flight ends; the thread then releases the engine
-//! and ends. A segment of one sentence is one part: its frames are delivered together once the
-//! sentence is generated, and only a segment of several sentences delivers frames while later
-//! sentences are still generated.
+//! and ends.
+//!
+//! A part is what sherpa-onnx generates in one run of the model and hands over at once. It makes
+//! one part per sentence, as espeak-ng divides the text, and starts a further part within a
+//! sentence each time its phonemes have filled one: about 510 tokens, the `max_token_len` of
+//! sherpa-onnx's Kokoro model, which is no field of its configuration but the first number of the
+//! model's `style_dim` metadata, 511 for the pinned checkpoint. Measured on a CPU: one sentence
+//! of 139 characters arrived as one part, and one sentence of 679 characters in 2 parts, 4.35 s
+//! apart in one run and 5.74 s in another. So the frames of a segment of one short sentence are
+//! delivered together once the sentence is generated, and frames arrive while more is generated
+//! only for a segment of several sentences or of one sentence long enough to be split.
 //!
 //! The synthesis's usage record is the contract's: the characters taken, the audio emitted and
 //! one request, with `local_compute_ms` `measured`, the time sherpa-onnx spent generating the
@@ -239,13 +249,52 @@ pub enum FileRole {
     Tokens,
 }
 
-/// One file of the pinned checkpoint: what it is, its name in the checkpoint directory and its
-/// sha256 in lowercase hex.
+/// One file of the pinned checkpoint: what it is, its name in the checkpoint directory, its
+/// length in bytes and its sha256 in lowercase hex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CheckpointFile {
     pub role: FileRole,
     pub name: &'static str,
+    pub len: u64,
     pub sha256: &'static str,
+}
+
+impl CheckpointFile {
+    /// Checks the file of this name in `dir` against the pin and returns its path. The file is
+    /// opened, its length is taken from the open file and compared first, and only a file of the
+    /// pinned length is read, to that length, for its sha256.
+    ///
+    /// # Errors
+    ///
+    /// [`OpenRefused::FileMissing`] when the path is not a regular file, by its metadata and
+    /// without opening it, or when the process may not open or read it;
+    /// [`OpenRefused::LengthMismatch`] when its length is not the pinned one, without reading it;
+    /// [`OpenRefused::ChecksumMismatch`] when its sha256 is not the pinned one.
+    pub fn check(&self, dir: &Path) -> Result<PathBuf, OpenRefused> {
+        let path = present(dir.join(self.name), false)?;
+        let missing = |error: io::Error| OpenRefused::FileMissing {
+            path: path.clone(),
+            kind: error.kind(),
+        };
+        let file = File::open(&path).map_err(missing)?;
+        let actual = file.metadata().map_err(missing)?.len();
+        if actual != self.len {
+            return Err(OpenRefused::LengthMismatch {
+                path,
+                expected: self.len,
+                actual,
+            });
+        }
+        let actual = sha256_of(file.take(self.len)).map_err(missing)?;
+        if actual != self.sha256 {
+            return Err(OpenRefused::ChecksumMismatch {
+                path,
+                expected: self.sha256,
+                actual,
+            });
+        }
+        Ok(path)
+    }
 }
 
 /// The files the synthesiser loads from the checkpoint directory, in the order they are checked.
@@ -253,16 +302,19 @@ pub const FILES: [CheckpointFile; 3] = [
     CheckpointFile {
         role: FileRole::Model,
         name: "model.onnx",
+        len: 345_555_491,
         sha256: "10ff414106a038ce7e9e0126c6461e4dc8a86efaa89dc91d2009d69fe635e339",
     },
     CheckpointFile {
         role: FileRole::Voices,
         name: "voices.bin",
+        len: 5_755_904,
         sha256: "a372c67b056ef0b695c375d39b99630d23fb07ad4c8d87aa32a19a62fca523ad",
     },
     CheckpointFile {
         role: FileRole::Tokens,
         name: TOKENS,
+        len: 1_078,
         sha256: "4f31c71282d14af4e926cd12462078fe9d20d00c589e63fe2750a8f56d6d7f7b",
     },
 ];
@@ -274,6 +326,43 @@ pub struct CheckpointTree {
     pub name: &'static str,
     pub files: usize,
     pub sha256: &'static str,
+}
+
+impl CheckpointTree {
+    /// Checks the directory of this name in `dir` against the pin and returns its path. The tree
+    /// is walked by metadata first, and the walk ends as soon as it has seen more files than the
+    /// pinned count: no file is read then. The length of a file of the tree is not pinned, so a
+    /// tree of no more files than the pin is read whole for its digest.
+    ///
+    /// # Errors
+    ///
+    /// [`OpenRefused::FileMissing`] when the path is not a directory, when an entry of its tree
+    /// is neither a regular file nor a directory ([`NOT_REGULAR`]; it is not opened), or when the
+    /// process may not list or read part of it; [`OpenRefused::TooManyFiles`] when the tree holds
+    /// more files than the pinned count; [`OpenRefused::ChecksumMismatch`] when the digest of the
+    /// tree is not the pinned one.
+    pub fn check(&self, dir: &Path) -> Result<PathBuf, OpenRefused> {
+        let path = present(dir.join(self.name), true)?;
+        let missing = |error: io::Error| OpenRefused::FileMissing {
+            path: path.clone(),
+            kind: error.kind(),
+        };
+        let Some(files) = tree_files(&path, self.files).map_err(missing)? else {
+            return Err(OpenRefused::TooManyFiles {
+                path,
+                pinned: self.files,
+            });
+        };
+        let actual = tree_digest(&files).map_err(missing)?;
+        if actual != self.sha256 {
+            return Err(OpenRefused::ChecksumMismatch {
+                path,
+                expected: self.sha256,
+                actual,
+            });
+        }
+        Ok(path)
+    }
 }
 
 /// The phoneme data of espeak-ng the pinned checkpoint carries and sherpa-onnx reads: GPL-3.0,
@@ -407,6 +496,16 @@ pub enum OpenRefused {
     FileMissing { path: PathBuf, kind: io::ErrorKind },
     /// The file at `path` of a caller's own voice holds no byte. sherpa-onnx was not called.
     FileEmpty { path: PathBuf },
+    /// The file at `path` is not the pinned one: it is `actual` bytes long, the pin `expected`.
+    /// It was not read.
+    LengthMismatch {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
+    /// The tree at `path` is not the pinned one: it holds more files than the `pinned` count. The
+    /// walk ended at the first file over the count and none was read.
+    TooManyFiles { path: PathBuf, pinned: usize },
     /// The file or tree at `path` is not the pinned one: its sha256 is `actual`, the pin
     /// `expected`.
     ChecksumMismatch {
@@ -437,6 +536,20 @@ impl fmt::Display for OpenRefused {
             Self::FileEmpty { path } => {
                 write!(f, "the voice's {} is empty", path.display())
             }
+            Self::LengthMismatch {
+                path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{} is not the pinned one: it is {actual} bytes long, the pin {expected}",
+                path.display()
+            ),
+            Self::TooManyFiles { path, pinned } => write!(
+                f,
+                "{} is not the pinned one: it holds more than the {pinned} files of the pin",
+                path.display()
+            ),
             Self::ChecksumMismatch {
                 path,
                 expected,
@@ -513,13 +626,12 @@ fn hex(digest: impl AsRef<[u8]>) -> String {
         .collect()
 }
 
-/// The sha256 of the file at `path` in lowercase hex.
-fn sha256_of(path: &Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
+/// The sha256 of what `reader` gives to its end, in lowercase hex.
+fn sha256_of(mut reader: impl Read) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; 1 << 16];
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
         }
@@ -528,17 +640,16 @@ fn sha256_of(path: &Path) -> io::Result<String> {
     Ok(hex(hasher.finalize()))
 }
 
-/// The files of the tree under `dir` and the digest of the tree, in lowercase hex: the sha256 of
-/// one line per file, `<sha256 of the file>  <its path below dir>` and a line feed, the lines in
-/// the byte order of the paths, whose parts are joined by `/`. It is what
-/// `find * -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum` prints in `dir`.
+/// The regular files of the tree under `dir`, each with its path below `dir`, whose parts are
+/// joined by `/`, in the byte order of those paths; none when the tree holds more than `most`
+/// files, in which case the walk ended at the first file over that count. Nothing is opened but
+/// directories: an entry is told by its metadata, and what a symbolic link points to counts.
 ///
 /// # Errors
 ///
-/// The error of reading a directory or a file of the tree, and [`NOT_REGULAR`] for an entry that
-/// is neither a regular file nor a directory, which is not opened; what a symbolic link points to
-/// counts.
-pub fn tree_sha256(dir: &Path) -> io::Result<(usize, String)> {
+/// The error of reading a directory of the tree, and [`NOT_REGULAR`] for an entry that is
+/// neither a regular file nor a directory.
+fn tree_files(dir: &Path, most: usize) -> io::Result<Option<Vec<(String, PathBuf)>>> {
     let mut files = Vec::new();
     let mut directories = vec![(dir.to_path_buf(), String::new())];
     while let Some((directory, prefix)) = directories.pop() {
@@ -549,6 +660,9 @@ pub fn tree_sha256(dir: &Path) -> io::Result<(usize, String)> {
             if metadata.is_dir() {
                 directories.push((entry.path(), format!("{name}/")));
             } else if metadata.is_file() {
+                if files.len() == most {
+                    return Ok(None);
+                }
                 files.push((name, entry.path()));
             } else {
                 return Err(io::Error::new(
@@ -559,11 +673,34 @@ pub fn tree_sha256(dir: &Path) -> io::Result<(usize, String)> {
         }
     }
     files.sort();
+    Ok(Some(files))
+}
+
+/// The digest of the tree whose `files` [`tree_files`] listed: the sha256 of one line per file,
+/// `<sha256 of the file>  <its path below the tree>` and a line feed, in lowercase hex.
+fn tree_digest(files: &[(String, PathBuf)]) -> io::Result<String> {
     let mut hasher = Sha256::new();
-    for (name, path) in &files {
-        hasher.update(format!("{}  {name}\n", sha256_of(path)?));
+    for (name, path) in files {
+        hasher.update(format!("{}  {name}\n", sha256_of(File::open(path)?)?));
     }
-    Ok((files.len(), hex(hasher.finalize())))
+    Ok(hex(hasher.finalize()))
+}
+
+/// The files of the tree under `dir` and the digest of the tree, in lowercase hex: the sha256 of
+/// one line per file, `<sha256 of the file>  <its path below dir>` and a line feed, the lines in
+/// the byte order of the paths, whose parts are joined by `/`. It is what
+/// `find * -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum` prints in `dir`.
+/// It reads every file of the tree, however many and however long: [`CheckpointTree::check`] is
+/// the form that ends at a pinned count of files.
+///
+/// # Errors
+///
+/// The error of reading a directory or a file of the tree, and [`NOT_REGULAR`] for an entry that
+/// is neither a regular file nor a directory, which is not opened; what a symbolic link points to
+/// counts.
+pub fn tree_sha256(dir: &Path) -> io::Result<(usize, String)> {
+    let files = tree_files(dir, usize::MAX)?.unwrap_or_default();
+    Ok((files.len(), tree_digest(&files)?))
 }
 
 /// Refuses `path` unless it is a directory when `directory` and a regular file otherwise, by its
@@ -581,13 +718,28 @@ fn present(path: PathBuf, directory: bool) -> Result<PathBuf, OpenRefused> {
     Err(OpenRefused::FileMissing { path, kind })
 }
 
-/// Refuses the file at `path` of a caller's own voice unless it is a regular file that holds at
-/// least one byte, by its metadata alone.
+/// Refuses the file at `path` of a caller's own voice unless it is a regular file, by its
+/// metadata, that the process may open and that holds at least one byte. The file is opened, so
+/// that one the process may not read is refused here and not inside sherpa-onnx; none of it is
+/// read.
 fn filled(path: PathBuf) -> Result<PathBuf, OpenRefused> {
     let path = present(path, false)?;
-    match path.metadata() {
+    match File::open(&path).and_then(|file| file.metadata()) {
         Ok(metadata) if metadata.len() > 0 => Ok(path),
         Ok(_) => Err(OpenRefused::FileEmpty { path }),
+        Err(error) => Err(OpenRefused::FileMissing {
+            path,
+            kind: error.kind(),
+        }),
+    }
+}
+
+/// Refuses the directory at `path` of a caller's own voice unless it is a directory, by its
+/// metadata, that the process may list. The files in it are not opened.
+fn listed(path: PathBuf) -> Result<PathBuf, OpenRefused> {
+    let path = present(path, true)?;
+    match fs::read_dir(&path) {
+        Ok(_) => Ok(path),
         Err(error) => Err(OpenRefused::FileMissing {
             path,
             kind: error.kind(),
@@ -693,7 +845,12 @@ impl SherpaOnnxSynthesiser {
     /// is read; [`OpenRefused::FileMissing`] naming the first of [`FILES`] that is not a regular file
     /// in `dir`, or [`ESPEAK_NG_DATA`] when it is not a directory there or holds an entry that is
     /// neither a regular file nor a directory: such a path is refused by its metadata and never
-    /// opened, and what a symbolic link points to counts;
+    /// opened, and what a symbolic link points to counts; the same naming a file or a directory
+    /// the process may not open, with the kind of that error;
+    /// [`OpenRefused::LengthMismatch`] naming the first of [`FILES`] whose length differs from its
+    /// pin, which is not read ([`CheckpointFile::check`]);
+    /// [`OpenRefused::TooManyFiles`] when the tree of [`ESPEAK_NG_DATA`] holds more files than
+    /// its pin, none of which is read ([`CheckpointTree::check`]);
     /// [`OpenRefused::ChecksumMismatch`] naming the first whose sha256 differs from its pin;
     /// [`OpenRefused::PathNotUnicode`] when a path is not Unicode;
     /// [`OpenRefused::LibraryWithoutTts`] when the native library the process loaded was built
@@ -724,32 +881,11 @@ impl SherpaOnnxSynthesiser {
         for file in FILES {
             present(dir.join(file.name), false)?;
         }
-        let data = present(dir.join(ESPEAK_NG_DATA.name), true)?;
+        present(dir.join(ESPEAK_NG_DATA.name), true)?;
         for file in FILES {
-            let path = dir.join(file.name);
-            let actual = sha256_of(&path).map_err(|error| OpenRefused::FileMissing {
-                path: path.clone(),
-                kind: error.kind(),
-            })?;
-            if actual != file.sha256 {
-                return Err(OpenRefused::ChecksumMismatch {
-                    path,
-                    expected: file.sha256,
-                    actual,
-                });
-            }
+            file.check(dir)?;
         }
-        let (_, actual) = tree_sha256(&data).map_err(|error| OpenRefused::FileMissing {
-            path: data.clone(),
-            kind: error.kind(),
-        })?;
-        if actual != ESPEAK_NG_DATA.sha256 {
-            return Err(OpenRefused::ChecksumMismatch {
-                path: data,
-                expected: ESPEAK_NG_DATA.sha256,
-                actual,
-            });
-        }
+        let data = ESPEAK_NG_DATA.check(dir)?;
         let path = |role: FileRole| {
             let file = FILES.iter().find(|file| file.role == role);
             unicode(&dir.join(file.map_or("", |file| file.name))).map(Some)
@@ -801,7 +937,10 @@ impl SherpaOnnxSynthesiser {
     /// that is of another family than the VITS form it reads, a Kokoro model for one, ends the
     /// process with exit status 255 and sherpa-onnx's message on standard error. Before
     /// sherpa-onnx is called, only what costs a good voice nothing is checked: the model and the
-    /// tokens are regular files that hold at least one byte, and the phoneme data is a directory.
+    /// tokens are regular files that the process may open and that hold at least one byte, and
+    /// the phoneme data is a directory the process may list. Each of the two files is opened for
+    /// that and none of it is read; the files in the phoneme data are not opened, so one of them
+    /// that may not be read is not found here.
     /// So open a voice only from a directory whose files are trusted, and in a child process when
     /// the calling process has to outlive a voice that does not load. The pinned checkpoint is not
     /// reached this way: [`SherpaOnnxSynthesiser::open`] checks each of its files against its
@@ -811,8 +950,10 @@ impl SherpaOnnxSynthesiser {
     ///
     /// [`OpenRefused::NonPositiveConcurrency`] when `max_concurrency` is below 1, before any file
     /// is read; [`OpenRefused::FileMissing`] naming `dir` when it cannot be listed, or the model,
-    /// [`TOKENS`] or `espeak-ng-data` when it is not there or not a regular file or a directory
-    /// as needed; [`OpenRefused::VoiceModelNotSingle`] when `dir` holds no `*.onnx` file or more
+    /// [`TOKENS`] or `espeak-ng-data` when it is not there, not a regular file or a directory
+    /// as needed, or one the process may not open, with the kind of that error (permission
+    /// denied for a file of mode 000);
+    /// [`OpenRefused::VoiceModelNotSingle`] when `dir` holds no `*.onnx` file or more
     /// than one; [`OpenRefused::FileEmpty`] naming the model or the tokens when it holds no byte;
     /// [`OpenRefused::PathNotUnicode`]; [`OpenRefused::LibraryWithoutTts`] when the native
     /// library the process loaded was built without text-to-speech; and
@@ -847,7 +988,7 @@ impl SherpaOnnxSynthesiser {
         };
         filled(model_path.clone())?;
         let tokens = filled(dir.join(TOKENS))?;
-        let data = present(dir.join("espeak-ng-data"), true)?;
+        let data = listed(dir.join("espeak-ng-data"))?;
         let created = create(
             dir,
             &config(OfflineTtsModelConfig {
@@ -866,7 +1007,8 @@ impl SherpaOnnxSynthesiser {
                 .unwrap_or_default()
         };
         let sum = |path: &Path| {
-            sha256_of(path)
+            File::open(path)
+                .and_then(sha256_of)
                 .map(|sha256| format!("sha256:{sha256} {}", name(path)))
                 .map_err(|error| OpenRefused::FileMissing {
                     path: path.to_path_buf(),
