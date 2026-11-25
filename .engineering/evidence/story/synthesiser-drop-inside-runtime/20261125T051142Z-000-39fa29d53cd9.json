@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T05:11:42Z",
+  "actor": "human:operator",
+  "artifact": "story:synthesiser-drop-inside-runtime",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source, task test-build and task test-run on the build node at 894e900e6",
+    "reference": "check-source exit 0 in 92 s; test-build exit 0 in 98 s; test-run exit 0 in 43 s with 3127 tests run: 3127 passed, 73 skipped, and 23 tests run: 23 passed in its second lane; no test over 60 s, the slowest 9.022 s (inference-testkit::adversary_usage_view the_suite_rejects_a_view_that_reads_an_unknown_quantity_as_zero)"
+  }
+}
