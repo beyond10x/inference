@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:ticker-tests-hold-on-a-loaded-host
 kind: story
-status: active
+status: implemented
 title: The two ticker tests of the ElevenLabs async handles pass on a loaded host and still catch a blocked runtime
 tags:
 - from-finding
@@ -11,11 +11,16 @@ relations:
 - serves: vision:inference
 scope:
 - confidence: cited
+  path: adapters/inference-elevenlabs/tests/adversary_w2_ticker_blocks.rs
+- confidence: cited
   path: adapters/inference-elevenlabs/tests/async_handles.rs
-revision: 7
+- confidence: cited
+  path: adapters/inference-elevenlabs/tests/support/ticker.rs
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-24T13:41:12Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-24T13:41:12Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-25T05:11:42Z", actor: "human:operator", revision: 10, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 
@@ -96,3 +101,21 @@ committed.
 The coordinator's reading: the wait is the host kernel's, inside a call any handle makes when it
 opens a descriptor on the runtime's thread; it is not a blocking wait of the adapter's own. Why the
 grace period is that long on this node and not on the forge's runner is not established.
+
+## Scope
+
+As built, 2026-11-25. Commits `c825c01bc` and `39710c30a`, test code only; no file under
+`adapters/inference-elevenlabs/src` changed for this story.
+
+- `adapters/inference-elevenlabs/tests/async_handles.rs`: the two ticker tests keep the 50 ms
+  bound. The descriptor table is grown before the ticker starts, and each gap is counted less the
+  time the thread was ready to run without a processor. The module comment states the limit of
+  the Acceptance section.
+- `adapters/inference-elevenlabs/tests/support/ticker.rs`: the ticker, `GAP_BOUND`,
+  `grow_descriptor_table` and `ReadyWait`, shared by the test files of the ElevenLabs adapter
+  and, included by path, by the Cartesia adapter's `tests/cancel.rs` and
+  `tests/adversary_w2_drop_backed_up.rs`.
+- `adapters/inference-elevenlabs/tests/adversary_w2_ticker_blocks.rs`: 6 cases, the controls of
+  the adversary pass; 5 run in the gate, the yield case is ignored with its reason.
+
+Not built: no change of the bound, no retry, no nextest override for these tests.

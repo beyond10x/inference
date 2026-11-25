@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T05:04:41Z",
+  "actor": "human:operator",
+  "artifact": "story:synthesiser-drop-inside-runtime",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-elevenlabs -p inference-cartesia --all-features --no-fail-fast",
+    "reference": "VERIFIED: baseline with the grace taken out of the drop at e4d23dcdd (inference-elevenlabs 202 tests run: 199 passed, 3 failed; inference-cartesia 44 tests run: 43 passed, 1 failed; the case a_drop_whose_close_cannot_be_written_holds_the_runtime_for_the_grace_and_no_longer is red in both) vs treatment at e4d23dcdd on the build node (ten runs, each 246 tests run: 246 passed, 7 skipped); four more planted changes (six graces, a handed-off close aborted, each in both crates) end red in one case each"
+  }
+}
