@@ -65,8 +65,12 @@ either. Each closes against a local fixture that takes the close at once; in the
 transcription test the socket is dropped before a close frame is due. So the wait never reaches
 the constant, and by reading the code each of these tests passes with the bound enlarged and
 with the bound removed. What they hold is that a close or a cancel returns soon against a peer
-that answers. No test closes against a peer that does not take the write, which is the case
-the bound is for. See [not-measured.md](not-measured.md).
+that answers. The case the bound is for is a peer that does not take the write. Six bindings
+have a test of that case, which no entry of this page names yet: its limits are numbers
+written out in the test, so it fails with the bound enlarged. The list "The close bound of six
+bindings" of [not-measured.md](not-measured.md) names these tests and what they do not tell
+apart, and its list "Time bounds no test fires" names the close bounds that are still not
+fired.
 
 ## `inference-audio-device`
 
