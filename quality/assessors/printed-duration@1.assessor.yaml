@@ -28,6 +28,7 @@ outputs:
       - end_of_input_speech_to_final_transcript
       - end_of_input_speech_to_first_token
       - end_of_input_speech_to_tts_first_audio
+      - first_segment_offer_to_first_frame
       - segment_offer_to_first_frame
       - turn_completion_to_first_playable_audio
       - interruption_to_playback_stop

@@ -206,7 +206,6 @@ assessments:
       package: inference-elevenlabs
       tests:
         - adapters/inference-elevenlabs/tests/closed_stream.rs::a_silent_server_is_a_stall_within_the_read_timeout
-        - adapters/inference-elevenlabs/tests/cancel.rs::a_cancel_does_not_wait_for_the_server
         - adapters/inference-elevenlabs/tests/stt.rs::a_handshake_never_answered_fails_within_the_connect_timeout
         - adapters/inference-elevenlabs/tests/stt.rs::a_server_silent_after_the_end_of_input_with_a_span_open_fails_as_stalled_within_the_bound
         - adapters/inference-elevenlabs/tests/agent_duplex.rs::no_metadata_within_the_deadline_fails_the_open_and_closes
@@ -583,6 +582,8 @@ assessments:
         {kind: sampled, output: duration, boundary: end_of_input_speech_to_first_token, scope: run, unit: ms, better: lower}
       tts-first-audio:
         {kind: sampled, output: duration, boundary: end_of_input_speech_to_tts_first_audio, scope: run, unit: ms, better: lower}
+      tts-offer-to-audio:
+        {kind: sampled, output: duration, boundary: first_segment_offer_to_first_frame, scope: run, unit: ms, better: lower}
       tts-segment-first-audio:
         {kind: sampled, output: duration, boundary: segment_offer_to_first_frame, scope: run, unit: ms, better: lower}
 

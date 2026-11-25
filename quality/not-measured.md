@@ -96,10 +96,26 @@ user:
 - Amazon Nova Sonic: no test asserts the default read timeout or the default idle limit. No
   test names the wait of the close for its task.
 - Audio device: no test asserts the value of `PLAYBACK_PATIENCE`.
-- Every `CLOSE_BOUND`: the tests compare a time with the constant, so a larger constant passes.
+- Every `CLOSE_BOUND`: no test fires it. The tests that compare a time with the constant close
+  against a local fixture that takes the close at once. So they pass with a larger constant
+  and, by reading the code, with the bound removed.
+- Cartesia: a cancel waits for its send up to twice `CLOSE_BOUND`
+  (`adapters/inference-cartesia/src/synthesiser.rs`). The test asserts once the constant and
+  does not reach the longer wait.
+- ElevenLabs text to speech: no test holds `CLOSE_BOUND`. The adapter reads it where a handle
+  is dropped (`adapters/inference-elevenlabs/src/synthesiser.rs`) and where a connection closes
+  (`adapters/inference-elevenlabs/src/connection.rs`). The cancel of a segment does no I/O and
+  does not wait for the server, so a test of a cancel does not reach the bound. Two tests drop
+  a handle, against a fixture that takes the close at once. The test
+  `dropping_the_handle_mid_segment_closes_the_socket` of
+  `adapters/inference-elevenlabs/tests/cancel.rs` asserts no time. The test
+  `adversary_rf1_a_handle_dropped_after_a_cancel_while_the_context_streams_closes_the_socket`
+  of `adapters/inference-elevenlabs/tests/adversary_rf1_multi_context.rs` asserts a limit of
+  its own, 2 s, and by reading the code passes with the bound removed.
 
 A test per binding that compares each default with its number, and one that starts a session
-against a listener that never answers the handshake, would produce them.
+against a listener that never answers the handshake, would produce them. A close against a
+peer that stops reading, timed against the constant, would fire a close bound.
 
 ### The default limits of the HTTP transport of llama-server
 
@@ -124,8 +140,10 @@ produce a latency.
 
 The log of the check run holds one number of skipped tests for the whole workspace, which the
 record of `workspace-tests` keeps. It has no line per skipped test, so nothing gives the count
-per package. A listing of the ignored tests by nextest, counted per package in the gate, would
-produce it.
+per package. The assessor of `adapter-tests` therefore does not report skipped tests, and the
+coverage of its record has 0 for them, as the format writes a count that is not reported
+(`ratchet:spec/domains/assessor.yaml:182-187`). A listing of the ignored tests by nextest,
+counted per package in the gate, would produce the count.
 
 ### Commits on `main` since the last release, and entries waiting for one
 
@@ -282,30 +300,38 @@ A release is a tag on `main`, and what it has to hold is on
 [README.md](README.md#a-release). The stage of a gate is a free label, so a gate could be
 named `release`. A gate has no field for what it judges: the candidate is given when the gate
 is evaluated, and the selection of a target is the candidate or its merge result. Nothing says
-"the commit the tag points at". A gate `release` would be the gate `check` under another name,
-so it is not in the YAML. The requirement `release-statuses-held` is part of the gate `check`.
+"the commit the tag points at" (`ratchet:spec/domains/specification.yaml:953-992`, the fields
+of a gate; `:227-229`, the selection; `:622-628`, the stage). The gate the documents leave out
+would require what the gates `check`, `slow` and `docs-ux` require, and a free stage label
+lets one write that list. What cannot be written at the pin is its binding to the commit a tag
+points at. Without it the gate would say nothing a release could be held to, so it is not in
+the YAML. The requirement `release-statuses-held` is part of the gate `check`.
 
 ### A measure that is defined and was never observed
 
 The latency measures are assessments with a command, a unit and a direction, and with no
-record and no requirement. A plan has no state that says "defined, no observation yet". A
-reader of the YAML cannot tell such a plan from one whose record is missing. The pages say it
-with the line `Baseline: none.`, and the test holds that no record and no requirement names
-the measure.
+record and no requirement. The specification names that state: "An assessment with no
+requirement in any gate is in observe mode" (`ratchet:spec/domains/specification.yaml:850-851`).
+What the formats cannot say is whether evidence was ever collected for a plan. A plan in
+observe mode whose command never ran and one whose record is missing look the same in the
+YAML. The pages say it with the line `Baseline: none.`, and the test holds that no record and
+no requirement names the measure.
 
 ### What a command needs before it can run
 
-An observation has one `command`. It has no field for a credential the command reads, for the
-environment variables it needs, for a device, or for the fact that a provider bills the run.
-The YAML holds the command alone. The lines `Needs:` and `Billed:` of an entry say the rest,
-and nothing compares them with the code.
+An observation has one `command` (`ratchet:spec/domains/specification.yaml:461-463`). It has no
+field for a credential the command reads, for the environment variables it needs, for a device,
+or for the fact that a provider bills the run. The YAML holds the command alone. The lines
+`Needs:` and `Billed:` of an entry say the rest, and nothing compares them with the code.
 
 ### What each test of a list holds
 
 A time-bounds assessment lists its tests as an input, and its record has one result per test.
 The list cannot say what a test bounds, which constant it belongs to, or whether the test
-asserts the default value or only the mechanism with a shorter one. A requirement names the
-whole measurement, not one test of it. That text is on [adapters.md](adapters.md) only.
+asserts the default value or only the mechanism with a shorter one: a declared input has a
+type, a default and no text per value (`ratchet:spec/domains/specification.yaml:692-727`). A
+requirement names the whole measurement, not one test of it (`:901-936`). That text is on
+[adapters.md](adapters.md) only.
 
 ### The digest of the native archive against its pinned value
 

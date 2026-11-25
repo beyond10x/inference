@@ -8,7 +8,8 @@
 //! the documents true": that list and `problems` say the same.
 //!
 //! A page is read as it is written for a person. An entry is the text under a heading
-//! `### \`<assessment>/<measurement>\``; its lines are the bullets `- <name>: <text>`; a run is a
+//! `### \`<assessment>/<measurement>\``, up to the next heading; its lines are the bullets
+//! `- <name>: <text>`, and what else stands under the heading is kept whole; a run is a
 //! row of the table whose last cell links a run by its number; a table inside an entry holds one
 //! row per scenario and one column per viewport. A section is the text under a heading
 //! `## \`<name>\``: `adapters.rs` holds the sections of `quality/adapters.md` against the
@@ -16,6 +17,7 @@
 
 mod adapters;
 mod adversary_q1;
+mod adversary_q2;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -32,6 +34,16 @@ const ENTITY_MAPS: [&str; 4] = ["subjects", "assessments", "requirements", "gate
 const PAGE: &str = "quality/README.md";
 const ADAPTERS_PAGE: &str = "quality/adapters.md";
 const NOT_MEASURED: &str = "quality/not-measured.md";
+/// The counts of a coverage. An assessor declares the ones it reports; the others are 0 in its
+/// records (`spec/domains/assessor.yaml` of the pinned commit, the field `coverage`).
+const COVERAGE_COUNTS: [&str; 6] = [
+    "executed",
+    "skipped",
+    "not_run",
+    "unsupported",
+    "passed",
+    "failed",
+];
 /// The whole baseline of a measure that no run has produced a value for.
 const UNOBSERVED: &str = "none. No run of this command is kept.";
 
@@ -302,6 +314,9 @@ struct Entry {
     lines: BTreeMap<String, String>,
     /// Every bullet of the entry, whole.
     bullets: Vec<String>,
+    /// Every other line under the heading of the entry, up to the next heading: a bullet
+    /// without a name, a line of a paragraph, a row of a table.
+    loose: Vec<String>,
     table: Vec<Vec<String>>,
 }
 
@@ -348,12 +363,17 @@ impl Page {
         };
         let entry = self.entries.entry(key.to_owned()).or_default();
         entry.bullets.push(bullet.to_owned());
-        if let Some((name, rest)) = bullet.split_once(": ")
-            && !name.contains('`')
-            && entry
-                .lines
-                .insert(name.to_owned(), rest.to_owned())
-                .is_some()
+        let named = bullet
+            .split_once(": ")
+            .filter(|(name, _)| !name.contains('`'));
+        let Some((name, rest)) = named else {
+            entry.loose.push(bullet.to_owned());
+            return;
+        };
+        if entry
+            .lines
+            .insert(name.to_owned(), rest.to_owned())
+            .is_some()
         {
             problems.push(format!(
                 "{}: the entry `{key}` has two lines `{name}:`",
@@ -430,14 +450,22 @@ impl Page {
                 }
             } else if let Some(text) = line.strip_prefix("- ") {
                 bullet = Some(text.trim().to_owned());
-            } else if line.starts_with('|') {
-                let cells = line
-                    .trim()
-                    .trim_matches('|')
-                    .split('|')
-                    .map(|cell| cell.trim().to_owned())
-                    .collect();
-                self.row(entry.as_deref(), in_section, cells);
+            } else {
+                if line.starts_with('|') {
+                    let cells = line
+                        .trim()
+                        .trim_matches('|')
+                        .split('|')
+                        .map(|cell| cell.trim().to_owned())
+                        .collect();
+                    self.row(entry.as_deref(), in_section, cells);
+                }
+                if let Some(id) = &entry
+                    && !line.trim().is_empty()
+                {
+                    let open = self.entries.entry(id.clone()).or_default();
+                    open.loose.push(line.trim().to_owned());
+                }
             }
         }
     }
@@ -689,8 +717,9 @@ fn check_entry(
 }
 
 /// An entry whose baseline starts with `none.`: the baseline is that one sentence, no record
-/// holds a value for the measure, no requirement names it, and no line of the entry but
-/// `Command` and `Needs` holds a digit, so no number stands where a baseline would.
+/// holds a value for the measure, no requirement names it, and nothing under its heading but
+/// the lines `Command` and `Needs` holds a digit, so no number stands where a baseline would.
+/// Every line up to the next heading is read: a paragraph, a bullet without a name, a table.
 fn check_unobserved(
     model: &Model,
     id: &str,
@@ -712,6 +741,13 @@ fn check_unobserved(
         } else if !free && said.contains(|character: char| character.is_ascii_digit()) {
             problems.push(format!(
                 "{at}: the entry `{key}` says `Baseline: none.` and its line `{line}:` holds a number"
+            ));
+        }
+    }
+    for line in &entry.loose {
+        if line.contains(|character: char| character.is_ascii_digit()) {
+            problems.push(format!(
+                "{at}: the entry `{key}` says `Baseline: none.` and a line under it holds a number: {line:?}"
             ));
         }
     }
@@ -797,6 +833,19 @@ fn check_assessments(model: &Model, problems: &mut Vec<String>) {
                     "assessments.{id}.measurements.{name}: unit is {:?}, {assessor} declares {:?}",
                     text(measurement, "unit"),
                     text(output, "unit")
+                ));
+            }
+            if let Some(boundary) = text(measurement, "boundary")
+                && !output
+                    .get("boundaries")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|declared| declared.as_str() == Some(boundary))
+            {
+                problems.push(format!(
+                    "assessments.{id}.measurements.{name}: {assessor} declares no boundary {boundary:?} for the output {:?}",
+                    text(measurement, "output").unwrap_or_default()
                 ));
             }
         }
@@ -953,6 +1002,24 @@ fn check_records(model: &Model, problems: &mut Vec<String>) {
             ));
             continue;
         };
+        let reported: BTreeSet<&str> = declaration
+            .get("coverage")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        for count in COVERAGE_COUNTS {
+            let counted = evidence
+                .get("coverage")
+                .and_then(|coverage| coverage.get(count))
+                .and_then(Value::as_u64);
+            if !reported.contains(count) && counted != Some(0) {
+                problems.push(format!(
+                    "{path}: the coverage has {counted:?} for `{count}`, a count {assessor} does not report; such a count is 0"
+                ));
+            }
+        }
         for result in evidence
             .get("results")
             .and_then(Value::as_array)

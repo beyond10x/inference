@@ -6,7 +6,7 @@ inputs:
   profile: {type: string, required: true}
   packages: {type: string, list: true, required: true}
 coverage_unit: test
-coverage: [executed, skipped, passed, failed]
+coverage: [executed, passed, failed]
 outputs:
   tests_run:
     {value_type: number, kind: exact, scopes: [package], unit: tests}

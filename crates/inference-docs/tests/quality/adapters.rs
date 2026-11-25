@@ -319,7 +319,22 @@ fn named_tests(text: &str) -> BTreeSet<String> {
     found
 }
 
-/// A named test: its file exists and holds a function of its name.
+/// Whether `code` holds a function item of this name: a line whose code starts with
+/// `fn <function>(`, with nothing before it but `pub`, `pub(...)`, `async`, `const` or `unsafe`.
+/// The name in a comment or in a string of one line is no item. Not told apart: a line of a
+/// block comment or of a string over several lines that starts like the item.
+fn holds_function(code: &str, function: &str) -> bool {
+    let item = format!("fn {function}(");
+    code.match_indices(&item).any(|(at, _)| {
+        let line = code[..at].rfind('\n').map_or(0, |end| end + 1);
+        code[line..at].split_whitespace().all(|word| {
+            matches!(word, "pub" | "async" | "const" | "unsafe")
+                || (word.starts_with("pub(") && word.ends_with(')'))
+        })
+    })
+}
+
+/// A named test: its file exists and holds a function item of its name.
 fn check_test(source: &str, test: &str, files: &mut Files<'_>, problems: &mut Vec<String>) {
     let Some((file, function)) = test.split_once("::") else {
         problems.push(format!(
@@ -331,7 +346,7 @@ fn check_test(source: &str, test: &str, files: &mut Files<'_>, problems: &mut Ve
         None => problems.push(format!(
             "{source}: names the test `{function}` of `{file}`, and that file does not exist"
         )),
-        Some(code) if !code.contains(&format!("fn {function}(")) => problems.push(format!(
+        Some(code) if !holds_function(code, function) => problems.push(format!(
             "{source}: names the test `{function}` of `{file}`, and that file has no `fn {function}`"
         )),
         Some(_) => {}
@@ -524,6 +539,55 @@ fn check_crate_rows(model: &Model, problems: &mut Vec<String>) {
     }
 }
 
+/// A record whose plan names packages as its input: it has one `tests_run` result for each
+/// package the plan names and for no other, and its coverage counts the tests of those packages,
+/// `executed` the sum of the `tests_run` results and `passed` the sum of the `tests_passed` ones.
+fn check_package_coverage(model: &Model, problems: &mut Vec<String>) {
+    for (id, assessment) in model.all("assessments") {
+        let Some(packages) = assessment
+            .pointer("/inputs/packages")
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        let Some(record) = model.record(id) else {
+            continue;
+        };
+        let path = format!("quality/records/{id}.evidence.json");
+        let of = |output: &'static str| {
+            record
+                .pointer("/evidence/results")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(move |result| text(result, "output") == Some(output))
+        };
+        let named: BTreeSet<&str> = packages.iter().filter_map(Value::as_str).collect();
+        let held: BTreeSet<&str> = of("tests_run")
+            .filter_map(|result| text(result, "item"))
+            .collect();
+        if named != held {
+            problems.push(format!(
+                "{path}: the `tests_run` results are of {held:?}, assessments.{id} names the packages {named:?}"
+            ));
+        }
+        for (count, output) in [("executed", "tests_run"), ("passed", "tests_passed")] {
+            let sum: u64 = of(output)
+                .filter_map(|result| text(result, "value")?.parse::<u64>().ok())
+                .sum();
+            let counted = record
+                .pointer("/evidence/coverage")
+                .and_then(|coverage| coverage.get(count))
+                .and_then(Value::as_u64);
+            if counted != Some(sum) {
+                problems.push(format!(
+                    "{path}: the coverage counts {counted:?} {count} tests, and the `{output}` results of the packages of assessments.{id} sum to {sum}"
+                ));
+            }
+        }
+    }
+}
+
 /// An entry of `quality/adapters.md` gives the command of its assessment, whole, as one code
 /// span of its `Command:` line.
 fn check_entry_commands(model: &Model, problems: &mut Vec<String>) {
@@ -562,6 +626,7 @@ pub(super) fn check(documents: &Documents, model: &Model, problems: &mut Vec<Str
     };
     check_sections(documents, model, problems);
     check_crate_rows(model, problems);
+    check_package_coverage(model, problems);
     check_named_tests(documents, model, &mut files, problems);
     check_commands(documents, model, &mut files, problems);
     check_entry_commands(model, problems);
@@ -845,6 +910,61 @@ fn an_entry_without_a_baseline_has_no_number_no_record_and_no_requirement() {
                     "    condition: {operator: lt, value: 500, unit: ms}\n",
                     "\ngates:\n"
                 ),
+            );
+        },
+    );
+}
+
+#[test]
+fn a_coverage_counts_the_packages_of_its_plan_and_what_its_assessor_reports() {
+    let record = "quality/records/adapter-tests.evidence.json";
+    assert_problems(
+        &[
+            "quality/records/adapter-tests.evidence.json: the coverage counts Some(3059) executed tests, and the `tests_run` results of the packages of assessments.adapter-tests sum to 1166",
+            "quality/records/adapter-tests.evidence.json: the coverage counts Some(1165) passed tests, and the `tests_passed` results of the packages of assessments.adapter-tests sum to 1166",
+            "quality/records/adapter-tests.evidence.json: the coverage has Some(72) for `skipped`, a count package-tests@1 does not report; such a count is 0",
+            "the `tests_run` results are of {\"inference-audio-device\", \"inference-aws\"",
+            "assessments.adapter-tests names the packages {\"inference-audio-device\", \"inference-aws\", \"inference-cartesia\", \"inference-deepgram\", \"inference-deepslate\", \"inference-elevenlabs\", \"inference-llama-server\", \"inference-new\"",
+        ],
+        |documents| {
+            change(
+                &mut documents.records,
+                record,
+                "\"executed\": 1166",
+                "\"executed\": 3059",
+            );
+            change(
+                &mut documents.records,
+                record,
+                "\"passed\": 1166",
+                "\"passed\": 1165",
+            );
+            change(
+                &mut documents.records,
+                record,
+                "\"skipped\": 0",
+                "\"skipped\": 72",
+            );
+            in_plans(
+                documents,
+                "        - inference-llama-server\n        - inference-openai\n",
+                "        - inference-llama-server\n        - inference-new\n        - inference-openai\n",
+            );
+        },
+    );
+}
+
+#[test]
+fn a_boundary_is_one_the_assessor_declares_for_the_output() {
+    assert_problems(
+        &[
+            "assessments.cartesia-live.measurements.first-audio: printed-duration@1 declares no boundary \"end_of_utterance_to_first_sound\" for the output \"duration\"",
+        ],
+        |documents| {
+            in_plans(
+                documents,
+                "boundary: end_of_utterance_to_first_audio",
+                "boundary: end_of_utterance_to_first_sound",
             );
         },
     );

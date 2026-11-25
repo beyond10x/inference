@@ -18,7 +18,6 @@
       "tests": {
         "value": [
           "adapters/inference-elevenlabs/tests/closed_stream.rs::a_silent_server_is_a_stall_within_the_read_timeout",
-          "adapters/inference-elevenlabs/tests/cancel.rs::a_cancel_does_not_wait_for_the_server",
           "adapters/inference-elevenlabs/tests/stt.rs::a_handshake_never_answered_fails_within_the_connect_timeout",
           "adapters/inference-elevenlabs/tests/stt.rs::a_server_silent_after_the_end_of_input_with_a_span_open_fails_as_stalled_within_the_bound",
           "adapters/inference-elevenlabs/tests/agent_duplex.rs::no_metadata_within_the_deadline_fails_the_open_and_closes",
@@ -31,11 +30,11 @@
     "conditions": {},
     "coverage": {
       "unit": "test",
-      "executed": 7,
+      "executed": 6,
       "skipped": 0,
       "not_run": 0,
       "unsupported": 0,
-      "passed": 7,
+      "passed": 6,
       "failed": 0
     },
     "results": [
@@ -44,14 +43,6 @@
         "kind": "exact",
         "scope": "test",
         "item": "adapters/inference-elevenlabs/tests/closed_stream.rs::a_silent_server_is_a_stall_within_the_read_timeout",
-        "value_type": "assertion",
-        "holds": true
-      },
-      {
-        "output": "passed",
-        "kind": "exact",
-        "scope": "test",
-        "item": "adapters/inference-elevenlabs/tests/cancel.rs::a_cancel_does_not_wait_for_the_server",
         "value_type": "assertion",
         "holds": true
       },

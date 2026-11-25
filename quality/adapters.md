@@ -44,6 +44,10 @@ The three measures below have one value per crate. The values are in the table o
 Tests that are ignored have no count per crate. The log holds one number for the whole
 workspace. See [not-measured.md](not-measured.md).
 
+The coverage of the record of `adapter-tests` counts the tests of the eleven crates and of no
+other package. Its `skipped` is 0 because the assessor does not report that count. It is not
+the number of ignored tests.
+
 ## How a time bound is written
 
 A time bound is a constant of the adapter and a test that holds it. Each line of a
@@ -56,7 +60,13 @@ test. It says one of two things about the test:
   the default does not fail it.
 
 A test that compares a time with the constant itself, such as `CLOSE_BOUND`, follows the
-constant. It does not fix the number.
+constant. It does not fix the number. The close tests of this kind do not fire the bound
+either. Each closes against a local fixture that takes the close at once; in the Deepgram
+transcription test the socket is dropped before a close frame is due. So the wait never reaches
+the constant, and by reading the code each of these tests passes with the bound enlarged and
+with the bound removed. What they hold is that a close or a cancel returns soon against a peer
+that answers. No test closes against a peer that does not take the write, which is the case
+the bound is for. See [not-measured.md](not-measured.md).
 
 ## `inference-audio-device`
 
@@ -161,7 +171,9 @@ Turns text into speech with Cartesia Sonic, streamed over a WebSocket.
   `adapters/inference-cartesia/tests/errors.rs` holds the mechanism, at 300 ms.
 - Close: `CLOSE_BOUND` is 1 s (`adapters/inference-cartesia/src/connection.rs`). The test
   `a_cancel_does_not_wait_for_the_server` of `adapters/inference-cartesia/tests/cancel.rs`
-  compares the time of a cancel with the constant itself.
+  compares the time of a cancel with the constant itself. The fixture takes the cancel at once,
+  so the bound is not fired. The cancel waits for its send up to twice the constant
+  (`adapters/inference-cartesia/src/synthesiser.rs`), and the test asserts once the constant.
 
 ### `cartesia-records/held`
 
@@ -341,20 +353,20 @@ with `duplex` it talks to an ElevenLabs agent.
 
 ### `elevenlabs-time-bounds/held`
 
-- For a user: a connection that does not open or goes silent fails after a stated time, and a
-  cancel does not wait for the server.
+- For a user: a connection that does not open or goes silent fails after a stated time, and an
+  agent session that is dropped closes its connection soon.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 7 of 7 tests. Check run.
+- Baseline: holds for 6 of 6 tests. Check run.
 - Read, text to speech: `DEFAULT_READ_TIMEOUT` is 10 s
   (`adapters/inference-elevenlabs/src/config.rs`). The test
   `a_silent_server_is_a_stall_within_the_read_timeout` of
   `adapters/inference-elevenlabs/tests/closed_stream.rs` holds the mechanism, at 300 ms.
-- Close, text to speech: `CLOSE_BOUND` is 1 s
-  (`adapters/inference-elevenlabs/src/connection.rs`). The test
-  `a_cancel_does_not_wait_for_the_server` of `adapters/inference-elevenlabs/tests/cancel.rs`
-  compares the time of a cancel with the constant itself.
+- Close, text to speech: not held. `CLOSE_BOUND` is 1 s
+  (`adapters/inference-elevenlabs/src/connection.rs`), and no test of the gate fires it or
+  asserts it. The cancel of a segment does no I/O, so a test of a cancel does not reach the
+  bound. See [not-measured.md](not-measured.md).
 - Connect, speech to text: `DEFAULT_CONNECT_TIMEOUT` is 10 s
   (`adapters/inference-elevenlabs/src/config.rs`). The test
   `a_handshake_never_answered_fails_within_the_connect_timeout` of
@@ -402,7 +414,7 @@ with `duplex` it talks to an ElevenLabs agent.
 - Command: `cargo run -p inference-elevenlabs --features live --example live`. It prints
   `first audio after` once per output format.
 - Needs: the feature `live`; `ELEVENLABS_API_KEY` or the key in the OS keychain;
-  `ELEVENLABS_VOICE_ID`.
+  `ELEVENLABS_VOICE_ID`. Optional: `ELEVENLABS_RESIDENCY`, for a residency key.
 - Billed: yes, by ElevenLabs.
 - Unit and direction: milliseconds; lower is better.
 - Clock: from the return of `start()`, before the first segment is offered, to the first audio
@@ -418,7 +430,7 @@ with `duplex` it talks to an ElevenLabs agent.
   --ignored --nocapture`. The test `tts_cancel_probe_prints_the_endpoints_context_behaviour` of
   `adapters/inference-elevenlabs/tests/tts_cancel_live.rs` prints it in the line `P1 result`.
 - Needs: the feature `live`; `ELEVENLABS_API_KEY` or the key in the OS keychain;
-  `ELEVENLABS_VOICE_ID`; `ELEVENLABS_RESIDENCY` for a residency key.
+  `ELEVENLABS_VOICE_ID`. Optional: `ELEVENLABS_RESIDENCY`, for a residency key.
 - Billed: yes, by ElevenLabs.
 - Unit and direction: milliseconds; lower is better.
 - Clock: from the send of the text on a socket that is already open to the first audio message.
@@ -536,7 +548,8 @@ returns at once when a variable is not set, and prints that it skipped.
 - Unit and direction: milliseconds; lower is better. The test prints a Rust `Duration` in its
   debug form, so the printed unit changes with the size of the value.
 - Clock: from the return of the cancel to the first poll of the server that shows no slot at
-  work. The test polls at a fixed interval, so the value is a multiple of it.
+  work. The first poll comes after the test has drained and dropped the handle. Each round is
+  one request for `/slots` and, while a slot is at work, a sleep of twenty milliseconds.
 - Bound: none. Nothing fails on this value.
 - Baseline: none. No run of this command is kept.
 
@@ -569,8 +582,9 @@ returns at once when a variable is not set, and prints that it skipped.
 - Billed: no.
 - Unit and direction: milliseconds; lower is better. The test prints a Rust `Duration` in its
   debug form, so the printed unit changes with the size of the value.
-- Clock: from the start of the generation to the end of the second turn, the one that follows
-  the result of the tool.
+- Clock: from the start of the generation to the moment the test prints the value. That is
+  after the second turn, the one that follows the result of the tool, has ended, and after a
+  request for `/props` that the test makes for the line it prints first. The request is inside.
 - Bound: none. Nothing fails on this value.
 - Baseline: none. No run of this command is kept.
 
@@ -657,7 +671,8 @@ into speech over the speech endpoint.
   `adapters/inference-openai/tests/live_gpt.rs` prints it as `started in`. The command runs the
   other ignored tests of the file too.
 - Needs: the features `live` and `gpt-live`; the key in the OS keychain, or
-  `INFERENCE_OPENAI_KEY_SOURCE` set to `env` and `OPENAI_API_KEY`.
+  `INFERENCE_OPENAI_KEY_SOURCE` set to `env` and `OPENAI_API_KEY`. Optional:
+  `INFERENCE_OPENAI_SECRET_NAME`, another name of the secret in the keychain.
 - Billed: yes, by OpenAI, per second of session.
 - Unit and direction: milliseconds; lower is better.
 - Clock: from before the call that connects the client to its return. The lookup of the
@@ -673,7 +688,8 @@ into speech over the speech endpoint.
   --nocapture`. The test `the_client_hears_speech_and_answers_with_audio_and_transcript` of
   `adapters/inference-openai/tests/live_gpt.rs` prints it as `closed in`.
 - Needs: the features `live` and `gpt-live`; the key in the OS keychain, or
-  `INFERENCE_OPENAI_KEY_SOURCE` set to `env` and `OPENAI_API_KEY`.
+  `INFERENCE_OPENAI_KEY_SOURCE` set to `env` and `OPENAI_API_KEY`. Optional:
+  `INFERENCE_OPENAI_SECRET_NAME`, another name of the secret in the keychain.
 - Billed: yes, by OpenAI, per second of session.
 - Unit and direction: milliseconds; lower is better.
 - Clock: from before the call that closes the client to its return.
@@ -688,7 +704,8 @@ into speech over the speech endpoint.
   --nocapture`. The test `speaks_an_utterance_as_mulaw_8k` of
   `adapters/inference-openai/tests/speech_live.rs` prints it as `first frame after`.
 - Needs: the features `live` and `speech`; the key in the OS keychain, or
-  `INFERENCE_OPENAI_KEY_SOURCE` set to `env` and `OPENAI_API_KEY`.
+  `INFERENCE_OPENAI_KEY_SOURCE` set to `env` and `OPENAI_API_KEY`. Optional:
+  `INFERENCE_OPENAI_SECRET_NAME`, another name of the secret in the keychain.
 - Billed: yes, by OpenAI.
 - Unit and direction: milliseconds; lower is better. The test prints a Rust `Duration` in its
   debug form, so the printed unit changes with the size of the value.
@@ -792,10 +809,13 @@ Two examples measure a whole turn across adapters. Their measures have no adapte
   openai,openai-live,nova,elevenlabs,deepgram,phonic,deepslate --runs 2 --runs-out runs.jsonl`.
   It writes one JSON line per run to the file, with the key `first_audio_ms`.
 - Needs: the key or the credentials of each provider that is named, as the head of
-  `examples/realtime-voice/examples/compare.rs` lists them: `DEEPGRAM_API_KEY`,
-  `PHONIC_API_KEY`, `DEEPSLATE_API_KEY`, `DEEPSLATE_VENDOR_ID`, `DEEPSLATE_ORGANIZATION_ID`,
-  `DEEPSLATE_VOICE_ID`, `ELEVENLABS_AGENT_ID` or `ELEVENLABS_AGENT_SIGNED_URL`, and those of
-  OpenAI and of AWS.
+  `examples/realtime-voice/examples/compare.rs` lists them. OpenAI: the key in the OS keychain,
+  or `INFERENCE_OPENAI_KEY_SOURCE` set to `env` and `OPENAI_API_KEY`. AWS: credentials and a
+  region from the default chain of the AWS SDK, such as `AWS_REGION` or a profile. ElevenLabs:
+  `ELEVENLABS_AGENT_ID` or `ELEVENLABS_AGENT_SIGNED_URL`. Deepgram: `DEEPGRAM_API_KEY`. Phonic:
+  `PHONIC_API_KEY`. Deepslate: `DEEPSLATE_API_KEY`, `DEEPSLATE_VENDOR_ID`,
+  `DEEPSLATE_ORGANIZATION_ID` and `DEEPSLATE_VOICE_ID`. Optional, each for another model:
+  `INFERENCE_OPENAI_REALTIME_MODEL`, `INFERENCE_NOVA_SONIC_MODEL`, `DEEPSLATE_MODEL`.
 - Billed: yes, by every hosted provider that runs.
 - Unit and direction: milliseconds; lower is better.
 - Clock: from the end of the input speech, the instant the client sent the frame with the last
@@ -852,10 +872,11 @@ Two examples measure a whole turn across adapters. Their measures have no adapte
 - For a user: how long the recogniser of a cascade takes to commit the question.
 - Command: `cargo run -p realtime-voice --features local --example compare -- --providers
   cascade --runs 2 --runs-out runs.jsonl`. The key is `final_transcript_ms`. The same run
-  writes the four keys of `compare` for the cascade.
+  writes three keys of `compare` for the cascade: `first_audio_ms`, `response_end_ms` and
+  `barge_in_stop_ms`. `first_transcript_ms` is written for a native provider only.
 - Needs: the feature `local`; the local recogniser and the `llama-server` that
   `cascade-talk/first-audio` needs; `ELEVENLABS_API_KEY` or the key in the OS keychain, and
-  `ELEVENLABS_VOICE_ID`.
+  `ELEVENLABS_VOICE_ID`. Optional: `ELEVENLABS_RESIDENCY`, for a residency key.
 - Billed: yes, by ElevenLabs for the speech.
 - Unit and direction: milliseconds; lower is better.
 - Clock: from the end of the input speech to the final transcript of the recogniser.
@@ -883,6 +904,20 @@ Two examples measure a whole turn across adapters. Their measures have no adapte
 - Billed: yes, by ElevenLabs for the speech.
 - Unit and direction: milliseconds; lower is better.
 - Clock: from the end of the input speech to the first audio of the synthesiser.
+- Bound: none. Nothing fails on this value.
+- Baseline: none. No run of this command is kept.
+
+### `compare-cascade/tts-offer-to-audio`
+
+- For a user: how long the first sentence of the answer waits for its first sound, inside the
+  synthesiser.
+- Command: `cargo run -p realtime-voice --features local --example compare -- --providers
+  cascade --runs 2 --runs-out runs.jsonl`. The key is `tts_offer_to_audio_ms`.
+- Needs: as `compare-cascade/final-transcript`.
+- Billed: yes, by ElevenLabs for the speech.
+- Unit and direction: milliseconds; lower is better.
+- Clock: from the offer of the first segment of the answer to its first frame, as the contract
+  of the synthesiser measures it. It is the first value of `tts_segment_first_audio_ms`.
 - Bound: none. Nothing fails on this value.
 - Baseline: none. No run of this command is kept.
 
@@ -941,8 +976,9 @@ Two examples measure a whole turn across adapters. Their measures have no adapte
   `examples/local-voice-cascade/tests/local_adapters.rs` prints it, and so do the other two
   ignored tests of the file.
 - Needs: the feature `local`; `INFERENCE_SHERPA_ONNX_STT_DIR` with the clip;
-  `INFERENCE_CASCADE_STT` and the checkpoint of the recogniser it selects;
-  `INFERENCE_LLAMA_SERVER_URL`; `INFERENCE_LLAMA_SERVER_MODEL`.
+  `INFERENCE_LLAMA_SERVER_URL`; `INFERENCE_LLAMA_SERVER_MODEL`. Optional:
+  `INFERENCE_CASCADE_STT` selects the recogniser, sherpa-onnx when it is unset; whisper.cpp
+  then needs `INFERENCE_WHISPERCPP_STT_MODEL`.
 - Billed: no.
 - Unit and direction: milliseconds; lower is better. The test prints a Rust `Duration` in its
   debug form, so the printed unit changes with the size of the value.

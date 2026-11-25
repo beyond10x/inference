@@ -43,10 +43,16 @@ about adapters, tests and commands, `adapters.rs`. It is not `ratchet validate`.
   files, an assessor declaration or a record is not in the file named after it, or
   `ratchet.toml` does not list the specification files and the assessor directory;
 - an assessment names a subject or an assessor that is not declared, a measurement names an
-  output its assessor does not declare, a requirement names an assessment or a measurement that
-  is not declared, or a gate requires a requirement that is not declared;
+  output its assessor does not declare or a boundary its assessor does not declare for that
+  output, a requirement names an assessment or a measurement that is not declared, or a gate
+  requires a requirement that is not declared;
 - a record names an assessment that is not declared, an assessor other than the one of its
   assessment, or an output that assessor does not declare;
+- the coverage of a record holds another number than 0 for a count its assessor does not
+  report;
+- an assessment names packages as its input, and its record has `tests_run` results for
+  another set of packages, or its coverage counts another number of executed tests than the
+  `tests_run` results sum to, or of passed tests than the `tests_passed` results sum to;
 - the unit of a measurement, of the condition of a requirement or of a result in a record
   differs from the unit the assessor declares for the output;
 - a command calls a task `Taskfile.yml` does not have;
@@ -66,8 +72,10 @@ about adapters, tests and commands, `adapters.rs`. It is not `ratchet validate`.
 - a baseline or a table differs from the values in the record, or a bound differs from the
   number in the requirement;
 - an entry says `Baseline: none.` in other words than `none. No run of this command is kept.`,
-  or a line of it other than `Command:` and `Needs:` holds a digit, or a record holds a value
-  for its measure, or a requirement bounds its measure;
+  or a record holds a value for its measure, or a requirement bounds its measure;
+- anything under the heading of such an entry, up to the next heading, holds a digit: a line of
+  the entry other than `Command:` and `Needs:`, a bullet without a name, a paragraph, a row of
+  a table;
 - a directory under `adapters/` with a `Cargo.toml` has no section on
   [adapters.md](adapters.md), a section names no such directory or stands twice, or the sections
   are not in the order of the directories;
@@ -75,7 +83,9 @@ about adapters, tests and commands, `adapters.rs`. It is not `ratchet validate`.
 - the table of a section lacks a row for a measure with one value per package, or a row differs
   from the record: the value, the unit, the test, or the run it was read from;
 - one of the three pages names a test, by its function and its file, and the file does not
-  exist or holds no function of that name;
+  exist or has no line that starts a function of that name: `fn`, the name and `(`, with
+  nothing before them but `pub`, `async`, `const` or `unsafe`. The name in a comment or in a
+  string does not count;
 - an assessment lists tests as its input, and one is not in its file, the entry of the measure
   names another set of tests, or the record has another set of results;
 - an entry on [adapters.md](adapters.md) does not give the command of its assessment, whole, in
@@ -94,6 +104,17 @@ anything. Of the other lines of an entry, the test holds the tests and the comma
 and nothing else: not the sentence for a user, not the value of a constant, not what a line
 says a test compares, not the clock of a latency, not whether a command is billed. That a named
 test is ignored, or runs in `task test-run`, is not held either.
+
+More that the test does not hold:
+
+- The search for a named test takes any function of the name: one without `#[test]`, one with
+  `#[ignore]`, and one in a file behind a `#![cfg(feature = "...")]` that the gate does not
+  turn on. A line of a block comment, or of a string over several lines, that starts like the
+  function is taken for it.
+- A number written in words under an entry that says `Baseline: none.`. The test finds digits
+  only.
+- The coverage of a record beyond the two rules above: not that a count is the count of the
+  run.
 
 ## The runs the baselines were read from
 

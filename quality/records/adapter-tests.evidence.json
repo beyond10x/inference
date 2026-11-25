@@ -40,11 +40,11 @@
     },
     "coverage": {
       "unit": "test",
-      "executed": 3059,
-      "skipped": 72,
+      "executed": 1166,
+      "skipped": 0,
       "not_run": 0,
       "unsupported": 0,
-      "passed": 3059,
+      "passed": 1166,
       "failed": 0
     },
     "results": [
