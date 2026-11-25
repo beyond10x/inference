@@ -4,7 +4,8 @@
 //! `generate` writes six files:
 //!
 //! - `website/docs/reference/crates.md`, from `cargo metadata --no-deps`;
-//! - `website/docs/reference/adapters.md`, from the adapters' capability and claims records;
+//! - `website/docs/reference/adapters.md`, from the adapters' capability and claims records, and
+//!   the notes of `adapters::NOTES`, each held to the sources of its adapter;
 //! - `website/docs/reference/errors.md`, from the error kinds of the compiled ESS specification,
 //!   each of which the code must name;
 //! - `website/data/status.json` (`b10x-status/1`) and `website/docs/status.mdx`, from

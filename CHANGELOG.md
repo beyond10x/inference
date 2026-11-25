@@ -55,6 +55,14 @@
   declare, when the coverage of a record counts something else than its plan and its assessor
   name, and when an entry without a baseline carries a number, a record or a requirement. The
   documents add no gate and change none. No crate's API changes.
+- The documentation site: the adapter reference gains the section "Opens, closes and drops", per
+  binding what an open, a close or a drop gives a caller where this release changed it: the close
+  timeout of GPT-Live, the drop of an ElevenLabs and of a Cartesia synthesis, the signed URL of an
+  ElevenLabs agent model. `inference-docs` reads the value of each constant a note names from the
+  adapter's source and refuses a note its sources do not hold. The error reference says that an
+  adapter's own error types are not on it. The guides "Run the checks", "Compare voice providers"
+  and "Talk to a hosted voice model" and the page of the `repo-podcast` example say these changes
+  where their reader meets them. No crate's API changes.
 
 ### Changed
 

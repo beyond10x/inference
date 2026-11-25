@@ -1,9 +1,9 @@
 ---
 title: Run the checks
 sidebar_position: 7
-description: What task check runs, in which order, how to run the conformance suite on its own, and which tests are ignored without a model, a server or a key.
+description: What task check runs, in which order, how to run the conformance suite on its own, which tests are ignored without a model, a server or a key, and the quality documents a test of task test-run keeps true.
 lede: One command validates the specification, the plan and the generated documentation, then formats, lints and tests the workspace, as CI does on every pull request.
-source: Taskfile.yml, ess/, crates/inference-testkit (tests/conform.rs), crates/inference-docs
+source: Taskfile.yml, ess/, crates/inference-testkit (tests/conform.rs), crates/inference-docs (tests/quality/), quality/, ratchet.toml, .github/workflows/check.yml
 ---
 
 # Run the checks
@@ -53,8 +53,10 @@ signal running until the job ends.
 
 CI runs the same three tasks, `task check-source`, `task test-build` and `task test-run`, as
 separate steps of the required check `inference / task check`. A pull request whose changed files
-are all under `.engineering/` or are `*.md` files outside `website/` and `ess/`, other than
-`CHANGELOG.md`, only validates the planning store, and the check passes without a build.
+are all under `.engineering/` or are `*.md` files outside `website/`, `ess/` and `quality/`, other
+than `CHANGELOG.md`, only validates the planning store, and the check passes without a build. A
+change to a file under `quality/`, a `*.md` file too, runs the full check: a test of
+`task test-run` reads those files, as [The quality documents](#the-quality-documents) says.
 
 The steps as `task --dry check` lists them in this tree:
 
@@ -146,11 +148,35 @@ with none of them. To run them:
 
 Every variable is in [Environment](../reference/environment.md).
 
+## The quality documents
+
+The directory [`quality/`](https://github.com/beyond10x/inference/tree/main/quality) and the file
+[`ratchet.toml`](https://github.com/beyond10x/inference/blob/main/ratchet.toml) say what counts as
+the quality of this repository, what each value is today and where it comes from:
+
+| File | Holds |
+|---|---|
+| `quality/README.md` | the measures of the gate, the tests, the specification, the turnaround, the documentation site, the local speech-to-text adapters and a release, each with its command, unit, direction, bound and baseline, and the CI runs the baselines were read from |
+| `quality/adapters.md` | one section per crate under `adapters/`: the tests run and passed and the slowest test, the time bounds and the records its tests hold, and the commands that print a latency, which have no baseline |
+| `quality/not-measured.md` | what is not measured, and what would produce the value |
+| `ratchet.toml`, `quality/*.ratchet.yaml`, `quality/assessors/`, `quality/records/` | the same measures in the formats of Ratchet (`beyond10x/ratchet`), what each assessor reports, and one record per assessment whose baseline was read from a CI run |
+
+The formats are those of the Ratchet specification at the commit `quality/README.md` names. No
+Ratchet command works at that commit, so Ratchet runs none of the files. They add no gate and change none: they describe what `task check`, `task test-slow` and
+the workflows under `.github/workflows/` already enforce.
+
+The tests of `crates/inference-docs/tests/quality/` run in `task test-run`. They fail when the
+YAML files and records stop agreeing with each other, with `Taskfile.yml`, with the tree, or with
+the pages that describe them, `quality/README.md` and `quality/adapters.md`: a measure without its
+entry, a baseline that differs from its record, a command that calls a task `Taskfile.yml` does
+not have, a test or an adapter directory a page names that does not exist. `quality/README.md` lists every rule under "The test
+that keeps the documents true".
+
 ## The generated pages
 
 The crate list, the adapter matrix, the error list and the status data of this site are generated
-from the workspace metadata, the adapter records, the specification and the test list. After a
-change to any of them:
+from the workspace metadata, the adapter records and sources, the specification and the test
+list. After a change to any of them:
 
 ```sh
 task docs-generate

@@ -3,7 +3,7 @@ title: Repository podcast
 sidebar_position: 3
 description: A coding agent distils a repository into a brief, and two native speech models discuss it over the speaker in a terminal UI with token and cost counters.
 lede: Two voice models, a host and a guest, talk about a repository until the minutes you asked for have played, with running token and cost counters.
-source: examples/repo-podcast (examples/podcast.rs, src/, prices/, tests/), CHANGELOG.md 0.7.0
+source: examples/repo-podcast (examples/podcast.rs, src/ with src/show.rs, prices/, tests/), CHANGELOG.md 0.7.0 and Unreleased
 ---
 
 # Repository podcast
@@ -94,6 +94,19 @@ Options:
   -h, --help
           Print help (see a summary with '-h')
 ```
+
+## A turn that stays silent
+
+A model that creates every response itself, as GPT-Live does, is fed silence, and the show takes
+its first response as the turn. When it sends no response, transcript or audio for 10 seconds, the
+turn is given up.
+A turn given up after its audio arrived keeps that audio, and the show goes on. One given up before
+any audio ends the show once what was generated has played.
+
+On main, in the next release, `repo_podcast::Settings::silent_turn` sets that bound for a show
+your own code opens with `Show::open`; `Settings::default()` keeps 10 seconds. A `Settings`
+written as a struct literal names `silent_turn`, or ends in `..Settings::default()`, as `podcast`
+does.
 
 ## Cost
 

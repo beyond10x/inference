@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T19:04:50Z",
+  "actor": "human:operator",
+  "artifact": "story:release-changes-on-the-documentation-site",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source, task test-build and task test-run through the shared build pool, at 029c1bd74",
+    "reference": "check-source exit 0 wall 75 s; test-build exit 0 wall 77 s; test-run exit 0 wall 52 s. The workspace run of test-run: 3175 tests run: 3175 passed, 73 skipped"
+  }
+}
