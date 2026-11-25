@@ -38,7 +38,18 @@
 //! all of it generated within 0.8 s of the text. A flush alone brought the context's final message
 //! only after the endpoint's 20 s inactivity timeout, so the close goes with the text, the one
 //! prompt way to end the segment, and a cancel sends no second one. A barge-in saves playback,
-//! not generation or cost. Dropping the handle closes the connection.
+//! not generation or cost.
+//!
+//! Dropping the handle closes the connection with `close_socket` and a close frame, bounded by
+//! [`CLOSE_BOUND`]. Outside a Tokio runtime the drop waits for that close. Inside one it waits
+//! for it at most [`CLOSE_GRACE`], and holds a worker no longer: a close that ended within it has
+//! been sent when the drop returns, and a close not written by then runs to its end on the
+//! handle's own thread, bounded by [`CLOSE_BOUND`]. A process that ends while such a close still
+//! runs ends the socket without the close frame; the server may then have received `close_socket`
+//! alone, or neither. The drop asks Tokio: inside another executor it waits as it does outside a
+//! runtime, at most [`CLOSE_BOUND`]. A handle dropped while its async form waits for a message to
+//! be sent or to arrive takes the connection with it: the server gets no close frame and sees the
+//! socket end.
 //!
 //! A connection that ends between segments, as the endpoint's inactivity timeout may end it, is
 //! reopened once for the next segment: when sending its context fails because the connection
@@ -242,4 +253,4 @@ pub use stt_config::{
 };
 #[cfg(feature = "stt")]
 pub use stt_protocol::SpanTiming;
-pub use synthesiser::{BACKEND, ElevenLabsSynthesis, ElevenLabsSynthesiser, claims};
+pub use synthesiser::{BACKEND, CLOSE_GRACE, ElevenLabsSynthesis, ElevenLabsSynthesiser, claims};

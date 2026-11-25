@@ -2,8 +2,23 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- `inference-elevenlabs` (feature `duplex`): a model built with `ElevenLabsAgent::signed` gives its
+  signed URL up to the first open that gets past its configuration and its runtime, whatever happens
+  next: the session opened, no request could be built from the URL, the open was cancelled before
+  the handshake was first polled, the connection could not be made, the server refused the upgrade,
+  the handshake timed out or was cancelled, or the agent's formats were not the session's. Every
+  later open that gets past its configuration and its runtime fails as the new variant
+  `agent::AgentError::SignedUrlSpent` (`SessionFailureKind::Rejected`) before anything connects, so
+  a failed connect and a format refusal spend the URL too: build a model with a new signed URL for
+  the next open. Only an open refused for its configuration, or whose runtime could not be built,
+  leaves the URL with the model. A public agent's model is unchanged.
+
 ### Added
 
+- `inference-elevenlabs`, `inference-cartesia`: `CLOSE_GRACE` (5 ms), the most a drop of a
+  synthesis inside a Tokio runtime waits for its close on the dropping thread.
 - `inference-openai`: `LiveClient::with_close_timeout` and `LiveClient::close_timeout`, and
   `OpenAiLive::with_close_timeout` and `OpenAiLive::close_timeout`: the most a graceful close of a
   GPT-Live session waits for the provider's last messages. Unset, it is `CLOSE_TIMEOUT`, 15
@@ -28,6 +43,27 @@
   ended: `no test ran` when that run left no report. `task` exits 201 when the bound ends the step.
 - The `check` workflow runs the full gate for a pull request that changes a file under
   `quality/`, also a `*.md` file: the test of the quality documents reads them.
+- `realtime-voice`, example `compare`: with `ELEVENLABS_AGENT_SIGNED_URL` the ElevenLabs arm measures
+  its first run and records every later run with the refusal as its note; with `ELEVENLABS_AGENT_ID`
+  it runs them all, as before.
+
+### Fixed
+
+- `inference-elevenlabs` (feature `duplex`): the signed URL of a private agent, whose token is a
+  credential, is no longer kept by the model past the handshake. The handshake request's URI is the
+  signed URL's own buffer instead of a copy, and the buffer is zeroized when the open's handshake
+  ends or is dropped, however it ends. The crate documentation lists every copy of the token.
+- `inference-elevenlabs`, `inference-cartesia`: dropping a synthesis inside a Tokio runtime holds
+  the dropping thread at most `CLOSE_GRACE` (5 ms). Before, the drop held it until the close was
+  written, at most `CLOSE_BOUND` (1 s). A close that ended within the grace has been sent when the
+  drop returns, as before: `close_socket` for ElevenLabs, then a close frame. A close not written
+  within it runs to its end on the handle's own thread, bounded by `CLOSE_BOUND`, and that thread
+  then ends its runtime. A process that ends while such a close still runs ends the socket without
+  the close frame; for ElevenLabs the server may have received `close_socket` alone or neither.
+  Outside a Tokio runtime the drop waits for its close as before, at most `CLOSE_BOUND`; the drop
+  asks Tokio, so inside another executor it waits as it does outside a runtime. The crate docs
+  say what the server sees after a drop: the close from an idle handle, the end of the socket
+  without a close frame from a handle whose async form waits for a message.
 
 ## [0.33.0] — 2026-11-23
 

@@ -30,6 +30,13 @@ use crate::wake;
 /// The backend name of the adapter record.
 pub const BACKEND: &str = "elevenlabs-multi-stream-input";
 
+/// The most a drop inside a Tokio runtime waits for its close on the dropping thread; a close
+/// not written by then goes on without that thread. The close of an idle handle to a server
+/// that reads took 0.1 to 1.1 ms over 300 drops, a quarter of this at most; and this is half of
+/// a 10 ms audio tick, so a drop whose close cannot be written holds a runtime's thread for
+/// less than one tick.
+pub const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(5);
+
 /// The capabilities an adapter record of the binding claims. `incremental_input`: a segment is
 /// sent as soon as the handle is iterated after it was offered, before the utterance ends.
 /// `output_streaming`: each audio chunk is emitted as a frame while its segment is still Queued.
@@ -753,9 +760,25 @@ impl Iterator for ElevenLabsSynthesis {
     }
 }
 
+/// A runtime that ends without a wait wherever it is dropped, a thread of its own included.
+struct EndsInBackground(Option<tokio::runtime::Runtime>);
+
+impl Drop for EndsInBackground {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 impl Drop for ElevenLabsSynthesis {
-    /// Closes the connection with a close frame, waiting at most
-    /// [`CLOSE_BOUND`]; an exchange in flight other than a close is dropped with its connection.
+    /// Closes the connection with `close_socket` and a close frame, bounded by [`CLOSE_BOUND`];
+    /// an exchange in flight other than a close is dropped with its connection, which then ends
+    /// without a close frame. Inside a Tokio runtime the drop waits for the close at most
+    /// [`CLOSE_GRACE`]: a close that ended within it has been sent when the drop returns, and
+    /// one that did not runs to its end on the synthesis's own thread, which then ends its
+    /// runtime. A process that ends first ends the socket without the close frame. Anywhere
+    /// else, inside another executor too, the drop waits for the close.
     fn drop(&mut self) {
         let closing = match self.exchange.take() {
             Some(Exchange::Close(task)) => Some(task),
@@ -769,12 +792,26 @@ impl Drop for ElevenLabsSynthesis {
             let connection = self.connection.take()?;
             self.start(connection.close(Some(CLOSE_SOCKET))).ok()
         });
-        if let Some(task) = closing {
-            let _ = wake::block_on_until(task, std::time::Instant::now().checked_add(CLOSE_BOUND));
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        let runtime = EndsInBackground(Some(runtime));
+        let Some(mut task) = closing else {
+            return;
+        };
+        let inside = tokio::runtime::Handle::try_current().is_ok();
+        let wait = if inside { CLOSE_GRACE } else { CLOSE_BOUND };
+        let until = std::time::Instant::now().checked_add(wait);
+        if wake::block_on_until(&mut task, until).is_some() || !inside {
+            return;
         }
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
-        }
+        let Some(own) = runtime.0.as_ref().map(|runtime| runtime.handle().clone()) else {
+            return;
+        };
+        own.spawn(async move {
+            let _ = tokio::time::timeout(CLOSE_BOUND, task).await;
+            drop(runtime);
+        });
     }
 }
 
