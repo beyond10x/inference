@@ -34,38 +34,51 @@ Five assessors have a program, `inference-docs assess` (`crates/inference-docs/s
 It reads a file a run left behind and writes the record of one assessment. It runs no measure.
 `nextest-run@1`, `package-tests@1`, `named-tests@1` and `capability-record@1` read the JUnit
 report of cargo-nextest; `capability-record@1` reads its value from the record and whether the
-record's test passed from the report. `printed-duration@1` reads the output that a live test or
-an example printed. The other seven declarations have no program: they name the outputs, units
+record's test passed from the report. `printed-duration@1` reads the output that a live test
+printed. The other seven declarations have no program: they name the outputs, units
 and scopes that a program would report. No declaration has a `command`.
 
-The program takes the arguments Ratchet gives an assessor and two of its own: `--from`, the file
-the run left, and `--source`, what the record names as its origin: an http or https URL of a
-forge run, or a path from the root without `..`. `--started-at` and `--ended-at` give the times
-of a printed output, which holds none, and `--exit-status` the exit status of the command that
-printed it. Ratchet's specification says it passes an assessor no argument beside its own and
-the declared inputs, so a call through Ratchet as the specification stands cannot pass these
-four: the declarations would have to name them as `inputs`, or a wrapper would have to add them.
+The program takes the arguments Ratchet gives an assessor and five of its own. Every call gives
+two: `--from`, the file the run left, and `--source`, what the record names as its origin. A
+source is an http or https URL of a forge run, its scheme in any case, without user info before
+the host and without a `..` segment in its path; or the path of a file from the root, without
+`..`, without a colon (`run:1.xml` reads as a URL of another scheme and is refused) and not the
+root or a directory. `--started-at` and `--ended-at` give the times of a printed output, which
+holds none, and `--exit-status` the exit status of the command that printed it. Ratchet's
+specification says it passes an assessor no argument beside its own and the declared inputs, so
+a call through Ratchet as the specification stands cannot pass these five: the declarations
+would have to name them as `inputs`, or a wrapper would have to add them.
 
 The program does not know which nextest profile wrote a report. The caller gives it the report of
 the profile the plan names as the input `profile`, and the record says that profile.
 
 A report is refused when its root counts other tests, failures, errors or skipped tests than the
 test cases it holds, or when it holds a test case outside a `<testsuite>` directly under the root.
-A named test is held only by a test case whose name is the module path of its file and the
-function, or that path, `tests` and the function. A capability record whose test failed or was
-skipped is refused.
+A named test is held only by the test case whose name is the module path of its file, the inline
+modules around its function in that file (`mod live {`, `mod tests {`), and the function. The
+program reads those modules from the file under `--root`, so the root is the tree of the run; a
+file it cannot read or that defines no function of the name is refused. A capability record
+whose test failed or was skipped is refused.
 
-A printed measure is read from the one line that holds its text. Of the plans of
-`printed-duration@1`, `compare` and `compare-cascade` write their values to `runs.jsonl`, the
-example of `elevenlabs-live-example` prints its text once per output format, and the tests of
-`cascade-local-adapters` print it once per turn and per test: the program reads none of the four,
-and a story of its own would add a second scope, per format or per turn, to read them. The output
-of a live test says whether the test held: a failed test, a `test result: FAILED` line, a panic of
-a test the output names or a failing line of cargo-nextest is refused, and a passed run is
-written as one passed run. The output of an example, here `cascade-talk`, says nothing of that:
-its call gives `--exit-status`, and an exit status other than 0 is refused. `cascade-talk` ends
-with Ctrl-C, so its run is read only when the caller gives the status of a run that ended
-otherwise, and only when it held one turn. The call for the record of `workspace-tests`:
+A printed measure is read from the one line that holds its text, after the colour codes of the
+output are taken out. Of the plans of `printed-duration@1`, `compare` and `compare-cascade` write
+their values to `runs.jsonl`, the example of `elevenlabs-live-example` prints its text once per
+output format, and the tests of `cascade-local-adapters` print it once per turn and per test: the
+program reads none of the four, and a story of its own would add a second scope, per format or
+per turn, to read them. The output of a live test says whether the run held. A passed run needs
+the closing line of the run, a `test result: ok.` line with a test passed or a `Summary` line of
+cargo-nextest with a test passed and nothing failed, and is written as one passed run; the `ok`
+of one test is not the pass of the run, and an output without a closing line is refused as a run
+that did not end. `cargo test` closes the tests of each binary with a `test result:` line of their
+own: a `running <n> tests` line without one after it is refused as a run that did not end, and the
+pass is read from the `test result:` line of the tests that printed the measures. A failed test, a `test result: FAILED` line, cargo's `error: test failed` line,
+a panic of a test the output names (`thread '<name>' (<id>) panicked at`, as the pinned rustc
+prints it), a failing status line of cargo-nextest (`FAIL`, `TMT`, also after `TRY <n>`) or a
+count of its `Summary` line such as `failed` or `timed out` is refused. `cascade-talk`, an
+example, is not read: its run ends by Ctrl-C, and the example exits 0 also when its run ended
+Failed, so neither its output nor its exit status tells a completed run from a failed one. The
+program exits 2 for it. A line the example printed only for a run that completed would make it
+readable. The call for the record of `workspace-tests`:
 
 ```sh
 cargo run -q -p inference-docs -- assess --project inference --assessment workspace-tests \
@@ -143,10 +156,12 @@ adapters, tests and commands `adapters.rs`, and for the program `assess.rs`. It 
   `crates/inference-docs/tests/fixtures/assess/`, writes another record than the expected file,
   writes a record that the rules above refuse in the place of a committed one, reads a printed
   measure by a text that no `println!`, `eprintln!`, `print!`, `format!`, `write!` or
-  `writeln!` of the source of its command writes in one string literal with the text its value
-  follows, or writes a record from a file that lacks what the assessment reads. That check reads
-  the first string literal of each such macro outside comments; it does not read a literal built
-  by `concat!` or a format string held in a variable, and it does not know that the macro runs.
+  `writeln!` of the source of its command writes in one string literal, with the text its value
+  follows after it and a `{...}` placeholder right after that text, past spaces only, or writes
+  a record from a file that lacks what the assessment reads. That check reads the first string
+  literal of each such macro outside comments; it does not read a literal built by `concat!` or
+  a format string held in a variable, and it does not know that the macro runs or what the
+  placeholder prints.
 
 One command stands in no `cmds` list of `Taskfile.yml` and names no test or example of a
 package, so the test holds it against nothing. A change of the workflow step that runs it goes
@@ -321,7 +336,10 @@ baseline names the two files and no run.
 - Baseline: 8.011 s. Check run.
 
 The same run gives the coverage of this assessment, which the record holds: 3059 tests run,
-3059 passed, 72 skipped. Recorded, no bound. `task test-run` has two more parts that this
+3059 passed. Recorded, no bound. The `Summary` line of the run's log also says 72 tests skipped.
+No record holds that number: cargo-nextest writes no skipped test into its JUnit report, so
+`nextest-run@1` does not report `skipped`, and its record has 0 there, as Ratchet's format says
+for a count an assessor does not report. `task test-run` has two more parts that this
 assessment does not cover: the stack test (23 tests run, 23 passed) and the doc tests (38
 passed). Check run.
 

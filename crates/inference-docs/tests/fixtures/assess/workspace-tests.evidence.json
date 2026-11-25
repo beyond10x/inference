@@ -26,7 +26,7 @@
     "coverage": {
       "unit": "test",
       "executed": 20,
-      "skipped": 1,
+      "skipped": 0,
       "not_run": 0,
       "unsupported": 0,
       "passed": 19,

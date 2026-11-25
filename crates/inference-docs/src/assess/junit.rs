@@ -4,7 +4,14 @@
 //! in `classname`, its path in the binary in `name` and its time in seconds in `time`. A
 //! `<failure>` or an `<error>` in a test case is a test that failed, a `<skipped>` one that did
 //! not run; every other test case passed, also one with a `<flakyFailure>`, which nextest writes
-//! for a test that passed on a retry.
+//! for a test that passed on a retry. cargo-nextest 0.9.143 writes no ignored test into its
+//! report, so a report of it holds no `<skipped>`: the reader counts the element where another
+//! writer writes it, and no assessor of the program reports that count.
+//!
+//! A named test `<file>::<function>` is the test case whose name is the module path of the file
+//! in its binary, the inline modules around the function in the file, and the function. The
+//! inline modules are read from the text of the file: the `mod <name> {` blocks open where its
+//! `fn <function>` stands, past comments, strings and characters.
 //!
 //! A `<testcase>` anywhere else, directly under the root, in a `<testsuite>` inside another one
 //! or inside any other element, is not read as a test: the report names it in
@@ -359,8 +366,9 @@ impl Place {
     }
 
     /// Whether `case` is the test `function` of a file at this place: its name is the module
-    /// path of the file in its binary and the function, or that path, `tests` and the function.
-    fn holds(&self, case: &Case, function: &str) -> bool {
+    /// path of the file in its binary, the inline modules around one definition of the function
+    /// in the file (one entry of `inline` each), and the function.
+    fn holds(&self, case: &Case, function: &str, inline: &[Vec<String>]) -> bool {
         let binary = case.binary();
         let mut paths: Vec<Vec<&str>> = Vec::new();
         match self {
@@ -388,9 +396,9 @@ impl Place {
             }
         }
         paths.into_iter().any(|path| {
-            let mut inline = path.clone();
-            inline.push("tests");
-            [path, inline].into_iter().any(|mut path| {
+            inline.iter().any(|modules| {
+                let mut path = path.clone();
+                path.extend(modules.iter().map(String::as_str));
                 path.push(function);
                 case.name == path.join("::")
             })
@@ -406,25 +414,195 @@ pub(super) enum Lookup<'r> {
     Many(Vec<&'r Case>),
     /// The file of the name is under no `src/` or `tests/`.
     Unplaced,
+    /// The file of the name cannot be read: why.
+    Unread(String),
+    /// The file of the name defines no function of the name.
+    Undefined,
 }
 
-/// The test case of `report` that the named test `<file>::<function>` of `package` is.
-pub(super) fn named<'r>(report: &'r Report, package: &str, test: &str) -> Lookup<'r> {
-    let Some(place) = test
+/// The test case of `report` that the named test `<file>::<function>` of `package` is, with the
+/// text of the file that `read` gives for its path.
+pub(super) fn named<'r>(
+    report: &'r Report,
+    package: &str,
+    test: &str,
+    read: impl FnOnce(&str) -> Result<String, String>,
+) -> Lookup<'r> {
+    let Some((place, file, function)) = test
         .split_once("::")
-        .and_then(|(file, function)| Some((Place::of(file)?, function)))
+        .and_then(|(file, function)| Some((Place::of(file)?, file, function)))
     else {
         return Lookup::Unplaced;
     };
-    let (place, function) = place;
+    let source = match read(file) {
+        Ok(source) => source,
+        Err(why) => return Lookup::Unread(why),
+    };
+    let inline = inline_modules(&source, function);
+    if inline.is_empty() {
+        return Lookup::Undefined;
+    }
     let found: Vec<&Case> = report
         .cases
         .iter()
-        .filter(|case| case.package() == package && place.holds(case, function))
+        .filter(|case| case.package() == package && place.holds(case, function, &inline))
         .collect();
     match found.len() {
         0 => Lookup::Absent,
         1 => Lookup::Found(found[0]),
         _ => Lookup::Many(found),
+    }
+}
+
+/// For each `fn <function>` of `source`, the names of the inline modules around it, outermost
+/// first: the `mod <name> {` blocks open where it stands, whatever attribute they carry. Line and
+/// block comments, string, raw string and character literals open and close nothing. Empty when
+/// `source` defines no such function.
+fn inline_modules(source: &str, function: &str) -> Vec<Vec<String>> {
+    let text: Vec<char> = source.chars().collect();
+    let mut found = Vec::new();
+    // One entry for each open brace: the module it opens, if it opens one.
+    let mut open: Vec<Option<String>> = Vec::new();
+    let mut module: Option<String> = None;
+    let mut at = 0;
+    while at < text.len() {
+        match text[at] {
+            '/' if text.get(at + 1) == Some(&'/') => {
+                while at < text.len() && text[at] != '\n' {
+                    at += 1;
+                }
+            }
+            '/' if text.get(at + 1) == Some(&'*') => at = block_comment_end(&text, at),
+            '"' => at = string_end(&text, at + 1, None),
+            '\'' => at = character_end(&text, at),
+            '{' => {
+                open.push(module.take());
+                at += 1;
+            }
+            '}' => {
+                open.pop();
+                module = None;
+                at += 1;
+            }
+            ';' => {
+                module = None;
+                at += 1;
+            }
+            character if character.is_alphabetic() || character == '_' => {
+                let (word, end) = word_at(&text, at);
+                at = end;
+                if matches!(word.as_str(), "r" | "br" | "cr")
+                    && matches!(text.get(at), Some('"' | '#'))
+                {
+                    let mut hashes = 0;
+                    while text.get(at) == Some(&'#') {
+                        hashes += 1;
+                        at += 1;
+                    }
+                    if text.get(at) == Some(&'"') {
+                        at = string_end(&text, at + 1, Some(hashes));
+                    }
+                    continue;
+                }
+                let next = next_word(&text, at);
+                match word.as_str() {
+                    "mod" => module = next.map(|(name, _)| name),
+                    "fn" => {
+                        if let Some((name, after)) = next
+                            && name == function
+                            && matches!(text.get(next_character(&text, after)), Some('(' | '<'))
+                        {
+                            found.push(open.iter().flatten().cloned().collect());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    found
+}
+
+/// The identifier that starts at `at`, and where it ends.
+fn word_at(text: &[char], mut at: usize) -> (String, usize) {
+    let start = at;
+    while text
+        .get(at)
+        .is_some_and(|character| character.is_alphanumeric() || *character == '_')
+    {
+        at += 1;
+    }
+    (text[start..at].iter().collect(), at)
+}
+
+/// Where the first character after `at` that is no white space stands.
+fn next_character(text: &[char], mut at: usize) -> usize {
+    while text
+        .get(at)
+        .is_some_and(|character| character.is_whitespace())
+    {
+        at += 1;
+    }
+    at
+}
+
+/// The identifier after the white space at `at`, and where it ends.
+fn next_word(text: &[char], at: usize) -> Option<(String, usize)> {
+    let at = next_character(text, at);
+    let (word, end) = word_at(text, at);
+    (end > at).then_some((word, end))
+}
+
+/// Where the block comment that starts at `at` ends, its nested comments with it.
+fn block_comment_end(text: &[char], mut at: usize) -> usize {
+    let mut depth = 0_usize;
+    while at < text.len() {
+        if text[at] == '/' && text.get(at + 1) == Some(&'*') {
+            depth += 1;
+            at += 2;
+        } else if text[at] == '*' && text.get(at + 1) == Some(&'/') {
+            depth = depth.saturating_sub(1);
+            at += 2;
+            if depth == 0 {
+                return at;
+            }
+        } else {
+            at += 1;
+        }
+    }
+    text.len()
+}
+
+/// Where the string whose text starts at `at` ends: at its `"`, after an escape in a plain one,
+/// or at its `"` with `hashes` times `#` in a raw one.
+fn string_end(text: &[char], mut at: usize, hashes: Option<usize>) -> usize {
+    while at < text.len() {
+        match (text[at], hashes) {
+            ('\\', None) => at += 2,
+            ('"', None) => return at + 1,
+            ('"', Some(hashes))
+                if text
+                    .get(at + 1..at + 1 + hashes)
+                    .is_some_and(|after| after.iter().all(|character| *character == '#')) =>
+            {
+                return at + 1 + hashes;
+            }
+            _ => at += 1,
+        }
+    }
+    text.len()
+}
+
+/// Where the character literal that starts at `at` ends, or the character after the `'` of a
+/// lifetime or a label.
+fn character_end(text: &[char], at: usize) -> usize {
+    match (text.get(at + 1), text.get(at + 2)) {
+        (Some('\\'), _) => text
+            .get(at + 3..)
+            .and_then(|rest| rest.iter().position(|character| *character == '\''))
+            .map_or(text.len(), |end| at + 3 + end + 1),
+        (Some(_), Some('\'')) => at + 3,
+        _ => at + 1,
     }
 }

@@ -41,6 +41,7 @@ assertion `left == right` failed: the recognition &lt;failed&gt; &amp; ended</fa
     </testsuite>
     <testsuite name="inference-openai::duplex" tests="2" skipped="1" errors="0" failures="0">
         <testcase name="a_silent_provider_fails_the_session_as_stalled_at_the_bound" classname="inference-openai::duplex" timestamp="2026-11-24T21:02:06.700+01:00" time="2.607"/>
+        <!-- cargo-nextest 0.9.143 writes no ignored test into its report. The skipped element below is the form other JUnit writers give a skipped test: the program counts it and compares the count with the root, and no assessor of the program reports it. -->
         <testcase name="a_live_session_answers" classname="inference-openai::duplex" timestamp="2026-11-24T21:02:06.700+01:00" time="0.000">
             <skipped/>
         </testcase>

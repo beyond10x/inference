@@ -1,7 +1,8 @@
 //! `assess`: writes the `ratchet-evidence/1` document of one assessment from a file a run left
 //! behind. It runs no measure; it reads what a run wrote.
 //!
-//! The call is Ratchet's call of an assessor, with two arguments of this program's own:
+//! The call is Ratchet's call of an assessor, with five arguments of this program's own, two of
+//! them in every call:
 //!
 //! ```sh
 //! inference-docs assess --project inference --assessment workspace-tests --root . --class ci \
@@ -10,9 +11,9 @@
 //! ```
 //!
 //! `--from` is the file the run left, `--source` what the document names as its origin: an http
-//! or https URL, which is a forge run, or a path from the root that does not leave it.
-//! `--started-at` and `--ended-at` give the times of a run whose file holds none, and
-//! `--exit-status` the exit status of the command whose output is read.
+//! or https URL, which is a forge run, without user info, or a path of a file from the root that
+//! does not leave it. `--started-at` and `--ended-at` give the times of a run whose file holds
+//! none, and `--exit-status` the exit status of the command whose output is read.
 //!
 //! It finds the assessment in the plan files `ratchet.toml` names and the assessor's declaration
 //! under the catalog sources there, and reads the file by the assessor:
@@ -21,10 +22,14 @@
 //!   report of cargo-nextest (`junit`); `capability-record@1` reads its value from the record and
 //!   whether the record's test passed from the report. A report whose root counts other tests,
 //!   failures, errors or skipped tests than the test cases it holds is refused, and so is one with
-//!   a test case outside a `<testsuite>` directly under the root.
-//! - `printed-duration@1` reads the output a live test or an example printed (`printed`), and
-//!   whether the run held: from the lines of `cargo test` or cargo-nextest for a test, from
-//!   `--exit-status` for an example. A run whose test failed is refused.
+//!   a test case outside a `<testsuite>` directly under the root. The name of a named test in the
+//!   report is read from its file under the root: its module path, the inline modules around the
+//!   function, and the function.
+//! - `printed-duration@1` reads the output a live test printed (`printed`), and whether the run
+//!   held, from the lines of `cargo test` or cargo-nextest, among them the closing line of the run.
+//!   A run whose test failed or that did not end is refused. The output of an example would take
+//!   its verdict from `--exit-status`; the one example with a single line per measure,
+//!   `cascade-talk`, is not read, since its exit status does not say whether its run held.
 //!
 //! The report or the output is the caller's choice: the document cannot tell which nextest
 //! profile wrote a report, and writes the `profile` input the plan names.
@@ -135,7 +140,7 @@ fn assess(arguments: &Arguments) -> Outcome<()> {
     let read = match plan.reader {
         Reader::NextestRun => nextest_run(&plan, &report(arguments)?)?,
         Reader::PackageTests => package_tests(&plan, &report(arguments)?)?,
-        Reader::NamedTests => named_tests(&plan, &report(arguments)?)?,
+        Reader::NamedTests => named_tests(&plan, &arguments.root, &report(arguments)?)?,
         Reader::CapabilityRecord => capability_record(arguments, &plan, &target)?,
         Reader::PrintedDuration => printed_duration(arguments, &plan, times.is_some())?,
     };
@@ -405,8 +410,9 @@ fn given_times(arguments: &Arguments) -> Outcome<Option<(i128, i128)>> {
     }
 }
 
-/// What `--source` names: an http or https URL, or a non-empty path from the root without `..`,
-/// a scheme or a leading `~`.
+/// What `--source` names: an http or https URL, its scheme in any case, without user info and
+/// without a `..` segment in its path; or a non-empty path of a file from the root, without
+/// `..`, `:`, `\` or a leading `~`, that names neither the root nor a directory.
 fn source(location: &str, reader: Reader) -> Outcome<Source> {
     let wrong = |why: &str| -> Outcome<Source> {
         Err(Failure::Call(format!(
@@ -419,27 +425,47 @@ fn source(location: &str, reader: Reader) -> Outcome<Source> {
                 .to_owned(),
         ));
     }
-    let url = location
-        .strip_prefix("https://")
-        .or_else(|| location.strip_prefix("http://"));
-    let kind = if let Some(rest) = url {
-        if rest.is_empty() || rest.starts_with('/') || location.contains(char::is_whitespace) {
+    let scheme = ["https://", "http://"].into_iter().find(|scheme| {
+        location
+            .get(..scheme.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
+    });
+    let kind = if let Some(scheme) = scheme {
+        let rest = &location[scheme.len()..];
+        let (authority, after) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
+        if authority.contains('@') {
+            return Err(Failure::Call(
+                "--source is a URL with user info before its host, which the record would make public; give the URL without it"
+                    .to_owned(),
+            ));
+        }
+        if authority.is_empty() {
             return wrong("a URL without a host");
+        }
+        if location.contains(char::is_whitespace) {
+            return wrong("a URL with white space");
+        }
+        let path = after.split(['?', '#']).next().unwrap_or_default();
+        if path.split('/').any(|segment| segment == "..") {
+            return wrong("a URL whose path leaves its directory with `..`");
         }
         "forge_runs"
     } else if location.is_empty() {
         return wrong("which is empty");
     } else if location.starts_with('~') {
         return wrong("a path from a home directory");
-    } else if location
-        .split_once(':')
-        .is_some_and(|(scheme, _)| !scheme.is_empty() && !scheme.contains('/'))
-    {
-        return wrong("a URL that is not http or https");
+    } else if location.contains(':') {
+        return wrong("a URL that is not http or https, or a path with `:`");
     } else if location.contains('\\') {
         return wrong("a path with `\\`");
     } else if location.split('/').any(|part| part == "..") {
         return wrong("a path that leaves the root");
+    } else if location
+        .rsplit('/')
+        .next()
+        .is_some_and(|last| last.is_empty() || last == ".")
+    {
+        return wrong("the root or a directory, not the file a run left");
     } else if reader == Reader::PrintedDuration {
         "build_pool_log"
     } else {
@@ -963,15 +989,28 @@ fn package_tests(plan: &Plan, report: &Report) -> Outcome<Read> {
     })
 }
 
-/// The case of the named test, or the line that refuses the report.
+/// The case of the named test, read with its file under `root`, or the line that refuses the
+/// report.
 fn named_case<'r>(
     plan: &Plan,
+    root: &Path,
     report: &'r Report,
     package: &str,
     test: &str,
 ) -> Outcome<Result<&'r junit::Case, String>> {
     let id = &plan.id;
-    Ok(match junit::named(report, package, test) {
+    let read = |file: &str| {
+        fs::read_to_string(root.join(file))
+            .map_err(|error| format!("{file} cannot be read: {error}"))
+    };
+    Ok(match junit::named(report, package, test, read) {
+        Lookup::Unread(why) => Err(format!("{id}: {why}")),
+        Lookup::Undefined => {
+            let (file, function) = test.split_once("::").unwrap_or((test, ""));
+            Err(format!(
+                "{id}: {file} holds no function {function}, which the named test {test} names"
+            ))
+        }
         Lookup::Found(case) if case.verdict == Verdict::Skipped => Err(format!(
             "{id}: the report holds the test {test} of the package {package} as skipped"
         )),
@@ -997,7 +1036,7 @@ fn named_case<'r>(
 }
 
 /// `named-tests@1`: whether each named test passed.
-fn named_tests(plan: &Plan, report: &Report) -> Outcome<Read> {
+fn named_tests(plan: &Plan, root: &Path, report: &Report) -> Outcome<Read> {
     let package = plan
         .input("package")
         .and_then(Yaml::as_str)
@@ -1008,7 +1047,7 @@ fn named_tests(plan: &Plan, report: &Report) -> Outcome<Read> {
     let mut results = Vec::new();
     let mut refused = Vec::new();
     for test in &tests {
-        let case = match named_case(plan, report, &package, test)? {
+        let case = match named_case(plan, root, report, &package, test)? {
             Ok(case) => case,
             Err(line) => {
                 refused.push(line);
@@ -1077,7 +1116,7 @@ fn capability_record(arguments: &Arguments, plan: &Plan, target: &Resolved) -> O
     };
     let report = report(arguments)?;
     let test = format!("{directory}/{RECORD_TEST}");
-    let case = match named_case(plan, &report, package, &test)? {
+    let case = match named_case(plan, &arguments.root, &report, package, &test)? {
         Ok(case) if case.verdict == Verdict::Failed => {
             refused.push(format!(
                 "{id}: the report holds the test {test} of the package {package} as failed"
@@ -1125,6 +1164,11 @@ fn capability_record(arguments: &Arguments, plan: &Plan, target: &Resolved) -> O
 /// `printed-duration@1`: one value per measure from the output a command printed.
 fn printed_duration(arguments: &Arguments, plan: &Plan, timed: bool) -> Outcome<Read> {
     let id = &plan.id;
+    if let Some(why) = printed::not_read(id) {
+        return Err(Failure::Call(format!(
+            "{id}: {why}; the program reads no record of it"
+        )));
+    }
     let mut labels = Vec::new();
     for (name, measurement) in plan.measurements() {
         let label = match (
@@ -1167,7 +1211,7 @@ fn printed_duration(arguments: &Arguments, plan: &Plan, timed: bool) -> Outcome<
             arguments.from.display()
         )])
     })?;
-    let output = String::from_utf8_lossy(&bytes);
+    let output = printed::plain(&String::from_utf8_lossy(&bytes));
     let mut refused: Vec<String> = printed::skipped(&output)
         .into_iter()
         .map(|line| format!("{id}: the output says a test skipped: `{line}`"))
@@ -1177,20 +1221,9 @@ fn printed_duration(arguments: &Arguments, plan: &Plan, timed: bool) -> Outcome<
     {
         refused.push(format!("{id}: its command exited {status}"));
     }
-    if !example {
-        match printed::verdict(&output) {
-            printed::Ran::Failed(lines) => {
-                refused.extend(lines.into_iter().map(|line| format!("{id}: {line}")));
-            }
-            printed::Ran::Passed => {}
-            printed::Ran::Unknown => {
-                if arguments.exit_status.is_none() {
-                    refused.push(format!(
-                        "{id}: the output holds no `test result:` line and no line of cargo-nextest that says whether a test passed; give --exit-status"
-                    ));
-                }
-            }
-        }
+    let measures: Vec<&str> = labels.iter().map(|(_, _, line, _)| *line).collect();
+    if !example && let Err(lines) = printed::verdict(&output, &measures) {
+        refused.extend(lines.into_iter().map(|line| format!("{id}: {line}")));
     }
     let mut results = Vec::new();
     for (name, measurement, line, after) in labels {

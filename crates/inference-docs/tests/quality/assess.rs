@@ -6,9 +6,10 @@
 //! committed records, against the rest of this check.
 //!
 //! Every case runs the program on a root of its own under the target's scratch directory: the
-//! plan files, the assessor declarations and `ratchet.toml` copied from the tree, and the pins of
-//! the tools, the manifest of `inference-sherpa-onnx` and its capability record written from the
-//! fixtures, so that a new toolchain or a release does not change what a case expects.
+//! plan files, the assessor declarations, `ratchet.toml` and the files of the named tests the
+//! cases read copied from the tree, and the pins of the tools, the manifest of
+//! `inference-sherpa-onnx` and its capability record written from the fixtures, so that a new
+//! toolchain or a release does not change what a case expects.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -28,6 +29,14 @@ const CHECK_RUN: &str = "https://github.com/beyond10x/inference/actions/runs/454
 const STARTED: &str = "2026-11-25T10:00:00Z";
 const ENDED: &str = "2026-11-25T10:00:09Z";
 const SHERPA_RECORD: &str = "adapters/inference-sherpa-onnx/records/stt-i9-10900k-cpu.json";
+/// The files of the named tests the cases read: the program reads the inline modules around a
+/// named test from its file.
+const NAMED_FILES: [&str; 4] = [
+    "crates/inference-docs/src/adapters.rs",
+    "crates/inference-docs/src/status.rs",
+    "adapters/inference-sherpa-onnx/tests/stt_record.rs",
+    "adapters/inference-whispercpp/tests/stt_record.rs",
+];
 
 fn fixture(name: &str) -> PathBuf {
     root()
@@ -56,6 +65,7 @@ fn scratch_root() -> PathBuf {
     ));
     let _ = fs::remove_dir_all(&directory);
     let mut copied = vec!["ratchet.toml".to_owned()];
+    copied.extend(NAMED_FILES.map(str::to_owned));
     for (from, suffix) in [
         ("quality", ".ratchet.yaml"),
         ("quality/assessors", ".assessor.yaml"),
@@ -405,9 +415,6 @@ fn every_printed_form_of_a_duration_is_read_as_milliseconds() {
     let printed = "P1: 52 characters with flush, no close\nP1 result: first audio Some(312) ms, last audio Some(1500) ms, audio 48000 B (1500 ms), final true\n";
     let written = from_output(&root, "elevenlabs-cancel-probe", printed).written();
     assert_eq!(values(&written), ["312"]);
-    let printed = "[committed input to first playable audio: Some(640.25ms)]\n[interruption to playback stop: 18ms]\n";
-    let written = printed_call(&root, "cascade-talk", printed, &["--exit-status", "0"]).written();
-    assert_eq!(values(&written), ["640.25", "18"]);
 }
 
 #[test]
@@ -832,33 +839,50 @@ fn printed_literals(source: &str) -> Vec<String> {
     literals
 }
 
-/// Whether a printing macro of `source` writes `label`, and `marker` after it, in one literal.
+/// Whether a printing macro of `source` writes `label`, and `marker` after it, in one literal,
+/// with a `{...}` placeholder after the label, or after the last `marker` behind it, past spaces
+/// only: where the program reads the value.
 fn prints(source: &str, label: &str, marker: Option<&str>) -> bool {
     printed_literals(source).iter().any(|literal| {
-        literal
-            .split_once(label)
-            .is_some_and(|(_, after)| marker.is_none_or(|marker| after.contains(marker)))
+        let Some((_, after)) = literal.split_once(label) else {
+            return false;
+        };
+        let value = match marker {
+            None => after,
+            Some(marker) => match after.rfind(marker) {
+                Some(at) => &after[at + marker.len()..],
+                None => return false,
+            },
+        };
+        let value = value.trim_start_matches(' ');
+        value.starts_with('{') && !value.starts_with("{{") && value.contains('}')
     })
 }
 
-/// The check of the labels below holds only what a printing macro writes.
+/// The check of the labels below holds only what a printing macro writes, and only where the
+/// value follows its label.
 #[test]
 fn the_label_check_takes_a_label_only_from_the_text_a_printing_macro_writes() {
     let printed =
         "fn run() {\n    println!(\"first delta {:?} after the start: {:?}\", a, b);\n}\n";
     assert!(prints(printed, "first delta", None));
-    assert!(prints(printed, "first delta", Some("after the start")));
+    assert!(prints(printed, "first delta", Some("after the start:")));
+    assert!(!prints(printed, "first delta", Some("after the start")));
+    let escaped_brace = "fn run() {\n    println!(\"first delta {{none}} {:?}\", a);\n}\n";
+    assert!(!prints(escaped_brace, "first delta", None));
     let commented = "//! Cancels it after the first delta and checks the slots.\nfn run() {\n    // first delta\n    /* first delta */\n    println!(\"done\");\n}\n";
     assert!(!prints(commented, "first delta", None));
     let panicked = "fn run() {\n    panic!(\"the usage was taken before its first delta: {x:?}\");\n    assert!(ok, \"first delta\");\n}\n";
     assert!(!prints(panicked, "first delta", None));
     let without_marker = "fn run() {\n    println!(\"P1 result: last audio {:?} ms\", a);\n}\n";
-    assert!(prints(without_marker, "P1 result:", None));
+    assert!(prints(without_marker, "P1 result:", Some("last audio")));
+    assert!(!prints(without_marker, "P1 result:", None));
     assert!(!prints(without_marker, "P1 result:", Some("first audio")));
     let marker_before = "fn run() {\n    println!(\"first audio then P1 result: {:?}\", a);\n}\n";
     assert!(!prints(marker_before, "P1 result:", Some("first audio")));
     let escaped = "fn run() {\n    writeln!(out, \"[\\\"x\\\"] closed in {} ms: {c:?}\", t)?;\n    let c = 'a';\n    let q = '\\'';\n    let s: &'static str = \"closed in\";\n}\n";
-    assert!(prints(escaped, "closed in", Some(" ms")));
+    assert!(prints(escaped, "closed in", None));
+    assert!(!prints(escaped, "closed in", Some(" ms")));
     assert_eq!(
         printed_literals(escaped).len(),
         1,
@@ -869,9 +893,10 @@ fn the_label_check_takes_a_label_only_from_the_text_a_printing_macro_writes() {
 
 /// The program finds a printed measure by the text before its value, and for some by a second
 /// text the value follows. A printing macro of the source of the measure's command writes both,
-/// the second after the first, in one string literal: run on an output that holds no measure,
-/// the program names, for each measure of a plan of `printed-duration@1` that it reads, the text
-/// it found no line of and the text its value follows.
+/// the second after the first, in one string literal, with a placeholder right after the one
+/// the value follows: run on an output that holds no measure, the program names, for each
+/// measure of a plan of `printed-duration@1` that it reads, the text it found no line of and the
+/// text its value follows.
 #[test]
 fn every_printed_measure_the_program_reads_has_its_label_in_the_source_of_its_command() {
     let root_directory = scratch_root();
@@ -905,7 +930,10 @@ fn every_printed_measure_the_program_reads_has_its_label_in_the_source_of_its_co
             if run.status == Some(2) {
                 assert!(
                     run.stderr
-                        .contains("the program reads no single printed line of this measure"),
+                        .contains("the program reads no single printed line of this measure")
+                        || run.stderr.contains(
+                            "its exit status does not tell a completed run from a failed one"
+                        ),
                     "{id}: {}",
                     run.stderr
                 );
@@ -939,7 +967,7 @@ fn every_printed_measure_the_program_reads_has_its_label_in_the_source_of_its_co
             }
         }
     }
-    assert_eq!(read.len(), 14, "the printed measures read: {read:?}");
+    assert_eq!(read.len(), 12, "the printed measures read: {read:?}");
 }
 
 /// Two commands print the text of their measure on more than one line in every run that ends:
@@ -972,7 +1000,8 @@ fn two_commands_that_print_their_measure_more_than_once_per_run_are_not_read() {
 }
 
 /// The output of `cargo test` says whether the measured test passed. A run whose test passed is
-/// one passed run.
+/// one passed run: its closing line, `test result: ok.` of cargo test or `Summary` of
+/// cargo-nextest, says that its tests passed.
 #[test]
 fn the_output_of_a_live_test_that_passed_is_one_passed_run() {
     let root = scratch_root();
@@ -980,7 +1009,7 @@ fn the_output_of_a_live_test_that_passed_is_one_passed_run() {
     let written = printed_call(&root, "openai-gpt-live", printed, &[]).written();
     assert_eq!(values(&written), ["812", "95"]);
     assert_eq!(coverage(&written), [1, 1, 0]);
-    let nextest = "started in 812 ms: SessionId(\"s-1\")\nclosed in 95 ms: Ok(Closed)\n        PASS [  21.400s] (1/1) inference-openai::live_gpt the_client_hears_speech_and_answers_with_audio_and_transcript\n";
+    let nextest = "started in 812 ms: SessionId(\"s-1\")\nclosed in 95 ms: Ok(Closed)\n        PASS [  21.400s] (1/1) inference-openai::live_gpt the_client_hears_speech_and_answers_with_audio_and_transcript\n────────────\n     Summary [  21.400s] 1 test run: 1 passed, 2 skipped\n";
     let written = printed_call(&root, "openai-gpt-live", nextest, &[]).written();
     assert_eq!(coverage(&written), [1, 1, 0]);
 }
@@ -1005,11 +1034,14 @@ fn the_output_of_a_live_test_that_failed_gives_no_record() {
             "openai-gpt-live: the output says `test result: FAILED. 2 passed; 1 failed;",
         ],
     );
-    let cut = format!("{measures}test {test} ... {panic}");
-    printed_call(&root, "openai-gpt-live", &cut, &[]).ended(
-        1,
-        &[format!("openai-gpt-live: the output says the test {test} panicked").as_str()],
-    );
+    let pinned_panic = panic.replacen("' panicked at", "' (4123015) panicked at", 1);
+    for panic in [&panic, &pinned_panic] {
+        let cut = format!("{measures}test {test} ... {panic}");
+        printed_call(&root, "openai-gpt-live", &cut, &[]).ended(
+            1,
+            &[format!("openai-gpt-live: the output says the test {test} panicked").as_str()],
+        );
+    }
     let nextest =
         format!("{measures}        FAIL [  21.400s] (1/1) inference-openai::live_gpt {test}\n");
     printed_call(&root, "openai-gpt-live", &nextest, &[]).ended(
@@ -1026,31 +1058,29 @@ fn the_output_of_a_live_test_that_failed_gives_no_record() {
         &["--exit-status", "101"],
     )
     .ended(1, &["openai-gpt-live: its command exited 101"]);
-    printed_call(&root, "openai-gpt-live", measures, &[]).ended(
-        1,
-        &["openai-gpt-live: the output holds no `test result:` line and no line of cargo-nextest that says whether a test passed; give --exit-status"],
-    );
-    let written =
-        printed_call(&root, "openai-gpt-live", measures, &["--exit-status", "0"]).written();
-    assert_eq!(coverage(&written), [1, 1, 0]);
+    let without: &[&str] = &[];
+    for status in [without, &["--exit-status", "0"]] {
+        printed_call(&root, "openai-gpt-live", measures, status).ended(
+            1,
+            &["openai-gpt-live: the output ends before the closing line of its run"],
+        );
+    }
 }
 
-/// The output of an example holds no verdict of a test: the exit status of its command, given
-/// with `--exit-status`, says whether the run held.
+/// `cascade-talk` ends by an interrupt (Ctrl-C), and its example exits 0 also when its run ended
+/// Failed: neither its output nor its exit status tells a completed run from a failed one. The
+/// program reads no record of it, with or without an exit status.
 #[test]
-fn the_output_of_an_example_takes_its_verdict_from_the_exit_status_of_its_command() {
+fn the_output_of_an_example_whose_exit_status_does_not_say_whether_its_run_held_is_not_read() {
     let root = scratch_root();
-    let printed =
-        "[committed input to first playable audio: 640ms]\n[interruption to playback stop: 18ms]\n";
-    printed_call(&root, "cascade-talk", printed, &[]).ended(
-        2,
-        &["cascade-talk: the output of an example holds no verdict; give --exit-status, the exit status of its command"],
-    );
-    let written = printed_call(&root, "cascade-talk", printed, &["--exit-status", "0"]).written();
-    assert_eq!(values(&written), ["640", "18"]);
-    assert_eq!(coverage(&written), [1, 1, 0]);
-    printed_call(&root, "cascade-talk", printed, &["--exit-status", "130"])
-        .ended(1, &["cascade-talk: its command exited 130"]);
+    let printed = "[committed input to first playable audio: 640ms]\n[interruption to playback stop: 18ms]\n[egress to 203.0.113.7:443: the run failed]\n[the run ended Failed]\n";
+    let without: &[&str] = &[];
+    for status in [without, &["--exit-status", "0"], &["--exit-status", "130"]] {
+        printed_call(&root, "cascade-talk", printed, status).ended(
+            2,
+            &["cascade-talk: its run ends by an interrupt (Ctrl-C), and its exit status does not tell a completed run from a failed one"],
+        );
+    }
 }
 
 /// A named test `<file>::<function>` is the function of that file. A test of the same name in a
@@ -1074,8 +1104,10 @@ fn a_test_of_the_same_name_in_another_module_does_not_hold_a_named_test() {
 }
 
 /// Adds the assessment `placed` of `named-tests@1`, for the one test `test` of the package
-/// `inference-example`, to the plans of `root`.
-fn plan_one_named_test(root: &Path, test: &str) {
+/// `inference-example`, to the plans of `root`, and writes `source` as the file of the test.
+fn plan_one_named_test(root: &Path, test: &str, source: &str) {
+    let (file, _) = test.split_once("::").expect("<file>::<function>");
+    place(root, file, source);
     let plan = format!(
         "format: ratchet/1\nproject: inference\n\nassessments:\n  placed:\n    subject: source-tree\n    assessor: named-tests@1\n    inputs:\n      package: inference-example\n      tests:\n        - {test}\n    target: {{kind: revision, environments: [ci], selection: candidate}}\n    observation:\n      kind: snapshot\n      command: task test-run\n    measurements:\n      held: {{kind: exact, output: passed, scope: test}}\n"
     );
@@ -1094,8 +1126,8 @@ fn plan_one_named_test(root: &Path, test: &str) {
     }
 }
 
-/// Whether the report of one test case `<classname> <name>` holds the named test of `placed`.
-fn holds(root: &Path, classname: &str, name: &str) -> bool {
+/// A report of one passed test case `<classname> <name>`, at `one.junit.xml` under `root`.
+fn one_case_report(root: &Path, classname: &str, name: &str) -> PathBuf {
     let report = root.join("one.junit.xml");
     fs::write(
         &report,
@@ -1104,6 +1136,12 @@ fn holds(root: &Path, classname: &str, name: &str) -> bool {
         ),
     )
     .expect("the report is written");
+    report
+}
+
+/// Whether the report of one test case `<classname> <name>` holds the named test of `placed`.
+fn holds(root: &Path, classname: &str, name: &str) -> bool {
+    let report = one_case_report(root, classname, name);
     let run = from_check_run(root, "placed", &report);
     match run.status {
         Some(0) => true,
@@ -1112,18 +1150,31 @@ fn holds(root: &Path, classname: &str, name: &str) -> bool {
     }
 }
 
-/// A named test is held only by a test case whose name is the module path of its file and the
-/// function, or that path, `tests` and the function: nothing between them, nothing before them.
+/// A file whose named test stands in a `mod tests`, with a function of the same name outside it
+/// in no other place.
+const IN_TESTS: &str = "pub fn rule() -> bool {\n    true\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn the_rule_holds() {\n        assert!(rule());\n    }\n}\n";
+
+/// A file whose named test stands outside its `mod tests`.
+const AT_THE_TOP: &str = "#[test]\nfn the_rule_holds() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn another_rule_holds() {}\n}\n";
+
+/// A file whose named test stands in two inline modules, after a module that closed before it,
+/// with a `mod`, a brace and a quote in comments, strings and characters that open no module.
+const NESTED: &str = "mod helpers {\n    pub fn wait() {}\n}\n\n#[cfg(feature = \"live\")]\nmod live {\n    use super::*;\n\n    // mod commented {\n    /* mod blocked { /* } */ } */\n    const TEXT: &str = \"mod quoted { \\\" }\";\n    const RAW: &str = r#\"mod raw { \" }\"#;\n    const BRACE: char = '{';\n    const QUOTE: char = '\\'';\n\n    pub(crate) mod nested {\n        fn helper<'a>(text: &'a str) -> &'a str {\n            text\n        }\n\n        #[tokio::test]\n        async fn the_bound_holds() {\n            let _ = (helper(\"}\"), '}');\n        }\n    }\n}\n";
+
+/// A named test is held only by the test case whose name is the module path of its file, the
+/// inline modules around its function in that file, and the function: nothing between them,
+/// nothing before them, and `tests` only where the file has the function in a `mod tests`.
 #[test]
 fn a_named_test_is_held_only_by_the_module_path_of_its_file_and_its_function() {
     let root = scratch_root();
     let library = "inference-example";
     let binary = "inference-example::bin/inference-example";
-    plan_one_named_test(&root, "crates/example/src/status.rs::the_rule_holds");
+    let status = "crates/example/src/status.rs::the_rule_holds";
+    plan_one_named_test(&root, status, IN_TESTS);
     for (classname, name, expected) in [
         (library, "status::tests::the_rule_holds", true),
-        (library, "status::the_rule_holds", true),
         (binary, "status::tests::the_rule_holds", true),
+        (library, "status::the_rule_holds", false),
         (library, "status::legacy::tests::the_rule_holds", false),
         (library, "legacy::status::tests::the_rule_holds", false),
         (library, "status::tests::inner::the_rule_holds", false),
@@ -1137,13 +1188,25 @@ fn a_named_test_is_held_only_by_the_module_path_of_its_file_and_its_function() {
         assert_eq!(
             holds(&root, classname, name),
             expected,
-            "src: {classname} {name}"
+            "src, in mod tests: {classname} {name}"
         );
     }
-    plan_one_named_test(&root, "crates/example/tests/stall.rs::the_bound_holds");
+    plan_one_named_test(&root, status, AT_THE_TOP);
+    for (classname, name, expected) in [
+        (library, "status::the_rule_holds", true),
+        (library, "status::tests::the_rule_holds", false),
+    ] {
+        assert_eq!(
+            holds(&root, classname, name),
+            expected,
+            "src, at the top: {classname} {name}"
+        );
+    }
+    let stall = "crates/example/tests/stall.rs::the_bound_holds";
+    plan_one_named_test(&root, stall, "#[test]\nfn the_bound_holds() {}\n");
     for (classname, name, expected) in [
         ("inference-example::stall", "the_bound_holds", true),
-        ("inference-example::stall", "tests::the_bound_holds", true),
+        ("inference-example::stall", "tests::the_bound_holds", false),
         ("inference-example::stall", "inner::the_bound_holds", false),
         ("inference-example::other", "the_bound_holds", false),
         (library, "the_bound_holds", false),
@@ -1154,9 +1217,29 @@ fn a_named_test_is_held_only_by_the_module_path_of_its_file_and_its_function() {
             "tests/x.rs: {classname} {name}"
         );
     }
+    plan_one_named_test(&root, stall, NESTED);
+    for (name, expected) in [
+        ("live::nested::the_bound_holds", true),
+        ("live::the_bound_holds", false),
+        ("nested::the_bound_holds", false),
+        ("the_bound_holds", false),
+        ("helpers::live::nested::the_bound_holds", false),
+        ("live::commented::nested::the_bound_holds", false),
+        ("live::blocked::nested::the_bound_holds", false),
+        ("live::quoted::nested::the_bound_holds", false),
+        ("live::raw::nested::the_bound_holds", false),
+        ("tests::live::nested::the_bound_holds", false),
+    ] {
+        assert_eq!(
+            holds(&root, "inference-example::stall", name),
+            expected,
+            "tests/x.rs, nested: {name}"
+        );
+    }
     plan_one_named_test(
         &root,
         "crates/example/tests/quality/assess.rs::the_record_is_written",
+        "#[test]\nfn the_record_is_written() {}\n",
     );
     for (classname, name, expected) in [
         (
@@ -1172,7 +1255,7 @@ fn a_named_test_is_held_only_by_the_module_path_of_its_file_and_its_function() {
         (
             "inference-example::workflows",
             "quality::assess::tests::the_record_is_written",
-            true,
+            false,
         ),
         (
             "inference-example::workflows",
@@ -1197,6 +1280,201 @@ fn a_named_test_is_held_only_by_the_module_path_of_its_file_and_its_function() {
             "tests/dir: {classname} {name}"
         );
     }
+}
+
+/// The name of a named test is read from its file: a file that defines no function of that name,
+/// or that the root does not hold, gives no record, also from a report whose test case has the
+/// name the test would have.
+#[test]
+fn a_named_test_whose_file_does_not_define_it_or_is_not_in_the_root_is_refused() {
+    let root = scratch_root();
+    let report = one_case_report(&root, "inference-example", "status::tests::the_rule_holds");
+    plan_one_named_test(
+        &root,
+        "crates/example/src/status.rs::the_rule_holds",
+        "#[cfg(test)]\nmod tests {\n    // fn the_rule_holds() {}\n    const NAME: &str = \"fn the_rule_holds() {}\";\n}\n",
+    );
+    from_check_run(&root, "placed", &report).ended(
+        1,
+        &["placed: crates/example/src/status.rs holds no function the_rule_holds"],
+    );
+    plan_one_named_test(
+        &root,
+        "crates/example/src/status.rs::the_rule_holds",
+        IN_TESTS,
+    );
+    fs::remove_file(root.join("crates/example/src/status.rs")).expect("the file is removed");
+    from_check_run(&root, "placed", &report)
+        .ended(1, &["placed: crates/example/src/status.rs cannot be read"]);
+}
+
+/// The name cargo-nextest gives the named test `<file>::<function>` of `package`, the binary it
+/// gives it to, and the inline modules around the function: the module path of the file in its
+/// crate, each `mod <name> {` around the function, read here from the indentation of the file
+/// as rustfmt writes it, and the function.
+fn nextest_name(package: &str, test: &str) -> (String, String, usize) {
+    let (file, function) = test.split_once("::").expect("<file>::<function>");
+    let source =
+        fs::read_to_string(root().join(file)).unwrap_or_else(|error| panic!("{file}: {error}"));
+    let lines: Vec<&str> = source.lines().collect();
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let bare = |line: &str| -> String {
+        let mut rest = line.trim_start();
+        while let Some(after) = ["pub(crate) ", "pub(super) ", "pub ", "async ", "unsafe "]
+            .iter()
+            .find_map(|word| rest.strip_prefix(word))
+        {
+            rest = after;
+        }
+        rest.to_owned()
+    };
+    let at = lines
+        .iter()
+        .position(|line| {
+            let line = bare(line);
+            line.starts_with(&format!("fn {function}("))
+                || line.starts_with(&format!("fn {function}<"))
+        })
+        .unwrap_or_else(|| panic!("{file} has no line that starts the function {function}"));
+    let mut level = indent(lines[at]);
+    let mut inline = Vec::new();
+    for &line in lines[..at].iter().rev() {
+        if line.trim().is_empty() || indent(line) >= level {
+            continue;
+        }
+        level = indent(line);
+        if let Some(name) = bare(line)
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(" {"))
+        {
+            inline.push(name.to_owned());
+        }
+    }
+    inline.reverse();
+    let (classname, mut path) = if let Some((directory, rest)) = file.split_once("/src/") {
+        let source_directory = root().join(directory).join("src");
+        let binary = source_directory.join("main.rs").is_file()
+            && !source_directory.join("lib.rs").is_file();
+        let classname = if binary {
+            format!("{package}::bin/{package}")
+        } else {
+            package.to_owned()
+        };
+        let modules: Vec<String> = rest
+            .trim_end_matches(".rs")
+            .split('/')
+            .filter(|part| !matches!(*part, "lib" | "main" | "mod"))
+            .map(str::to_owned)
+            .collect();
+        (classname, modules)
+    } else if let Some((_, rest)) = file.split_once("/tests/")
+        && !rest.contains('/')
+    {
+        (
+            format!("{package}::{}", rest.trim_end_matches(".rs")),
+            Vec::new(),
+        )
+    } else {
+        panic!("{test}: this test gives no name of cargo-nextest to a test of {file}");
+    };
+    let modules = inline.len();
+    path.extend(inline);
+    path.push(function.to_owned());
+    (classname, path.join("::"), modules)
+}
+
+/// cargo-nextest names a test by its module path in its binary: the function of
+/// `tests/transport_deadlines.rs` that stands in the file's `mod live` is `live::<function>`.
+/// For every committed record of `named-tests@1`, a report in which its named tests passed under
+/// the names cargo-nextest gives them, with the record's class, revision and source, gives the
+/// committed record byte for byte.
+#[test]
+fn every_named_tests_record_comes_out_byte_equal_from_a_report_under_the_names_of_cargo_nextest() {
+    let root_directory = scratch_root();
+    let mut records: Vec<PathBuf> = fs::read_dir(root().join("quality/records"))
+        .expect("the records are listed")
+        .map(|entry| entry.expect("an entry of the directory").path())
+        .collect();
+    records.sort();
+    let mut checked = Vec::new();
+    let mut differ = Vec::new();
+    let mut inline = 0;
+    for record_path in records {
+        let committed = fs::read_to_string(&record_path).expect("the committed record is read");
+        let record: Value = serde_json::from_str(&committed).expect("the record is JSON");
+        if record.pointer("/evidence/assessor").and_then(Value::as_str) != Some("named-tests@1") {
+            continue;
+        }
+        let field = |pointer: &str| {
+            record
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{}: the record has {pointer}", record_path.display()))
+                .to_owned()
+        };
+        let id = field("/evidence/assessment");
+        let package = field("/evidence/inputs/package/value");
+        let tests: Vec<String> = record
+            .pointer("/evidence/inputs/tests/value")
+            .and_then(Value::as_array)
+            .expect("the record names its tests")
+            .iter()
+            .map(|test| test.as_str().expect("a test is a text").to_owned())
+            .collect();
+        let mut suites = String::new();
+        for test in &tests {
+            let (file, _) = test.split_once("::").expect("<file>::<function>");
+            let text = fs::read_to_string(root().join(file)).expect("the file of the test is read");
+            place(&root_directory, file, &text);
+            let (classname, name, modules) = nextest_name(&package, test);
+            if file.contains("/tests/") {
+                inline += modules;
+            }
+            suites.push_str(&format!(
+                "    <testsuite name=\"{classname}\" tests=\"1\" skipped=\"0\" errors=\"0\" failures=\"0\">\n        <testcase name=\"{name}\" classname=\"{classname}\" timestamp=\"2026-11-24T21:02:06.000+01:00\" time=\"0.100\"/>\n    </testsuite>\n"
+            ));
+        }
+        let report = root_directory.join(format!("{id}.junit.xml"));
+        fs::write(
+            &report,
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuites name=\"nextest-run\" tests=\"{}\" skipped=\"0\" failures=\"0\" errors=\"0\" timestamp=\"2026-11-24T21:02:05.400+01:00\" time=\"101.000\">\n{suites}</testsuites>\n",
+                tests.len()
+            ),
+        )
+        .expect("the report is written");
+        let run = assess(
+            &root_directory,
+            &[
+                "--project",
+                "inference",
+                "--assessment",
+                &id,
+                "--class",
+                &field("/evidence/target/class"),
+                "--revision",
+                &field("/evidence/target/revision"),
+                "--from",
+                path(&report),
+                "--source",
+                &field("/evidence/source/location"),
+            ],
+        );
+        if run.status != Some(0) || run.document.as_deref() != Some(committed.as_str()) {
+            differ.push(format!("{id}: exit {:?}: {}", run.status, run.stderr));
+        }
+        checked.push(id);
+    }
+    assert!(differ.is_empty(), "{}", differ.join("\n"));
+    assert_eq!(
+        checked.len(),
+        18,
+        "the records of named-tests@1: {checked:?}"
+    );
+    assert!(
+        inline > 0,
+        "no named test of a test binary stands in an inline module: the case the test is for"
+    );
 }
 
 /// `evidence` holds no absolute path (Ratchet, evidence format, section 4, rule 9), and a path
@@ -1320,5 +1598,320 @@ fn a_capability_record_whose_test_failed_is_refused() {
     .ended(
         1,
         &["sherpa-onnx-stt-record: the report holds the test adapters/inference-sherpa-onnx/tests/stt_record.rs::the_resource_profile_is_a_measured_cpu_profile of the package inference-sherpa-onnx as failed"],
+    );
+}
+
+/// The measures of `openai-gpt-live` as its test prints them, before the test ends.
+const GPT_MEASURES: &str = "started in 812 ms: SessionId(\"s-1\")\nclosed in 95 ms: Err(Timeout)\n";
+const GPT_MEASURED: &str = "the_client_hears_speech_and_answers_with_audio_and_transcript";
+const GPT_BINARY: &str = "inference-openai::live_gpt";
+/// What the program says of an output without the closing line of its run.
+const UNENDED: &str = "openai-gpt-live: the output ends before the closing line of its run";
+
+/// The run ended before libtest reported the measured test: it printed its measures, another
+/// test of the binary had passed, and then the process was killed or aborted. The `ok` of another
+/// test is not the pass of the run: without the closing line of the run the output gives no
+/// record, with or without an exit status and with or without its measures.
+#[test]
+fn a_run_that_ended_before_the_measured_test_reported_gives_no_record() {
+    let root = scratch_root();
+    let other = "test one_spoken_exchange_through_the_duplex_contract ... ok\n";
+    let killed = format!("running 3 tests\n{other}{GPT_MEASURES}");
+    printed_call(&root, "openai-gpt-live", &killed, &[]).ended(1, &[UNENDED]);
+    printed_call(&root, "openai-gpt-live", &killed, &["--exit-status", "0"]).ended(1, &[UNENDED]);
+    printed_call(
+        &root,
+        "openai-gpt-live",
+        &format!("running 3 tests\n{other}"),
+        &[],
+    )
+    .ended(
+        1,
+        &[
+            UNENDED,
+            "openai-gpt-live/session-start: no line of the output holds `started in`",
+        ],
+    );
+    let aborted = format!(
+        "running 3 tests\n{other}{GPT_MEASURES}\nthread '{GPT_MEASURED}' (4123015) has overflowed its stack\nfatal runtime error: stack overflow, aborting\nerror: test failed, to rerun pass `-p inference-openai --test live_gpt`\n\nCaused by:\n  process didn't exit successfully: `target/debug/deps/live_gpt-0123456789abcdef --ignored --nocapture` (signal: 6, SIGABRT: process abort signal)\n"
+    );
+    printed_call(&root, "openai-gpt-live", &aborted, &[]).ended(
+        1,
+        &[
+            UNENDED,
+            "openai-gpt-live: the output says `error: test failed, to rerun pass",
+        ],
+    );
+}
+
+/// `cargo test` closes the tests of each binary with its own `test result:` line. The closing
+/// line of another binary does not close the run of the binary that printed the measures: a
+/// binary killed after its measures, after another one passed, gives no record. A pass is read
+/// from the `test result:` line of the tests that printed the measures, and a `running` line
+/// whose tests never closed before the next one is a run that did not end.
+#[test]
+fn the_closing_line_of_another_test_binary_does_not_pass_the_run() {
+    let root = scratch_root();
+    let first = "running 3 tests\ntest a ... ok\ntest b ... ok\ntest c ... ok\n\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n\n";
+    let killed = format!("{first}running 1 test\n{GPT_MEASURES}");
+    printed_call(&root, "openai-gpt-live", &killed, &[]).ended(1, &[UNENDED]);
+    printed_call(&root, "openai-gpt-live", &killed, &["--exit-status", "0"]).ended(1, &[UNENDED]);
+    let unclosed = format!("running 1 test\n{GPT_MEASURES}{first}");
+    printed_call(&root, "openai-gpt-live", &unclosed, &[]).ended(1, &[UNENDED]);
+    let none_passed = format!(
+        "running 1 test\n{GPT_MEASURES}\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n{first}"
+    );
+    printed_call(&root, "openai-gpt-live", &none_passed, &[]).ended(
+        1,
+        &["openai-gpt-live: the `test result:` line of the tests that printed the measures says that no test passed"],
+    );
+    let measured = format!(
+        "{first}running 1 test\n{GPT_MEASURES}test {GPT_MEASURED} ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s\n"
+    );
+    let written = printed_call(&root, "openai-gpt-live", &measured, &[]).written();
+    assert_eq!(values(&written), ["812", "95"]);
+    assert_eq!(coverage(&written), [1, 1, 0]);
+}
+
+/// The rustc of `rust-toolchain.toml` prints a panic as `thread '<name>' (<id>) panicked at`, as
+/// the failures of this suite show. An output cut after the panic of the measured test, in that
+/// form.
+#[test]
+fn a_panic_in_the_form_the_pinned_rustc_prints_is_read_as_a_failure_of_its_test() {
+    let root = scratch_root();
+    let cut = format!(
+        "{GPT_MEASURES}test {GPT_MEASURED} ... thread '{GPT_MEASURED}' (4123015) panicked at adapters/inference-openai/tests/live_gpt.rs:266:25:\nsession.closed confirms the final usage: Timeout\n"
+    );
+    printed_call(&root, "openai-gpt-live", &cut, &[]).ended(
+        1,
+        &[format!("openai-gpt-live: the output says the test {GPT_MEASURED} panicked").as_str()],
+    );
+}
+
+/// A print that keeps the text of its measure and puts other words between it and the value
+/// gives an output the program reads no value from. The label check of the sources must fail
+/// for that change of the source; here it is made to the source of `deepgram-live`.
+#[test]
+fn the_label_check_fails_for_a_print_that_no_longer_puts_the_value_after_its_label() {
+    let source_path = "adapters/inference-deepgram/tests/live.rs";
+    let source = fs::read_to_string(root().join(source_path)).expect("the source is read");
+    let printed = "first event after {first:?}";
+    assert!(source.contains(printed), "{source_path} prints {printed:?}");
+    assert!(prints(&source, "first event after", None));
+    let mutated = source.replace(printed, "first event after the start: {first:?}");
+    let root_directory = scratch_root();
+    printed_call(
+        &root_directory,
+        "deepgram-live",
+        &format!("first event after the start: 412ms; committed true\n{PASSED}"),
+        &[],
+    )
+    .ended(1, &["holds no duration after `first event after`"]);
+    assert!(
+        !prints(&mutated, "first event after", None),
+        "the label check passes a source whose print the program reads no value from"
+    );
+}
+
+/// cargo-nextest 0.9.143 run with retries writes the last failure of a test as `TRY <n> FAIL`
+/// and a timeout as `TRY <n> TMT`, in the line of the test and in the list after `Summary`. The
+/// measured test failed before its measures on the first try and after them on the second;
+/// another test passed. The output gives no record.
+#[test]
+fn a_failure_that_cargo_nextest_reports_after_a_retry_gives_no_record() {
+    let root = scratch_root();
+    let other = "one_spoken_exchange_through_the_duplex_contract";
+    for (first, last, counted) in [
+        ("TRY 1 FAIL", "TRY 2 FAIL", "1 failed"),
+        ("TRY 1 TMT", "TRY 2 TMT", "1 timed out"),
+    ] {
+        let summary = format!("Summary [  26.400s] 2 tests run: 1 passed, {counted}, 0 skipped");
+        let printed = format!(
+            "  {first} [   0.400s] (───) {GPT_BINARY} {GPT_MEASURED}\n  RETRY 2/2 [         ] (───) {GPT_BINARY} {GPT_MEASURED}\n{GPT_MEASURES}TRY 2 TRMNTG [> 21.000s] (───) {GPT_BINARY} {GPT_MEASURED}\n  {last} [  21.400s] (1/2) {GPT_BINARY} {GPT_MEASURED}\n        PASS [   5.000s] (2/2) {GPT_BINARY} {other}\n────────────\n     {summary}\n  {last} [  21.400s] (1/2) {GPT_BINARY} {GPT_MEASURED}\nerror: test run failed\n"
+        );
+        printed_call(&root, "openai-gpt-live", &printed, &[]).ended(
+            1,
+            &[
+                format!(
+                    "openai-gpt-live: the output says the test {GPT_BINARY} {GPT_MEASURED} failed"
+                )
+                .as_str(),
+                format!("openai-gpt-live: the output says `{summary}`").as_str(),
+                "openai-gpt-live: the output says `error: test run failed`",
+            ],
+        );
+    }
+}
+
+/// cargo-nextest without retries: a test ended at its timeout is `TMT` (`TIMEOUT` in older
+/// releases). The counts of its `Summary` line say a failure also where no line of the test
+/// stands in the output. A run whose `Summary` says that its tests passed is one passed run.
+#[test]
+fn cargo_nextest_says_a_timeout_or_a_failure_in_its_status_and_its_summary_lines() {
+    let root = scratch_root();
+    let summary = "Summary [  65.002s] 2 tests run: 1 passed, 1 timed out, 0 skipped";
+    for status in ["TMT", "TIMEOUT"] {
+        let printed = format!(
+            "{GPT_MEASURES}     {status} [  60.002s] (1/2) {GPT_BINARY} {GPT_MEASURED}\n        PASS [   5.000s] (2/2) {GPT_BINARY} other\n────────────\n     {summary}\n"
+        );
+        printed_call(&root, "openai-gpt-live", &printed, &[]).ended(
+            1,
+            &[
+                format!(
+                    "openai-gpt-live: the output says the test {GPT_BINARY} {GPT_MEASURED} failed"
+                )
+                .as_str(),
+                format!("openai-gpt-live: the output says `{summary}`").as_str(),
+            ],
+        );
+    }
+    for counted in [
+        "1 passed, 1 failed, 0 skipped",
+        "1 passed, 1 timed out, 0 skipped",
+        "1 passed, 1 exec failed, 0 skipped",
+        "0 passed, 2 skipped",
+    ] {
+        let summary = format!("Summary [  65.002s] 2 tests run: {counted}");
+        let printed = format!(
+            "{GPT_MEASURES}        PASS [   5.000s] (1/2) {GPT_BINARY} other\n────────────\n     {summary}\n"
+        );
+        let run = printed_call(&root, "openai-gpt-live", &printed, &[]);
+        assert_eq!(run.status, Some(1), "{summary}: {}", run.stderr);
+        assert!(run.document.is_none(), "{summary}: a record was written");
+    }
+    let passed = format!(
+        "{GPT_MEASURES}        PASS [  21.400s] (1/1) {GPT_BINARY} {GPT_MEASURED}\n────────────\n     Summary [  21.400s] 1 test run: 1 passed (1 flaky), 2 skipped\n"
+    );
+    let written = printed_call(&root, "openai-gpt-live", &passed, &[]).written();
+    assert_eq!(values(&written), ["812", "95"]);
+    assert_eq!(coverage(&written), [1, 1, 0]);
+}
+
+/// cargo test and cargo-nextest colour their status words with `--color always` or
+/// `CARGO_TERM_COLOR=always`. The colour codes are taken out before the output is read.
+#[test]
+fn a_coloured_output_is_read_as_the_same_output_without_colour() {
+    let root = scratch_root();
+    let green = |word: &str| format!("\u{1b}[32m{word}\u{1b}[0m");
+    let red = |word: &str| format!("\u{1b}[1;31m{word}\u{1b}[0m");
+    let passed = format!(
+        "running 1 test\nstarted in \u{1b}[1m812\u{1b}[0m ms: SessionId(\"s-1\")\nclosed in 95 ms: Ok(Closed)\ntest {GPT_MEASURED} ... {}\n\ntest result: {}. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s\n",
+        green("ok"),
+        green("ok")
+    );
+    let written = printed_call(&root, "openai-gpt-live", &passed, &[]).written();
+    assert_eq!(values(&written), ["812", "95"]);
+    assert_eq!(coverage(&written), [1, 1, 0]);
+    let nextest = format!(
+        "{GPT_MEASURES}{} [  21.400s] (1/1) {GPT_BINARY} {GPT_MEASURED}\n────────────\n{} [  21.400s] 1 test run: 1 passed, 0 skipped\n",
+        green("        PASS"),
+        green("     Summary")
+    );
+    let written = printed_call(&root, "openai-gpt-live", &nextest, &[]).written();
+    assert_eq!(coverage(&written), [1, 1, 0]);
+    let failed = format!(
+        "{GPT_MEASURES}test {GPT_MEASURED} ... {}\n\ntest result: {}. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s\n",
+        red("FAILED"),
+        red("FAILED")
+    );
+    printed_call(&root, "openai-gpt-live", &failed, &[]).ended(
+        1,
+        &[
+            format!("openai-gpt-live: the output says the test {GPT_MEASURED} failed").as_str(),
+            "openai-gpt-live: the output says `test result: FAILED. 0 passed; 1 failed;",
+        ],
+    );
+}
+
+/// A URL with user info would put a credential into a public record: it is a wrong call, and the
+/// line on stderr does not repeat it. The scheme is read without regard to case. A URL path that
+/// leaves its directory with `..`, the root (`.`) and a directory (a path that ends in `/`) are
+/// no file of a run, and a file name with a colon reads as a URL of another scheme.
+#[test]
+fn a_source_with_user_info_a_parent_segment_or_a_directory_is_a_wrong_call() {
+    let root = scratch_root();
+    let report = fixture("report.junit.xml");
+    let ci = ["--class", "ci", "--revision", REVISION];
+    let run = |source: &str| {
+        call(
+            &root,
+            "workspace-tests",
+            &ci,
+            &["--from", path(&report), "--source", source],
+        )
+    };
+    for source in [
+        "https://name:s3cr3t@github.com/beyond10x/inference/actions/runs/1",
+        "HTTPS://t0ken@github.com/beyond10x/inference/actions/runs/1",
+        "http://name:s3cr3t@github.com",
+    ] {
+        let refused = run(source);
+        refused.ended(2, &["--source is a URL with user info"]);
+        for secret in ["s3cr3t", "t0ken", "name:"] {
+            assert!(
+                !refused.stderr.contains(secret),
+                "{source}: stderr repeats {secret}: {}",
+                refused.stderr
+            );
+        }
+    }
+    for source in [
+        "https://github.com/x/../../y",
+        "https://github.com/x/..",
+        "https://github.com/x/..?a=b",
+        ".",
+        "target/",
+        "target/nextest/.",
+        "run:1.xml",
+        "target/run:1.xml",
+    ] {
+        run(source).ended(2, &["--source"]);
+    }
+    for source in [
+        "HTTPS://github.com/beyond10x/inference/actions/runs/45474241015",
+        "Http://github.com/x?mail=a@b",
+        "https://github.com/x/a..b/#..",
+    ] {
+        let written = run(source).written();
+        let document: Value = serde_json::from_str(&written).expect("the document is JSON");
+        assert_eq!(
+            document.pointer("/evidence/source"),
+            Some(&serde_json::json!({"kind": "forge_runs", "location": source}))
+        );
+    }
+}
+
+/// cargo-nextest 0.9.143 writes no ignored test into its JUnit report: a run that skipped 72
+/// tests has `skipped="0"` on its root and no `<skipped>` element. `nextest-run@1` reports no
+/// `skipped` count, and its documents hold 0 there, as Ratchet's format says for a count an
+/// assessor does not report, also from a report that holds a `<skipped>` case.
+#[test]
+fn the_workspace_run_reports_no_skipped_count_because_its_report_holds_none() {
+    let text = fs::read_to_string(root().join("quality/assessors/nextest-run@1.assessor.yaml"))
+        .expect("the declaration is read");
+    let declaration: Value = serde_norway::from_str(&text).expect("the declaration parses");
+    let reported: Vec<&str> = declaration
+        .get("coverage")
+        .and_then(Value::as_array)
+        .expect("the declaration lists its counts")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(reported, ["executed", "passed", "failed"]);
+    assert!(
+        fixture_text("report.junit.xml").contains("<skipped/>"),
+        "the fixture holds a skipped case"
+    );
+    let root_directory = scratch_root();
+    let written = from_check_run(
+        &root_directory,
+        "workspace-tests",
+        &fixture("report.junit.xml"),
+    )
+    .written();
+    let document: Value = serde_json::from_str(&written).expect("the document is JSON");
+    assert_eq!(
+        document.pointer("/evidence/coverage/skipped"),
+        Some(&Value::from(0))
     );
 }
