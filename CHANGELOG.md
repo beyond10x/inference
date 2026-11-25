@@ -30,7 +30,8 @@
   `quality/` from a file a run left behind, a JUnit report of cargo-nextest or the captured output
   of a command that prints a duration, in the form Ratchet's specification gives a record. It runs
   no measure. It exits 1 and writes nothing when the file does not hold what the assessment
-  reads: a named test that did not run, a failed run, counts that disagree with the report's own.
+  reads: a named test that did not run, a failed run, a run whose output ends before its closing
+  line, counts that disagree with the report's own.
   `quality/README.md` says which assessments it reads and how it is called. The committed records
   are still the ones written by hand. No crate's API changes.
 - `realtime-voice` (example, not published): `elevenlabs::resolves_within(source, wait)`, the key
@@ -62,6 +63,10 @@
   ended: `no test ran` when that run left no report. `task` exits 201 when the bound ends the step.
 - `task test-run` runs the stack test under the cargo-nextest profile `stack`, so that
   `target/nextest/default/junit.xml` stays the report of the workspace run after the step.
+- `quality/`: the assessor `nextest-run@1` no longer reports `skipped`, and the record of
+  `workspace-tests` holds 0 there instead of 72. cargo-nextest 0.9.143 writes no ignored test into
+  its JUnit report, so a record written from that report cannot hold the count;
+  `quality/README.md` says that the 72 come from the `Summary` line of the run.
 - The `check` workflow runs the full gate for a pull request that changes a file under
   `quality/`, also a `*.md` file: the test of the quality documents reads them.
 - `realtime-voice`, example `compare`: with `ELEVENLABS_AGENT_SIGNED_URL` the ElevenLabs arm measures
