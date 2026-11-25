@@ -1,19 +1,27 @@
 //! A closed or failed stream: the server closes mid-segment, sends text that is not JSON, JSON
-//! that is not a message, audio that is not base64, an error, or nothing at all. Each ends the
-//! synthesis with a typed failure, no panic and no hang, and its usage record is not final.
+//! that is not a message, audio that is not base64, an error or nothing at all, or never
+//! answers the handshake. Each ends the synthesis with a typed failure, no panic and no hang,
+//! and its usage record is not final.
 
 mod support;
 
 use std::time::{Duration, Instant};
 
 use inference_elevenlabs::{
-    ElevenLabsError, ElevenLabsSynthesis, ElevenLabsSynthesiser, Endpoint, OutputFormat,
-    VoiceConfig,
+    ConnectError, ElevenLabsError, ElevenLabsSynthesis, ElevenLabsSynthesiser, Endpoint,
+    OutputFormat, VoiceConfig,
 };
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
-use support::{FixedKey, FixtureServer, KEY, Script, VOICE, committed};
+use support::{FixedKey, FixtureServer, KEY, Script, VOICE, committed, within};
 
 const FORMAT: OutputFormat = OutputFormat::Ulaw8000;
+
+/// The connect timeout given to the open whose handshake is never answered.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// The longest that open may take; past it the test fails instead of waiting. Wide enough for a
+/// loaded machine, and under the default connect timeout.
+const CEILING: Duration = Duration::from_secs(4);
 
 /// Speaks one segment against `script`, ends the utterance, drains the handle and returns it
 /// with its events.
@@ -227,6 +235,43 @@ fn no_server_at_all_is_a_connect_failure() {
         other => panic!("{other:?}"),
     }
     assert_failed_and_ended(&mut handle, &events);
+}
+
+/// The listener takes the TCP connection into its queue and nothing reads it or answers the
+/// upgrade, so only the connect timeout ends the open. A refused connection is the same variant
+/// with no status, as the test above holds: the detail and the time tell the two apart. The
+/// wait is the test's own, so an open that no timeout ends fails here at [`CEILING`] instead of
+/// hanging.
+#[test]
+fn a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint::new()
+        .with_url(format!("ws://{}", listener.local_addr().unwrap()))
+        .with_connect_timeout(CONNECT_TIMEOUT);
+    let (failure, took) = within(CEILING, move || {
+        let mut synthesiser = ElevenLabsSynthesiser::new(
+            endpoint,
+            VoiceConfig::new(VOICE, FORMAT),
+            std::sync::Arc::new(FixedKey(KEY)),
+            "elevenlabs-api-key",
+        )
+        .unwrap();
+        let started = Instant::now();
+        let (handle, _) = drain(&mut synthesiser);
+        (handle.failure().cloned(), started.elapsed())
+    });
+    assert_eq!(
+        failure,
+        Some(ElevenLabsError::Connect(ConnectError {
+            status: None,
+            detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
+        }))
+    );
+    assert!(
+        took >= CONNECT_TIMEOUT,
+        "the synthesis failed after {took:?}, before its connect timeout"
+    );
+    assert!(took < CEILING, "the synthesis took {took:?}");
 }
 
 #[test]

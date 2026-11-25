@@ -1,12 +1,13 @@
 //! The Phonic binding against the local fixture server of `support/mod.rs`, which speaks the
 //! documented conversation protocol: the opening order and `config`, input chunking, a response
-//! from start to finish, barge-in, a closed session, server errors and closes, the refusals
-//! before connecting, liveness, tools, and the duplex conformance procedure.
+//! from start to finish, barge-in, a closed session, server errors and closes, a handshake never
+//! answered, the refusals before connecting, liveness, tools, and the duplex conformance
+//! procedure.
 
 mod support;
 
 use std::num::{NonZeroU16, NonZeroU32};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use inference_phonic::inference_duplex::conformance::{
@@ -31,6 +32,13 @@ use support::{Handshake, KEY, PhonicServer, Script, Step, bounded};
 
 const WAIT: Duration = Duration::from_millis(20);
 const KEY_NAME: &str = "phonic-api-key";
+
+/// The connect timeout given to the open whose handshake is never answered.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// The longest that open may take; past it the test fails instead of waiting. Wide enough for a
+/// loaded machine, and under the default connect timeout.
+const CEILING: Duration = Duration::from_secs(4);
 
 struct FixedKey(&'static str);
 
@@ -485,6 +493,53 @@ fn no_ready_within_the_deadline_fails_the_open_and_closes_the_connection() {
             "the failed open left its connection open"
         );
     });
+}
+
+/// The listener takes the TCP connection into its queue and nothing reads it or answers the
+/// upgrade, so only the connect timeout ends the open. A refused connection is the same variant
+/// with no status: the detail and the time tell the two apart. The wait is the test's own, so an
+/// open that no timeout ends fails here at [`CEILING`] instead of hanging.
+#[test]
+fn a_handshake_never_answered_fails_the_open_at_the_connect_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = PhonicEndpoint::new()
+        .with_url(format!("ws://{}", listener.local_addr().unwrap()))
+        .with_connect_timeout(CONNECT_TIMEOUT);
+    let (done, waited) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut model = PhonicSpeech::new(
+            endpoint,
+            PhonicConfig::new(),
+            Arc::new(FixedKey(KEY)),
+            KEY_NAME,
+        )
+        .unwrap();
+        let started = Instant::now();
+        let outcome = model.open(config()).err();
+        let took = started.elapsed();
+        let _ = done.send((outcome, model.open_error().cloned(), took));
+    });
+    let (outcome, error, took) = waited
+        .recv_timeout(CEILING)
+        .unwrap_or_else(|error| panic!("the open did not end within {CEILING:?}: {error}"));
+    match outcome {
+        Some(OpenError::Failed(failure)) => {
+            assert_eq!(failure.kind, SessionFailureKind::TransportClosed)
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        error,
+        Some(PhonicError::Connect {
+            status: None,
+            detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
+        })
+    );
+    assert!(
+        took >= CONNECT_TIMEOUT,
+        "the open failed after {took:?}, before its connect timeout"
+    );
+    assert!(took < CEILING, "the open took {took:?}");
 }
 
 #[test]

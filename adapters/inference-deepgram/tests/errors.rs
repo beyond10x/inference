@@ -1,16 +1,27 @@
 //! Errors: an `Error` message, each documented close code, a malformed text message, a close
-//! before the summary `Metadata` and a server silent after `CloseStream` each fail the
-//! recognition with a typed error, never a panic or a hang, and the usage record that ends it is
-//! not final.
+//! before the summary `Metadata`, a server silent after `CloseStream` and a handshake never
+//! answered each fail the recognition with a typed error, never a panic or a hang, and the usage
+//! record that ends it is not final.
 
 mod support;
 
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use inference_deepgram::{CloseCause, DeepgramError, DeepgramRecognition};
+use inference_deepgram::{
+    CloseCause, ConnectError, DeepgramError, DeepgramRecogniser, DeepgramRecognition, Endpoint,
+    ListenConfig,
+};
 use inference_stt::TranscriptEvent;
 use inference_stt::inference_core::envelope::EventEnvelope;
-use support::{FixtureServer, Script, describe, recognise, tone};
+use support::{FixedKey, FixtureServer, KEY, Script, describe, recognise, tone};
+
+/// The connect timeout given to the open whose handshake is never answered.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// The longest that open may take; past it the test fails instead of waiting. Wide enough for a
+/// loaded machine, and under the default connect timeout.
+const CEILING: Duration = Duration::from_secs(4);
 
 fn failed(script: Script) -> (DeepgramRecognition, Vec<EventEnvelope<TranscriptEvent>>) {
     let server = FixtureServer::start(script);
@@ -136,4 +147,45 @@ fn a_server_silent_after_close_stream_stalls_within_the_read_timeout() {
         handle.failure(),
         Some(&DeepgramError::Stalled(Duration::from_secs(3)))
     );
+}
+
+/// The listener takes the TCP connection into its queue and nothing reads it or answers the
+/// upgrade, so only the connect timeout ends the open. A refused connection is the same variant
+/// with no status: the detail and the time tell the two apart. The read timeout stays at its
+/// default, so the handle's own wait for the summary ends later than [`CEILING`]. The wait is
+/// the test's own, so an open that no connect timeout ends fails here at [`CEILING`].
+#[test]
+fn a_handshake_never_answered_fails_the_recognition_at_the_connect_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint::new()
+        .with_url(format!("ws://{}", listener.local_addr().unwrap()))
+        .with_connect_timeout(CONNECT_TIMEOUT);
+    let (done, waited) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut recogniser = DeepgramRecogniser::new(
+            endpoint,
+            ListenConfig::new(),
+            Arc::new(FixedKey(KEY)),
+            "deepgram-api-key",
+        )
+        .unwrap();
+        let started = Instant::now();
+        let (handle, _) = recognise(&mut recogniser, tone(2));
+        let _ = done.send((handle.failure().cloned(), started.elapsed()));
+    });
+    let (failure, took) = waited
+        .recv_timeout(CEILING)
+        .unwrap_or_else(|error| panic!("the recognition did not end within {CEILING:?}: {error}"));
+    assert_eq!(
+        failure,
+        Some(DeepgramError::Connect(ConnectError {
+            status: None,
+            detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
+        }))
+    );
+    assert!(
+        took >= CONNECT_TIMEOUT,
+        "the recognition failed after {took:?}, before its connect timeout"
+    );
+    assert!(took < CEILING, "the recognition took {took:?}");
 }

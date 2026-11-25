@@ -1,21 +1,30 @@
 //! How a synthesis ends when the server or the credential does not cooperate: an `error`
 //! message, a close mid-segment, silence, a context the binding never opened, a refused
-//! handshake and a missing key each fail the synthesis with their own error, never a panic or a
-//! hang; a final chunk with `done` true completes its segment without a `done` message.
+//! handshake, a handshake never answered and a missing key each fail the synthesis with their
+//! own error, never a panic or a hang; a final chunk with `done` true completes its segment
+//! without a `done` message.
 
 mod support;
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use inference_cartesia::{
-    CartesiaError, CartesiaSynthesiser, CredentialError, OutputFormat, ServerError, VoiceConfig,
+    CartesiaError, CartesiaSynthesiser, ConnectError, CredentialError, Endpoint, OutputFormat,
+    ServerError, VoiceConfig,
 };
 use inference_tts::inference_text::SegmentState;
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
-use support::{FixtureServer, NoKey, Script, VOICE, committed, within};
+use support::{FixedKey, FixtureServer, KEY, NoKey, Script, VOICE, committed, within};
 
 const FORMAT: OutputFormat = OutputFormat::MULAW_8000;
+
+/// The connect timeout given to the open whose handshake is never answered.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// The longest that open may take; past it the test fails instead of waiting. Wide enough for a
+/// loaded machine, and under the default connect timeout.
+const CEILING: Duration = Duration::from_secs(4);
 
 /// Speaks one segment with `synthesiser` and returns its events and its failure.
 fn run(mut synthesiser: CartesiaSynthesiser) -> (Vec<SynthesisEvent>, Option<CartesiaError>) {
@@ -181,6 +190,46 @@ fn a_refused_handshake_is_a_refusal_and_a_missing_key_connects_nowhere() {
         );
         assert!(server.seen().is_empty(), "nothing connected without a key");
     });
+}
+
+/// The listener takes the TCP connection into its queue and nothing reads it or answers the
+/// upgrade, so only the connect timeout ends the open. A refused connection is the same variant
+/// with no status: the detail and the time tell the two apart. The wait is the test's own, so an
+/// open that no timeout ends fails here at [`CEILING`] instead of hanging.
+#[test]
+fn a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint::new()
+        .with_url(format!("ws://{}", listener.local_addr().unwrap()))
+        .with_connect_timeout(CONNECT_TIMEOUT);
+    let (done, waited) = mpsc::channel();
+    std::thread::spawn(move || {
+        let synthesiser = CartesiaSynthesiser::new(
+            endpoint,
+            VoiceConfig::new(VOICE, FORMAT),
+            Arc::new(FixedKey(KEY)),
+            "cartesia-api-key",
+        )
+        .unwrap();
+        let started = Instant::now();
+        let (_, failure) = run(synthesiser);
+        let _ = done.send((failure, started.elapsed()));
+    });
+    let (failure, took) = waited
+        .recv_timeout(CEILING)
+        .unwrap_or_else(|error| panic!("the synthesis did not end within {CEILING:?}: {error}"));
+    assert_eq!(
+        failure,
+        Some(CartesiaError::Connect(ConnectError {
+            status: None,
+            detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
+        }))
+    );
+    assert!(
+        took >= CONNECT_TIMEOUT,
+        "the synthesis failed after {took:?}, before its connect timeout"
+    );
+    assert!(took < CEILING, "the synthesis took {took:?}");
 }
 
 #[test]

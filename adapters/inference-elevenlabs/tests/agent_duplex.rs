@@ -1,12 +1,13 @@
 //! The agent conversation binding against the local fixture server of `support/agent.rs`: the
-//! opening order, keepalive, the format check, barge-in, corrections, errors, cancels and drops,
-//! the refusals before connecting, the message size bound, tools, and the duplex conformance
-//! procedure.
+//! opening order, keepalive, the format check, barge-in, corrections, errors, a handshake never
+//! answered, cancels and drops, the refusals before connecting, the message size bound, tools,
+//! and the duplex conformance procedure.
 
 #[path = "support/agent.rs"]
 mod fixture;
 
 use std::num::{NonZeroU16, NonZeroU32};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use fixture::{AGENT, AgentServer, Handshake, Script, Step};
@@ -29,6 +30,13 @@ use inference_elevenlabs::{
 };
 
 const WAIT: Duration = Duration::from_millis(20);
+
+/// The connect timeout given to the open whose handshake is never answered.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// The longest that open may take; past it the test fails instead of waiting. Wide enough for a
+/// loaded machine, and under the default connect timeout.
+const CEILING: Duration = Duration::from_secs(4);
 
 fn pcm(rate: u32) -> AudioFormat {
     AudioFormat {
@@ -359,6 +367,47 @@ fn a_cancel_during_the_handshake_closes_the_connection_within_the_close_bound() 
     let seen = server.wait(0, CLOSE_BOUND, |seen| seen.closed.is_some());
     let closed = seen.closed.expect("the connection was closed");
     assert!(closed.saturating_duration_since(cancelled_at) < CLOSE_BOUND);
+}
+
+/// The server takes the TCP connection and never answers the upgrade, so only the connect
+/// timeout ends the open. A refused connection is the same variant with no status: the detail
+/// and the time tell the two apart. The wait is the test's own, so an open that no timeout ends
+/// fails here at [`CEILING`] instead of hanging.
+#[test]
+fn a_handshake_never_answered_fails_the_open_at_the_connect_timeout() {
+    let mut script = Script::new(Vec::new());
+    script.handshake = Handshake::Stall;
+    let server = AgentServer::start(script);
+    let endpoint = endpoint(&server).with_connect_timeout(CONNECT_TIMEOUT);
+    let (done, waited) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut model = ElevenLabsAgent::public(AGENT, endpoint).expect("a valid agent id");
+        let started = Instant::now();
+        let outcome = model.open(config()).err();
+        let took = started.elapsed();
+        let _ = done.send((outcome, model.open_error().cloned(), took));
+    });
+    let (outcome, error, took) = waited
+        .recv_timeout(CEILING)
+        .unwrap_or_else(|error| panic!("the open did not end within {CEILING:?}: {error}"));
+    match outcome {
+        Some(OpenError::Failed(failure)) => {
+            assert_eq!(failure.kind, SessionFailureKind::TransportClosed)
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        error,
+        Some(AgentError::Connect {
+            status: None,
+            detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
+        })
+    );
+    assert!(
+        took >= CONNECT_TIMEOUT,
+        "the open failed after {took:?}, before its connect timeout"
+    );
+    assert!(took < CEILING, "the open took {took:?}");
 }
 
 #[test]
