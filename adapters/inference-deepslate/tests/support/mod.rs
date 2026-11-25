@@ -11,6 +11,13 @@
 //! `ServiceBoundMessage`, a first message that is not `InitializeSessionRequest`, a second one,
 //! audio before `SessionReady`, empty audio, a frame carrying the key and an `Authorization`
 //! header other than `Bearer` and the fixture key are recorded as violations.
+//!
+//! A deaf server ([`Script::deaf`]) reads `InitializeSessionRequest` and nothing after it until
+//! the test calls [`OpalServer::read_again`]. With [`Step::Pings`] it backs the connection up:
+//! the client answers every WebSocket ping it reads with a pong, the pongs fill the socket
+//! buffers and then wait in the client's WebSocket buffer, in front of everything the client
+//! writes later. Reading again, the server counts the pongs and notes whether a close frame
+//! followed them.
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
@@ -22,11 +29,11 @@ use inference_deepslate::{Credential, CredentialError, CredentialFuture, Credent
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc};
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::{Bytes, Message};
 
 /// The key the fixture server expects; no real key appears in any test.
 pub const KEY: &str = "fixture-opal-key-5c0e1b7a92d4";
@@ -67,6 +74,8 @@ pub enum Step {
     AwaitToolResponse(&'static str),
     /// Waits this long.
     Pause(Duration),
+    /// Sends this many WebSocket pings of 125 bytes.
+    Pings(usize),
     /// Closes the connection with this code.
     Close(u16),
 }
@@ -101,6 +110,9 @@ pub struct Script {
     pub ready: Ready,
     /// Whether the server answers `Ping` with `Pong`.
     pub pong: bool,
+    /// A deaf server reads the client's first message and nothing after it, until the test
+    /// calls [`OpalServer::read_again`].
+    pub deaf: bool,
     pub steps: Vec<Step>,
 }
 
@@ -111,6 +123,7 @@ impl Script {
             handshake: Handshake::Answer,
             ready: Ready::After(Duration::ZERO),
             pong: true,
+            deaf: false,
             steps,
         }
     }
@@ -126,6 +139,13 @@ pub struct Seen {
     pub ready_sent: Option<Instant>,
     /// When the client closed the connection: a close frame, the end of the stream or an error.
     pub closed: Option<Instant>,
+    /// The WebSocket pongs the server read.
+    pub pongs: usize,
+    /// The pongs the server had read when the test called `read_again`: none where it read
+    /// nothing until then.
+    pub early_pongs: usize,
+    /// The client ended the connection with a close frame.
+    pub close_frame: bool,
     pub violations: Vec<String>,
 }
 
@@ -167,6 +187,8 @@ impl Seen {
 struct Connection {
     seen: Mutex<Seen>,
     changed: Notify,
+    /// Tells a deaf server to read again.
+    read_again: Notify,
 }
 
 /// A running fixture server; it stops when dropped.
@@ -211,6 +233,7 @@ impl OpalServer {
                     let connection = Arc::new(Connection {
                         seen: Mutex::new(Seen::default()),
                         changed: Notify::new(),
+                        read_again: Notify::new(),
                     });
                     thread_connections
                         .lock()
@@ -241,6 +264,18 @@ impl OpalServer {
             .lock()
             .unwrap()
             .clone()
+    }
+
+    /// Tells the deaf server of connection `index` to read again; it then reads until the
+    /// client's side ends.
+    pub fn read_again(&self, index: usize) {
+        let connections = self.connections.lock().unwrap();
+        let connection = &connections[index];
+        {
+            let mut seen = connection.seen.lock().unwrap();
+            seen.early_pongs = seen.pongs;
+        }
+        connection.read_again.notify_one();
     }
 
     /// Waits at most `within` for connection `index` to exist and satisfy `done`, and returns
@@ -335,6 +370,7 @@ async fn serve(mut stream: TcpStream, script: Script, connection: Arc<Connection
     let reader_connection = Arc::clone(&connection);
     let pong = script.pong;
     let reader_out = out.clone();
+    let mut deaf = script.deaf;
     let reader = tokio::spawn(async move {
         while let Some(message) = source.next().await {
             match message {
@@ -385,10 +421,19 @@ async fn serve(mut stream: TcpStream, script: Script, connection: Arc<Connection
                         .violations
                         .push(format!("a text frame: {}", text.as_str()));
                 }
-                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Pong(_)) => reader_connection.seen.lock().unwrap().pongs += 1,
+                Ok(Message::Close(_)) => {
+                    reader_connection.seen.lock().unwrap().close_frame = true;
+                    break;
+                }
+                Err(_) => break,
                 Ok(_) => {}
             }
             reader_connection.changed.notify_waiters();
+            if deaf {
+                reader_connection.read_again.notified().await;
+                deaf = false;
+            }
         }
         closed(&reader_connection);
     });
@@ -444,6 +489,10 @@ async fn run(out: &mpsc::UnboundedSender<Message>, connection: &Connection, step
             Step::Pause(duration) => {
                 tokio::time::sleep(duration).await;
                 true
+            }
+            Step::Pings(count) => {
+                let payload = Bytes::from(vec![0x2a_u8; 125]);
+                (0..count).all(|_| out.send(Message::Ping(payload.clone())).is_ok())
             }
             Step::Close(code) => {
                 let _ = out.send(close_frame(code));

@@ -8,8 +8,9 @@ mod support;
 use std::time::{Duration, Instant};
 
 use inference_elevenlabs::{
-    ConnectError, ElevenLabsError, ElevenLabsSynthesis, ElevenLabsSynthesiser, Endpoint,
-    OutputFormat, VoiceConfig,
+    CLOSE_BOUND, CLOSE_GRACE, ConnectError, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT,
+    ElevenLabsError, ElevenLabsSynthesis, ElevenLabsSynthesiser, Endpoint, OutputFormat,
+    VoiceConfig,
 };
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
 use support::{FixedKey, FixtureServer, KEY, Script, VOICE, committed, within};
@@ -296,6 +297,49 @@ fn a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout() {
     assert!(
         took < LATEST,
         "the synthesis failed after {took:?}, at twice its connect timeout or later"
+    );
+}
+
+/// The bounds of the endpoint a caller gets from `Endpoint::new()`, which text to speech and
+/// speech to text share, their constants and the close bound, each compared with its number
+/// written out: a changed default fails here. Outside the source, `quality/adapters.md`, entry
+/// `elevenlabs-time-bounds/held`, states all three: the read timeout (10 s), the connect timeout
+/// (10 s) and the close bound (1 s). The documentation site states the read timeout too, in
+/// `website/docs/guides/compare-voice-providers.md`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let endpoint = Endpoint::new();
+    let defaults = [
+        (
+            "DEFAULT_READ_TIMEOUT",
+            DEFAULT_READ_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "Endpoint::new().read_timeout",
+            endpoint.read_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "DEFAULT_CONNECT_TIMEOUT",
+            DEFAULT_CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "Endpoint::new().connect_timeout",
+            endpoint.connect_timeout,
+            Duration::from_secs(10),
+        ),
+        ("CLOSE_BOUND", CLOSE_BOUND, Duration::from_secs(1)),
+        ("CLOSE_GRACE", CLOSE_GRACE, Duration::from_millis(5)),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
     );
 }
 

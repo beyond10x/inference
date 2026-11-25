@@ -482,11 +482,21 @@ fn started() -> Started {
 /// A started sink waiting `patience` for a stalled speaker, its speaker opened on `opener`,
 /// whose output stream `host` drives.
 fn started_on(opener: &dyn AudioHost, host: FakeHost, patience: Duration) -> Started {
+    started_with(opener, host, Some(patience))
+}
+
+/// A started sink, its speaker opened on `opener`, whose output stream `host` drives. It waits
+/// `patience` for a stalled speaker; given none, it is built without
+/// `with_playback_patience(..)` and waits the patience a sink starts with.
+fn started_with(opener: &dyn AudioHost, host: FakeHost, patience: Option<Duration>) -> Started {
     let nodes = declared();
     let speaker = Speaker::open(opener, &DeviceSelector::Default, PlayoutConfig::default())
         .expect("the default output opens");
-    let mut sink =
-        AcknowledgingSink::new(RunId::generate(), speaker).with_playback_patience(patience);
+    let sink = AcknowledgingSink::new(RunId::generate(), speaker);
+    let mut sink = match patience {
+        Some(patience) => sink.with_playback_patience(patience),
+        None => sink,
+    };
     let (speech, receipts) = (Edge::default(), Edge::default());
     let node: &mut dyn NodeImplementation<Payload> = &mut sink;
     block_on(node.describe(&nodes.sink));
@@ -1022,6 +1032,65 @@ fn a_speaker_whose_callback_stopped_fails_the_drain_within_the_stated_patience()
     assert_eq!(failure.detail(), fault.to_string());
     assert_eq!(handle.failure(), Some(fault.to_string()));
     assert_eq!(settled(&run.receipts), 0, "nothing was acknowledged");
+    block_on(node.stop());
+    assert!(!run.host.output_open(), "the speaker is closed");
+}
+
+/// The constant of the patience a sink starts with, compared with its number written out: a
+/// changed constant fails here. A sink gives its patience back only in the fault of a drain that
+/// stalled, so this test reads the constant, and
+/// `a_sink_given_no_patience_waits_the_stated_two_seconds_for_a_stalled_speaker` reads the sink.
+/// Outside the source the number is stated in `CHANGELOG.md`, under 0.19.0 (`PLAYBACK_PATIENCE`
+/// (2 s)), and in `quality/adapters.md`, entry `audio-device-time-bounds/held`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    assert_eq!(
+        PLAYBACK_PATIENCE,
+        Duration::from_secs(2),
+        "PLAYBACK_PATIENCE, the default (left), is not its stated number (right)"
+    );
+}
+
+/// The patience a sink starts with, read from a sink that was given none: its drain on a speaker
+/// that stopped fails with a stall that names 2 s, written out here, and not before 2 s passed.
+/// A sink that starts with another patience than its constant fails here and not in the test of
+/// the constant. The test waits for the stall, about 2 s, and gives up after 4 s.
+#[test]
+fn a_sink_given_no_patience_waits_the_stated_two_seconds_for_a_stalled_speaker() {
+    let stated = Duration::from_secs(2);
+    let host = FakeHost::laptop();
+    let mut run = started_with(&host.clone(), host, None);
+    let handle = run.sink.handle();
+    let segment = run.synthesis.segment("never heard to the end");
+    for _ in 0..2 {
+        let frame = run.synthesis.frame(segment);
+        run.feed.send(frame);
+    }
+    assert!(eventually(|| handle.pushed() == 2));
+    let _ = run.host.pull(DEVICE_FRAME);
+    let completed = run.synthesis.complete(segment);
+    run.feed.send(completed);
+
+    // The sink watches its speaker from the end of its input on, so the time is taken before
+    // that end is sent. The device calls back no more: the second frame is never played.
+    let began = Instant::now();
+    run.feed.send(Payload::Control(ControlKind::Stop));
+    let node: &mut dyn NodeImplementation<Payload> = &mut run.sink;
+    let drained = block_on_within(node.drain(), Duration::from_secs(4))
+        .expect("the drain of a stalled speaker ends within 4 s, twice the stated patience");
+    let took = began.elapsed();
+    drained.expect_err("a drain the device never finished fails");
+    let Some(PlaybackFault::Stalled { patience, .. }) = handle.fault() else {
+        panic!("a stall, not {:?}", handle.fault());
+    };
+    assert_eq!(
+        patience, stated,
+        "the patience of a sink given none (left) is not its stated number (right)"
+    );
+    assert!(
+        took >= stated,
+        "the drain failed {took:?} after the end of input was sent, before the stated {stated:?}"
+    );
     block_on(node.stop());
     assert!(!run.host.output_open(), "the speaker is closed");
 }

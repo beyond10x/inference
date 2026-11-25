@@ -22,7 +22,8 @@ use inference_duplex::{
     Unsupported, UsageRecorded,
 };
 use inference_openai::duplex::{
-    OpenAiRealtime, OpenAiRealtimeSession, capabilities, claims, wire_format,
+    OpenAiRealtime, OpenAiRealtimeSession, capabilities, claims, default_session_config,
+    wire_format,
 };
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Eagerness, Endpoint,
@@ -936,6 +937,46 @@ fn a_silent_provider_fails_the_session_as_stalled_at_the_bound() {
         "{events:#?}"
     );
     assert!(waited >= Duration::from_millis(400), "{waited:?}");
+}
+
+/// The idle limit of the session configuration a caller gets from
+/// `duplex::default_session_config()`, and the two deadlines of a model built with
+/// `OpenAiRealtime::new(..)` and given none, each compared with its number written out: a
+/// changed default fails here, and so does a model that starts with other deadlines than
+/// `Deadlines::default()`. The idle limit has no constant. Outside the source the numbers are
+/// stated in `quality/adapters.md`, entry `openai-time-bounds/held`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let model = OpenAiRealtime::new(
+        Endpoint::new("gpt-realtime-2.1"),
+        Box::new(FixedSource),
+        OPENAI_KEY_NAME,
+    );
+    let defaults = [
+        (
+            "duplex::default_session_config().idle_limit",
+            default_session_config().idle_limit,
+            Duration::from_secs(30),
+        ),
+        (
+            "OpenAiRealtime::new(..).connect_timeout()",
+            model.connect_timeout(),
+            Duration::from_secs(10),
+        ),
+        (
+            "OpenAiRealtime::new(..).write_timeout()",
+            model.write_timeout(),
+            Duration::from_secs(10),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
 }
 
 #[test]

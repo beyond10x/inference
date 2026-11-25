@@ -16,6 +16,13 @@
 //! `reason` of a close frame the server sends, after which it reads only the client's close) or
 //! `wait` (milliseconds before the next step). The steps run in file order, each waiting for its
 //! own trigger.
+//!
+//! Two actions no fixture file names back a connection up: [`Action::Pings`] sends a flood of
+//! WebSocket pings and [`Action::Hold`] reads nothing until the test calls
+//! [`FixtureServer::read_again`]. The client answers every ping it reads with a pong; the pongs
+//! fill the socket buffers and then wait in the client's WebSocket buffer, in front of
+//! everything the client writes later. Reading again, the server counts the pongs and notes
+//! whether a close frame ended the stream.
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
@@ -40,10 +47,11 @@ use inference_stt::inference_text::TurnId;
 use inference_stt::{Recogniser, RecognitionHandle, RecognitionRequest, TranscriptEvent};
 use serde_json::Value;
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::Message;
+use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::{Bytes, Message};
 
 /// The key the fixture server expects; no real key appears in any test.
 pub const KEY: &str = "fixture-key-3c59dc048e885024";
@@ -68,6 +76,11 @@ pub enum Action {
     Close(u16, String),
     /// Waits this long before the next step.
     Wait(Duration),
+    /// Sends this many WebSocket pings of 125 bytes, written together.
+    Pings(usize),
+    /// Reads nothing and takes no step until the test calls [`FixtureServer::read_again`], at
+    /// most 30 seconds.
+    Hold,
 }
 
 /// One step of a script.
@@ -202,6 +215,13 @@ pub struct Seen {
     pub violations: Vec<String>,
     /// The client closed the connection, by a close frame or by dropping it.
     pub client_closed: bool,
+    /// The client ended the connection with a close frame.
+    pub close_frame: bool,
+    /// The WebSocket pongs the server read.
+    pub pongs: usize,
+    /// The pongs the server had read when the test called `read_again`: none where it read
+    /// nothing until then.
+    pub early_pongs: usize,
 }
 
 /// A running fixture server; it stops when dropped.
@@ -209,6 +229,7 @@ pub struct FixtureServer {
     pub url: String,
     seen: Arc<Mutex<Vec<Seen>>>,
     closes: Mutex<mpsc::Receiver<usize>>,
+    read_again: Arc<Notify>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -229,6 +250,8 @@ impl FixtureServer {
         let (close_tx, close_rx) = mpsc::channel();
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
         let thread_seen = Arc::clone(&seen);
+        let read_again = Arc::new(Notify::new());
+        let thread_read_again = Arc::clone(&read_again);
         let thread = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -252,6 +275,7 @@ impl FixtureServer {
                         script,
                         Arc::clone(&thread_seen),
                         close_tx.clone(),
+                        Arc::clone(&thread_read_again),
                     ));
                     index += 1;
                 }
@@ -261,6 +285,7 @@ impl FixtureServer {
             url,
             seen,
             closes: Mutex::new(close_rx),
+            read_again,
             stop: Some(stop_tx),
             thread: Some(thread),
         }
@@ -282,6 +307,14 @@ impl FixtureServer {
     /// The index of the next connection the client closed, waiting at most `bound`.
     pub fn next_client_close(&self, bound: Duration) -> Option<usize> {
         self.closes.lock().unwrap().recv_timeout(bound).ok()
+    }
+
+    /// Ends an [`Action::Hold`]: the server reads again, until the client's side ends.
+    pub fn read_again(&self) {
+        for seen in self.seen.lock().unwrap().iter_mut() {
+            seen.early_pongs = seen.pongs;
+        }
+        self.read_again.notify_one();
     }
 
     /// An endpoint at this server, with short bounds.
@@ -335,6 +368,7 @@ async fn serve(
     script: Script,
     seen: Arc<Mutex<Vec<Seen>>>,
     closes: mpsc::Sender<usize>,
+    read_again: Arc<Notify>,
 ) {
     let record = |update: &dyn Fn(&mut Seen)| update(&mut seen.lock().unwrap()[index]);
     let head = Arc::new(Mutex::new((String::new(), String::new(), None)));
@@ -431,6 +465,17 @@ async fn serve(
                     server_closed = true;
                 }
                 Action::Wait(pause) => tokio::time::sleep(pause).await,
+                Action::Pings(count) => {
+                    let payload = Bytes::from(vec![0x2a_u8; 125]);
+                    for _ in 0..count {
+                        let _ = socket.feed(Message::Ping(payload.clone())).await;
+                    }
+                    let _ = socket.flush().await;
+                }
+                Action::Hold => {
+                    let told = read_again.notified();
+                    let _ = tokio::time::timeout(Duration::from_secs(30), told).await;
+                }
             }
         }
         let violation = match socket.next().await {
@@ -465,8 +510,16 @@ async fn serve(
             Some(Ok(Message::Binary(data))) => {
                 Some(format!("a binary message of {} bytes", data.len()))
             }
-            Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => None,
-            Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+            Some(Ok(Message::Pong(_))) => {
+                record(&|seen| seen.pongs += 1);
+                None
+            }
+            Some(Ok(Message::Ping(_) | Message::Frame(_))) => None,
+            Some(Ok(Message::Close(_))) => {
+                record(&|seen| seen.close_frame = true);
+                break;
+            }
+            Some(Err(_)) | None => break,
         };
         if let Some(violation) = violation {
             record(&|seen| seen.violations.push(violation.clone()));

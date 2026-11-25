@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T12:15:43Z",
+  "actor": "human:operator",
+  "artifact": "story:close-bounds-fired-by-a-test",
+  "kind": "story",
+  "revision": 11,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p <crate> --all-features -E 'test(on_a_backed_up_connection)', per adapter crate (inference-phonic, inference-deepgram, inference-deepslate, inference-elevenlabs), on the build node",
+    "reference": "VERIFIED: baseline with CLOSE_BOUND at 3 s in the source at a1dd00dab (6 tests run in four crates: 0 passed, 6 failed; the close held 3.001 s to 3.014 s, the connection thread was gone 3.002 s and 3.005 s after the cancel, each message naming twice the bound or longer) vs treatment at a1dd00dab on the unchanged source (the same 6 tests passed in 10 of 10 runs each, 1.163 s to 2.104 s, one round at the first flood, 0 pongs read before the release). Planted by the adversary pass at 08c0f5bc5 and restored: 500 ms fails all six on the lower limit; 1,500 ms, 1,900 ms and (Phonic) 999 ms pass; in each of the four session bindings the timeout on the frame write removed alone passes, the timeout on the wait for the task removed alone passes, both removed fail at the test's own deadline of 4 s; a close not attempted fails all six. Planted at a1dd00dab: a fixture that reads on fails the two transcription tests in 8 of 8 runs and the four session tests in 5 of 5; a fixture that reads one pong each millisecond fails the two transcription tests in 3 of 3 on the assertion that the server read nothing before the release"
+  }
+}
