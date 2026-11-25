@@ -1,0 +1,14 @@
+format: ratchet-assessor/1
+name: forge-job
+version: "1"
+targets: [workflow_run]
+inputs:
+  workflow: {type: string, required: true}
+  job: {type: string, required: true}
+coverage_unit: job
+coverage: [executed, passed, failed]
+outputs:
+  succeeded:
+    {value_type: assertion, kind: exact, scopes: []}
+  duration:
+    {value_type: number, kind: sampled, scopes: [], unit: s, boundaries: [run_time, queue_wait]}

@@ -1,0 +1,129 @@
+format: ratchet/1
+project: inference
+
+subjects:
+  docs-site:
+    kind: documentation-site
+    audiences: [docs-reader]
+
+assessments:
+  docs-ux:
+    subject: docs-site
+    assessor: docs-ux@1
+    inputs: {rows: ux/.out/rows}
+    target: {kind: revision, environments: [local, ci], selection: candidate}
+    observation:
+      kind: snapshot
+      command: npx playwright test --workers=2
+      scenarios:
+        - sitemap
+        - find-dependency-lines
+        - find-error-kinds
+        - find-limitations
+        - find-provider-comparison
+        - find-realtime-model-variable
+    measurements:
+      horizontal-scroll:
+        {kind: exact, output: layout.h_scroll, scope: view, unit: pages, better: lower}
+      overflowing-elements:
+        {kind: exact, output: layout.overflow_elements, scope: view, unit: elements, better: lower}
+      always-visible-misses:
+        {kind: exact, output: always_visible.misses, scope: view, unit: misses, better: lower}
+      accessibility-violations:
+        {kind: exact, output: axe.serious_critical, scope: view, unit: nodes, better: lower}
+      keyboard-unreachable:
+        {kind: exact, output: keyboard.unreachable, scope: view, unit: elements, better: lower}
+      completion-misses:
+        {kind: exact, output: completion_miss, scope: view, unit: misses, better: lower}
+      actions:
+        {kind: exact, output: screen_only.actions, scope: view, unit: actions, better: lower}
+      looks:
+        {kind: exact, output: screen_only.looks, scope: view, unit: looks, better: lower}
+      steers:
+        {kind: exact, output: screen_only.steers, scope: view, unit: steers, better: lower}
+      steps-to-act:
+        {kind: exact, output: screen_only.time_to_act_steps.max, scope: view, unit: steps, better: lower}
+      glance-cost-median:
+        {kind: exact, output: glance_cost.median, scope: view, unit: level, better: lower}
+      glance-cost-p95:
+        {kind: exact, output: glance_cost.p95, scope: view, unit: level, better: lower}
+
+requirements:
+  docs-horizontal-scroll-not-worse:
+    assessment: docs-ux
+    measurement: horizontal-scroll
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+  docs-overflowing-elements-not-worse:
+    assessment: docs-ux
+    measurement: overflowing-elements
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+  docs-always-visible-misses-not-worse:
+    assessment: docs-ux
+    measurement: always-visible-misses
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+  docs-accessibility-violations-not-worse:
+    assessment: docs-ux
+    measurement: accessibility-violations
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+  docs-keyboard-unreachable-not-worse:
+    assessment: docs-ux
+    measurement: keyboard-unreachable
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+  docs-completion-misses-not-worse:
+    assessment: docs-ux
+    measurement: completion-misses
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+  docs-actions-not-worse:
+    assessment: docs-ux
+    measurement: actions
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+  docs-looks-not-worse:
+    assessment: docs-ux
+    measurement: looks
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+  docs-steers-not-worse:
+    assessment: docs-ux
+    measurement: steers
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+  docs-steps-to-act-not-worse:
+    assessment: docs-ux
+    measurement: steps-to-act
+    reference: {kind: accepted_value, tolerance: {percent: 5}, adoption: {from: same_change}}
+  docs-glance-cost-median-not-worse:
+    assessment: docs-ux
+    measurement: glance-cost-median
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+  docs-glance-cost-p95-not-worse:
+    assessment: docs-ux
+    measurement: glance-cost-p95
+    reference: {kind: accepted_value, adoption: {from: same_change}}
+
+gates:
+  docs-ux:
+    stage: pre-merge
+    qualifying_environments: [ci]
+    requires:
+      - requirement: docs-horizontal-scroll-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-overflowing-elements-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-always-visible-misses-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-accessibility-violations-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-keyboard-unreachable-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-completion-misses-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-actions-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-looks-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-steers-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-steps-to-act-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-glance-cost-median-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}
+      - requirement: docs-glance-cost-p95-not-worse
+        when: {changed: ["website/**", "docs/**", "ux/**", ".github/workflows/docs-ux.yml"]}

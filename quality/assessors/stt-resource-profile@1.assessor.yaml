@@ -1,0 +1,13 @@
+format: ratchet-assessor/1
+name: stt-resource-profile
+version: "1"
+targets: [build]
+coverage_unit: run
+coverage: [executed, passed, failed]
+outputs:
+  load_time:
+    {value_type: number, kind: sampled, scopes: [], unit: ms}
+  cpu_real_time_factor:
+    {value_type: number, kind: sampled, scopes: [], unit: thousandths}
+  peak_resident_memory:
+    {value_type: number, kind: sampled, scopes: [], unit: MiB}
