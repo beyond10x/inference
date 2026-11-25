@@ -9,7 +9,7 @@ relations:
 - decides: story:synthesiser-drop-inside-runtime
 - decides: story:local-tts-adapter-under-licence-policy
 - decides: story:signed-url-token-copies
-revision: 7
+revision: 8
 ---
 ## Decision
 
@@ -134,6 +134,18 @@ waits for a ruling of the owner and follows as a pull request of its own.
 | U1 | story:sdk-one-call | `impl/sdk-one-call` | not merged. At `2fb2f9ae2` one case is red: the bound of the tool loop. The specification's sentence on that bound has to be amended before the code, in a commit of its own, and that edit waits for the owner's yes. The `Chat`, `Transcriber` and `Voice` handles are therefore not in the wave's pull request. |
 | U2 | story:ticker-tests-hold-on-a-loaded-host, story:synthesiser-drop-inside-runtime | `impl/synthesiser-drop-inside-runtime` | merged at `e4d23dcdd` (`894e900e6`). One adversary pass on the ticker story, two on the drop story, each recorded with its outcome. |
 | U3 | story:signed-url-token-copies | `impl/signed-url-token-copies` | merged at `ba1870be0` (`e04621e9f`). Two adversary passes, each recorded with its outcome. |
-| U4 | story:local-tts-adapter-under-licence-policy | `impl/local-tts-adapter` | not merged. Two adversary passes are recorded; the correction of the second runs in the unit's branch. story:sherpa-onnx-linked-libraries-licences-read found libraries in the linked archives whose licences are outside the list of `AGENTS.md`; whether the adapter ships, and how, is the owner's ruling. |
+| U4 | story:local-tts-adapter-under-licence-policy, story:sherpa-onnx-linked-libraries-licences-read | `impl/local-tts-adapter` | not merged; the branch is at `c281a8b4c`. Two adversary passes, each recorded with its outcome. The branch also records what story:sherpa-onnx-linked-libraries-licences-read read: 29 code-licence entries for the archive built with text-to-speech and 25 for the archive built without, each held against the build script of the pinned `sherpa-onnx-sys`. Libraries in the linked archives carry licences outside the list of `AGENTS.md`; whether the adapter ships, and how, is the owner's ruling. |
+
+Open in U4's branch, for its merge:
+
+- `CHANGELOG.md` has no entry of the unit yet, and one case of `inference-docs` is red until it
+  has (`every_binding_is_since_the_release_whose_changelog_section_introduced_it`).
+- `website/product.json` names the licence of espeak-ng as GPL-3.0; the pages of the branch say
+  GPL-3.0-or-later.
+- Neither story has its verification, its test result or its scope as built; they are recorded
+  when the branch is merged.
+- The 16 cases on the weights are run by no task, and three cases against a loopback
+  llama-server were not run after their answer length changed
+  (story:local-tts-weights-cases-run-in-a-lane).
 
 No release is tagged from this wave before both rulings.
