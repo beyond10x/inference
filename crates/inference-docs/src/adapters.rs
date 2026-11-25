@@ -204,7 +204,7 @@ const BINDINGS: &[Binding] = &[
             "streaming Zipformer, English",
         ),
         environment: "`INFERENCE_SHERPA_ONNX_STT_DIR`",
-        licence: "code Apache-2.0 (sherpa-onnx 1.13.8), MIT (onnxruntime); weights Apache-2.0, trained on LibriSpeech (CC BY 4.0)",
+        licence: "code in the 25 libraries the native archive without text-to-speech links, each in `CODE_LICENSES` of the crate's module `stt` with the licence read: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, BSL-1.0, Zlib, MPL-2.0 (Eigen, twice), GPL-3.0-or-later WITH GCC-exception-3.1 (pieces of libstdc++ and libgcc), LGPL-2.1-or-later (pieces of glibc); weights Apache-2.0, trained on LibriSpeech (CC BY 4.0)",
         release: Release::Since("0.6.0"),
     },
     Binding {
@@ -253,7 +253,7 @@ const BINDINGS: &[Binding] = &[
             "Kokoro-82M v0.19, English",
         ),
         environment: "`INFERENCE_SHERPA_ONNX_TTS_DIR`",
-        licence: "code Apache-2.0 (sherpa-onnx 1.13.8), MIT (onnxruntime), MIT (piper-phonemize), GPL-3.0 (espeak-ng, admitted for this adapter alone by the owner's exception), the four components whose licence was read, with eight further libraries of the native build not read; weights and voices Apache-2.0; the checkpoint carries espeak-ng's phoneme data, GPL-3.0",
+        licence: "code in the 29 libraries the native archive with text-to-speech links, each in the crate's `CODE_LICENSES` with the licence read: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, BSL-1.0, Zlib, Unlicense OR MIT (uni-algo), MPL-2.0 (Eigen, twice), GPL-3.0-or-later (espeak-ng, admitted for this adapter alone by the owner's exception), GPL-3.0-or-later AND Unicode-DFS-2016 (ucd-tools), GPL-3.0-or-later WITH GCC-exception-3.1 (pieces of libstdc++ and libgcc), LGPL-2.1-or-later (pieces of glibc); weights and voices Apache-2.0; the checkpoint carries espeak-ng's phoneme data, GPL-3.0",
         release: Release::Next,
     },
 ];

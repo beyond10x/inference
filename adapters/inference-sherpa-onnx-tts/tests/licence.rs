@@ -1,10 +1,14 @@
 //! The constraints of the owner's exception for espeak-ng, each held here: espeak-ng is a
 //! code-licence entry of its own beside sherpa-onnx's, in the model the adapter declares and in
-//! the crate's README, among the components whose licence was read at adoption, which are not
-//! every library of the native build; nothing of espeak-ng or of the native library is in the
-//! repository; and the adapter is opt-in, a dependency of no contract crate and of no other
-//! adapter, as Cargo reads the manifests. What the adapter declares about itself is held here
-//! too. Needs no weights.
+//! the crate's README; nothing of espeak-ng or of the native library is in the repository; and
+//! the adapter is opt-in, a dependency of no contract crate and of no other adapter, as Cargo
+//! reads the manifests.
+//!
+//! The code-licence list is held to the native archive: every library the build script of the
+//! pinned `sherpa-onnx-sys` names is covered by one entry, every entry has an SPDX expression
+//! and a source pinned to a version, tag or commit, and the entries are the 29 libraries whose
+//! licence was read for the archive built with text-to-speech. What the adapter declares about
+//! itself is held here too. Needs no weights and no network.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,9 +19,9 @@ use inference_sherpa_onnx_tts::inference_tts::inference_core::model::{
     Capability, ExecutionForm, Locality, Modality,
 };
 use inference_sherpa_onnx_tts::{
-    ARCHIVE_SHA256, BACKEND, CHECKPOINT, CODE_LICENSES, DEFAULT_MAX_CONCURRENCY, ESPEAK_NG_DATA,
-    FILES, NATIVE_VERSION, SOURCE_REVISION, VOICES, WEIGHT_LICENSE, checksum, code_license,
-    declare_adapter, declare_model, native_version,
+    ARCHIVE_SHA256, BACKEND, CHECKPOINT, CODE_LICENSES, CodeLicense, DEFAULT_MAX_CONCURRENCY,
+    ESPEAK_NG_DATA, FILES, NATIVE_VERSION, SOURCE_REVISION, VOICES, WEIGHT_LICENSE, checksum,
+    code_license, declare_adapter, declare_model, native_version,
 };
 
 const CRATE: &str = "inference-sherpa-onnx-tts";
@@ -59,27 +63,291 @@ fn tree(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// The names of the library list in the build script of the `sherpa-onnx-sys` that `Cargo.lock`
+/// pins. The script is read from the source Cargo unpacked on this machine to build the crate,
+/// below the registry of Cargo's home: no network, and a pin that moves is read at its new
+/// version.
+fn build_script_libraries() -> Vec<String> {
+    let lock = read(&repository().join("Cargo.lock"));
+    let mut versions = Vec::new();
+    let mut lines = lock.lines();
+    while let Some(line) = lines.next() {
+        if line == "name = \"sherpa-onnx-sys\"" {
+            let version = lines
+                .next()
+                .and_then(|line| line.strip_prefix("version = \""))
+                .and_then(|rest| rest.strip_suffix('"'))
+                .expect("Cargo.lock gives a package's version below its name");
+            versions.push(version);
+        }
+    }
+    let [version] = versions.as_slice() else {
+        panic!("Cargo.lock pins one sherpa-onnx-sys: {versions:?}");
+    };
+    let home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+        .expect("CARGO_HOME or HOME says where Cargo keeps its registry");
+    let sources = home.join("registry").join("src");
+    let mut scripts: Vec<PathBuf> = fs::read_dir(&sources)
+        .unwrap_or_else(|error| panic!("{}: {error}", sources.display()))
+        .map(|entry| {
+            entry
+                .expect("the entry is read")
+                .path()
+                .join(format!("sherpa-onnx-sys-{version}"))
+                .join("build.rs")
+        })
+        .filter(|script| script.is_file())
+        .collect();
+    scripts.sort();
+    let script = scripts.first().unwrap_or_else(|| {
+        panic!(
+            "no build.rs of sherpa-onnx-sys {version} below {}: the case reads the source \
+             Cargo built this crate from",
+            sources.display()
+        )
+    });
+    let text = read(script);
+    let list = text
+        .split_once("const SHERPA_ONNX_STATIC_LIBS: &[&str] = &[")
+        .and_then(|(_, rest)| rest.split_once("];"))
+        .map(|(list, _)| list)
+        .unwrap_or_else(|| panic!("{} has no library list", script.display()));
+    let names: Vec<String> = list
+        .lines()
+        .map(|line| line.trim().trim_end_matches(','))
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.strip_prefix('"')
+                .and_then(|line| line.strip_suffix('"'))
+                .unwrap_or_else(|| panic!("{}: `{line}` is not a name", script.display()))
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "sherpa-onnx-c-api"),
+        "{} lists the libraries: {names:?}",
+        script.display()
+    );
+    names
+}
+
+/// The licence identifiers of the reading, as SPDX writes them, and the one exception.
+const IDENTIFIERS: [&str; 11] = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "Zlib",
+    "MPL-2.0",
+    "Unlicense",
+    "Unicode-DFS-2016",
+    "GPL-3.0-or-later",
+    "LGPL-2.1-or-later",
+];
+const EXCEPTION: &str = "GCC-exception-3.1";
+
+/// Whether `license` is an SPDX expression over [`IDENTIFIERS`]: identifiers joined by `AND` or
+/// `OR`, an identifier at most once `WITH` the exception.
+fn is_an_expression_of_the_identifiers_read(license: &str) -> bool {
+    let mut tokens = license.split(' ');
+    loop {
+        if !tokens
+            .next()
+            .is_some_and(|identifier| IDENTIFIERS.contains(&identifier))
+        {
+            return false;
+        }
+        let mut next = tokens.next();
+        if next == Some("WITH") {
+            if tokens.next() != Some(EXCEPTION) {
+                return false;
+            }
+            next = tokens.next();
+        }
+        match next {
+            None => return true,
+            Some("AND" | "OR") => {}
+            Some(_) => return false,
+        }
+    }
+}
+
+/// Whether the entry's source is a URL of one file at the entry's revision: `…/<revision>/<file>`,
+/// or the form of a git web view, `…;f=<file>;hb=…/<revision>`. A branch is no revision.
+fn is_pinned(entry: &CodeLicense) -> bool {
+    let revision = entry.revision;
+    let a_file_below_the_revision = entry
+        .source
+        .split_once(&format!("/{revision}/"))
+        .is_some_and(|(_, file)| !file.is_empty());
+    let a_file_of_a_web_view =
+        entry.source.contains(";f=") && entry.source.ends_with(&format!("/{revision}"));
+    entry.source.starts_with("https://")
+        && !revision.is_empty()
+        && !["main", "master", "HEAD", "trunk", "develop"].contains(&revision)
+        && (a_file_below_the_revision || a_file_of_a_web_view)
+}
+
+/// The libraries the native archive built with text-to-speech links and the licence read for
+/// each, on 2026-11-25: this case's own copy of the reading, so that an entry added to, dropped
+/// from or changed in [`CODE_LICENSES`] alone is red.
+const READ: [(&str, &str); 29] = [
+    ("sherpa-onnx", "Apache-2.0"),
+    ("kaldi-native-fbank", "Apache-2.0"),
+    ("kissfft", "BSD-3-Clause"),
+    ("kaldi-decoder", "Apache-2.0"),
+    ("kaldifst", "Apache-2.0"),
+    ("openfst", "Apache-2.0"),
+    ("Eigen", "MPL-2.0"),
+    (
+        "simple-sentencepiece",
+        "Apache-2.0 AND BSD-2-Clause AND Zlib",
+    ),
+    ("nlohmann/json", "MIT"),
+    ("hclust-cpp", "BSD-2-Clause"),
+    ("espeak-ng", "GPL-3.0-or-later"),
+    ("ucd-tools", "GPL-3.0-or-later AND Unicode-DFS-2016"),
+    ("piper-phonemize", "MIT"),
+    ("uni-algo", "Unlicense OR MIT"),
+    ("onnxruntime", "MIT"),
+    ("abseil-cpp", "Apache-2.0"),
+    ("onnx", "Apache-2.0"),
+    ("protobuf", "BSD-3-Clause"),
+    ("re2", "BSD-3-Clause"),
+    ("flatbuffers", "Apache-2.0"),
+    ("Eigen in onnxruntime", "MPL-2.0"),
+    ("GSL", "MIT"),
+    ("nlohmann/json in onnxruntime", "MIT"),
+    ("date", "MIT"),
+    ("Boost.Mp11", "BSL-1.0"),
+    ("SafeInt", "MIT"),
+    ("cpuinfo", "BSD-2-Clause"),
+    (
+        "libstdc++ and libgcc",
+        "GPL-3.0-or-later WITH GCC-exception-3.1",
+    ),
+    ("glibc", "LGPL-2.1-or-later"),
+];
+
 #[test]
-fn of_the_licences_read_at_adoption_espeak_ng_is_an_entry_of_its_own_and_the_one_under_the_gpl() {
-    let license_of = |component: &str| {
+fn every_library_the_pinned_build_script_names_is_covered_by_one_code_licence_entry() {
+    let named = build_script_libraries();
+    let not_by_one: Vec<(&str, Vec<&str>)> = named
+        .iter()
+        .map(|name| {
+            let covering: Vec<&str> = CODE_LICENSES
+                .iter()
+                .filter(|entry| entry.libraries.contains(&name.as_str()))
+                .map(|entry| entry.component)
+                .collect();
+            (name.as_str(), covering)
+        })
+        .filter(|(_, covering)| covering.len() != 1)
+        .collect();
+    assert!(
+        not_by_one.is_empty(),
+        "each of the {} libraries the build script of the pinned sherpa-onnx-sys names is \
+         covered by one entry of CODE_LICENSES; these are not, each with the entries that name \
+         it: {not_by_one:?}",
+        named.len()
+    );
+    let not_named: Vec<(&str, &str)> = CODE_LICENSES
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .libraries
+                .iter()
+                .map(move |library| (entry.component, *library))
+        })
+        .filter(|(_, library)| !named.iter().any(|name| name == library))
+        .collect();
+    assert!(
+        not_named.is_empty(),
+        "an entry covers only libraries the build script names {named:?}; not so: {not_named:?}"
+    );
+}
+
+#[test]
+fn no_two_code_licence_entries_name_one_component_and_each_has_a_licence_and_a_pinned_source() {
+    let mut components: Vec<&str> = CODE_LICENSES.iter().map(|entry| entry.component).collect();
+    components.sort_unstable();
+    let twice: Vec<&str> = components
+        .windows(2)
+        .filter(|pair| pair[0] == pair[1])
+        .map(|pair| pair[0])
+        .collect();
+    assert!(
+        twice.is_empty(),
+        "components named by two entries: {twice:?}"
+    );
+
+    let not_joinable: Vec<&str> = components
+        .iter()
+        .copied()
+        .filter(|component| component.is_empty() || component.contains([',', '(', ')']))
+        .collect();
+    assert!(
+        not_joinable.is_empty(),
+        "a component is named, without the comma and the parentheses that code_license joins \
+         with: {not_joinable:?}"
+    );
+
+    let no_expression: Vec<(&str, &str)> = CODE_LICENSES
+        .iter()
+        .filter(|entry| !is_an_expression_of_the_identifiers_read(entry.license))
+        .map(|entry| (entry.component, entry.license))
+        .collect();
+    assert!(
+        no_expression.is_empty(),
+        "every licence is an SPDX expression over {IDENTIFIERS:?} and {EXCEPTION}; not so: \
+         {no_expression:?}"
+    );
+
+    let not_pinned: Vec<(&str, &str, &str)> = CODE_LICENSES
+        .iter()
+        .filter(|entry| !is_pinned(entry))
+        .map(|entry| (entry.component, entry.revision, entry.source))
+        .collect();
+    assert!(
+        not_pinned.is_empty(),
+        "every source is the URL of a file at the entry's version, tag or commit, no branch \
+         and no bare repository; not so (component, revision, source): {not_pinned:?}"
+    );
+}
+
+#[test]
+fn the_code_licence_list_is_the_29_libraries_read_for_the_archive_with_text_to_speech() {
+    let listed: Vec<(&str, &str)> = CODE_LICENSES
+        .iter()
+        .map(|entry| (entry.component, entry.license))
+        .collect();
+    assert_eq!(
+        listed, READ,
+        "CODE_LICENSES names the libraries of the reading, each with the licence read"
+    );
+}
+
+#[test]
+fn espeak_ng_is_a_code_licence_entry_of_its_own_under_the_gpl_version_3_or_later() {
+    let entry_of = |component: &str| {
         let mut entries = CODE_LICENSES
             .iter()
-            .filter(|entry| entry.component.starts_with(component));
+            .filter(|entry| entry.component == component);
         match (entries.next(), entries.next()) {
-            (Some(entry), None) => entry.license,
+            (Some(entry), None) => entry,
             _ => panic!("{component} has exactly one entry: {CODE_LICENSES:?}"),
         }
     };
-    assert_eq!(license_of("sherpa-onnx"), "Apache-2.0");
-    assert_eq!(license_of("espeak-ng"), "GPL-3.0");
+    assert_eq!(entry_of("sherpa-onnx").license, "Apache-2.0");
+    let espeak_ng = entry_of("espeak-ng");
+    assert_eq!(espeak_ng.license, "GPL-3.0-or-later");
     assert_eq!(
-        CODE_LICENSES
-            .iter()
-            .filter(|entry| entry.license.contains("GPL"))
-            .map(|entry| entry.component)
-            .collect::<Vec<_>>(),
+        espeak_ng.libraries,
         ["espeak-ng"],
-        "of the components whose licence was read, espeak-ng is the one under the GPL"
+        "the entry is espeak-ng's alone: it covers no other library of the build script"
     );
 }
 
@@ -161,11 +429,16 @@ fn the_readme_carries_every_code_licence_entry_and_the_exception() {
         assert!(
             readme.lines().any(|line| line.contains(entry.component)
                 && line.contains(entry.license)
-                && line.contains(entry.source)),
-            "the README has a row for {} under {} at {}",
+                && line.contains(entry.source)
+                && entry
+                    .libraries
+                    .iter()
+                    .all(|library| line.contains(&format!("`{library}`")))),
+            "the README has a row for {} under {} at {}, naming {:?}",
             entry.component,
             entry.license,
-            entry.source
+            entry.source,
+            entry.libraries
         );
     }
     assert!(

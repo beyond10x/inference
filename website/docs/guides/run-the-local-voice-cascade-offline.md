@@ -20,12 +20,12 @@ checkpoint, a `llama-server` binary and a GGUF model, the synthesiser's library 
 
 :::
 
-:::note[The synthesiser's library carries GPL-3.0 code]
+:::note[The synthesiser's library carries GPL-3.0-or-later code]
 
 The answer is spoken by `inference-sherpa-onnx-tts`. It runs on the sherpa-onnx native library
-built with text-to-speech, which carries the phonemiser espeak-ng, GPL-3.0. The repository admits
-that for this one adapter and distributes none of it: step 3 fetches it to your machine. What that
-means is in [Limitations](../status/limitations.md#local-adapters).
+built with text-to-speech, which carries the phonemiser espeak-ng, GPL-3.0-or-later. The repository
+admits that for this one adapter and distributes none of it: step 3 fetches it to your machine.
+What that means is in [Limitations](../status/limitations.md#local-adapters).
 
 :::
 

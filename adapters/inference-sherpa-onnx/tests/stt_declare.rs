@@ -5,8 +5,8 @@
 use std::collections::HashSet;
 
 use inference_sherpa_onnx::stt::{
-    BACKEND, CHECKPOINT, CODE_LICENSE, FILES, FileRole, REFERENCE_CLIP, SOURCE_REVISION,
-    SOURCE_URL, WEIGHT_LICENSE, checksum, declare_adapter, declare_model,
+    BACKEND, CHECKPOINT, CODE_LICENSE, CODE_LICENSES, FILES, FileRole, REFERENCE_CLIP,
+    SOURCE_REVISION, SOURCE_URL, WEIGHT_LICENSE, checksum, declare_adapter, declare_model,
 };
 use inference_stt::CONTRACT_REVISION;
 use inference_stt::inference_core::model::{
@@ -27,10 +27,13 @@ fn the_pin_names_the_checkpoint_its_source_revision_and_licences() {
     );
     assert_eq!(SOURCE_REVISION, "672fbf1b30579d6585301139bb363f42a0ad4a24");
     assert_eq!(WEIGHT_LICENSE, "Apache-2.0");
-    assert!(CODE_LICENSE.contains("Apache-2.0"), "{CODE_LICENSE}");
-    assert!(CODE_LICENSE.contains("sherpa-onnx"), "{CODE_LICENSE}");
-    assert!(CODE_LICENSE.contains("MIT"), "{CODE_LICENSE}");
-    assert!(CODE_LICENSE.contains("onnxruntime"), "{CODE_LICENSE}");
+    for entry in CODE_LICENSES {
+        assert!(
+            CODE_LICENSE.contains(&format!("{} ({})", entry.license, entry.component)),
+            "{}: {CODE_LICENSE}",
+            entry.component
+        );
+    }
     assert_eq!(BACKEND, "sherpa-onnx 1.13.8");
 }
 

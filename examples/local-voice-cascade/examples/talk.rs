@@ -18,10 +18,10 @@
 //!
 //! The answer is spoken by `inference-sherpa-onnx-tts` over its pinned checkpoint, whose directory
 //! `--tts-dir` or `INFERENCE_SHERPA_ONNX_TTS_DIR` names. It speaks only in a process started on
-//! the sherpa-onnx native library built with text-to-speech, which carries espeak-ng (GPL-3.0):
-//! the task fetches that library and the checkpoint under `target/`, and the target runner starts
-//! the example on it. Started on the library the workspace builds against, the example ends with
-//! the refusal naming that library.
+//! the sherpa-onnx native library built with text-to-speech, which carries espeak-ng
+//! (GPL-3.0-or-later): the task fetches that library and the checkpoint under `target/`, and the
+//! target runner starts the example on it. Started on the library the workspace builds against,
+//! the example ends with the refusal naming that library.
 //!
 //! `--stt whispercpp`, or `INFERENCE_CASCADE_STT=whispercpp`, binds the whisper.cpp recogniser
 //! over the checkpoint file `--whispercpp-model` or `INFERENCE_WHISPERCPP_STT_MODEL` names

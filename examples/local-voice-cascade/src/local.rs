@@ -33,9 +33,10 @@
 //! that listens and answers locally and speaks through another synthesiser, as the `compare`
 //! example of `realtime-voice` does, opens those two alone and needs neither the synthesiser's
 //! checkpoint nor its library. The synthesiser speaks only in a process started on the
-//! sherpa-onnx native library built with text-to-speech, which carries espeak-ng (GPL-3.0); the
-//! workspace builds against the one without, and [`synthesiser`] on that one is refused, naming
-//! the library. The README of `inference-sherpa-onnx-tts` says how the process is started.
+//! sherpa-onnx native library built with text-to-speech, which carries espeak-ng
+//! (GPL-3.0-or-later); the workspace builds against the one without, and [`synthesiser`] on that
+//! one is refused, naming the library. The README of `inference-sherpa-onnx-tts` says how the
+//! process is started.
 //!
 //! The synthesiser speaks each segment on its own, and each delta of the server is a segment: an
 //! answer is spoken delta by delta, each with the prosody of a text of its own, a segment of

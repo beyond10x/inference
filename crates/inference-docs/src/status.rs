@@ -347,7 +347,7 @@ pub const CAPABILITIES: &[Capability] = &[
     next(
         "Adapters",
         "sherpa-onnx TTS",
-        "A local text-to-speech adapter over sherpa-onnx and the pinned Kokoro-82M v0.19 checkpoint; the offline cascade speaks through it. Opt-in: its phonemiser, espeak-ng, is GPL-3.0.",
+        "A local text-to-speech adapter over sherpa-onnx and the pinned Kokoro-82M v0.19 checkpoint; the offline cascade speaks through it. Opt-in: its phonemiser, espeak-ng, is GPL-3.0-or-later.",
         "adapters/inference-sherpa-onnx-tts/tests/record.rs::the_record_of_the_measured_machine_loads_and_evidences_exactly_the_claims",
         "/docs/reference/adapters",
     ),

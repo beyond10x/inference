@@ -50,11 +50,11 @@ The three native speech adapters are hosted services. A self-hosted native speec
   not recognise synthetic speech reliably. The native archive is for Linux x86_64.
 - **sherpa-onnx text-to-speech** (`inference-sherpa-onnx-tts`, on `main` and in no release yet)
   speaks only in a process started on the sherpa-onnx library built with TTS, which carries the
-  phonemiser espeak-ng, GPL-3.0; the pinned checkpoint carries espeak-ng's phoneme data. The
-  repository commits and distributes neither: a task fetches them to your machine, and whoever
-  distributes a program with that library distributes GPL-3.0 code. Opening the synthesiser on the
-  library without TTS is refused, naming the library. The pinned checkpoint speaks English at
-  24 kHz, and the archive is for Linux x86_64.
+  phonemiser espeak-ng, GPL-3.0-or-later; the pinned checkpoint carries espeak-ng's phoneme data.
+  The repository commits and distributes neither: a task fetches them to your machine, and whoever
+  distributes a program with that library distributes GPL-3.0-or-later code. Opening the
+  synthesiser on the library without TTS is refused, naming the library. The pinned checkpoint
+  speaks English at 24 kHz, and the archive is for Linux x86_64.
   - It streams output part by part: one part per sentence, and a further part within a sentence
     each time its phonemes have filled one, about 510 tokens (sherpa-onnx's `max_token_len`, the
     first number of the model's `style_dim` metadata, 511 for the pinned checkpoint; no field of
@@ -115,8 +115,10 @@ If you need isolation, run the process in a network namespace or behind a firewa
   espeak-ng is a licence entry of its own in three places: the `code_license` of the `Model` the
   adapter declares, the README of the crate, and the adapter's line on
   [Adapters](../reference/adapters.md). The capability record file has no licence field. The
-  entries are the four components whose licence was read at adoption; the README names the eight
-  further libraries of the native build whose licence was not read.
+  entries are the 29 libraries the native archive built with TTS links, each with the licence as
+  it was read and the URL of its text; the README has the table and says what the reading did
+  not determine. The speech-recognition adapter lists the 25 libraries of the archive built
+  without TTS the same way.
 - Pinned weights are CC BY 4.0, or more permissive.
 - Each checkpoint's licence, source URL and hash go into the adapter's capability record when it is
   adopted. Any other licence needs an explicit decision for that checkpoint.

@@ -24,14 +24,26 @@
 //!
 //! # The native library and espeak-ng
 //!
-//! Both kinds of voice turn text into phonemes with espeak-ng, which is GPL-3.0. This repository
-//! admits it by a named exception of its owner, only as part of the sherpa-onnx native library
-//! built with text-to-speech and of the `espeak-ng-data` directory a voice carries; neither is
-//! committed to or distributed by this repository. [`CODE_LICENSES`] lists it as an entry of its
-//! own beside sherpa-onnx's Apache-2.0; that list holds the four components whose licence was
-//! read at adoption and names the libraries of the native build it does not cover. That is why
-//! this adapter is a crate of its own that no contract crate and no other adapter depends on: a
-//! build that does not name it links none of it.
+//! Both kinds of voice turn text into phonemes with espeak-ng, which is under the GPL, version 3
+//! or later (`GPL-3.0-or-later`). This repository admits it by a named exception of its owner,
+//! only as part of the sherpa-onnx native library built with text-to-speech and of the
+//! `espeak-ng-data` directory a voice carries; neither is committed to or distributed by this
+//! repository. [`CODE_LICENSES`] lists it as an entry of its own beside sherpa-onnx's
+//! Apache-2.0. That is why this adapter is a crate of its own that no contract crate and no
+//! other adapter depends on: a build that does not name it links none of it.
+//!
+//! [`CODE_LICENSES`] has one entry for each of the 29 libraries that archive links, with the
+//! licence read and the URL of its text. What the reading did not determine: the versions are
+//! those the build files of sherpa-onnx 1.13.8 and of the onnxruntime commit name, read from
+//! those files and not observed in a build, so which Eigen and openfst went into the sherpa-onnx
+//! object, and whether the onnxruntime object was built from exactly the versions its
+//! `cmake/deps.txt` names, is open. The pieces of the compiler's runtime and of the C library
+//! were read at the upstream releases nearest to what the objects say, GCC 11.2.0 for a compiler
+//! string of 11.2.1 and glibc 2.17 by the name of the build container, not in the sources of
+//! the container's packages. Files with a licence of their own inside the trees were not
+//! audited one by one, the revision of the project that sherpa-onnx's tashkeel tokenizer was
+//! adapted from is not pinned, and what the sherpa-onnx build fetches but the archive does not
+//! link was not read.
 //!
 //! sherpa-onnx publishes its shared library in two builds with one file name and one set of
 //! exported symbols, with and without text-to-speech. This crate links against either; which one
@@ -124,48 +136,278 @@ pub const SOURCE_URL: &str = "https://huggingface.co/hexgrad/kLegacy";
 /// The revision of [`SOURCE_URL`] the licence of the weights and voices was read at.
 pub const SOURCE_REVISION: &str = "d0acca3b0748cae52e0a14a28ad03515002ff22f";
 
-/// One component of the code that runs a voice, with its licence and the page that carries it.
+/// One library of the code that runs a voice, with its licence as it was read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CodeLicense {
+    /// The library, by the name of its project. No two entries of a list share it.
     pub component: &'static str,
+    /// The version, tag or commit the licence was read at; [`CodeLicense::source`] names it.
+    pub revision: &'static str,
+    /// The licence as an SPDX expression.
     pub license: &'static str,
+    /// The URL the licence text was read at, pinned to [`CodeLicense::revision`].
     pub source: &'static str,
+    /// The names in the library list of the `sherpa-onnx-sys` build script that are this
+    /// library; empty for a library that list does not name.
+    pub libraries: &'static [&'static str],
 }
 
-/// The licences of the code that runs a voice that were read when this adapter was adopted, one
-/// entry per component read: sherpa-onnx itself, onnxruntime, and the two phonemiser sources
-/// sherpa-onnx 1.13.8 builds in at the revisions its build files pin. espeak-ng is GPL-3.0 and is
-/// admitted by the repository owner's named exception only as part of the native library built
-/// with text-to-speech and as the `espeak-ng-data` a voice carries.
+/// The licences of the code that runs a voice: one entry per library that the sherpa-onnx native
+/// archive built with text-to-speech links, 29 of them, each with the licence read on
+/// 2026-11-25 at the version, tag or commit named and the URL of the text read.
 ///
-/// The list is not every component of that library. The build script of `sherpa-onnx-sys` 1.13.8
-/// names thirteen libraries (`build.rs:16-30`). The four entries here cover five of them:
-/// `sherpa-onnx-c-api` and `sherpa-onnx-core` are sherpa-onnx itself, and `onnxruntime`,
-/// `piper_phonemize` and `espeak-ng` have an entry each. The licences of the other eight were
-/// not read and have no entry: `kaldi-decoder-core`, `sherpa-onnx-kaldifst-core`,
-/// `sherpa-onnx-fstfar`, `sherpa-onnx-fst`, `kaldi-native-fbank-core`, `kissfft-float`, `ucd`
-/// and `ssentencepiece_core`. So [`code_license`] says which licences were read, not that no
-/// other licence applies.
-pub const CODE_LICENSES: [CodeLicense; 4] = [
+/// The archive holds three objects. `libsherpa-onnx-c-api.so` is sherpa-onnx with the next
+/// thirteen entries built in, among them the phonemiser espeak-ng and the Unicode tables of
+/// ucd-tools from the same source tree; `libsherpa-onnx-cxx-api.so` is sherpa-onnx's own C++
+/// wrapper; `libonnxruntime.so` is onnxruntime with the twelve entries from abseil-cpp to
+/// cpuinfo built in. The last two entries are pieces of the compiler's runtime, in all three
+/// objects, and of the C library, in the first. The build script of `sherpa-onnx-sys` names
+/// thirteen libraries (`build.rs:16-30` at 1.13.8): [`CodeLicense::libraries`] says which entry
+/// each of them is, and a test of this crate compares the two, so a pin that moves is red until
+/// the list follows.
+///
+/// What an entry's identifier does not say:
+///
+/// * espeak-ng is admitted by the repository owner's named exception only as part of the native
+///   library built with text-to-speech and as the `espeak-ng-data` a voice carries. One of its
+///   files is offered under BSD-2-Clause as well. Its `COPYING` is the text of the GPL version
+///   3; "or later" is read from its `README.md` ("released under the GPL version 3 or later")
+///   and from the headers of its sources ("either version 3 of the License, or (at your option)
+///   any later version", `src/libespeak-ng/speech.c`).
+/// * `GPL-3.0-or-later AND Unicode-DFS-2016` for ucd-tools is this repository's reading of the
+///   texts, not an expression a file states. ucd-tools has licence files of its own in
+///   espeak-ng's source tree. The files read: `src/ucd-tools/COPYING`, the text of the GPL
+///   version 3; the compiled `src/ucd-tools/src/case.c` and `src/ucd-tools/src/categories.c`,
+///   whose headers say "either version 3 of the License, or (at your option) any later
+///   version"; and `src/ucd-tools/COPYING.UCD`, the licence of the Unicode data files from
+///   which the compiled tables are generated, in the form SPDX names Unicode-DFS-2016.
+/// * `Apache-2.0 AND BSD-2-Clause AND Zlib` for simple-sentencepiece is this repository's
+///   reading of the texts as well. The files read: `LICENSE`, the Apache License 2.0;
+///   `ssentencepiece/csrc/darts.h`, the bundled darts-clone, whose header names "The BSD
+///   2-clause license"; and `ssentencepiece/csrc/threadpool.h`, the bundled thread pool, whose
+///   header carries the wording SPDX names Zlib ("This software is provided 'as-is'") and no
+///   name for it. Both bundled files are in the object.
+/// * `Unlicense OR MIT` for uni-algo is read from `licenses/uni-algo/LICENSE.md` in
+///   piper-phonemize's tree: a public-domain dedication in the wording SPDX names Unlicense,
+///   then the MIT text. The header of the bundled `src/uni_algo.h` says "License: Public Domain
+///   or MIT - choose whatever you want."
+/// * onnxruntime is not built by sherpa-onnx: the object is the one of the prebuilt
+///   `onnxruntime-linux-x64-glibc2_17-Release-1.28.2.zip` that sherpa-onnx 1.13.8 pins
+///   (`cmake/onnxruntime-linux-x86_64.cmake`), sha256
+///   `c4f8994d56191d9d2c92a961b39fe790459f2c5d155f912b239506ea31359534`, version 1.28.2, built
+///   from the commit the entry names. The text was read at a fork that holds that commit and is
+///   byte for byte the `LICENSE` of the zip; the upstream repository did not answer that day.
+/// * Boost.Mp11 has no licence file in its own repository at the tag; its header names the Boost
+///   Software License 1.0, read in the Boost super-project at the same tag.
+/// * The glibc files carry, beside the LGPL, a permission that has no SPDX identifier:
+///   "unlimited permission to link the compiled version of this file with other programs, and
+///   to distribute those programs without any restriction coming from the use of this file"
+///   (header of `stdlib/atexit.c` at the tag).
+///
+/// The crate documentation says what the reading did not determine.
+pub const CODE_LICENSES: [CodeLicense; 29] = [
     CodeLicense {
-        component: "sherpa-onnx 1.13.8",
+        component: "sherpa-onnx",
+        revision: "v1.13.8",
         license: "Apache-2.0",
-        source: "https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.8/LICENSE",
+        source: "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.8/LICENSE",
+        libraries: &["sherpa-onnx-c-api", "sherpa-onnx-core"],
     },
     CodeLicense {
-        component: "onnxruntime",
-        license: "MIT",
-        source: "https://github.com/microsoft/onnxruntime",
+        component: "kaldi-native-fbank",
+        revision: "v1.22.3",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/csukuangfj/kaldi-native-fbank/v1.22.3/LICENSE",
+        libraries: &["kaldi-native-fbank-core"],
     },
     CodeLicense {
-        component: "piper-phonemize",
+        component: "kissfft",
+        revision: "febd4caeed32e33ad8b2e0bb5ea77542c40f18ec",
+        license: "BSD-3-Clause",
+        source: "https://raw.githubusercontent.com/mborgerding/kissfft/febd4caeed32e33ad8b2e0bb5ea77542c40f18ec/COPYING",
+        libraries: &["kissfft-float"],
+    },
+    CodeLicense {
+        component: "kaldi-decoder",
+        revision: "v0.3.0",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/k2-fsa/kaldi-decoder/v0.3.0/LICENSE",
+        libraries: &["kaldi-decoder-core"],
+    },
+    CodeLicense {
+        component: "kaldifst",
+        revision: "v1.8.0",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/k2-fsa/kaldifst/v1.8.0/LICENSE",
+        libraries: &["sherpa-onnx-kaldifst-core"],
+    },
+    CodeLicense {
+        component: "openfst",
+        revision: "v1.8.5-2026-07-09",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/csukuangfj/openfst/v1.8.5-2026-07-09/COPYING",
+        libraries: &["sherpa-onnx-fstfar", "sherpa-onnx-fst"],
+    },
+    CodeLicense {
+        component: "Eigen",
+        revision: "5.0.1",
+        license: "MPL-2.0",
+        source: "https://gitlab.com/libeigen/eigen/-/raw/5.0.1/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "simple-sentencepiece",
+        revision: "v0.7",
+        license: "Apache-2.0 AND BSD-2-Clause AND Zlib",
+        source: "https://raw.githubusercontent.com/pkufool/simple-sentencepiece/v0.7/LICENSE",
+        libraries: &["ssentencepiece_core"],
+    },
+    CodeLicense {
+        component: "nlohmann/json",
+        revision: "v3.12.0",
         license: "MIT",
-        source: "https://github.com/csukuangfj/piper-phonemize/blob/f3ff95afc03640bc1399e113e83361192a2fafb4/LICENSE.md",
+        source: "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "hclust-cpp",
+        revision: "2026-02-25",
+        license: "BSD-2-Clause",
+        source: "https://raw.githubusercontent.com/csukuangfj/hclust-cpp/2026-02-25/LICENSE",
+        libraries: &[],
     },
     CodeLicense {
         component: "espeak-ng",
-        license: "GPL-3.0",
-        source: "https://github.com/csukuangfj/espeak-ng/blob/ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING",
+        revision: "ed530aa113046142eb5115cf2fc9157854d0ffe1",
+        license: "GPL-3.0-or-later",
+        source: "https://raw.githubusercontent.com/csukuangfj/espeak-ng/ed530aa113046142eb5115cf2fc9157854d0ffe1/COPYING",
+        libraries: &["espeak-ng"],
+    },
+    CodeLicense {
+        component: "ucd-tools",
+        revision: "ed530aa113046142eb5115cf2fc9157854d0ffe1",
+        license: "GPL-3.0-or-later AND Unicode-DFS-2016",
+        source: "https://raw.githubusercontent.com/csukuangfj/espeak-ng/ed530aa113046142eb5115cf2fc9157854d0ffe1/src/ucd-tools/COPYING",
+        libraries: &["ucd"],
+    },
+    CodeLicense {
+        component: "piper-phonemize",
+        revision: "f3ff95afc03640bc1399e113e83361192a2fafb4",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/csukuangfj/piper-phonemize/f3ff95afc03640bc1399e113e83361192a2fafb4/LICENSE.md",
+        libraries: &["piper_phonemize"],
+    },
+    CodeLicense {
+        component: "uni-algo",
+        revision: "f3ff95afc03640bc1399e113e83361192a2fafb4",
+        license: "Unlicense OR MIT",
+        source: "https://raw.githubusercontent.com/csukuangfj/piper-phonemize/f3ff95afc03640bc1399e113e83361192a2fafb4/licenses/uni-algo/LICENSE.md",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "onnxruntime",
+        revision: "33ca9628233dc8f002435e868d4c2e9f82766ca1",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/csukuangfj/onnxruntime/33ca9628233dc8f002435e868d4c2e9f82766ca1/LICENSE",
+        libraries: &["onnxruntime"],
+    },
+    CodeLicense {
+        component: "abseil-cpp",
+        revision: "20250814.0",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/abseil/abseil-cpp/20250814.0/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "onnx",
+        revision: "v1.22.0",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/onnx/onnx/v1.22.0/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "protobuf",
+        revision: "v21.12",
+        license: "BSD-3-Clause",
+        source: "https://raw.githubusercontent.com/protocolbuffers/protobuf/v21.12/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "re2",
+        revision: "2024-07-02",
+        license: "BSD-3-Clause",
+        source: "https://raw.githubusercontent.com/google/re2/2024-07-02/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "flatbuffers",
+        revision: "v23.5.26",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/google/flatbuffers/v23.5.26/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "Eigen in onnxruntime",
+        revision: "1d8b82b0740839c0de7f1242a3585e3390ff5f33",
+        license: "MPL-2.0",
+        source: "https://raw.githubusercontent.com/eigen-mirror/eigen/1d8b82b0740839c0de7f1242a3585e3390ff5f33/COPYING.MPL2",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "GSL",
+        revision: "v4.2.1",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/microsoft/GSL/v4.2.1/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "nlohmann/json in onnxruntime",
+        revision: "v3.11.3",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/nlohmann/json/v3.11.3/LICENSE.MIT",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "date",
+        revision: "v3.0.1",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/HowardHinnant/date/v3.0.1/LICENSE.txt",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "Boost.Mp11",
+        revision: "boost-1.82.0",
+        license: "BSL-1.0",
+        source: "https://raw.githubusercontent.com/boostorg/boost/boost-1.82.0/LICENSE_1_0.txt",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "SafeInt",
+        revision: "3.0.28",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/dcleblanc/SafeInt/3.0.28/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "cpuinfo",
+        revision: "4628dc060ce4e82345dc166bbac875609db4ff69",
+        license: "BSD-2-Clause",
+        source: "https://raw.githubusercontent.com/pytorch/cpuinfo/4628dc060ce4e82345dc166bbac875609db4ff69/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "libstdc++ and libgcc",
+        revision: "releases/gcc-11.2.0",
+        license: "GPL-3.0-or-later WITH GCC-exception-3.1",
+        source: "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-11.2.0/COPYING.RUNTIME",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "glibc",
+        revision: "glibc-2.17",
+        license: "LGPL-2.1-or-later",
+        source: "https://sourceware.org/git/?p=glibc.git;a=blob_plain;f=COPYING.LIB;hb=refs/tags/glibc-2.17",
+        libraries: &[],
     },
 ];
 
