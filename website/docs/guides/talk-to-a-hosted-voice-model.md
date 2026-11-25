@@ -186,6 +186,10 @@ These ship in `inference_openai` since 0.11.0:
 - `ConversationItem::SystemText` adds a system-role item, so an out-of-band response can carry
   instructions in context without adding them to the conversation.
 
+On main, in the next release: `LiveClient::with_close_timeout` and `OpenAiLive::with_close_timeout`
+set how long `close` waits for `session.closed` when the endpoint's read timeout is shorter.
+[Adapters](../reference/adapters.md#opens-closes-and-drops) gives the longest a close takes.
+
 ## Next
 
 - [Compare voice providers](compare-voice-providers.md) on latency and usage

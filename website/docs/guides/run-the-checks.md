@@ -159,17 +159,17 @@ the quality of this repository, what each value is today and where it comes from
 | `quality/README.md` | the measures of the gate, the tests, the specification, the turnaround, the documentation site, the local speech-to-text adapters and a release, each with its command, unit, direction, bound and baseline, and the CI runs the baselines were read from |
 | `quality/adapters.md` | one section per crate under `adapters/`: the tests run and passed and the slowest test, the time bounds and the records its tests hold, and the commands that print a latency, which have no baseline |
 | `quality/not-measured.md` | what is not measured, and what would produce the value |
-| `ratchet.toml`, `quality/*.ratchet.yaml`, `quality/assessors/`, `quality/records/` | the same measures in the formats of Ratchet, what each assessor reports, and one record per assessment that has a baseline, read from a CI run |
+| `ratchet.toml`, `quality/*.ratchet.yaml`, `quality/assessors/`, `quality/records/` | the same measures in the formats of Ratchet (`beyond10x/ratchet`), what each assessor reports, and one record per assessment whose baseline was read from a CI run |
 
-No Ratchet command works at the commit of Ratchet the documents are written against, so Ratchet
-runs none of them. They add no gate and change none: they describe what `task check`,
-`task test-slow` and the workflows under `.github/workflows/` already enforce.
+The formats are those of the Ratchet specification at the commit `quality/README.md` names. No
+Ratchet command works at that commit, so Ratchet runs none of the files. They add no gate and change none: they describe what `task check`, `task test-slow` and
+the workflows under `.github/workflows/` already enforce.
 
 The tests of `crates/inference-docs/tests/quality/` run in `task test-run`. They fail when the
-documents stop agreeing with each other, with `Taskfile.yml`, with the tree, or with
-`quality/README.md` and `quality/adapters.md`: a measure without its entry, a baseline that differs
-from its record, a command that calls a task `Taskfile.yml` does not have, a test or an adapter
-directory a page names that does not exist. `quality/README.md` lists every rule under "The test
+YAML files and records stop agreeing with each other, with `Taskfile.yml`, with the tree, or with
+the pages that describe them, `quality/README.md` and `quality/adapters.md`: a measure without its
+entry, a baseline that differs from its record, a command that calls a task `Taskfile.yml` does
+not have, a test or an adapter directory a page names that does not exist. `quality/README.md` lists every rule under "The test
 that keeps the documents true".
 
 ## The generated pages
