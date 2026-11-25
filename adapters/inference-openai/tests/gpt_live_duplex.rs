@@ -26,7 +26,7 @@ use inference_duplex::{
 use inference_openai::live::{CLOSE_TIMEOUT, LIVE_MODEL, LiveClosed, LiveFormat};
 use inference_openai::live_duplex::{
     DEFAULT_BACKEND_MODEL, OpenAiLive, OpenAiLiveSession, Segmentation, capabilities, claims,
-    live_format, native_duplex_verdict,
+    default_session_config, live_format, native_duplex_verdict,
 };
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Endpoint, OPENAI_KEY_NAME,
@@ -1461,6 +1461,53 @@ fn a_model_keeps_the_documented_close_timeout_unless_given_another() {
     assert_eq!(model.close_timeout(), CLOSE_TIMEOUT);
     let model = model.with_close_timeout(Duration::from_secs(2));
     assert_eq!(model.close_timeout(), Duration::from_secs(2));
+}
+
+/// The idle limit of the session configuration a caller gets from
+/// `live_duplex::default_session_config()`, the read timeout of the endpoint a caller gets from
+/// `Endpoint::live(..)`, and the two deadlines of a model built with `OpenAiLive::new(..)` and
+/// given none, each compared with its number written out: a changed default fails here, and so
+/// does an endpoint or a model that starts with another value than its constant. The idle limit
+/// has no constant, and no document outside the source states it: its number below is the
+/// reference. The read timeout and the two deadlines are stated in `quality/adapters.md`, entry
+/// `openai-time-bounds/held`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let model = OpenAiLive::new(
+        Endpoint::live(LIVE_MODEL),
+        Box::new(FixedSource),
+        OPENAI_KEY_NAME,
+    );
+    let defaults = [
+        (
+            "live_duplex::default_session_config().idle_limit",
+            default_session_config().idle_limit,
+            Duration::from_secs(30),
+        ),
+        (
+            "Endpoint::live(..).read_timeout",
+            Endpoint::live(LIVE_MODEL).read_timeout,
+            Duration::from_secs(30),
+        ),
+        (
+            "OpenAiLive::new(..).connect_timeout()",
+            model.connect_timeout(),
+            Duration::from_secs(10),
+        ),
+        (
+            "OpenAiLive::new(..).write_timeout()",
+            model.write_timeout(),
+            Duration::from_secs(10),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
 }
 
 /// The close of a session whose server answers only with a running total and then messages the

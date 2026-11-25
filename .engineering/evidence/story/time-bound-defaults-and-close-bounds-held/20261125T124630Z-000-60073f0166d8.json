@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T12:46:30Z",
+  "actor": "human:operator",
+  "artifact": "story:time-bound-defaults-and-close-bounds-held",
+  "kind": "story",
+  "revision": 14,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-cartesia --all-features -E 'test(=the_time_bound_defaults_are_the_stated_numbers)' and the same for inference-elevenlabs, on the build node",
+    "reference": "VERIFIED: baseline with CLOSE_GRACE at 6 ms in the source at cdfa965b1 (cartesia: 1 test run: 0 passed, 1 failed, naming (CLOSE_GRACE, 6ms, 5ms); elevenlabs: 2 tests run: 1 passed, 1 failed, naming (CLOSE_GRACE, 6ms, 5ms)) vs treatment at cdfa965b1 on the unchanged source (cartesia 1 passed, elevenlabs 2 passed; the crates whole: 46 passed and 206 passed)"
+  }
+}

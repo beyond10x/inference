@@ -1,12 +1,13 @@
 //! The Phonic binding against the local fixture server of `support/mod.rs`, which speaks the
 //! documented conversation protocol: the opening order and `config`, input chunking, a response
-//! from start to finish, barge-in, a closed session, server errors and closes, the refusals
-//! before connecting, liveness, tools, and the duplex conformance procedure.
+//! from start to finish, barge-in, a closed session, server errors and closes, a handshake never
+//! answered, the refusals before connecting, liveness, tools, and the duplex conformance
+//! procedure.
 
 mod support;
 
 use std::num::{NonZeroU16, NonZeroU32};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use inference_phonic::inference_duplex::conformance::{
@@ -23,6 +24,9 @@ use inference_phonic::inference_duplex::{
     NativeSpeechModel, OpenError, ResponseId, SessionConfig, SessionError, SessionEvent,
     SessionFailureKind, SpeechSessionHandle, TurnDetection, TurnTuning, Unsupported,
 };
+use inference_phonic::protocol::{
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_PING_INTERVAL, DEFAULT_READ_TIMEOUT, DEFAULT_READY_TIMEOUT,
+};
 use inference_phonic::{
     CLOSE_BOUND, Credential, CredentialError, CredentialFuture, CredentialSource, PhonicConfig,
     PhonicEndpoint, PhonicError, PhonicSession, PhonicSpeech, claims, native_duplex_verdict,
@@ -31,6 +35,33 @@ use support::{Handshake, KEY, PhonicServer, Script, Step, bounded};
 
 const WAIT: Duration = Duration::from_millis(20);
 const KEY_NAME: &str = "phonic-api-key";
+
+/// The connect timeout given to the open whose handshake is never answered.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// That open must end before twice its connect timeout: a bound doubled or more fails the test,
+/// a bound multiplied by less than two still passes. The 500 ms past the bound are room for a
+/// loaded machine: over repeated runs on one, such an open ended at most 51 ms after its bound,
+/// and tests that measure stalls saw one of 204 ms there.
+const LATEST: Duration = CONNECT_TIMEOUT.saturating_mul(2);
+
+/// The test's own deadline for an open that nothing ends: past it the test fails instead of
+/// waiting.
+const DEADLINE: Duration = Duration::from_secs(4);
+
+/// How many connections wait in the queue of `listener`, which nothing accepted before. An
+/// attempt is there from the moment its TCP connect completed, so the count needs no wait.
+fn attempts(listener: &std::net::TcpListener) -> usize {
+    listener.set_nonblocking(true).unwrap();
+    let mut count = 0;
+    loop {
+        match listener.accept() {
+            Ok(_) => count += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return count,
+            Err(error) => panic!("the listener failed: {error}"),
+        }
+    }
+}
 
 struct FixedKey(&'static str);
 
@@ -394,6 +425,120 @@ fn dropping_a_session_mid_stream_closes_the_connection_within_the_close_bound() 
     });
 }
 
+/// The pings of the first flood of the backed-up close. The session answers each with a pong of
+/// 131 bytes; 36,000 of them are 4.7 MB, more than the socket buffers hold where the kernel's
+/// largest send buffer is 4 MiB.
+const FLOOD: usize = 36_000;
+
+/// The largest flood: a host whose buffers took every pong gets the flood doubled up to here.
+/// It is one the session reads within the wait of `events_until`, so a host that took this one
+/// too fails on that and not on the wait for the audio behind it.
+const LARGEST_FLOOD: usize = 4 * FLOOD;
+
+/// The test's own deadline for a close that nothing ends: past it the test lets the server read
+/// again, which ends the close, and fails.
+const CLOSE_DEADLINE: Duration = Duration::from_secs(4);
+
+/// The server reads nothing, sends a flood of pings and then one audio chunk. The session
+/// answers each ping with a pong as it reads; the pongs fill the socket buffers and then wait in
+/// the session's WebSocket buffer, in front of the close frame, so that frame cannot be written
+/// and only the close bound ends the close. Whether the connection was backed up is the
+/// server's to tell: it had read no pong when the test told it to read again, and reading again
+/// after the close, it counts fewer pongs than it sent pings. A flood whose pongs all arrived is
+/// doubled and the session run again.
+///
+/// The close must hold its caller no shorter than one second and less than two. Both numbers
+/// are written out and not taken from `CLOSE_BOUND`: limits that moved with the constant would
+/// pass with any value of it. The bound is applied twice here, on the write of the close frame
+/// and on the caller's wait for the connection task, both against the same blocked write; this
+/// test does not tell the two apart.
+#[test]
+fn a_close_on_a_backed_up_connection_ends_at_the_close_bound() {
+    bounded(|| {
+        let mut pings = FLOOD;
+        loop {
+            let mut script = Script::new(vec![
+                Step::Pings(pings),
+                Step::Send(support::audio(640, "Hello")),
+            ]);
+            script.deaf = true;
+            let server = PhonicServer::start(script);
+            let patient = endpoint(&server)
+                .with_read_timeout(Duration::from_secs(30))
+                .with_ping_interval(Duration::from_secs(30));
+            let mut model = PhonicSpeech::new(
+                patient,
+                PhonicConfig::new(),
+                Arc::new(FixedKey(KEY)),
+                KEY_NAME,
+            )
+            .unwrap();
+            let opened = Instant::now();
+            let mut session = model.open(config()).expect("the session opens");
+            let events = events_until(&mut session, |event| {
+                matches!(event, SessionEvent::OutputAudio(_))
+            });
+            assert!(
+                matches!(events.last(), Some(SessionEvent::OutputAudio(_))),
+                "the audio behind a flood of {pings} pings did not arrive: {events:#?}"
+            );
+            let flooded = opened.elapsed();
+            let (done, finished) = mpsc::channel();
+            let closer = std::thread::spawn(move || {
+                let closing = Instant::now();
+                let closed = session.close();
+                let _ = done.send((closing.elapsed(), closed));
+            });
+            let outcome = finished.recv_timeout(CLOSE_DEADLINE);
+            server.read_again(0);
+            closer.join().expect("the close returned");
+            let (held, closed) = outcome.unwrap_or_else(|error| {
+                panic!("the close did not end within {CLOSE_DEADLINE:?}: {error}")
+            });
+            closed.expect("an open session closes");
+            let seen = server.wait(0, Duration::from_secs(5), |seen| seen.closed.is_some());
+            assert!(
+                seen.closed.is_some(),
+                "the server read no end of the stream"
+            );
+            println!(
+                "a flood of {pings} pings, read within {flooded:?}: the close held {held:?}; the \
+                 server had read {} pongs when it was told to read again and {} at the end, \
+                 close frame: {}",
+                seen.early_pongs, seen.pongs, seen.close_frame
+            );
+            if seen.pongs < pings {
+                assert_eq!(
+                    seen.early_pongs, 0,
+                    "the server read pongs before it was told to read again, so fewer pongs \
+                     than pings does not say that the connection was backed up"
+                );
+                assert!(
+                    !seen.close_frame,
+                    "a close frame behind pongs never written"
+                );
+                assert!(
+                    held >= Duration::from_secs(1),
+                    "the close on a backed-up connection returned after {held:?}, before its bound"
+                );
+                assert!(
+                    held < Duration::from_secs(2),
+                    "the close on a backed-up connection held {held:?}, twice its bound or longer"
+                );
+                return;
+            }
+            assert!(
+                pings < LARGEST_FLOOD,
+                "the socket buffers of this host took every pong of a flood of {pings} pings, \
+                 {} of them before the server was told to read again, so no close was backed \
+                 up and nothing was asserted of its bound",
+                seen.early_pongs
+            );
+            pings *= 2;
+        }
+    });
+}
+
 #[test]
 fn a_server_close_mid_response_fails_the_response_and_the_session_with_its_code() {
     bounded(|| {
@@ -485,6 +630,120 @@ fn no_ready_within_the_deadline_fails_the_open_and_closes_the_connection() {
             "the failed open left its connection open"
         );
     });
+}
+
+/// The bounds of the endpoint a caller gets from `PhonicEndpoint::new()`, their constants in
+/// `inference_phonic::protocol` and the close bound, each compared with its number written out:
+/// a changed default fails here. Outside the source, `quality/adapters.md`, entry
+/// `phonic-time-bounds/held`, states the bound on the wait for the ready message (10 s), the
+/// read timeout (30 s), the ping interval (10 s) and the close bound (1 s). No document states
+/// the connect timeout: for it the number below is the reference.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let endpoint = PhonicEndpoint::new();
+    let defaults = [
+        (
+            "protocol::DEFAULT_CONNECT_TIMEOUT",
+            DEFAULT_CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "PhonicEndpoint::new().connect_timeout",
+            endpoint.connect_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "protocol::DEFAULT_READY_TIMEOUT",
+            DEFAULT_READY_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "PhonicEndpoint::new().ready_timeout",
+            endpoint.ready_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "protocol::DEFAULT_READ_TIMEOUT",
+            DEFAULT_READ_TIMEOUT,
+            Duration::from_secs(30),
+        ),
+        (
+            "PhonicEndpoint::new().read_timeout",
+            endpoint.read_timeout,
+            Duration::from_secs(30),
+        ),
+        (
+            "protocol::DEFAULT_PING_INTERVAL",
+            DEFAULT_PING_INTERVAL,
+            Duration::from_secs(10),
+        ),
+        (
+            "PhonicEndpoint::new().ping_interval",
+            endpoint.ping_interval,
+            Duration::from_secs(10),
+        ),
+        ("CLOSE_BOUND", CLOSE_BOUND, Duration::from_secs(1)),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
+}
+
+/// The listener takes the TCP connection into its queue and nothing reads it or answers the
+/// upgrade, so only the connect timeout ends the open. A refused connection is the same variant
+/// with no status: the detail and the time tell the two apart. The open connects once: a second
+/// attempt after the timeout is a second connection in the listener's queue. The wait is the
+/// test's own, so an open that no timeout ends fails here at [`DEADLINE`] instead of hanging.
+#[test]
+fn a_handshake_never_answered_fails_the_open_at_the_connect_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = PhonicEndpoint::new()
+        .with_url(format!("ws://{}", listener.local_addr().unwrap()))
+        .with_connect_timeout(CONNECT_TIMEOUT);
+    let (done, waited) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut model = PhonicSpeech::new(
+            endpoint,
+            PhonicConfig::new(),
+            Arc::new(FixedKey(KEY)),
+            KEY_NAME,
+        )
+        .unwrap();
+        let started = Instant::now();
+        let outcome = model.open(config()).err();
+        let took = started.elapsed();
+        let _ = done.send((outcome, model.open_error().cloned(), took));
+    });
+    let (outcome, error, took) = waited
+        .recv_timeout(DEADLINE)
+        .unwrap_or_else(|error| panic!("the open did not end within {DEADLINE:?}: {error}"));
+    match outcome {
+        Some(OpenError::Failed(failure)) => {
+            assert_eq!(failure.kind, SessionFailureKind::TransportClosed)
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        error,
+        Some(PhonicError::Connect {
+            status: None,
+            detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
+        })
+    );
+    assert_eq!(attempts(&listener), 1, "the connections the open made");
+    assert!(
+        took >= CONNECT_TIMEOUT,
+        "the open failed after {took:?}, before its connect timeout"
+    );
+    assert!(
+        took < LATEST,
+        "the open failed after {took:?}, at twice its connect timeout or later"
+    );
 }
 
 #[test]

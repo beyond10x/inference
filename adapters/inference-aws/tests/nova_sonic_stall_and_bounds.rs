@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use aws_sdk_bedrockruntime::config::{Credentials, Region};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use inference_aws::duplex::{Connector, NovaSonicSpeech, OPEN_TIMEOUT};
+use inference_aws::duplex::{Connector, NovaSonicSpeech, OPEN_TIMEOUT, default_session_config};
 use inference_aws::nova_sonic::{
     self, DEFAULT_MODEL_ID, NovaSonic, NovaSonicError, Session, SessionConfig as ClientConfig,
 };
@@ -278,6 +278,34 @@ fn the_open_deadline_is_stated() {
     assert_eq!(model.open_timeout(), OPEN_TIMEOUT);
     assert_eq!(OPEN_TIMEOUT, Duration::from_secs(10));
     assert_eq!(silent_nova().open_timeout(), OPEN_TIMEOUT);
+}
+
+/// The read timeout a session configuration starts with and the idle limit of the default
+/// session configuration, each compared with its number written out: a changed default fails
+/// here. Neither has a constant, so each is read from the value a caller gets. Outside the
+/// source both numbers are stated in `quality/adapters.md`, entry `aws-time-bounds/held`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let defaults = [
+        (
+            "nova_sonic::SessionConfig::new(..).read_timeout",
+            ClientConfig::new("a prompt").read_timeout,
+            Duration::from_secs(30),
+        ),
+        (
+            "duplex::default_session_config().idle_limit",
+            default_session_config().idle_limit,
+            Duration::from_secs(30),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
 }
 
 /// Frames that commit the user's input, then start assistant audio at 24 kHz, for a session

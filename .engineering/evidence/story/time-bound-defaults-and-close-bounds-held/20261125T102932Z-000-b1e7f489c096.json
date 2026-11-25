@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T10:29:32Z",
+  "actor": "human:operator",
+  "artifact": "story:time-bound-defaults-and-close-bounds-held",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p <crate> --all-features -E 'test(=the_time_bound_defaults_are_the_stated_numbers) | test(=the_deadlines_are_stated_and_settable) | test(=a_sink_given_no_patience_waits_the_stated_two_seconds_for_a_stalled_speaker)', per adapter crate, on the build node",
+    "reference": "VERIFIED: baseline with each of the 34 defaults changed in the source at 1b4697831, one run per crate with all of its defaults changed (14 tests run in nine crates: 0 passed, 14 failed, each failure naming every changed default with both values) vs treatment at 1b4697831 on the unchanged source (the same 14 tests passed, 0.004 s to 0.011 s each). The adversary pass planted 43 further changes at 1b4697831: every one of the 34 turned a test red when its constant or literal changed, alone or batched, and when the constructor took another literal. Four left the whole crate green: the patience a sink of the audio device starts with, the deadlines the OpenAI models and clients start with (two plants), and the connect bound of the client llama-server builds. At 12d77e8e3 the first is red (129 tests run: 128 passed, 1 failed, left 3s right 2s), the parts of the two OpenAI plants that a model's reader reaches are red (352 tests run: 350 passed, 2 failed; 351 passed, 1 failed), and the read timeout of Endpoint::live is red alone. Still green at 12d77e8e3, and named on the page: the deadlines the two OpenAI clients start with (352 passed) and the bound of the client llama-server builds (48 passed)"
+  }
+}

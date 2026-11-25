@@ -69,47 +69,50 @@ user:
 - The example `talk` of `realtime-voice` and its ignored test `live_usage`: the time of the
   whole run.
 
-### Time bounds no test fires, and defaults no test asserts
+### Time bounds no test fires
 
-[adapters.md](adapters.md) names the tests that hold a bound. The rest, per binding:
+[adapters.md](adapters.md) names the tests that hold a bound. Three lists further down name
+what a test does and no record of a run holds yet: "The connect timeout of five bindings" has
+the tests that fire that timeout and time the failure, "The close bound of six bindings" has
+the tests that fire a close bound and compare the time with numbers, and "The value of each
+time-bound default" has the tests that compare each default with its number. What is left, per
+binding:
 
-- Cartesia: no test fires the connect timeout, `DEFAULT_CONNECT_TIMEOUT` in
-  `adapters/inference-cartesia/src/config.rs`. No test asserts the value of that default or of
-  `DEFAULT_READ_TIMEOUT`.
-- Phonic: no test fires the connect timeout, `DEFAULT_CONNECT_TIMEOUT` in
-  `adapters/inference-phonic/src/protocol.rs`. No test asserts the value of any of its four
-  defaults.
-- ElevenLabs agent: no test times the connect timeout, `DEFAULT_CONNECT_TIMEOUT` in
-  `adapters/inference-elevenlabs/src/agent.rs`. No test asserts the value of that default, of
-  `DEFAULT_METADATA_TIMEOUT` or of the agent's `DEFAULT_READ_TIMEOUT`.
-  Two tests fire the connect timeout, at 200 ms against a handshake that is never answered,
-  and assert no time: the test
+- ElevenLabs agent: beside the test listed further down, two tests fire the connect timeout, at
+  200 ms against a handshake that is never answered, and assert no time: the test
   `a_handshake_that_timed_out_or_was_cancelled_spends_the_signed_url_too` of
   `adapters/inference-elevenlabs/tests/agent_duplex.rs` and the test
   `no_memory_holds_the_url_after_a_handshake_that_timed_out` of
   `adapters/inference-elevenlabs/tests/adversary2_w2_u3_signed_url_memory.rs`. With the
   timeout not applied both pass, 30 s later, when the fixture ends the connection.
-- ElevenLabs text to speech and speech to text: no test asserts the value of
-  `DEFAULT_READ_TIMEOUT` or `DEFAULT_CONNECT_TIMEOUT`.
-- Deepgram transcription: no test asserts the value of `DEFAULT_CONNECT_TIMEOUT`,
-  `DEFAULT_READ_TIMEOUT` or `DEFAULT_KEEPALIVE_INTERVAL`.
-- Deepgram Voice Agent: no test asserts the value of `DEFAULT_AGENT_OPEN_TIMEOUT` or
-  `DEFAULT_AGENT_READ_TIMEOUT`. The keep-alive interval is asserted.
-- Deepslate Opal: no test asserts the value of `DEFAULT_OPEN_TIMEOUT`, `DEFAULT_READ_TIMEOUT`
-  or `DEFAULT_PING_INTERVAL`.
-- OpenAI: the connect and write defaults are held only to be the constants and to lie between
-  zero and a wide upper limit. No test asserts the idle limit of the default session
-  configuration.
-- Amazon Nova Sonic: no test asserts the default read timeout or the default idle limit. No
-  test names the wait of the close for its task.
-- Audio device: no test asserts the value of `PLAYBACK_PATIENCE`.
-- `CLOSE_BOUND` of Phonic, of Deepgram, of Deepslate, of the ElevenLabs agent and of ElevenLabs
-  speech to text: no test fires it. The tests that compare a time with the constant close
-  against a local fixture that takes the close at once. So they pass with a larger constant
-  and, by reading the code, with the bound removed.
+- Amazon Nova Sonic: the adapter has no bound on its close, so there is none to fire. The close
+  sends a command to the task of the session and does not wait for it, and the task ends the
+  session on the stream without a timeout (`adapters/inference-aws/src/duplex.rs`).
+- Every `CLOSE_BOUND`: six bindings have a test that fires it and compares the time with
+  numbers, in the list "The close bound of six bindings". Cartesia text to speech and
+  ElevenLabs text to speech have no such test: their tests fire the bound where a synthesis is
+  dropped and follow the constant, and the next three entries say what these tests do. No test
+  fires what follows. In these two bindings a close also runs as an exchange that the next
+  step of the synthesis waits for with no deadline of its own, so the write of the close frame
+  is its only bound (`adapters/inference-cartesia/src/synthesiser.rs`,
+  `adapters/inference-elevenlabs/src/synthesiser.rs`). In Phonic, the Deepgram Voice Agent,
+  Deepslate Opal and the ElevenLabs agent no test fires one application of the constant alone:
+  a close outside an async runtime bounds the write of the close frame and the wait for the
+  connection task with the same constant, and the test of each binding passes with either of
+  the two removed. A Deepgram transcription handle adds the constant to the read timeout for
+  its deadline after the end of input (`adapters/inference-deepgram/src/recogniser.rs`). No
+  test fires that deadline: the test
+  `messages_trickling_in_after_close_stream_do_not_stretch_the_summary_deadline` of
+  `adapters/inference-deepgram/tests/bounds.rs` and the test
+  `a_server_silent_after_close_stream_stalls_within_the_read_timeout` of
+  `adapters/inference-deepgram/tests/errors.rs` pass with the constant at 3 s, so the
+  connection thread's own deadline ends both. A test asserts the value of each of the five
+  constants, 1 s: one per crate, of Cartesia, Deepgram, Deepslate, ElevenLabs and Phonic. These
+  tests are in the list "The value of each time-bound default". They fix the number and fire
+  nothing.
 - Cartesia: a drop fires `CLOSE_BOUND`, against a peer that reads nothing
-  (`adapters/inference-cartesia/tests/support/deaf.rs`), and no test asserts its value. Outside
-  a runtime the test
+  (`adapters/inference-cartesia/tests/support/deaf.rs`), and no test of a drop asserts its
+  value. Outside a runtime the test
   `dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound`
   of `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs` compares the wait of
   the drop with the constant itself. Inside a Tokio runtime the test
@@ -130,7 +133,7 @@ user:
   (`adapters/inference-elevenlabs/src/connection.rs`). The cancel of a segment does no I/O and
   does not wait for the server, so a test of a cancel does not reach the bound. A drop reaches
   it against a peer that reads nothing (`adapters/inference-elevenlabs/tests/support/deaf.rs`),
-  and no test asserts its value. Outside a runtime the test
+  and no test of a drop asserts its value. Outside a runtime the test
   `dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound`
   of `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs` compares the wait of
   the drop with the constant itself, and so does the test
@@ -140,11 +143,15 @@ user:
   `dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime` of
   `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs` waits for the close the
   drop handed off, the constant and 3 s more at most. All three pass with a larger constant. The
-  code of a drop has the bound three times, as in Cartesia, and every test passes with one of
-  the three removed. With the wait outside a runtime and the close of the connection unbounded
-  the first test runs until the runner ends it at 60 s and the second fails at a limit of its
-  own, 30 s. With the close handed off and the close of the connection unbounded the third
-  fails. No entry of [adapters.md](adapters.md) names these tests. Other tests drop
+  code of a drop has the bound three times, as in Cartesia, and every test of a drop passes
+  with one of the three removed. With the wait outside a runtime and the close of the
+  connection unbounded the first test runs until the runner ends it at 60 s and the second
+  fails at a limit of its own, 30 s. With the close handed off and the close of the connection
+  unbounded the third fails. Speech to text closes its connection with the same function as
+  the last of the three: with the close of the connection unbounded alone the test
+  `a_cancel_on_a_backed_up_connection_ends_its_thread_at_the_close_bound` of
+  `adapters/inference-elevenlabs/tests/stt.rs` fails, at a limit of its own, 4 s. No entry of
+  [adapters.md](adapters.md) names these tests. Other tests drop
   a handle, against a fixture that takes the close at once. The test
   `dropping_the_handle_mid_segment_closes_the_socket` of
   `adapters/inference-elevenlabs/tests/cancel.rs` asserts no time. The test
@@ -152,24 +159,26 @@ user:
   of `adapters/inference-elevenlabs/tests/adversary_rf1_multi_context.rs` asserts a limit of
   its own, 2 s, and by reading the code passes with the bound removed.
 - `CLOSE_GRACE` of Cartesia and of ElevenLabs text to speech, the most a drop inside a Tokio
-  runtime waits for its close: no test asserts its value. The test
+  runtime waits for its close: no test of a drop asserts its value. The test
   `a_drop_whose_close_cannot_be_written_holds_the_runtime_for_the_grace_and_no_longer` of
   `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs`, and the one of that name
   of `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs`, holds it under the
-  limit of its ticker, 50 ms, and fails with the constant at ten times that limit.
+  limit of its ticker, 50 ms, and fails with the constant at ten times that limit. A test
+  asserts the value of each of the two constants, 5 ms; these tests are in the list "The value
+  of each time-bound default".
+- llama-server: no test fires the bound on establishing a connection. The adapter does not set
+  it: it builds its HTTP client with `HttpClient::new` of `llm`
+  (`adapters/inference-llama-server/src/lib.rs`), which takes `CONNECT_TIMEOUT` of `llm-http`,
+  15 s at the tag `Cargo.lock` pins. The adapter's configuration has no field for it, so a
+  caller cannot set it.
 
-A test per binding that compares each default with its number, and one that starts a session
-against a listener that never answers the handshake and times the failure, would produce
-them. A close against a peer that stops reading, as Cartesia and ElevenLabs text to speech
-have it, would fire the close bound of another binding. A comparison of the wait with a
-number would assert the value of a close bound.
-
-### The default limits of the HTTP transport of llama-server
-
-The adapter has no time constant of its own. Its configuration takes the default limits of the
-HTTP client of `llm`, at the tag `Cargo.lock` pins. Their values are not in this tree, and no
-test of the adapter holds them: the one test of a limit sets its own. A test that asserts the
-three default limits of the configuration would produce it.
+The peer of the six tests, one that floods pings and stops reading, would fire most of what is
+left of the close bounds, in a test per case: a close as an exchange in the two text-to-speech
+bindings, a cancel in Cartesia, and in a session binding a case that reaches one application of
+the constant without the other. In the drop tests of the two text-to-speech bindings a
+comparison of the wait with a number, as the six tests have it, would assert the value of the
+bound where it is fired. What would fire the deadline of a Deepgram transcription handle is not
+worked out here.
 
 ### Real-time factor and latency of the hosted speech-to-text bindings
 
@@ -334,6 +343,161 @@ check, would produce it.
 The `Docs UX` workflow runs on pull requests only. The baseline in the README is from a run that
 checked out the merge of a pull request into `main`; the tree of that merge is the tree of
 `main`. A run of the workflow on `main` would give a baseline at the commit itself.
+
+### The connect timeout of five bindings
+
+`task test-run` runs one test per binding that fires the connect timeout and times the failure:
+the test opens against a local listener that never answers the handshake, with a value of its own
+in place of the binding's `DEFAULT_CONNECT_TIMEOUT`. No record of a run holds the result of any
+of the five yet:
+
+- Cartesia text to speech: the test
+  `a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout` of
+  `adapters/inference-cartesia/tests/errors.rs`.
+- Phonic: the test `a_handshake_never_answered_fails_the_open_at_the_connect_timeout` of
+  `adapters/inference-phonic/tests/duplex.rs`.
+- ElevenLabs agent: the test
+  `a_handshake_never_answered_fails_the_open_at_the_connect_timeout` of
+  `adapters/inference-elevenlabs/tests/agent_duplex.rs`.
+- ElevenLabs text to speech: the test
+  `a_handshake_never_answered_fails_the_synthesis_at_the_connect_timeout` of
+  `adapters/inference-elevenlabs/tests/closed_stream.rs`.
+- Deepgram transcription: the test
+  `a_handshake_never_answered_fails_the_recognition_at_the_connect_timeout` of
+  `adapters/inference-deepgram/tests/errors.rs`.
+
+A record of a run of the workflow `check` that ran these five tests would hold their results.
+
+### The close bound of six bindings
+
+`task test-run` runs one test per binding that fires `CLOSE_BOUND`. The local fixture sends a
+flood of WebSocket pings and reads nothing more. The binding answers each ping with a pong, the
+pongs fill the socket buffers, and the close frame behind them cannot be written: the bound is
+what ends the close. Each test compares the time with two limits of its own, written out as
+numbers and not read from the constant: no sooner than 1 s, and before 2 s. So it fails with a
+constant of 3 s. Whether the connection was backed up is the fixture's to tell. It says how
+many pongs it had read when the test let it read again; reading again, it counts the pongs and
+looks for a close frame. The limits are asserted of a run in which it had read no pong until
+then, counted fewer pongs than pings at the end and found no close frame. A flood whose pongs
+all arrived is doubled, up to the largest the binding reads within the test's own wait: between
+72,000 and 288,000 pings, by the test. The test fails when the largest arrived whole too. No
+record of a run holds the result of any of the six yet:
+
+- Phonic: the test `a_close_on_a_backed_up_connection_ends_at_the_close_bound` of
+  `adapters/inference-phonic/tests/duplex.rs`.
+- Deepgram Voice Agent: the test `a_close_on_a_backed_up_connection_ends_at_the_close_bound` of
+  `adapters/inference-deepgram/tests/agent_duplex.rs`.
+- Deepslate Opal: the test `a_close_on_a_backed_up_connection_ends_at_the_close_bound` of
+  `adapters/inference-deepslate/tests/opal_duplex.rs`.
+- ElevenLabs agent: the test `a_close_on_a_backed_up_connection_ends_at_the_close_bound` of
+  `adapters/inference-elevenlabs/tests/agent_duplex.rs`.
+- Deepgram transcription: the test
+  `a_cancel_on_a_backed_up_connection_ends_its_thread_at_the_close_bound` of
+  `adapters/inference-deepgram/tests/cancel.rs`.
+- ElevenLabs speech to text: the test
+  `a_cancel_on_a_backed_up_connection_ends_its_thread_at_the_close_bound` of
+  `adapters/inference-elevenlabs/tests/stt.rs`.
+
+What these tests do not tell apart:
+
+- The four session tests time a close called outside an async runtime. There the binding
+  applies the constant twice, to the write of the close frame and to the wait for the
+  connection task, and either ends the close at the same time. A test passes with one of the
+  two timeouts removed and does not say which of them held.
+- The two transcription tests time the end of the recognition's connection thread, because the
+  cancel itself returns at once. They find the thread by its name under `/proc/self/task`, so
+  they run on Linux only and rely on cargo-nextest, which runs each test in a process of its
+  own. They fire the bound through a cancel and not through a dropped handle or the end of
+  input.
+- The limits are on the time measured, which is the bound and what a close takes besides it.
+  So they pass a bound a little under 1 s and any bound from there to a little under 2 s: with
+  a constant of 999 ms the close of the Phonic test held 1.000308908 s and the test passed, and
+  all six passed with 1,500 ms and with 1,900 ms. They failed with 500 ms and with 3 s. The
+  number itself is fixed by the tests of the list "The value of each time-bound default".
+- Deepgram has one constant for its two bindings and ElevenLabs one for its three, so the two
+  tests of a crate follow the same constant.
+
+A record of a run of the workflow `check` that ran these six tests would hold their results.
+
+### The value of each time-bound default
+
+`task test-run` runs the tests below. Each compares time-bound defaults of one binding with
+their numbers written out in the test. A test reads the public constant where there is one. It
+also reads the value from what a caller gets without setting it, where that can be read without
+a connection: the field of a new endpoint or configuration, and the reader of a new model. A
+constant or a literal changed in the source fails its test, and so does an endpoint,
+configuration or model read this way that starts with another value. A test does not read the
+places where an adapter uses the value later. Two defaults a caller gets are read by no test:
+
+- OpenAI Realtime and GPT-Live, the clients: `RealtimeClient::connect` and `LiveClient::connect`
+  start with the connect deadline and the write deadline of `Deadlines::default()`
+  (`adapters/inference-openai/src/client.rs`, `adapters/inference-openai/src/live.rs`). A
+  client gives no reader of them before its connection is open, and no test opens a client this
+  way and reads them. A client that starts with other deadlines fails no test.
+- llama-server, the bound on establishing a connection: the test reads the constant of
+  `llm-http` and a client built as the adapter builds its own. The adapter gives no reader of
+  its client. An adapter that builds its client with another bound fails no test.
+
+No record of a run holds a result of any of these comparisons yet:
+
+- Audio device: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-audio-device/tests/acknowledging.rs`, for `PLAYBACK_PATIENCE`, and the
+  test `a_sink_given_no_patience_waits_the_stated_two_seconds_for_a_stalled_speaker` of
+  `adapters/inference-audio-device/tests/acknowledging.rs`, for the patience of a sink that was
+  given none. The second reads it from the fault of a drain on a speaker that stopped, and
+  waits about 2 s for that fault.
+- Amazon Nova Sonic: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-aws/tests/nova_sonic_stall_and_bounds.rs`, for the read timeout a session
+  configuration starts with and the idle limit of the default session configuration.
+- Cartesia text to speech: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-cartesia/tests/errors.rs`, for `DEFAULT_READ_TIMEOUT`,
+  `DEFAULT_CONNECT_TIMEOUT`, `CLOSE_BOUND` and `CLOSE_GRACE`.
+- Deepgram transcription: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-deepgram/tests/errors.rs`, for `DEFAULT_CONNECT_TIMEOUT`,
+  `DEFAULT_READ_TIMEOUT`, `DEFAULT_KEEPALIVE_INTERVAL` and `CLOSE_BOUND`.
+- Deepgram Voice Agent: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-deepgram/tests/agent_duplex.rs`, for `DEFAULT_AGENT_OPEN_TIMEOUT` and
+  `DEFAULT_AGENT_READ_TIMEOUT`.
+- Deepslate Opal: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-deepslate/tests/opal_duplex.rs`, for `DEFAULT_OPEN_TIMEOUT`,
+  `DEFAULT_READ_TIMEOUT`, `DEFAULT_PING_INTERVAL` and `CLOSE_BOUND`.
+- ElevenLabs text to speech and speech to text: the test
+  `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-elevenlabs/tests/closed_stream.rs`, for `DEFAULT_READ_TIMEOUT`,
+  `DEFAULT_CONNECT_TIMEOUT`, `CLOSE_BOUND` and, of text to speech alone, `CLOSE_GRACE`.
+- ElevenLabs agent: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-elevenlabs/tests/agent_duplex.rs`, for the agent's
+  `DEFAULT_CONNECT_TIMEOUT`, `DEFAULT_METADATA_TIMEOUT` and `DEFAULT_READ_TIMEOUT`.
+- llama-server: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-llama-server/tests/offline.rs`, for the three limits of a new
+  configuration: 60 s to the response headers, 180 s idle and 600 s in total. The adapter has
+  no time constant of its own. Its configuration takes the default limits of the HTTP client of
+  `llm`, at the tag `Cargo.lock` pins, and their values are not in the adapter's source. A move
+  of that pin that changes a limit fails the test. The same test compares the bound on
+  establishing a connection with 15 s. It is `CONNECT_TIMEOUT` of `llm-http` at the same tag,
+  and a move of the pin that changes it fails the test.
+- OpenAI Realtime: the test `the_deadlines_are_stated_and_settable` of
+  `adapters/inference-openai/tests/transport_deadlines.rs`, for `DEFAULT_CONNECT_TIMEOUT` and
+  `DEFAULT_WRITE_TIMEOUT`, and the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-openai/tests/duplex.rs`, for the idle limit of the default session
+  configuration and for the connect deadline and the write deadline of a model built with
+  `OpenAiRealtime::new`. The first of the two is older than its comparison: the record of
+  `openai-time-bounds` holds a result of it from a run before it compared the numbers.
+- OpenAI GPT-Live: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-openai/tests/gpt_live_duplex.rs`, for the idle limit of the default
+  session configuration, the read timeout of the endpoint `Endpoint::live` gives, and the
+  connect deadline and the write deadline of a model built with `OpenAiLive::new`.
+- OpenAI speech: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-openai/tests/speech_request.rs`, for the connect timeout and the read
+  timeout of the default endpoint. The binding has no constant of its own: the two are
+  `DEFAULT_CONNECT_TIMEOUT` and `DEFAULT_READ_TIMEOUT` of the Realtime binding.
+- Phonic: the test `the_time_bound_defaults_are_the_stated_numbers` of
+  `adapters/inference-phonic/tests/duplex.rs`, for the four defaults of
+  `adapters/inference-phonic/src/protocol.rs` and `CLOSE_BOUND`.
+
+A record of a run of the workflow `check` that ran these tests would hold their results. Until
+[adapters.md](adapters.md) is written from such a run, it does not name the new tests, and its
+lines that say no test fixes or asserts one of these defaults are older than the tests.
 
 ## Measured, but not expressible in the formats at the pin
 

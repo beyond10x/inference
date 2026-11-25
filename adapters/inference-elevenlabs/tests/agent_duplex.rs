@@ -1,16 +1,20 @@
 //! The agent conversation binding against the local fixture server of `support/agent.rs`: the
-//! opening order, keepalive, the format check, barge-in, corrections, errors, cancels and drops,
-//! the refusals before connecting, the message size bound, tools, and the duplex conformance
-//! procedure.
+//! opening order, keepalive, the format check, barge-in, corrections, errors, a handshake never
+//! answered, cancels and drops, the refusals before connecting, the message size bound, tools,
+//! and the duplex conformance procedure.
 
 #[path = "support/agent.rs"]
 mod fixture;
 
 use std::num::{NonZeroU16, NonZeroU32};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use fixture::{AGENT, AgentServer, Handshake, Script, Step};
-use inference_elevenlabs::agent::{AgentEndpoint, AgentError, SignedUrl};
+use inference_elevenlabs::agent::{
+    AgentEndpoint, AgentError, DEFAULT_CONNECT_TIMEOUT, DEFAULT_METADATA_TIMEOUT,
+    DEFAULT_READ_TIMEOUT, SignedUrl,
+};
 use inference_elevenlabs::inference_duplex::conformance::{
     NativeDuplexProbe, NoNativeDuplex, native_duplex_evidence,
 };
@@ -29,6 +33,19 @@ use inference_elevenlabs::{
 };
 
 const WAIT: Duration = Duration::from_millis(20);
+
+/// The connect timeout given to the open whose handshake is never answered.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// That open must end before twice its connect timeout: a bound doubled or more fails the test,
+/// a bound multiplied by less than two still passes. The 500 ms past the bound are room for a
+/// loaded machine: over repeated runs on one, such an open ended at most 51 ms after its bound,
+/// and tests that measure stalls saw one of 204 ms there.
+const LATEST: Duration = CONNECT_TIMEOUT.saturating_mul(2);
+
+/// The test's own deadline for an open that nothing ends: past it the test fails instead of
+/// waiting.
+const DEADLINE: Duration = Duration::from_secs(4);
 
 fn pcm(rate: u32) -> AudioFormat {
     AudioFormat {
@@ -361,6 +378,54 @@ fn a_cancel_during_the_handshake_closes_the_connection_within_the_close_bound() 
     assert!(closed.saturating_duration_since(cancelled_at) < CLOSE_BOUND);
 }
 
+/// The server takes the TCP connection and never answers the upgrade, so only the connect
+/// timeout ends the open. A refused connection is the same variant with no status: the detail
+/// and the time tell the two apart. The open connects once: a second attempt after the timeout
+/// is a second connection the server accepted. The wait is the test's own, so an open that no
+/// timeout ends fails here at [`DEADLINE`] instead of hanging.
+#[test]
+fn a_handshake_never_answered_fails_the_open_at_the_connect_timeout() {
+    let mut script = Script::new(Vec::new());
+    script.handshake = Handshake::Stall;
+    let server = AgentServer::start(script);
+    let endpoint = endpoint(&server).with_connect_timeout(CONNECT_TIMEOUT);
+    let (done, waited) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut model = ElevenLabsAgent::public(AGENT, endpoint).expect("a valid agent id");
+        let started = Instant::now();
+        let outcome = model.open(config()).err();
+        let took = started.elapsed();
+        let _ = done.send((outcome, model.open_error().cloned(), took));
+    });
+    let (outcome, error, took) = waited
+        .recv_timeout(DEADLINE)
+        .unwrap_or_else(|error| panic!("the open did not end within {DEADLINE:?}: {error}"));
+    match outcome {
+        Some(OpenError::Failed(failure)) => {
+            assert_eq!(failure.kind, SessionFailureKind::TransportClosed)
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        error,
+        Some(AgentError::Connect {
+            status: None,
+            detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
+        })
+    );
+    // The server accepts on a thread of its own: this returns once it holds the first connection.
+    server.wait(0, DEADLINE, |_| true);
+    assert_eq!(server.connections(), 1, "the connections the open made");
+    assert!(
+        took >= CONNECT_TIMEOUT,
+        "the open failed after {took:?}, before its connect timeout"
+    );
+    assert!(
+        took < LATEST,
+        "the open failed after {took:?}, at twice its connect timeout or later"
+    );
+}
+
 #[test]
 fn a_cancel_while_awaiting_the_metadata_closes_the_connection_within_the_close_bound() {
     let mut script = Script::new(Vec::new());
@@ -419,6 +484,57 @@ fn no_metadata_within_the_deadline_fails_the_open_and_closes() {
     assert!(seen.closed.is_some());
 }
 
+/// The bounds of the endpoint a caller gets from `AgentEndpoint::new()`, and their constants in
+/// `inference_elevenlabs::agent`, each compared with its number written out: a changed default
+/// fails here. Outside the source, `quality/adapters.md`, entry `elevenlabs-time-bounds/held`,
+/// states the bound on the metadata (10 s) and the read timeout (30 s). No document states the
+/// agent's connect timeout: for it the number below is the reference. The close bound has its
+/// comparison in `tests/closed_stream.rs`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let endpoint = AgentEndpoint::new();
+    let defaults = [
+        (
+            "agent::DEFAULT_CONNECT_TIMEOUT",
+            DEFAULT_CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "AgentEndpoint::new().connect_timeout",
+            endpoint.connect_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "agent::DEFAULT_METADATA_TIMEOUT",
+            DEFAULT_METADATA_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "AgentEndpoint::new().metadata_timeout",
+            endpoint.metadata_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "agent::DEFAULT_READ_TIMEOUT",
+            DEFAULT_READ_TIMEOUT,
+            Duration::from_secs(30),
+        ),
+        (
+            "AgentEndpoint::new().read_timeout",
+            endpoint.read_timeout,
+            Duration::from_secs(30),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
+}
+
 #[test]
 fn dropping_a_session_mid_stream_closes_the_connection_within_the_close_bound() {
     let server = AgentServer::start(Script::new(vec![
@@ -475,6 +591,120 @@ fn a_closed_session_takes_nothing_more_and_closes_its_connection() {
     assert!(session.close().is_err());
     let seen = server.wait(0, CLOSE_BOUND, |seen| seen.closed.is_some());
     assert!(seen.closed.is_some());
+}
+
+/// The pings of the first flood of the backed-up close. The session answers each with a pong of
+/// 131 bytes; 36,000 of them are 4.7 MB, more than the socket buffers hold where the kernel's
+/// largest send buffer is 4 MiB.
+const FLOOD: usize = 36_000;
+
+/// The largest flood: a host whose buffers took every pong gets the flood doubled up to here.
+/// It is one the session reads within the wait of `events_until`, so a host that took this one
+/// too fails on that and not on the wait for the audio behind it.
+const LARGEST_FLOOD: usize = 4 * FLOOD;
+
+/// The test's own deadline for a close that nothing ends: past it the test lets the server read
+/// again, which ends the close, and fails.
+const CLOSE_DEADLINE: Duration = Duration::from_secs(4);
+
+/// How long the test waits, past that deadline, for the close to end once the server reads
+/// again. A close that has not ended by then is left behind with its thread, and the test fails
+/// without joining it.
+const RELEASE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The server reads the initiation and nothing after it, sends a flood of WebSocket pings and
+/// then one audio message. The session answers each ping with a pong as it reads; the pongs fill
+/// the socket buffers and then wait in the session's WebSocket buffer, in front of the close
+/// frame, so that frame cannot be written and only the close bound ends the close. Whether the
+/// connection was backed up is the server's to tell: it had read no pong when the test told it
+/// to read again, and reading again after the close, it counts fewer pongs than it sent pings.
+/// A flood whose pongs all arrived is doubled and the session run again. The read timeout is
+/// set long: a WebSocket ping does not restart its clock, so the flood and the close have to
+/// end within it.
+///
+/// The close must hold its caller no shorter than one second and less than two. Both numbers
+/// are written out and not taken from `CLOSE_BOUND`: limits that moved with the constant would
+/// pass with any value of it. The bound is applied twice here, on the write of the close frame
+/// and on the caller's wait for the connection task, both against the same blocked write; this
+/// test does not tell the two apart.
+#[test]
+fn a_close_on_a_backed_up_connection_ends_at_the_close_bound() {
+    let mut pings = FLOOD;
+    loop {
+        let mut script = Script::new(vec![Step::Pings(pings), Step::Send(fixture::audio(3, 640))]);
+        script.deaf = true;
+        let server = AgentServer::start(script);
+        let patient = endpoint(&server).with_read_timeout(Duration::from_secs(30));
+        let opened = Instant::now();
+        let mut session = ElevenLabsAgent::public(AGENT, patient)
+            .expect("a valid agent id")
+            .open(config())
+            .expect("the session opens");
+        let events = events_until(&mut session, |event| {
+            matches!(event, SessionEvent::OutputAudio(_))
+        });
+        assert!(
+            matches!(events.last(), Some(SessionEvent::OutputAudio(_))),
+            "the audio behind a flood of {pings} pings did not arrive: {events:#?}"
+        );
+        let flooded = opened.elapsed();
+        let (done, finished) = mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            let closing = Instant::now();
+            let closed = session.close();
+            let _ = done.send((closing.elapsed(), closed));
+        });
+        let outcome = finished.recv_timeout(CLOSE_DEADLINE);
+        server.read_again(0);
+        let Ok((held, closed)) = outcome else {
+            let ended = finished.recv_timeout(RELEASE_DEADLINE).is_ok();
+            panic!(
+                "the close did not end within {CLOSE_DEADLINE:?}; that it ended within \
+                 {RELEASE_DEADLINE:?} of the server reading again: {ended}"
+            );
+        };
+        closer.join().expect("the close returned");
+        closed.expect("an open session closes");
+        let seen = server.wait(0, Duration::from_secs(5), |seen| seen.closed.is_some());
+        assert!(
+            seen.closed.is_some(),
+            "the server read no end of the stream"
+        );
+        println!(
+            "a flood of {pings} pings, read within {flooded:?}: the close held {held:?}; the \
+             server had read {} pongs when it was told to read again and {} at the end, close \
+             frame: {}",
+            seen.early_pongs, seen.pongs, seen.close_frame
+        );
+        if seen.pongs < pings {
+            assert_eq!(
+                seen.early_pongs, 0,
+                "the server read pongs before it was told to read again, so fewer pongs than \
+                 pings does not say that the connection was backed up"
+            );
+            assert!(
+                !seen.close_frame,
+                "a close frame behind pongs never written"
+            );
+            assert!(
+                held >= Duration::from_secs(1),
+                "the close on a backed-up connection returned after {held:?}, before its bound"
+            );
+            assert!(
+                held < Duration::from_secs(2),
+                "the close on a backed-up connection held {held:?}, twice its bound or longer"
+            );
+            return;
+        }
+        assert!(
+            pings < LARGEST_FLOOD,
+            "the socket buffers of this host took every pong of a flood of {pings} pings, {} of \
+             them before the server was told to read again, so no close was backed up and \
+             nothing was asserted of its bound",
+            seen.early_pongs
+        );
+        pings *= 2;
+    }
 }
 
 #[test]

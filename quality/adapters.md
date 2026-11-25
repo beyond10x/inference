@@ -65,10 +65,16 @@ either. Each closes against a local fixture that takes the close at once; in the
 transcription test the socket is dropped before a close frame is due. So the wait never reaches
 the constant, and by reading the code each of these tests passes with the bound enlarged and
 with the bound removed. What they hold is that a close or a cancel returns soon against a peer
-that answers. Tests of `inference-cartesia` and of `inference-elevenlabs` drop a synthesis
-against a peer that does not take the write, which is the case the bound is for. They fire the
-bound and follow the constant, and no entry of this page names them yet. See
-[not-measured.md](not-measured.md).
+that answers. The case the bound is for is a peer that does not take the write. Six bindings
+have a test of that case, which no entry of this page names yet: its limits are numbers
+written out in the test, 1 s and 2 s on the time measured, so it fails with the bound at twice
+its value or more and with a bound of half its value, and it passes with a bound between the
+two limits. Tests of `inference-cartesia` and of `inference-elevenlabs` drop a synthesis
+against such a peer. They fire the bound and follow the constant, and no entry of this page
+names them yet either. The list "The close bound of six bindings" of
+[not-measured.md](not-measured.md) names the six tests and what they do not tell apart, and
+its list "Time bounds no test fires" names the drop tests and the close bounds that are still
+not fired.
 
 ## `inference-audio-device`
 
