@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-25T10:29:31Z",
+  "actor": "human:operator",
+  "artifact": "story:time-bound-defaults-and-close-bounds-held",
+  "kind": "story",
+  "revision": 12,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:time-bound-defaults-and-close-bounds-held-adversary-1",
+    "review": "review-result:time-bound-defaults-and-close-bounds-held-adversary-1",
+    "outcome": "fixed"
+  }
+}

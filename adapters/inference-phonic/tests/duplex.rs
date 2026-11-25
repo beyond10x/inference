@@ -24,6 +24,9 @@ use inference_phonic::inference_duplex::{
     NativeSpeechModel, OpenError, ResponseId, SessionConfig, SessionError, SessionEvent,
     SessionFailureKind, SpeechSessionHandle, TurnDetection, TurnTuning, Unsupported,
 };
+use inference_phonic::protocol::{
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_PING_INTERVAL, DEFAULT_READ_TIMEOUT, DEFAULT_READY_TIMEOUT,
+};
 use inference_phonic::{
     CLOSE_BOUND, Credential, CredentialError, CredentialFuture, CredentialSource, PhonicConfig,
     PhonicEndpoint, PhonicError, PhonicSession, PhonicSpeech, claims, native_duplex_verdict,
@@ -513,6 +516,68 @@ fn no_ready_within_the_deadline_fails_the_open_and_closes_the_connection() {
             "the failed open left its connection open"
         );
     });
+}
+
+/// The bounds of the endpoint a caller gets from `PhonicEndpoint::new()`, their constants in
+/// `inference_phonic::protocol` and the close bound, each compared with its number written out:
+/// a changed default fails here. Outside the source, `quality/adapters.md`, entry
+/// `phonic-time-bounds/held`, states the bound on the wait for the ready message (10 s), the
+/// read timeout (30 s), the ping interval (10 s) and the close bound (1 s). No document states
+/// the connect timeout: for it the number below is the reference.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let endpoint = PhonicEndpoint::new();
+    let defaults = [
+        (
+            "protocol::DEFAULT_CONNECT_TIMEOUT",
+            DEFAULT_CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "PhonicEndpoint::new().connect_timeout",
+            endpoint.connect_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "protocol::DEFAULT_READY_TIMEOUT",
+            DEFAULT_READY_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "PhonicEndpoint::new().ready_timeout",
+            endpoint.ready_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "protocol::DEFAULT_READ_TIMEOUT",
+            DEFAULT_READ_TIMEOUT,
+            Duration::from_secs(30),
+        ),
+        (
+            "PhonicEndpoint::new().read_timeout",
+            endpoint.read_timeout,
+            Duration::from_secs(30),
+        ),
+        (
+            "protocol::DEFAULT_PING_INTERVAL",
+            DEFAULT_PING_INTERVAL,
+            Duration::from_secs(10),
+        ),
+        (
+            "PhonicEndpoint::new().ping_interval",
+            endpoint.ping_interval,
+            Duration::from_secs(10),
+        ),
+        ("CLOSE_BOUND", CLOSE_BOUND, Duration::from_secs(1)),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
 }
 
 /// The listener takes the TCP connection into its queue and nothing reads it or answers the

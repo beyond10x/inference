@@ -31,9 +31,9 @@ use inference_deepslate::protocol::{
     TriggerMode, Vad, VadState,
 };
 use inference_deepslate::{
-    CLOSE_BOUND, CredentialError, CredentialSource, DeepslateError, DeepslateOpal,
-    DeepslateOpalSession, Endpoint, OpalConfig, capabilities, claims, native_duplex_verdict,
-    tool_unavailable,
+    CLOSE_BOUND, CredentialError, CredentialSource, DEFAULT_OPEN_TIMEOUT, DEFAULT_PING_INTERVAL,
+    DEFAULT_READ_TIMEOUT, DeepslateError, DeepslateOpal, DeepslateOpalSession, Endpoint,
+    OpalConfig, capabilities, claims, native_duplex_verdict, tool_unavailable,
 };
 use serde_json::json;
 use support::{
@@ -1078,6 +1078,58 @@ fn closing_cancels_the_response_in_progress_and_closes_the_connection() {
         assert!(seen.closed.is_some());
         assert!(matches!(session.close(), Err(SessionError::NotOpen(_))));
     });
+}
+
+/// The bounds of the endpoint a caller gets from `Endpoint::new(..)`, their constants and the
+/// close bound, each compared with its number written out: a changed default fails here. Outside
+/// the source, `quality/adapters.md`, entry `deepslate-time-bounds/held`, states all four: the
+/// bound on the opening (15 s), the read timeout (30 s), the ping interval (10 s) and the close
+/// bound (1 s). `protocol/README.md` of this crate gives the ping interval as the provider
+/// advises it, every 10 seconds.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let endpoint = Endpoint::new("a-vendor", "an-organization");
+    let defaults = [
+        (
+            "DEFAULT_OPEN_TIMEOUT",
+            DEFAULT_OPEN_TIMEOUT,
+            Duration::from_secs(15),
+        ),
+        (
+            "Endpoint::new(..).open_timeout",
+            endpoint.open_timeout,
+            Duration::from_secs(15),
+        ),
+        (
+            "DEFAULT_READ_TIMEOUT",
+            DEFAULT_READ_TIMEOUT,
+            Duration::from_secs(30),
+        ),
+        (
+            "Endpoint::new(..).read_timeout",
+            endpoint.read_timeout,
+            Duration::from_secs(30),
+        ),
+        (
+            "DEFAULT_PING_INTERVAL",
+            DEFAULT_PING_INTERVAL,
+            Duration::from_secs(10),
+        ),
+        (
+            "Endpoint::new(..).ping_interval",
+            endpoint.ping_interval,
+            Duration::from_secs(10),
+        ),
+        ("CLOSE_BOUND", CLOSE_BOUND, Duration::from_secs(1)),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
 }
 
 #[test]

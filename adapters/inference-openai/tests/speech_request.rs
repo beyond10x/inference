@@ -5,6 +5,7 @@
 mod speech_support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use inference_openai::speech::{
     DEFAULT_MODEL, DEFAULT_URL, MAX_INPUT_CHARACTERS, OpenAiSpeech, SpeechConfig,
@@ -200,6 +201,37 @@ fn plain_http_is_taken_only_to_a_loopback_host() {
             "{refused} was taken"
         );
     }
+}
+
+/// The bounds of the endpoint a caller gets from `SpeechEndpoint::new()`, each compared with its
+/// number written out: a changed default fails here. The speech binding has no constant of its
+/// own: it takes `DEFAULT_CONNECT_TIMEOUT` and `DEFAULT_READ_TIMEOUT` of the crate. Outside the
+/// source, `quality/adapters.md`, entry `openai-time-bounds/held`, states the two constants
+/// (10 s and 30 s). It does not state them for this endpoint: for it the numbers below are the
+/// reference.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let endpoint = SpeechEndpoint::new();
+    let defaults = [
+        (
+            "SpeechEndpoint::new().connect_timeout",
+            endpoint.connect_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "SpeechEndpoint::new().read_timeout",
+            endpoint.read_timeout,
+            Duration::from_secs(30),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
 }
 
 #[test]

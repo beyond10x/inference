@@ -9,7 +9,8 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use inference_deepgram::{
-    CloseCause, ConnectError, DeepgramError, DeepgramRecogniser, DeepgramRecognition, Endpoint,
+    CLOSE_BOUND, CloseCause, ConnectError, DEFAULT_CONNECT_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL,
+    DEFAULT_READ_TIMEOUT, DeepgramError, DeepgramRecogniser, DeepgramRecognition, Endpoint,
     ListenConfig,
 };
 use inference_stt::TranscriptEvent;
@@ -217,5 +218,57 @@ fn a_handshake_never_answered_fails_the_recognition_at_the_connect_timeout() {
     assert!(
         took < LATEST,
         "the recognition failed after {took:?}, at twice its connect timeout or later"
+    );
+}
+
+/// The bounds of the endpoint a caller gets from `Endpoint::new()`, the keep-alive interval of
+/// `ListenConfig::new()`, their constants and the close bound, each compared with its number
+/// written out: a changed default fails here. Outside the source, `quality/adapters.md`, entry
+/// `deepgram-time-bounds/held`, states the read timeout (10 s), the keep-alive interval (4 s)
+/// and the close bound (1 s). No document states the connect timeout: for it the number below is
+/// the reference.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let endpoint = Endpoint::new();
+    let defaults = [
+        (
+            "DEFAULT_CONNECT_TIMEOUT",
+            DEFAULT_CONNECT_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "Endpoint::new().connect_timeout",
+            endpoint.connect_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "DEFAULT_READ_TIMEOUT",
+            DEFAULT_READ_TIMEOUT,
+            Duration::from_secs(10),
+        ),
+        (
+            "Endpoint::new().read_timeout",
+            endpoint.read_timeout,
+            Duration::from_secs(10),
+        ),
+        (
+            "DEFAULT_KEEPALIVE_INTERVAL",
+            DEFAULT_KEEPALIVE_INTERVAL,
+            Duration::from_secs(4),
+        ),
+        (
+            "ListenConfig::new().keepalive_interval",
+            ListenConfig::new().keepalive_interval,
+            Duration::from_secs(4),
+        ),
+        ("CLOSE_BOUND", CLOSE_BOUND, Duration::from_secs(1)),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
     );
 }
