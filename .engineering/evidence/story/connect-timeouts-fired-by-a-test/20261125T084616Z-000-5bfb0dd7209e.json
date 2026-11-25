@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T08:46:16Z",
+  "actor": "human:operator",
+  "artifact": "story:connect-timeouts-fired-by-a-test",
+  "kind": "story",
+  "revision": 11,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source, task test-build, task test-run at d75990f20 on the build node",
+    "reference": "check-source exit 0 (82 s); test-build exit 0 (96 s); test-run exit 0 (44 s): 3102 tests run: 3102 passed, 72 skipped, then 23 tests run: 23 passed. The five new tests passed at 0.510 s to 0.528 s. The store records of this closure were uncommitted in the tree during the run"
+  }
+}
