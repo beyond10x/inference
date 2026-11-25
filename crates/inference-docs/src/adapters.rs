@@ -8,6 +8,24 @@
 //! adapter's record test loads and checks. Generation refuses a record whose `adapter_revision` is
 //! not the workspace version, a claim that is not a capability, a feature the package does not
 //! have, and a test the record names that its adapter does not define.
+//!
+//! A binding may carry one note ([`NOTES`]): what an open, a close or a drop gives a caller or
+//! holds a thread for, with the release that brought it. Generation refuses:
+//!
+//! - a note on a binding the page does not list, and a second note on one binding;
+//! - a constant listed in the note's `constants` that the file named beside it does not define
+//!   exactly once as whole seconds or milliseconds ([`Note::constants`] names the forms read), or
+//!   that the text does not give at least once as "`NAME` (value)" with that value;
+//! - a code span that is a path of identifiers, `a` or `a::b`, one of whose parts is no whole
+//!   word of the package's sources, comments and strings included;
+//! - a code span `a::b` whose last part no source of the package or of a crate under `crates/`
+//!   defines as a function, a constant, a type, a module or an enum variant.
+//!
+//! That is all it holds. Other numbers of the text, other mentions of a listed constant, and the
+//! prose are not checked. Of `a::b` only the last part is held to a definition: that `b` belongs
+//! to `a`, is public, or is about that binding rather than another of the same package is not
+//! checked. A code span that is no path of identifiers, such as `session.closed` or a feature
+//! name, is skipped.
 
 use std::fs;
 use std::path::Path;
@@ -17,6 +35,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::crates::{Package, packages, workspace_version};
+use crate::errors::names;
 use crate::{Result, SOURCE, TREE, cell, front_matter, test_defined};
 
 /// Where the adapter reference lands, relative to the repository root.
@@ -38,7 +57,7 @@ pub enum Release {
     /// In the release `0.x.0` whose section introduced it, and in every one after it.
     Since(&'static str),
     /// On `main`, its entry under `[Unreleased]`, and in no release yet. Unused from a release
-    /// until the next binding lands on `main`, as `status::next` is.
+    /// until the next binding or note lands on `main`, as `status::next` is.
     #[allow(dead_code)]
     Next,
 }
@@ -245,6 +264,291 @@ const BINDINGS: &[Binding] = &[
     },
 ];
 
+/// What an open, a close or a drop of a binding gives a caller or holds a thread for, beyond its
+/// claims, with the release that brought it.
+struct Note {
+    /// The binding, by its name in [`BINDINGS`].
+    binding: &'static str,
+    /// When it shipped, by its `CHANGELOG.md` entry.
+    release: Release,
+    /// The constants the text gives with their value, each as its name and the file that defines
+    /// it, a path under the package's `src/`. Generation reads the value from that file only,
+    /// which must define it exactly once as `pub const NAME: <type> = <…>from_secs(n);` or
+    /// `from_millis(n)`, on one line or wrapped after `=`, `n` in digits with or without `_`; the
+    /// text gives it at least once as "`NAME` (n s)" or "`NAME` (n ms)".
+    constants: &'static [(&'static str, &'static str)],
+    text: &'static str,
+}
+
+/// The binding whose note the error reference links to.
+pub const AGENT_CONVERSATION: &str = "ElevenLabs agent conversation";
+
+/// Every note, at most one per binding.
+const NOTES: &[Note] = &[
+    Note {
+        binding: "OpenAI GPT-Live",
+        release: Release::Next,
+        constants: &[
+            ("CLOSE_TIMEOUT", "live.rs"),
+            ("DEFAULT_READ_TIMEOUT", "config.rs"),
+        ],
+        text: "`LiveClient::with_close_timeout` sets the close timeout and \
+               `LiveClient::close_timeout` reads it; it stays with the session across \
+               `LiveClient::into_split` and `LiveClient::reunite`. \
+               `OpenAiLive::with_close_timeout` and `OpenAiLive::close_timeout` do the same for \
+               the sessions the model opens. Unset, it is `CLOSE_TIMEOUT` (15 s), as before. A \
+               graceful close waits for `session.closed` at most the longer of the close timeout \
+               and the endpoint's read timeout, `DEFAULT_READ_TIMEOUT` (30 s) unless \
+               `Endpoint::with_read_timeout` set another. With that default, a close timeout of \
+               30 s or less changes nothing; a shorter close needs a shorter read timeout, which \
+               also bounds every read of the session. Without `session.closed` by then, \
+               `LiveClient::close` returns `RealtimeError::Stalled`, and an `OpenAiLive` session \
+               closes with the usage seen so far, unconfirmed.",
+    },
+    Note {
+        binding: "ElevenLabs streaming TTS",
+        release: Release::Next,
+        constants: &[
+            ("CLOSE_BOUND", "connection.rs"),
+            ("CLOSE_GRACE", "synthesiser.rs"),
+        ],
+        text: "Dropping an `ElevenLabsSynthesis` closes its connection with `close_socket` and a \
+               close frame, within `CLOSE_BOUND` (1 s). Inside a Tokio runtime the drop holds the \
+               dropping thread at most `CLOSE_GRACE` (5 ms). A close that ended by then has been \
+               sent when the drop returns; one that did not goes on, on the handle's own thread, \
+               within `CLOSE_BOUND`. When the process ends before that close is written, the \
+               socket ends without the close frame, and the server may have received \
+               `close_socket` alone, or neither. Outside a Tokio runtime, and inside another \
+               executor, the drop waits for the close, at most `CLOSE_BOUND`. A handle dropped \
+               while its async form waits for a message to be sent or to arrive ends the socket \
+               without a close frame.",
+    },
+    Note {
+        binding: AGENT_CONVERSATION,
+        release: Release::Next,
+        constants: &[],
+        text: "A model built with `ElevenLabsAgent::signed` opens at most one session. Its first \
+               open that the binding does not refuse for its configuration, and whose runtime \
+               was built, takes the signed URL for its handshake, whatever happens next: also \
+               when nothing connects, the server refuses the upgrade, the handshake times out or \
+               is cancelled, or the agent's formats are not the session's. Every later open that \
+               the binding does not refuse for its configuration, and whose runtime was built, \
+               fails with `SessionFailureKind::Rejected` before anything connects, and \
+               `ElevenLabsAgent::open_error` is `agent::AgentError::SignedUrlSpent`. For the next \
+               open, also the one with the formats the agent reported, fetch a new signed URL \
+               and build a new model with it. An open refused for its configuration, or whose \
+               runtime could not be built, leaves the URL with the model. A model built with \
+               `ElevenLabsAgent::public` opens any number of sessions.",
+    },
+    Note {
+        binding: "Cartesia Sonic streaming TTS",
+        release: Release::Next,
+        constants: &[
+            ("CLOSE_BOUND", "connection.rs"),
+            ("CLOSE_GRACE", "synthesiser.rs"),
+        ],
+        text: "Dropping a `CartesiaSynthesis` closes its connection with a close frame, within \
+               `CLOSE_BOUND` (1 s). Inside a Tokio runtime the drop holds the dropping thread at \
+               most `CLOSE_GRACE` (5 ms). A close that ended by then has been sent when the drop \
+               returns; one that did not goes on, on the handle's own thread, within \
+               `CLOSE_BOUND`. When the process ends before that close is written, the socket ends \
+               without the close frame. Outside a Tokio runtime, and inside another executor, the \
+               drop waits for the close, at most `CLOSE_BOUND`. A handle dropped while its async \
+               form waits for a message to be sent or to arrive ends the socket without a close \
+               frame.",
+    },
+];
+
+/// The text of the note on `binding`, if it has one.
+pub fn note(binding: &str) -> Option<&'static str> {
+    NOTES
+        .iter()
+        .find(|note| note.binding == binding)
+        .map(|note| note.text)
+}
+
+/// The value of the constant `name` as `text` defines it, in the forms [`Note::constants`]
+/// names, written `n s` or `n ms`. `Err` says what is wrong.
+fn duration_constant(text: &str, name: &str) -> std::result::Result<String, &'static str> {
+    let start = format!("pub const {name}:");
+    let definitions: Vec<&str> = text
+        .match_indices(start.as_str())
+        .filter(|(at, _)| {
+            text[..*at]
+                .rsplit('\n')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        })
+        .map(|(at, _)| &text[at + start.len()..])
+        .collect();
+    let rest = match definitions[..] {
+        [] => return Err("does not define"),
+        [rest] => rest,
+        _ => return Err("defines more than once"),
+    };
+    let expression = rest
+        .split_once('=')
+        .and_then(|(_, after)| after.split_once(';'))
+        .map(|(expression, _)| expression)
+        .ok_or("has no value `= …;` for")?;
+    let number = |call: &str| -> Option<u64> {
+        let (digits, tail) = expression.split_once(call)?.1.split_once(')')?;
+        let digits = digits.trim();
+        if digits.is_empty()
+            || !tail.trim().is_empty()
+            || !digits.chars().all(|c| c.is_ascii_digit() || c == '_')
+        {
+            return None;
+        }
+        digits.replace('_', "").parse().ok()
+    };
+    number("from_secs(")
+        .map(|n| format!("{n} s"))
+        .or_else(|| number("from_millis(").map(|n| format!("{n} ms")))
+        .ok_or("gives no whole seconds or milliseconds in digits for")
+}
+
+/// Whether `span` is a path of identifiers, `a` or `a::b`.
+fn is_item(span: &str) -> bool {
+    span.split("::").all(|part| {
+        part.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Whether a line of `text` outside a `//` comment defines `item`: `fn`, `const`, `struct`,
+/// `enum`, `trait`, `type` or `mod` and the name, or a line that starts with the name alone or
+/// followed by `,`, `(` or `{`, as an enum variant does (and so does a call on a line of its
+/// own, which this takes for a definition too).
+fn defines(text: &str, item: &str) -> bool {
+    let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with("//"))
+        .any(|line| {
+            let keyword = [
+                "fn ", "const ", "struct ", "enum ", "trait ", "type ", "mod ",
+            ]
+            .iter()
+            .any(|keyword| {
+                let needle = format!("{keyword}{item}");
+                line.match_indices(needle.as_str()).any(|(at, _)| {
+                    !line[..at].chars().next_back().is_some_and(identifier)
+                        && line[at + needle.len()..]
+                            .chars()
+                            .next()
+                            .is_some_and(|c| "(<:{; ".contains(c))
+                })
+            });
+            let variant = line.strip_prefix(item).is_some_and(|rest| {
+                let rest = rest.trim_start();
+                rest.is_empty() || rest.starts_with([',', '(', '{'])
+            });
+            keyword || variant
+        })
+}
+
+/// The section of the notes, each binding given as its name and its package's directory, the
+/// sources as `errors::sources` reads them; empty without a note.
+fn notes_section(
+    bindings: &[(&str, &str)],
+    notes: &[Note],
+    sources: &[(String, String)],
+) -> Result<String> {
+    for note in notes {
+        if !bindings.iter().any(|(name, _)| *name == note.binding) {
+            return Err(format!("a note is on no binding {}", note.binding));
+        }
+    }
+    if notes.is_empty() {
+        return Ok(String::new());
+    }
+    let shared: Vec<&str> = sources
+        .iter()
+        .filter(|(file, _)| file.starts_with("crates/"))
+        .map(|(_, text)| text.as_str())
+        .collect();
+    let mut out = String::from(
+        "\n## Opens, closes and drops\n\nWhat an open, a close or a drop of a binding gives a \
+         caller or holds a thread for, where a release changed it. The status is that of the \
+         release that brought it, as in the bindings table. A constant is the adapter's, with \
+         the value its source defines.\n\n",
+    );
+    for (name, directory) in bindings {
+        let mine: Vec<&Note> = notes.iter().filter(|note| note.binding == *name).collect();
+        let note = match mine[..] {
+            [] => continue,
+            [note] => note,
+            _ => return Err(format!("{name} has two notes; a binding has one at most")),
+        };
+        let prefix = format!("{directory}/src/");
+        let own: Vec<&str> = sources
+            .iter()
+            .filter(|(file, _)| file.starts_with(&prefix))
+            .map(|(_, text)| text.as_str())
+            .collect();
+        for (constant, file) in note.constants {
+            let path = format!("{prefix}{file}");
+            let text = sources
+                .iter()
+                .find(|(source, _)| *source == path)
+                .map(|(_, text)| text.as_str())
+                .ok_or_else(|| format!("{name}: {constant} is in {path}, which does not exist"))?;
+            let value = duration_constant(text, constant)
+                .map_err(|problem| format!("{name}: {path} {problem} {constant}"))?;
+            let written = format!("`{constant}` ({value})");
+            if !note.text.contains(&written) {
+                return Err(format!("{name}: the note does not say {written}"));
+            }
+        }
+        let items: Vec<&str> = note
+            .text
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|span| is_item(span))
+            .collect();
+        let unnamed: Vec<String> = items
+            .iter()
+            .filter(|span| {
+                span.split("::")
+                    .any(|part| !own.iter().any(|text| names(text, part)))
+            })
+            .map(|span| format!("`{span}`"))
+            .collect();
+        if !unnamed.is_empty() {
+            return Err(format!(
+                "{name}: no source of {directory} names {}",
+                unnamed.join(", ")
+            ));
+        }
+        let undefined: Vec<String> = items
+            .iter()
+            .filter_map(|span| Some((span, span.rsplit_once("::")?.1)))
+            .filter(|(_, last)| {
+                !own.iter()
+                    .chain(shared.iter())
+                    .any(|text| defines(text, last))
+            })
+            .map(|(span, _)| format!("`{span}`"))
+            .collect();
+        if !undefined.is_empty() {
+            return Err(format!(
+                "{name}: no source of {directory} or of crates/ defines the last part of {}",
+                undefined.join(", ")
+            ));
+        }
+        out.push_str(&format!(
+            "- **{name}** ({}). {}\n",
+            note.release.status(),
+            cell(note.text)
+        ));
+    }
+    Ok(out)
+}
+
 /// A hosted binding's claims record.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -436,7 +740,7 @@ fn grouped(value: u64) -> String {
     out
 }
 
-fn page_for(root: &Path, metadata: &Value, bindings: &[Binding]) -> Result<String> {
+fn page_for(root: &Path, metadata: &Value, bindings: &[Binding], notes: &[Note]) -> Result<String> {
     let all = packages(metadata)?;
     let version = workspace_version(metadata)?;
     let names = capability_names()?;
@@ -499,6 +803,23 @@ fn page_for(root: &Path, metadata: &Value, bindings: &[Binding]) -> Result<Strin
             read.path,
         ));
     }
+    let directories: Vec<(&str, &str)> = reads
+        .iter()
+        .map(|read| {
+            (
+                read.binding.name,
+                all.iter()
+                    .find(|package| package.name == read.binding.package)
+                    .map(|package| package.directory.as_str())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    out.push_str(&notes_section(
+        &directories,
+        notes,
+        &crate::errors::sources(root)?,
+    )?);
     out.push_str("\n## Claims\n\nEvery capability of the contract and the bindings that claim it, separated by semicolons. A capability nobody claims is still part of the contract: a pipeline that requires it is refused at planning, naming the node.\n\n| Capability | Claimed by |\n|---|---|\n");
     for name in &names {
         let claimed: Vec<_> = reads
@@ -553,7 +874,7 @@ fn page_for(root: &Path, metadata: &Value, bindings: &[Binding]) -> Result<Strin
 
 /// The adapter reference for the repository at `root`.
 pub fn page(root: &Path, metadata: &Value) -> Result<String> {
-    page_for(root, metadata, BINDINGS)
+    page_for(root, metadata, BINDINGS, NOTES)
 }
 
 /// Each binding's name, the release it shipped in, and whether it is hosted.
@@ -776,9 +1097,13 @@ mod tests {
     }
 
     /// What is wrong with each `(binding, release, introducing phrase)` against `changelog`: the
-    /// oldest section that carries the phrase, in its Added list, must be the binding's release,
-    /// `[Unreleased]` for one on main in no release yet.
-    fn introduction_problems(changelog: &str, bindings: &[(&str, Release, &str)]) -> Vec<String> {
+    /// oldest section that carries the phrase, in its Added list when `added_only`, must be the
+    /// binding's release, `[Unreleased]` for one on main in no release yet.
+    fn introduction_problems(
+        changelog: &str,
+        bindings: &[(&str, Release, &str)],
+        added_only: bool,
+    ) -> Vec<String> {
         let sections = sections(changelog);
         let mut wrong = Vec::new();
         for (name, release, phrase) in bindings {
@@ -796,12 +1121,14 @@ mod tests {
                 .iter()
                 .find(|section| section.text.contains(phrase))
             {
-                Some(section) if section.version == expected && section.added.contains(phrase) => {}
+                Some(section)
+                    if section.version == expected
+                        && (!added_only || section.added.contains(phrase)) => {}
                 Some(section) => wrong.push(format!(
                     "{name}: {}, but {phrase:?} is first in the {} section{}",
                     release.status(),
                     section.version,
-                    if section.added.contains(phrase) {
+                    if !added_only || section.added.contains(phrase) {
                         ""
                     } else {
                         ", outside its Added list"
@@ -832,7 +1159,7 @@ mod tests {
                 None => wrong.push(format!("{}: no introducing phrase", binding.name)),
             }
         }
-        wrong.extend(introduction_problems(&changelog, &bindings));
+        wrong.extend(introduction_problems(&changelog, &bindings, true));
         for (name, _) in INTRODUCED {
             if !BINDINGS.iter().any(|binding| binding.name == *name) {
                 wrong.push(format!("{name}: no such binding"));
@@ -855,11 +1182,13 @@ mod tests {
                 &[
                     ("F", Release::Next, fresh),
                     ("O", Release::Since("0.2.0"), old)
-                ]
+                ],
+                true
             ),
             Vec::<String>::new()
         );
-        let refused = |release, phrase| introduction_problems(changelog, &[("B", release, phrase)]);
+        let refused =
+            |release, phrase| introduction_problems(changelog, &[("B", release, phrase)], true);
         let wrong = refused(Release::Next, old);
         assert!(
             wrong.len() == 1 && wrong[0].contains("is first in the 0.2.0 section"),
@@ -888,7 +1217,7 @@ mod tests {
             release: Release::Next,
             ..BINDINGS[0]
         }];
-        let page = page_for(&crate::repository_root(), &metadata(), &next).unwrap();
+        let page = page_for(&crate::repository_root(), &metadata(), &next, &[]).unwrap();
         let row = page
             .lines()
             .find(|line| line.starts_with(&format!("| {} |", BINDINGS[0].name)))
@@ -930,6 +1259,236 @@ mod tests {
                 .any(|row| row.starts_with("| ElevenLabs realtime STT |")
                     && row.ends_with(" | Since 0.28.0 |")),
             "{table}"
+        );
+    }
+
+    #[test]
+    fn the_page_says_what_an_open_a_close_or_a_drop_gives_a_caller() {
+        let page = page(&crate::repository_root(), &metadata()).unwrap();
+        let section = page
+            .split_once("\n## Opens, closes and drops\n")
+            .unwrap_or_else(|| panic!("no section Opens, closes and drops in\n{page}"))
+            .1
+            .split_once("\n## ")
+            .unwrap()
+            .0;
+        for expected in [
+            "- **ElevenLabs agent conversation** (On main, in the next release). A model built \
+             with `ElevenLabsAgent::signed` opens at most one session.",
+            "`agent::AgentError::SignedUrlSpent`",
+            "- **OpenAI GPT-Live** (On main, in the next release). `LiveClient::with_close_timeout`",
+            "`CLOSE_TIMEOUT` (15 s)",
+            "`DEFAULT_READ_TIMEOUT` (30 s)",
+            "With that default, a close timeout of 30 s or less changes nothing",
+            "- **ElevenLabs streaming TTS** (On main, in the next release). Dropping an \
+             `ElevenLabsSynthesis`",
+            "- **Cartesia Sonic streaming TTS** (On main, in the next release). Dropping a \
+             `CartesiaSynthesis`",
+            "`CLOSE_GRACE` (5 ms)",
+            "`CLOSE_BOUND` (1 s)",
+        ] {
+            assert!(
+                section.contains(expected),
+                "{expected:?} is not in\n{section}"
+            );
+        }
+        let at = |name: &str| {
+            section
+                .find(&format!("- **{name}** "))
+                .unwrap_or_else(|| panic!("no note on {name}"))
+        };
+        assert!(
+            at("OpenAI GPT-Live") < at("ElevenLabs streaming TTS")
+                && at("ElevenLabs streaming TTS") < at("ElevenLabs agent conversation")
+                && at("ElevenLabs agent conversation") < at("Cartesia Sonic streaming TTS"),
+            "the notes are not in the order of the bindings:\n{section}"
+        );
+    }
+
+    #[test]
+    fn a_note_the_sources_of_its_package_do_not_hold_is_refused() {
+        let bindings = [("B", "adapters/b")];
+        let sources = vec![
+            (
+                "adapters/b/src/lib.rs".to_owned(),
+                "pub const GRACE: Duration = Duration::from_millis(5);\n\
+                 pub const BOUND: std::time::Duration = std::time::Duration::from_secs(1);\n\
+                 pub struct Handle;\nimpl Handle {\n    pub fn close(&self) {}\n}\n\
+                 // Kind::Rejected and Kind::Stalled; open comes later.\n"
+                    .to_owned(),
+            ),
+            (
+                "adapters/c/src/lib.rs".to_owned(),
+                "pub struct Elsewhere;\npub const OTHER: Duration = Duration::from_secs(2);\n"
+                    .to_owned(),
+            ),
+            (
+                "crates/core/src/lib.rs".to_owned(),
+                "pub enum Kind {\n    Rejected,\n}\n".to_owned(),
+            ),
+        ];
+        let note = |binding: &'static str,
+                    constants: &'static [(&'static str, &'static str)],
+                    text: &'static str| Note {
+            binding,
+            release: Release::Next,
+            constants,
+            text,
+        };
+        let held = notes_section(
+            &bindings,
+            &[note(
+                "B",
+                &[("GRACE", "lib.rs"), ("BOUND", "lib.rs")],
+                "`Handle::close` waits `GRACE` (5 ms), then `BOUND` (1 s), and fails with \
+                 `Kind::Rejected`, for `x.close` with feature `some-feature`.",
+            )],
+            &sources,
+        )
+        .unwrap();
+        assert!(
+            held.contains(
+                "- **B** (On main, in the next release). `Handle::close` waits `GRACE` (5 ms)"
+            ),
+            "{held}"
+        );
+        let refused = |notes: &[Note]| notes_section(&bindings, notes, &sources).err().unwrap();
+        let error = refused(&[note("B", &[("GRACE", "lib.rs")], "`GRACE` (5 s)")]);
+        assert!(error.contains("`GRACE` (5 ms)"), "{error}");
+        let error = refused(&[note("B", &[("OTHER", "lib.rs")], "`OTHER` (2 s)")]);
+        assert!(
+            error.contains("adapters/b/src/lib.rs does not define OTHER"),
+            "{error}"
+        );
+        let error = refused(&[note("B", &[("GRACE", "gone.rs")], "`GRACE` (5 ms)")]);
+        assert!(
+            error.contains("adapters/b/src/gone.rs, which does not exist"),
+            "{error}"
+        );
+        let error = refused(&[note("B", &[], "`Handle::open` and `Elsewhere`")]);
+        assert!(
+            error.contains("no source of adapters/b names")
+                && error.contains("`Elsewhere`")
+                && !error.contains("`Handle::open`"),
+            "{error}"
+        );
+        let error = refused(&[note("B", &[], "`Kind::Stalled` and `Handle::open`")]);
+        assert!(
+            error.contains("defines the last part of `Kind::Stalled`, `Handle::open`"),
+            "{error}"
+        );
+        let error = refused(&[note("C", &[], "text")]);
+        assert!(error.contains("no binding C"), "{error}");
+        let error = refused(&[note("B", &[], "one"), note("B", &[], "two")]);
+        assert!(error.contains("B has two notes"), "{error}");
+    }
+
+    #[test]
+    fn a_constant_is_read_from_its_own_file_in_the_forms_rustfmt_leaves() {
+        let bindings = [("B", "adapters/b")];
+        let sources = vec![
+            (
+                "adapters/b/src/agent.rs".to_owned(),
+                "pub const READ: Duration = Duration::from_secs(30);\n".to_owned(),
+            ),
+            (
+                "adapters/b/src/config.rs".to_owned(),
+                "pub const READ: Duration = Duration::from_secs(10);\n\
+                 pub const WIDE: Duration = Duration::from_millis(1_000);\n\
+                 pub const WRAPPED: std::time::Duration =\n    \
+                 std::time::Duration::from_secs(15);\n\
+                 pub const EXPR: Duration = Duration::from_secs(60 * 5);\n"
+                    .to_owned(),
+            ),
+            (
+                "adapters/b/src/twice.rs".to_owned(),
+                "#[cfg(unix)]\npub const BOTH: Duration = Duration::from_secs(1);\n\
+                 #[cfg(not(unix))]\npub const BOTH: Duration = Duration::from_secs(2);\n"
+                    .to_owned(),
+            ),
+        ];
+        let note = |constants: &'static [(&'static str, &'static str)], text: &'static str| Note {
+            binding: "B",
+            release: Release::Next,
+            constants,
+            text,
+        };
+        let section = |constants: &'static [(&'static str, &'static str)], text: &'static str| {
+            notes_section(&bindings, &[note(constants, text)], &sources)
+        };
+        assert!(section(&[("READ", "config.rs")], "`READ` (10 s)").is_ok());
+        let error = section(&[("READ", "agent.rs")], "`READ` (10 s)").unwrap_err();
+        assert!(error.contains("does not say `READ` (30 s)"), "{error}");
+        assert!(section(&[("WIDE", "config.rs")], "`WIDE` (1000 ms)").is_ok());
+        assert!(section(&[("WRAPPED", "config.rs")], "`WRAPPED` (15 s)").is_ok());
+        let error = section(&[("EXPR", "config.rs")], "`EXPR` (300 s)").unwrap_err();
+        assert!(
+            error.contains(
+                "adapters/b/src/config.rs gives no whole seconds or milliseconds in digits for EXPR"
+            ),
+            "{error}"
+        );
+        let error = section(&[("BOTH", "twice.rs")], "`BOTH` (1 s)").unwrap_err();
+        assert!(
+            error.contains("adapters/b/src/twice.rs defines more than once BOTH"),
+            "{error}"
+        );
+    }
+
+    /// Per note, by its binding, a phrase of the `CHANGELOG.md` entry that brought it.
+    const NOTED: &[(&str, &str)] = &[
+        (
+            "OpenAI GPT-Live",
+            "`OpenAiLive::with_close_timeout` and `OpenAiLive::close_timeout`",
+        ),
+        (
+            "ElevenLabs streaming TTS",
+            "`inference-elevenlabs`, `inference-cartesia`: dropping a synthesis inside a Tokio runtime",
+        ),
+        (
+            "ElevenLabs agent conversation",
+            "`agent::AgentError::SignedUrlSpent` (`SessionFailureKind::Rejected`)",
+        ),
+        (
+            "Cartesia Sonic streaming TTS",
+            "`inference-elevenlabs`, `inference-cartesia`: dropping a synthesis inside a Tokio runtime",
+        ),
+    ];
+
+    #[test]
+    fn every_note_is_of_the_release_whose_changelog_section_brought_it() {
+        let changelog = fs::read_to_string(crate::repository_root().join("CHANGELOG.md")).unwrap();
+        let mut notes = Vec::new();
+        let mut wrong = Vec::new();
+        for note in NOTES {
+            match NOTED.iter().find(|(name, _)| *name == note.binding) {
+                Some((_, phrase)) => notes.push((note.binding, note.release, *phrase)),
+                None => wrong.push(format!("{}: no phrase of its entry", note.binding)),
+            }
+        }
+        wrong.extend(introduction_problems(&changelog, &notes, false));
+        for (name, _) in NOTED {
+            if !NOTES.iter().any(|note| note.binding == *name) {
+                wrong.push(format!("{name}: no such note"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_note_may_be_brought_by_any_list_of_its_section() {
+        let changelog = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- `fresh`: a drop\n  \
+                         waits less.\n\n## [0.1.0] — 2026-01-01\n\n### Added\n\n- The \
+                         contracts.\n";
+        let phrase = "`fresh`: a drop waits less";
+        assert_eq!(
+            introduction_problems(changelog, &[("N", Release::Next, phrase)], false),
+            Vec::<String>::new()
+        );
+        let wrong = introduction_problems(changelog, &[("B", Release::Next, phrase)], true);
+        assert!(
+            wrong.len() == 1 && wrong[0].contains("outside its Added list"),
+            "{wrong:?}"
         );
     }
 
