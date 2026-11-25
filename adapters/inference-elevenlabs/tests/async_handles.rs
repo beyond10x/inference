@@ -2,20 +2,46 @@
 //! 20 recognitions and 20 agent conversations at once on one current-thread runtime, without
 //! `spawn_blocking`, each delivering every event while a ticker on the same runtime keeps its
 //! largest gap under 50 ms. Each server holds its answer back for longer than that bound, so a
-//! handle that blocks the runtime thread while it waits fails the bound.
+//! handle that blocks the runtime thread while it waits fails the bound. The same ticker runs
+//! beside the drop of an idle synthesis inside the runtime.
+//!
+//! The gap counts what holds the runtime's thread, and leaves out two waits that are the host's
+//! and were measured on a loaded host with many processors:
+//!
+//! - Linux grows a process's descriptor table when descriptor 64, 128, 256 and so on is first
+//!   opened, and the thread that opens it waits there for an RCU grace period: 110 to 140 ms
+//!   each, uninterruptible, in whatever call opened the descriptor, where every other descriptor
+//!   took under 0.1 ms. Twenty sessions hold about 130 descriptors, so two of their first polls
+//!   met that wait and the gap was 250 ms. The ticker of `support/ticker.rs` grows the table
+//!   before it starts.
+//! - A thread that is ready to run and gets no processor is late, not blocked: up to 18 ms of one
+//!   gap. The ticker reads what the kernel counted of it for the runtime's thread and takes it
+//!   out of each gap. A thread that sleeps, parks or waits on a lock or a socket is not ready to
+//!   run, so a handle that blocks the thread is counted in full.
+//!
+//! The limit of the second: a thread that stays ready to run while it holds the runtime, in a
+//! loop of yields or in a spin that is preempted, is taken out of the gap too when another thread
+//! is ready on its processor. The kernel's run-queue field cannot tell it from a late host.
+//! `adversary_w2_ticker_blocks.rs` holds the thread 200 ms in six forms: the sleep, the park, the
+//! lock, the socket read and the busy loop fail the bound, and the loop of yields is ignored
+//! there for this reason.
 
 mod stt_support;
 mod support;
 
+#[path = "support/dropped.rs"]
+mod dropped;
 #[path = "support/agent.rs"]
 mod fixture;
+#[path = "support/ticker.rs"]
+mod ticker;
 
-use std::cell::Cell;
-use std::future::Future;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dropped::{CLOSE, Relay, TEXT, threads_named};
 use fixture::{AGENT, AgentServer, Step as AgentStep};
 use inference_elevenlabs::agent::AgentEndpoint;
 use inference_elevenlabs::inference_duplex::inference_audio::{
@@ -24,66 +50,18 @@ use inference_elevenlabs::inference_duplex::inference_audio::{
 use inference_elevenlabs::inference_duplex::{
     NativeSpeechModel, SessionConfig, SessionEvent, SpeechSessionHandle, TurnDetection, TurnTuning,
 };
-use inference_elevenlabs::{ElevenLabsAgent, ElevenLabsAgentSession, InputFormat, OutputFormat};
+use inference_elevenlabs::{
+    ElevenLabsAgent, ElevenLabsAgentSession, ElevenLabsSynthesiser, InputFormat, OutputFormat,
+    VoiceConfig,
+};
 use inference_stt::{Recogniser, RecognitionHandle};
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
 use stt_support::{Action, Script as SttScript, Step as SttStep, Trigger, describe, manual};
+use ticker::{GAP_BOUND, with_ticker};
 
 const SESSIONS: usize = 20;
-const TICK: Duration = Duration::from_millis(10);
-const GAP_BOUND: Duration = Duration::from_millis(50);
 /// How long each server holds its answer back: longer than the gap bound.
 const HELD: Duration = Duration::from_millis(150);
-/// How long one session may take before the test fails it.
-const SESSION_BOUND: Duration = Duration::from_secs(20);
-
-/// Runs `sessions` on a current-thread runtime beside a ticker that ticks every [`TICK`] until
-/// they are done; returns what they returned and the ticker's largest gap.
-fn with_ticker<F, T>(sessions: Vec<F>) -> (Vec<T>, Duration)
-where
-    F: Future<Output = T> + 'static,
-    T: 'static,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("a current-thread runtime");
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async move {
-        let done = Rc::new(Cell::new(false));
-        let ticker = {
-            let done = Rc::clone(&done);
-            tokio::task::spawn_local(async move {
-                let mut largest = Duration::ZERO;
-                let mut last = Instant::now();
-                while !done.get() {
-                    tokio::time::sleep(TICK).await;
-                    let now = Instant::now();
-                    largest = largest.max(now - last);
-                    last = now;
-                }
-                largest
-            })
-        };
-        let running: Vec<_> = sessions
-            .into_iter()
-            .map(|session| {
-                tokio::task::spawn_local(async move {
-                    tokio::time::timeout(SESSION_BOUND, session)
-                        .await
-                        .expect("the session ends within its bound")
-                })
-            })
-            .collect();
-        let mut results = Vec::new();
-        for session in running {
-            results.push(session.await.expect("a session task ends without a panic"));
-        }
-        done.set(true);
-        let largest = ticker.await.expect("the ticker ends without a panic");
-        (results, largest)
-    })
-}
 
 /// One synthesis of two segments against `server` through the async form: every event until
 /// the async form ends, and the failure, if any.
@@ -132,6 +110,141 @@ fn twenty_syntheses_wait_for_the_server_without_blocking_the_runtime() {
     }
     assert_eq!(server.violations(), Vec::<String>::new());
     assert!(largest < GAP_BOUND, "the ticker's largest gap {largest:?}");
+}
+
+/// What a session awaits before and after it drops its handle, so the ticker runs on both sides.
+const LEAD: Duration = Duration::from_millis(35);
+
+/// A synthesiser of the fixture voice at `relay`, which passes on to `server`.
+fn through(relay: &Relay, server: &support::FixtureServer) -> ElevenLabsSynthesiser {
+    ElevenLabsSynthesiser::new(
+        server.endpoint().with_url(&relay.url),
+        VoiceConfig::new(support::VOICE, OutputFormat::Ulaw8000),
+        Arc::new(support::FixedKey(support::KEY)),
+        "elevenlabs-api-key",
+    )
+    .expect("the fixture configuration is valid")
+}
+
+/// The kernel's name of a synthesis's own thread: the first 15 bytes of `inference-elevenlabs`.
+const OWN_THREAD: &str = "inference-eleve";
+
+/// One synthesis of `synthesiser` that speaks a segment and is then idle, its utterance open
+/// and its connection with it, and is dropped there on the runtime's thread: how long the drop
+/// held that thread, and how many threads of its own the synthesis had before.
+async fn drop_idle(mut synthesiser: ElevenLabsSynthesiser) -> (Duration, Option<usize>) {
+    let mut handle = synthesiser
+        .start()
+        .expect("a fresh synthesiser runs nothing");
+    handle
+        .offer_segment(support::committed(&["First."]).remove(0))
+        .expect("the utterance is open");
+    let mut completed = false;
+    while let Some(event) = handle.event().await {
+        completed |= matches!(event, SynthesisEvent::Completed(_));
+    }
+    assert!(completed, "the segment completes");
+    assert_eq!(handle.failure().map(ToString::to_string), None);
+    let own = threads_named(OWN_THREAD, 1, Duration::ZERO);
+    tokio::time::sleep(LEAD).await;
+    let started = Instant::now();
+    drop(handle);
+    let held = started.elapsed();
+    tokio::time::sleep(LEAD).await;
+    (held, own)
+}
+
+/// The drop of an idle synthesis inside a runtime: it holds the runtime's thread for less than
+/// the ticker's bound, the server gets `close_socket` and a close frame, which the relay tells
+/// from a socket that only ended, and the synthesis's own thread ends after them. How the socket
+/// ends after the close frame is not asserted: the fixture server answers `close_socket` with a
+/// close frame of its own, and when that reaches the client before the client lets go of its
+/// socket, the socket ends with a reset and not in order.
+#[test]
+fn dropping_an_idle_synthesis_does_not_block_the_runtime() {
+    let server = support::FixtureServer::start(OutputFormat::Ulaw8000, support::Script::Serve);
+    let relay = Relay::to(&server.url);
+    let (dropped, largest) = with_ticker(vec![drop_idle(through(&relay, &server))]);
+    let (held, own) = dropped[0];
+    println!("the drop held the thread {held:?}, the ticker's largest gap is {largest:?}");
+    assert!(largest < GAP_BOUND, "the ticker's largest gap {largest:?}");
+    assert!(
+        matches!(own, None | Some(1)),
+        "an idle synthesis has one thread of its own: {own:?}"
+    );
+    let side = relay
+        .next_client_side(Duration::from_secs(5))
+        .expect("the client's side of the connection ends");
+    assert_eq!(
+        side.opcodes.last_chunk(),
+        Some(&[TEXT, CLOSE]),
+        "a text message, then a close frame, end what the client sent: {side:?}"
+    );
+    assert_eq!(
+        side.unframed, 0,
+        "nothing follows the close frame: {side:?}"
+    );
+    assert_eq!(server.next_client_close(Duration::from_secs(5)), Some(0));
+    assert!(
+        server.seen()[0].close_socket,
+        "the text message is `close_socket`"
+    );
+    assert_eq!(server.violations(), Vec::<String>::new());
+    let left = threads_named(OWN_THREAD, 0, Duration::from_secs(5));
+    assert!(
+        matches!(left, None | Some(0)),
+        "the synthesis's own thread ends after its close: {left:?}"
+    );
+}
+
+/// One synthesis of `synthesiser`, whose server answers nothing, dropped on the runtime's thread
+/// while its async form waits for the first message of its segment.
+async fn drop_waiting(mut synthesiser: ElevenLabsSynthesiser, server: Rc<support::FixtureServer>) {
+    let mut handle = synthesiser
+        .start()
+        .expect("a fresh synthesiser runs nothing");
+    handle
+        .offer_segment(support::committed(&["First."]).remove(0))
+        .expect("the utterance is open");
+    let mut polls = 0;
+    while polls == 0
+        || server
+            .seen()
+            .first()
+            .is_none_or(|seen| seen.contexts.is_empty())
+    {
+        let waited = tokio::time::timeout(Duration::from_millis(10), handle.event()).await;
+        assert!(waited.is_err(), "the server answers nothing: {waited:?}");
+        polls += 1;
+    }
+    tokio::time::sleep(LEAD).await;
+    drop(handle);
+    tokio::time::sleep(LEAD).await;
+}
+
+/// The drop of a synthesis inside a runtime while a read is in flight: it does not hold the
+/// runtime's thread either, and the server gets no close frame, only the end of the socket.
+#[test]
+fn dropping_a_synthesis_that_waits_for_the_server_ends_the_socket_without_a_close_frame() {
+    let server = Rc::new(support::FixtureServer::start(
+        OutputFormat::Ulaw8000,
+        support::Script::Silent,
+    ));
+    let relay = Relay::to(&server.url);
+    let session = drop_waiting(through(&relay, &server), Rc::clone(&server));
+    let (_, largest) = with_ticker(vec![session]);
+    assert!(largest < GAP_BOUND, "the ticker's largest gap {largest:?}");
+    let side = relay
+        .next_client_side(Duration::from_secs(5))
+        .expect("the client's side of the connection ends");
+    assert!(
+        !side.opcodes.is_empty() && side.opcodes.iter().all(|opcode| *opcode == TEXT),
+        "the segment's text and no close frame are what the client sent: {side:?}"
+    );
+    assert_eq!(side.unframed, 0, "{side:?}");
+    assert_eq!(server.next_client_close(Duration::from_secs(5)), Some(0));
+    assert!(!server.seen()[0].close_socket, "no `close_socket` either");
+    assert_eq!(server.violations(), Vec::<String>::new());
 }
 
 /// `session_started`, a partial transcript after the fifth chunk, and the committed transcript
