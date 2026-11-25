@@ -8,6 +8,12 @@
 //! `ready_to_start_conversation`, and when the client closed the connection. A first message that
 //! is not `config`, or an `audio_chunk` before `ready_to_start_conversation`, is recorded as a
 //! violation.
+//!
+//! A deaf server ([`Script::deaf`]) reads nothing until the test calls
+//! [`PhonicServer::read_again`]. With [`Step::Pings`] it backs the connection up: the client
+//! answers every ping it reads with a pong, the pongs fill the socket buffers and then wait in
+//! the client's WebSocket buffer, in front of everything the client writes later. Reading
+//! again, the server counts the pongs and notes whether a close frame followed them.
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
@@ -19,11 +25,11 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::{Bytes, Message};
 
 /// The key the tests' credential source gives.
 pub const KEY: &str = "phonic-fixture-key-0123456789";
@@ -64,6 +70,8 @@ pub enum Step {
     AwaitType(&'static str),
     /// Waits this long.
     Pause(Duration),
+    /// Sends this many WebSocket pings of 125 bytes, written together.
+    Pings(usize),
     /// Closes the connection with this code.
     Close(u16),
 }
@@ -86,7 +94,7 @@ pub struct Script {
     /// How long the server waits after `config` before it sends them.
     pub ready_delay: Duration,
     /// A deaf server reads nothing, so answers no ping: it sends the ready messages at once,
-    /// then takes its steps.
+    /// then takes its steps. It reads again when the test calls [`PhonicServer::read_again`].
     pub deaf: bool,
     pub steps: Vec<Step>,
 }
@@ -113,6 +121,10 @@ pub struct Seen {
     /// Every text message the client sent, parsed where it is JSON, with when it arrived.
     pub messages: Vec<(Instant, Value)>,
     pub pings: usize,
+    /// The WebSocket pongs the server read.
+    pub pongs: usize,
+    /// The client ended the connection with a close frame.
+    pub close_frame: bool,
     pub ready_sent: Option<Instant>,
     /// When the client closed the connection: a close frame, the end of the stream or an error.
     pub closed: Option<Instant>,
@@ -145,6 +157,8 @@ impl Seen {
 struct Connection {
     seen: Mutex<Seen>,
     changed: Notify,
+    /// Tells a deaf server to read again.
+    read_again: Notify,
 }
 
 /// A running fixture server; it stops when dropped.
@@ -189,6 +203,7 @@ impl PhonicServer {
                     let connection = Arc::new(Connection {
                         seen: Mutex::new(Seen::default()),
                         changed: Notify::new(),
+                        read_again: Notify::new(),
                     });
                     thread_connections
                         .lock()
@@ -219,6 +234,14 @@ impl PhonicServer {
             .lock()
             .unwrap()
             .clone()
+    }
+
+    /// Tells the deaf server of connection `index` to read again; it then reads until the
+    /// client's side ends.
+    pub fn read_again(&self, index: usize) {
+        self.connections.lock().unwrap()[index]
+            .read_again
+            .notify_one();
     }
 
     /// Waits at most `within` for connection `index` to exist and satisfy `done`, and returns
@@ -294,8 +317,25 @@ async fn serve(stream: TcpStream, script: Script, connection: Arc<Connection>) {
         }
         connection.seen.lock().unwrap().ready_sent = Some(Instant::now());
         run(&mut sink, &connection, script.steps).await;
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        drop(source);
+        let told = connection.read_again.notified();
+        if tokio::time::timeout(Duration::from_secs(10), told)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        while let Some(message) = source.next().await {
+            match message {
+                Ok(Message::Pong(_)) => connection.seen.lock().unwrap().pongs += 1,
+                Ok(Message::Close(_)) => {
+                    connection.seen.lock().unwrap().close_frame = true;
+                    break;
+                }
+                Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        closed(&connection);
         return;
     }
     let reader_connection = Arc::clone(&connection);
@@ -317,7 +357,12 @@ async fn serve(stream: TcpStream, script: Script, connection: Arc<Connection>) {
                     seen.messages.push((Instant::now(), value));
                 }
                 Ok(Message::Ping(_)) => reader_connection.seen.lock().unwrap().pings += 1,
-                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Pong(_)) => reader_connection.seen.lock().unwrap().pongs += 1,
+                Ok(Message::Close(_)) => {
+                    reader_connection.seen.lock().unwrap().close_frame = true;
+                    break;
+                }
+                Err(_) => break,
                 Ok(_) => {}
             }
             reader_connection.changed.notify_waiters();
@@ -371,6 +416,7 @@ async fn run(sink: &mut Sink, connection: &Connection, steps: Vec<Step>) {
                 tokio::time::sleep(duration).await;
                 Ok(())
             }
+            Step::Pings(count) => flood(sink, count).await,
             Step::Close(code) => {
                 let _ = sink
                     .send(Message::Close(Some(CloseFrame {
@@ -385,6 +431,16 @@ async fn run(sink: &mut Sink, connection: &Connection, steps: Vec<Step>) {
             return;
         }
     }
+}
+
+/// Writes `count` WebSocket pings of 125 bytes, the largest a control frame carries, and
+/// flushes them once.
+async fn flood(sink: &mut Sink, count: usize) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+    let payload = Bytes::from(vec![0x2a_u8; 125]);
+    for _ in 0..count {
+        sink.feed(Message::Ping(payload.clone())).await?;
+    }
+    sink.flush().await
 }
 
 /// What the server sends once `config` arrived: the conversation, then readiness.

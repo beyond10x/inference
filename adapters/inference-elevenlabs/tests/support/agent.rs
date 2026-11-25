@@ -7,6 +7,13 @@
 //! when it sent the initiation metadata, and when the client closed the connection. A user audio
 //! chunk before the metadata, or a first message that is not the initiation, is recorded as a
 //! violation.
+//!
+//! A deaf server ([`Script::deaf`]) reads the initiation and nothing after it until the test
+//! calls [`AgentServer::read_again`]. With [`Step::Pings`] it backs the connection up: the
+//! client answers every WebSocket ping it reads with a pong, the pongs fill the socket buffers
+//! and then wait in the client's WebSocket buffer, in front of everything the client writes
+//! later. Reading again, the server counts the pongs and notes whether a close frame followed
+//! them.
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
@@ -19,11 +26,11 @@ use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::{Bytes, Message};
 
 /// The public agent the tests connect to.
 pub const AGENT: &str = "fixture-agent-01";
@@ -43,6 +50,8 @@ pub enum Step {
     AwaitType(&'static str),
     /// Waits this long.
     Pause(Duration),
+    /// Sends this many WebSocket pings of 125 bytes, written together.
+    Pings(usize),
     /// Closes the connection with this code.
     Close(u16),
 }
@@ -66,6 +75,9 @@ pub struct Script {
     pub metadata: Option<(&'static str, &'static str)>,
     /// How long the server waits after the initiation before it sends the metadata.
     pub metadata_delay: Duration,
+    /// A deaf server reads the client's first message and nothing after it, until the test
+    /// calls [`AgentServer::read_again`].
+    pub deaf: bool,
     pub steps: Vec<Step>,
 }
 
@@ -76,6 +88,7 @@ impl Script {
             handshake: Handshake::Answer,
             metadata: Some(("pcm_16000", "pcm_16000")),
             metadata_delay: Duration::ZERO,
+            deaf: false,
             steps,
         }
     }
@@ -91,6 +104,10 @@ pub struct Seen {
     pub metadata_sent: Option<Instant>,
     /// When the client closed the connection: a close frame, the end of the stream or an error.
     pub closed: Option<Instant>,
+    /// The WebSocket pongs the server read.
+    pub pongs: usize,
+    /// The client ended the connection with a close frame.
+    pub close_frame: bool,
     pub violations: Vec<String>,
 }
 
@@ -116,6 +133,8 @@ impl Seen {
 struct Connection {
     seen: Mutex<Seen>,
     changed: Notify,
+    /// Tells a deaf server to read again.
+    read_again: Notify,
 }
 
 /// A running fixture server; it stops when dropped.
@@ -160,6 +179,7 @@ impl AgentServer {
                     let connection = Arc::new(Connection {
                         seen: Mutex::new(Seen::default()),
                         changed: Notify::new(),
+                        read_again: Notify::new(),
                     });
                     thread_connections
                         .lock()
@@ -190,6 +210,14 @@ impl AgentServer {
             .lock()
             .unwrap()
             .clone()
+    }
+
+    /// Tells the deaf server of connection `index` to read again; it then reads until the
+    /// client's side ends.
+    pub fn read_again(&self, index: usize) {
+        self.connections.lock().unwrap()[index]
+            .read_again
+            .notify_one();
     }
 
     /// Waits at most `within` for connection `index` to exist and satisfy `done`, and returns
@@ -261,6 +289,7 @@ async fn serve(mut stream: TcpStream, script: Script, connection: Arc<Connection
     };
     let (mut sink, mut source) = socket.split();
     let reader_connection = Arc::clone(&connection);
+    let mut deaf = script.deaf;
     let reader = tokio::spawn(async move {
         while let Some(message) = source.next().await {
             match message {
@@ -280,10 +309,19 @@ async fn serve(mut stream: TcpStream, script: Script, connection: Arc<Connection
                     }
                     seen.messages.push((Instant::now(), value));
                 }
-                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Pong(_)) => reader_connection.seen.lock().unwrap().pongs += 1,
+                Ok(Message::Close(_)) => {
+                    reader_connection.seen.lock().unwrap().close_frame = true;
+                    break;
+                }
+                Err(_) => break,
                 Ok(_) => {}
             }
             reader_connection.changed.notify_waiters();
+            if deaf {
+                reader_connection.read_again.notified().await;
+                deaf = false;
+            }
         }
         reader_connection.seen.lock().unwrap().closed = Some(Instant::now());
         reader_connection.changed.notify_waiters();
@@ -330,6 +368,20 @@ async fn serve(mut stream: TcpStream, script: Script, connection: Arc<Connection
                 Step::Pause(duration) => {
                     tokio::time::sleep(duration).await;
                     Ok(())
+                }
+                Step::Pings(count) => {
+                    let payload = Bytes::from(vec![0x2a_u8; 125]);
+                    let mut fed = Ok(());
+                    for _ in 0..count {
+                        fed = sink.feed(Message::Ping(payload.clone())).await;
+                        if fed.is_err() {
+                            break;
+                        }
+                    }
+                    match fed {
+                        Ok(()) => sink.flush().await,
+                        Err(error) => Err(error),
+                    }
                 }
                 Step::Close(code) => {
                     let _ = sink
