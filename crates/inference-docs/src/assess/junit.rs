@@ -1,13 +1,18 @@
-//! The JUnit report cargo-nextest writes, `target/nextest/<profile>/junit.xml`: the start and
-//! the length of the run on the root `<testsuites>`, and one `<testcase>` per test that the run
-//! reported, with its binary in `classname`, its path in the binary in `name` and its time in
-//! seconds in `time`. A `<failure>` or an `<error>` in a test case is a test that failed, a
-//! `<skipped>` one that did not run; every other test case passed, also one with a
-//! `<flakyFailure>`, which nextest writes for a test that passed on a retry.
+//! The JUnit report cargo-nextest writes, `target/nextest/<profile>/junit.xml`: the start, the
+//! length and the counts of the run on the root `<testsuites>`, one `<testsuite>` per test
+//! binary under it, and in each one `<testcase>` per test that the run reported, with its binary
+//! in `classname`, its path in the binary in `name` and its time in seconds in `time`. A
+//! `<failure>` or an `<error>` in a test case is a test that failed, a `<skipped>` one that did
+//! not run; every other test case passed, also one with a `<flakyFailure>`, which nextest writes
+//! for a test that passed on a retry.
+//!
+//! A `<testcase>` anywhere else, directly under the root, in a `<testsuite>` inside another one
+//! or inside any other element, is not read as a test: the report names it in
+//! [`Report::unplaced`], and the program refuses such a report. The counts of the root are kept
+//! in [`Report::counts`] for the program to compare with the cases read.
 //!
 //! Not handled: an entity a DTD declares, the normalisation of white space in an attribute value,
-//! a namespace prefix (it is ignored), and a `<testcase>` that is not a child of a `<testsuite>`
-//! under the root (it is not read).
+//! and a namespace prefix (it is ignored).
 
 use xmlparser::{ElementEnd, Token, Tokenizer};
 
@@ -17,7 +22,20 @@ pub(super) struct Report {
     pub(super) timestamp: Option<String>,
     /// The `time` of the root: how long the run took, in seconds.
     pub(super) time: Option<String>,
+    /// The counts the root states, as far as it states them.
+    pub(super) counts: Counts,
     pub(super) cases: Vec<Case>,
+    /// The test cases outside a `<testsuite>` directly under the root, as `<classname> <name>`.
+    pub(super) unplaced: Vec<String>,
+}
+
+/// The attributes `tests`, `failures`, `errors` and `skipped` of the root.
+#[derive(Default)]
+pub(super) struct Counts {
+    pub(super) tests: Option<u64>,
+    pub(super) failures: Option<u64>,
+    pub(super) errors: Option<u64>,
+    pub(super) skipped: Option<u64>,
 }
 
 /// One test case of a report.
@@ -32,6 +50,10 @@ pub(super) struct Case {
     /// The same time in nanoseconds.
     pub(super) nanos: u128,
     pub(super) verdict: Verdict,
+    /// Whether the case holds a `<failure>`.
+    pub(super) failure: bool,
+    /// Whether the case holds an `<error>`.
+    pub(super) error: bool,
 }
 
 impl Case {
@@ -58,13 +80,26 @@ pub(super) enum Verdict {
 /// A test case whose element is still open.
 struct Open {
     suite: String,
+    /// Whether it stands in a `<testsuite>` directly under the root.
+    placed: bool,
     classname: Option<String>,
     name: Option<String>,
     time: Option<String>,
-    verdict: Verdict,
+    failure: bool,
+    error: bool,
+    skipped: bool,
 }
 
 impl Open {
+    /// The case as `<classname> <name>`, for a case the report does not place.
+    fn label(&self) -> String {
+        format!(
+            "{} {}",
+            self.classname.as_deref().unwrap_or(&self.suite),
+            self.name.as_deref().unwrap_or("without a name")
+        )
+    }
+
     fn finish(self) -> Result<Case, String> {
         let name = self
             .name
@@ -76,14 +111,31 @@ impl Open {
         let nanos = super::scaled(&time, 9).ok_or_else(|| {
             format!("the test {classname} {name} has the time {time:?}, not a number of seconds")
         })?;
+        let verdict = if self.failure || self.error {
+            Verdict::Failed
+        } else if self.skipped {
+            Verdict::Skipped
+        } else {
+            Verdict::Passed
+        };
         Ok(Case {
             classname,
             name,
             time,
             nanos,
-            verdict: self.verdict,
+            verdict,
+            failure: self.failure,
+            error: self.error,
         })
     }
+}
+
+/// A count of the root, or why it is not one.
+fn count(attribute: &str, value: &str) -> Result<Option<u64>, String> {
+    value
+        .parse()
+        .map(Some)
+        .map_err(|_| format!("its root has {attribute}={value:?}, not a count"))
 }
 
 /// The report in `text`, or why it is not one.
@@ -91,7 +143,9 @@ pub(super) fn parse(text: &str) -> Result<Report, String> {
     let mut report = Report {
         timestamp: None,
         time: None,
+        counts: Counts::default(),
         cases: Vec::new(),
+        unplaced: Vec::new(),
     };
     let mut open: Vec<String> = Vec::new();
     let mut rooted = false;
@@ -101,31 +155,36 @@ pub(super) fn parse(text: &str) -> Result<Report, String> {
         match token.map_err(|error| error.to_string())? {
             Token::ElementStart { local, .. } => {
                 let name = local.as_str();
-                match (open.last().map(String::as_str), name) {
-                    (None, "testsuites") => rooted = true,
-                    (None, other) => {
+                let parents: Vec<&str> = open.iter().map(String::as_str).collect();
+                match (parents.as_slice(), name) {
+                    ([], "testsuites") => rooted = true,
+                    ([], other) => {
                         return Err(format!("its root is <{other}>, not <testsuites>"));
                     }
-                    (Some("testsuites"), "testsuite") => suite.clear(),
-                    (Some("testsuite"), "testcase") => {
+                    (["testsuites"], "testsuite") => suite.clear(),
+                    (_, "testcase") => {
+                        if case.is_some() {
+                            return Err("a <testcase> stands inside a <testcase>".to_owned());
+                        }
                         case = Some(Open {
                             suite: suite.clone(),
+                            placed: parents == ["testsuites", "testsuite"],
                             classname: None,
                             name: None,
                             time: None,
-                            verdict: Verdict::Passed,
+                            failure: false,
+                            error: false,
+                            skipped: false,
                         });
                     }
-                    (Some("testcase"), "failure" | "error") => {
+                    ([.., "testcase"], child) => {
                         if let Some(case) = case.as_mut() {
-                            case.verdict = Verdict::Failed;
-                        }
-                    }
-                    (Some("testcase"), "skipped") => {
-                        if let Some(case) = case.as_mut()
-                            && case.verdict == Verdict::Passed
-                        {
-                            case.verdict = Verdict::Skipped;
+                            match child {
+                                "failure" => case.failure = true,
+                                "error" => case.error = true,
+                                "skipped" => case.skipped = true,
+                                _ => {}
+                            }
                         }
                     }
                     _ => {}
@@ -134,11 +193,22 @@ pub(super) fn parse(text: &str) -> Result<Report, String> {
             }
             Token::Attribute { local, value, .. } => {
                 let value = unescape(value.as_str())?;
-                match (open.last().map(String::as_str), local.as_str()) {
-                    (Some("testsuites"), "timestamp") => report.timestamp = Some(value),
-                    (Some("testsuites"), "time") => report.time = Some(value),
-                    (Some("testsuite"), "name") => suite = value,
-                    (Some("testcase"), attribute) => {
+                let parents: Vec<&str> = open.iter().map(String::as_str).collect();
+                match (parents.as_slice(), local.as_str()) {
+                    (["testsuites"], "timestamp") => report.timestamp = Some(value),
+                    (["testsuites"], "time") => report.time = Some(value),
+                    (["testsuites"], "tests") => report.counts.tests = count("tests", &value)?,
+                    (["testsuites"], "failures") => {
+                        report.counts.failures = count("failures", &value)?;
+                    }
+                    (["testsuites"], "errors") => {
+                        report.counts.errors = count("errors", &value)?;
+                    }
+                    (["testsuites"], "skipped") => {
+                        report.counts.skipped = count("skipped", &value)?;
+                    }
+                    (["testsuites", "testsuite"], "name") => suite = value,
+                    ([.., "testcase"], attribute) => {
                         if let Some(case) = case.as_mut() {
                             match attribute {
                                 "name" => case.name = Some(value),
@@ -168,10 +238,13 @@ pub(super) fn parse(text: &str) -> Result<Report, String> {
                     }
                 };
                 if closed.as_deref() == Some("testcase")
-                    && open.last().map(String::as_str) == Some("testsuite")
                     && let Some(done) = case.take()
                 {
-                    report.cases.push(done.finish()?);
+                    if done.placed {
+                        report.cases.push(done.finish()?);
+                    } else {
+                        report.unplaced.push(done.label());
+                    }
                 }
             }
             _ => {}
@@ -285,36 +358,44 @@ impl Place {
         }
     }
 
-    /// Whether `case` is the test `function` of a file at this place.
+    /// Whether `case` is the test `function` of a file at this place: its name is the module
+    /// path of the file in its binary and the function, or that path, `tests` and the function.
     fn holds(&self, case: &Case, function: &str) -> bool {
-        let path: Vec<&str> = case.name.split("::").collect();
-        let function: Vec<&str> = function.split("::").collect();
-        if !path.ends_with(&function) {
-            return false;
-        }
         let binary = case.binary();
+        let mut paths: Vec<Vec<&str>> = Vec::new();
         match self {
             Self::Library { modules } => {
-                binary.is_none_or(|binary| binary.starts_with("bin/")) && starts(&path, modules)
+                if binary.is_none_or(|binary| binary.starts_with("bin/")) {
+                    paths.push(modules.iter().map(String::as_str).collect());
+                }
             }
-            Self::Binary { binary: expected } => binary == Some(expected.as_str()),
+            Self::Binary { binary: expected } => {
+                if binary == Some(expected.as_str()) {
+                    paths.push(Vec::new());
+                }
+            }
             Self::Module { directory, modules } => {
-                binary.is_some_and(|binary| !binary.starts_with("bin/"))
-                    && ((binary == Some(directory.as_str()) && starts(&path, modules))
-                        || (path.first() == Some(&directory.as_str())
-                            && starts(&path[1..], modules)))
+                if binary.is_some_and(|binary| !binary.starts_with("bin/")) {
+                    if binary == Some(directory.as_str()) {
+                        paths.push(modules.iter().map(String::as_str).collect());
+                    }
+                    paths.push(
+                        std::iter::once(directory.as_str())
+                            .chain(modules.iter().map(String::as_str))
+                            .collect(),
+                    );
+                }
             }
         }
+        paths.into_iter().any(|path| {
+            let mut inline = path.clone();
+            inline.push("tests");
+            [path, inline].into_iter().any(|mut path| {
+                path.push(function);
+                case.name == path.join("::")
+            })
+        })
     }
-}
-
-/// Whether `path` starts with `modules` and has the function after them.
-fn starts(path: &[&str], modules: &[String]) -> bool {
-    path.len() > modules.len()
-        && modules
-            .iter()
-            .zip(path)
-            .all(|(module, part)| module.as_str() == *part)
 }
 
 /// What a report holds for a named test.

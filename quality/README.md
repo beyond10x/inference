@@ -39,9 +39,33 @@ an example printed. The other seven declarations have no program: they name the 
 and scopes that a program would report. No declaration has a `command`.
 
 The program takes the arguments Ratchet gives an assessor and two of its own: `--from`, the file
-the run left, and `--source`, what the record names as its origin, a URL of a forge run or a
-path from the root. `--started-at` and `--ended-at` give the times of a printed output, which
-holds none. The call for the record of `workspace-tests`:
+the run left, and `--source`, what the record names as its origin: an http or https URL of a
+forge run, or a path from the root without `..`. `--started-at` and `--ended-at` give the times
+of a printed output, which holds none, and `--exit-status` the exit status of the command that
+printed it. Ratchet's specification says it passes an assessor no argument beside its own and
+the declared inputs, so a call through Ratchet as the specification stands cannot pass these
+four: the declarations would have to name them as `inputs`, or a wrapper would have to add them.
+
+The program does not know which nextest profile wrote a report. The caller gives it the report of
+the profile the plan names as the input `profile`, and the record says that profile.
+
+A report is refused when its root counts other tests, failures, errors or skipped tests than the
+test cases it holds, or when it holds a test case outside a `<testsuite>` directly under the root.
+A named test is held only by a test case whose name is the module path of its file and the
+function, or that path, `tests` and the function. A capability record whose test failed or was
+skipped is refused.
+
+A printed measure is read from the one line that holds its text. Of the plans of
+`printed-duration@1`, `compare` and `compare-cascade` write their values to `runs.jsonl`, the
+example of `elevenlabs-live-example` prints its text once per output format, and the tests of
+`cascade-local-adapters` print it once per turn and per test: the program reads none of the four,
+and a story of its own would add a second scope, per format or per turn, to read them. The output
+of a live test says whether the test held: a failed test, a `test result: FAILED` line, a panic of
+a test the output names or a failing line of cargo-nextest is refused, and a passed run is
+written as one passed run. The output of an example, here `cascade-talk`, says nothing of that:
+its call gives `--exit-status`, and an exit status other than 0 is refused. `cascade-talk` ends
+with Ctrl-C, so its run is read only when the caller gives the status of a run that ended
+otherwise, and only when it held one turn. The call for the record of `workspace-tests`:
 
 ```sh
 cargo run -q -p inference-docs -- assess --project inference --assessment workspace-tests \
@@ -118,8 +142,11 @@ adapters, tests and commands `adapters.rs`, and for the program `assess.rs`. It 
 - `inference-docs assess`, run on the fixtures under
   `crates/inference-docs/tests/fixtures/assess/`, writes another record than the expected file,
   writes a record that the rules above refuse in the place of a committed one, reads a printed
-  measure by a text the source of its command does not print, or writes a record from a file
-  that lacks what the assessment reads.
+  measure by a text that no `println!`, `eprintln!`, `print!`, `format!`, `write!` or
+  `writeln!` of the source of its command writes in one string literal with the text its value
+  follows, or writes a record from a file that lacks what the assessment reads. That check reads
+  the first string literal of each such macro outside comments; it does not read a literal built
+  by `concat!` or a format string held in a variable, and it does not know that the macro runs.
 
 One command stands in no `cmds` list of `Taskfile.yml` and names no test or example of a
 package, so the test holds it against nothing. A change of the workflow step that runs it goes
