@@ -17,11 +17,31 @@ use inference_stt::inference_core::envelope::EventEnvelope;
 use support::{FixedKey, FixtureServer, KEY, Script, describe, recognise, tone};
 
 /// The connect timeout given to the open whose handshake is never answered.
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// The longest that open may take; past it the test fails instead of waiting. Wide enough for a
-/// loaded machine, and under the default connect timeout.
-const CEILING: Duration = Duration::from_secs(4);
+/// That open must end before twice its connect timeout: a bound doubled or more fails the test,
+/// a bound multiplied by less than two still passes. The 500 ms past the bound are room for a
+/// loaded machine: over repeated runs on one, such an open ended at most 51 ms after its bound,
+/// and tests that measure stalls saw one of 204 ms there.
+const LATEST: Duration = CONNECT_TIMEOUT.saturating_mul(2);
+
+/// The test's own deadline for an open that nothing ends: past it the test fails instead of
+/// waiting.
+const DEADLINE: Duration = Duration::from_secs(4);
+
+/// How many connections wait in the queue of `listener`, which nothing accepted before. An
+/// attempt is there from the moment its TCP connect completed, so the count needs no wait.
+fn attempts(listener: &std::net::TcpListener) -> usize {
+    listener.set_nonblocking(true).unwrap();
+    let mut count = 0;
+    loop {
+        match listener.accept() {
+            Ok(_) => count += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return count,
+            Err(error) => panic!("the listener failed: {error}"),
+        }
+    }
+}
 
 fn failed(script: Script) -> (DeepgramRecognition, Vec<EventEnvelope<TranscriptEvent>>) {
     let server = FixtureServer::start(script);
@@ -151,9 +171,11 @@ fn a_server_silent_after_close_stream_stalls_within_the_read_timeout() {
 
 /// The listener takes the TCP connection into its queue and nothing reads it or answers the
 /// upgrade, so only the connect timeout ends the open. A refused connection is the same variant
-/// with no status: the detail and the time tell the two apart. The read timeout stays at its
-/// default, so the handle's own wait for the summary ends later than [`CEILING`]. The wait is
-/// the test's own, so an open that no connect timeout ends fails here at [`CEILING`].
+/// with no status: the detail and the time tell the two apart. The open connects once: a second
+/// attempt after the timeout is a second connection in the listener's queue. The read timeout
+/// stays at its default, so the handle's own wait for the summary ends later than [`DEADLINE`].
+/// The wait is the test's own, so an open that no connect timeout ends fails here at
+/// [`DEADLINE`].
 #[test]
 fn a_handshake_never_answered_fails_the_recognition_at_the_connect_timeout() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -174,8 +196,8 @@ fn a_handshake_never_answered_fails_the_recognition_at_the_connect_timeout() {
         let _ = done.send((handle.failure().cloned(), started.elapsed()));
     });
     let (failure, took) = waited
-        .recv_timeout(CEILING)
-        .unwrap_or_else(|error| panic!("the recognition did not end within {CEILING:?}: {error}"));
+        .recv_timeout(DEADLINE)
+        .unwrap_or_else(|error| panic!("the recognition did not end within {DEADLINE:?}: {error}"));
     assert_eq!(
         failure,
         Some(DeepgramError::Connect(ConnectError {
@@ -183,9 +205,17 @@ fn a_handshake_never_answered_fails_the_recognition_at_the_connect_timeout() {
             detail: format!("no handshake within {CONNECT_TIMEOUT:?}"),
         }))
     );
+    assert_eq!(
+        attempts(&listener),
+        1,
+        "the connections the recognition made"
+    );
     assert!(
         took >= CONNECT_TIMEOUT,
         "the recognition failed after {took:?}, before its connect timeout"
     );
-    assert!(took < CEILING, "the recognition took {took:?}");
+    assert!(
+        took < LATEST,
+        "the recognition failed after {took:?}, at twice its connect timeout or later"
+    );
 }
