@@ -219,6 +219,9 @@ pub struct Seen {
     pub close_frame: bool,
     /// The WebSocket pongs the server read.
     pub pongs: usize,
+    /// The pongs the server had read when the test called `read_again`: none where it read
+    /// nothing until then.
+    pub early_pongs: usize,
 }
 
 /// A running fixture server; it stops when dropped.
@@ -308,6 +311,9 @@ impl FixtureServer {
 
     /// Ends an [`Action::Hold`]: the server reads again, until the client's side ends.
     pub fn read_again(&self) {
+        for seen in self.seen.lock().unwrap().iter_mut() {
+            seen.early_pongs = seen.pongs;
+        }
         self.read_again.notify_one();
     }
 

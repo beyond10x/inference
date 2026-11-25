@@ -123,6 +123,9 @@ pub struct Seen {
     pub pings: usize,
     /// The WebSocket pongs the server read.
     pub pongs: usize,
+    /// The pongs the server had read when the test called `read_again`: none where it read
+    /// nothing until then.
+    pub early_pongs: usize,
     /// The client ended the connection with a close frame.
     pub close_frame: bool,
     pub ready_sent: Option<Instant>,
@@ -239,9 +242,13 @@ impl PhonicServer {
     /// Tells the deaf server of connection `index` to read again; it then reads until the
     /// client's side ends.
     pub fn read_again(&self, index: usize) {
-        self.connections.lock().unwrap()[index]
-            .read_again
-            .notify_one();
+        let connections = self.connections.lock().unwrap();
+        let connection = &connections[index];
+        {
+            let mut seen = connection.seen.lock().unwrap();
+            seen.early_pongs = seen.pongs;
+        }
+        connection.read_again.notify_one();
     }
 
     /// Waits at most `within` for connection `index` to exist and satisfy `done`, and returns

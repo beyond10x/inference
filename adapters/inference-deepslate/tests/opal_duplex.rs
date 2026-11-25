@@ -1081,12 +1081,16 @@ fn closing_cancels_the_response_in_progress_and_closes_the_connection() {
 }
 
 /// The pings of the first flood of the backed-up close. The session answers each with a pong of
-/// 131 bytes; 36,000 of them are 4.7 MB, more than the socket buffers hold where the kernel's
-/// largest send buffer is 4 MiB.
-const FLOOD: usize = 36_000;
+/// 131 bytes. Where this test was first run, the socket buffers took between 35,800 and 37,800
+/// of these pongs: a flood of 36,000 arrived whole in most runs, and one of 72,000 backed the
+/// connection up in every run.
+const FLOOD: usize = 72_000;
 
-/// The largest flood: a host whose buffers took every pong gets the flood doubled up to here.
-const LARGEST_FLOOD: usize = 16 * FLOOD;
+/// The largest flood, which for this session is the first: it is one the session reads well
+/// within the five seconds of `events_until`, and a flood of twice that took most of them. So a
+/// host whose buffers took every pong of it fails on that, and not on the wait for the audio
+/// behind a larger one.
+const LARGEST_FLOOD: usize = FLOOD;
 
 /// The test's own deadline for a close that nothing ends: past it the test lets the server read
 /// again, which ends the close, and fails.
@@ -1096,11 +1100,12 @@ const CLOSE_DEADLINE: Duration = Duration::from_secs(4);
 /// pings and then the start of a reply. The session answers each ping with a pong as it reads;
 /// the pongs fill the socket buffers and then wait in the session's WebSocket buffer, in front
 /// of the close frame, so that frame cannot be written and only the close bound ends the close.
-/// Whether the connection was backed up is the server's to tell: reading again after the close,
-/// it counts fewer pongs than it sent pings. A flood whose pongs all arrived is doubled and the
-/// session run again. The endpoint is this test's own: the session's `Ping` every second of the
-/// other tests would be a write of the session's own on the backed-up connection, and it would
-/// hold the connection task until the read timeout.
+/// Whether the connection was backed up is the server's to tell: it had read no pong when the
+/// test told it to read again, and reading again after the close, it counts fewer pongs than it
+/// sent pings. A flood whose pongs all arrived fails the test, since it is the largest. The
+/// endpoint is this test's own: the session's `Ping` every second of the other tests would be a
+/// write of the session's own on the backed-up connection, and it would hold the connection
+/// task until the read timeout.
 ///
 /// The close must hold its caller no shorter than one second and less than two. Both numbers
 /// are written out and not taken from `CLOSE_BOUND`: limits that moved with the constant would
@@ -1153,10 +1158,16 @@ fn a_close_on_a_backed_up_connection_ends_at_the_close_bound() {
             );
             println!(
                 "a flood of {pings} pings, read within {flooded:?}: the close held {held:?}; the \
-                 server then read {} pongs, close frame: {}",
-                seen.pongs, seen.close_frame
+                 server had read {} pongs when it was told to read again and {} at the end, \
+                 close frame: {}",
+                seen.early_pongs, seen.pongs, seen.close_frame
             );
             if seen.pongs < pings {
+                assert_eq!(
+                    seen.early_pongs, 0,
+                    "the server read pongs before it was told to read again, so fewer pongs \
+                     than pings does not say that the connection was backed up"
+                );
                 assert!(
                     !seen.close_frame,
                     "a close frame behind pongs never written"
@@ -1174,7 +1185,9 @@ fn a_close_on_a_backed_up_connection_ends_at_the_close_bound() {
             assert!(
                 pings < LARGEST_FLOOD,
                 "the socket buffers of this host took every pong of a flood of {pings} pings, \
-                 so no close was backed up and nothing was asserted of its bound"
+                 {} of them before the server was told to read again, so no close was backed \
+                 up and nothing was asserted of its bound",
+                seen.early_pongs
             );
             pings *= 2;
         }

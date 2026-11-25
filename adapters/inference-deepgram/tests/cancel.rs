@@ -67,14 +67,17 @@ fn a_dropped_handle_closes_its_socket_and_frees_its_slot() {
 const FLOOD: usize = 36_000;
 
 /// The largest flood: a host whose buffers took every pong gets the flood doubled up to here.
-const LARGEST_FLOOD: usize = 16 * FLOOD;
+/// It is one the connection reads within the test's wait for the hypothesis behind it, so a
+/// host that took this one too fails on that and not on the wait.
+const LARGEST_FLOOD: usize = 8 * FLOOD;
 
 /// The test's own deadline for a connection thread that nothing ends: past it the test lets the
 /// server read again, which ends the thread, and fails.
 const THREAD_DEADLINE: Duration = Duration::from_secs(4);
 
 /// The kernel's name of a recognition's connection thread, the first 15 bytes of
-/// `inference-deepgram`.
+/// `inference-deepgram`. The kernel keeps no more of a name, so the crate's clock thread,
+/// `inference-deepgram-clock`, is listed under the same 15 bytes.
 const THREAD: &str = "inference-deepg";
 
 /// How many threads of this process the kernel lists under a name that starts with `name`. It
@@ -95,10 +98,12 @@ fn threads_named(name: &str) -> usize {
 /// flood of pings and one `Results`, and reads nothing more. The connection answers each ping
 /// with a pong as it reads; the pongs fill the socket buffers and then wait in its WebSocket
 /// buffer, in front of the close frame, so that frame cannot be written and only the close
-/// bound ends the thread. Whether the connection was backed up is the server's to tell: reading
-/// again once the thread is gone, it finds the stream ended with no close frame and fewer pongs
-/// than it sent pings. A flood whose pongs all arrived is doubled and the recognition run
-/// again. The keep-alive interval is set long, so no `KeepAlive` is written first.
+/// bound ends the thread. Whether the connection was backed up is the server's to tell: it had
+/// read no pong when the test told it to read again, and reading again once the thread is gone,
+/// it finds the stream ended with no close frame and fewer pongs than it sent pings. A server
+/// that read on and was only slow would count fewer pongs too, which is why the first count is
+/// asserted. A flood whose pongs all arrived is doubled and the recognition run again. The
+/// keep-alive interval is set long, so no `KeepAlive` is written first.
 ///
 /// The thread must be gone no sooner than one second after the cancel and before two. Both
 /// numbers are written out and not taken from `CLOSE_BOUND`: limits that moved with the
@@ -106,7 +111,11 @@ fn threads_named(name: &str) -> usize {
 ///
 /// The thread is found by its name, so the test must see no other recognition's thread: it
 /// relies on cargo-nextest, which runs each test in a process of its own, and fails where it
-/// finds more than its one thread.
+/// finds more than its one thread. The name it matches is also the start of the name of the
+/// crate's clock thread, which starts when an async handle waits for a deadline and never ends.
+/// This test starts none: it takes its events with the blocking `next` and does not end the
+/// input. If the clock ran, the count before the cancel would be two and the test would fail
+/// there.
 #[test]
 fn a_cancel_on_a_backed_up_connection_ends_its_thread_at_the_close_bound() {
     let mut pings = FLOOD;
@@ -163,15 +172,21 @@ fn a_cancel_on_a_backed_up_connection_ends_its_thread_at_the_close_bound() {
         let seen = server.seen().remove(0);
         println!(
             "a flood of {pings} pings, read within {flooded:?}: the cancel returned after \
-             {returned:?} and the connection thread was gone after {gone:?}; the server then \
-             read {} pongs, close frame: {}, end of the stream: {ended:?}",
-            seen.pongs, seen.close_frame
+             {returned:?} and the connection thread was gone after {gone:?}; the server had \
+             read {} pongs when it was told to read again and {} at the end, close frame: {}, \
+             end of the stream: {ended:?}",
+            seen.early_pongs, seen.pongs, seen.close_frame
         );
         let gone = gone.unwrap_or_else(|| {
             panic!("the connection thread did not end within {THREAD_DEADLINE:?} of the cancel")
         });
         assert_eq!(ended, Some(0), "the server read no end of the stream");
         if seen.pongs < pings {
+            assert_eq!(
+                seen.early_pongs, 0,
+                "the server read pongs before it was told to read again, so fewer pongs than \
+                 pings does not say that the connection was backed up"
+            );
             assert!(
                 !seen.close_frame,
                 "a close frame behind pongs never written"
@@ -190,8 +205,10 @@ fn a_cancel_on_a_backed_up_connection_ends_its_thread_at_the_close_bound() {
         }
         assert!(
             pings < LARGEST_FLOOD,
-            "the socket buffers of this host took every pong of a flood of {pings} pings, so no \
-             close was backed up and nothing was asserted of its bound"
+            "the socket buffers of this host took every pong of a flood of {pings} pings, {} of \
+             them before the server was told to read again, so no close was backed up and \
+             nothing was asserted of its bound",
+            seen.early_pongs
         );
         pings *= 2;
     }

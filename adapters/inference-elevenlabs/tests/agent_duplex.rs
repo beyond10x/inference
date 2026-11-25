@@ -599,20 +599,28 @@ fn a_closed_session_takes_nothing_more_and_closes_its_connection() {
 const FLOOD: usize = 36_000;
 
 /// The largest flood: a host whose buffers took every pong gets the flood doubled up to here.
-const LARGEST_FLOOD: usize = 16 * FLOOD;
+/// It is one the session reads within the wait of `events_until`, so a host that took this one
+/// too fails on that and not on the wait for the audio behind it.
+const LARGEST_FLOOD: usize = 4 * FLOOD;
 
 /// The test's own deadline for a close that nothing ends: past it the test lets the server read
 /// again, which ends the close, and fails.
 const CLOSE_DEADLINE: Duration = Duration::from_secs(4);
 
+/// How long the test waits, past that deadline, for the close to end once the server reads
+/// again. A close that has not ended by then is left behind with its thread, and the test fails
+/// without joining it.
+const RELEASE_DEADLINE: Duration = Duration::from_secs(5);
+
 /// The server reads the initiation and nothing after it, sends a flood of WebSocket pings and
 /// then one audio message. The session answers each ping with a pong as it reads; the pongs fill
 /// the socket buffers and then wait in the session's WebSocket buffer, in front of the close
 /// frame, so that frame cannot be written and only the close bound ends the close. Whether the
-/// connection was backed up is the server's to tell: reading again after the close, it counts
-/// fewer pongs than it sent pings. A flood whose pongs all arrived is doubled and the session
-/// run again. The read timeout is set long: a WebSocket ping does not restart its clock, so the
-/// flood and the close have to end within it.
+/// connection was backed up is the server's to tell: it had read no pong when the test told it
+/// to read again, and reading again after the close, it counts fewer pongs than it sent pings.
+/// A flood whose pongs all arrived is doubled and the session run again. The read timeout is
+/// set long: a WebSocket ping does not restart its clock, so the flood and the close have to
+/// end within it.
 ///
 /// The close must hold its caller no shorter than one second and less than two. Both numbers
 /// are written out and not taken from `CLOSE_BOUND`: limits that moved with the constant would
@@ -648,10 +656,14 @@ fn a_close_on_a_backed_up_connection_ends_at_the_close_bound() {
         });
         let outcome = finished.recv_timeout(CLOSE_DEADLINE);
         server.read_again(0);
+        let Ok((held, closed)) = outcome else {
+            let ended = finished.recv_timeout(RELEASE_DEADLINE).is_ok();
+            panic!(
+                "the close did not end within {CLOSE_DEADLINE:?}; that it ended within \
+                 {RELEASE_DEADLINE:?} of the server reading again: {ended}"
+            );
+        };
         closer.join().expect("the close returned");
-        let (held, closed) = outcome.unwrap_or_else(|error| {
-            panic!("the close did not end within {CLOSE_DEADLINE:?}: {error}")
-        });
         closed.expect("an open session closes");
         let seen = server.wait(0, Duration::from_secs(5), |seen| seen.closed.is_some());
         assert!(
@@ -660,10 +672,16 @@ fn a_close_on_a_backed_up_connection_ends_at_the_close_bound() {
         );
         println!(
             "a flood of {pings} pings, read within {flooded:?}: the close held {held:?}; the \
-             server then read {} pongs, close frame: {}",
-            seen.pongs, seen.close_frame
+             server had read {} pongs when it was told to read again and {} at the end, close \
+             frame: {}",
+            seen.early_pongs, seen.pongs, seen.close_frame
         );
         if seen.pongs < pings {
+            assert_eq!(
+                seen.early_pongs, 0,
+                "the server read pongs before it was told to read again, so fewer pongs than \
+                 pings does not say that the connection was backed up"
+            );
             assert!(
                 !seen.close_frame,
                 "a close frame behind pongs never written"
@@ -680,8 +698,10 @@ fn a_close_on_a_backed_up_connection_ends_at_the_close_bound() {
         }
         assert!(
             pings < LARGEST_FLOOD,
-            "the socket buffers of this host took every pong of a flood of {pings} pings, so no \
-             close was backed up and nothing was asserted of its bound"
+            "the socket buffers of this host took every pong of a flood of {pings} pings, {} of \
+             them before the server was told to read again, so no close was backed up and \
+             nothing was asserted of its bound",
+            seen.early_pongs
         );
         pings *= 2;
     }
