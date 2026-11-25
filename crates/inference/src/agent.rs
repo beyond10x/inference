@@ -26,15 +26,16 @@ use inference_pipeline::nodes::AuthorityHandle;
 use inference_pipeline::nodes::duplex::CallIds;
 use inference_pipeline::nodes::log::StreamEvent;
 use inference_runtime::RunError;
-use inference_text::{OutputSegment, SpanId};
+use inference_text::{OutputSegment, SegmentId, SpanId};
 use inference_tools::{
-    CancellationSignal, ExecutionFuture, IntoTool, Tool, ToolCall, ToolCallId, ToolExecutor, ToolId,
+    CancellationSignal, ExecutionFuture, IntoTool, Tool, ToolCall, ToolCallId, ToolCallProposed,
+    ToolExecutor, ToolId,
 };
 use tokio::sync::{Notify, broadcast, watch};
 use tokio::task::JoinHandle;
 
 use crate::event::{Event, Events, Item};
-use crate::recipe::{SwitchFailed, TextIngress};
+use crate::recipe::{Proposed, SwitchFailed, TextIngress};
 use crate::stack::{Bound, default_session_config, role};
 use crate::{BindingSource, Env, Error, Instantiation, Payload, Recipe, Result, Role, Stack};
 
@@ -238,6 +239,8 @@ struct Core {
     route: Arc<Route>,
     authority: Option<AuthorityHandle>,
     call_ids: Option<CallIds>,
+    /// The calls the run told its session, with their arguments.
+    proposed: Option<Proposed>,
     names: Vec<(ToolId, String)>,
     confirmations: Mutex<Confirmations>,
 }
@@ -253,6 +256,7 @@ impl Core {
             route,
             authority: None,
             call_ids: None,
+            proposed: None,
             names: Vec::new(),
             confirmations: Mutex::default(),
         }
@@ -299,6 +303,45 @@ impl Core {
             .into_iter()
             .chain(authority.calls())
             .find(|call| call.call_id() == call_id)
+    }
+
+    /// Yields `ToolCalled` for the call `proposed`, once: nothing for a call it was yielded for.
+    fn tool_called(
+        &self,
+        proposed: ToolCallProposed,
+        arguments: serde_json::Value,
+        raw: SessionEvent,
+    ) {
+        if !lock(&self.confirmations).called.insert(proposed.call_id) {
+            return;
+        }
+        self.route.send(Event::ToolCalled {
+            name: self.name_of(proposed.tool_id),
+            arguments,
+            call_id: proposed.call_id,
+            speech_call_id: self
+                .call_ids
+                .as_ref()
+                .and_then(|ids| ids.speech_call_id(proposed.call_id)),
+            raw,
+        });
+    }
+
+    /// Yields `ToolCalled` for each call the run told before it sent the part of the text
+    /// segment `segment_id` the pump has just read, and whose own event the pump has not read
+    /// yet: a call is yielded before the text its model wrote after it. `whole` says the part
+    /// is the segment's commit.
+    fn tell_calls_before(&self, segment_id: SegmentId, whole: bool) {
+        let Some(told) = self.proposed.as_ref() else {
+            return;
+        };
+        for (proposed, arguments) in told.take_before(segment_id, whole) {
+            self.tool_called(
+                proposed,
+                arguments,
+                SessionEvent::ToolCallProposed(proposed),
+            );
+        }
     }
 
     /// The pump's look at the authority's held calls: with the agent `Open`, one
@@ -388,6 +431,13 @@ impl Step {
         let mut act = Act::default();
         let old = self.left.is_some();
         let route = &core.route;
+        match &event {
+            SessionEvent::TextDelta(delta) => core.tell_calls_before(delta.segment_id, false),
+            SessionEvent::TextSegmentCommitted(said) => {
+                core.tell_calls_before(said.segment_id, true);
+            }
+            _ => {}
+        }
         match &event {
             SessionEvent::SessionReady(_) => {
                 if !core.started.swap(true, Ordering::AcqRel) {
@@ -480,20 +530,19 @@ impl Step {
                 }
             }
             SessionEvent::ToolCallProposed(proposed) => {
-                lock(&core.confirmations).called.insert(proposed.call_id);
+                // The run kept the call as it sent this event; the authority's record, which
+                // may not hold the call yet, answers only for a run that kept none. A call the
+                // pump told ahead of a text that followed it is not told again.
                 let arguments = core
-                    .call(proposed.call_id)
-                    .map_or(serde_json::Value::Null, |call| call.arguments().clone());
-                route.send(Event::ToolCalled {
-                    name: core.name_of(proposed.tool_id),
-                    arguments,
-                    call_id: proposed.call_id,
-                    speech_call_id: core
-                        .call_ids
-                        .as_ref()
-                        .and_then(|ids| ids.speech_call_id(proposed.call_id)),
-                    raw: event.clone(),
-                });
+                    .proposed
+                    .as_ref()
+                    .and_then(|told| told.take(proposed.call_id))
+                    .or_else(|| {
+                        core.call(proposed.call_id)
+                            .map(|call| call.arguments().clone())
+                    })
+                    .unwrap_or(serde_json::Value::Null);
+                core.tool_called(*proposed, arguments, event.clone());
             }
             SessionEvent::UsageRecorded(record) => route.send(Event::Usage(record.clone())),
             SessionEvent::SpeechResponseFailed(failed) => route.send(Event::Error {
@@ -950,6 +999,12 @@ impl AgentBuilder {
     }
 
     /// Gives the agent a tool: a `#[inference::tool]` function or a `(Tool, executor)` pair.
+    ///
+    /// A tool's future is polled on a thread of the run, outside any Tokio runtime, the
+    /// application's included. A tool that needs one holds a `tokio::runtime::Handle`, spawns
+    /// its work onto it and awaits the join handle; a tool that awaits a Tokio timer or socket
+    /// directly panics there, which fails its call with the panic's message: the model is given
+    /// the failure as that call's result.
     #[must_use]
     pub fn tool(mut self, tool: impl IntoTool) -> Self {
         let (tool, executor) = tool.into_tool();
@@ -1060,6 +1115,7 @@ impl AgentBuilder {
         let mut core = Core::new(plan.auto_interrupt, route, Arc::clone(&self.clock));
         core.authority = instantiation.authority().cloned();
         core.call_ids = instantiation.call_ids().cloned();
+        core.proposed = instantiation.proposed().cloned();
         core.names = self
             .given
             .tools
@@ -1199,6 +1255,7 @@ async fn switch(inner: &mut Inner, recipe: Recipe) -> Switched {
             *exclusive(&mut inner.driver) = Some(spawn_driver(driver, Arc::clone(&inner.failure)));
             inner.core.authority = successor.authority().cloned();
             inner.core.call_ids = successor.call_ids().cloned();
+            inner.core.proposed = successor.proposed().cloned();
             successor.recipe().clone_into(&mut inner.settings.recipe);
             inner.instantiation = successor;
             *exclusive(&mut inner.config) = plan.config;

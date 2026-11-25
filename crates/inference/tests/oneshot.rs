@@ -628,6 +628,271 @@ async fn chat_given_tools_exposes_the_egress_tool_events() {
     );
 }
 
+/// The tool loop of `chat` given tools and of `native_voice`, edge by edge: the three edges the
+/// authority and the executor send on hold 4 envelopes and pause their producer when they are
+/// full; the feedback edge holds 8 and is the one edge that fails on overload.
+#[tokio::test]
+async fn the_tool_loop_fails_on_its_feedback_edge_alone_and_pauses_on_the_others() {
+    use inference::__private::serde_json::json;
+    use inference::Recipe;
+    use inference::graph::OverloadPolicy;
+    use inference::tools::ToolExecutor;
+
+    let _held = SESSIONS.lock().await;
+    let edges = |recipe: Recipe| -> Vec<(String, String, usize, OverloadPolicy)> {
+        let declaration = recipe.declaration();
+        let port = |port_id| {
+            let port = declaration
+                .ports()
+                .find(|port| port.port_id() == port_id)
+                .expect("declared");
+            let node = declaration.node(port.node_id()).expect("declared");
+            format!("{}.{}", node.name(), port.name())
+        };
+        let mut edges: Vec<_> = declaration
+            .edges()
+            .map(|edge| {
+                (
+                    port(edge.from_port()),
+                    port(edge.to_port()),
+                    edge.capacity().get(),
+                    edge.overload(),
+                )
+            })
+            .collect();
+        edges.sort_by(|left, right| left.0.cmp(&right.0));
+        edges
+    };
+    let wired = |model: &str| -> Vec<(String, String, usize, OverloadPolicy)> {
+        let mut edges = vec![
+            (
+                "authority.authorized".to_owned(),
+                "executor.authorized".to_owned(),
+                4,
+                OverloadPolicy::Pause,
+            ),
+            (
+                "authority.rejected".to_owned(),
+                format!("{model}.tool_result"),
+                4,
+                OverloadPolicy::Pause,
+            ),
+            (
+                "executor.outcomes".to_owned(),
+                format!("{model}.tool_result"),
+                4,
+                OverloadPolicy::Pause,
+            ),
+            (
+                format!("{model}.tool_call"),
+                "authority.proposed".to_owned(),
+                8,
+                OverloadPolicy::Fail,
+            ),
+        ];
+        edges.sort_by(|left, right| left.0.cmp(&right.0));
+        edges
+    };
+    let executor: Box<dyn ToolExecutor> = Box::new(Recording {
+        answer: json!({}),
+        calls: std::sync::Arc::default(),
+    });
+
+    assert_eq!(
+        edges(Recipe::chat().tools([(lookup(), executor)])),
+        wired("agent")
+    );
+    assert_eq!(edges(Recipe::native_voice()), wired("speech"));
+}
+
+/// A mock generator with no script whose first model request of a conversation ends with `count`
+/// calls of `tool` with [`berlin`], the calls of one round.
+fn calling_round(tool: &inference::tools::Tool, count: usize) -> MockGenerator {
+    let round = (0..count).map(|_| llm::ToolProposal {
+        tool_id: tool.tool_id(),
+        arguments: berlin(),
+    });
+    MockGenerator::new(
+        llm::MockConfiguration::StreamingAndConcurrentInput,
+        ModelId::generate(),
+        Vec::<String>::new(),
+    )
+    .proposing_round(round, 1)
+}
+
+/// An executor of [`lookup`] that answers every call at once.
+fn answering() -> Box<dyn inference::tools::ToolExecutor> {
+    Box::new(Recording {
+        answer: inference::__private::serde_json::json!({"temperature": 21}),
+        calls: std::sync::Arc::default(),
+    })
+}
+
+/// How long a case of the tool loop waits for a call before it fails rather than hangs.
+const LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A reply that ends with eight calls fills no edge of the tool loop, in each of 30
+/// conversations: all eight reach the authority, which admits four calls of a generation and
+/// answers the fifth as exhausted, so `send` returns the error of the loop's bound, never that of
+/// a failed run, and never hangs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_round_of_eight_calls_fills_no_edge_of_the_tool_loop() {
+    let _held = SESSIONS.lock().await;
+    let mut wrong = Vec::new();
+    for conversation in 0..30 {
+        let tool = lookup();
+        let stack = chatting(&calling_round(&tool, 8));
+        let mut chat = Chat::new_with(&stack)
+            .expect("plans")
+            .tool((tool, answering()))
+            .expect("plans with the tool");
+        match tokio::time::timeout(LIMIT, chat.send("the weather in Berlin")).await {
+            Ok(Err(error)) if error.kind() == inference::ErrorKind::Closed => {}
+            Ok(sent) => wrong.push(format!("conversation {conversation}: {sent:?}")),
+            Err(_) => wrong.push(format!("conversation {conversation}: send did not return")),
+        }
+        let closed = tokio::time::timeout(LIMIT, chat.close()).await;
+        assert!(closed.is_ok(), "conversation {conversation}: close returns");
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// How many calls the reply of the cases below ends with: more than the tool loop can hold
+/// between its model and its authority, so the feedback edge is full before the round is sent
+/// and fails the model's node.
+const OVERFLOWING: usize = 24;
+
+/// What the error of a run failed by the full feedback edge says.
+const FULL: &str = "the edge is full and fails on overload";
+
+/// A chat whose tool loop failed an edge: `send` returns the error of the failed run, and
+/// `close` returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_whose_tool_loop_fails_an_edge_returns_the_error_and_closes() {
+    let _held = SESSIONS.lock().await;
+    let tool = lookup();
+    let stack = chatting(&calling_round(&tool, OVERFLOWING));
+    let before = rows();
+    let mut chat = Chat::new_with(&stack)
+        .expect("plans")
+        .tool((tool, answering()))
+        .expect("plans with the tool");
+
+    let error = tokio::time::timeout(LIMIT, chat.send("the weather in Berlin"))
+        .await
+        .expect("send returns within the limit")
+        .expect_err("the run failed");
+
+    assert!(error.to_string().contains(FULL), "{error}");
+    tokio::time::timeout(LIMIT, chat.close())
+        .await
+        .expect("close returns within the limit")
+        .expect("nothing is left to close");
+    one_closed_session_since(&before);
+}
+
+/// A text agent whose tool loop failed an edge: its stream yields `Event::Error` naming the
+/// failed run, and `close` returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_text_agent_whose_tool_loop_fails_an_edge_tells_the_error_and_closes() {
+    use futures_util::StreamExt;
+    use inference::{Agent, Event};
+
+    let _held = SESSIONS.lock().await;
+    let tool = lookup();
+    let stack = chatting(&calling_round(&tool, OVERFLOWING));
+    let agent = Agent::text()
+        .stack(stack)
+        .tool((tool, answering()))
+        .start()
+        .await
+        .expect("starts");
+    let mut events = agent.events();
+    agent
+        .send_text("the weather in Berlin")
+        .await
+        .expect("taken");
+    // The run may fail between the text and its commit, which the commit then reports: the
+    // stream tells the error either way.
+    let _ = agent.commit().await;
+
+    let told = tokio::time::timeout(LIMIT, async {
+        while let Some(event) = events.next().await {
+            if let Ok(Event::Error { error, .. }) = event {
+                return Some(error.to_string());
+            }
+        }
+        None
+    })
+    .await
+    .expect("the stream tells an error or ends within the limit");
+
+    let told = told.expect("the stream yields an error before it ends");
+    assert!(told.contains(FULL), "{told}");
+    let _ = tokio::time::timeout(LIMIT, agent.close())
+        .await
+        .expect("close returns within the limit");
+}
+
+/// A `chat` run opened one layer down whose tool loop failed an edge: its driver ends with the
+/// failed run, with no close asked for, and the session's stream ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_run_whose_tool_loop_fails_an_edge_ends_its_driver() {
+    use inference::core::envelope::{EventEnvelope, EventId, Timebase};
+    use inference::core::id::{NodeId, StreamId};
+    use inference::facade::live::LiveSessions;
+    use inference::pipeline::nodes::log::StreamEvent;
+    use inference::text::{SpanId, TranscriptCommitted};
+    use inference::{Env, Payload, Recipe};
+
+    let _held = SESSIONS.lock().await;
+    let tool = lookup();
+    let stack = chatting(&calling_round(&tool, OVERFLOWING))
+        .resolve_with(&Env::new())
+        .expect("resolves");
+    let mut instantiation = Recipe::chat()
+        .tools([(tool, answering())])
+        .instantiate(&stack)
+        .expect("chat plans with the tool");
+    let sessions = LiveSessions::new();
+    let (session, driver) = instantiation
+        .open(&stack, &sessions)
+        .await
+        .expect("the run opens");
+    let driving = tokio::spawn(async move { format!("{:?}", driver.drive().await) });
+    let event = StreamEvent::TranscriptCommitted(TranscriptCommitted {
+        span_id: SpanId::generate(),
+        text: "the weather in Berlin".to_owned(),
+    });
+    let envelope = EventEnvelope {
+        schema_version: 1,
+        event_id: EventId::generate(),
+        run_id: session.run_id(),
+        session_id: None,
+        stream_id: StreamId::generate(),
+        sequence: 1,
+        producer: NodeId::generate(),
+        port: "user_input".to_owned(),
+        kind: event.name().to_owned(),
+        generation_id: None,
+        timestamp: 0,
+        timebase: Timebase::WallTime,
+        causation_id: None,
+        payload: Payload::Stream(event),
+    };
+    session.send(envelope).await.expect("sent");
+
+    let driven = tokio::time::timeout(LIMIT, driving)
+        .await
+        .expect("the driver ends within the limit")
+        .expect("the driver does not panic");
+
+    assert!(driven.contains(FULL), "{driven}");
+    tokio::time::timeout(LIMIT, async { while session.receive().await.is_some() {} })
+        .await
+        .expect("the session's stream ends within the limit");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refusal_is_an_error_of_its_send_and_the_conversation_goes_on() {
     let _held = SESSIONS.lock().await;

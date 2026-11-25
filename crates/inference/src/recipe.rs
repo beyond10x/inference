@@ -61,7 +61,7 @@ use inference_text::Span;
 use inference_tools::ToolExecutor;
 
 use self::dispatch::Dispatch;
-pub(crate) use self::run::ReplyPart;
+pub(crate) use self::run::{Proposed, ReplyPart};
 use crate::graph::{Builder, Implementation};
 use crate::{Error, Payload, Role, Stack};
 
@@ -81,6 +81,15 @@ const VAD: VadConfig = VadConfig {
 
 /// How many times the tool loop of `native_voice`, and of `chat` given tools, may return a call
 /// to the model: 4.
+///
+/// The bound counts calls, not replies: the tool authority counts every call a model proposes
+/// in one generation, one it rejects too, whether one reply proposes several or several replies
+/// one each, and answers the call past the bound as exhausted, which completes the generation.
+/// `chat`'s model node runs one generation for its whole run, so for a chat the bound counts the
+/// calls of the whole conversation, across its turns: the fifth call ends the session, and the
+/// conversation's history ends with it. One reply may end with up to 8 calls without filling
+/// the loop's feedback edge; a reply with more may fail the run with the error of the full
+/// edge.
 pub const MAX_TOOL_ITERATIONS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
 
 /// The names the five built-in recipes hold in the recipe table.
@@ -724,6 +733,7 @@ pub(crate) struct TextIngress {
 struct Tools {
     authority: Option<AuthorityHandle>,
     call_ids: Option<CallIds>,
+    proposed: Proposed,
 }
 
 impl Instantiation {
@@ -943,6 +953,13 @@ impl Instantiation {
         self.tools
             .as_ref()
             .and_then(|tools| tools.call_ids.as_ref())
+    }
+
+    /// The calls the run [`Instantiation::open`] opened last told its session, with their
+    /// arguments; none where [`Instantiation::authority`] and [`Instantiation::call_ids`] are
+    /// both none.
+    pub(crate) fn proposed(&self) -> Option<&Proposed> {
+        self.tools.as_ref().map(|tools| &tools.proposed)
     }
 
     /// `recipe` instantiated over `stack` as this instantiation was: a cascade's audio over the

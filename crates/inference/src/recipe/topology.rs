@@ -25,8 +25,14 @@ pub(super) type Requirement<'r> = dyn Fn(Role, &[Capability]) -> Vec<Capability>
 /// The capacity of the cascade's internal edges and its playback loops' bound.
 const EDGE_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(63);
 
-/// The capacity of the tool loop's edges.
+/// The capacity of the tool loop's edges that pause: those the authority and the executor send
+/// on.
 const TOOL_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
+
+/// The capacity of the tool loop's feedback edge, the one edge of the loop that fails on
+/// overload: 8, twice [`MAX_TOOL_ITERATIONS`]. See [`tool_loop`].
+const FEEDBACK_CAPACITY: NonZeroUsize =
+    MAX_TOOL_ITERATIONS.saturating_mul(NonZeroUsize::MIN.saturating_add(1));
 
 const STREAM: PortTraits = PortTraits {
     essentiality: Essentiality::Essential,
@@ -94,6 +100,18 @@ pub(super) fn chat(
 /// bounded at [`MAX_TOOL_ITERATIONS`], the authority's `authorized` output reaches the `executor`
 /// node, and the executor's `outcomes` and the authority's `rejected` both return to the model's
 /// `tool_result` input.
+///
+/// The three edges the authority and the executor send on pause their producer when they are
+/// full, so nothing the authority decides and no step of a call can fail an edge: the executor
+/// sends two envelopes for each call, and a reply that ends with several calls puts all of them
+/// on these edges before the model reads the first. The feedback edge alone fails on overload,
+/// so the model's sends on it never wait and the model always comes to read `tool_result`: no
+/// pause of the loop can hold itself. Its capacity is [`FEEDBACK_CAPACITY`]: the authority admits
+/// at most [`MAX_TOOL_ITERATIONS`] calls of a generation, and beside them the model sends at most
+/// three more envelopes on the edge, the interruptions of its generation and its end of input,
+/// so the calls it admits of one generation never fill it. A reply that ends with more than
+/// [`FEEDBACK_CAPACITY`] calls may still fill it before the authority reads; the model's node
+/// then fails, and so does the run, with the error of the full edge.
 fn tool_loop<'b>(pipeline: &mut Builder<'_, 'b>, model: &NodeHandle<'b>) {
     let structured = TOOL;
     let fail = OverloadPolicy::Fail;
@@ -109,13 +127,13 @@ fn tool_loop<'b>(pipeline: &mut Builder<'_, 'b>, model: &NodeHandle<'b>) {
     pipeline.connect_feedback(
         &tool_call,
         &proposed,
-        TOOL_CAPACITY,
+        FEEDBACK_CAPACITY,
         fail,
         MAX_TOOL_ITERATIONS,
     );
-    pipeline.connect(&authorized, &calls, TOOL_CAPACITY, fail);
-    pipeline.connect(&outcomes, &tool_result, TOOL_CAPACITY, fail);
-    pipeline.connect(&rejected, &tool_result, TOOL_CAPACITY, fail);
+    pipeline.connect(&authorized, &calls, TOOL_CAPACITY, PAUSE);
+    pipeline.connect(&outcomes, &tool_result, TOOL_CAPACITY, PAUSE);
+    pipeline.connect(&rejected, &tool_result, TOOL_CAPACITY, PAUSE);
 }
 
 pub(super) fn transcribe(

@@ -116,6 +116,15 @@ impl Chat {
     /// that call's result and answers it, and [`Chat::send`] returns that reply. No error of the
     /// tool is an error of the `send`.
     ///
+    /// A tool's future is polled on a thread of the run, outside any Tokio runtime, the
+    /// application's included. A tool that needs one holds a `tokio::runtime::Handle`, spawns
+    /// its work onto it and awaits the join handle; a tool that awaits a Tokio timer or socket
+    /// directly panics there, which fails its call with the panic's message.
+    ///
+    /// The model's calls are bounded as [`MAX_TOOL_ITERATIONS`](crate::MAX_TOOL_ITERATIONS)
+    /// says, over the whole conversation; [`Chat::stream`] says what the call past the bound
+    /// comes to.
+    ///
     /// # Errors
     ///
     /// Those of [`Recipe::instantiate`], such as an `llm` binding that does not claim
@@ -162,8 +171,11 @@ impl Chat {
     /// answer, its message the refusal, after which the conversation goes on; the error of the
     /// session's first [`Event::Error`], such as a turn the model failed, and [`Error::Closed`]
     /// when the session ended before the reply was whole, as when the model's tool calls reached
-    /// the bound of the tool loop. After either of those two the session is closed, and the next
-    /// text starts a new conversation.
+    /// the bound of the tool loop: the tool authority admits
+    /// [`MAX_TOOL_ITERATIONS`](crate::MAX_TOOL_ITERATIONS) calls of a chat's whole conversation,
+    /// counted call by call across its turns, and the call past them ends the session. After
+    /// either of those two the session is closed and its history is gone with it: the next text
+    /// starts a new conversation, which the model is given without the turns before it.
     pub fn stream(
         &mut self,
         text: impl Into<String>,
@@ -225,8 +237,10 @@ impl Chat {
                 Ok(())
             }
             Err(error) => {
-                self.end().await;
-                Err(error)
+                // A run that failed as the text went in refuses the commit: the error the
+                // session reported says why, the refusal only that.
+                let failed = self.end().await;
+                Err(failed.unwrap_or(error))
             }
         }
     }
