@@ -178,7 +178,7 @@ fn yield_in_a_loop() {
 }
 
 #[test]
-#[ignore = "limit: a thread that yields in a loop stays ready to run, so on a shared processor the kernel counts it as run-queue wait and the ticker takes it out of the gap"]
+#[ignore = "limit: adapters/inference-elevenlabs/tests/async_handles.rs states it: a thread that yields in a loop stays ready to run, so on a shared processor the kernel counts it as run-queue wait and the ticker takes it out of the gap"]
 fn a_thread_yielding_in_a_loop_for_200_ms_fails_the_tests() {
     fails_the_tests("a loop of yields", yield_in_a_loop);
 }

@@ -95,19 +95,28 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
 - Every `#[ignore]` gives a reason of one of five kinds. The test
   `ignores::every_ignore_of_the_workspace_gives_a_reason_of_an_admitted_kind` in
   `crates/inference-docs/tests/ignores/mod.rs`, which runs in `task test-run`, reads each
-  `#[ignore]` of the workspace's `.rs` files and fails naming the file, the line and the reason of
-  every other one:
-  - billed: the reason contains `billed`; a reason that speaks of a hosted service, a key,
-    credentials or money, or names a `*_API_KEY` variable, without that word is refused;
+  `#[ignore]` and each `#[cfg_attr(…)]` with an `ignore` item (over as many lines as it spans) in
+  the workspace's `.rs` files, outside hidden directories, `node_modules`, the build directory
+  `target/` and any directory holding a `CACHEDIR.TAG`, and fails naming the file, the line and
+  the reason of every other one:
+  - billed: the reason contains `billed` (not `not billed`). An ignore in a test target built
+    only with feature `live` (`required-features` of its `[[test]]`, or `#![cfg(feature =
+    "live")]` in its file) is refused without that word, unless its package is a local adapter
+    (its `description` begins `Local adapter`: `inference-llama-server` binds feature `live` to a
+    server on loopback); so is a reason that speaks of a hosted service, a key, credentials or
+    money, or names a `*_API_KEY` variable;
   - local: a test that needs a checkpoint, a clip or a model server names the `INFERENCE_*`
-    variables it reads, and its package reads each of them;
-  - by hand: a test that opens a device of the machine (a microphone, a speaker) says `by hand`,
-    because no runner has the device;
+    variables it reads, and a string literal of its package (comments and ignores left out)
+    holds each whole name;
+  - by hand: a test that opens a device of the machine says `by hand` and names the device, a
+    microphone or a speaker, because no runner has the device;
   - child: a case that a parent case of its file runs in a child process, with the environment
-    the parent sets, begins `a child of`, and its function's name stands elsewhere in that file,
+    the parent sets, begins `a child of`, and its function's name stands elsewhere in that file
+    as a whole identifier or inside a string literal, outside comments and its own declaration,
     because it is run only through its parent;
   - limit: a case that shows a limit the code's documentation states, red only on some machines,
-    begins `limit:`, because it records the limit and would make the gate depend on the machine.
+    begins `limit:` and names the path of the file that states the limit, which must exist,
+    because it records the limit and would make the gate depend on the machine.
 - Every `aep` write runs with `AEP_ACTOR=human:operator` (otherwise `aep` records `human:$USER`):
   no person's name, login, path or company goes into the store, a commit or a PR.
 - Before a story about a hosted provider is drafted, read the provider's current product list and
