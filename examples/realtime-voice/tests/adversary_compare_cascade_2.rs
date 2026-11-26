@@ -405,23 +405,29 @@ fn adv2_a_recognition_left_to_end_on_its_own_does_not_refuse_the_next_runs_turn(
     );
 }
 
-/// Control for F1's fix: a stall whose read timeout passes within the drain after the limit is
-/// one note of the run, not two, and the next run is not touched by it. The commit goes out
-/// after the 300 ms question and the 600 ms hold, near 0.9 s; the read timeout of 1 s passes
-/// near 1.9 s, 0.9 s after the limit of 1 s and 2.1 s before the drain of 3 s ends.
-#[test]
-fn adv2_a_stall_caught_in_the_drain_is_noted_once_and_stays_in_its_run() {
+/// The read timeout of the stall cases below.
+const STALL_READ_TIMEOUT: Duration = Duration::from_millis(1_200);
+/// The limit of the stall cases below. The runner decides before it sends a frame, so a commit
+/// due after the limit is never sent and the turn is cut with no recognition left to fail.
+const STALL_LIMIT: Duration = Duration::from_millis(1_500);
+/// The drain of the stall cases below.
+const STALL_DRAIN: Duration = Duration::from_secs(3);
+
+/// Two runs over a question voiced for `voiced` against an endpoint that never answers the
+/// commit: each run notes the recognition's failure once and is not refused. The commit goes
+/// out when the 600 ms hold after the voice ends.
+fn a_stall_is_noted_once_in_each_run(voiced: Duration) {
     let fixture = Fixture::start(Script::Stall);
     let arm = elevenlabs_arm(
-        fixture.endpoint(Duration::from_secs(1)),
+        fixture.endpoint(STALL_READ_TIMEOUT),
         Arc::new(FixedKey),
         generator(),
         synthesiser(),
     )
     .expect("the arm is made");
-    let mut plan = Plan::new(utterance(Duration::from_millis(300)));
-    plan.limit = Duration::from_secs(1);
-    plan.drain = Duration::from_secs(3);
+    let mut plan = Plan::new(utterance(voiced));
+    plan.limit = STALL_LIMIT;
+    plan.drain = STALL_DRAIN;
     let runs = run_arm(arm, plan, 2, elevenlabs::failure);
     drop(fixture);
     for run in &runs {
@@ -433,15 +439,33 @@ fn adv2_a_stall_caught_in_the_drain_is_noted_once_and_stays_in_its_run() {
             .iter()
             .filter(|note| note.contains("the recognition failed"))
             .count();
-        assert_eq!(failures, 1, "{:?}", run.notes);
+        assert_eq!(failures, 1, "voiced {voiced:?}: {:?}", run.notes);
         assert!(
             !run.notes
                 .iter()
                 .any(|note| note.contains("the recogniser refused the turn")),
-            "{:?}",
+            "voiced {voiced:?}: {:?}",
             run.notes
         );
     }
+}
+
+/// Control for F1's fix: a stall whose read timeout passes within the drain after the limit is
+/// one note of the run, not two, and the next run is not touched by it. The commit goes out
+/// after the 300 ms question and the hold, near 0.9 s, 0.6 s inside the limit of 1.5 s; the
+/// read timeout of 1.2 s passes near 2.1 s, 0.6 s after the limit and 2.4 s before the drain of
+/// 3 s ends.
+#[test]
+fn adv2_a_stall_caught_in_the_drain_is_noted_once_and_stays_in_its_run() {
+    a_stall_is_noted_once_in_each_run(Duration::from_millis(300));
+}
+
+/// The control with its commit 150 ms late, as a driving thread held off its processor for
+/// 150 ms near 0.9 s sends it: voiced for 450 ms, the commit goes out near 1.05 s, still 0.45 s
+/// inside the limit, and the read timeout passes near 2.25 s.
+#[test]
+fn adv_u2_a_stall_whose_commit_goes_out_150_ms_late_is_noted_once() {
+    a_stall_is_noted_once_in_each_run(Duration::from_millis(450));
 }
 
 /// The `compare` example in the profile directory above this test binary: `target/<profile>/deps`

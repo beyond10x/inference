@@ -37,12 +37,13 @@ It runs, in order, and stops at the first failure:
 | tests | `task test-run`, which runs `task test-run-parts` under `timeout`: `cargo nextest run --workspace --all-features`, then the stack test without default features and the doc tests |
 | the quality records | `task quality-records`, which writes the record of each assessment of `quality/` that reads the report of the tests to `target/quality-records/` |
 
-The first seven steps are `task check-source`. Under `.config/nextest.toml` a test that runs over 60
-seconds is killed and fails, and the test step prints its ten slowest tests, also when one failed,
-or `no test ran` when the run left no report. The test step itself is ended after 120 seconds and
-fails then: `task test-run` exits 201, as it does when a test fails, and prints the line
-`task test-run was ended at its bound of 120 s`, which a run that only has a failing test does not
-print.
+The first seven steps are `task check-source`. Under `.config/nextest.toml` the tests of the
+workspace run 8 at once, or as many as the environment variable `NEXTEST_TEST_THREADS` names when
+it is set, which wins over the file; a test that runs over 60 seconds is killed and fails, and the
+test step prints its ten slowest tests, also when one failed, or `no test ran` when the run left no
+report. The test step itself is ended after 120 seconds and fails then: `task test-run` exits 201,
+as it does when a test fails, and prints the line `task test-run was ended at its bound of 120 s`,
+which a run that only has a failing test does not print.
 
 The bound is two signals. After 120 seconds `timeout` sends the step a first signal: the tests are
 ended, and the step prints the list of its slowest tests and the line. A part that is still running
