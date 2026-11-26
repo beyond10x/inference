@@ -406,19 +406,21 @@ fn adv2_a_recognition_left_to_end_on_its_own_does_not_refuse_the_next_runs_turn(
 }
 
 /// Control for F1's fix: a stall whose read timeout passes within the drain after the limit is
-/// one note of the run, not two, and the next run is not touched by it.
+/// one note of the run, not two, and the next run is not touched by it. The commit goes out
+/// after the 300 ms question and the 600 ms hold, near 0.9 s; the read timeout of 1 s passes
+/// near 1.9 s, 0.9 s after the limit of 1 s and 2.1 s before the drain of 3 s ends.
 #[test]
 fn adv2_a_stall_caught_in_the_drain_is_noted_once_and_stays_in_its_run() {
     let fixture = Fixture::start(Script::Stall);
     let arm = elevenlabs_arm(
-        fixture.endpoint(Duration::from_secs(2)),
+        fixture.endpoint(Duration::from_secs(1)),
         Arc::new(FixedKey),
         generator(),
         synthesiser(),
     )
     .expect("the arm is made");
     let mut plan = Plan::new(utterance(Duration::from_millis(300)));
-    plan.limit = Duration::from_secs(2);
+    plan.limit = Duration::from_secs(1);
     plan.drain = Duration::from_secs(3);
     let runs = run_arm(arm, plan, 2, elevenlabs::failure);
     drop(fixture);

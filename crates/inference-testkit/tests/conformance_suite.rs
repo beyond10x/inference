@@ -3,7 +3,7 @@
 //!
 //! cargo-nextest runs each test in a process of its own, so the first test starts eight
 //! processes of this binary that read one empty cache at the same time and counts the syntheses.
-//! A stand-in takes the place of `ess` in every test but the last: it counts its calls in a
+//! A stand-in takes the place of `ess` in every test but the last two: it counts its calls in a
 //! file, takes long enough for the readers to overlap, and writes its suite in two halves, so a
 //! reader that saw a suite before it was whole would read half of one.
 
@@ -349,4 +349,25 @@ fn every_suite_of_this_repository_was_synthesized_at_most_once() {
         suites += usize::from(key.join("suite.json").is_file());
     }
     assert!(suites >= 1, "the cache holds the suite just read");
+}
+
+/// The setup step of `task test-build` runs this case: every suite the tests of this crate read
+/// is synthesized into the cache, the suites side by side, before `task test-run` starts, so
+/// that no test there waits on the lock of a suite while `ess` synthesizes it. A run that finds
+/// them kept reads them and synthesizes nothing.
+#[test]
+fn every_suite_the_tests_read_is_kept() {
+    thread::scope(|scope| {
+        for product in suite::Product::ALL {
+            scope.spawn(move || {
+                let text = suite::synthesized(product);
+                assert!(
+                    text.contains("\"scenarios\""),
+                    "{product:?} carries its scenarios"
+                );
+                let kept = suite::kept_in(product).join("suite.json");
+                assert!(kept.is_file(), "{product:?} is kept at {}", kept.display());
+            });
+        }
+    });
 }
