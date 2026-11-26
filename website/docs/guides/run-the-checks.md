@@ -174,9 +174,11 @@ The formats are those of the Ratchet specification at the commit `quality/README
 Ratchet command works at that commit, so Ratchet runs none of the files. They are a gate all the
 same: a step of `task check` and of the required check `inference / task check` reads them, and
 `task quality-records` fails when a plan file cannot be read, when the plan files list no
-assessment it writes a record for, or when a record is refused because the report of the tests
-lacks what its assessment reads. Beyond that step they describe what `task check`,
-`task test-slow` and the workflows under `.github/workflows/` enforce.
+assessment it writes a record for, when the declaration of an assessor is missing or cannot be
+read, when `inference-docs assess` refuses its call for an assessment or cannot write the
+record, or when a record is refused because the report of the tests lacks what its assessment
+reads. Beyond that step they describe what `task check`, `task test-slow` and the workflows
+under `.github/workflows/` enforce.
 
 The tests of `crates/inference-docs/tests/quality/` run in `task test-run`. They fail when the
 YAML files and records stop agreeing with each other, with `Taskfile.yml`, with the tree, or with

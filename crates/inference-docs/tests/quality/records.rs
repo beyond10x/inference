@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use super::{entries, load, text, yaml};
+use super::{entries, load, problems, record_problems, report, text, yaml};
 use crate::root;
 
 /// The assessors whose records are read from the JUnit report of cargo-nextest.
@@ -185,15 +185,17 @@ fn scratch(name: &str) -> PathBuf {
 /// prints `list.txt`; for `assess` it exits 1, 2 or 3 for the assessments named so, and
 /// otherwise writes `--out`.
 const STUB_CARGO: &str = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> calls.log\ncase \" $* \" in *' junit-assessments '*) cat list.txt; exit 0;; esac\nprev=''; assessment=''; out=''\nfor argument do\n  case \"$prev\" in --assessment) assessment=$argument;; --out) out=$argument;; esac\n  prev=$argument\ndone\ncase \"$assessment\" in refused-one) exit 1;; wrong-call) exit 2;; unreadable) exit 3;; esac\nprintf '{}' > \"$out\"\n";
-/// A stand-in for `git`: the commit of the run.
-const STUB_GIT: &str = "#!/bin/sh\necho 0123456789abcdef0123456789abcdef01234567\n";
+/// A stand-in for `git`: it logs its arguments to `git.log` and answers the commit of the run.
+const STUB_GIT: &str =
+    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> git.log\necho 0123456789abcdef0123456789abcdef01234567\n";
 
 /// What one run of the commands of `task quality-records` left: the exit status, stderr and the
-/// calls of `cargo`.
+/// calls of `cargo` and of `git`.
 struct TaskRun {
     status: Option<i32>,
     stderr: String,
     calls: Vec<String>,
+    git: Vec<String>,
 }
 
 impl TaskRun {
@@ -223,6 +225,7 @@ fn run_the_records_task(directory: &Path, list: &str, forge: bool) -> TaskRun {
     }
     fs::write(directory.join("list.txt"), list).expect("the list is written");
     let _ = fs::remove_file(directory.join("calls.log"));
+    let _ = fs::remove_file(directory.join("git.log"));
     let path = format!(
         "{}:{}",
         bin.display(),
@@ -254,15 +257,18 @@ fn run_the_records_task(directory: &Path, list: &str, forge: bool) -> TaskRun {
             break;
         }
     }
-    let calls = fs::read_to_string(directory.join("calls.log"))
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_owned)
-        .collect();
+    let log = |name: &str| -> Vec<String> {
+        fs::read_to_string(directory.join(name))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
     TaskRun {
         status,
         stderr,
-        calls,
+        calls: log("calls.log"),
+        git: log("git.log"),
     }
 }
 
@@ -325,6 +331,11 @@ fn the_records_task_writes_each_listed_record_and_fails_naming_every_refused_one
     ] {
         assert!(ok.contains(part), "{ok}");
     }
+    assert_eq!(
+        run.git,
+        ["rev-parse HEAD"],
+        "the revision is the commit of HEAD, asked of git once"
+    );
     assert!(
         !run.call("doc-one").contains("--revision"),
         "{}",
@@ -393,4 +404,59 @@ fn junit_assessments_leaves_out_another_profile_and_the_assessors_of_no_report()
     assert!(String::from_utf8_lossy(&output.stderr).contains("kindless has no target kind"));
     fs::remove_file(directory.join("ratchet.toml")).unwrap();
     assert_eq!(run(&plan).status.code(), Some(3));
+}
+
+/// A record that holds no result for a measure of its assessment, or for one package of a
+/// measure with one value per package: `problems()` refuses it through the entries and the
+/// sections of the pages ("has no value for the measure", "no result of .. for <adapter>"), and
+/// the record rules refuse it from the plan alone, since the output of each measure is what the
+/// plan asks of the record. The committed records hold every rule of a record.
+#[test]
+fn record_problems_refuses_a_record_without_the_result_of_a_measure() {
+    assert!(
+        record_problems(&load()).is_empty(),
+        "{}",
+        report(&record_problems(&load()))
+    );
+    let mut documents = load();
+    let drop_slowest = |result: &Value| result["output"] == "slowest_test";
+    let drop_aws_slowest =
+        |result: &Value| result["output"] == "slowest_test" && result["item"] == "inference-aws";
+    for (name, drop) in [
+        ("workspace-tests", &drop_slowest as &dyn Fn(&Value) -> bool),
+        ("adapter-tests", &drop_aws_slowest),
+    ] {
+        let path = format!("quality/records/{name}.evidence.json");
+        let mut record: Value = serde_json::from_str(&documents.records[&path]).unwrap();
+        record
+            .pointer_mut("/evidence/results")
+            .and_then(Value::as_array_mut)
+            .expect("the record has results")
+            .retain(|result| !drop(result));
+        documents
+            .records
+            .insert(path, serde_json::to_string_pretty(&record).unwrap());
+    }
+    let all = problems(&documents);
+    for expected in [
+        "the record of workspace-tests has no value for the measure",
+        "quality/records/adapter-tests.evidence.json: no result of `adapter-tests/slowest-test` for inference-aws",
+    ] {
+        assert!(
+            all.iter().any(|problem| problem.contains(expected)),
+            "problems() does not name {expected:?}: {}",
+            report(&all)
+        );
+    }
+    let found = record_problems(&documents);
+    for expected in [
+        "quality/records/workspace-tests.evidence.json: no result of `workspace-tests/slowest-test`",
+        "quality/records/adapter-tests.evidence.json: no result of `adapter-tests/slowest-test` for the package inference-aws",
+    ] {
+        assert!(
+            found.iter().any(|problem| problem.contains(expected)),
+            "record_problems() does not name {expected:?}: {}",
+            report(&found)
+        );
+    }
 }
