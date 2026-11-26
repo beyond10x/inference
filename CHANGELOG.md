@@ -17,6 +17,11 @@
 
 ### Added
 
+- `inference-docs` (not published): a test of the documentation crate reads every `#[ignore]`
+  (also a `#[cfg_attr(…)]` over several lines) of the workspace and refuses one without a reason or
+  with a reason of no kind `AGENTS.md` admits (billed, local, by hand, child, limit), and one in a
+  test target built only with feature `live` without `billed`, naming the file, the line and the
+  reason; it runs in `task test-run`.
 - `inference-elevenlabs`, `inference-cartesia`: `CLOSE_GRACE` (5 ms), the most a drop of a
   synthesis inside a Tokio runtime waits for its close on the dropping thread.
 - `inference-openai`: `LiveClient::with_close_timeout` and `LiveClient::close_timeout`, and
@@ -66,6 +71,28 @@
 
 ### Changed
 
+- `task check` runs `task quality-records` after `task test-run`: it writes the record of every
+  assessment of `quality/` that reads the run's JUnit report to
+  `target/quality-records/<plan>/<assessment>.evidence.json`, and fails naming each assessment the
+  report does not hold. The workflow `check` runs the same step and uploads those records from each
+  push to `main` as the artifact `quality-records-<commit>`. `inference-docs junit-assessments`
+  lists the assessments it writes. No crate's API changes.
+- `task test-build` ends with `task test-fixtures`, which synthesizes the conformance suites the
+  tests of `inference-testkit` read once, into a cache keyed by the digest of their sources, so
+  `task test-run` waits for no synthesis. The default cargo-nextest profile runs 8 tests at once;
+  `NEXTEST_TEST_THREADS` wins over it. Six slow tests keep their inputs and assertions at a lower
+  cost.
+- Tests: the drop tests of `inference-cartesia` and `inference-elevenlabs` hold the close bound to
+  numbers written out: 1 s, and outside a runtime at most 100 ms more once the host's scheduler
+  delay is taken out. A changed `CLOSE_BOUND` fails them. The ElevenLabs drop tests that wait for
+  the bound end at a limit of their own, 10 s. A Cartesia test reaches the bound on the close of a
+  connection alone, through a synthesis that fails on a backed-up connection, and holds it to
+  900 ms to 1.2 s after the stall.
+- Tests: four tests that failed on a loaded host now wait for the event they need, or take the
+  host's scheduler delay out of the time they measure: the Deepgram keep-alive test (which still
+  fails when two KeepAlives take 2 s at an interval of 100 ms), two Nova Sonic duplex tests, and
+  the Cartesia and ElevenLabs tests of the hold of a drop inside a runtime. The Nova Sonic wait for
+  an event ends with its own message after 20 s.
 - `task test-run` prints `task test-run was ended at its bound of 120 s` also when a part outlived
   the first signal and was killed, and its list of the ten slowest tests is of the run that just
   ended: `no test ran` when that run left no report. `task` exits 201 when the bound ends the step.
