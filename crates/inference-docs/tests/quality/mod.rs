@@ -19,6 +19,7 @@ mod adapters;
 mod adversary_q1;
 mod adversary_q2;
 mod assess;
+mod records;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

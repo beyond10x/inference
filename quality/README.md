@@ -95,6 +95,30 @@ record. `task test-run` keeps the report of its workspace part at
 
 The records under `records/` are still the ones written by hand from the CI runs named below.
 
+## The records of a check run
+
+`task quality-records`, which `task check` runs after `task test-run`, writes the record of each
+assessment whose record is read from the report of `task test-run`. The list comes from the plan
+files: `inference-docs junit-assessments` prints one line per assessment whose assessor reads the
+JUnit report, whose observation runs `task test-run` and whose input `profile`, if it names one,
+is `default`: its plan, its key and the kind of its target. The slow lane is not on it: its
+report is the one of `task test-slow`. The task calls `inference-docs assess` once per line with
+the report at `target/nextest/default/junit.xml` and the commit, and writes each record to
+`target/quality-records/<plan>/<assessment>.evidence.json`. On the forge the record names the
+run, with the class `ci`; elsewhere it names the report, with the class `local`. The task exits
+non-zero and names every assessment whose record the program refused.
+
+The workflow `check` runs the task in the full gate, on a pull request and on a push to `main`.
+On a push to `main` it uploads `target/quality-records/` as one artifact named
+`quality-records-<commit>`, the full commit id. To get the records of a run on `main`:
+
+```sh
+gh run download <run id> -R beyond10x/inference -n quality-records-<commit>
+```
+
+The forge keeps an artifact for the retention time of the repository; no series of records is
+kept yet, and nothing copies a record of a run into `records/`.
+
 ## The test that keeps the documents true
 
 `crates/inference-docs/tests/quality/`, part of `task test-run`: `mod.rs`, for the rules about
