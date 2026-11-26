@@ -42,6 +42,7 @@
 //! The document holds no time but the run's, no host and no absolute path, so the same file
 //! gives the same bytes.
 
+pub(crate) mod adopt;
 mod junit;
 mod printed;
 
@@ -219,14 +220,21 @@ struct Plan {
     declaration: Yaml,
 }
 
-impl Plan {
-    fn read(root: &Path, project: &str, id: &str) -> Outcome<Self> {
+/// `ratchet.toml` and the plan files it names, parsed once for every assessment read from them.
+struct PlanFiles {
+    config: serde_json::Value,
+    plans: Vec<Yaml>,
+}
+
+impl PlanFiles {
+    /// The files under `root`, each held to be of `project`.
+    fn read(root: &Path, project: &str) -> Outcome<Self> {
         let config: serde_json::Value = toml::from_str(&read_text(root, "ratchet.toml")?)
             .map_err(|error| Failure::Broken(format!("ratchet.toml: does not parse: {error}")))?;
         let paths = strings(config.pointer("/spec/paths")).ok_or_else(|| {
             Failure::Broken("ratchet.toml: names no plan file under [spec] paths".to_owned())
         })?;
-        let mut found = None;
+        let mut plans = Vec::new();
         for path in &paths {
             let plan: Yaml = serde_norway::from_str(&read_text(root, path)?)
                 .map_err(|error| Failure::Broken(format!("{path}: does not parse: {error}")))?;
@@ -239,12 +247,25 @@ impl Plan {
                     "--project is {project}, the plan files of ratchet.toml are of the project {of}"
                 )));
             }
-            if found.is_none()
-                && let Some(assessment) = plan.get("assessments").and_then(|all| all.get(id))
-            {
-                found = Some(assessment.clone());
-            }
+            plans.push(plan);
         }
+        Ok(Self { config, plans })
+    }
+}
+
+impl Plan {
+    fn read(root: &Path, project: &str, id: &str) -> Outcome<Self> {
+        Self::of(root, &PlanFiles::read(root, project)?, id)
+    }
+
+    /// The assessment `id` of the first plan file that declares it, and its assessor's
+    /// declaration.
+    fn of(root: &Path, files: &PlanFiles, id: &str) -> Outcome<Self> {
+        let found = files
+            .plans
+            .iter()
+            .find_map(|plan| plan.get("assessments").and_then(|all| all.get(id)))
+            .cloned();
         let assessment = found.ok_or_else(|| {
             Failure::Call(format!(
                 "no plan file of ratchet.toml declares the assessment {id}"
@@ -260,7 +281,7 @@ impl Plan {
                 "the assessor {assessor} of {id} has no reader in this program"
             ))
         })?;
-        let declaration = declaration(root, &config, &assessor)?;
+        let declaration = declaration(root, &files.config, &assessor)?;
         Ok(Self {
             id: id.to_owned(),
             assessor,

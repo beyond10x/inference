@@ -16,6 +16,7 @@
 //! directories under `adapters/`.
 
 mod adapters;
+mod adopt;
 mod adversary_q1;
 mod adversary_q2;
 mod assess;

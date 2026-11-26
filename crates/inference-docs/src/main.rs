@@ -23,6 +23,8 @@
 //! `assess` writes the `ratchet-evidence/1` record of one assessment of `quality/` from a file a
 //! run left behind ([`assess`]). `junit-assessments` prints the assessments whose record is read
 //! from the JUnit report of `task test-run`, the list `task quality-records` calls `assess` for.
+//! `adopt-records` copies the records of a check run on `main`, downloaded by the caller, into
+//! `quality/records/` after it has checked all of them ([`assess::adopt`]).
 
 mod adapters;
 mod assess;
@@ -96,6 +98,13 @@ enum Action {
     /// the JUnit report of cargo-nextest and whose observation runs `task test-run`. Exit 3 when
     /// a plan file cannot be read.
     JunitAssessments(assess::ListArguments),
+    /// Adopt the records of a check run on `main` into `quality/records/`, byte for byte: from the
+    /// directory its artifact `quality-records-<commit>` was downloaded to, and the saved output
+    /// of `gh run view <id> --json databaseId,headBranch,headSha,event,workflowName`. Downloads
+    /// nothing. Exit 0 with every record written, 1 when a record or the run is refused, 2 for a
+    /// wrong call, 3 when a plan file cannot be read or a record cannot be written; it writes all
+    /// records or none.
+    AdoptRecords(assess::adopt::Arguments),
 }
 
 /// Generated files keyed by their path relative to the repository root.
@@ -195,6 +204,7 @@ fn main() -> ExitCode {
             .map(|()| println!("{}: bound to {commit}", site.display())),
         Action::Assess(arguments) => return assess::run(&arguments),
         Action::JunitAssessments(arguments) => return assess::list(&arguments),
+        Action::AdoptRecords(arguments) => return assess::adopt::run(&arguments),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
