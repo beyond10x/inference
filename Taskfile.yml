@@ -6,11 +6,12 @@ tasks:
       - task: check
 
   check:
-    desc: The checks of the source, then the build of the tests, then the tests of the workspace, as CI runs them.
+    desc: The checks of the source, then the build of the tests, then the tests of the workspace, then the quality records of their report, as CI runs them.
     cmds:
       - task: check-source
       - task: test-build
       - task: test-run
+      - task: quality-records
 
   check-source:
     desc: The verified sherpa-onnx native library, specification and planning store validation, the documentation drift check, then format, lint and the documentation build with warnings denied.
@@ -24,10 +25,16 @@ tasks:
       - RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 
   test-build:
-    desc: Builds the tests test-run runs, without running one.
+    desc: Builds the tests test-run runs, then makes the fixtures they read with test-fixtures.
     cmds:
       - cargo nextest run --workspace --all-features --no-run
       - cargo nextest run -p inference --no-default-features --test stack --no-run
+      - task: test-fixtures
+
+  test-fixtures:
+    desc: Synthesizes every conformance suite the tests of inference-testkit read into their cache under target/tmp, side by side, with the one case that reads them all, under the nextest profile setup, so that no test of test-run waits for ess; a suite already kept for the same sources is read, not synthesized again.
+    cmds:
+      - cargo nextest run -p inference-testkit --all-features --test conformance_suite --profile setup -E 'test(=every_suite_the_tests_read_is_kept)'
 
   test-run:
     desc: Runs test-run-parts and ends it, as a failure, when it has not finished within 120 s.
@@ -53,6 +60,47 @@ tasks:
     cmds:
       - echo "the ten slowest tests, in seconds:"
       - if [ -f target/nextest/default/junit.xml ]; then grep '<testcase ' target/nextest/default/junit.xml | sed -E 's/.* name="([^"]*)" classname="([^"]*)".* time="([^"]*)".*/\3 \2 \1/' | sort -rn | head -n 10; else echo "no test ran"; fi
+
+  quality-records:
+    desc: Writes the record of each assessment that inference-docs junit-assessments lists from the plan files, with inference-docs assess from the report test-run kept at target/nextest/default/junit.xml, to target/quality-records/<plan>/<assessment>.evidence.json; fails and names every assessment whose record was refused. The source is the forge run when GITHUB_SERVER_URL, GITHUB_REPOSITORY and GITHUB_RUN_ID are set, else the report.
+    cmds:
+      - rm -rf target/quality-records target/quality-records.list
+      - mkdir -p target/quality-records
+      - cargo run -q -p inference-docs -- junit-assessments > target/quality-records.list
+      - |
+        report=target/nextest/default/junit.xml
+        revision=$(git rev-parse HEAD)
+        if [ -n "${GITHUB_SERVER_URL:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_RUN_ID:-}" ]; then
+          class=ci
+          source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+        else
+          class=local
+          source=$report
+        fi
+        written=0
+        refused=""
+        while read -r plan assessment kind; do
+          out="target/quality-records/$plan/$assessment.evidence.json"
+          mkdir -p "target/quality-records/$plan"
+          set -- --project inference --assessment "$assessment" --root . --class "$class" --out "$out" --from "$report" --source "$source"
+          if [ "$kind" = revision ]; then
+            set -- "$@" --revision "$revision"
+          fi
+          if cargo run -q -p inference-docs -- assess "$@" < /dev/null; then
+            echo "$out: written"
+            written=$((written + 1))
+          else
+            refused="$refused $assessment"
+          fi
+        done < target/quality-records.list
+        if [ -n "$refused" ]; then
+          echo "task quality-records: no record of$refused" >&2
+          exit 1
+        fi
+        if [ "$written" -eq 0 ]; then
+          echo "task quality-records: inference-docs junit-assessments listed no assessment" >&2
+          exit 1
+        fi
 
   test-slow:
     desc: The slow lane, every trybuild case of the inference crate in one trybuild run, under the slow nextest profile; runs again only when one of its sources changed.

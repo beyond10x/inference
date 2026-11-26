@@ -40,6 +40,25 @@ fn pairs() -> impl Iterator<Item = (u32, u32)> {
         .flat_map(|from| RESAMPLER_RATES.into_iter().map(move |to| (from, to)))
 }
 
+/// Runs `case` for every pair of [`pairs`], each pair on a thread of its own, and fails as the
+/// first failing pair fails. A pair's resampling in a test build takes up to seconds, and no
+/// pair reads another's, so the test holds its test thread for the slowest pair, not for the
+/// sum of all.
+fn each_pair_side_by_side<T: Sync>(inputs: &[(u32, u32, T)], case: impl Fn(u32, u32, &T) + Sync) {
+    std::thread::scope(|scope| {
+        let case = &case;
+        let running: Vec<_> = inputs
+            .iter()
+            .map(|(from, to, input)| scope.spawn(move || case(*from, *to, input)))
+            .collect();
+        for pair in running {
+            if let Err(panic) = pair.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+    });
+}
+
 fn sine(frequency: f64, amplitude: f64, phase: f64, rate: u32, len: usize) -> Vec<i16> {
     (0..len)
         .map(|n| {
@@ -148,7 +167,11 @@ fn the_stated_delay_is_the_measured_lag_for_every_pair() {
 
 #[test]
 fn content_just_above_and_at_the_lower_nyquist_frequency_does_not_fold_or_image() {
-    for (from, to) in pairs().filter(|(f, t)| f != t) {
+    let changing: Vec<(u32, u32, ())> = pairs()
+        .filter(|(f, t)| f != t)
+        .map(|(from, to)| (from, to, ()))
+        .collect();
+    each_pair_side_by_side(&changing, |from, to, ()| {
         let lower = from.min(to);
         let nyquist = f64::from(lower) / 2.0;
         let amplitude = 30_000.0;
@@ -186,7 +209,7 @@ fn content_just_above_and_at_the_lower_nyquist_frequency_does_not_fold_or_image(
                 "{from} -> {to}: the lower Nyquist tone is only {attenuation:.1} dB down"
             );
         }
-    }
+    });
 }
 
 #[test]
@@ -279,18 +302,26 @@ fn frame(rate: u32, position: u64, samples: &[i16]) -> AudioFrame {
     }
 }
 
+/// Every pair's stream is drawn first, from the one seeded generator in the order of
+/// [`pairs`], its start and then its 400 frame lengths, and the pairs then run side by side.
 #[test]
 fn resample_frame_positions_stay_on_the_output_clock_over_a_long_stream() {
     let mut rng = Lcg(0x5eed_0002);
-    for (from, to) in pairs() {
-        let start = 1 + rng.next() % 10_000 + if from > to { 1 << 40 } else { 0 };
+    let streams: Vec<(u32, u32, (u64, Vec<usize>))> = pairs()
+        .map(|(from, to)| {
+            let start = 1 + rng.next() % 10_000 + if from > to { 1 << 40 } else { 0 };
+            let lengths = (0..400).map(|_| (rng.next() % 600) as usize).collect();
+            (from, to, (start, lengths))
+        })
+        .collect();
+    each_pair_side_by_side(&streams, |from, to, (start, lengths)| {
+        let start = *start;
         let mut resampler = Resampler::new(from, to).expect("supported rates");
         let first_out = start * u64::from(to) / u64::from(from);
         let mut position = start;
         let mut out_end = first_out;
         let mut consumed = 0u64;
-        for _ in 0..400 {
-            let len = (rng.next() % 600) as usize;
+        for &len in lengths {
             let samples = vec![0i16; len];
             let out = resampler
                 .resample_frame(&frame(from, position, &samples))
@@ -334,7 +365,7 @@ fn resample_frame_positions_stay_on_the_output_clock_over_a_long_stream() {
         let mut fresh = Resampler::new(from, to).expect("supported rates");
         let restarted = fresh.resample_frame(&restart).expect("a new stream");
         assert_eq!(restarted.position.get(), 0);
-    }
+    });
 }
 
 #[test]

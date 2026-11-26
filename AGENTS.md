@@ -40,8 +40,8 @@ on this repository. `README.md` is for people.
 | `ess/` | the ESS specification: `system.yaml`, `ess-inputs.yaml` and one domain document per layer of the design under `domains/` (audio, duplex, graph, model, policy, session, stream, tools, usage); every declaration carries a `read from:` line naming the design line it was read from; `scenarios/` holds authored scenarios for what synthesis cannot witness |
 | `.engineering/planning` | the AEP planning store; change it only through `aep plan artifact` verbs |
 | `.engineering/drafts` | scratch bodies for `aep plan artifact … --from`; git-ignored |
-| `rust-toolchain.toml`, `.config/nextest.toml` | the one rustc the local gate and every workflow use (the UI snapshots of `crates/inference/tests/ui/` and `tests/compile_fail/` are rustc's messages, blessed on it), and the cargo-nextest profiles: `default` kills a test at 60 s and leaves out the `trybuild` binary `crates/inference/tests/ui.rs`, `slow` runs only that binary, `stack` runs the stack test of `task test-run-parts` under the same 60 s kill so that `target/nextest/default/junit.xml` stays the report of the workspace run; `.cargo/config.toml` builds without debug info |
-| `.github/workflows/` | `check.yml` runs `task check` with pinned `ess`, `aep` and cargo-nextest releases, as `task check-source`, `task test-build` and `task test-run`, after its `scope` step: a pull request whose changed paths are all under `.engineering/` or `*.md` outside `website/`, `ess/` and `quality/` and other than `CHANGELOG.md` (the one path list, tested by `crates/inference-docs/tests/workflows.rs`) only validates the planning store, and the required check passes; `slow.yml` runs `task test-slow` when the macro crate, the SDK crate's sources or the UI cases change; `shared-gates.yml` calls the common source gates of `beyond10x/gates` at an exact commit; `pages.yml` ("Documentation validation") checks the generated pages, builds `website/` and binds the build to its commit on every pull request and push to `main`, and uploads it as the `b10x-project-site` artifact from `main`; `b10x-docs-site.yml` hands that artifact to the shared project-site workflow, which publishes it, so a documentation fix ships from `main` without a release; `docs-ux.yml` runs the `ux/` gates and the ratchet on pull requests that touch `website/`, `docs/` or `ux/` |
+| `rust-toolchain.toml`, `.config/nextest.toml` | the one rustc the local gate and every workflow use (the UI snapshots of `crates/inference/tests/ui/` and `tests/compile_fail/` are rustc's messages, blessed on it), and the cargo-nextest profiles: `default` runs 8 tests at once (`NEXTEST_TEST_THREADS`, which the build pool `slot` sets for each job, wins over it), kills a test at 60 s and leaves out the `trybuild` binary `crates/inference/tests/ui.rs`, `slow` runs only that binary, `stack` runs the stack test of `task test-run-parts` under the same 60 s kill so that `target/nextest/default/junit.xml` stays the report of the workspace run, `setup` runs the one test of `task test-fixtures` under the same kill; `.cargo/config.toml` builds without debug info |
+| `.github/workflows/` | `check.yml` runs `task check` with pinned `ess`, `aep` and cargo-nextest releases, as `task check-source`, `task test-build`, `task test-run` and `task quality-records`, after its `scope` step, and on a push to `main` uploads `target/quality-records/` as the artifact `quality-records-<commit>`: a pull request whose changed paths are all under `.engineering/` or `*.md` outside `website/`, `ess/` and `quality/` and other than `CHANGELOG.md` (the one path list, tested by `crates/inference-docs/tests/workflows.rs`) only validates the planning store, and the required check passes; `slow.yml` runs `task test-slow` when the macro crate, the SDK crate's sources or the UI cases change; `shared-gates.yml` calls the common source gates of `beyond10x/gates` at an exact commit; `pages.yml` ("Documentation validation") checks the generated pages, builds `website/` and binds the build to its commit on every pull request and push to `main`, and uploads it as the `b10x-project-site` artifact from `main`; `b10x-docs-site.yml` hands that artifact to the shared project-site workflow, which publishes it, so a documentation fix ships from `main` without a release; `docs-ux.yml` runs the `ux/` gates and the ratchet on pull requests that touch `website/`, `docs/` or `ux/` |
 | `CHANGELOG.md` | one entry per release, written before the tag; a change a consumer can see goes under `## [Unreleased]` when it lands on `main` |
 
 ## Commands
@@ -51,10 +51,11 @@ Tools: the rustc `rust-toolchain.toml` pins (the crates' `rust-version` stays 1.
 `ess` and `aep`; Node 22 and npm for the site only.
 
 ```
-task check                      # task check-source, then task test-build and task test-run, as CI runs them
+task check                      # task check-source, then task test-build, task test-run and task quality-records, as CI runs them
 task check-source               # the sherpa-onnx archive, specification and planning store validation, the documentation drift check, then format, lint and the docs build with warnings denied
-task test-build                 # builds the tests, runs none
+task test-build                 # builds the tests, then task test-fixtures: the conformance suites the testkit tests read, synthesized into target/tmp before task test-run
 task test-run                   # task test-run-parts under `timeout`: ended at 120 s, as a failure; the parts are cargo nextest run --workspace --all-features (a test over 60 s is killed and fails; prints the ten slowest), the stack test without default features, the doc tests
+task quality-records            # the record of each assessment `inference-docs junit-assessments` lists, written by `inference-docs assess` from the report of task test-run into target/quality-records/<plan>/; fails naming each refused assessment
 task test-slow                  # the slow lane: every trybuild case of crates/inference in one trybuild run; go-task skips it while its sources are unchanged
 task docs-generate              # rewrite the generated files of the site
 npm --prefix website ci --allow-git=root && npm --prefix website run build   # build the site into website/build
@@ -90,8 +91,32 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   checkpoint. Tests download no weights and start no model server: a test that needs one reads
   its path or URL from an environment variable and is ignored without it.
 - A live test that talks to a hosted provider is ignored, behind feature `live`, and its ignore
-  reason contains the word `billed`; the release check admits an added `#[ignore]` only with that
-  word.
+  reason contains the word `billed`.
+- Every `#[ignore]` gives a reason of one of five kinds. The test
+  `ignores::every_ignore_of_the_workspace_gives_a_reason_of_an_admitted_kind` in
+  `crates/inference-docs/tests/ignores/mod.rs`, which runs in `task test-run`, reads each
+  `#[ignore]` and each `#[cfg_attr(…)]` with an `ignore` item (over as many lines as it spans) in
+  the workspace's `.rs` files, outside hidden directories, `node_modules`, the build directory
+  `target/` and any directory holding a `CACHEDIR.TAG`, and fails naming the file, the line and
+  the reason of every other one:
+  - billed: the reason contains `billed` (not `not billed`). An ignore in a test target built
+    only with feature `live` (`required-features` of its `[[test]]`, or `#![cfg(feature =
+    "live")]` in its file) is refused without that word, unless its package is a local adapter
+    (its `description` begins `Local adapter`: `inference-llama-server` binds feature `live` to a
+    server on loopback); so is a reason that speaks of a hosted service, a key, credentials or
+    money, or names a `*_API_KEY` variable;
+  - local: a test that needs a checkpoint, a clip or a model server names the `INFERENCE_*`
+    variables it reads, and a string literal of its package (comments and ignores left out)
+    holds each whole name;
+  - by hand: a test that opens a device of the machine says `by hand` and names the device, a
+    microphone or a speaker, because no runner has the device;
+  - child: a case that a parent case of its file runs in a child process, with the environment
+    the parent sets, begins `a child of`, and its function's name stands elsewhere in that file
+    as a whole identifier or inside a string literal, outside comments and its own declaration,
+    because it is run only through its parent;
+  - limit: a case that shows a limit the code's documentation states, red only on some machines,
+    begins `limit:` and names the path of the file that states the limit, which must exist,
+    because it records the limit and would make the gate depend on the machine.
 - Every `aep` write runs with `AEP_ACTOR=human:operator` (otherwise `aep` records `human:$USER`):
   no person's name, login, path or company goes into the store, a commit or a PR.
 - Before a story about a hosted provider is drafted, read the provider's current product list and

@@ -104,7 +104,9 @@ fn speak(session: &mut impl SpeechSessionHandle, from: u64, frames: u64) {
     }
 }
 
-/// Every event until nothing arrives for one wait.
+/// Every event until nothing arrives for one wait. This waits for a time: on a busy host a gap
+/// between two events of the replay passes the wait, and the events after it are left out. A
+/// test that needs an event waits for it with [`until`] first.
 fn drain(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
     let mut events = Vec::new();
     while let Some(event) = session.next_event(WAIT) {
@@ -114,27 +116,57 @@ fn drain(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
     events
 }
 
-/// Every event up to and including the first `stop` holds for.
+/// How long [`until`] waits for its event in all, however often events that are not the one
+/// come: a third of the runner's 60 s, so the wait fails with its own message first.
+const UNTIL_LIMIT: Duration = Duration::from_secs(20);
+
+/// Every event up to and including the first `stop` holds for, within [`UNTIL_LIMIT`].
 fn until(
     session: &mut impl SpeechSessionHandle,
     stop: impl Fn(&SessionEvent) -> bool,
 ) -> Vec<SessionEvent> {
+    until_within(session, stop, UNTIL_LIMIT)
+}
+
+/// Every event up to and including the first `stop` holds for. It fails with its own message at
+/// either of two ends: once 30 waits in a row bring nothing, 3 s without an event, and once
+/// `limit` has passed since it began. Waits that came up empty between events do not count
+/// towards the first: on a busy host a gap between two events of the replay can pass one wait.
+fn until_within(
+    session: &mut impl SpeechSessionHandle,
+    stop: impl Fn(&SessionEvent) -> bool,
+    limit: Duration,
+) -> Vec<SessionEvent> {
+    let started = Instant::now();
     let mut events = Vec::new();
     let mut idle = 0;
     loop {
         match session.next_event(WAIT) {
             Some(event) => {
+                idle = 0;
                 let done = stop(&event);
                 events.push(event);
                 if done {
                     return events;
                 }
+                assert!(
+                    events.len() < 500,
+                    "the awaited event never came: {events:#?}"
+                );
             }
             None => {
                 idle += 1;
-                assert!(idle < 30, "the awaited event never came: {events:#?}");
+                assert!(
+                    idle < 30,
+                    "the awaited event never came, and no event for 30 waits of {WAIT:?}: \
+                     {events:#?}"
+                );
             }
         }
+        assert!(
+            started.elapsed() < limit,
+            "the awaited event did not come within {limit:?}: {events:#?}"
+        );
     }
 }
 
@@ -390,6 +422,11 @@ fn audio_in_gives_audio_and_transcript_out_on_one_response_id() {
 
 /// The mock's `speech_during_a_response_cancels_it_and_the_next_response_has_a_new_id`: Nova
 /// Sonic's own barge-in, its late audio dropped.
+///
+/// After the barge-in the test waits for the next response to complete, then for the session to
+/// go quiet. On a host whose load average was 95 to 122 on 20 processors it waited only for the
+/// quiet, and a gap of the replay longer than [`WAIT`] ended the wait before the next response's
+/// transcript.
 #[test]
 fn speech_during_a_response_cancels_it_and_the_next_response_has_a_new_id() {
     let mut replay = Replay::new(vec![
@@ -408,7 +445,11 @@ fn speech_during_a_response_cancels_it_and_the_next_response_has_a_new_id() {
     let first = created(&events)[0];
 
     speak(&mut session, 1_280, 2);
-    let rest = drain(&mut session);
+    let mut rest = until(
+        &mut session,
+        |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id != first),
+    );
+    rest.extend(drain(&mut session));
     let cancelled = position(
         &rest,
         |event| matches!(event, SessionEvent::ResponseCancelled(c) if c.response_id == first),
@@ -1112,8 +1153,23 @@ fn input_usage_no_response_took_is_recorded_before_the_sessions_failure() {
 /// unknown, never 0. Left out of every delta of a direction, so is input reported after the
 /// response ended, for a next response that never begins: the session's end records it as
 /// unknown, for the session.
+///
+/// The test closes the session once the last usage event it reads has arrived, and then waits
+/// for `SpeechSessionClosed`. On a host whose load average was 95 to 122 on 20 processors it
+/// waited for the session to go quiet instead, and the wait ended before the first event.
 #[test]
 fn a_count_nova_sonic_leaves_out_is_recorded_unknown_never_zero() {
+    // The replay's last event is a usage event after the response, which reports 8 output text
+    // tokens. Where its delta leaves out the input speech tokens, it reaches the response's
+    // record and the session's, and the test waits for it: the running total it reports.
+    let last_usage: fn(&SessionEvent) -> bool = |event| {
+        matches!(event, SessionEvent::ResponseUsageRecorded(recorded)
+            if recorded.usage.output.text_tokens == 8)
+    };
+    // Where every delta leaves out the output text tokens, that event changes no count the test
+    // reads and reports none, so the test waits for the response to complete.
+    let response_completed: fn(&SessionEvent) -> bool =
+        |event| matches!(event, SessionEvent::ResponseCompleted(_));
     let complete = |unknown: QuantityKind| {
         [
             Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
@@ -1133,11 +1189,12 @@ fn a_count_nova_sonic_leaves_out_is_recorded_unknown_never_zero() {
         })
         .to_vec()
     };
-    for (omits, unknown, session_record) in [
+    for (omits, unknown, session_record, settled) in [
         (
             ("output", "textTokens"),
             QuantityKind::OutputTextTokens,
             None,
+            response_completed,
         ),
         (
             ("input", "speechTokens"),
@@ -1146,6 +1203,7 @@ fn a_count_nova_sonic_leaves_out_is_recorded_unknown_never_zero() {
                 Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
                 Quantity::unknown(QuantityKind::InputAudioTokens),
             ]),
+            last_usage,
         ),
     ] {
         let mut replay = Replay::new(vec![turn("hi", "Hello")]);
@@ -1155,10 +1213,12 @@ fn a_count_nova_sonic_leaves_out_is_recorded_unknown_never_zero() {
         };
         let mut session = model(&replay).open(config()).expect("opens");
         speak(&mut session, 0, 2);
-        let mut events = drain(&mut session);
+        let mut events = until(&mut session, settled);
         let response = created(&events)[0];
         session.close().expect("open");
-        events.extend(drain(&mut session));
+        events.extend(until(&mut session, |event| {
+            matches!(event, SessionEvent::SpeechSessionClosed(_))
+        }));
         let recorded = usage_records(&events);
         let of_response: Vec<_> = recorded
             .iter()
@@ -1324,5 +1384,48 @@ fn with_its_own_barge_in_input_during_output_restarts_the_response() {
     assert!(
         matches!(refused, Err(NoNativeDuplex::Restarted { first, second }) if first != second),
         "{refused:?}"
+    );
+}
+
+/// [`until_within`] on a session whose events keep coming, each a little later than [`WAIT`],
+/// and none of them the one it waits for, fails with its own message at its limit. Every event
+/// resets the count of empty waits, so without the limit the wait would end only at its 500th
+/// event, 75 s here, past the runner's 60 s. [`until`] holds [`UNTIL_LIMIT`]; this test gives
+/// the same wait 2 s so it ends within a few seconds.
+#[test]
+fn until_fails_with_its_message_on_a_slow_stream_that_never_brings_the_event() {
+    let mut replay = Replay::new(vec![turn("tell me a story", "Once upon a time")]);
+    replay.pace = Duration::from_millis(150);
+    replay.audio_frames = 1_000;
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut session = model(&replay).open(config()).expect("opens");
+        speak(&mut session, 0, 2);
+        let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            until_within(&mut session, |_| false, Duration::from_secs(2)).len()
+        }));
+        let message = waited.err().map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default()
+        });
+        let _ = done.send(message);
+    });
+    let limit = Duration::from_secs(15);
+    let started = Instant::now();
+    let message = ended.recv_timeout(limit);
+    assert_eq!(
+        message.as_ref().map(Option::is_some),
+        Ok(true),
+        "until neither found the event nor failed within {:?} of a stream with one event every \
+         150 ms",
+        started.elapsed()
+    );
+    let message = message.ok().flatten().unwrap_or_default();
+    assert!(
+        message.starts_with("the awaited event did not come within 2s"),
+        "the wait fails with the message of its limit: {}",
+        message.lines().next().unwrap_or_default()
     );
 }

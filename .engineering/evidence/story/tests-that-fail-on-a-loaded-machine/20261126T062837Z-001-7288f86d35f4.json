@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T06:28:37Z",
+  "actor": "human:operator",
+  "artifact": "story:tests-that-fail-on-a-loaded-machine",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run per package through the shared build pool, each test against a defect planted in the library and restored byte for byte, before and after the change",
+    "reference": "VERIFIED: baseline vs treatment. A 150 ms replay gap planted: the old Nova Sonic tests 2 run, 0 passed, 2 failed (the same line as the gate log), the new 2 passed; left-out count read as 0 and an interruption that cancels nothing each fail the new tests. A drop holding its thread CLOSE_GRACE x5: Cartesia 4 run, 3 passed, 1 failed; ElevenLabs 5 run, 4 passed, 1 failed. The until case with a stream that never brings the event: red at 15.018 s before correction 1, passes after with its own deadline message. 10 to 20 loaded runs per changed file, 0 failed"
+  }
+}

@@ -21,7 +21,8 @@
 //! `provenance` writes `.well-known/b10x-site.json` and `.nojekyll` into a built site.
 //!
 //! `assess` writes the `ratchet-evidence/1` record of one assessment of `quality/` from a file a
-//! run left behind ([`assess`]).
+//! run left behind ([`assess`]). `junit-assessments` prints the assessments whose record is read
+//! from the JUnit report of `task test-run`, the list `task quality-records` calls `assess` for.
 
 mod adapters;
 mod assess;
@@ -90,6 +91,11 @@ enum Action {
     /// assessment reads, 2 for a wrong call, 3 when a plan file, a declaration or a pin cannot be
     /// read.
     Assess(assess::Arguments),
+    /// Print the assessments `task quality-records` writes a record for: one line
+    /// `<plan> <assessment> <target kind>` per assessment of the plan files whose assessor reads
+    /// the JUnit report of cargo-nextest and whose observation runs `task test-run`. Exit 3 when
+    /// a plan file cannot be read.
+    JunitAssessments(assess::ListArguments),
 }
 
 /// Generated files keyed by their path relative to the repository root.
@@ -188,6 +194,7 @@ fn main() -> ExitCode {
         Action::Provenance { site, commit } => write_provenance(&site, &commit)
             .map(|()| println!("{}: bound to {commit}", site.display())),
         Action::Assess(arguments) => return assess::run(&arguments),
+        Action::JunitAssessments(arguments) => return assess::list(&arguments),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

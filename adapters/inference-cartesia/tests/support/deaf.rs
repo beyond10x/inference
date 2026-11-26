@@ -85,6 +85,18 @@ pub struct Deaf {
 impl Deaf {
     /// A server that sends `pings` pings, then one chunk of the segment and the context's `done`.
     pub fn start(pings: usize) -> Self {
+        Self::serve(pings, true)
+    }
+
+    /// A server that sends `pings` pings, then one chunk of the segment and nothing more: the
+    /// synthesis waits for the rest of the segment until its read timeout has passed.
+    pub fn stalling(pings: usize) -> Self {
+        Self::serve(pings, false)
+    }
+
+    /// A server that sends `pings` pings, one chunk of the segment and, with `done`, the
+    /// context's `done`.
+    fn serve(pings: usize, done: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let url = format!("ws://{}", listener.local_addr().expect("an address"));
         let (release, released) = mpsc::channel::<()>();
@@ -119,15 +131,17 @@ impl Deaf {
             socket
                 .send(Message::text(chunk.to_string()))
                 .expect("the chunk is sent");
-            let done = json!({
-                "type": "done",
-                "done": true,
-                "status_code": 206,
-                "context_id": context,
-            });
-            socket
-                .send(Message::text(done.to_string()))
-                .expect("`done` is sent");
+            if done {
+                let done = json!({
+                    "type": "done",
+                    "done": true,
+                    "status_code": 206,
+                    "context_id": context,
+                });
+                socket
+                    .send(Message::text(done.to_string()))
+                    .expect("`done` is sent");
+            }
             let _ = released.recv_timeout(Duration::from_secs(30));
             let stream = socket.get_mut();
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -204,7 +218,14 @@ fn setting(limit: &str) -> String {
 /// Runs `session` against a server whose flood, `first` pings at first, is doubled until the
 /// connection was backed up: until the server, reading again after the synthesis's own thread
 /// has ended, finds fewer pongs than it sent pings. What that session returned, and the flood.
-pub fn on_a_backed_up_connection<T>(
+pub fn on_a_backed_up_connection<T>(first: usize, session: impl FnMut(String) -> T) -> (T, Flood) {
+    on_a_backed_up_connection_of(Deaf::start, first, session)
+}
+
+/// [`on_a_backed_up_connection`] with the server `serve` starts for a flood of the pings it is
+/// given: [`Deaf::start`] or [`Deaf::stalling`].
+pub fn on_a_backed_up_connection_of<T>(
+    serve: fn(usize) -> Deaf,
     first: usize,
     mut session: impl FnMut(String) -> T,
 ) -> (T, Flood) {
@@ -216,7 +237,7 @@ pub fn on_a_backed_up_connection<T>(
     let mut pings = first;
     let mut written = None;
     loop {
-        let server = Deaf::start(pings);
+        let server = serve(pings);
         let seen = session(server.url.clone());
         let left = threads_named(OWN_THREAD, 0, CLOSE_BOUND + Duration::from_secs(3));
         assert_eq!(left, Some(0), "the synthesis's own thread ends");

@@ -383,6 +383,95 @@ fn declaration(root: &Path, config: &serde_json::Value, assessor: &str) -> Outco
     )))
 }
 
+/// The command whose JUnit report `task quality-records` reads, at
+/// `target/nextest/default/junit.xml`.
+const TEST_RUN: &str = "task test-run";
+
+/// The call of `junit-assessments`.
+#[derive(Args)]
+pub(crate) struct ListArguments {
+    /// The root of the tree whose plan files are read.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+}
+
+/// Prints one line per assessment of the plan files that `ratchet.toml` names whose record is
+/// read from the JUnit report of `task test-run`: `<plan> <assessment> <target kind>`, the plan
+/// as the name of its file without `.ratchet.yaml`, in the order of `ratchet.toml` and of each
+/// file. An assessment is listed when its assessor has a reader of the JUnit report, its
+/// observation runs `task test-run`, and its input `profile`, when it names one, is `default`.
+/// Exit 3 when a plan file cannot be read.
+pub(crate) fn list(arguments: &ListArguments) -> ExitCode {
+    match junit_assessments(&arguments.root) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(line) => {
+            eprintln!("inference-docs junit-assessments: {line}");
+            ExitCode::from(3)
+        }
+    }
+}
+
+fn junit_assessments(root: &Path) -> Result<Vec<String>, String> {
+    let read = |path: &str| {
+        fs::read_to_string(root.join(path))
+            .map_err(|error| format!("{path}: cannot be read: {error}"))
+    };
+    let config: serde_json::Value = toml::from_str(&read("ratchet.toml")?)
+        .map_err(|error| format!("ratchet.toml: does not parse: {error}"))?;
+    let paths = strings(config.pointer("/spec/paths"))
+        .ok_or("ratchet.toml: names no plan file under [spec] paths")?;
+    let mut lines = Vec::new();
+    for path in &paths {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let plan_name = name
+            .strip_suffix(".ratchet.yaml")
+            .ok_or_else(|| format!("{path}: a plan file is named <plan>.ratchet.yaml"))?;
+        let plan: Yaml = serde_norway::from_str(&read(path)?)
+            .map_err(|error| format!("{path}: does not parse: {error}"))?;
+        let assessments = plan
+            .get("assessments")
+            .and_then(Yaml::as_mapping)
+            .into_iter()
+            .flatten();
+        for (id, assessment) in assessments {
+            let id = id
+                .as_str()
+                .ok_or_else(|| format!("{path}: an assessment key is not text"))?;
+            let reads_the_report = assessment
+                .get("assessor")
+                .and_then(Yaml::as_str)
+                .and_then(Reader::of)
+                .is_some_and(|reader| reader != Reader::PrintedDuration);
+            let command = assessment
+                .get("observation")
+                .and_then(|observation| observation.get("command"))
+                .and_then(Yaml::as_str);
+            let profile = assessment
+                .get("inputs")
+                .and_then(|inputs| inputs.get("profile"))
+                .and_then(Yaml::as_str);
+            if !reads_the_report
+                || command != Some(TEST_RUN)
+                || profile.is_some_and(|profile| profile != "default")
+            {
+                continue;
+            }
+            let kind = assessment
+                .get("target")
+                .and_then(|target| target.get("kind"))
+                .and_then(Yaml::as_str)
+                .ok_or_else(|| format!("{path}: {id} has no target kind"))?;
+            lines.push(format!("{plan_name} {id} {kind}"));
+        }
+    }
+    Ok(lines)
+}
+
 /// The times `--started-at` and `--ended-at` give, in nanoseconds since 1970.
 fn given_times(arguments: &Arguments) -> Outcome<Option<(i128, i128)>> {
     let parse = |flag: &str, text: &str| {

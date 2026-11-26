@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T05:43:01Z",
+  "actor": "human:operator",
+  "artifact": "story:test-run-step-keeps-its-margin",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run per package through the shared build pool, the adversary's cases on the code before correction 1, then with it",
+    "reference": "VERIFIED: baseline vs treatment. The stall case with a commit 150 ms late on 68d199eca: 2 tests run: 1 passed, 1 failed (read timeout 1s, limit 1s, no failure note); on 6cf3a352d: 6 tests run: 6 passed, the control 4.233 s and the late case 4.599 s. The testkit ticker with a planted 200 ms sleep in synthesise(): 6 tests run: 5 passed, 1 failed (largest gap 4.004 s); without it 16 passed. inference-docs 122 passed. cargo fmt --all --check and clippy -D warnings on the four packages exit 0. The step's forge wall time is measured by the wave's check run"
+  }
+}

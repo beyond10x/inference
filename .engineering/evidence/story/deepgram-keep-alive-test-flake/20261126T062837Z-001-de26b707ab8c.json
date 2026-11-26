@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T06:28:37Z",
+  "actor": "human:operator",
+  "artifact": "story:deepgram-keep-alive-test-flake",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run per package through the shared build pool, each test against a defect planted in the library and restored byte for byte, before and after the change",
+    "reference": "VERIFIED: baseline vs treatment. With the interval stretched to 400 ms the old test failed (1 KeepAlive messages in 600 ms), the new passed; no KeepAlive written: FAIL at 5.023 s (0 KeepAlive messages in 5s of silence); after correction 1, keepalive_interval x20 planted: 2 run, 1 passed, 1 failed (two KeepAlives at an interval of 100 ms took 4.01s); without the plant 2 passed; 50 runs alone, 0 failed"
+  }
+}

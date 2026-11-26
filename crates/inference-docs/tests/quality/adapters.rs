@@ -353,9 +353,23 @@ fn check_test(source: &str, test: &str, files: &mut Files<'_>, problems: &mut Ve
     }
 }
 
+/// The tests an assessment lists as its `tests` input, if it lists any.
+fn listed_tests(assessment: &Value) -> Option<BTreeSet<String>> {
+    let listed = assessment
+        .pointer("/inputs/tests")
+        .and_then(Value::as_array)?;
+    Some(
+        listed
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
 /// The tests the pages name, and the tests an assessment lists as its `tests` input: each is in
-/// its file, the entry of each measure of the assessment names exactly the listed tests, and
-/// the record has one result per listed test.
+/// its file, and the entry of each measure of the assessment names exactly the listed tests.
+/// That the record has one result per listed test is `check_named_records`.
 fn check_named_tests(
     documents: &Documents,
     model: &Model,
@@ -368,21 +382,13 @@ fn check_named_tests(
         }
     }
     for (id, assessment) in model.all("assessments") {
-        let Some(listed) = assessment
-            .pointer("/inputs/tests")
-            .and_then(Value::as_array)
-        else {
+        let Some(listed) = listed_tests(assessment) else {
             continue;
         };
-        let listed: BTreeSet<String> = listed
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect();
         for test in &listed {
             check_test(&format!("assessments.{id}"), test, files, problems);
         }
-        for (name, measurement) in entries(assessment, "measurements") {
+        for (name, _) in entries(assessment, "measurements") {
             let key = format!("{id}/{name}");
             if let Some(entry) = model.page.entries.get(&key) {
                 let said = named_tests(&entry.bullets.join(" "));
@@ -399,6 +405,19 @@ fn check_named_tests(
                     ));
                 }
             }
+        }
+    }
+}
+
+/// The record of an assessment that lists tests as its `tests` input has one result per listed
+/// test for each measure, and none for another test.
+fn check_named_records(model: &Model, problems: &mut Vec<String>) {
+    for (id, assessment) in model.all("assessments") {
+        let Some(listed) = listed_tests(assessment) else {
+            continue;
+        };
+        for (name, measurement) in entries(assessment, "measurements") {
+            let key = format!("{id}/{name}");
             let Some(record) = model.record(id) else {
                 continue;
             };
@@ -628,8 +647,17 @@ pub(super) fn check(documents: &Documents, model: &Model, problems: &mut Vec<Str
     check_crate_rows(model, problems);
     check_package_coverage(model, problems);
     check_named_tests(documents, model, &mut files, problems);
+    check_named_records(model, problems);
     check_commands(documents, model, &mut files, problems);
     check_entry_commands(model, problems);
+}
+
+/// The rules of this file that a record is held to by itself and against its plan, and no value
+/// of a page: the packages and coverage sums of a plan that names packages, and one result per
+/// test of a plan that lists tests.
+pub(super) fn check_records(model: &Model, problems: &mut Vec<String>) {
+    check_package_coverage(model, problems);
+    check_named_records(model, problems);
 }
 
 const ADAPTERS: &str = "quality/adapters.ratchet.yaml";

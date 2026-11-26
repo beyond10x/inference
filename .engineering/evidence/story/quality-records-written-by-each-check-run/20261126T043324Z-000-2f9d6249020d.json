@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-26T04:33:24Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-records-written-by-each-check-run",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:quality-records-written-by-each-check-run-adversary-1",
+    "review": "review-result:quality-records-written-by-each-check-run-adversary-1",
+    "outcome": "fixed"
+  }
+}
