@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-26T06:06:34Z",
+  "actor": "human:operator",
+  "artifact": "story:release-check-for-added-ignores",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:release-check-for-added-ignores-adversary-1",
+    "review": "review-result:release-check-for-added-ignores-adversary-1",
+    "outcome": "fixed"
+  }
+}
