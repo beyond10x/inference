@@ -33,7 +33,7 @@ It runs, in order, and stops at the first failure:
 | format | `cargo fmt --all --check` |
 | lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
 | the API documentation | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` |
-| the build of the tests | `task test-build`, which runs no test |
+| the build of the tests | `task test-build`, which builds the tests and then runs `task test-fixtures`: one test that synthesizes the conformance suites the testkit tests read, so that no test of the next step waits for `ess` |
 | tests | `task test-run`, which runs `task test-run-parts` under `timeout`: `cargo nextest run --workspace --all-features`, then the stack test without default features and the doc tests |
 | the quality records | `task quality-records`, which writes the record of each assessment of `quality/` that reads the report of the tests to `target/quality-records/` |
 
@@ -75,6 +75,7 @@ task: [check-source] cargo clippy --workspace --all-targets --all-features -- -D
 task: [check-source] RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 task: [test-build] cargo nextest run --workspace --all-features --no-run
 task: [test-build] cargo nextest run -p inference --no-default-features --test stack --no-run
+task: [test-fixtures] cargo nextest run -p inference-testkit --all-features --test conformance_suite --profile setup -E 'test(=every_suite_the_tests_read_is_kept)'
 task: [test-run] timeout --kill-after=10s 120s task test-run-parts || { status=$?; if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then echo "task test-run was ended at its bound of 120 s"; fi; exit "$status"; }
 task: [quality-records] rm -rf target/quality-records target/quality-records.list
 task: [quality-records] mkdir -p target/quality-records
