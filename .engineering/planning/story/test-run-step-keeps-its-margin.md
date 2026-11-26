@@ -2,14 +2,15 @@
 format: aep.planning-md/3
 id: story:test-run-step-keeps-its-margin
 kind: story
-status: active
+status: implemented
 title: The forge's test step ends well inside its 120 s budget
 relations:
 - serves: vision:inference
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-26T04:28:11Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-26T04:28:11Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-26T06:32:39Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 

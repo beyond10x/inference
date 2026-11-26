@@ -2,14 +2,15 @@
 format: aep.planning-md/3
 id: story:tests-that-fail-on-a-loaded-machine
 kind: story
-status: active
+status: implemented
 title: Three tests of two adapters hold on a loaded machine or state the condition they need
 relations:
 - serves: vision:inference
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-26T04:28:11Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-26T04:28:12Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-26T06:32:40Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":1}}}
 ---
 ## Context
 

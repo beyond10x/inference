@@ -2,14 +2,15 @@
 format: aep.planning-md/3
 id: story:quality-records-written-by-each-check-run
 kind: story
-status: active
+status: implemented
 title: Each check run writes the quality records its JUnit report holds and keeps those of main as an artifact
 relations:
 - serves: vision:inference
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-26T03:26:52Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-26T03:26:52Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-26T06:32:39Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 ## Context
 
