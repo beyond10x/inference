@@ -6,8 +6,7 @@
 //!
 //! The ticker is the one of the ElevenLabs binding's tests, `support/ticker.rs` there, included
 //! by path: each gap is counted less the time the runtime's thread was ready to run without a
-//! processor, and never less than half of its wall time, so a host whose processors are all
-//! taken does not fail the bound and a hold of 100 ms or more always does.
+//! processor, so a host whose processors are all taken does not fail the bound.
 
 #![cfg(all(feature = "stt", feature = "tts", feature = "duplex"))]
 

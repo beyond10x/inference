@@ -27,7 +27,7 @@ use inference_duplex::{
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use wait::{WAIT, after_sent, completed, ended, until};
+use wait::{WAIT, after_sent, completed, drain, ended, until};
 
 /// One step of the scripted provider's output stream.
 #[derive(Debug, Clone)]
@@ -42,6 +42,8 @@ enum Step {
         every: Duration,
         for_: Duration,
     },
+    /// The end of the output stream; the provider still takes input.
+    End,
 }
 
 /// A provider that sends its steps once the session opens, then stays open; it counts the steps
@@ -77,6 +79,11 @@ impl Connector for Scripted {
                                 tokio::time::sleep(every).await;
                             }
                             sent
+                        }
+                        Step::End => {
+                            drop(frames);
+                            while received.recv().await.is_some() {}
+                            return;
                         }
                     };
                     if sent.is_err() {
@@ -313,10 +320,8 @@ fn audio_appended_after_the_close_is_refused_and_drops_nothing() {
     assert_eq!(session.ledger().dropped_events().len(), kept);
 }
 
-/// A `completionEnd` without its `stopReason` still ends the response in progress: the binding
-/// never reads the reason.
-#[test]
-fn a_completion_end_without_its_stop_reason_ends_the_response() {
+/// The user's turn and a response that a `completionEnd` without its `stopReason` ends.
+fn a_response_a_completion_end_without_its_stop_reason_ends() -> Vec<Step> {
     let mut steps = user_turn();
     steps.push(content_start("assistant-1", "TEXT", "ASSISTANT"));
     steps.push(event(
@@ -324,8 +329,27 @@ fn a_completion_end_without_its_stop_reason_ends_the_response() {
         json!({"contentId": "assistant-1", "content": "Hello"}),
     ));
     steps.push(event("completionEnd", json!({})));
+    steps
+}
+
+/// Every event through the response's completion, then the quiet after it: what
+/// [`a_completion_end_without_its_stop_reason_ends_the_response`] reads before it checks the
+/// session's state. The binding records an arrival only when the caller takes the next event,
+/// so the state read right after the completion would not show an end that follows it.
+fn through_the_completion(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
+    let mut events = completed(session);
+    // Quiet: nothing ends the session after the completion.
+    events.extend(drain(session));
+    events
+}
+
+/// A `completionEnd` without its `stopReason` still ends the response in progress: the binding
+/// never reads the reason, and the session stays open.
+#[test]
+fn a_completion_end_without_its_stop_reason_ends_the_response() {
+    let steps = a_response_a_completion_end_without_its_stop_reason_ends();
     let mut session = open(steps, Duration::from_secs(5));
-    let events = completed(&mut session);
+    let events = through_the_completion(&mut session);
     let states: Vec<_> = session
         .ledger()
         .responses()
@@ -334,6 +358,23 @@ fn a_completion_end_without_its_stop_reason_ends_the_response() {
         .collect();
     assert_eq!(states, [ResponseState::Completed], "{events:#?}");
     assert_eq!(session.ledger().session().state(), SpeechSessionState::Open);
+}
+
+/// Adversary pass 3 on story:nova-sonic-tests-wait-for-their-event, finding F2: the wait of
+/// [`a_completion_end_without_its_stop_reason_ends_the_response`] sees a session that ends right
+/// after the completion. A provider whose stream ends there stands in for a reader that quits on
+/// the missing field; the check of the state that test makes then fails.
+#[test]
+fn the_wait_after_the_completion_sees_a_session_that_ends_right_after_it() {
+    let mut steps = a_response_a_completion_end_without_its_stop_reason_ends();
+    steps.push(Step::End);
+    let mut session = open(steps, Duration::from_secs(5));
+    let events = through_the_completion(&mut session);
+    assert_ne!(
+        session.ledger().session().state(),
+        SpeechSessionState::Open,
+        "the session ended right after the completion, and the wait did not see it: {events:#?}"
+    );
 }
 
 /// A `contentEnd` that says the user interrupted, without its `contentId` or `type`, still

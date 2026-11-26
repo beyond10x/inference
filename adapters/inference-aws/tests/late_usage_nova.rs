@@ -26,7 +26,7 @@ use inference_duplex::{
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use wait::{completed, ended, until};
+use wait::{completed, drain, ended, until};
 
 /// A provider that sends `events` in order once the session opens, then does what `after` says.
 #[derive(Debug, Clone)]
@@ -427,6 +427,8 @@ fn an_undecodable_frame_does_not_end_the_session() {
         matches!(event, SessionEvent::ResponseUsageRecorded(recorded)
             if recorded.usage.output.text_tokens == 13)
     });
+    // Quiet: nothing ends the session after its last usage event.
+    events.extend(drain(&mut session));
     assert_eq!(
         session.ledger().session().state(),
         SpeechSessionState::Open,

@@ -16,17 +16,16 @@
 //!   before it starts.
 //! - A thread that is ready to run and gets no processor is late, not blocked: up to 18 ms of one
 //!   gap. The ticker reads what the kernel counted of it for the runtime's thread and takes it
-//!   out of each gap, at most half of it. A thread that sleeps, parks or waits on a lock or a
-//!   socket is not ready to run, so a handle that blocks the thread is counted in full.
+//!   out of each gap. A thread that sleeps, parks or waits on a lock or a socket is not ready to
+//!   run, so a handle that blocks the thread is counted in full.
 //!
 //! The limit of the second: a thread that stays ready to run while it holds the runtime, in a
-//! loop of yields or in a spin that is preempted, is counted as ready too when another thread is
-//! ready on its processor; the kernel's run-queue field cannot tell it from a late host. On the
-//! build node at a load average of 86 the field also took a 200 ms sleep out of its gap. So the
-//! ticker never counts a gap as less than half of its wall time: a hold of 100 ms or more fails
-//! the bound whatever the field counted, and a hold under that which stays ready to run can still
-//! pass it. `adversary_w2_ticker_blocks.rs` holds the thread 200 ms in six forms on a processor
-//! that eight spinning threads contend for, and all six fail the bound.
+//! loop of yields or in a spin that is preempted, is taken out of the gap too when another thread
+//! is ready on its processor. The kernel's run-queue field cannot tell it from a late host. Only
+//! the time it ran stays in the gap. `adversary_w2_ticker_blocks.rs` holds the thread in six forms
+//! on a processor that eight spinning threads contend for: the sleep, the park, the lock and the
+//! socket read for 200 ms, and the busy loop for 200 ms of its own processor time, all fail the
+//! bound; the loop of yields is ignored there for this reason.
 
 mod stt_support;
 mod support;

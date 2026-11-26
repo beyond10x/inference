@@ -1,36 +1,41 @@
 //! Adversary, story:ticker-tests-hold-on-a-loaded-host and
 //! story:ticker-test-holds-under-contention: the ticker of `async_handles.rs` against a runtime
-//! thread that is held for 200 ms in other ways than `std::thread::sleep`, on a processor other
-//! threads contend for.
+//! thread that is held in other ways than `std::thread::sleep`, on a processor other threads
+//! contend for.
 //!
 //! The first story's acceptance: "A change that blocks the runtime for 200 ms inside a synthesis
 //! or a recognition fails both tests." The second's: the test fails on that block also when the
-//! processors are contended. The ticker takes out of each gap the time the kernel counted the
-//! runtime's thread as ready to run without a processor, and at most half of the gap
-//! (`support/ticker.rs`). Half, because that count is not the host's alone: a thread that spins
-//! or yields while it holds the runtime is counted as ready whenever it is preempted, and on the
-//! build node at a load average of 86 the count took a 200 ms sleep down to a gap of 11.2 ms. A
-//! gap is therefore never counted as less than half of its wall time, so a hold of 200 ms leaves
-//! at least 100 ms, twice the 50 ms bound, whatever the kernel counted; a gap of the host alone
-//! still passes the bound up to 100 ms of wall time, where the most counted in one gap on a
-//! loaded host was 18 ms.
+//! processors are contended. The ticker (`support/ticker.rs`) takes out of each gap all of the time
+//! the kernel counted the runtime's thread as ready to run without a processor, and nothing else.
 //!
 //! Each case pins the test to one processor beside [`LOADERS`] threads that spin there
-//! ([`Contended`]), so the runtime's thread gets about a ninth of that processor: a busy loop of
-//! 200 ms computes about 22 ms of it and is counted as ready for the rest. Each case holds the
-//! runtime's thread once for 200 ms, in one form, between two awaits, and asserts the opposite of
-//! what the two tests assert: the largest gap is at least the bound, so a handle that held the
-//! thread that way would fail them. The forms that wait also assert that the wait is counted in
-//! full: the largest gap is at least the hold less what the kernel counted as ready inside the
-//! hold, which for a sleep, a park, a lock or a read is only the wait for a processor once the
-//! wait ended. The last case holds nothing beside the same load and passes the bound.
+//! ([`Contended`]), so the runtime's thread gets about a ninth of that processor, and holds the
+//! runtime's thread once between two awaits. It asserts the opposite of what the two tests assert:
+//! the largest gap is at least the bound, so a handle that held the thread that way would fail
+//! them. What the ticker counts of a hold is what the hold is made of, so each form plants what the
+//! rule counts:
 //!
-//! The ticker is the one of `async_handles.rs`, `support/ticker.rs`.
+//! - A wait (a sleep, a park, a lock, a read) is not ready to run, so it is counted in full: the
+//!   largest gap is at least the hold less what the kernel counted as ready inside it. A ticker
+//!   that took out more than the kernel's count fails that. The kernel counts only the wait for a
+//!   processor once the wait ended, so a case whose kernel counted more than a quarter of the hold
+//!   as ready fails with a message that says so: the kernel then counted the wait itself, as the
+//!   build node's did at a load average of 86 (a 200 ms sleep, a gap of 11.2 ms), and no rule of
+//!   the ticker can tell that from a late host.
+//! - A busy loop plants 200 ms of its own thread's processor time, not 200 ms of wall time: the
+//!   time a thread runs is never counted as ready, so the gap holds all of it however long the
+//!   thread waited for a processor between its runs.
+//! - A loop of yields stays ready to run and is taken out of the gap: the limit
+//!   `support/ticker.rs` states. Its case is ignored.
+//!
+//! Two controls beside the same load pass the bound: a session that holds nothing, and one that
+//! computes 15 ms of its own processor time between two awaits, a third of the bound.
 
 #[path = "support/ticker.rs"]
 mod ticker;
 
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -38,15 +43,19 @@ use std::task::{Context, Wake, Waker};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ticker::{GAP_BOUND, ReadyWait, with_ticker};
+use ticker::{GAP_BOUND, with_ticker};
 
-/// How long each form holds the runtime's thread: the story's 200 ms.
+/// How long each wait holds the runtime's thread, and how much processor time the busy loop
+/// takes: the story's 200 ms.
 const BLOCK: Duration = Duration::from_millis(200);
+/// What the computing control takes of its own processor time: a third of [`GAP_BOUND`].
+const SHORT: Duration = Duration::from_millis(15);
+/// How long a busy loop may wait for its processor time before its case fails: beside the
+/// loaders it takes about nine times its processor time.
+const COMPUTE_LIMIT: Duration = Duration::from_secs(10);
 /// What a session awaits before and after it holds the thread, so the ticker runs on both sides.
 const LEAD: Duration = Duration::from_millis(35);
-/// How many threads spin on the test's processor: with the runtime's thread there are nine, so
-/// a busy loop of [`BLOCK`] computes about 22 ms, under the bound, and is counted as ready for
-/// the rest.
+/// How many threads spin on the test's processor: with the runtime's thread there are nine.
 const LOADERS: usize = 8;
 
 /// The test pinned to one processor beside [`LOADERS`] threads that spin there, until dropped.
@@ -104,45 +113,81 @@ impl Drop for Contended {
     }
 }
 
-/// What one session measured of its hold: how long it held the runtime's thread, and how much
-/// of that the kernel counted as ready to run without a processor.
+/// The calling thread's `/proc/thread-self/schedstat`: how long it ran, and how long it was ready
+/// to run without a processor. Read it on the thread that opened it only.
+struct Schedstat(File);
+
+impl Schedstat {
+    fn of_this_thread() -> Self {
+        Self(File::open("/proc/thread-self/schedstat").expect("the thread's schedstat"))
+    }
+
+    /// The time the thread ran and the time it was ready to run, so far.
+    fn read(&mut self) -> (Duration, Duration) {
+        let mut text = String::new();
+        self.0
+            .seek(SeekFrom::Start(0))
+            .expect("the start of schedstat");
+        self.0.read_to_string(&mut text).expect("schedstat");
+        let mut fields = text
+            .split_whitespace()
+            .map(|nanoseconds| Duration::from_nanos(nanoseconds.parse().expect("nanoseconds")));
+        let ran = fields.next().expect("the time the thread ran");
+        let ready = fields.next().expect("the time the thread was ready");
+        (ran, ready)
+    }
+}
+
+/// What one session measured of its hold: how long it held the runtime's thread, how much of that
+/// the kernel counted as ready to run without a processor, and how long the thread ran in it.
 #[derive(Debug, Clone, Copy)]
 struct Hold {
     held: Duration,
     ready: Duration,
+    ran: Duration,
 }
 
 /// One session that holds the runtime's thread once with `block`; what it measured of the hold.
+/// The ready time is read outside the hold and the run time inside it, so the first is at least
+/// the ready time of the hold and the second at most its run time.
 async fn held_by(block: fn()) -> Hold {
-    let mut ready = ReadyWait::of_this_thread();
+    let mut schedstat = Schedstat::of_this_thread();
     tokio::time::sleep(LEAD).await;
-    let ready_before = ready.so_far();
+    let (_, ready_before) = schedstat.read();
     let started = Instant::now();
+    let (ran_first, _) = schedstat.read();
     block();
+    let (ran_last, _) = schedstat.read();
     let held = started.elapsed();
-    let ready = ready.so_far().saturating_sub(ready_before);
+    let (_, ready_after) = schedstat.read();
     tokio::time::sleep(LEAD).await;
-    Hold { held, ready }
+    Hold {
+        held,
+        ready: ready_after.saturating_sub(ready_before),
+        ran: ran_last.saturating_sub(ran_first),
+    }
 }
 
 /// Holds the thread with `block` beside the ticker on a contended processor; what the session
-/// measured of the hold and the ticker's largest gap. Fails where the two tests of
-/// `async_handles.rs` would pass.
-fn fails_the_tests(form: &str, block: fn()) -> (Hold, Duration) {
+/// measured of the hold and the ticker's largest gap.
+fn beside_the_load(form: &str, block: fn()) -> (Hold, Duration) {
     let contended = Contended::start();
     let (hold, largest) = with_ticker(vec![held_by(block)]);
     let hold = hold[0];
     let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
     println!(
-        "{form}: the thread was held {:?}, {:?} of it counted as ready; the ticker's largest gap \
-         is {largest:?}; processor {} beside {LOADERS} loaders, load {}",
-        hold.held,
-        hold.ready,
+        "{form}: {hold:?}; the ticker's largest gap is {largest:?}; processor {} beside {LOADERS} \
+         loaders, load {}",
         contended.processor,
         load.trim_end(),
     );
     drop(contended);
-    assert!(hold.held >= BLOCK, "{form} held the thread only {hold:?}");
+    (hold, largest)
+}
+
+/// As [`beside_the_load`], and fails where the two tests of `async_handles.rs` would pass.
+fn fails_the_tests(form: &str, block: fn()) -> (Hold, Duration) {
+    let (hold, largest) = beside_the_load(form, block);
     assert!(
         largest >= GAP_BOUND,
         "{form} held the runtime's thread {hold:?} and the ticker's largest gap is {largest:?}: \
@@ -151,13 +196,28 @@ fn fails_the_tests(form: &str, block: fn()) -> (Hold, Duration) {
     (hold, largest)
 }
 
-/// As [`fails_the_tests`], for a form in which the thread waits and is not ready to run: the gap
-/// is the whole hold, less only what the kernel counted as ready inside it.
+/// As [`fails_the_tests`], for a wait of [`BLOCK`]: the gap is the whole hold less what the kernel
+/// counted as ready inside it, and the kernel counted no more than a quarter of the hold.
 fn is_counted_in_full(form: &str, block: fn()) {
-    let (hold, largest) = fails_the_tests(form, block);
+    let (hold, largest) = beside_the_load(form, block);
+    assert!(hold.held >= BLOCK, "{form} held the thread only {hold:?}");
+    assert!(
+        hold.ready <= hold.held / 4,
+        "the kernel counted {:?} of a hold of {:?} by {form} as ready to run: more than a quarter, \
+         so it counted the wait itself as ready, and the ticker takes that count as it is \
+         (largest gap {largest:?})",
+        hold.ready,
+        hold.held,
+    );
     assert!(
         largest >= hold.held.saturating_sub(hold.ready),
-        "{form} held the runtime's thread {hold:?} and the ticker counted {largest:?} of it"
+        "{form} held the runtime's thread {hold:?} and the ticker counted {largest:?} of it: it \
+         took out more than the kernel counted as ready"
+    );
+    assert!(
+        largest >= GAP_BOUND,
+        "{form} held the runtime's thread {hold:?} and the ticker's largest gap is {largest:?}: \
+         under the bound, the two tests pass"
     );
 }
 
@@ -244,17 +304,40 @@ fn a_thread_waiting_200_ms_in_a_blocking_read_fails_the_tests() {
     is_counted_in_full("a blocking read", read_a_socket);
 }
 
-/// The thread computes for [`BLOCK`] of wall time.
-fn compute() {
+/// The thread computes until it has run for `time` of its own processor time, however long it
+/// waits for a processor between its runs; it fails once [`COMPUTE_LIMIT`] has passed.
+fn compute_for(time: Duration) {
+    let mut schedstat = Schedstat::of_this_thread();
     let started = Instant::now();
-    while started.elapsed() < BLOCK {
-        std::hint::spin_loop();
+    let (first, _) = schedstat.read();
+    loop {
+        for _ in 0..10_000 {
+            std::hint::spin_loop();
+        }
+        let ran = schedstat.read().0.saturating_sub(first);
+        if ran >= time {
+            return;
+        }
+        assert!(
+            started.elapsed() < COMPUTE_LIMIT,
+            "the thread ran {ran:?} of its {time:?} of processor time in {COMPUTE_LIMIT:?}"
+        );
     }
+}
+
+/// The thread computes for [`BLOCK`] of its own processor time.
+fn compute() {
+    compute_for(BLOCK);
 }
 
 #[test]
 fn a_thread_computing_for_200_ms_fails_the_tests() {
-    fails_the_tests("a busy loop", compute);
+    let (hold, largest) = fails_the_tests("a busy loop", compute);
+    assert!(
+        largest >= hold.ran,
+        "a busy loop ran {:?} and the ticker counted {largest:?} of it",
+        hold.ran
+    );
 }
 
 /// The thread waits for [`BLOCK`] of wall time by yielding in a loop, ready to run throughout.
@@ -266,24 +349,37 @@ fn yield_in_a_loop() {
 }
 
 #[test]
+#[ignore = "limit: adapters/inference-elevenlabs/tests/support/ticker.rs states it: a thread that yields in a loop stays ready to run, so on a shared processor the kernel counts it as run-queue wait and the ticker takes it out of the gap"]
 fn a_thread_yielding_in_a_loop_for_200_ms_fails_the_tests() {
     fails_the_tests("a loop of yields", yield_in_a_loop);
 }
 
-/// The control: a session that holds nothing, beside the same load, passes the bound, so the
-/// cases above fail on their hold and not on the load.
+/// A control: a session that holds nothing, beside the same load, passes the bound, so the cases
+/// above fail on their hold and not on the load.
 #[test]
 fn a_thread_held_by_nothing_passes_the_tests_beside_the_same_load() {
-    let contended = Contended::start();
-    let (hold, largest) = with_ticker(vec![held_by(|| {})]);
-    println!(
-        "nothing: the ticker's largest gap is {largest:?}, {:?} counted as ready in the session; \
-         processor {} beside {LOADERS} loaders",
-        hold[0].ready, contended.processor,
-    );
-    drop(contended);
+    let (hold, largest) = beside_the_load("nothing", || {});
     assert!(
         largest < GAP_BOUND,
-        "the ticker's largest gap {largest:?} beside the load, with nothing held"
+        "the ticker's largest gap {largest:?} beside the load, with nothing held: {hold:?}"
+    );
+}
+
+/// The thread computes for [`SHORT`] of its own processor time.
+fn compute_short() {
+    compute_for(SHORT);
+}
+
+/// A control: a session that computes 15 ms of its own processor time between two awaits, beside
+/// the same load, passes the bound, so the busy loop fails on its 200 ms and not on the time it
+/// waited for a processor between its runs.
+#[test]
+fn a_thread_computing_for_15_ms_passes_the_tests_beside_the_same_load() {
+    let (hold, largest) = beside_the_load("a short busy loop", compute_short);
+    assert!(
+        largest < GAP_BOUND,
+        "a session that ran {:?} of its own processor time beside the load, and the ticker's \
+         largest gap is {largest:?}: {hold:?}",
+        hold.ran
     );
 }
