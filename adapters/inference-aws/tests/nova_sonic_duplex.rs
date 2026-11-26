@@ -8,6 +8,8 @@
 #![cfg(feature = "duplex")]
 
 mod replay;
+#[allow(dead_code)]
+mod wait;
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::{Duration, Instant};
@@ -31,8 +33,7 @@ use inference_duplex::{
 };
 use replay::{Faults, Replay, Reply, Turn, turn};
 use serde_json::{Value, json};
-
-const WAIT: Duration = Duration::from_millis(100);
+use wait::{WAIT, completed, drain, ended, until, until_within};
 
 fn pcm(sample_rate: u32) -> AudioFormat {
     AudioFormat {
@@ -104,70 +105,14 @@ fn speak(session: &mut impl SpeechSessionHandle, from: u64, frames: u64) {
     }
 }
 
-/// Every event until nothing arrives for one wait. This waits for a time: on a busy host a gap
-/// between two events of the replay passes the wait, and the events after it are left out. A
-/// test that needs an event waits for it with [`until`] first.
-fn drain(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
-    let mut events = Vec::new();
-    while let Some(event) = session.next_event(WAIT) {
-        events.push(event);
-        assert!(events.len() < 500, "the session never went quiet");
-    }
+/// Every event of a turn the replay answers with speech: up to the response's completion, then up
+/// to the usage event that follows it, the replay's last of the turn.
+fn answered(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
+    let mut events = completed(session);
+    events.extend(until(session, |event| {
+        matches!(event, SessionEvent::ResponseUsageRecorded(_))
+    }));
     events
-}
-
-/// How long [`until`] waits for its event in all, however often events that are not the one
-/// come: a third of the runner's 60 s, so the wait fails with its own message first.
-const UNTIL_LIMIT: Duration = Duration::from_secs(20);
-
-/// Every event up to and including the first `stop` holds for, within [`UNTIL_LIMIT`].
-fn until(
-    session: &mut impl SpeechSessionHandle,
-    stop: impl Fn(&SessionEvent) -> bool,
-) -> Vec<SessionEvent> {
-    until_within(session, stop, UNTIL_LIMIT)
-}
-
-/// Every event up to and including the first `stop` holds for. It fails with its own message at
-/// either of two ends: once 30 waits in a row bring nothing, 3 s without an event, and once
-/// `limit` has passed since it began. Waits that came up empty between events do not count
-/// towards the first: on a busy host a gap between two events of the replay can pass one wait.
-fn until_within(
-    session: &mut impl SpeechSessionHandle,
-    stop: impl Fn(&SessionEvent) -> bool,
-    limit: Duration,
-) -> Vec<SessionEvent> {
-    let started = Instant::now();
-    let mut events = Vec::new();
-    let mut idle = 0;
-    loop {
-        match session.next_event(WAIT) {
-            Some(event) => {
-                idle = 0;
-                let done = stop(&event);
-                events.push(event);
-                if done {
-                    return events;
-                }
-                assert!(
-                    events.len() < 500,
-                    "the awaited event never came: {events:#?}"
-                );
-            }
-            None => {
-                idle += 1;
-                assert!(
-                    idle < 30,
-                    "the awaited event never came, and no event for 30 waits of {WAIT:?}: \
-                     {events:#?}"
-                );
-            }
-        }
-        assert!(
-            started.elapsed() < limit,
-            "the awaited event did not come within {limit:?}: {events:#?}"
-        );
-    }
 }
 
 fn created(events: &[SessionEvent]) -> Vec<ResponseId> {
@@ -228,7 +173,7 @@ fn the_notice_over_a_finished_answer_is_reported_as_speech() {
     ]);
     let mut session = model(&replay).open(config()).expect("opens");
     speak(&mut session, 0, 2);
-    let first_turn = drain(&mut session);
+    let first_turn = answered(&mut session);
     let first = created(&first_turn)[0];
     assert_eq!(
         session.ledger().response(first).map(|r| r.state()),
@@ -252,7 +197,7 @@ fn the_notice_over_a_finished_answer_is_reported_as_speech() {
     session
         .append_audio(frame(pcm(16_000), 1_600, 0))
         .expect("silence");
-    let rest = drain(&mut session);
+    let rest = completed(&mut session);
     assert!(
         speech_started(&rest).is_empty(),
         "the turn's transcript adds no second report: {rest:#?}"
@@ -343,7 +288,9 @@ fn audio_in_gives_audio_and_transcript_out_on_one_response_id() {
         .open(config())
         .expect("the model takes the configuration");
     speak(&mut session, 0, 3);
-    let events = drain(&mut session);
+    let mut events = answered(&mut session);
+    // Quiet: the assertion below that only usage follows the completion needs nothing more to come.
+    events.extend(drain(&mut session));
 
     let responses = created(&events);
     assert_eq!(responses.len(), 1, "{events:#?}");
@@ -449,6 +396,7 @@ fn speech_during_a_response_cancels_it_and_the_next_response_has_a_new_id() {
         &mut session,
         |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id != first),
     );
+    // Quiet: nothing of the cancelled response comes after, and its usage is recorded once.
     rest.extend(drain(&mut session));
     let cancelled = position(
         &rest,
@@ -538,7 +486,10 @@ fn barge_in_by_the_caller_and_truncation_are_refused() {
         session.truncate_output(response, SampleClockPosition::new(160).expect("a position")),
         Err(SessionError::Unsupported(Unsupported::Truncation))
     );
-    let rest = drain(&mut session);
+    let rest = until(
+        &mut session,
+        |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id == response),
+    );
     assert!(rest.iter().any(
         |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id == response)
     ));
@@ -564,7 +515,7 @@ fn a_tool_call_answered_on_the_session_yields_a_response_that_uses_its_result() 
         .open(config())
         .expect("the model takes the configuration");
     speak(&mut session, 0, 2);
-    let events = drain(&mut session);
+    let events = completed(&mut session);
     let first = created(&events)[0];
     let (call_id, response_id, tool_id, arguments) = events
         .iter()
@@ -592,7 +543,10 @@ fn a_tool_call_answered_on_the_session_yields_a_response_that_uses_its_result() 
     session
         .submit_tool_result(&call_id, json!({"celsius": 21}))
         .expect("the call awaits its result");
-    let answer = drain(&mut session);
+    let answer = until(
+        &mut session,
+        |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id != first),
+    );
     assert!(answer.iter().any(|event| matches!(
         event,
         SessionEvent::SpeechToolCallAnswered(answered) if answered.call_id == call_id
@@ -624,13 +578,15 @@ fn a_tool_result_that_is_not_an_object_is_sent_as_one() {
     }]);
     let mut session = model(&replay).open(config()).expect("opens");
     speak(&mut session, 0, 2);
-    let call_id = drain(&mut session)
-        .into_iter()
-        .find_map(|event| match event {
-            SessionEvent::SpeechToolCallProposed(proposed) => Some(proposed.call_id),
-            _ => None,
-        })
-        .expect("a proposed call");
+    let call_id = until(&mut session, |event| {
+        matches!(event, SessionEvent::SpeechToolCallProposed(_))
+    })
+    .into_iter()
+    .find_map(|event| match event {
+        SessionEvent::SpeechToolCallProposed(proposed) => Some(proposed.call_id),
+        _ => None,
+    })
+    .expect("a proposed call");
     session
         .submit_tool_result(&call_id, json!(21))
         .expect("the call awaits its result");
@@ -943,7 +899,7 @@ fn the_session_configuration_reaches_the_provider() {
         Err(SessionError::FormatMismatch { .. })
     ));
 
-    let events = drain(&mut session);
+    let events = completed(&mut session);
     let audio: Vec<&AudioFrame> = events
         .iter()
         .filter_map(|event| match event {
@@ -994,9 +950,9 @@ fn usage_is_a_running_total_per_response() {
     let replay = Replay::new(vec![turn("hi", "Hello"), turn("again", "Hello again")]);
     let mut session = model(&replay).open(config()).expect("opens");
     speak(&mut session, 0, 2);
-    let first_turn = drain(&mut session);
+    let first_turn = answered(&mut session);
     speak(&mut session, 960, 2);
-    let second_turn = drain(&mut session);
+    let second_turn = answered(&mut session);
     let expected = ResponseUsage {
         input: TokenCounts {
             text_tokens: 0,
@@ -1031,7 +987,7 @@ fn usage_is_a_running_total_per_response() {
     }
 
     session.close().expect("open");
-    let closing = drain(&mut session);
+    let closing = ended(&mut session);
     let first = created(&first_turn)[0];
     let second = created(&second_turn)[0];
     assert!(
@@ -1390,7 +1346,7 @@ fn with_its_own_barge_in_input_during_output_restarts_the_response() {
 /// [`until_within`] on a session whose events keep coming, each a little later than [`WAIT`],
 /// and none of them the one it waits for, fails with its own message at its limit. Every event
 /// resets the count of empty waits, so without the limit the wait would end only at its 500th
-/// event, 75 s here, past the runner's 60 s. [`until`] holds [`UNTIL_LIMIT`]; this test gives
+/// event, 75 s here, past the runner's 60 s. [`until`] holds `wait::UNTIL_LIMIT`; this test gives
 /// the same wait 2 s so it ends within a few seconds.
 #[test]
 fn until_fails_with_its_message_on_a_slow_stream_that_never_brings_the_event() {
