@@ -521,8 +521,10 @@ fn results(record: &mut Value) -> &mut Vec<Value> {
 /// of its text, and the words `record_problems` and the program both name it with.
 type Plant = (&'static str, fn(&str) -> String, &'static str);
 
-/// One plant for each rule `record_problems` holds a record to.
-const PLANTS: [Plant; 14] = [
+/// One plant for each rule `record_problems` holds a record to, then a second plant of the rules
+/// a copy could narrow without the first one seeing it: a missing value where the first changes
+/// one, another count of the coverage, the other sum of the packages.
+const PLANTS: [Plant; 21] = [
     (
         "adapters/phonic-records.evidence.json",
         |_| "{ not JSON".to_owned(),
@@ -656,6 +658,78 @@ const PLANTS: [Plant; 14] = [
         },
         "for the test crates/inference-docs/src/adapters.rs::another_test, which assessments.deepgram-records does not list",
     ),
+    (
+        "gate/workspace-tests.evidence.json",
+        |text| {
+            changed_record(text, |record| {
+                for result in results(record) {
+                    result.as_object_mut().unwrap().remove("unit");
+                }
+            })
+        },
+        "the unit of slowest_test is None, nextest-run@1 declares Some(\"s\")",
+    ),
+    (
+        "adapters/cartesia-records.evidence.json",
+        |text| {
+            changed_record(text, |record| {
+                record["evidence"]["coverage"]["not_run"] = 2.into();
+            })
+        },
+        "the coverage has Some(2) for `not_run`, a count named-tests@1 does not report",
+    ),
+    (
+        "adapters/deepslate-records.evidence.json",
+        |text| {
+            changed_record(text, |record| {
+                record.as_object_mut().unwrap().remove("format");
+            })
+        },
+        "format is None, not \"ratchet-evidence/1\"",
+    ),
+    (
+        "adapters/adapter-tests.evidence.json",
+        |text| {
+            changed_record(text, |record| {
+                let passed = record["evidence"]["coverage"]["passed"].as_u64().unwrap();
+                record["evidence"]["coverage"]["passed"] = (passed + 1).into();
+            })
+        },
+        "passed tests, and the `tests_passed` results of the packages of assessments.adapter-tests sum to",
+    ),
+    (
+        "adapters/aws-records.evidence.json",
+        |text| {
+            changed_record(text, |record| {
+                record["evidence"]["coverage"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("unsupported");
+            })
+        },
+        "the coverage has None for `unsupported`",
+    ),
+    (
+        "adapters/elevenlabs-records.evidence.json",
+        |text| {
+            changed_record(text, |record| {
+                record["evidence"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("project");
+            })
+        },
+        "project is None, the specification's is \"inference\"",
+    ),
+    (
+        "adapters/openai-records.evidence.json",
+        |text| {
+            changed_record(text, |record| {
+                results(record)[0].as_object_mut().unwrap().remove("output");
+            })
+        },
+        "named-tests@1 declares no output \"\"",
+    ),
 ];
 
 /// The record rules live twice: in `record_problems` of this check, and in the program, which
@@ -676,10 +750,11 @@ fn a_record_the_record_rules_refuse_is_refused_by_the_program_in_the_same_words(
             None => rounds.push(vec![plant]),
         }
     }
-    assert_eq!(rounds.len(), 3, "adapter-tests holds three plants");
+    assert_eq!(rounds.len(), 4, "adapter-tests holds four plants");
+    let loaded = load();
     for round in rounds {
         let case = Case::new();
-        let mut documents = load();
+        let mut documents = loaded.clone();
         for (path, change, _) in &round {
             let text = change(&case.record(path));
             documents.records.insert(committed_path(path), text.clone());
@@ -761,3 +836,5 @@ fn a_write_that_fails_leaves_every_record_as_it_was() {
     fs::write(&record, earlier).unwrap();
     case.untouched(&[]);
 }
+
+mod adversary;

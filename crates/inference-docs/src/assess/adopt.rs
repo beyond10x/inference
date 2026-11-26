@@ -17,25 +17,32 @@
 //! - a run that is not a push to `main` of the workflow `check`, or whose id is not `--run`;
 //! - a record that names another run than `--run`, or another commit than the run's;
 //! - a missing record of an assessment `junit-assessments` lists, and any other file or directory;
+//! - a record or a `run.json` that is not JSON, or in which one object holds a key twice, which
+//!   readers of the copied bytes could read in two ways;
 //! - a record of another project than the plan files', of another assessor than its assessment's,
-//!   of another class than `ci`, or of another target than its plan's;
+//!   of another class than `ci`, or with another target than the one `assess` writes for its plan
+//!   and the run: its kind, class, selection, revision or identifiers, and no other field;
 //! - a record whose source `assess` refuses, or names no forge run;
 //! - a record the record rules of the quality documents refuse: [`record_rules`], the rules
 //!   `record_problems` of `tests/quality/mod.rs` holds.
 //!
 //! Exit 0: every record is written to `quality/records/<assessment>.evidence.json` under the root.
-//! Exit 1: a refusal, nothing written. Exit 2: a wrong call. Exit 3: a plan file or a declaration
-//! cannot be read, or a record cannot be written; the records written before it are put back, so
-//! the directory holds all adopted records or none.
+//! Exit 1: a refusal, nothing written. Exit 2: a wrong call. Exit 3: a plan file, a declaration or
+//! the file of the tree a document target names cannot be read, or a record cannot be written;
+//! the records written before it are put back, so the directory holds all adopted records or
+//! none. A temporary file is created new, after whatever stood at its path is removed, so a link
+//! there is never written through.
 
 use std::{
     collections::BTreeSet,
-    fs,
+    fmt, fs,
+    io::{ErrorKind, Write as _},
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
 use clap::Args;
+use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use serde_norway::Value as Yaml;
 
@@ -181,6 +188,10 @@ fn adopt(arguments: &Arguments) -> Outcome<Vec<String>> {
                 continue;
             }
         };
+        if let Err(error) = serde_json::from_slice::<Unique>(&bytes) {
+            refused.push(format!("{at}: {error}"));
+            continue;
+        }
         let before = refused.len();
         for problem in of_the_run(root, arguments.run, commit.as_deref(), one, &plan, &record)?
             .into_iter()
@@ -205,7 +216,9 @@ fn run_commit(arguments: &Arguments, refused: &mut Vec<String>) -> Option<String
     let run: Value = match fs::read_to_string(&arguments.run_json)
         .map_err(|error| format!("cannot be read: {error}"))
         .and_then(|text| {
-            serde_json::from_str(&text).map_err(|error| format!("is not JSON: {error}"))
+            serde_json::from_str::<Unique>(&text)
+                .and_then(|_| serde_json::from_str(&text))
+                .map_err(|error| format!("is not JSON with each key once: {error}"))
         }) {
         Ok(run) => run,
         Err(why) => {
@@ -239,6 +252,81 @@ fn run_commit(arguments: &Arguments, refused: &mut Vec<String>) -> Option<String
             None
         }
     }
+}
+
+/// A JSON value read only to refuse an object that holds one key twice: `serde_json` keeps the
+/// last value of such a key, and another reader of the same bytes may keep the first.
+struct Unique;
+
+impl<'de> Deserialize<'de> for Unique {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(Unique)
+    }
+}
+
+impl<'de> Visitor<'de> for Unique {
+    type Value = Unique;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Unique, E> {
+        Ok(Unique)
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<Unique, E> {
+        Ok(Unique)
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<Unique, E> {
+        Ok(Unique)
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<Unique, E> {
+        Ok(Unique)
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<Unique, E> {
+        Ok(Unique)
+    }
+
+    fn visit_unit<E>(self) -> Result<Unique, E> {
+        Ok(Unique)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<Unique, A::Error> {
+        while items.next_element::<Unique>()?.is_some() {}
+        Ok(Unique)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Unique, A::Error> {
+        let mut keys = BTreeSet::new();
+        while let Some(key) = entries.next_key::<String>()? {
+            entries.next_value::<Unique>()?;
+            if !keys.insert(key.clone()) {
+                return Err(de::Error::custom(format!(
+                    "the key {key:?} stands twice in one object"
+                )));
+            }
+        }
+        Ok(Unique)
+    }
+}
+
+/// Writes `bytes` to a file created new at `path`, after whatever stood there is removed: a link
+/// at `path` is removed, not written through.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 fn full_commit(text: &str) -> bool {
@@ -363,6 +451,17 @@ fn of_the_run(
         .and_then(|target| target.get("selection"))
         .is_some();
     let candidate = text_at(record, "/evidence/candidate");
+    let mut written = serde_json::Map::new();
+    written.insert("kind".to_owned(), expected.kind.clone().into());
+    written.insert("class".to_owned(), "ci".into());
+    if let Some(selection) = plan
+        .assessment
+        .get("target")
+        .and_then(|target| target.get("selection"))
+        .and_then(Yaml::as_str)
+    {
+        written.insert("selection".to_owned(), selection.into());
+    }
     let identity = match expected.kind.as_str() {
         "revision" => {
             let revision = text_at(record, "/evidence/target/revision");
@@ -372,6 +471,15 @@ fn of_the_run(
                 problems.push(format!(
                     "the revision is {revision:?}, the commit of the run is {commit}"
                 ));
+            }
+            if record.pointer("/evidence/target/identifiers").is_some() {
+                problems.push(
+                    "the target is a revision and names identifiers, which assess never writes for a revision"
+                        .to_owned(),
+                );
+            }
+            if let Some(revision) = commit.or(revision) {
+                written.insert("revision".to_owned(), revision.into());
             }
             revision.map(str::to_owned)
         }
@@ -403,6 +511,16 @@ fn of_the_run(
                     "the digest of the target is {held:?}, {path} of the tree has {digest}"
                 ));
             }
+            let form = text_at(record, "/evidence/target/identifiers/digest_form");
+            if form != Some("bytes") {
+                problems.push(format!(
+                    "the digest form of the target is {form:?}, assess writes \"bytes\""
+                ));
+            }
+            written.insert(
+                "identifiers".to_owned(),
+                serde_json::json!({"path": path, "digest": digest, "digest_form": "bytes"}),
+            );
             Some(digest)
         }
         other => {
@@ -414,6 +532,13 @@ fn of_the_run(
     if candidate != wanted.as_deref() {
         problems.push(format!(
             "the candidate is {candidate:?}, its target gives {wanted:?}"
+        ));
+    }
+    let written = Value::Object(written);
+    let target = record.pointer("/evidence/target").unwrap_or(&Value::Null);
+    if *target != written {
+        problems.push(format!(
+            "the target is {target}, assess writes {written} for its plan and the run"
         ));
     }
     Ok(problems)
@@ -628,7 +753,7 @@ fn write_all(root: &Path, adopted: &[(String, Vec<u8>)]) -> Outcome<Vec<String>>
         }
     };
     for (at, one) in planned.iter().enumerate() {
-        if let Err(error) = fs::write(&one.temporary, one.bytes) {
+        if let Err(error) = write_new(&one.temporary, one.bytes) {
             remove_temporaries(at + 1);
             return Err(Failure::Broken(format!(
                 "{}: its temporary file {} cannot be written: {error}; no record was adopted",
