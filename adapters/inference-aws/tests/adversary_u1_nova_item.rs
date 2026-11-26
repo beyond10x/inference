@@ -6,6 +6,8 @@
 
 #[allow(dead_code)]
 mod replay;
+#[allow(dead_code)]
+mod wait;
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;
@@ -20,8 +22,7 @@ use inference_duplex::{
 };
 use replay::{Replay, turn};
 use serde_json::json;
-
-const WAIT: Duration = Duration::from_millis(100);
+use wait::{drain, until};
 
 fn pcm(sample_rate: u32) -> AudioFormat {
     AudioFormat {
@@ -81,11 +82,11 @@ fn a_user_turn_is_named_by_its_text_blocks_content_id() {
             .append_audio(frame(pcm(16_000), index * 320, byte))
             .expect("input in the session's format");
     }
-    let mut events = Vec::new();
-    while let Some(event) = session.next_event(WAIT) {
-        events.push(event);
-        assert!(events.len() < 500, "the session never went quiet");
-    }
+    let mut events = until(&mut session, |event| {
+        matches!(event, SessionEvent::InputTranscribed(_))
+    });
+    // Quiet: no second commit or transcript of the turn comes.
+    events.extend(drain(&mut session));
     let items: Vec<String> = events
         .iter()
         .filter_map(|event| match event {

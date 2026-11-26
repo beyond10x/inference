@@ -5,8 +5,11 @@
 
 #[allow(dead_code)]
 mod replay;
+#[allow(dead_code)]
+mod wait;
 
 use std::num::{NonZeroU16, NonZeroU32};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use inference_aws::duplex::NovaSonicSpeech;
@@ -19,8 +22,7 @@ use inference_duplex::{
     TurnDetection, TurnTuning, UsageRecorded,
 };
 use replay::{Faults, Replay, turn};
-
-const WAIT: Duration = Duration::from_millis(100);
+use wait::{after_sent, ended, until};
 
 fn pcm() -> AudioFormat {
     AudioFormat {
@@ -59,15 +61,6 @@ fn speak(session: &mut impl SpeechSessionHandle, frames: u64) {
     }
 }
 
-fn drain(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
-    let mut events = Vec::new();
-    while let Some(event) = session.next_event(WAIT) {
-        events.push(event);
-        assert!(events.len() < 500, "the session never went quiet");
-    }
-    events
-}
-
 fn records(events: &[SessionEvent]) -> Vec<&UsageRecorded> {
     events
         .iter()
@@ -95,7 +88,9 @@ fn input_usage_reported_before_any_response_survives_the_sessions_end() {
         .open(config())
         .expect("opens");
     speak(&mut session, 2);
-    let mut events = drain(&mut session);
+    // The fifth event, the usage of the user's turn, brings no event of its own; the quiet after it
+    // shows no response begins.
+    let mut events = after_sent(&mut session, || replay.sent.load(Ordering::SeqCst), 5);
     assert!(
         events
             .iter()
@@ -109,7 +104,7 @@ fn input_usage_reported_before_any_response_survives_the_sessions_end() {
         "{events:#?}"
     );
     session.close().expect("open");
-    events.extend(drain(&mut session));
+    events.extend(ended(&mut session));
     let reported: i64 = session
         .ledger()
         .usage_records()
@@ -141,9 +136,11 @@ fn the_same_input_usage_is_recorded_once_a_response_began() {
         .open(config())
         .expect("opens");
     speak(&mut session, 2);
-    let _ = drain(&mut session);
+    let _ = until(&mut session, |event| {
+        matches!(event, SessionEvent::ResponseCreated(_))
+    });
     session.close().expect("open");
-    let _ = drain(&mut session);
+    let _ = ended(&mut session);
     let records = session.ledger().usage_records();
     assert_eq!(records.len(), 1, "{records:#?}");
     assert!(
@@ -175,7 +172,7 @@ fn a_service_failure_records_the_unsettled_response_before_the_sessions_failure(
         .open(config())
         .expect("opens");
     speak(&mut session, 2);
-    let events = drain(&mut session);
+    let events = ended(&mut session);
     let completed = events
         .iter()
         .position(|event| matches!(event, SessionEvent::ResponseCompleted(_)))

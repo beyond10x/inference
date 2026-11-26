@@ -6,8 +6,13 @@
 //! over in-process channels, no network, no credential.
 #![cfg(feature = "duplex")]
 
+#[allow(dead_code)]
+mod wait;
+
 use std::future::Future;
 use std::num::{NonZeroU16, NonZeroU32};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use inference_aws::duplex::{Connector, NovaSonicSpeech};
@@ -22,8 +27,7 @@ use inference_duplex::{
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-
-const WAIT: Duration = Duration::from_millis(100);
+use wait::{WAIT, after_sent, completed, ended, until};
 
 /// One step of the scripted provider's output stream.
 #[derive(Debug, Clone)]
@@ -40,9 +44,10 @@ enum Step {
     },
 }
 
-/// A provider that sends its steps once the session opens, then stays open.
+/// A provider that sends its steps once the session opens, then stays open; it counts the steps
+/// it sent.
 #[derive(Debug, Clone)]
-struct Scripted(Vec<Step>);
+struct Scripted(Vec<Step>, Arc<AtomicUsize>);
 
 impl Connector for Scripted {
     fn model_id(&self) -> &str {
@@ -54,6 +59,7 @@ impl Connector for Scripted {
         config: SessionConfig,
     ) -> impl Future<Output = Result<Session, NovaSonicError>> + Send + 'static {
         let steps = self.0.clone();
+        let counted = Arc::clone(&self.1);
         async move {
             let (input, mut received) = mpsc::channel::<Vec<u8>>(256);
             let (frames, output) = mpsc::channel(256);
@@ -76,6 +82,7 @@ impl Connector for Scripted {
                     if sent.is_err() {
                         return;
                     }
+                    counted.fetch_add(1, Ordering::SeqCst);
                 }
                 while received.recv().await.is_some() {}
             });
@@ -152,19 +159,20 @@ fn config(idle_limit: Duration) -> SpeechConfig {
 }
 
 fn open(steps: Vec<Step>, idle_limit: Duration) -> impl SpeechSessionHandle {
-    NovaSonicSpeech::with_connector(Scripted(steps))
-        .expect("the binding's runtime starts")
-        .open(config(idle_limit))
-        .expect("opens")
+    open_counted(steps, idle_limit).0
 }
 
-fn drain(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
-    let mut events = Vec::new();
-    while let Some(event) = session.next_event(WAIT) {
-        events.push(event);
-        assert!(events.len() < 500, "the session never went quiet");
-    }
-    events
+/// As [`open`], with the count of the steps the provider sent.
+fn open_counted(
+    steps: Vec<Step>,
+    idle_limit: Duration,
+) -> (impl SpeechSessionHandle, Arc<AtomicUsize>) {
+    let sent = Arc::new(AtomicUsize::new(0));
+    let session = NovaSonicSpeech::with_connector(Scripted(steps, Arc::clone(&sent)))
+        .expect("the binding's runtime starts")
+        .open(config(idle_limit))
+        .expect("opens");
+    (session, sent)
 }
 
 fn output_text_tokens(session: &impl SpeechSessionHandle) -> i64 {
@@ -187,12 +195,15 @@ fn an_undecodable_frame_is_counted_on_the_session() {
     steps.push(Step::Raw("not json at all"));
     steps.push(usage(5));
     let mut session = open(steps, Duration::from_secs(5));
-    let events = drain(&mut session);
+    // The usage after the frame counts toward the response in progress.
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::ResponseUsageRecorded(_))
+    });
     assert_eq!(session.ledger().unreadable_frames(), 1, "{events:#?}");
     let last = session.ledger().last_unreadable().unwrap_or_default();
     assert!(last.contains("not json at all"), "{last}");
     session.close().expect("open");
-    drain(&mut session);
+    ended(&mut session);
     assert_eq!(output_text_tokens(&session), 5);
 }
 
@@ -274,9 +285,11 @@ fn a_stall_after_a_readable_frame_stays_a_stall_naming_the_unreadable_frame() {
 #[test]
 fn audio_appended_after_the_close_is_refused_and_drops_nothing() {
     let mut session = open(user_turn(), Duration::from_secs(5));
-    drain(&mut session);
+    until(&mut session, |event| {
+        matches!(event, SessionEvent::InputTranscribed(_))
+    });
     session.close().expect("open");
-    drain(&mut session);
+    ended(&mut session);
     let dropped = session.ledger().dropped_count();
     let kept = session.ledger().dropped_events().len();
     let started = Instant::now();
@@ -312,7 +325,7 @@ fn a_completion_end_without_its_stop_reason_ends_the_response() {
     ));
     steps.push(event("completionEnd", json!({})));
     let mut session = open(steps, Duration::from_secs(5));
-    let events = drain(&mut session);
+    let events = completed(&mut session);
     let states: Vec<_> = session
         .ledger()
         .responses()
@@ -331,7 +344,9 @@ fn a_content_end_without_its_id_still_cancels_the_response_in_progress() {
     steps.push(content_start("assistant-1", "TEXT", "ASSISTANT"));
     steps.push(event("contentEnd", json!({"stopReason": "INTERRUPTED"})));
     let mut session = open(steps, Duration::from_secs(5));
-    let events = drain(&mut session);
+    let events = until(&mut session, |event| {
+        matches!(event, SessionEvent::ResponseCancelled(_))
+    });
     let states: Vec<_> = session
         .ledger()
         .responses()
@@ -358,8 +373,11 @@ fn a_content_start_without_its_id_type_or_role_is_counted_as_unreadable() {
         steps.push(event("contentStart", body));
     }
     steps.push(usage(5));
-    let mut session = open(steps, Duration::from_secs(5));
-    let events = drain(&mut session);
+    let count = steps.len();
+    let (mut session, sent) = open_counted(steps, Duration::from_secs(5));
+    // No step after the user's turn brings an event: the three frames are unreadable and the usage
+    // waits for a response.
+    let events = after_sent(&mut session, || sent.load(Ordering::SeqCst), count);
     assert_eq!(session.ledger().unreadable_frames(), 3, "{events:#?}");
     let last = session.ledger().last_unreadable().unwrap_or_default();
     assert!(
@@ -367,6 +385,6 @@ fn a_content_start_without_its_id_type_or_role_is_counted_as_unreadable() {
         "{last}"
     );
     session.close().expect("open");
-    drain(&mut session);
+    ended(&mut session);
     assert_eq!(output_text_tokens(&session), 5);
 }

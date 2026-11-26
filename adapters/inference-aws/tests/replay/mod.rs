@@ -20,6 +20,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -87,6 +88,8 @@ pub struct Replay {
     pub faults: Faults,
     /// Every input event the replay received, in order.
     pub wire: Arc<Mutex<Vec<Value>>>,
+    /// How many events of its answers the replay sent, over every session it opened.
+    pub sent: Arc<AtomicUsize>,
 }
 
 impl Replay {
@@ -100,6 +103,7 @@ impl Replay {
             pace: Duration::from_millis(1),
             faults: Faults::default(),
             wire: Arc::new(Mutex::new(Vec::new())),
+            sent: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -148,6 +152,7 @@ struct Provider {
     pace: Duration,
     faults: Faults,
     wire: Arc<Mutex<Vec<Value>>>,
+    counted: Arc<AtomicUsize>,
     frames: mpsc::Sender<OutputFrame>,
     plan: VecDeque<Value>,
     sent: usize,
@@ -171,6 +176,7 @@ impl Provider {
             pace: replay.pace,
             faults: replay.faults,
             wire: replay.wire,
+            counted: replay.sent,
             frames,
             plan: VecDeque::new(),
             sent: 0,
@@ -240,6 +246,7 @@ impl Provider {
         }
         self.sent += 1;
         let _ = self.frames.send(Ok(event.to_string().into_bytes())).await;
+        self.counted.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Takes one input event; `false` once the session ended.

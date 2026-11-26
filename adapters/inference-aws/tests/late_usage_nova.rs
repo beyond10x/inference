@@ -5,6 +5,9 @@
 //! network, no credential.
 #![cfg(feature = "duplex")]
 
+#[allow(dead_code)]
+mod wait;
+
 use std::future::Future;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;
@@ -23,8 +26,7 @@ use inference_duplex::{
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-
-const WAIT: Duration = Duration::from_millis(100);
+use wait::{completed, ended, until};
 
 /// A provider that sends `events` in order once the session opens, then does what `after` says.
 #[derive(Debug, Clone)]
@@ -213,15 +215,6 @@ fn config() -> SpeechConfig {
     }
 }
 
-fn drain(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
-    let mut events = Vec::new();
-    while let Some(event) = session.next_event(WAIT) {
-        events.push(event);
-        assert!(events.len() < 500, "the session never went quiet");
-    }
-    events
-}
-
 /// The sum of `kind` over every usage record of the session, and whether every one is known.
 fn total(session: &impl SpeechSessionHandle, kind: QuantityKind) -> (i64, bool) {
     let quantities: Vec<Quantity> = session
@@ -247,7 +240,12 @@ fn counted_once(late: &[u64], when: Late) {
         .expect("the binding's runtime starts")
         .open(config())
         .expect("opens");
-    let mut events = drain(&mut session);
+    // Both responses complete, and the usage event of response 2 is the script's last.
+    let mut events = completed(&mut session);
+    events.extend(completed(&mut session));
+    events.extend(until(&mut session, |event| {
+        matches!(event, SessionEvent::ResponseUsageRecorded(_))
+    }));
     assert_eq!(
         events
             .iter()
@@ -257,7 +255,7 @@ fn counted_once(late: &[u64], when: Late) {
         "{events:#?}"
     );
     session.close().expect("open");
-    events.extend(drain(&mut session));
+    events.extend(ended(&mut session));
     let records = session.ledger().usage_records();
     let recorded = events
         .iter()
@@ -351,16 +349,7 @@ fn closes_over(after: After, refused_send: bool) {
     .expect("the binding's runtime starts")
     .open(config())
     .expect("opens");
-    let mut events = Vec::new();
-    loop {
-        let event = session.next_event(WAIT).expect("the response completes");
-        let completed = matches!(event, SessionEvent::ResponseCompleted(_));
-        events.push(event);
-        if completed {
-            break;
-        }
-        assert!(events.len() < 500, "the response never completed");
-    }
+    let mut events = completed(&mut session);
     std::thread::sleep(Duration::from_millis(300));
     if refused_send {
         session
@@ -371,7 +360,7 @@ fn closes_over(after: After, refused_send: bool) {
     session
         .close()
         .expect("closing an open session succeeds whatever already arrived");
-    events.extend(drain(&mut session));
+    events.extend(ended(&mut session));
     assert_eq!(
         session.ledger().session().state(),
         SpeechSessionState::Closed,
@@ -433,14 +422,18 @@ fn an_undecodable_frame_does_not_end_the_session() {
         .expect("the binding's runtime starts")
         .open(config())
         .expect("opens");
-    let mut events = drain(&mut session);
+    // The usage event after the undecodable frame, the script's last, brings the total to 13.
+    let mut events = until(&mut session, |event| {
+        matches!(event, SessionEvent::ResponseUsageRecorded(recorded)
+            if recorded.usage.output.text_tokens == 13)
+    });
     assert_eq!(
         session.ledger().session().state(),
         SpeechSessionState::Open,
         "{events:#?}"
     );
     session.close().expect("open");
-    events.extend(drain(&mut session));
+    events.extend(ended(&mut session));
     assert!(
         matches!(events.last(), Some(SessionEvent::SpeechSessionClosed(_))),
         "{events:#?}"
@@ -527,16 +520,7 @@ fn fails_over(after: After, next: Next, kind: SessionFailureKind) {
     .expect("the binding's runtime starts")
     .open(config)
     .expect("opens");
-    let mut events = Vec::new();
-    loop {
-        let event = session.next_event(WAIT).expect("the response completes");
-        let completed = matches!(event, SessionEvent::ResponseCompleted(_));
-        events.push(event);
-        if completed {
-            break;
-        }
-        assert!(events.len() < 500, "the response never completed");
-    }
+    let mut events = completed(&mut session);
     std::thread::sleep(Duration::from_millis(300));
     session
         .append_audio(silence(0))
@@ -557,7 +541,7 @@ fn fails_over(after: After, next: Next, kind: SessionFailureKind) {
             session.submit_tool_result(&call_id, json!({"celsius": 21}))
         }
     };
-    events.extend(drain(&mut session));
+    events.extend(ended(&mut session));
     let records = session.ledger().usage_records();
     assert_eq!(
         total(&session, QuantityKind::OutputTextTokens),
