@@ -171,9 +171,12 @@ the quality of this repository, what each value is today and where it comes from
 | `ratchet.toml`, `quality/*.ratchet.yaml`, `quality/assessors/`, `quality/records/` | the same measures in the formats of Ratchet (`beyond10x/ratchet`), what each assessor reports, and one record per assessment whose baseline was read from a CI run |
 
 The formats are those of the Ratchet specification at the commit `quality/README.md` names. No
-Ratchet command works at that commit, so Ratchet runs none of the files. They change no gate: they describe what `task check`, `task test-slow` and
-the workflows under `.github/workflows/` already enforce. One step of `task check` reads them:
-`task quality-records` fails when the report of the tests lacks what an assessment reads.
+Ratchet command works at that commit, so Ratchet runs none of the files. They are a gate all the
+same: a step of `task check` and of the required check `inference / task check` reads them, and
+`task quality-records` fails when a plan file cannot be read, when the plan files list no
+assessment it writes a record for, or when a record is refused because the report of the tests
+lacks what its assessment reads. Beyond that step they describe what `task check`,
+`task test-slow` and the workflows under `.github/workflows/` enforce.
 
 The tests of `crates/inference-docs/tests/quality/` run in `task test-run`. They fail when the
 YAML files and records stop agreeing with each other, with `Taskfile.yml`, with the tree, or with

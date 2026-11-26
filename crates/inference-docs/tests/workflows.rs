@@ -282,6 +282,32 @@ fn a_push_to_main_writes_the_quality_records_and_uploads_them() {
     assert_eq!(step.value("run").as_deref(), Some("task quality-records"));
 }
 
+/// A refused record fails the forge's required check as it fails `task check`: neither the step
+/// nor its job lets it fail.
+#[test]
+fn the_records_step_and_its_job_do_not_continue_on_error() {
+    let workflow = check_workflow();
+    let step = steps(&workflow)
+        .into_iter()
+        .find(|step| step.label() == "task quality-records")
+        .expect("check.yml has the step task quality-records");
+    assert_eq!(step.value("continue-on-error"), None);
+    let job: Vec<&str> = workflow
+        .lines()
+        .skip_while(|line| line.trim() != "jobs:")
+        .take_while(|line| line.trim() != "steps:")
+        .collect();
+    assert!(
+        job.iter().any(|line| line.trim() == "check:"),
+        "the job is read: {job:?}"
+    );
+    assert!(
+        !job.iter()
+            .any(|line| line.trim_start().starts_with("continue-on-error:")),
+        "the job of check.yml continues on error: {job:?}"
+    );
+}
+
 #[test]
 fn a_pull_request_writes_the_quality_records_and_does_not_upload_them() {
     let ran = steps_that_run(

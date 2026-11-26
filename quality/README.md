@@ -10,9 +10,12 @@ specification at commit `f139eccc17a548444f0f4e1dc06520120c28739f`.
 
 - No Ratchet command works at that commit. Nothing here is run by Ratchet.
 - Every field name is a proposal of that specification. A release of Ratchet can change it.
-- The documents change no gate. They describe what `task check`, `task test-slow` and the
-  workflows under `.github/workflows/` already enforce. One step of `task check` reads them:
-  `task quality-records` fails when the report of the tests lacks what an assessment reads.
+- The documents are a gate: a step of `task check` and of the required check
+  `inference / task check` reads them. `task quality-records` fails when a plan file cannot be
+  read, when the plan files list no assessment it writes a record for, or when a record is
+  refused because the report of the tests lacks what its assessment reads. A change of a plan
+  file can fail both. Beyond that step the documents describe what `task check`,
+  `task test-slow` and the workflows under `.github/workflows/` enforce.
 - A measure can be defined and have no value. The latency measures on
   [adapters.md](adapters.md) are such: each names its command and its clock, and says
   `Baseline: none.`
@@ -123,8 +126,8 @@ kept yet, and nothing copies a record of a run into `records/`.
 ## The test that keeps the documents true
 
 `crates/inference-docs/tests/quality/`, part of `task test-run`: `mod.rs`, for the rules about
-adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for the list of
-`task quality-records` `records.rs`. It is not
+adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for
+`task quality-records`, its list and its commands, `records.rs`. It is not
 `ratchet validate`. It fails when:
 
 - a file stops parsing, has another format or names another project, a name is declared in two
@@ -187,7 +190,20 @@ adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for
   a record from a file that lacks what the assessment reads. That check reads the first string
   literal of each such macro outside comments; it does not read a literal built by `concat!` or
   a format string held in a variable, and it does not know that the macro runs or what the
-  placeholder prints.
+  placeholder prints;
+- a record written as `task quality-records` writes it, with the class `ci` and the URL of a
+  forge run or the class `local` and the path of the report, and the commit of another run,
+  breaks a rule above that holds a record by itself or against its plan, in the place of the
+  committed record: it does not parse, its format, project, file name, assessor, outputs, units
+  or coverage, its packages, or its results of the listed tests. The baselines, tables and runs
+  the pages state are not held against such a record: a new run changes them;
+- the commands of `task quality-records`, run with `sh` and stand-ins of `cargo` and `git`, do
+  not call the program for the list and then once per listed assessment from the report of
+  `task test-run`, give `--revision` to a target that is no revision, give the class and source
+  of the forge run without its variables or the report's with them, keep a record of an earlier
+  run, or exit 0 with a refused record or an empty list;
+- `inference-docs junit-assessments` lists an assessment of another profile or of an assessor
+  that reads no report, or leaves out one of a reader of the report that names no profile.
 
 One command stands in no `cmds` list of `Taskfile.yml` and names no test or example of a
 package, so the test holds it against nothing. A change of the workflow step that runs it goes

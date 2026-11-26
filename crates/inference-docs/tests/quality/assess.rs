@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
-use super::{load, problems, report};
+use super::{load, problems, record_problems, report};
 use crate::root;
 
 /// The commit and the check run the hand-written records name.
@@ -1914,4 +1914,62 @@ fn the_workspace_run_reports_no_skipped_count_because_its_report_holds_none() {
         document.pointer("/evidence/coverage/skipped"),
         Some(&Value::from(0))
     );
+}
+
+/// The acceptance of `story:quality-records-written-by-each-check-run`, as amended: a record
+/// written as `task quality-records` writes it holds every rule the test of the quality documents
+/// sets a record by itself and against its plan (`record_problems`), in the place of the committed
+/// record of its assessment. On the forge the task gives the class `ci` and the URL of the run,
+/// elsewhere the class `local` and the path of the report; `--revision` is the commit of the run,
+/// here another one than the committed records name. The values the pages state and the run they
+/// name are the next story's: no check of a page value is asked here.
+#[test]
+fn a_record_as_the_records_task_writes_it_holds_the_rules_of_a_record_in_the_place_of_its_own() {
+    let root_directory = scratch_root();
+    let junit = fixture("report.junit.xml");
+    let other_commit = "0123456789abcdef0123456789abcdef01234567";
+    for (class, source) in [
+        (
+            "ci",
+            "https://github.com/beyond10x/inference/actions/runs/1",
+        ),
+        ("local", "target/nextest/default/junit.xml"),
+    ] {
+        let mut documents = load();
+        for (assessment, revision) in [
+            ("workspace-tests", true),
+            ("adapter-tests", true),
+            ("release-statuses", true),
+            ("sherpa-onnx-stt-record", false),
+        ] {
+            let mut arguments = vec![
+                "--project",
+                "inference",
+                "--assessment",
+                assessment,
+                "--class",
+                class,
+                "--from",
+                path(&junit),
+                "--source",
+                source,
+            ];
+            if revision {
+                arguments.extend(["--revision", other_commit]);
+            }
+            let written = assess(&root_directory, &arguments).written();
+            assert!(
+                documents
+                    .records
+                    .insert(
+                        format!("quality/records/{assessment}.evidence.json"),
+                        written
+                    )
+                    .is_some(),
+                "{assessment} has a committed record"
+            );
+        }
+        let found = record_problems(&documents);
+        assert!(found.is_empty(), "class {class}: {}", report(&found));
+    }
 }

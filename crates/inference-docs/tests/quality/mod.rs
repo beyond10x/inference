@@ -1044,13 +1044,11 @@ fn check_records(model: &Model, problems: &mut Vec<String>) {
     }
 }
 
-/// Every way the documents and the page disagree, one line each; empty when they agree.
-fn problems(documents: &Documents) -> Vec<String> {
-    let mut problems = Vec::new();
-    check_config(documents, &mut problems);
-    let (maps, project) = specification(documents, &mut problems);
-    let declared = assessors(documents, &mut problems);
-    let (tasks, task_commands) = tasks(documents, &mut problems);
+/// The documents parsed, with a line in `problems` for each that does not parse.
+fn model(documents: &Documents, problems: &mut Vec<String>) -> Model {
+    let (maps, project) = specification(documents, problems);
+    let declared = assessors(documents, problems);
+    let (tasks, task_commands) = tasks(documents, problems);
     let mut records = BTreeMap::new();
     for (path, source) in &documents.records {
         match serde_json::from_str::<Value>(source) {
@@ -1060,8 +1058,8 @@ fn problems(documents: &Documents) -> Vec<String> {
             Err(error) => problems.push(format!("{path}: is not valid JSON: {error}")),
         }
     }
-    let page = pages(documents, &mut problems);
-    let model = Model {
+    let page = pages(documents, problems);
+    Model {
         maps,
         project,
         declared,
@@ -1069,12 +1067,36 @@ fn problems(documents: &Documents) -> Vec<String> {
         task_commands,
         page,
         records,
-    };
+    }
+}
+
+/// Every way the documents and the page disagree, one line each; empty when they agree.
+fn problems(documents: &Documents) -> Vec<String> {
+    let mut problems = Vec::new();
+    check_config(documents, &mut problems);
+    let model = model(documents, &mut problems);
     check_assessments(&model, &mut problems);
     check_requirements(&model, &mut problems);
     check_gates(&model, &mut problems);
     check_records(&model, &mut problems);
     adapters::check(documents, &model, &mut problems);
+    problems
+}
+
+/// The rules a record is held to by itself and against its plan, and no value of a page: that
+/// it parses; its format, project, file name, assessor, outputs, units and the counts of its
+/// coverage (`check_records`); the packages and the coverage sums of a plan that names packages,
+/// and one result per test of a plan that lists tests (`adapters::check_records`). A subset of
+/// `problems`: the baselines, tables and runs the pages state are left out.
+fn record_problems(documents: &Documents) -> Vec<String> {
+    let mut parsed = Vec::new();
+    let model = model(documents, &mut parsed);
+    let mut problems: Vec<String> = parsed
+        .into_iter()
+        .filter(|problem| problem.starts_with("quality/records/"))
+        .collect();
+    check_records(&model, &mut problems);
+    adapters::check_records(&model, &mut problems);
     problems
 }
 
