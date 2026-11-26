@@ -116,13 +116,28 @@ fn drain(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
     events
 }
 
-/// Every event up to and including the first `stop` holds for. It fails once 30 waits in a row
-/// bring nothing, 3 s without an event, and not on waits that came up empty between events: on
-/// a busy host a gap between two events of the replay can pass one wait.
+/// How long [`until`] waits for its event in all, however often events that are not the one
+/// come: a third of the runner's 60 s, so the wait fails with its own message first.
+const UNTIL_LIMIT: Duration = Duration::from_secs(20);
+
+/// Every event up to and including the first `stop` holds for, within [`UNTIL_LIMIT`].
 fn until(
     session: &mut impl SpeechSessionHandle,
     stop: impl Fn(&SessionEvent) -> bool,
 ) -> Vec<SessionEvent> {
+    until_within(session, stop, UNTIL_LIMIT)
+}
+
+/// Every event up to and including the first `stop` holds for. It fails with its own message at
+/// either of two ends: once 30 waits in a row bring nothing, 3 s without an event, and once
+/// `limit` has passed since it began. Waits that came up empty between events do not count
+/// towards the first: on a busy host a gap between two events of the replay can pass one wait.
+fn until_within(
+    session: &mut impl SpeechSessionHandle,
+    stop: impl Fn(&SessionEvent) -> bool,
+    limit: Duration,
+) -> Vec<SessionEvent> {
+    let started = Instant::now();
     let mut events = Vec::new();
     let mut idle = 0;
     loop {
@@ -141,9 +156,17 @@ fn until(
             }
             None => {
                 idle += 1;
-                assert!(idle < 30, "the awaited event never came: {events:#?}");
+                assert!(
+                    idle < 30,
+                    "the awaited event never came, and no event for 30 waits of {WAIT:?}: \
+                     {events:#?}"
+                );
             }
         }
+        assert!(
+            started.elapsed() < limit,
+            "the awaited event did not come within {limit:?}: {events:#?}"
+        );
     }
 }
 
@@ -1361,5 +1384,48 @@ fn with_its_own_barge_in_input_during_output_restarts_the_response() {
     assert!(
         matches!(refused, Err(NoNativeDuplex::Restarted { first, second }) if first != second),
         "{refused:?}"
+    );
+}
+
+/// [`until_within`] on a session whose events keep coming, each a little later than [`WAIT`],
+/// and none of them the one it waits for, fails with its own message at its limit. Every event
+/// resets the count of empty waits, so without the limit the wait would end only at its 500th
+/// event, 75 s here, past the runner's 60 s. [`until`] holds [`UNTIL_LIMIT`]; this test gives
+/// the same wait 2 s so it ends within a few seconds.
+#[test]
+fn until_fails_with_its_message_on_a_slow_stream_that_never_brings_the_event() {
+    let mut replay = Replay::new(vec![turn("tell me a story", "Once upon a time")]);
+    replay.pace = Duration::from_millis(150);
+    replay.audio_frames = 1_000;
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut session = model(&replay).open(config()).expect("opens");
+        speak(&mut session, 0, 2);
+        let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            until_within(&mut session, |_| false, Duration::from_secs(2)).len()
+        }));
+        let message = waited.err().map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default()
+        });
+        let _ = done.send(message);
+    });
+    let limit = Duration::from_secs(15);
+    let started = Instant::now();
+    let message = ended.recv_timeout(limit);
+    assert_eq!(
+        message.as_ref().map(Option::is_some),
+        Ok(true),
+        "until neither found the event nor failed within {:?} of a stream with one event every \
+         150 ms",
+        started.elapsed()
+    );
+    let message = message.ok().flatten().unwrap_or_default();
+    assert!(
+        message.starts_with("the awaited event did not come within 2s"),
+        "the wait fails with the message of its limit: {}",
+        message.lines().next().unwrap_or_default()
     );
 }

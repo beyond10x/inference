@@ -101,6 +101,11 @@ fn an_empty_frame_is_never_sent_as_an_empty_binary_message() {
 /// loaded host.
 const KEEP_ALIVE_LIMIT: Duration = Duration::from_secs(5);
 
+/// How long the two `KeepAlive`s of [`a_keep_alive_is_sent_after_silence`] may take: twenty
+/// keep-alive intervals of 100 ms, ten for each. A loaded host gets ten times the interval, and
+/// an interval twenty times the configured one fails the test.
+const KEEP_ALIVE_SPACING: Duration = Duration::from_secs(2);
+
 #[test]
 fn a_keep_alive_is_sent_after_silence() {
     let server = FixtureServer::start(Script::fixture("conversation.jsonl"));
@@ -117,11 +122,16 @@ fn a_keep_alive_is_sent_after_silence() {
     while keepalives() < 2 && silent.elapsed() < KEEP_ALIVE_LIMIT {
         std::thread::sleep(Duration::from_millis(10));
     }
+    let took = silent.elapsed();
     let _ = handle.by_ref().count();
     let keepalives = keepalives();
     assert!(
         keepalives >= 2,
         "{keepalives} KeepAlive messages in {KEEP_ALIVE_LIMIT:?} of silence"
+    );
+    assert!(
+        took < KEEP_ALIVE_SPACING,
+        "two KeepAlives at an interval of 100 ms took {took:?}"
     );
     handle.end_input().unwrap();
     let _ = handle.by_ref().count();

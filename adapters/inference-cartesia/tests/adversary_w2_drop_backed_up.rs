@@ -17,17 +17,21 @@
 //!   fails the ticker's bound. The first case also asserts that the close was still waiting
 //!   300 ms after the drop, and that the synthesis's own thread ends once the bound has passed:
 //!   no sooner than 900 ms after the drop and before 2 s.
-//! - Outside a Tokio runtime the drop waits for the bound and no longer: 900 ms to 1.5 s.
+//! - Outside a Tokio runtime the drop waits for the bound and no longer: at least 900 ms, and at
+//!   most 1.1 s once the time its thread was ready to run without a processor is taken out
+//!   ([`ReadyWait`]).
 //! - The hold of the drop inside a Tokio runtime is bounded on both sides: at least
 //!   `CLOSE_GRACE`, because the close cannot end sooner, and at most [`HOLD_SLACK`] more, once
-//!   the time its thread was ready to run without a processor is taken out ([`ReadyWait`]).
+//!   the time its thread was ready to run without a processor is taken out. A drop that yields
+//!   or spins instead of parking is counted as ready, and so that limit does not see it.
 //! - The server reads again after a drop handed its close off, while the synthesis's own thread
 //!   still waits to write it: `src/lib.rs` says such a close "runs to its end on the handle's
 //!   own thread".
 //! - A synthesis that fails on such a connection waits for its close, and only the bound on
 //!   `Connection::close` ends that wait: the one application of the bound of three that a case
-//!   reaches alone. In a drop that bound starts with the drop and bounds the same close as each
-//!   of the other two, no later than they do, so no case of a drop fails with one of them removed.
+//!   reaches alone, held to the stall and 900 ms to 1.2 s more. In a drop that bound starts with
+//!   the drop and bounds the same close as each of the other two, no later than they do, so no
+//!   case of a drop fails with one of them removed.
 //!
 //! The limits on a wait for `CLOSE_BOUND` are numbers from [`STATED`], the bound as the crate
 //! states it, and not the constant: limits that moved with the constant would pass with any
@@ -68,6 +72,18 @@ const STATED: Duration = Duration::from_secs(1);
 /// 900 ms.
 const EARLY: Duration = Duration::from_millis(100);
 
+/// How long past [`STATED`] the drop outside a runtime may hold its thread once the time the
+/// thread was ready to run without a processor is taken out ([`ReadyWait`]): the margin the
+/// ElevenLabs test inside an executor that is not Tokio allows the same wait. A bound of 1.4 s
+/// fails it.
+const BOUND_SLACK: Duration = Duration::from_millis(100);
+
+/// How long past [`STALL`] and [`STATED`] the iterator of a synthesis that failed on a backed-up
+/// connection may end: its wait spans two timers, the stall and the close, and the wake of a
+/// parked thread after each, and nothing in it is taken out. A bound on `Connection::close` of
+/// 1.4 s fails it.
+const STALL_SLACK: Duration = Duration::from_millis(200);
+
 /// The first flood of the case that compares descriptors: a quarter of [`FIXED`], so that a
 /// session whose close was written runs before the one whose close is backed up.
 const FIRST: usize = FIXED / 4;
@@ -77,6 +93,11 @@ const FIRST: usize = FIXED / 4;
 /// work on a processor and the wake of a parked thread at its deadline. The time taken out is
 /// the host's: on a host whose load average was 95 to 122 on 20 processors the drop held its
 /// thread 20.4 ms and 31.7 ms, and this limit, counted on the whole hold, failed the test.
+///
+/// What this does not see: the kernel counts a thread that yields or spins as ready to run, not
+/// as waiting, so a drop that yields or spins for its close instead of parking has that time
+/// taken out of its hold and passes this limit. The ticker's bound, [`GAP_BOUND`], still holds
+/// such a drop to its gap.
 const HOLD_SLACK: Duration = Duration::from_millis(15);
 
 /// What a session awaits before it drops its handle, so the ticker runs before the drop.
@@ -237,12 +258,13 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_r
 /// The other half of what `src/lib.rs` says of the drop: "Outside a Tokio runtime the drop
 /// waits for that close", "bounded by `CLOSE_BOUND`". On a thread with no runtime, where the
 /// close cannot be written, the drop of the idle synthesis waits for the bound and no longer:
-/// 900 ms to 1.5 s. The half second past [`STATED`] is what a thread parked for 1 s may take to
-/// run again on a busy host; a bound of 1.5 s fails it.
+/// at least 900 ms, and at most [`STATED`] and [`BOUND_SLACK`] once the time its thread was ready
+/// to run without a processor is taken out ([`ReadyWait`]). On a busy host a thread parked for
+/// 1 s may wait longer than that margin to run again; that wait is what is taken out.
 #[test]
 fn dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound() {
     within(|| {
-        let (held, flood) = on_a_backed_up_connection(FIXED, |url| {
+        let ((held, ready), flood) = on_a_backed_up_connection(FIXED, |url| {
             let mut synthesiser = at(&url);
             let mut handle = synthesiser
                 .start()
@@ -258,12 +280,16 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_wa
                 "the segment completes"
             );
             assert!(handle.failure().is_none(), "{:?}", handle.failure());
+            let mut ready = ReadyWait::of_this_thread();
+            let ready_before = ready.so_far();
             let started = Instant::now();
             drop(handle);
-            started.elapsed()
+            let held = started.elapsed();
+            (held, ready.so_far().saturating_sub(ready_before))
         });
         println!(
-            "backed up by {} pings: outside a runtime the drop held its thread {held:?}",
+            "backed up by {} pings: outside a runtime the drop held its thread {held:?}, \
+             {ready:?} of it ready to run",
             flood.pings
         );
         assert!(
@@ -271,8 +297,9 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_wa
             "outside a runtime the drop waits for its close, which cannot be written: {held:?}"
         );
         assert!(
-            held <= STATED + Duration::from_millis(500),
-            "the drop waits at most the bound, {STATED:?}: {held:?}"
+            held.saturating_sub(ready) <= STATED + BOUND_SLACK,
+            "the drop waits at most the bound, {STATED:?}, and {BOUND_SLACK:?}: held {held:?}, \
+             {ready:?} of it ready to run"
         );
     });
 }
@@ -439,9 +466,10 @@ fn a_close_handed_off_is_written_once_when_the_server_reads_again() {
 /// deadline of its own (`fail` in `src/synthesiser.rs`), so where the close cannot be written
 /// only that bound ends the wait. The server floods pings, sends one chunk of the segment and
 /// then nothing. The synthesis fails as stalled [`STALL`] after the chunk, and the blocking
-/// iterator ends once the close gave up: no sooner than [`STALL`] and half of [`STATED`] after
-/// the chunk's audio, and no later than [`STALL`], [`STATED`] and half a second, what a parked
-/// thread may take to run again on a busy host. The connection is gone before the handle is
+/// iterator ends once the close gave up: no sooner than [`STALL`] and [`STATED`] less [`EARLY`]
+/// after the chunk's audio, and no later than [`STALL`], [`STATED`] and [`STALL_SLACK`]. A bound
+/// on `Connection::close` of 1.4 s or of 600 ms fails it, while every case of a drop passes. The
+/// connection is gone before the handle is
 /// dropped, so the drop waits for nothing. With that bound removed the iterator does not end
 /// and the case fails at the limit of its fixture, `support::DEADLINE`.
 #[test]
@@ -483,14 +511,15 @@ fn a_synthesis_that_fails_on_a_backed_up_connection_ends_at_the_close_bound() {
             flood.drained
         );
         assert!(
-            ended >= STALL + STATED / 2,
+            ended + EARLY >= STALL + STATED,
             "the close cannot be written, so the iterator waits for the bound, {STATED:?}, after \
              the stall, {STALL:?}; it ended {ended:?} after the chunk's audio"
         );
         assert!(
-            ended <= STALL + STATED + Duration::from_millis(500),
+            ended <= STALL + STATED + STALL_SLACK,
             "the close of a failed synthesis waits at most the bound, {STATED:?}, after the \
-             stall, {STALL:?}; the iterator ended {ended:?} after the chunk's audio"
+             stall, {STALL:?}, and {STALL_SLACK:?}; the iterator ended {ended:?} after the chunk's \
+             audio"
         );
     });
 }

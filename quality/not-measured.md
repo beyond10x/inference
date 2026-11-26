@@ -117,7 +117,9 @@ binding:
   `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs` compare the wait with
   numbers written out, not with the constant. Outside a runtime the test
   `dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound`
-  holds the wait of the drop to 900 ms to 1.5 s. Inside a Tokio runtime the test
+  holds the wait of the drop to at least 900 ms, and to at most 1.1 s once the time its thread
+  was ready to run without a processor is taken out; it fails with every application of the
+  bound at 1.4 s. Inside a Tokio runtime the test
   `dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime` holds
   the end of the synthesis's own thread, which runs the close the drop handed off, to 900 ms to
   2 s after the drop. Both fail with the constant at 3 s. The code of a drop has the bound three
@@ -130,8 +132,9 @@ binding:
   at a limit of its fixture, 25 s. With the second and the third removed the second test fails.
   The third alone bounds the close of a synthesis that failed, which its next step waits for:
   the test `a_synthesis_that_fails_on_a_backed_up_connection_ends_at_the_close_bound` of the
-  same file holds the end of that wait to the stall and 500 ms to 1.5 s more, fails with the
-  third removed, at the limit of its fixture, 25 s, and fails with the constant at 3 s. No entry
+  same file holds the end of that wait to the stall and 900 ms to 1.2 s more, fails with the
+  third removed, at the limit of its fixture, 25 s, fails with the third alone at 1.4 s and at
+  600 ms, and fails with the constant at 3 s. No entry
   of [adapters.md](adapters.md) names these tests.
 - Cartesia: a cancel waits for its send up to twice `CLOSE_BOUND`
   (`adapters/inference-cartesia/src/synthesiser.rs`). The test asserts once the constant and
@@ -144,7 +147,9 @@ binding:
   The tests of a drop in `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs`
   compare the wait with numbers written out, not with the constant. Outside a runtime the test
   `dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound`
-  holds the wait of the drop to 900 ms to 1.5 s, and the test
+  holds the wait of the drop to at least 900 ms, and to at most 1.1 s once the time its thread
+  was ready to run without a processor is taken out, and fails with every application of the
+  bound at 1.4 s. The test
   `a_drop_inside_an_executor_that_is_not_tokio_waits_close_bound_and_not_the_grace` holds it to
   900 ms to 1.1 s inside an executor that is not Tokio. Inside a Tokio runtime the test
   `dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime` holds
@@ -172,8 +177,10 @@ binding:
   limit of its ticker, 50 ms, and fails with the constant at ten times that limit. Each also
   compares the hold of the drop, less the time its thread was ready to run without a processor,
   with the constant and 15 ms more, so it follows the constant; a drop that waits five times
-  the constant fails it. A test asserts the value of each of the two constants, 5 ms; these
-  tests are in the list "The value of each time-bound default".
+  the constant fails it. That comparison does not see a drop that yields or spins for its close
+  instead of parking: the kernel counts such a thread as ready to run, so that time is taken out
+  of the hold; only the ticker's 50 ms holds such a drop. A test asserts the value of each of the
+  two constants, 5 ms; these tests are in the list "The value of each time-bound default".
 - llama-server: no test fires the bound on establishing a connection. The adapter does not set
   it: it builds its HTTP client with `HttpClient::new` of `llm`
   (`adapters/inference-llama-server/src/lib.rs`), which takes `CONNECT_TIMEOUT` of `llm-http`,
