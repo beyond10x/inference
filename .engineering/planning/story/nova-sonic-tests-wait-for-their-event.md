@@ -2,11 +2,14 @@
 format: aep.planning-md/3
 id: story:nova-sonic-tests-wait-for-their-event
 kind: story
-status: draft
+status: active
 title: The Nova Sonic duplex tests wait for the event they assert, not for 100 ms of quiet
 relations:
 - serves: vision:inference
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-26T07:09:14Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-26T07:09:15Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 

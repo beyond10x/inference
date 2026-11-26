@@ -2,11 +2,14 @@
 format: aep.planning-md/3
 id: story:ticker-test-holds-under-contention
 kind: story
-status: draft
+status: active
 title: The ElevenLabs ticker test fails on its block also when processors are contended
 relations:
 - serves: vision:inference
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-26T07:09:13Z", actor: "human:operator", revision: 3}
+- {from: "proposed", to: "active", at: "2026-11-26T07:09:14Z", actor: "human:operator", revision: 4}
 ---
 ## Context
 
