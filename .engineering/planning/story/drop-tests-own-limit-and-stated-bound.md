@@ -2,13 +2,16 @@
 format: aep.planning-md/3
 id: story:drop-tests-own-limit-and-stated-bound
 kind: story
-status: draft
+status: active
 title: The drop tests of Cartesia and ElevenLabs text to speech end by a limit of their own and fail with an enlarged close bound
 tags:
 - from-finding
 relations:
 - serves: vision:inference
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-26T04:28:12Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-26T04:28:12Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 

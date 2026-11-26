@@ -2,14 +2,17 @@
 format: aep.planning-md/3
 id: story:release-check-for-added-ignores
 kind: story
-status: draft
+status: active
 title: The check on added ignored tests exists, or AGENTS.md stops naming it
 tags:
 - from-finding
 relations:
 - informed_by: review-result:synthesiser-drop-inside-runtime-adversary-1
 - serves: vision:inference
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-26T04:28:12Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-26T04:28:12Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 
