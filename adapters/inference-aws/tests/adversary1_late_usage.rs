@@ -3,6 +3,9 @@
 //! in-process channels, no network, no credential.
 #![cfg(feature = "duplex")]
 
+#[allow(dead_code)]
+mod wait;
+
 use std::future::Future;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;
@@ -11,13 +14,12 @@ use inference_aws::duplex::{Connector, NovaSonicSpeech};
 use inference_aws::nova_sonic::{DEFAULT_MODEL_ID, NovaSonicError, Session, SessionConfig};
 use inference_duplex::inference_audio::{AudioEncoding, AudioFormat};
 use inference_duplex::{
-    NativeSpeechModel, Quantity, QuantityKind, SessionConfig as SpeechConfig, SessionEvent,
-    SpeechSessionHandle, TurnDetection, TurnTuning,
+    NativeSpeechModel, Quantity, QuantityKind, SessionConfig as SpeechConfig, SpeechSessionHandle,
+    TurnDetection, TurnTuning,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-
-const WAIT: Duration = Duration::from_millis(100);
+use wait::{completed, ended};
 
 #[derive(Debug, Clone)]
 struct Scripted {
@@ -152,21 +154,10 @@ fn usage_that_arrived_before_close_is_counted() {
         .expect("the binding's runtime starts")
         .open(config())
         .expect("opens");
-    let mut seen = Vec::new();
-    loop {
-        let event = session.next_event(WAIT).expect("the response completes");
-        let completed = matches!(event, SessionEvent::ResponseCompleted(_));
-        seen.push(event);
-        if completed {
-            break;
-        }
-        assert!(seen.len() < 500, "the response never completed");
-    }
+    let mut seen = completed(&mut session);
     std::thread::sleep(Duration::from_millis(300));
     session.close().expect("open");
-    while let Some(event) = session.next_event(WAIT) {
-        seen.push(event);
-    }
+    seen.extend(ended(&mut session));
     let records = session.ledger().usage_records();
     assert_eq!(
         total(&session, QuantityKind::OutputTextTokens),

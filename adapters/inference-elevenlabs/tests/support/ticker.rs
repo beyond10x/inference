@@ -48,7 +48,9 @@ fn grow_descriptor_table() {
 ///
 /// The limit: the field cannot tell a late host from a thread that holds itself ready to run. A
 /// thread that waits in a loop of yields, or spins and is preempted, is counted here while
-/// another thread is ready on its processor, and that time is taken out of the gap.
+/// another thread is ready on its processor, and that time is taken out of the gap. A thread that
+/// computes is counted only for the time it waited for a processor: the time it ran stays in the
+/// gap.
 pub struct ReadyWait(Option<File>);
 
 impl ReadyWait {
@@ -68,6 +70,34 @@ impl ReadyWait {
             .filter(|_| read)
             .and_then(|nanoseconds| nanoseconds.parse().ok())
             .map_or(Duration::ZERO, Duration::from_nanos)
+    }
+}
+
+/// One reading of the ticker: the ready time between two instants, so that all of the ready
+/// time between two readings lies inside the wall time between them.
+struct Reading {
+    before: Instant,
+    ready: Duration,
+    after: Instant,
+}
+
+impl Reading {
+    fn of(ready: &mut ReadyWait) -> Self {
+        let before = Instant::now();
+        let ready = ready.so_far();
+        Self {
+            before,
+            ready,
+            after: Instant::now(),
+        }
+    }
+
+    /// The gap from `self` to `later`, less the ready time between them.
+    fn gap_to(&self, later: &Self) -> Duration {
+        later
+            .after
+            .saturating_duration_since(self.before)
+            .saturating_sub(later.ready.saturating_sub(self.ready))
     }
 }
 
@@ -93,12 +123,11 @@ where
             let done = Rc::clone(&done);
             tokio::task::spawn_local(async move {
                 let mut largest = Duration::ZERO;
-                let mut last = (Instant::now(), ready.so_far());
+                let mut last = Reading::of(&mut ready);
                 while !done.get() {
                     tokio::time::sleep(TICK).await;
-                    let now = (Instant::now(), ready.so_far());
-                    let late = now.1.saturating_sub(last.1);
-                    largest = largest.max((now.0 - last.0).saturating_sub(late));
+                    let now = Reading::of(&mut ready);
+                    largest = largest.max(last.gap_to(&now));
                     last = now;
                 }
                 largest

@@ -123,7 +123,54 @@ gh run download <run id> -R beyond10x/inference -n quality-records-<commit>
 ```
 
 The forge keeps an artifact for the retention time of the repository; no series of records is
-kept yet, and nothing copies a record of a run into `records/`.
+kept yet.
+
+## Adopting the records of a run on `main`
+
+`inference-docs adopt-records` copies the records of one check run on `main` into `records/`,
+byte for byte, after it has checked all of them. It downloads nothing: the caller saves what
+the forge says of the run and downloads the artifact, and the task runs the program on both:
+
+```sh
+gh run view <run id> -R beyond10x/inference --json databaseId,headBranch,headSha,event,workflowName > run.json
+gh run download <run id> -R beyond10x/inference -n quality-records-<commit> --dir <dir>
+task quality-adopt RUN=<run id> DIR=<dir> RUN_JSON=run.json
+```
+
+The task calls `cargo run -q -p inference-docs -- adopt-records --run <run id> --run-json
+run.json --from <dir> --root .`. `<dir>` holds `<plan>/<assessment>.evidence.json`, as
+`task quality-records` wrote it. The program refuses, writes nothing and names the file and the
+reason on stderr for each of these:
+
+- `run.json` does not describe the run `--run`, or the run is not a push (`event`) to `main`
+  (`headBranch`) of the workflow `check` (`workflowName`), or its `headSha` is not a full commit
+  id;
+- a record names another run than `--run` as its source, or another commit than `headSha` as
+  its revision and candidate; a record of a document names another file than its plan, or
+  another digest than the file of the tree has;
+- a record of an assessment `inference-docs junit-assessments` lists is missing, or the
+  directory holds any other file or directory;
+- a record or `run.json` is not JSON, or one of its objects holds a key twice: the program would
+  read the last value, another reader of the same bytes may read the first;
+- a record is of another project than the plan files, of another assessor than its assessment,
+  or of another class than `ci`, or its target is not the one `inference-docs assess` writes for
+  its plan and the run: its kind, class, selection, revision, or for a document its path, digest
+  and the digest form `bytes`, and no other field, so a revision names no file;
+- `inference-docs assess` would refuse its source, or the source is not the run on the forge;
+- a rule of a record that the test of the quality documents holds refuses it: it does not parse,
+  its format, project, file name, assessor, outputs, units or coverage, a result for each measure
+  of its plan and for each package of a measure with one value per package, its packages, or its
+  results of the listed tests.
+
+It exits 0 with every record written, 1 with the refusals, 2 for a wrong call, and 3 when it
+cannot read a plan file, an assessor declaration or the file of the tree a document target
+names, or cannot write a record. It writes each record to a temporary file first and then
+renames each over its record; it removes whatever stands at the path of a temporary file and
+creates the file new, so a link there is never written through. When a write fails it removes
+the temporary files and puts back the records it had replaced, so `records/` holds all the
+records of the run or none. The records the artifact does not hold stay as they are. The pages
+name the values of the records; after an adoption they change with it, and the test below fails
+until they do.
 
 ## The test that keeps the documents true
 
@@ -200,6 +247,14 @@ adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for
   or coverage, a result for each measure of its plan and for each package of a measure with one
   value per package, its packages, or its results of the listed tests. The baselines, tables and
   runs the pages state are not held against such a record: a new run changes them;
+- `inference-docs adopt-records`, run on the fixture artifact under
+  `crates/inference-docs/tests/fixtures/adopt/` (the committed records of the listed
+  assessments with another run and commit, and its `run.json`), does not write each record of
+  it byte for byte and leave the others, writes records that the rules of a record above refuse,
+  writes a record on any refusal of the section above, leaves a record changed when a write
+  fails, writes through a link at the path of a temporary file, or does not refuse, in the words
+  of this test, a record in which one rule of a record above is broken (two plants for a rule a
+  copy could narrow: a missing value besides a wrong one, a second count, the other sum);
 - the commands of `task quality-records`, run with `sh` and stand-ins of `cargo` and `git`, do
   not call the program for the list and then once per listed assessment from the report of
   `task test-run`, ask `git` for anything but `rev-parse HEAD`, give `--revision` to a target

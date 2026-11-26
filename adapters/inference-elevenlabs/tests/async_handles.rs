@@ -21,10 +21,11 @@
 //!
 //! The limit of the second: a thread that stays ready to run while it holds the runtime, in a
 //! loop of yields or in a spin that is preempted, is taken out of the gap too when another thread
-//! is ready on its processor. The kernel's run-queue field cannot tell it from a late host.
-//! `adversary_w2_ticker_blocks.rs` holds the thread 200 ms in six forms: the sleep, the park, the
-//! lock, the socket read and the busy loop fail the bound, and the loop of yields is ignored
-//! there for this reason.
+//! is ready on its processor. The kernel's run-queue field cannot tell it from a late host. Only
+//! the time it ran stays in the gap. `adversary_w2_ticker_blocks.rs` holds the thread in six forms
+//! on a processor that eight spinning threads contend for: the sleep, the park, the lock and the
+//! socket read for 200 ms, and the busy loop for 200 ms of its own processor time, all fail the
+//! bound; the loop of yields is ignored there for this reason.
 
 mod stt_support;
 mod support;

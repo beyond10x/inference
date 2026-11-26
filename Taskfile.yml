@@ -102,6 +102,13 @@ tasks:
           exit 1
         fi
 
+  quality-adopt:
+    desc: Adopts the records of the check run RUN on main into quality/records/ with inference-docs adopt-records, from the directory DIR its artifact quality-records-<commit> was downloaded to and the file RUN_JSON where the output of gh run view RUN --json databaseId,headBranch,headSha,event,workflowName was saved; downloads nothing, and writes all records or none.
+    requires:
+      vars: [RUN, DIR, RUN_JSON]
+    cmds:
+      - cargo run -q -p inference-docs -- adopt-records --run "{{.RUN}}" --run-json "{{.RUN_JSON}}" --from "{{.DIR}}" --root .
+
   test-slow:
     desc: The slow lane, every trybuild case of the inference crate in one trybuild run, under the slow nextest profile; runs again only when one of its sources changed.
     sources:

@@ -17,6 +17,15 @@
 
 ### Added
 
+- `inference-docs` (not published): `inference-docs adopt-records` and `task quality-adopt RUN=…
+  DIR=… RUN_JSON=…` copy the records of a check run on `main`, downloaded by the caller from its
+  artifact `quality-records-<commit>` and described by the saved output of `gh run view <id> --json
+  databaseId,headBranch,headSha,event,workflowName`, into `quality/records/` byte for byte. They
+  download nothing; refuse a run that is not a push to `main` of the workflow `check`, a record of
+  another run or commit, a missing or extra record, a record of another project, assessor or class
+  than `ci`, a target `assess` would not write, a record holding a key twice and a record the record
+  rules of the quality documents refuse, naming each file and reason; and write all records or
+  none. The committed records are not adopted yet.
 - `inference-docs` (not published): a test of the documentation crate reads every `#[ignore]`
   (also a `#[cfg_attr(…)]` over several lines) of the workspace and refuses one without a reason or
   with a reason of no kind `AGENTS.md` admits (billed, local, by hand, child, limit), and one in a
@@ -93,6 +102,10 @@
   fails when two KeepAlives take 2 s at an interval of 100 ms), two Nova Sonic duplex tests, and
   the Cartesia and ElevenLabs tests of the hold of a drop inside a runtime. The Nova Sonic wait for
   an event ends with its own message after 20 s.
+- Tests: the ElevenLabs ticker tests plant 200 ms of processor time and fail on it beside a load
+  pinned to their processor, and fail with their own message when the kernel counts a sleep as
+  ready to run; the Nova Sonic tests of eight files wait for the event they assert instead of for
+  100 ms of quiet.
 - `task test-run` prints `task test-run was ended at its bound of 120 s` also when a part outlived
   the first signal and was killed, and its list of the ten slowest tests is of the run that just
   ended: `no test ran` when that run left no report. `task` exits 201 when the bound ends the step.

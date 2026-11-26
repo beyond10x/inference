@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T08:10:41Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-records-adopted-from-a-main-run",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run per package through the shared build pool, the cases on the code before each change, then with it",
+    "reference": "VERIFIED (phase 1, the command): its tests against a stub, 148 run, 140 passed, 8 failed; with the command 148 passed. The adversary's cases on 6acbb8333: 155 run, 152 passed, 3 failed; after correction 1 155 passed. The drift test red under two test-side mutants of the record rules after correction 1"
+  }
+}
