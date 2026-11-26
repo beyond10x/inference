@@ -6,7 +6,7 @@ mod support;
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use inference_deepgram::{DeepgramError, DeepgramRecogniser, Endpoint, ListenConfig, Region};
 use inference_stt::inference_audio::{AudioEncoding, AudioFormat, AudioFrame};
@@ -94,6 +94,13 @@ fn an_empty_frame_is_never_sent_as_an_empty_binary_message() {
     assert_eq!(server.violations(), Vec::<String>::new());
 }
 
+/// How long [`a_keep_alive_is_sent_after_silence`] waits for its second `KeepAlive`: fifty
+/// keep-alive intervals of 100 ms. The test waits for the server to count the messages, not for
+/// a time, so a busy host makes it wait longer and does not fail it; the limit ends the test
+/// where no `KeepAlive` is sent. Waiting 600 ms instead, it once counted one `KeepAlive` on a
+/// loaded host.
+const KEEP_ALIVE_LIMIT: Duration = Duration::from_secs(5);
+
 #[test]
 fn a_keep_alive_is_sent_after_silence() {
     let server = FixtureServer::start(Script::fixture("conversation.jsonl"));
@@ -105,10 +112,17 @@ fn a_keep_alive_is_sent_after_silence() {
     let mut handle = recogniser.start(request()).unwrap();
     handle.offer_frame(tone(1).remove(0)).unwrap();
     let _ = handle.by_ref().count();
-    std::thread::sleep(Duration::from_millis(600));
+    let silent = Instant::now();
+    let keepalives = || server.seen().first().map_or(0, |seen| seen.keepalives);
+    while keepalives() < 2 && silent.elapsed() < KEEP_ALIVE_LIMIT {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let _ = handle.by_ref().count();
-    let keepalives = server.seen()[0].keepalives;
-    assert!(keepalives >= 2, "{keepalives} KeepAlive messages in 600 ms");
+    let keepalives = keepalives();
+    assert!(
+        keepalives >= 2,
+        "{keepalives} KeepAlive messages in {KEEP_ALIVE_LIMIT:?} of silence"
+    );
     handle.end_input().unwrap();
     let _ = handle.by_ref().count();
     assert!(handle.failure().is_none(), "{:?}", handle.failure());
