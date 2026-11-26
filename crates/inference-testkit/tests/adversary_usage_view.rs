@@ -13,7 +13,11 @@
 //!   harness reaches the view, and is expected to be caught.
 //!
 //! The suite is the one `ess` synthesizes from `ess/`, read through `suite/mod.rs` as `conform.rs`
-//! reads it; `ess` must be on PATH.
+//! reads it, cut to the scenarios that name `UsageRecords`; `ess` must be on PATH. A mutant
+//! rewrites only the rows of that view, so a scenario that does not name it runs alike against
+//! the target and against every mutant, and the cut leaves out no scenario that could catch one.
+//! Admitting the whole suite takes seconds; that the target passes all of it is `conform.rs`'s
+//! case.
 
 #![allow(clippy::duplicate_mod)]
 
@@ -123,9 +127,13 @@ impl ConformanceTarget for Mutant {
     }
 }
 
+/// The scenarios of the synthesized suite that name [`USAGE_RECORDS`].
 fn synthesized() -> AdmittedSuite {
-    AdmittedSuite::from_json(&suite::synthesized(suite::Product::Authored))
-        .expect("the synthesized suite is admitted")
+    let cut = suite::cut_by(
+        &suite::synthesized(suite::Product::Authored),
+        |_, scenario| scenario.to_string().contains(USAGE_RECORDS),
+    );
+    AdmittedSuite::from_json(&cut).expect("the cut suite is admitted")
 }
 
 /// Every scenario of the suite that does not pass against `target`.
@@ -144,7 +152,7 @@ fn the_suite_rejects_a_view_that_reads_an_unknown_quantity_as_zero() {
     let control = failing(&admitted, &Mutant::new(Mutation::None));
     assert!(
         control.is_empty(),
-        "the unmutated target passes every scenario: {control:?}"
+        "the unmutated target passes every scenario that names the view: {control:?}"
     );
     let dropped = failing(&admitted, &Mutant::new(Mutation::DropQuantities));
     assert!(
@@ -154,7 +162,8 @@ fn the_suite_rejects_a_view_that_reads_an_unknown_quantity_as_zero() {
     let zeroed = failing(&admitted, &Mutant::new(Mutation::ZeroUnknown));
     assert!(
         !zeroed.is_empty(),
-        "a view that publishes an unknown quantity with value 0 survives the whole suite: no \
+        "a view that publishes an unknown quantity with value 0 survives every scenario that \
+         names the view: no \
          scenario records a quantity of source `unknown`, so the invariant \
          `source != unknown or not defined(value)` is checked only where it holds trivially"
     );

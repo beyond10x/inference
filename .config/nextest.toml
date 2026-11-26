@@ -2,6 +2,7 @@ nextest-version = { required = "0.9.143" }
 
 [profile.default]
 default-filter = "not (package(inference) & binary(ui))"
+test-threads = 8
 slow-timeout = { period = "60s", terminate-after = 1 }
 final-status-level = "slow"
 fail-fast = false
@@ -10,6 +11,11 @@ fail-fast = false
 path = "junit.xml"
 
 [profile.stack]
+slow-timeout = { period = "60s", terminate-after = 1 }
+final-status-level = "slow"
+fail-fast = false
+
+[profile.setup]
 slow-timeout = { period = "60s", terminate-after = 1 }
 final-status-level = "slow"
 fail-fast = false

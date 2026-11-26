@@ -25,10 +25,16 @@ tasks:
       - RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 
   test-build:
-    desc: Builds the tests test-run runs, without running one.
+    desc: Builds the tests test-run runs, then makes the fixtures they read with test-fixtures.
     cmds:
       - cargo nextest run --workspace --all-features --no-run
       - cargo nextest run -p inference --no-default-features --test stack --no-run
+      - task: test-fixtures
+
+  test-fixtures:
+    desc: Synthesizes every conformance suite the tests of inference-testkit read into their cache under target/tmp, side by side, with the one case that reads them all, under the nextest profile setup, so that no test of test-run waits for ess; a suite already kept for the same sources is read, not synthesized again.
+    cmds:
+      - cargo nextest run -p inference-testkit --all-features --test conformance_suite --profile setup -E 'test(=every_suite_the_tests_read_is_kept)'
 
   test-run:
     desc: Runs test-run-parts and ends it, as a failure, when it has not finished within 120 s.

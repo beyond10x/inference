@@ -284,11 +284,24 @@ impl Product {
     reason = "a test file that runs the whole suite does not cut it"
 )]
 pub fn cut(text: &str, keep: impl Fn(&str) -> bool) -> String {
+    cut_by(text, |id, _| keep(id))
+}
+
+/// As [`cut`], with `keep` given each scenario's JSON beside its id: for a test that keeps the
+/// scenarios naming something, such as a view its mutant rewrites.
+///
+/// # Panics
+/// As [`cut`].
+#[allow(
+    dead_code,
+    reason = "a test file that runs the whole suite does not cut it"
+)]
+pub fn cut_by(text: &str, keep: impl Fn(&str, &serde_json::Value) -> bool) -> String {
     let mut suite: serde_json::Value = serde_json::from_str(text).expect("the suite is JSON");
     let scenarios = suite["scenarios"]
         .as_object_mut()
         .expect("the suite's scenarios are a map");
-    scenarios.retain(|id, _| keep(id));
+    scenarios.retain(|id, scenario| keep(id, scenario));
     assert!(!scenarios.is_empty(), "the cut keeps a scenario");
     let refers = scenarios.values().any(|scenario| {
         scenario.get("absent_events").is_some() || scenario.get("unpublished_events").is_some()
