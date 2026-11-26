@@ -19,8 +19,12 @@
 //! package has.
 //!
 //! `provenance` writes `.well-known/b10x-site.json` and `.nojekyll` into a built site.
+//!
+//! `assess` writes the `ratchet-evidence/1` record of one assessment of `quality/` from a file a
+//! run left behind ([`assess`]).
 
 mod adapters;
+mod assess;
 mod crates;
 mod errors;
 mod pages;
@@ -36,7 +40,8 @@ use std::{
 
 use clap::{Parser, Subcommand};
 
-/// Every failure is reported as one message and exit code 1.
+/// Every failure of `generate` and `provenance` is reported as one message and exit code 1;
+/// `assess` has exit codes of its own.
 type Result<T> = std::result::Result<T, String>;
 
 /// The first line of every generated page's front matter.
@@ -79,6 +84,12 @@ enum Action {
         #[arg(long)]
         commit: String,
     },
+    /// Write the `ratchet-evidence/1` record of one assessment of `quality/` from a file a run
+    /// left behind: the JUnit report of cargo-nextest, or the captured output of a command. Runs
+    /// no measure. Exit 0 with the record at `--out`, 1 when the file does not hold what the
+    /// assessment reads, 2 for a wrong call, 3 when a plan file, a declaration or a pin cannot be
+    /// read.
+    Assess(assess::Arguments),
 }
 
 /// Generated files keyed by their path relative to the repository root.
@@ -176,6 +187,7 @@ fn main() -> ExitCode {
         Action::Generate { check, root } => generate(&root, check),
         Action::Provenance { site, commit } => write_provenance(&site, &commit)
             .map(|()| println!("{}: bound to {commit}", site.display())),
+        Action::Assess(arguments) => return assess::run(&arguments),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

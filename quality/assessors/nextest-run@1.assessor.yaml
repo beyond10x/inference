@@ -5,7 +5,7 @@ targets: [revision]
 inputs:
   profile: {type: string, required: true}
 coverage_unit: test
-coverage: [executed, skipped, passed, failed]
+coverage: [executed, passed, failed]
 outputs:
   duration:
     {value_type: number, kind: sampled, scopes: [], unit: s, boundaries: [run_time]}
