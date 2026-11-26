@@ -1,0 +1,44 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "whispercpp-stt-record",
+    "assessor": "capability-record@1",
+    "candidate": "sha256:7d7f92e78c6d43931f9356d820c03571b6792c767f76e6fb9fde9820dba4604c",
+    "target": {
+      "kind": "document",
+      "class": "ci",
+      "selection": "candidate",
+      "identifiers": {
+        "path": "adapters/inference-whispercpp/records/stt-i9-10900k-cpu.json",
+        "digest": "sha256:7d7f92e78c6d43931f9356d820c03571b6792c767f76e6fb9fde9820dba4604c",
+        "digest_form": "bytes"
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "record",
+      "executed": 1,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "cpu_real_time_factor",
+        "kind": "exact",
+        "scope": "run",
+        "value_type": "number",
+        "value": "202",
+        "unit": "thousandths"
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/45000000017"
+    }
+  }
+}

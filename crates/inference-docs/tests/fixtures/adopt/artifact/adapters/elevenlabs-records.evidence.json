@@ -1,0 +1,68 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "elevenlabs-records",
+    "assessor": "named-tests@1",
+    "candidate": "abcdef0123456789abcdef0123456789abcdef01",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "abcdef0123456789abcdef0123456789abcdef01"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-elevenlabs"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-elevenlabs/tests/claims_record.rs::the_tts_record_holds_the_claims_of_the_binding",
+          "adapters/inference-elevenlabs/tests/claims_record.rs::the_stt_record_holds_the_claims_of_the_binding",
+          "adapters/inference-elevenlabs/tests/claims_record.rs::the_agent_record_holds_the_claims_of_the_binding"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 3,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 3,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-elevenlabs/tests/claims_record.rs::the_tts_record_holds_the_claims_of_the_binding",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-elevenlabs/tests/claims_record.rs::the_stt_record_holds_the_claims_of_the_binding",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-elevenlabs/tests/claims_record.rs::the_agent_record_holds_the_claims_of_the_binding",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/45000000017"
+    }
+  }
+}
