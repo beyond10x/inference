@@ -2,7 +2,9 @@
 //! what held the runtime's thread, without two waits that are the host's. The table of
 //! descriptors is grown before the ticker starts ([`grow_descriptor_table`]), and each gap is
 //! counted less the time its thread was ready to run without a processor ([`ReadyWait`]).
-//! The ElevenLabs binding's `tests/async_handles.rs` says what was measured of both.
+//! The ElevenLabs binding's `tests/async_handles.rs` says what was measured of both. The drop
+//! tests (`adversary_w2_drop_backed_up.rs` of both adapters) take [`ReadyWait`] out of the hold of
+//! a drop the same way.
 //!
 //! The Cartesia adapter's tests include this file by path
 //! (`adapters/inference-cartesia/tests/cancel.rs` and its `adversary_w2_drop_backed_up.rs`), and so
@@ -47,14 +49,16 @@ fn grow_descriptor_table() {
 /// The limit: the field cannot tell a late host from a thread that holds itself ready to run. A
 /// thread that waits in a loop of yields, or spins and is preempted, is counted here while
 /// another thread is ready on its processor, and that time is taken out of the gap.
-struct ReadyWait(Option<File>);
+pub struct ReadyWait(Option<File>);
 
 impl ReadyWait {
-    fn of_this_thread() -> Self {
+    /// The reading of the calling thread; read it on that thread only.
+    pub fn of_this_thread() -> Self {
         Self(File::open("/proc/thread-self/schedstat").ok())
     }
 
-    fn so_far(&mut self) -> Duration {
+    /// How long the thread has been ready to run without a processor since it started.
+    pub fn so_far(&mut self) -> Duration {
         let mut text = String::new();
         let read = self.0.as_mut().is_some_and(|file| {
             file.seek(SeekFrom::Start(0)).is_ok() && file.read_to_string(&mut text).is_ok()

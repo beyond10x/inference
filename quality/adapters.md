@@ -373,11 +373,11 @@ with `duplex` it talks to an ElevenLabs agent.
   (`adapters/inference-elevenlabs/src/config.rs`). The test
   `a_silent_server_is_a_stall_within_the_read_timeout` of
   `adapters/inference-elevenlabs/tests/closed_stream.rs` holds the mechanism, at 300 ms.
-- Close, text to speech: not held. `CLOSE_BOUND` is 1 s
-  (`adapters/inference-elevenlabs/src/connection.rs`), and no test of the gate asserts it.
-  Tests that no entry of this page names yet fire it where a synthesis is dropped against a
-  peer that does not take the write. The cancel of a segment does no I/O, so a test of a
-  cancel does not reach the bound. See [not-measured.md](not-measured.md).
+- Close, text to speech: not held by an entry of this page. `CLOSE_BOUND` is 1 s
+  (`adapters/inference-elevenlabs/src/connection.rs`). Tests that no entry of this page names yet
+  fire it where a synthesis is dropped against a peer that does not take the write, and hold the
+  wait to numbers written out. The cancel of a segment does no I/O, so a test of a cancel does not
+  reach the bound. See [not-measured.md](not-measured.md).
 - Connect, speech to text: `DEFAULT_CONNECT_TIMEOUT` is 10 s
   (`adapters/inference-elevenlabs/src/config.rs`). The test
   `a_handshake_never_answered_fails_within_the_connect_timeout` of
