@@ -20,7 +20,8 @@
 //! - Outside a Tokio runtime the drop waits `CLOSE_BOUND` and no longer: on a thread with no
 //!   executor, and inside an executor that is not Tokio.
 //! - The hold of the drop inside a Tokio runtime is bounded on both sides: at least
-//!   `CLOSE_GRACE`, because the close cannot end sooner, and at most [`HOLD_SLACK`] more.
+//!   `CLOSE_GRACE`, because the close cannot end sooner, and at most [`HOLD_SLACK`] more, once
+//!   the time its thread was ready to run without a processor is taken out ([`ReadyWait`]).
 //! - The server reads again after a drop handed its close off, while the synthesis's own thread
 //!   still waits to write it: `src/lib.rs` says such a close "runs to its end on the handle's
 //!   own thread".
@@ -48,14 +49,18 @@ use inference_elevenlabs::{
     VoiceConfig,
 };
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
-use ticker::{GAP_BOUND, with_ticker};
+use ticker::{GAP_BOUND, ReadyWait, with_ticker};
 
 /// The first flood of the case that compares descriptors: a quarter of [`FIXED`], so that a
 /// session whose close was written runs before the one whose close is backed up.
 const FIRST: usize = FIXED / 4;
 
-/// How long past `CLOSE_GRACE` the drop may hold the runtime's thread: what a parked thread may
-/// take to run again on a busy host.
+/// How long past `CLOSE_GRACE` the drop may hold the runtime's thread once the time the thread
+/// was ready to run without a processor is taken out of the hold ([`ReadyWait`]): the drop's own
+/// work on a processor and the wake of a parked thread at its deadline. The time taken out is
+/// the host's: on a host whose load average was 95 to 122 on 20 processors the Cartesia test of
+/// this name held its thread 20.4 ms and 31.7 ms, and this limit, counted on the whole hold,
+/// failed it.
 const HOLD_SLACK: Duration = Duration::from_millis(15);
 
 /// How long past `CLOSE_BOUND` a drop that waits for its close may hold its thread inside an
@@ -79,12 +84,21 @@ const AGAIN: Duration = Duration::from_millis(100);
 struct Seen {
     /// How long the drop held the runtime's thread.
     held: Duration,
+    /// How long of the drop the runtime's thread was ready to run without a processor.
+    ready: Duration,
     /// When the drop began.
     dropped: Instant,
     /// The synthesis's own threads before the drop.
     before: Option<usize>,
     /// The synthesis's own threads [`LOOK`] after the drop.
     waiting: Option<usize>,
+}
+
+impl Seen {
+    /// The hold of the drop less the time its thread was ready to run without a processor.
+    fn own_hold(&self) -> Duration {
+        self.held.saturating_sub(self.ready)
+    }
 }
 
 /// A synthesiser of the fixture voice at `url`.
@@ -124,14 +138,18 @@ async fn idle(url: &str) -> ElevenLabsSynthesis {
 async fn drop_idle(url: String) -> Seen {
     let handle = idle(&url).await;
     let before = threads_named(OWN_THREAD, 1, Duration::ZERO);
+    let mut ready = ReadyWait::of_this_thread();
     tokio::time::sleep(LEAD).await;
+    let ready_before = ready.so_far();
     let dropped = Instant::now();
     drop(handle);
     let held = dropped.elapsed();
+    let ready = ready.so_far().saturating_sub(ready_before);
     tokio::time::sleep(LOOK).await;
     let waiting = threads_named(OWN_THREAD, 1, Duration::ZERO);
     Seen {
         held,
+        ready,
         dropped,
         before,
         waiting,
@@ -152,9 +170,10 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_r
     });
     let seen = &seen[0];
     println!(
-        "backed up by {} pings: the drop held the thread {:?}, the ticker's largest gap is \
-         {largest:?}, own threads before the drop {:?} and {LOOK:?} after it {:?}",
-        flood.pings, seen.held, seen.before, seen.waiting
+        "backed up by {} pings: the drop held the thread {:?}, {:?} of it ready to run, the \
+         ticker's largest gap is {largest:?}, own threads before the drop {:?} and {LOOK:?} \
+         after it {:?}",
+        flood.pings, seen.held, seen.ready, seen.before, seen.waiting
     );
     assert!(
         largest < GAP_BOUND,
@@ -223,7 +242,8 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_wa
 
 /// The story's acceptance on a connection the case knows to be backed up, on any host: the
 /// ticker's bound, and the hold of the drop bounded by `CLOSE_GRACE` from below and by
-/// `CLOSE_GRACE` and [`HOLD_SLACK`] from above. Its flood starts at [`FIRST`], so that the
+/// `CLOSE_GRACE` and [`HOLD_SLACK`] from above, the upper limit on the hold less the time its
+/// thread was ready to run without a processor. Its flood starts at [`FIRST`], so that the
 /// descriptors a handed-off drop leaves are compared with those of a drop whose close was
 /// written.
 #[test]
@@ -233,10 +253,12 @@ fn a_drop_whose_close_cannot_be_written_holds_the_runtime_for_the_grace_and_no_l
         on_a_backed_up_connection(FIRST, |url| with_ticker(vec![drop_idle(url)]));
     let seen = &seen[0];
     println!(
-        "backed up by {} pings: the drop held the thread {:?}, the ticker's largest gap is \
-         {largest:?}, own threads {LOOK:?} after the drop {:?}; the case took {:?}",
+        "backed up by {} pings: the drop held the thread {:?}, {:?} of it ready to run, the \
+         ticker's largest gap is {largest:?}, own threads {LOOK:?} after the drop {:?}; the case \
+         took {:?}",
         flood.pings,
         seen.held,
+        seen.ready,
         seen.waiting,
         started.elapsed()
     );
@@ -270,10 +292,11 @@ fn a_drop_whose_close_cannot_be_written_holds_the_runtime_for_the_grace_and_no_l
         seen.held
     );
     assert!(
-        seen.held < CLOSE_GRACE + HOLD_SLACK,
+        seen.own_hold() < CLOSE_GRACE + HOLD_SLACK,
         "inside a runtime the drop waits at most `CLOSE_GRACE`, {CLOSE_GRACE:?}, and held its \
-         thread {:?}",
-        seen.held
+         thread {:?}, {:?} of it ready to run without a processor",
+        seen.held,
+        seen.ready
     );
 }
 
