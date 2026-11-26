@@ -283,28 +283,34 @@ fn a_push_to_main_writes_the_quality_records_and_uploads_them() {
 }
 
 /// A refused record fails the forge's required check as it fails `task check`: neither the step
-/// nor its job lets it fail.
+/// nor its job lets it fail. `check.yml` is read as YAML, so a key is found wherever it stands
+/// in its mapping.
 #[test]
 fn the_records_step_and_its_job_do_not_continue_on_error() {
-    let workflow = check_workflow();
-    let step = steps(&workflow)
-        .into_iter()
-        .find(|step| step.label() == "task quality-records")
-        .expect("check.yml has the step task quality-records");
-    assert_eq!(step.value("continue-on-error"), None);
-    let job: Vec<&str> = workflow
-        .lines()
-        .skip_while(|line| line.trim() != "jobs:")
-        .take_while(|line| line.trim() != "steps:")
-        .collect();
-    assert!(
-        job.iter().any(|line| line.trim() == "check:"),
-        "the job is read: {job:?}"
+    let workflow: serde_json::Value =
+        serde_norway::from_str(&check_workflow()).expect("check.yml parses");
+    let job = workflow
+        .pointer("/jobs/check")
+        .expect("check.yml has the job check");
+    assert_eq!(
+        job.get("continue-on-error"),
+        None,
+        "the job check continues on error"
     );
-    assert!(
-        !job.iter()
-            .any(|line| line.trim_start().starts_with("continue-on-error:")),
-        "the job of check.yml continues on error: {job:?}"
+    let records: Vec<&serde_json::Value> = job
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .expect("the job has steps")
+        .iter()
+        .filter(|step| {
+            step.get("run").and_then(serde_json::Value::as_str) == Some("task quality-records")
+        })
+        .collect();
+    assert_eq!(records.len(), 1, "one step runs task quality-records");
+    assert_eq!(
+        records[0].get("continue-on-error"),
+        None,
+        "the step task quality-records continues on error"
     );
 }
 
