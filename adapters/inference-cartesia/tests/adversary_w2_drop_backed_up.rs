@@ -15,15 +15,23 @@
 //!
 //! - A drop that waits for its close holds the runtime's thread for `CLOSE_BOUND` there and
 //!   fails the ticker's bound. The first case also asserts that the close was still waiting
-//!   300 ms after the drop, and that the synthesis's own thread ends once `CLOSE_BOUND` has
-//!   passed.
-//! - Outside a Tokio runtime the drop waits `CLOSE_BOUND` and no longer.
+//!   300 ms after the drop, and that the synthesis's own thread ends once the bound has passed:
+//!   no sooner than 900 ms after the drop and before 2 s.
+//! - Outside a Tokio runtime the drop waits for the bound and no longer: 900 ms to 1.5 s.
 //! - The hold of the drop inside a Tokio runtime is bounded on both sides: at least
 //!   `CLOSE_GRACE`, because the close cannot end sooner, and at most [`HOLD_SLACK`] more, once
 //!   the time its thread was ready to run without a processor is taken out ([`ReadyWait`]).
 //! - The server reads again after a drop handed its close off, while the synthesis's own thread
 //!   still waits to write it: `src/lib.rs` says such a close "runs to its end on the handle's
 //!   own thread".
+//! - A synthesis that fails on such a connection waits for its close, and only the bound on
+//!   `Connection::close` ends that wait: the one application of the bound of three that a case
+//!   reaches alone. In a drop that bound starts with the drop and bounds the same close as each
+//!   of the other two, no later than they do, so no case of a drop fails with one of them removed.
+//!
+//! The limits on a wait for `CLOSE_BOUND` are numbers from [`STATED`], the bound as the crate
+//! states it, and not the constant: limits that moved with the constant would pass with any
+//! value of it.
 
 mod support;
 
@@ -39,7 +47,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use deaf::{Deaf, FIXED, OWN_THREAD, on_a_backed_up_connection};
+use deaf::{Deaf, FIXED, OWN_THREAD, on_a_backed_up_connection, on_a_backed_up_connection_of};
 use dropped::{CLOSE, threads_named};
 use inference_cartesia::{
     CLOSE_BOUND, CLOSE_GRACE, CartesiaSynthesis, CartesiaSynthesiser, Endpoint, OutputFormat,
@@ -50,6 +58,15 @@ use support::{committed, within};
 use ticker::{GAP_BOUND, ReadyWait, with_ticker};
 
 const FORMAT: OutputFormat = OutputFormat::MULAW_8000;
+
+/// `CLOSE_BOUND` as `src/connection.rs` states it, 1 s, written out. The test
+/// `the_time_bound_defaults_are_the_stated_numbers` of `tests/errors.rs` holds the constant to
+/// the same number.
+const STATED: Duration = Duration::from_secs(1);
+
+/// How long before [`STATED`] a wait for the bound may be seen to end: the lower limits are
+/// 900 ms.
+const EARLY: Duration = Duration::from_millis(100);
 
 /// The first flood of the case that compares descriptors: a quarter of [`FIXED`], so that a
 /// session whose close was written runs before the one whose close is backed up.
@@ -71,12 +88,21 @@ const LOOK: Duration = Duration::from_millis(300);
 /// How long after the drop the server of the last case reads again.
 const AGAIN: Duration = Duration::from_millis(100);
 
+/// How long the synthesis of the last case waits for the rest of its segment before it fails as
+/// stalled: longer than the flood takes to read, which comes first.
+const STALL: Duration = Duration::from_secs(1);
+
 /// A synthesiser of the fixture voice at `url`.
 fn at(url: &str) -> CartesiaSynthesiser {
+    at_with(url, Duration::from_secs(20))
+}
+
+/// A synthesiser of the fixture voice at `url` whose read timeout is `read_timeout`.
+fn at_with(url: &str, read_timeout: Duration) -> CartesiaSynthesiser {
     CartesiaSynthesiser::new(
         Endpoint::new()
             .with_url(url)
-            .with_read_timeout(Duration::from_secs(20))
+            .with_read_timeout(read_timeout)
             .with_connect_timeout(Duration::from_secs(5)),
         VoiceConfig::new(support::VOICE, FORMAT),
         Arc::new(support::FixedKey(support::KEY)),
@@ -149,14 +175,17 @@ async fn drop_idle(url: String) -> Seen {
 
 /// The acceptance, where the close cannot be written: the drop of the idle synthesis holds the
 /// runtime's thread for less than the ticker's bound, the close goes on waiting on the
-/// synthesis's own thread, and that thread ends once `CLOSE_BOUND` has passed.
+/// synthesis's own thread, and that thread ends once the bound has passed: no sooner than
+/// 900 ms after the drop and before 2 s. The second past [`STATED`] is what the thread takes to
+/// end its runtime once the close gave up, and the polls of 5 ms that see it gone, on a busy
+/// host; a bound of 2 s fails it.
 #[test]
 fn dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime() {
     within(|| {
         let started = Instant::now();
         let ((seen, largest, left, ended), flood) = on_a_backed_up_connection(FIXED, |url| {
             let (seen, largest) = with_ticker(vec![drop_idle(url)]);
-            let left = threads_named(OWN_THREAD, 0, CLOSE_BOUND + Duration::from_secs(3));
+            let left = threads_named(OWN_THREAD, 0, 3 * STATED);
             let ended = seen[0].dropped.elapsed();
             (seen, largest, left, ended)
         });
@@ -189,14 +218,27 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_r
         assert_eq!(
             left,
             Some(0),
-            "the synthesis's own thread ends once CLOSE_BOUND has passed, {ended:?} after the drop"
+            "the synthesis's own thread ends once the bound has passed; {ended:?} after the drop \
+             it was still there"
+        );
+        assert!(
+            ended + EARLY >= STATED,
+            "the close cannot be written, so the synthesis's own thread ends no sooner than the \
+             bound, {STATED:?}; it ended within {ended:?} of the drop"
+        );
+        assert!(
+            ended < 2 * STATED,
+            "the synthesis's own thread ends once the bound, {STATED:?}, has passed, and ended \
+             {ended:?} after the drop"
         );
     });
 }
 
 /// The other half of what `src/lib.rs` says of the drop: "Outside a Tokio runtime the drop
 /// waits for that close", "bounded by `CLOSE_BOUND`". On a thread with no runtime, where the
-/// close cannot be written, the drop of the idle synthesis waits `CLOSE_BOUND` and no longer.
+/// close cannot be written, the drop of the idle synthesis waits for the bound and no longer:
+/// 900 ms to 1.5 s. The half second past [`STATED`] is what a thread parked for 1 s may take to
+/// run again on a busy host; a bound of 1.5 s fails it.
 #[test]
 fn dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound() {
     within(|| {
@@ -225,12 +267,12 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_wa
             flood.pings
         );
         assert!(
-            held + Duration::from_millis(100) >= CLOSE_BOUND,
+            held + EARLY >= STATED,
             "outside a runtime the drop waits for its close, which cannot be written: {held:?}"
         );
         assert!(
-            held <= CLOSE_BOUND + Duration::from_millis(500),
-            "the drop waits at most CLOSE_BOUND: {held:?}"
+            held <= STATED + Duration::from_millis(500),
+            "the drop waits at most the bound, {STATED:?}: {held:?}"
         );
     });
 }
@@ -318,8 +360,7 @@ async fn drop_idle_then_read_again(url: String, release: mpsc::Sender<()>) -> Ha
     tokio::time::sleep(AGAIN).await;
     let waiting = threads_named(OWN_THREAD, 1, Duration::ZERO);
     let _ = release.send(());
-    while threads_named(OWN_THREAD, 0, Duration::ZERO) != Some(0)
-        && dropped.elapsed() < CLOSE_BOUND + Duration::from_secs(3)
+    while threads_named(OWN_THREAD, 0, Duration::ZERO) != Some(0) && dropped.elapsed() < 4 * STATED
     {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -390,5 +431,66 @@ fn a_close_handed_off_is_written_once_when_the_server_reads_again() {
             );
             return;
         }
+    });
+}
+
+/// The bound on `Connection::close` (`src/connection.rs`) alone, where no drop is: a synthesis
+/// that fails closes its connection as an exchange that its next step waits for with no
+/// deadline of its own (`fail` in `src/synthesiser.rs`), so where the close cannot be written
+/// only that bound ends the wait. The server floods pings, sends one chunk of the segment and
+/// then nothing. The synthesis fails as stalled [`STALL`] after the chunk, and the blocking
+/// iterator ends once the close gave up: no sooner than [`STALL`] and half of [`STATED`] after
+/// the chunk's audio, and no later than [`STALL`], [`STATED`] and half a second, what a parked
+/// thread may take to run again on a busy host. The connection is gone before the handle is
+/// dropped, so the drop waits for nothing. With that bound removed the iterator does not end
+/// and the case fails at the limit of its fixture, `support::DEADLINE`.
+#[test]
+fn a_synthesis_that_fails_on_a_backed_up_connection_ends_at_the_close_bound() {
+    within(|| {
+        let ((ended, failure), flood) =
+            on_a_backed_up_connection_of(Deaf::stalling, FIXED, |url| {
+                let mut synthesiser = at_with(&url, STALL);
+                let mut handle = synthesiser
+                    .start()
+                    .expect("a fresh synthesiser runs nothing");
+                handle
+                    .offer_segment(committed(&["Speak, then stall."]).remove(0))
+                    .expect("the utterance is open");
+                let mut audio = None;
+                for event in handle.by_ref() {
+                    if matches!(event, SynthesisEvent::Audio(_)) && audio.is_none() {
+                        audio = Some(Instant::now());
+                    }
+                }
+                let ended = audio.map(|audio| audio.elapsed());
+                (ended, handle.failure().map(ToString::to_string))
+            });
+        println!(
+            "backed up by {} pings: the iterator ended {ended:?} after the chunk's audio, the \
+             synthesis failed with {failure:?}; the server then read {:?}",
+            flood.pings, flood.drained
+        );
+        assert_eq!(
+            failure,
+            Some(format!("no server message within {STALL:?}")),
+            "the synthesis fails as stalled after the chunk"
+        );
+        let ended = ended.expect("the chunk's audio arrives before the stall");
+        assert_eq!(
+            flood.drained.others,
+            Vec::<u8>::new(),
+            "a close that could not be written did not arrive: {:?}",
+            flood.drained
+        );
+        assert!(
+            ended >= STALL + STATED / 2,
+            "the close cannot be written, so the iterator waits for the bound, {STATED:?}, after \
+             the stall, {STALL:?}; it ended {ended:?} after the chunk's audio"
+        );
+        assert!(
+            ended <= STALL + STATED + Duration::from_millis(500),
+            "the close of a failed synthesis waits at most the bound, {STATED:?}, after the \
+             stall, {STALL:?}; the iterator ended {ended:?} after the chunk's audio"
+        );
     });
 }

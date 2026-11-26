@@ -16,15 +16,21 @@
 //! - A drop that waits for its close holds the runtime's thread for `CLOSE_BOUND` there and
 //!   fails the ticker's bound. The first case also asserts that the close was still waiting
 //!   300 ms after the drop, so it cannot pass because the scenario built no slow close, and that
-//!   the synthesis's own thread ends once `CLOSE_BOUND` has passed.
-//! - Outside a Tokio runtime the drop waits `CLOSE_BOUND` and no longer: on a thread with no
-//!   executor, and inside an executor that is not Tokio.
+//!   the synthesis's own thread ends once the bound has passed: no sooner than 900 ms after the
+//!   drop and before 2 s.
+//! - Outside a Tokio runtime the drop waits for the bound and no longer: on a thread with no
+//!   executor, 900 ms to 1.5 s, and inside an executor that is not Tokio, 900 ms to 1.1 s.
 //! - The hold of the drop inside a Tokio runtime is bounded on both sides: at least
 //!   `CLOSE_GRACE`, because the close cannot end sooner, and at most [`HOLD_SLACK`] more, once
 //!   the time its thread was ready to run without a processor is taken out ([`ReadyWait`]).
 //! - The server reads again after a drop handed its close off, while the synthesis's own thread
 //!   still waits to write it: `src/lib.rs` says such a close "runs to its end on the handle's
 //!   own thread".
+//!
+//! The limits on a wait for `CLOSE_BOUND` are numbers from [`STATED`], the bound as the crate
+//! states it, and not the constant: limits that moved with the constant would pass with any
+//! value of it. A case whose drop waits for the bound ends by a limit of its own, [`LIMIT`], so
+//! that a drop nothing ends fails the case and leaves no thread to the runner.
 
 mod support;
 
@@ -51,6 +57,19 @@ use inference_elevenlabs::{
 use inference_tts::{SynthesisEvent, SynthesisHandle, Synthesiser};
 use ticker::{GAP_BOUND, ReadyWait, with_ticker};
 
+/// `CLOSE_BOUND` as `src/connection.rs` states it, 1 s, written out. The test
+/// `the_time_bound_defaults_are_the_stated_numbers` of `tests/closed_stream.rs` holds the
+/// constant to the same number.
+const STATED: Duration = Duration::from_secs(1);
+
+/// How long before [`STATED`] a wait for the bound may be seen to end: the lower limits are
+/// 900 ms.
+const EARLY: Duration = Duration::from_millis(100);
+
+/// How long a case whose drop waits for the bound may run before it fails: alone it takes about
+/// 1.3 s, a flood and a drop of 1 s.
+const LIMIT: Duration = Duration::from_secs(10);
+
 /// The first flood of the case that compares descriptors: a quarter of [`FIXED`], so that a
 /// session whose close was written runs before the one whose close is backed up.
 const FIRST: usize = FIXED / 4;
@@ -63,8 +82,8 @@ const FIRST: usize = FIXED / 4;
 /// failed it.
 const HOLD_SLACK: Duration = Duration::from_millis(15);
 
-/// How long past `CLOSE_BOUND` a drop that waits for its close may hold its thread inside an
-/// executor that is not Tokio, and how long before `CLOSE_BOUND` it may return. Measured there
+/// How long past [`STATED`] a drop that waits for its close may hold its thread inside an
+/// executor that is not Tokio, and how long before it the drop may return. Measured there
 /// the drop held its thread 1.0001 to 1.0002 s over five runs, and outside a runtime, where it
 /// waits the same way, 1.0001 to 1.0054 s over twenty runs of the suite. This is about twenty
 /// times the largest overshoot, and the lower bound it leaves, 900 ms, is 180 times
@@ -158,13 +177,16 @@ async fn drop_idle(url: String) -> Seen {
 
 /// The acceptance, where the close cannot be written: the drop of the idle synthesis holds the
 /// runtime's thread for less than the ticker's bound, the close goes on waiting on the
-/// synthesis's own thread, and that thread ends once `CLOSE_BOUND` has passed.
+/// synthesis's own thread, and that thread ends once the bound has passed: no sooner than
+/// 900 ms after the drop and before 2 s. The second past [`STATED`] is what the thread takes to
+/// end its runtime once the close gave up, and the polls of 5 ms that see it gone, on a busy
+/// host; a bound of 2 s fails it.
 #[test]
 fn dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime() {
     let started = Instant::now();
     let ((seen, largest, left, ended), flood) = on_a_backed_up_connection(FIXED, |url| {
         let (seen, largest) = with_ticker(vec![drop_idle(url)]);
-        let left = threads_named(OWN_THREAD, 0, CLOSE_BOUND + Duration::from_secs(3));
+        let left = threads_named(OWN_THREAD, 0, 3 * STATED);
         let ended = seen[0].dropped.elapsed();
         (seen, largest, left, ended)
     });
@@ -197,46 +219,61 @@ fn dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_r
     assert_eq!(
         left,
         Some(0),
-        "the synthesis's own thread ends once CLOSE_BOUND has passed, {ended:?} after the drop"
+        "the synthesis's own thread ends once the bound has passed; {ended:?} after the drop it \
+         was still there"
+    );
+    assert!(
+        ended + EARLY >= STATED,
+        "the close cannot be written, so the synthesis's own thread ends no sooner than the \
+         bound, {STATED:?}; it ended within {ended:?} of the drop"
+    );
+    assert!(
+        ended < 2 * STATED,
+        "the synthesis's own thread ends once the bound, {STATED:?}, has passed, and ended \
+         {ended:?} after the drop"
     );
 }
 
 /// The other half of what `src/lib.rs` says of the drop: "Outside a Tokio runtime the drop
 /// waits for that close", "bounded by `CLOSE_BOUND`". On a thread with no runtime, where the
-/// close cannot be written, the drop of the idle synthesis waits `CLOSE_BOUND` and no longer.
+/// close cannot be written, the drop of the idle synthesis waits for the bound and no longer:
+/// 900 ms to 1.5 s. The half second past [`STATED`] is what a thread parked for 1 s may take to
+/// run again on a busy host; a bound of 1.5 s fails it. The case ends by [`LIMIT`].
 #[test]
 fn dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound() {
-    let (held, flood) = on_a_backed_up_connection(FIXED, |url| {
-        let mut synthesiser = at(&url);
-        let mut handle = synthesiser
-            .start()
-            .expect("a fresh synthesiser runs nothing");
-        handle
-            .offer_segment(support::committed(&["First."]).remove(0))
-            .expect("the utterance is open");
-        let events: Vec<SynthesisEvent> = handle.by_ref().collect();
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, SynthesisEvent::Completed(_))),
-            "the segment completes"
-        );
-        assert_eq!(handle.failure().map(ToString::to_string), None);
-        let started = Instant::now();
-        drop(handle);
-        started.elapsed()
+    let (held, flood) = support::within(LIMIT, || {
+        on_a_backed_up_connection(FIXED, |url| {
+            let mut synthesiser = at(&url);
+            let mut handle = synthesiser
+                .start()
+                .expect("a fresh synthesiser runs nothing");
+            handle
+                .offer_segment(support::committed(&["First."]).remove(0))
+                .expect("the utterance is open");
+            let events: Vec<SynthesisEvent> = handle.by_ref().collect();
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, SynthesisEvent::Completed(_))),
+                "the segment completes"
+            );
+            assert_eq!(handle.failure().map(ToString::to_string), None);
+            let started = Instant::now();
+            drop(handle);
+            started.elapsed()
+        })
     });
     println!(
         "backed up by {} pings: outside a runtime the drop held its thread {held:?}",
         flood.pings
     );
     assert!(
-        held + Duration::from_millis(100) >= CLOSE_BOUND,
+        held + EARLY >= STATED,
         "outside a runtime the drop waits for its close, which cannot be written: {held:?}"
     );
     assert!(
-        held <= CLOSE_BOUND + Duration::from_millis(500),
-        "the drop waits at most CLOSE_BOUND: {held:?}"
+        held <= STATED + Duration::from_millis(500),
+        "the drop waits at most the bound, {STATED:?}: {held:?}"
     );
 }
 
@@ -326,12 +363,12 @@ fn run<F: Future>(future: F) -> F::Output {
 /// `src/lib.rs`: "The drop asks Tokio: inside another executor it waits as it does outside a
 /// runtime, at most [`CLOSE_BOUND`]." The async form needs no Tokio runtime, and an executor
 /// that is not Tokio runs it; the idle handle dropped inside that executor's future, where the
-/// close cannot be written, holds the executor's thread for `CLOSE_BOUND`, [`BOUND_SLACK`] more
-/// or less, and so not for `CLOSE_GRACE` alone.
+/// close cannot be written, holds the executor's thread for the bound, [`STATED`], and
+/// [`BOUND_SLACK`] more or less, and so not for `CLOSE_GRACE` alone. The case ends by [`LIMIT`].
 #[test]
 fn a_drop_inside_an_executor_that_is_not_tokio_waits_close_bound_and_not_the_grace() {
-    let (held, flood) = on_a_backed_up_connection(FIXED, |url| {
-        support::within(Duration::from_secs(30), move || {
+    let (held, flood) = support::within(LIMIT, || {
+        on_a_backed_up_connection(FIXED, |url| {
             run(async move {
                 let handle = idle(&url).await;
                 let dropped = Instant::now();
@@ -346,12 +383,12 @@ fn a_drop_inside_an_executor_that_is_not_tokio_waits_close_bound_and_not_the_gra
         flood.pings
     );
     assert!(
-        held <= CLOSE_BOUND + BOUND_SLACK,
-        "inside an executor that is not Tokio the drop waits at most `CLOSE_BOUND`, and held \
-         the executor's thread {held:?}"
+        held <= STATED + BOUND_SLACK,
+        "inside an executor that is not Tokio the drop waits at most the bound, {STATED:?}, and \
+         held the executor's thread {held:?}"
     );
     assert!(
-        held + BOUND_SLACK >= CLOSE_BOUND,
+        held + BOUND_SLACK >= STATED,
         "inside an executor that is not Tokio the drop waits for its close as it does outside \
          a runtime, not for {CLOSE_GRACE:?}, and held the executor's thread {held:?}"
     );
@@ -378,8 +415,7 @@ async fn drop_idle_then_read_again(url: String, release: mpsc::Sender<()>) -> Ha
     tokio::time::sleep(AGAIN).await;
     let waiting = threads_named(OWN_THREAD, 1, Duration::ZERO);
     let _ = release.send(());
-    while threads_named(OWN_THREAD, 0, Duration::ZERO) != Some(0)
-        && dropped.elapsed() < CLOSE_BOUND + Duration::from_secs(3)
+    while threads_named(OWN_THREAD, 0, Duration::ZERO) != Some(0) && dropped.elapsed() < 4 * STATED
     {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }

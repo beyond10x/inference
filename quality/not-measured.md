@@ -90,12 +90,14 @@ binding:
   session on the stream without a timeout (`adapters/inference-aws/src/duplex.rs`).
 - Every `CLOSE_BOUND`: six bindings have a test that fires it and compares the time with
   numbers, in the list "The close bound of six bindings". Cartesia text to speech and
-  ElevenLabs text to speech have no such test: their tests fire the bound where a synthesis is
-  dropped and follow the constant, and the next three entries say what these tests do. No test
-  fires what follows. In these two bindings a close also runs as an exchange that the next
-  step of the synthesis waits for with no deadline of its own, so the write of the close frame
-  is its only bound (`adapters/inference-cartesia/src/synthesiser.rs`,
-  `adapters/inference-elevenlabs/src/synthesiser.rs`). In Phonic, the Deepgram Voice Agent,
+  ElevenLabs text to speech have such tests too, where a synthesis is dropped, and the next
+  three entries say what these tests hold and what they leave out. In these two bindings a
+  close also runs as an exchange that the next step of the synthesis waits for with no
+  deadline of its own, so the write of the close frame is its only bound
+  (`adapters/inference-cartesia/src/synthesiser.rs`,
+  `adapters/inference-elevenlabs/src/synthesiser.rs`): a test of Cartesia fires it, named in
+  the entry on Cartesia, and no test of ElevenLabs text to speech does. No test fires what
+  follows. In Phonic, the Deepgram Voice Agent,
   Deepslate Opal and the ElevenLabs agent no test fires one application of the constant alone:
   a close outside an async runtime bounds the write of the close frame and the wait for the
   connection task with the same constant, and the test of each binding passes with either of
@@ -111,20 +113,26 @@ binding:
   tests are in the list "The value of each time-bound default". They fix the number and fire
   nothing.
 - Cartesia: a drop fires `CLOSE_BOUND`, against a peer that reads nothing
-  (`adapters/inference-cartesia/tests/support/deaf.rs`), and no test of a drop asserts its
-  value. Outside a runtime the test
+  (`adapters/inference-cartesia/tests/support/deaf.rs`). The tests of a drop in
+  `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs` compare the wait with
+  numbers written out, not with the constant. Outside a runtime the test
   `dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound`
-  of `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs` compares the wait of
-  the drop with the constant itself. Inside a Tokio runtime the test
-  `dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime` of
-  `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs` waits for the close the
-  drop handed off, the constant and 3 s more at most. Both pass with a larger constant. The code
-  of a drop has the bound three times: on the wait outside a runtime, on the close handed off
-  inside one (`adapters/inference-cartesia/src/synthesiser.rs`) and on the close of the
-  connection (`adapters/inference-cartesia/src/connection.rs`). Every test passes with one of
-  the three removed. With the first and the third removed the first test fails, at a limit of
-  its fixture, 25 s. With the second and the third removed the second test fails. No entry of
-  [adapters.md](adapters.md) names these tests.
+  holds the wait of the drop to 900 ms to 1.5 s. Inside a Tokio runtime the test
+  `dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime` holds
+  the end of the synthesis's own thread, which runs the close the drop handed off, to 900 ms to
+  2 s after the drop. Both fail with the constant at 3 s. The code of a drop has the bound three
+  times: on the wait outside a runtime, on the close handed off inside one
+  (`adapters/inference-cartesia/src/synthesiser.rs`) and on the close of the connection
+  (`adapters/inference-cartesia/src/connection.rs`). No test of a drop fails with one of the
+  three removed, and none can: the close of the connection starts with the drop and bounds the
+  same close as each of the other two, no later than they do, and each of those two bounds that
+  close where the third is removed. With the first and the third removed the first test fails,
+  at a limit of its fixture, 25 s. With the second and the third removed the second test fails.
+  The third alone bounds the close of a synthesis that failed, which its next step waits for:
+  the test `a_synthesis_that_fails_on_a_backed_up_connection_ends_at_the_close_bound` of the
+  same file holds the end of that wait to the stall and 500 ms to 1.5 s more, fails with the
+  third removed, at the limit of its fixture, 25 s, and fails with the constant at 3 s. No entry
+  of [adapters.md](adapters.md) names these tests.
 - Cartesia: a cancel waits for its send up to twice `CLOSE_BOUND`
   (`adapters/inference-cartesia/src/synthesiser.rs`). The test asserts once the constant and
   does not reach the longer wait.
@@ -132,22 +140,20 @@ binding:
   is dropped (`adapters/inference-elevenlabs/src/synthesiser.rs`) and where a connection closes
   (`adapters/inference-elevenlabs/src/connection.rs`). The cancel of a segment does no I/O and
   does not wait for the server, so a test of a cancel does not reach the bound. A drop reaches
-  it against a peer that reads nothing (`adapters/inference-elevenlabs/tests/support/deaf.rs`),
-  and no test of a drop asserts its value. Outside a runtime the test
+  it against a peer that reads nothing (`adapters/inference-elevenlabs/tests/support/deaf.rs`).
+  The tests of a drop in `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs`
+  compare the wait with numbers written out, not with the constant. Outside a runtime the test
   `dropping_an_idle_synthesis_whose_close_cannot_be_written_outside_a_runtime_waits_close_bound`
-  of `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs` compares the wait of
-  the drop with the constant itself, and so does the test
-  `a_drop_inside_an_executor_that_is_not_tokio_waits_close_bound_and_not_the_grace` of
-  `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs` inside an executor that
-  is not Tokio. Inside a Tokio runtime the test
-  `dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime` of
-  `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs` waits for the close the
-  drop handed off, the constant and 3 s more at most. All three pass with a larger constant. The
-  code of a drop has the bound three times, as in Cartesia, and every test of a drop passes
-  with one of the three removed. With the wait outside a runtime and the close of the
-  connection unbounded the first test runs until the runner ends it at 60 s and the second
-  fails at a limit of its own, 30 s. With the close handed off and the close of the connection
-  unbounded the third fails. Speech to text closes its connection with the same function as
+  holds the wait of the drop to 900 ms to 1.5 s, and the test
+  `a_drop_inside_an_executor_that_is_not_tokio_waits_close_bound_and_not_the_grace` holds it to
+  900 ms to 1.1 s inside an executor that is not Tokio. Inside a Tokio runtime the test
+  `dropping_an_idle_synthesis_whose_close_cannot_be_written_does_not_block_the_runtime` holds
+  the end of the synthesis's own thread to 900 ms to 2 s after the drop. All three fail with
+  the constant at 3 s. The code of a drop has the bound three times, as in Cartesia, and for the
+  same reason no test of a drop fails with one of the three removed. With the wait outside a
+  runtime and the close of the connection unbounded the first two tests fail at a limit of
+  their own, 10 s. With the close handed off and the close of the connection unbounded the
+  third fails. Speech to text closes its connection with the same function as
   the last of the three: with the close of the connection unbounded alone the test
   `a_cancel_on_a_backed_up_connection_ends_its_thread_at_the_close_bound` of
   `adapters/inference-elevenlabs/tests/stt.rs` fails, at a limit of its own, 4 s. No entry of
@@ -163,9 +169,11 @@ binding:
   `a_drop_whose_close_cannot_be_written_holds_the_runtime_for_the_grace_and_no_longer` of
   `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs`, and the one of that name
   of `adapters/inference-elevenlabs/tests/adversary_w2_drop_backed_up.rs`, holds it under the
-  limit of its ticker, 50 ms, and fails with the constant at ten times that limit. A test
-  asserts the value of each of the two constants, 5 ms; these tests are in the list "The value
-  of each time-bound default".
+  limit of its ticker, 50 ms, and fails with the constant at ten times that limit. Each also
+  compares the hold of the drop, less the time its thread was ready to run without a processor,
+  with the constant and 15 ms more, so it follows the constant; a drop that waits five times
+  the constant fails it. A test asserts the value of each of the two constants, 5 ms; these
+  tests are in the list "The value of each time-bound default".
 - llama-server: no test fires the bound on establishing a connection. The adapter does not set
   it: it builds its HTTP client with `HttpClient::new` of `llm`
   (`adapters/inference-llama-server/src/lib.rs`), which takes `CONNECT_TIMEOUT` of `llm-http`,
