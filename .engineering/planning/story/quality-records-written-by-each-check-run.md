@@ -6,7 +6,7 @@ status: active
 title: Each check run writes the quality records its JUnit report holds and keeps those of main as an artifact
 relations:
 - serves: vision:inference
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-26T03:26:52Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-26T03:26:52Z", actor: "human:operator", revision: 3}
@@ -68,3 +68,35 @@ differences, all of them page values and none in a record.
   a reader and a `workflow_run` job with `actions: read`, a story of their own.
 - The workflows `slow` and `Docs UX`, a schedule, a secret, a keyed run.
 - The cancellation setting of `check` on `main` (a cancelled run leaves no artifact).
+
+## Scope as built
+
+Built on the branch `quality/check-records`, merged into `wave/2026-11-26-quality`:
+
+- `inference-docs junit-assessments [--root .]` (`crates/inference-docs/src/assess.rs`, wired in
+  `src/main.rs`): prints `<plan> <assessment> <target kind>` for every assessment of the
+  assessors `nextest-run@1`, `package-tests@1`, `named-tests@1` and `capability-record@1` whose
+  observation runs `task test-run` and whose profile, if given, is `default`; 22 on the tree
+  (`slow-lane` is left out: its report is of the profile `slow`).
+- `Taskfile.yml`: the task `quality-records` calls `inference-docs assess` once per listed
+  assessment with `--from target/nextest/default/junit.xml`, writes
+  `target/quality-records/<plan>/<assessment>.evidence.json`, and fails naming every refused
+  assessment and on an empty list; the source is the forge run when the three `GITHUB_*`
+  variables are set. `task check` runs it after `test-run`. The binary is built by `task
+  docs-check` in `check-source`, so the task builds nothing new inside the gate.
+- `.github/workflows/check.yml`: the step `task quality-records` in the full gate; for a push to
+  `main` the upload of `target/quality-records/` as `quality-records-<commit>` with
+  `actions/upload-artifact` pinned to the commit of its release v7.0.2.
+- Tests: `crates/inference-docs/tests/quality/records.rs` (the list against the plan files, the
+  task's commands run with stand-ins for `cargo` and `git`, the list filters),
+  `crates/inference-docs/tests/workflows.rs` (both sides of the upload, the planning gate, no
+  `continue-on-error`), `crates/inference-docs/tests/quality/assess.rs` (a record as the task
+  writes it holds the record rules in the place of its own). The test of the quality documents
+  is split into `problems()` (unchanged set of problems) and `record_problems()` (the rules of
+  a record, one result per measure and per package, no page value).
+- Pages: `quality/README.md` (the records of a check run, how to download them, that the
+  documents are a gate and what fails it), `AGENTS.md`, `website/docs/guides/run-the-checks.md`.
+
+Left open: no series of records is kept (the owner's open decision on where it lives); the page
+values of `quality/` still name the check run of 2026-11-24 until the next story adopts a run on
+`main`.
