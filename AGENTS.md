@@ -91,8 +91,23 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   checkpoint. Tests download no weights and start no model server: a test that needs one reads
   its path or URL from an environment variable and is ignored without it.
 - A live test that talks to a hosted provider is ignored, behind feature `live`, and its ignore
-  reason contains the word `billed`; the release check admits an added `#[ignore]` only with that
-  word.
+  reason contains the word `billed`.
+- Every `#[ignore]` gives a reason of one of five kinds. The test
+  `ignores::every_ignore_of_the_workspace_gives_a_reason_of_an_admitted_kind` in
+  `crates/inference-docs/tests/ignores/mod.rs`, which runs in `task test-run`, reads each
+  `#[ignore]` of the workspace's `.rs` files and fails naming the file, the line and the reason of
+  every other one:
+  - billed: the reason contains `billed`; a reason that speaks of a hosted service, a key,
+    credentials or money, or names a `*_API_KEY` variable, without that word is refused;
+  - local: a test that needs a checkpoint, a clip or a model server names the `INFERENCE_*`
+    variables it reads, and its package reads each of them;
+  - by hand: a test that opens a device of the machine (a microphone, a speaker) says `by hand`,
+    because no runner has the device;
+  - child: a case that a parent case of its file runs in a child process, with the environment
+    the parent sets, begins `a child of`, and its function's name stands elsewhere in that file,
+    because it is run only through its parent;
+  - limit: a case that shows a limit the code's documentation states, red only on some machines,
+    begins `limit:`, because it records the limit and would make the gate depend on the machine.
 - Every `aep` write runs with `AEP_ACTOR=human:operator` (otherwise `aep` records `human:$USER`):
   no person's name, login, path or company goes into the store, a commit or a PR.
 - Before a story about a hosted provider is drafted, read the provider's current product list and

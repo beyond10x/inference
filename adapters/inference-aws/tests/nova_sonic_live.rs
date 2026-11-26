@@ -53,7 +53,7 @@ struct Seen {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "calls Amazon Bedrock: needs credentials, model access and AWS_REGION, and costs money"]
+#[ignore = "calls Amazon Bedrock and is billed: needs credentials, model access and AWS_REGION"]
 async fn one_audio_in_audio_out_exchange() {
     assert!(
         std::env::var("AWS_REGION").is_ok_and(|region| !region.is_empty()),
