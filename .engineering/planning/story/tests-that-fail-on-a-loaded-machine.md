@@ -6,7 +6,7 @@ status: active
 title: Three tests of two adapters hold on a loaded machine or state the condition they need
 relations:
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-26T04:28:11Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-26T04:28:12Z", actor: "human:operator", revision: 3}
@@ -45,3 +45,21 @@ change.
 
 - The bound of 120 s of `task test-run` and the number of tests a loaded machine runs in it.
 - The load of the machine.
+
+## Scope as built
+
+Built on the branch `wave/u3-tests-under-load`, merged into `wave/2026-11-26-quality`:
+
+- `adapters/inference-aws/tests/nova_sonic_duplex.rs`: the speech test and the count test wait with
+  `until` for the event they need; `until` fails after 3 s with no event in a row and after
+  `UNTIL_LIMIT` (20 s) overall, each with its own message (`until_within` takes the limit).
+- `adapters/inference-cartesia/tests/adversary_w2_drop_backed_up.rs` and the ElevenLabs file of the
+  same name: the hold of a drop inside a runtime is measured less the time the thread was ready to
+  run without a processor (`ReadyWait`, now `pub` in
+  `adapters/inference-elevenlabs/tests/support/ticker.rs`), against `CLOSE_GRACE` and `HOLD_SLACK`
+  (15 ms). A drop that yields or spins instead of parking is counted as ready; the doc of
+  `HOLD_SLACK` and `quality/not-measured.md` say so.
+
+Left open: 11 more call sites of `drain` in the Nova Sonic duplex tests (the draft
+story:nova-sonic-tests-wait-for-their-event); the ticker tests under contention (the draft
+story:ticker-test-holds-under-contention).

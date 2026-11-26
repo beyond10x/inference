@@ -8,7 +8,7 @@ tags:
 - from-finding
 relations:
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-26T04:28:12Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-26T04:28:12Z", actor: "human:operator", revision: 3}
@@ -64,3 +64,20 @@ with the source changed and restored showed three things these tests do not hold
 
 - The cancel of Cartesia, which waits up to twice the constant and which no test reaches.
 - Any change under `adapters/*/src`.
+
+## Scope as built
+
+Built on the branch `wave/u3-tests-under-load`, merged into `wave/2026-11-26-quality`:
+
+- The drop tests of `inference-cartesia` and `inference-elevenlabs` take their limits from `STATED`
+  (1 s) written out: outside a runtime at least 900 ms and at most 1 s plus `BOUND_SLACK` (100 ms)
+  with ready time taken out; inside an executor that is not Tokio 900 ms to 1.1 s; the synthesis's
+  own thread gone 900 ms to 2 s after a drop inside Tokio.
+- The ElevenLabs drop tests that wait for the bound end by `LIMIT` (10 s).
+- New Cartesia case `a_synthesis_that_fails_on_a_backed_up_connection_ends_at_the_close_bound`,
+  through `Deaf::stalling` and `on_a_backed_up_connection_of` in `tests/support/deaf.rs`: it
+  reaches the bound on `Connection::close` alone and holds the end to the stall and 900 ms to 1.2 s
+  more (`STALL_SLACK`).
+- `quality/not-measured.md` names these numbers and why no test of a drop fails with one of the
+  other two applications of the bound removed; `quality/adapters.md` (ElevenLabs, close of text to
+  speech) no longer says no test asserts the bound.
