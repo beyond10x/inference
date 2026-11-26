@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T18:37:23Z",
+  "actor": "human:operator",
+  "artifact": "story:nova-sonic-tests-wait-for-their-event",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "the workflow check on the push of main at d7cb2d48b (task test-run)",
+    "reference": "https://github.com/beyond10x/inference/actions/runs/45868854898, conclusion success; inference-aws 137 tests passed, 3 skipped in the unit's package run"
+  }
+}
