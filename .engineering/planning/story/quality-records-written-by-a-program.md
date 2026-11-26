@@ -2,14 +2,15 @@
 format: aep.planning-md/3
 id: story:quality-records-written-by-a-program
 kind: story
-status: active
+status: implemented
 title: A program writes the record of an assessment from what a run left behind
 relations:
 - serves: vision:inference
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-25T14:04:59Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-25T14:04:59Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-26T02:59:25Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":1}}}
 ---
 ## Context
 

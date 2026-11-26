@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T02:59:25Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-records-written-by-a-program",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source, task test-build and task test-run through the shared build pool, at 1d5cdfbb5",
+    "reference": "check-source exit 0 wall 17 s; test-build exit 0 wall 9 s; test-run exit 0 wall 94 s. The workspace run of test-run: 3207 tests run: 3207 passed, 73 skipped. The reports the run left: cases in default report: 3207; skipped elements: 0; cases in stack report: 23"
+  }
+}
