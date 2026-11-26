@@ -1,10 +1,11 @@
 //! A ticker beside the sessions of a test on one current-thread runtime, and its largest gap:
 //! what held the runtime's thread, without two waits that are the host's. The table of
 //! descriptors is grown before the ticker starts ([`grow_descriptor_table`]), and each gap is
-//! counted less the time its thread was ready to run without a processor ([`ReadyWait`]).
-//! The ElevenLabs binding's `tests/async_handles.rs` says what was measured of both. The drop
-//! tests (`adversary_w2_drop_backed_up.rs` of both adapters) take [`ReadyWait`] out of the hold of
-//! a drop the same way.
+//! counted less the time its thread was ready to run without a processor ([`ReadyWait`]), and
+//! never less than half of its wall time ([`counted`]). The ElevenLabs binding's
+//! `tests/async_handles.rs` says what was measured of both. The drop tests
+//! (`adversary_w2_drop_backed_up.rs` of both adapters) take [`ReadyWait`] out of the hold of a
+//! drop the same way.
 //!
 //! The Cartesia adapter's tests include this file by path
 //! (`adapters/inference-cartesia/tests/cancel.rs` and its `adversary_w2_drop_backed_up.rs`), and so
@@ -48,7 +49,7 @@ fn grow_descriptor_table() {
 ///
 /// The limit: the field cannot tell a late host from a thread that holds itself ready to run. A
 /// thread that waits in a loop of yields, or spins and is preempted, is counted here while
-/// another thread is ready on its processor, and that time is taken out of the gap.
+/// another thread is ready on its processor. [`counted`] takes at most half of a gap out for it.
 pub struct ReadyWait(Option<File>);
 
 impl ReadyWait {
@@ -71,10 +72,52 @@ impl ReadyWait {
     }
 }
 
+/// What one gap of `wall` counts, `ready` of it counted by [`ReadyWait`]: the wall time less the
+/// ready time, and never less than half of the wall time.
+///
+/// Half, because the ready time is not the host's alone: a thread that spins or yields while it
+/// holds the runtime is counted as ready whenever it is preempted, and on a build node at a load
+/// average of 86 on 32 processors the count took a gap that held a 200 ms sleep down to 11.2 ms.
+/// So a hold of 100 ms or more fails [`GAP_BOUND`] whatever the kernel counted, a hold of 200 ms
+/// leaves at least 100 ms; and a gap of the host alone still passes the bound up to 100 ms of
+/// wall time, where the most counted as ready in one gap on a loaded host was 18 ms.
+fn counted(wall: Duration, ready: Duration) -> Duration {
+    wall.saturating_sub(ready.min(wall / 2))
+}
+
+/// One reading of the ticker: the ready time between two instants, so that all of the ready
+/// time between two readings lies inside the wall time between them.
+struct Reading {
+    before: Instant,
+    ready: Duration,
+    after: Instant,
+}
+
+impl Reading {
+    fn of(ready: &mut ReadyWait) -> Self {
+        let before = Instant::now();
+        let ready = ready.so_far();
+        Self {
+            before,
+            ready,
+            after: Instant::now(),
+        }
+    }
+
+    /// What the gap from `self` to `later` counts ([`counted`]).
+    fn gap_to(&self, later: &Self) -> Duration {
+        counted(
+            later.after.saturating_duration_since(self.before),
+            later.ready.saturating_sub(self.ready),
+        )
+    }
+}
+
 /// Runs `sessions` on a current-thread runtime beside a ticker that ticks every [`TICK`] until
 /// they are done; returns what they returned and the ticker's largest gap, each gap less the
-/// time the runtime's thread was ready to run in it without a processor ([`ReadyWait`]). The
-/// descriptor table is grown first ([`grow_descriptor_table`]).
+/// time the runtime's thread was ready to run in it without a processor ([`ReadyWait`]) and at
+/// least half of its wall time ([`counted`]). The descriptor table is grown first
+/// ([`grow_descriptor_table`]).
 pub fn with_ticker<F, T>(sessions: Vec<F>) -> (Vec<T>, Duration)
 where
     F: Future<Output = T> + 'static,
@@ -93,12 +136,11 @@ where
             let done = Rc::clone(&done);
             tokio::task::spawn_local(async move {
                 let mut largest = Duration::ZERO;
-                let mut last = (Instant::now(), ready.so_far());
+                let mut last = Reading::of(&mut ready);
                 while !done.get() {
                     tokio::time::sleep(TICK).await;
-                    let now = (Instant::now(), ready.so_far());
-                    let late = now.1.saturating_sub(last.1);
-                    largest = largest.max((now.0 - last.0).saturating_sub(late));
+                    let now = Reading::of(&mut ready);
+                    largest = largest.max(last.gap_to(&now));
                     last = now;
                 }
                 largest
