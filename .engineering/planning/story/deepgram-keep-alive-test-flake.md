@@ -2,9 +2,14 @@
 format: aep.planning-md/3
 id: story:deepgram-keep-alive-test-flake
 kind: story
-status: draft
+status: active
 title: The Deepgram keep-alive test does not fail under host load
-revision: 1
+relations:
+- serves: vision:inference
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-26T04:28:28Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-26T04:28:28Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 
