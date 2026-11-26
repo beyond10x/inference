@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T08:10:40Z",
+  "actor": "human:operator",
+  "artifact": "story:nova-sonic-tests-wait-for-their-event",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run per package through the shared build pool, the cases on the code before each change, then with it",
+    "reference": "VERIFIED: baseline vs treatment. A 150 ms gap planted before every event: the old files 136 run, 100 passed, 36 failed; the new 136 passed. The adversary's session that ends right after a completion: red on the first build (8 run, 7 passed, 1 failed), green after correction 1 (20 passed). inference-aws 137 passed, 3 skipped"
+  }
+}

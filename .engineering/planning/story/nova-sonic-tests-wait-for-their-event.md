@@ -6,7 +6,7 @@ status: active
 title: The Nova Sonic duplex tests wait for the event they assert, not for 100 ms of quiet
 relations:
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-26T07:09:14Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-26T07:09:15Z", actor: "human:operator", revision: 3}
@@ -33,3 +33,14 @@ their own, not checked.
 ## Out of scope
 
 - The adapter's code.
+
+## Scope as built
+
+Built on the branch `wave2/tests-under-contention`, merged into `wave/2026-11-26-adoption`:
+
+- `adapters/inference-aws/tests/wait/mod.rs`: `until`, `until_within`, `ended`, `completed`,
+  `after_sent`, `until_sent`; the replay and two scripted providers count the frames they sent.
+- 44 call sites in 8 test files of `inference-aws` wait for the event they assert (the list is in
+  the commit body of the unit); `drain` stays where a test asserts that nothing more comes, also
+  after a completion before a check that the session is open (`unreadable_nova.rs`,
+  `late_usage_nova.rs`).

@@ -6,7 +6,7 @@ status: active
 title: The ElevenLabs ticker test fails on its block also when processors are contended
 relations:
 - serves: vision:inference
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-26T07:09:13Z", actor: "human:operator", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-26T07:09:14Z", actor: "human:operator", revision: 4}
@@ -43,3 +43,17 @@ parks).
 ## Out of scope
 
 - The library's ticker and the adapters' runtime use.
+
+## Scope as built
+
+Built on the branch `wave2/tests-under-contention`, merged into `wave/2026-11-26-adoption`:
+
+- `adapters/inference-elevenlabs/tests/support/ticker.rs` keeps its rule: the whole time the
+  thread was ready to run comes out of a gap; its doc states the limit (a thread that computes or
+  yields is counted only for the time it ran).
+- `adapters/inference-elevenlabs/tests/adversary_w2_ticker_blocks.rs`: each case pins itself beside
+  8 spinning threads; the computing case plants 200 ms of its own processor time; the sleep case
+  fails with its own message when the kernel counts more than a quarter of the sleep as ready;
+  each wait case checks that the ticker took out no more than the kernel counted; two controls
+  (nothing held, 15 ms of computing) pass beside the load; the loop of yields stays ignored with
+  a `limit:` reason.
