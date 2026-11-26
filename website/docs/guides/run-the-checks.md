@@ -35,6 +35,7 @@ It runs, in order, and stops at the first failure:
 | the API documentation | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` |
 | the build of the tests | `task test-build`, which runs no test |
 | tests | `task test-run`, which runs `task test-run-parts` under `timeout`: `cargo nextest run --workspace --all-features`, then the stack test without default features and the doc tests |
+| the quality records | `task quality-records`, which writes the record of each assessment of `quality/` that reads the report of the tests to `target/quality-records/` |
 
 The first seven steps are `task check-source`. Under `.config/nextest.toml` a test that runs over 60
 seconds is killed and fails, and the test step prints its ten slowest tests, also when one failed,
@@ -51,14 +52,18 @@ whole process group at the second signal. One that kills only its own child ther
 of uutils coreutils on the image of the CI runner does, can leave a part that ignored the first
 signal running until the job ends.
 
-CI runs the same three tasks, `task check-source`, `task test-build` and `task test-run`, as
-separate steps of the required check `inference / task check`. A pull request whose changed files
+CI runs the same four tasks, `task check-source`, `task test-build`, `task test-run` and
+`task quality-records`, as separate steps of the required check `inference / task check`, and on
+a push to `main` keeps the records as the artifact `quality-records-<commit>`
+([The quality of this repository](https://github.com/beyond10x/inference/blob/main/quality/README.md#the-records-of-a-check-run)
+says how to download them). A pull request whose changed files
 are all under `.engineering/` or are `*.md` files outside `website/`, `ess/` and `quality/`, other
 than `CHANGELOG.md`, only validates the planning store, and the check passes without a build. A
 change to a file under `quality/`, a `*.md` file too, runs the full check: a test of
 `task test-run` reads those files, as [The quality documents](#the-quality-documents) says.
 
-The steps as `task --dry check` lists them in this tree:
+The steps as `task --dry check` lists them in this tree, the script of `quality-records` cut after
+its first line (the whole script is in `Taskfile.yml`):
 
 ```text
 task: Task "sherpa-onnx-archive" is up to date
@@ -71,6 +76,10 @@ task: [check-source] RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 task: [test-build] cargo nextest run --workspace --all-features --no-run
 task: [test-build] cargo nextest run -p inference --no-default-features --test stack --no-run
 task: [test-run] timeout --kill-after=10s 120s task test-run-parts || { status=$?; if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then echo "task test-run was ended at its bound of 120 s"; fi; exit "$status"; }
+task: [quality-records] rm -rf target/quality-records target/quality-records.list
+task: [quality-records] mkdir -p target/quality-records
+task: [quality-records] cargo run -q -p inference-docs -- junit-assessments > target/quality-records.list
+task: [quality-records] report=target/nextest/default/junit.xml
 ```
 
 And the parts of the test step, as `task --dry test-run-parts` lists them:
@@ -162,8 +171,9 @@ the quality of this repository, what each value is today and where it comes from
 | `ratchet.toml`, `quality/*.ratchet.yaml`, `quality/assessors/`, `quality/records/` | the same measures in the formats of Ratchet (`beyond10x/ratchet`), what each assessor reports, and one record per assessment whose baseline was read from a CI run |
 
 The formats are those of the Ratchet specification at the commit `quality/README.md` names. No
-Ratchet command works at that commit, so Ratchet runs none of the files. They add no gate and change none: they describe what `task check`, `task test-slow` and
-the workflows under `.github/workflows/` already enforce.
+Ratchet command works at that commit, so Ratchet runs none of the files. They change no gate: they describe what `task check`, `task test-slow` and
+the workflows under `.github/workflows/` already enforce. One step of `task check` reads them:
+`task quality-records` fails when the report of the tests lacks what an assessment reads.
 
 The tests of `crates/inference-docs/tests/quality/` run in `task test-run`. They fail when the
 YAML files and records stop agreeing with each other, with `Taskfile.yml`, with the tree, or with

@@ -10,8 +10,9 @@ specification at commit `f139eccc17a548444f0f4e1dc06520120c28739f`.
 
 - No Ratchet command works at that commit. Nothing here is run by Ratchet.
 - Every field name is a proposal of that specification. A release of Ratchet can change it.
-- The documents add no gate to the repository and change none. They describe what `task check`,
-  `task test-slow` and the workflows under `.github/workflows/` already enforce.
+- The documents change no gate. They describe what `task check`, `task test-slow` and the
+  workflows under `.github/workflows/` already enforce. One step of `task check` reads them:
+  `task quality-records` fails when the report of the tests lacks what an assessment reads.
 - A measure can be defined and have no value. The latency measures on
   [adapters.md](adapters.md) are such: each names its command and its clock, and says
   `Baseline: none.`
@@ -122,7 +123,8 @@ kept yet, and nothing copies a record of a run into `records/`.
 ## The test that keeps the documents true
 
 `crates/inference-docs/tests/quality/`, part of `task test-run`: `mod.rs`, for the rules about
-adapters, tests and commands `adapters.rs`, and for the program `assess.rs`. It is not
+adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for the list of
+`task quality-records` `records.rs`. It is not
 `ratchet validate`. It fails when:
 
 - a file stops parsing, has another format or names another project, a name is declared in two
