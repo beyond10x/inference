@@ -6,7 +6,7 @@ status: active
 title: Each check run writes the quality records its JUnit report holds and keeps those of main as an artifact
 relations:
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-26T03:26:52Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-26T03:26:52Z", actor: "human:operator", revision: 3}
@@ -31,11 +31,18 @@ as a forge artifact. It keeps no series: where the series lives is the owner's o
 ## Acceptance
 
 Given a tree whose `task test-run` ended green, when `task quality-records` runs, then one
-`ratchet-evidence/1` document per assessment that reads the JUnit report exists under
-`target/quality-records/`, each accepted by the test of the quality documents in the place of
-that assessment's record, and the task exits non-zero and names the assessment when the report
-does not hold what an assessment names; and when the workflow `check` ran for a push to `main`,
-then its run has one artifact that holds those documents and names the commit.
+`ratchet-evidence/1` document per assessment whose record the JUnit report of that run holds
+exists under `target/quality-records/`, each with the format, project, file name, assessor,
+outputs, units, coverage and packages that the test of the quality documents demands of that
+assessment's record, and the task exits non-zero and names every assessment whose record was
+refused; and when the workflow `check` ran for a push to `main`, then its run has one artifact
+that holds those documents and names the commit.
+
+The values the pages of `quality/` name (the baselines and the run they were read from) are not
+part of this acceptance: they name the check run of 2026-11-24, so a record of any later run
+differs from them until the story after this one adopts a run on `main`. Decided by the
+coordinator on 2026-11-26, after the implementor's records check of a real local run found 86
+differences, all of them page values and none in a record.
 
 ## Planned scope
 
