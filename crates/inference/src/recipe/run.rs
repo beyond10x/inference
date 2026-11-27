@@ -390,6 +390,13 @@ impl<'i> Run<'i> {
         };
         if let Some((tool_call, tool_result)) = tools {
             model = model.with_tools(self.recipe.tools.tools().cloned(), tool_call, tool_result);
+            if let Some(feedback) = self
+                .declaration
+                .edges()
+                .find(|edge| edge.from_port() == tool_call)
+            {
+                model = model.with_round_bound(feedback.capacity());
+            }
         }
         let replies = Replies::default();
         self.replies = Some(replies.clone());

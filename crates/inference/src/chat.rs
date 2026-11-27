@@ -122,8 +122,8 @@ impl Chat {
     /// directly panics there, which fails its call with the panic's message.
     ///
     /// The model's calls are bounded as [`MAX_TOOL_ITERATIONS`](crate::MAX_TOOL_ITERATIONS)
-    /// says, over the whole conversation; [`Chat::stream`] says what the call past the bound
-    /// comes to.
+    /// says, for each text of the conversation; [`Chat::stream`] says what the call past the
+    /// bound comes to.
     ///
     /// # Errors
     ///
@@ -172,8 +172,9 @@ impl Chat {
     /// session's first [`Event::Error`], such as a turn the model failed, and [`Error::Closed`]
     /// when the session ended before the reply was whole, as when the model's tool calls reached
     /// the bound of the tool loop: the tool authority admits
-    /// [`MAX_TOOL_ITERATIONS`](crate::MAX_TOOL_ITERATIONS) calls of a chat's whole conversation,
-    /// counted call by call across its turns, and the call past them ends the session. After
+    /// [`MAX_TOOL_ITERATIONS`](crate::MAX_TOOL_ITERATIONS) replies that end with calls for each
+    /// text, the calls of one reply counted once, and a call of the reply past them ends the
+    /// session. After
     /// either of those two the session is closed and its history is gone with it: the next text
     /// starts a new conversation, which the model is given without the turns before it.
     pub fn stream(

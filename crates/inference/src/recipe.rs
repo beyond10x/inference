@@ -79,17 +79,21 @@ const VAD: VadConfig = VadConfig {
     hold: Duration::from_millis(200),
 };
 
-/// How many times the tool loop of `native_voice`, and of `chat` given tools, may return a call
-/// to the model: 4.
+/// How many times the tool loop of `native_voice`, and of `chat` given tools, may return calls
+/// to the model for one input: 4.
 ///
-/// The bound counts calls, not replies: the tool authority counts every call a model proposes
-/// in one generation, one it rejects too, whether one reply proposes several or several replies
-/// one each, and answers the call past the bound as exhausted, which completes the generation.
-/// `chat`'s model node runs one generation for its whole run, so for a chat the bound counts the
-/// calls of the whole conversation, across its turns: the fifth call ends the session, and the
-/// conversation's history ends with it. One reply may end with up to 8 calls without filling
-/// the loop's feedback edge; a reply with more may fail the run with the error of the full
-/// edge.
+/// The tool authority counts the replies that end with calls, per generation and input, and
+/// answers a call past the bound as exhausted, which completes the generation. `chat`'s model
+/// node names on each call the event its reply answers, the text or the last result of the
+/// round before, and rests it on the text it answers: the calls of one reply count once, and
+/// each text of a conversation is counted anew. A turn whose model returns calls a fifth time
+/// therefore ends the session, as `chat`'s model node runs one generation for its whole run, and
+/// the conversation's history ends with it; a conversation whose turns each stay within the
+/// bound goes on. One reply may end with up to 8 calls, the capacity of the loop's feedback
+/// edge; a reply with more fails the run with an error naming that 8, and none of its calls
+/// runs. `native_voice`'s speech node names no event on its calls, so each of its calls counts
+/// by itself, one call a rejected one too, against the generation it belongs to, and each
+/// response of the speech model is a generation of its own.
 pub const MAX_TOOL_ITERATIONS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
 
 /// The names the five built-in recipes hold in the recipe table.

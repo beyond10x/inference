@@ -106,12 +106,18 @@ pub(super) fn chat(
 /// sends two envelopes for each call, and a reply that ends with several calls puts all of them
 /// on these edges before the model reads the first. The feedback edge alone fails on overload,
 /// so the model's sends on it never wait and the model always comes to read `tool_result`: no
-/// pause of the loop can hold itself. Its capacity is [`FEEDBACK_CAPACITY`]: the authority admits
-/// at most [`MAX_TOOL_ITERATIONS`] calls of a generation, and beside them the model sends at most
-/// three more envelopes on the edge, the interruptions of its generation and its end of input,
-/// so the calls it admits of one generation never fill it. A reply that ends with more than
-/// [`FEEDBACK_CAPACITY`] calls may still fill it before the authority reads; the model's node
-/// then fails, and so does the run, with the error of the full edge.
+/// pause of the loop can hold itself. Its capacity is [`FEEDBACK_CAPACITY`]. The authority counts
+/// the calls of one reply as one time round the loop, so it does not bound how many calls one
+/// reply ends with; the edge does. The model sends a reply's calls only once the authority read
+/// every call of the reply before, as it awaits their outcomes first, so the calls of one reply
+/// are all the edge holds of them. `chat`'s model node is therefore given the edge's capacity as
+/// the most calls one reply may end with (`ModelNode::with_round_bound`): a reply with more
+/// fails the node, and so the run, with an error naming the capacity, before any of its calls is
+/// sent. An interruption of the generation sent behind a reply of 8 calls the authority has not
+/// read yet still finds the edge full; the model's node then fails, and so does the run, with
+/// the error of the full edge. `native_voice`'s speech node is
+/// given no such bound: the authority counts its calls one by one, and admits at most
+/// [`MAX_TOOL_ITERATIONS`] of a generation.
 fn tool_loop<'b>(pipeline: &mut Builder<'_, 'b>, model: &NodeHandle<'b>) {
     let structured = TOOL;
     let fail = OverloadPolicy::Fail;
