@@ -99,7 +99,18 @@ record. `task test-run` keeps the report of its workspace part at
 `target/nextest/default/junit.xml`: the stack test after it runs under the nextest profile
 `stack`.
 
-The records under `records/` are still the ones written by hand from the CI runs named below.
+Of the 40 records under `records/`, 22 are the records of the adopted run named below, adopted
+byte for byte from its artifact by `task quality-adopt` (see "Adopting the records of a run on
+`main`"): those of every assessment `inference-docs junit-assessments` lists. The other 18 are
+records no artifact holds, and they stay records written by hand from the CI runs named below:
+
+- the steps and checks of `task check-source`: `formatting`, `lint`, `doc-build`,
+  `generated-docs`, `planning-store`, `ess-specification` and `native-archive`;
+- the source scan: `source-scan`;
+- the steps and the jobs: `test-run-step`, `check-source-step`, `test-build-step`,
+  `check-workflow`, `slow-lane-step` and `slow-workflow`;
+- the slow lane: `slow-lane`;
+- the documentation site: `docs-ux`, `docs-ux-step` and `docs-ux-workflow`.
 
 ## The records of a check run
 
@@ -468,7 +479,9 @@ unnoticed here:
 
 - `npx playwright test --workers=2`
 
-The test reads no CI run. That a record equals its run was checked by hand. A baseline without
+The test reads no CI run. That an adopted record equals its run was checked by
+`inference-docs adopt-records` when it was adopted; that a record written by hand equals its run
+was checked by hand. A baseline without
 a record is held only to name a file that exists: the test does not read the number in that
 file. A bound without a number ("must hold", "recorded, no bound") is not held against
 anything. Of the other lines of an entry, the test holds the tests and the commands they name,
@@ -489,11 +502,15 @@ More that the test does not hold:
 
 ## The runs the baselines were read from
 
-All ran on 2026-11-24. The first three ran on `main` at
-`59b8f4a858ab9c4eef94bc21de8e7bb85f90ddad`.
+The adopted run ran on 2026-11-26, for a push to `main`, at
+`0ac1e2f7b74f60b8019a25e5a98bc2460841ecd7`. Its artifact
+`quality-records-0ac1e2f7b74f60b8019a25e5a98bc2460841ecd7` holds the 22 records that were
+adopted. The other four ran on 2026-11-24; the check run, the slow run and the gates run ran on
+`main` at `59b8f4a858ab9c4eef94bc21de8e7bb85f90ddad`.
 
 | Name here | Workflow | Run |
 | --- | --- | --- |
+| adopted run | `check` | [45771353687](https://github.com/beyond10x/inference/actions/runs/45771353687) |
 | check run | `check` | [45474241015](https://github.com/beyond10x/inference/actions/runs/45474241015) |
 | slow run | `slow` | [45474240955](https://github.com/beyond10x/inference/actions/runs/45474240955) |
 | gates run | `Shared source gates` | [45474241551](https://github.com/beyond10x/inference/actions/runs/45474241551) |
@@ -505,18 +522,12 @@ the commit `1ed5587d63ab46006e85cc0164e7e0ecd70ec18c`. The tree of that commit i
 `59b8f4a8`: `17ea6f2eb4d9601ed4d3bd6c5e33c966dfe225f0`. The records of the docs run name the
 head as the candidate and the merge commit as the revision, with the selection `merge_result`.
 
-The values per adapter crate on [adapters.md](adapters.md) were counted in the log of the step
-`task test-run` of the check run. That log has one line per test, with the result, the time in
-brackets and the name of the package. This counts the tests of one package, here
-`inference-aws`, in a log saved as the file `$log`:
-
-```sh
-sed -E 's/(\x1b|\^\[)\[[0-9;]*m//g' "$log" |
-  grep -cE '\( *[0-9]+/3059\) +inference-aws(::[^ ]+)? '
-```
-
-The same lines that say `PASS` are the tests that passed, and the longest time on them is the
-slowest test.
+The values per adapter crate on [adapters.md](adapters.md) are those of the record of
+`adapter-tests` of the adopted run, which `inference-docs assess` wrote from the JUnit report of
+the step `task test-run`: the test cases of each package, those of them that passed, and the
+longest time on them. The facts below that no record holds, the skipped tests, the stack test
+and the doc tests, are read from the log of the step `task test-run` of the check run, and name
+it.
 
 ## How to read an entry
 
@@ -632,15 +643,19 @@ baseline names the two files and no run.
 - Command: `task test-run`, the part that runs `cargo nextest run` with the default profile.
 - Unit and direction: seconds; lower is better.
 - Bound: under 60 s. `.config/nextest.toml` ends a test at 60 s and counts it as failed.
-- Baseline: 8.011 s. Check run.
+- Baseline: 9.173 s. Adopted run.
 
-The same run gives the coverage of this assessment, which the record holds: 3059 tests run,
-3059 passed. Recorded, no bound. The `Summary` line of the run's log also says 72 tests skipped.
-No record holds that number: cargo-nextest writes no skipped test into its JUnit report, so
-`nextest-run@1` does not report `skipped`, and its record has 0 there, as Ratchet's format says
-for a count an assessor does not report. `task test-run` has two more parts that this
-assessment does not cover: the stack test (23 tests run, 23 passed) and the doc tests (38
-passed). Check run.
+The same run gives the coverage of this assessment, which the record holds: 3238 tests run,
+3238 passed. Recorded, no bound. Adopted run.
+
+No record holds the number of skipped tests: cargo-nextest writes no skipped test into its JUnit
+report, so `nextest-run@1` does not report `skipped`, and its record has 0 there, as Ratchet's
+format says for a count an assessor does not report. `task test-run` has two more parts that
+this assessment does not cover, the stack test and the doc tests, and no record holds them
+either. These three are read from the log of the step `task test-run` of the check run; the log
+of the adopted run was not read for these pages. In the log of the check run the `Summary` line
+says 72 tests skipped, the stack test ran 23 tests and 23 passed, and the doc tests passed 38.
+Check run.
 
 The tests run and passed and the slowest test of each adapter crate, from the same part of the
 same run, are on [adapters.md](adapters.md).
@@ -939,7 +954,7 @@ It is the value as committed, and every `task test-run` holds its bound.
   measures nothing.
 - Unit and direction: thousandths of real time; lower is better.
 - Bound: under 1000 and at least 1. The test fails otherwise, in every `task test-run`.
-- Baseline: 131. Check run, which read
+- Baseline: 131. Adopted run, which read
   `adapters/inference-sherpa-onnx/records/stt-i9-10900k-cpu.json`.
 
 ### `sherpa-onnx-stt-resources/load-time`
@@ -973,7 +988,7 @@ It is the value as committed, and every `task test-run` holds its bound.
   measures nothing.
 - Unit and direction: thousandths of real time; lower is better.
 - Bound: under 1000 and at least 1. The test fails otherwise, in every `task test-run`.
-- Baseline: 202. Check run, which read
+- Baseline: 202. Adopted run, which read
   `adapters/inference-whispercpp/records/stt-i9-10900k-cpu.json`.
 
 ### `whispercpp-stt-resources/load-time`
@@ -1028,7 +1043,7 @@ it was tagged.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 4 of 4 tests. Check run.
+- Baseline: holds for 4 of 4 tests. Adopted run.
 - Bindings against the changelog: the test
   `every_binding_is_since_the_release_whose_changelog_section_introduced_it` of
   `crates/inference-docs/src/adapters.rs` holds that each binding of the adapters page names

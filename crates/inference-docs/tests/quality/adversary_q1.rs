@@ -206,11 +206,11 @@ fn q1_planted_a_record_value_differs_from_the_baseline_of_the_page() {
     change(
         &mut documents.records,
         "quality/records/workspace-tests.evidence.json",
-        "\"value\": \"8.011\"",
+        "\"value\": \"9.173\"",
         "\"value\": \"9.999\"",
     );
     assert_reported(
-        "the record of workspace-tests holds 9.999 s, the page states the baseline 8.011 s",
+        "the record of workspace-tests holds 9.999 s, the page states the baseline 9.173 s",
         &documents,
     );
 }

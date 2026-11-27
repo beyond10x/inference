@@ -209,8 +209,10 @@ produce a latency.
 
 ### Ignored tests per adapter crate
 
-The log of the check run holds one number of skipped tests for the whole workspace, which the
-record of `workspace-tests` keeps. It has no line per skipped test, so nothing gives the count
+The log of the check run holds one number of skipped tests for the whole workspace, which
+[README.md](README.md) states and no record keeps: the JUnit report the record of
+`workspace-tests` is read from holds no skipped test. The log has no line per skipped test, so
+nothing gives the count
 per package. The assessor of `adapter-tests` therefore does not report skipped tests, and the
 coverage of its record has 0 for them, as the format writes a count that is not reported
 (`ratchet:spec/domains/assessor.yaml:182-187`). A listing of the ignored tests by nextest,
@@ -453,7 +455,8 @@ places where an adapter uses the value later. Two defaults a caller gets are rea
   `llm-http` and a client built as the adapter builds its own. The adapter gives no reader of
   its client. An adapter that builds its client with another bound fails no test.
 
-No record of a run holds a result of any of these comparisons yet:
+No record of a run holds a result of these comparisons yet, but for the first test of OpenAI
+Realtime below:
 
 - Audio device: the test `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-audio-device/tests/acknowledging.rs`, for `PLAYBACK_PATIENCE`, and the
@@ -496,8 +499,9 @@ No record of a run holds a result of any of these comparisons yet:
   `DEFAULT_WRITE_TIMEOUT`, and the test `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-openai/tests/duplex.rs`, for the idle limit of the default session
   configuration and for the connect deadline and the write deadline of a model built with
-  `OpenAiRealtime::new`. The first of the two is older than its comparison: the record of
-  `openai-time-bounds` holds a result of it from a run before it compared the numbers.
+  `OpenAiRealtime::new`. The first of the two is older than its comparison, and the record of
+  `openai-time-bounds` holds its result from the adopted run of
+  [README.md](README.md#the-runs-the-baselines-were-read-from), whose commit has the comparison.
 - OpenAI GPT-Live: the test `the_time_bound_defaults_are_the_stated_numbers` of
   `adapters/inference-openai/tests/gpt_live_duplex.rs`, for the idle limit of the default
   session configuration, the read timeout of the endpoint `Endpoint::live` gives, and the
@@ -593,7 +597,7 @@ median are not kept. These two assessments have measures in the YAML and no reco
 
 What is expressible is the committed file as a document that a test reads:
 `sherpa-onnx-stt-record` and `whispercpp-stt-record` have the real-time factor as an exact value
-of the file, with a record from the check run. The load time and the peak memory are not
+of the file, with a record from the adopted run. The load time and the peak memory are not
 repeated there, because no bound is held on them.
 
 ### The machine a resource profile was measured on

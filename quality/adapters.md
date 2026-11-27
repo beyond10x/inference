@@ -5,8 +5,9 @@ adapter is for, how many tests hold it, which time bounds and records its tests 
 commands print a latency. The general rules are in [README.md](README.md). What has no command
 is in [not-measured.md](not-measured.md).
 
-- "Check run" is the run of that name in the
-  [table of runs](README.md#the-runs-the-baselines-were-read-from).
+- "Adopted run" is the run of that name in the
+  [table of runs](README.md#the-runs-the-baselines-were-read-from): the check run on `main`
+  whose records `quality/records/` holds for every measure of this page that has a baseline.
 - A path is from the root of the repository.
 - A latency entry has no baseline. Its command was not run for this page, and no file keeps its
   output. Most of these commands are billed by the provider.
@@ -18,28 +19,28 @@ The three measures below have one value per crate. The values are in the table o
 ### `adapter-tests/tests-run`
 
 - For a user: how many tests hold the adapter in every `task check`.
-- Command: `task test-run`. The value is the number of test lines of the package in the log. The
-  command that counts them is beside the table of runs.
+- Command: `task test-run`. The value is the number of test cases of the package in the JUnit
+  report of the run, as `inference-docs assess` counts them for `task quality-records`.
 - Unit and direction: tests; higher is better.
 - Bound: recorded, no bound.
-- Baseline: one value per crate, in the table of its section. Check run.
+- Baseline: one value per crate, in the table of its section. Adopted run.
 
 ### `adapter-tests/tests-passed`
 
 - For a user: every test of the adapter passed in the run the values are read from.
-- Command: `task test-run`. The value is the number of test lines of the package that say `PASS`.
+- Command: `task test-run`. The value is the number of those test cases that passed.
 - Unit and direction: tests; higher is better.
 - Bound: recorded, no bound. `task test-run` fails when one test fails.
-- Baseline: one value per crate, in the table of its section. Check run.
+- Baseline: one value per crate, in the table of its section. Adopted run.
 
 ### `adapter-tests/slowest-test`
 
 - For a user: how long the slowest test of the adapter keeps a change waiting.
-- Command: `task test-run`. The value is the longest time on a test line of the package.
+- Command: `task test-run`. The value is the longest time on a test case of the package.
 - Unit and direction: seconds; lower is better.
 - Bound: recorded, no bound per crate. `workspace-tests/slowest-test` bounds every test of the
   workspace.
-- Baseline: one value per crate, in the table of its section. Check run.
+- Baseline: one value per crate, in the table of its section. Adopted run.
 
 Tests that are ignored have no count per crate. The log holds one number for the whole
 workspace. See [not-measured.md](not-measured.md).
@@ -82,9 +83,9 @@ Captures the microphone and plays to the speaker, so that a pipeline can run on 
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 127 tests | Check run |
-| `adapter-tests/tests-passed` | 127 tests | Check run |
-| `adapter-tests/slowest-test` | 1.226 s, `inference-audio-device::adversary2_loopback a_one_second_delay_on_the_default_buffers_reports_no_audio_dropped_after_forwarding` | Check run |
+| `adapter-tests/tests-run` | 129 tests | Adopted run |
+| `adapter-tests/tests-passed` | 129 tests | Adopted run |
+| `adapter-tests/slowest-test` | 2.041 s, `inference-audio-device::acknowledging a_sink_given_no_patience_waits_the_stated_two_seconds_for_a_stalled_speaker` | Adopted run |
 
 It has no committed record and no command that prints a latency.
 
@@ -94,7 +95,7 @@ It has no committed record and no command that prints a latency.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 2 of 2 tests. Check run.
+- Baseline: holds for 2 of 2 tests. Adopted run.
 - Drain, stopped callback: `PLAYBACK_PATIENCE` is 2 s
   (`adapters/inference-audio-device/src/acknowledging.rs`). The test
   `a_speaker_whose_callback_stopped_fails_the_drain_within_the_stated_patience` of
@@ -110,9 +111,9 @@ Speech in and speech out with Amazon Nova Sonic on Amazon Bedrock, over one bidi
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 134 tests | Check run |
-| `adapter-tests/tests-passed` | 134 tests | Check run |
-| `adapter-tests/slowest-test` | 1.110 s, `inference-aws::unreadable_nova audio_appended_after_the_close_is_refused_and_drops_nothing` | Check run |
+| `adapter-tests/tests-run` | 136 tests | Adopted run |
+| `adapter-tests/tests-passed` | 136 tests | Adopted run |
+| `adapter-tests/slowest-test` | 2.089 s, `inference-aws::nova_sonic_duplex until_fails_with_its_message_on_a_slow_stream_that_never_brings_the_event` | Adopted run |
 
 ### `aws-time-bounds/held`
 
@@ -121,7 +122,7 @@ Speech in and speech out with Amazon Nova Sonic on Amazon Bedrock, over one bidi
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 4 of 4 tests. Check run.
+- Baseline: holds for 4 of 4 tests. Adopted run.
 - Open, default: `OPEN_TIMEOUT` is 10 s (`adapters/inference-aws/src/nova_sonic/client.rs`). The
   test `the_open_deadline_is_stated` of
   `adapters/inference-aws/tests/nova_sonic_stall_and_bounds.rs` asserts the value.
@@ -145,7 +146,7 @@ Speech in and speech out with Amazon Nova Sonic on Amazon Bedrock, over one bidi
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 1 of 1 tests. Check run.
+- Baseline: holds for 1 of 1 tests. Adopted run.
 - Nova Sonic: `adapters/inference-aws/records/claims-nova-sonic.json`. The test
   `the_nova_sonic_record_holds_the_claims_of_the_binding` of
   `adapters/inference-aws/tests/claims_record.rs` compares its claims, model, binding, features
@@ -162,9 +163,9 @@ Turns text into speech with Cartesia Sonic, streamed over a WebSocket.
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 37 tests | Check run |
-| `adapter-tests/tests-passed` | 37 tests | Check run |
-| `adapter-tests/slowest-test` | 1.032 s, `inference-cartesia::adversary_rf1_protocol segments_offered_while_one_speaks_and_after_an_idle_gap_are_all_spoken_in_order` | Check run |
+| `adapter-tests/tests-run` | 47 tests | Adopted run |
+| `adapter-tests/tests-passed` | 47 tests | Adopted run |
+| `adapter-tests/slowest-test` | 2.179 s, `inference-cartesia::adversary_w2_drop_backed_up a_synthesis_that_fails_on_a_backed_up_connection_ends_at_the_close_bound` | Adopted run |
 
 ### `cartesia-time-bounds/held`
 
@@ -173,7 +174,7 @@ Turns text into speech with Cartesia Sonic, streamed over a WebSocket.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 2 of 2 tests. Check run.
+- Baseline: holds for 2 of 2 tests. Adopted run.
 - Read: `DEFAULT_READ_TIMEOUT` is 10 s (`adapters/inference-cartesia/src/config.rs`). The test
   `silence_fails_the_synthesis_as_stalled_within_the_read_timeout` of
   `adapters/inference-cartesia/tests/errors.rs` holds the mechanism, at 300 ms.
@@ -192,7 +193,7 @@ Turns text into speech with Cartesia Sonic, streamed over a WebSocket.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 1 of 1 tests. Check run.
+- Baseline: holds for 1 of 1 tests. Adopted run.
 - Text to speech: `adapters/inference-cartesia/records/claims-tts.json`. The test
   `the_tts_record_holds_the_claims_of_the_binding` of
   `adapters/inference-cartesia/tests/claims_record.rs` compares its claims, model, binding,
@@ -224,9 +225,9 @@ to a Deepgram Voice Agent.
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 126 tests | Check run |
-| `adapter-tests/tests-passed` | 126 tests | Check run |
-| `adapter-tests/slowest-test` | 3.011 s, `inference-deepgram::bounds messages_trickling_in_after_close_stream_do_not_stretch_the_summary_deadline` | Check run |
+| `adapter-tests/tests-run` | 131 tests | Adopted run |
+| `adapter-tests/tests-passed` | 131 tests | Adopted run |
+| `adapter-tests/slowest-test` | 3.018 s, `inference-deepgram::errors a_server_silent_after_close_stream_stalls_within_the_read_timeout` | Adopted run |
 
 ### `deepgram-time-bounds/held`
 
@@ -235,7 +236,7 @@ to a Deepgram Voice Agent.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 7 of 7 tests. Check run.
+- Baseline: holds for 7 of 7 tests. Adopted run.
 - Keep-alive, transcription: `DEFAULT_KEEPALIVE_INTERVAL` is 4 s
   (`adapters/inference-deepgram/src/config.rs`). The test `a_keep_alive_is_sent_after_silence` of
   `adapters/inference-deepgram/tests/audio.rs` holds the mechanism, at 100 ms.
@@ -268,7 +269,7 @@ to a Deepgram Voice Agent.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 2 of 2 tests. Check run.
+- Baseline: holds for 2 of 2 tests. Adopted run.
 - Transcription: `adapters/inference-deepgram/records/claims-stt.json`. The test
   `the_stt_record_holds_the_claims_of_the_binding` of
   `adapters/inference-deepgram/tests/claims_record.rs` compares its claims, model, binding,
@@ -305,9 +306,9 @@ Speech in and speech out with Deepslate Opal, a speech-to-speech model hosted in
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 70 tests | Check run |
-| `adapter-tests/tests-passed` | 70 tests | Check run |
-| `adapter-tests/slowest-test` | 2.603 s, `inference-deepslate::adversary_rf1_tool_turn an_answer_in_a_new_turn_leaves_nothing_owed` | Check run |
+| `adapter-tests/tests-run` | 72 tests | Adopted run |
+| `adapter-tests/tests-passed` | 72 tests | Adopted run |
+| `adapter-tests/slowest-test` | 2.617 s, `inference-deepslate::adversary_rf1_tool_turn an_answer_in_a_new_turn_leaves_nothing_owed` | Adopted run |
 
 ### `deepslate-time-bounds/held`
 
@@ -316,7 +317,7 @@ Speech in and speech out with Deepslate Opal, a speech-to-speech model hosted in
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 4 of 4 tests. Check run.
+- Baseline: holds for 4 of 4 tests. Adopted run.
 - Open: `DEFAULT_OPEN_TIMEOUT` is 15 s (`adapters/inference-deepslate/src/config.rs`). The test
   `a_refused_or_failed_opening_opens_nothing` of
   `adapters/inference-deepslate/tests/opal_duplex.rs` holds the mechanism, at 300 ms.
@@ -340,7 +341,7 @@ Speech in and speech out with Deepslate Opal, a speech-to-speech model hosted in
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 1 of 1 tests. Check run.
+- Baseline: holds for 1 of 1 tests. Adopted run.
 - Opal: `adapters/inference-deepslate/records/claims-opal.json`. The test
   `the_opal_record_holds_the_claims_of_the_binding` of
   `adapters/inference-deepslate/tests/claims_record.rs` compares its claims, model, binding,
@@ -357,9 +358,9 @@ with `duplex` it talks to an ElevenLabs agent.
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 163 tests | Check run |
-| `adapter-tests/tests-passed` | 163 tests | Check run |
-| `adapter-tests/slowest-test` | 4.006 s, `inference-elevenlabs::security_u1_stt a_handshake_still_pending_when_the_read_timeout_after_input_passes_fails_the_recognition` | Check run |
+| `adapter-tests/tests-run` | 208 tests | Adopted run |
+| `adapter-tests/tests-passed` | 208 tests | Adopted run |
+| `adapter-tests/slowest-test` | 4.007 s, `inference-elevenlabs::security_u1_stt a_handshake_still_pending_when_the_read_timeout_after_input_passes_fails_the_recognition` | Adopted run |
 
 ### `elevenlabs-time-bounds/held`
 
@@ -368,7 +369,7 @@ with `duplex` it talks to an ElevenLabs agent.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 6 of 6 tests. Check run.
+- Baseline: holds for 6 of 6 tests. Adopted run.
 - Read, text to speech: `DEFAULT_READ_TIMEOUT` is 10 s
   (`adapters/inference-elevenlabs/src/config.rs`). The test
   `a_silent_server_is_a_stall_within_the_read_timeout` of
@@ -405,7 +406,7 @@ with `duplex` it talks to an ElevenLabs agent.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 3 of 3 tests. Check run.
+- Baseline: holds for 3 of 3 tests. Adopted run.
 - Text to speech: `adapters/inference-elevenlabs/records/claims-tts.json`. The test
   `the_tts_record_holds_the_claims_of_the_binding` of
   `adapters/inference-elevenlabs/tests/claims_record.rs` compares its claims, model, binding,
@@ -458,9 +459,9 @@ Generates text with a llama.cpp `llama-server` that runs on the same machine.
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 47 tests | Check run |
-| `adapter-tests/tests-passed` | 47 tests | Check run |
-| `adapter-tests/slowest-test` | 0.314 s, `inference-llama-server::cancellation a_server_silent_past_the_idle_limit_cancels_the_generation_with_the_deadline_error` | Check run |
+| `adapter-tests/tests-run` | 48 tests | Adopted run |
+| `adapter-tests/tests-passed` | 48 tests | Adopted run |
+| `adapter-tests/slowest-test` | 0.324 s, `inference-llama-server::cancellation a_server_silent_past_the_idle_limit_cancels_the_generation_with_the_deadline_error` | Adopted run |
 
 ### `llama-server-time-bounds/held`
 
@@ -469,7 +470,7 @@ Generates text with a llama.cpp `llama-server` that runs on the same machine.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 1 of 1 tests. Check run.
+- Baseline: holds for 1 of 1 tests. Adopted run.
 - Idle: the crate has no constant. The limits are those of the HTTP transport it is given. The
   test `a_server_silent_past_the_idle_limit_cancels_the_generation_with_the_deadline_error` of
   `adapters/inference-llama-server/tests/cancellation.rs` holds the mechanism, at 300 ms. No test
@@ -482,7 +483,7 @@ Generates text with a llama.cpp `llama-server` that runs on the same machine.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 1 of 1 tests. Check run.
+- Baseline: holds for 1 of 1 tests. Adopted run.
 - Both records: `adapters/inference-llama-server/capability/reference-machine-cpu.json` and
   `adapters/inference-llama-server/capability/reference-machine-cpu-tools.json`. The test
   `each_committed_capability_record_checks_against_the_declaration_of_its_adapter` of
@@ -606,9 +607,9 @@ into speech over the speech endpoint.
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 349 tests | Check run |
-| `adapter-tests/tests-passed` | 349 tests | Check run |
-| `adapter-tests/slowest-test` | 2.607 s, `inference-openai::adversary16_u1_live_split adversary16_live_close_after_a_stalled_write_keeps_its_documented_bound` | Check run |
+| `adapter-tests/tests-run` | 352 tests | Adopted run |
+| `adapter-tests/tests-passed` | 352 tests | Adopted run |
+| `adapter-tests/slowest-test` | 2.663 s, `inference-openai::adversary16_u1_live_split adversary16_live_close_after_a_stalled_write_keeps_its_documented_bound` | Adopted run |
 
 ### `openai-time-bounds/held`
 
@@ -617,7 +618,7 @@ into speech over the speech endpoint.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 11 of 11 tests. Check run.
+- Baseline: holds for 11 of 11 tests. Adopted run.
 - Connect and write, defaults: `DEFAULT_CONNECT_TIMEOUT` is 10 s and `DEFAULT_WRITE_TIMEOUT` is
   10 s (`adapters/inference-openai/src/config.rs`). The test
   `the_deadlines_are_stated_and_settable` of
@@ -659,7 +660,7 @@ into speech over the speech endpoint.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 3 of 3 tests. Check run.
+- Baseline: holds for 3 of 3 tests. Adopted run.
 - Realtime: `adapters/inference-openai/records/claims-realtime.json`. The test
   `the_realtime_record_holds_the_claims_of_the_binding` of
   `adapters/inference-openai/tests/claims_record.rs` compares its claims, model, binding,
@@ -733,9 +734,9 @@ Speech in and speech out with Phonic over its realtime WebSocket.
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 31 tests | Check run |
-| `adapter-tests/tests-passed` | 31 tests | Check run |
-| `adapter-tests/slowest-test` | 1.857 s, `inference-phonic::adversary_rf1_phonic adversary_rf1_a_caller_running_its_tool_past_the_idle_limit_is_not_a_stalled_provider` | Check run |
+| `adapter-tests/tests-run` | 34 tests | Adopted run |
+| `adapter-tests/tests-passed` | 34 tests | Adopted run |
+| `adapter-tests/slowest-test` | 1.870 s, `inference-phonic::adversary_rf1_phonic adversary_rf1_a_caller_running_its_tool_past_the_idle_limit_is_not_a_stalled_provider` | Adopted run |
 
 ### `phonic-time-bounds/held`
 
@@ -744,7 +745,7 @@ Speech in and speech out with Phonic over its realtime WebSocket.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 3 of 3 tests. Check run.
+- Baseline: holds for 3 of 3 tests. Adopted run.
 - Ready: `DEFAULT_READY_TIMEOUT` is 10 s (`adapters/inference-phonic/src/protocol.rs`). The test
   `no_ready_within_the_deadline_fails_the_open_and_closes_the_connection` of
   `adapters/inference-phonic/tests/duplex.rs` holds the mechanism, at 200 ms.
@@ -763,7 +764,7 @@ Speech in and speech out with Phonic over its realtime WebSocket.
 - Command: `task test-run`.
 - Unit and direction: none; holds, once per test.
 - Bound: must hold for every test. `task test-run` fails otherwise.
-- Baseline: holds for 1 of 1 tests. Check run.
+- Baseline: holds for 1 of 1 tests. Adopted run.
 - Speech to speech: `adapters/inference-phonic/records/claims-duplex.json`. The test
   `the_duplex_record_holds_the_claims_of_the_binding` of
   `adapters/inference-phonic/tests/claims_record.rs` compares its claims, model, binding,
@@ -779,9 +780,9 @@ Turns speech into text on the local CPU with the sherpa-onnx runtime, as the aud
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 40 tests | Check run |
-| `adapter-tests/tests-passed` | 40 tests | Check run |
-| `adapter-tests/slowest-test` | 0.494 s, `inference-sherpa-onnx::stt_network the_archive_download_is_reached_only_through_build_dependencies` | Check run |
+| `adapter-tests/tests-run` | 40 tests | Adopted run |
+| `adapter-tests/tests-passed` | 40 tests | Adopted run |
+| `adapter-tests/slowest-test` | 1.181 s, `inference-sherpa-onnx::licence no_gpl_phonemiser_is_linked` | Adopted run |
 
 The crate has no time bound as a constant. Its measures of load time, real-time factor and peak
 memory are in [README.md](README.md#local-speech-to-text-adapters), with the committed record
@@ -806,9 +807,9 @@ Turns speech into text on the local CPU with whisper.cpp, one turn at a time.
 
 | Measure | Baseline | Read from |
 |---|---|---|
-| `adapter-tests/tests-run` | 42 tests | Check run |
-| `adapter-tests/tests-passed` | 42 tests | Check run |
-| `adapter-tests/slowest-test` | 0.334 s, `inference-whispercpp::stt_network the_build_downloads_nothing` | Check run |
+| `adapter-tests/tests-run` | 42 tests | Adopted run |
+| `adapter-tests/tests-passed` | 42 tests | Adopted run |
+| `adapter-tests/slowest-test` | 0.546 s, `inference-whispercpp::stt_network the_normal_dependency_tree_names_no_network_crate` | Adopted run |
 
 The crate has no time bound as a constant. Its measures of load time, real-time factor and peak
 memory are in [README.md](README.md#local-speech-to-text-adapters), with the committed record
