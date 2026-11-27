@@ -24,6 +24,9 @@ use crate::root;
 const RUN: &str = "45000000017";
 const COMMIT: &str = "abcdef0123456789abcdef0123456789abcdef01";
 const RECORDS: &str = "quality/records";
+/// A digest no record of the tree has, put in place of the one a record names.
+const OTHER_DIGEST: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 /// What the program names a temporary file of a record after: `.<file name>` and this.
 const TEMPORARY: &str = ".adopting";
 
@@ -320,10 +323,17 @@ fn a_run_id_or_a_commit_the_records_do_not_name_is_refused() {
         &format!("\"candidate\": \"{COMMIT}\""),
         "\"candidate\": \"0123456789abcdef0123456789abcdef01234567\"",
     );
+    let held = case
+        .record("adapters/sherpa-onnx-stt-record.evidence.json")
+        .split("\"digest\": \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the record names the digest of its target")
+        .to_owned();
     case.edit(
         "adapters/sherpa-onnx-stt-record.evidence.json",
-        "\"digest\": \"sha256:6d8d",
-        "\"digest\": \"sha256:0d8d",
+        &format!("\"digest\": \"{held}\""),
+        &format!("\"digest\": \"{OTHER_DIGEST}\""),
     );
     let outcome = case.adopt();
     case.refused(
@@ -345,7 +355,7 @@ fn a_run_id_or_a_commit_the_records_do_not_name_is_refused() {
             ),
             (
                 "adapters/sherpa-onnx-stt-record.evidence.json",
-                "the digest of the target is Some(\"sha256:0d8d",
+                &format!("the digest of the target is Some(\"{OTHER_DIGEST}\")"),
             ),
         ],
     );

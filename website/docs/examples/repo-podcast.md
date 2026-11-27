@@ -103,7 +103,7 @@ turn is given up.
 A turn given up after its audio arrived keeps that audio, and the show goes on. One given up before
 any audio ends the show once what was generated has played.
 
-On main, in the next release, `repo_podcast::Settings::silent_turn` sets that bound for a show
+Since 0.34.0, `repo_podcast::Settings::silent_turn` sets that bound for a show
 your own code opens with `Show::open`; `Settings::default()` keeps 10 seconds. A `Settings`
 written as a struct literal names `silent_turn`, or ends in `..Settings::default()`, as `podcast`
 does.

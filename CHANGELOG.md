@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.34.0] — 2026-11-27
+
+Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these
+releases, and no other release since then has one.
+
+- [0.34.0](#0340--2026-11-27)
+- [0.33.0](#0330--2026-11-23)
+- [0.29.0](#0290--2026-11-13)
+- [0.28.0](#0280--2026-11-12)
+- [0.27.0](#0270--2026-11-09)
+- [0.26.0](#0260--2026-11-07)
+- [0.25.0](#0250--2026-11-07)
+- [0.24.0](#0240--2026-11-07)
+- [0.23.0](#0230--2026-11-06)
+- [0.22.0](#0220--2026-11-06)
+- [0.20.0](#0200--2026-11-06)
+
 ### Breaking
 
 - `inference-elevenlabs` (feature `duplex`): a model built with `ElevenLabsAgent::signed` gives its
@@ -214,6 +231,8 @@
   Started with no result, and the node's drain failed naming the panic. A model over a tool loop
   (`native_voice`, `chat` given tools) is now given the failure as the call's result and answers
   it.
+- The `ess` pin moves from 0.98.0 to 0.99.8: CI, the documentation workflow and the testkit's
+  `ess-conformance` and `ess-primitives` tags.
 
 ### Fixed
 

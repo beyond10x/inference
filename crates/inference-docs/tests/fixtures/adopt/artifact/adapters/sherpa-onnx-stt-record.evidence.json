@@ -4,14 +4,14 @@
     "project": "inference",
     "assessment": "sherpa-onnx-stt-record",
     "assessor": "capability-record@1",
-    "candidate": "sha256:6d8dadb5aa7ff2f9fba6ae6ecb116563903e8c162c686e04fe24cb53afffc16b",
+    "candidate": "sha256:799de6d92a87885e66b1c096100407a9f6a10331fb6096237ea75967a2a8af96",
     "target": {
       "kind": "document",
       "class": "ci",
       "selection": "candidate",
       "identifiers": {
         "path": "adapters/inference-sherpa-onnx/records/stt-i9-10900k-cpu.json",
-        "digest": "sha256:6d8dadb5aa7ff2f9fba6ae6ecb116563903e8c162c686e04fe24cb53afffc16b",
+        "digest": "sha256:799de6d92a87885e66b1c096100407a9f6a10331fb6096237ea75967a2a8af96",
         "digest_form": "bytes"
       }
     },
