@@ -290,6 +290,15 @@ and runs `slot --local <executable> --ignored --nocapture` for each of the three
   provider's runs only: `OPENAI_API_KEY` and `INFERENCE_OPENAI_KEY_SOURCE=env` for OpenAI,
   `ELEVENLABS_API_KEY` for ElevenLabs. Every run starts without the other provider's variable,
   and no build gets either.
+- `secret-tool` answers with the whole entry `secretsctl` wrote to the keychain: the format byte
+  1, a 16-byte version and the value (crate `secrets-keychain` of the `secrets` repository,
+  `seal` and `open`). The key is the value alone, as UTF-8, with a trailing line end dropped.
+  The version is never used, printed or written. An entry shorter than 17 bytes, with another
+  first byte, or with a value that is empty or not UTF-8 gives no key.
+- `ELEVENLABS_RESIDENCY` (`global`, `us`, `eu`, `in` or `sg`) comes from the environment. When
+  it is set, it reaches the ElevenLabs runs and no OpenAI run, and the count names it beside
+  ElevenLabs: `ElevenLabs (residency eu)`. A value the adapter does not take is named as such
+  and not printed.
 - `secret-tool` has 10 s to answer (`--key-timeout-ms` of the program names another bound);
   past it the lane ends it.
 - No key is printed, passed as an argument or written to a file. A line of a run's output that

@@ -6,10 +6,16 @@
 //! it stops there with exit 2 and starts nothing: no build, no command, no `secret-tool`. With
 //! `YES=1` it reads each provider's key with `secret-tool lookup service b10x-secrets username
 //! <key>`, once, only for a provider with a measure to run, and within a bound (10 s unless
-//! `--key-timeout-ms` names another). A key that is missing or empty, or a `secret-tool` that
-//! cannot be started or does not answer in time, skips its provider's measures with a line naming
-//! the key and the measures; `ELEVENLABS_VOICE_ID` unset skips both ElevenLabs measures, which both
-//! read it, by name, and their key is not read. The lane goes on with the others.
+//! `--key-timeout-ms` names another). `secret-tool` answers with the whole keychain entry
+//! `secretsctl` wrote: the format byte 1, a 16-byte version and the value (`secrets-keychain`,
+//! see [`value_of`]). The key is the value alone, UTF-8 with trailing line ends dropped; the
+//! version is never used, printed or written. A key that is missing or empty, an entry in another
+//! layout, or a `secret-tool` that cannot be started or does not answer in time, skips its
+//! provider's measures with a line naming the key and the measures, never a byte of the entry;
+//! `ELEVENLABS_VOICE_ID` unset skips both ElevenLabs measures, which both read it, by name, and
+//! their key is not read. The lane goes on with the others. `ELEVENLABS_RESIDENCY`, when the
+//! lane's environment sets it, reaches the ElevenLabs runs and no OpenAI run, and the count names
+//! it beside ElevenLabs.
 //!
 //! Each measure is then built and run apart, because a key stays on this machine:
 //!
@@ -66,6 +72,15 @@ pub(crate) struct Arguments {
 
 /// The `service` attribute of every key in the Secret Service.
 const SERVICE: &str = "b10x-secrets";
+/// The first byte of every keychain entry `secretsctl` writes.
+const ENTRY_FORMAT: u8 = 1;
+/// The format byte and the 16-byte version that precede the value in such an entry.
+const ENTRY_HEADER: usize = 1 + 16;
+/// The variable `inference-elevenlabs` reads the host of a key's data from, and the names it
+/// takes (`adapters/inference-elevenlabs/src/config.rs`, `RESIDENCY_VARIABLE`): it reaches the
+/// ElevenLabs runs from the lane's environment and no other run.
+const RESIDENCY: &str = "ELEVENLABS_RESIDENCY";
+const RESIDENCIES: [&str; 5] = ["global", "us", "eu", "in", "sg"];
 /// The voice both ElevenLabs commands read.
 const VOICE: &str = "ELEVENLABS_VOICE_ID";
 /// Every key variable a command of the lane reads; each build and run starts without all of them.
@@ -89,6 +104,8 @@ struct Provider {
     variable: &'static str,
     /// Further variables its commands need to read the key from the environment.
     also: &'static [(&'static str, &'static str)],
+    /// Variables of the lane's environment that reach its runs and no other provider's.
+    own: &'static [&'static str],
     measures: &'static [Measure],
 }
 
@@ -108,6 +125,7 @@ const PROVIDERS: [Provider; 2] = [
         key: "default/default/default/openai-api-key",
         variable: "OPENAI_API_KEY",
         also: &[("INFERENCE_OPENAI_KEY_SOURCE", "env")],
+        own: &[],
         measures: &[
             Measure {
                 assessment: "openai-speech-live",
@@ -130,6 +148,7 @@ const PROVIDERS: [Provider; 2] = [
         key: "default/default/default/elevenlabs-api-key",
         variable: "ELEVENLABS_API_KEY",
         also: &[],
+        own: &[RESIDENCY],
         measures: &[
             Measure {
                 assessment: "elevenlabs-live-example",
@@ -189,7 +208,7 @@ fn lane(arguments: &Arguments) -> Result<u8, String> {
         }
     }
     let voice = env::var(VOICE).is_ok_and(|voice| !voice.trim().is_empty());
-    print!("{}", count(voice));
+    print!("{}", count(voice, residency().as_deref()));
     if env::var("YES").as_deref() != Ok("1") {
         println!(
             "quality-live: called nothing; with the owner's yes to this count, run `YES=1 task quality-live`"
@@ -244,8 +263,24 @@ fn lane(arguments: &Arguments) -> Result<u8, String> {
     Ok(u8::from(failed > 0))
 }
 
-/// The hosted calls of one run, per provider, as the lane prints them before it calls anything.
-fn count(voice: bool) -> String {
+/// What the count says of [`RESIDENCY`] in the lane's environment: nothing when it is unset or
+/// empty, which the adapter reads as `global`; its name when the adapter takes it; otherwise that
+/// the adapter takes none of it, without the value, which may be a key set in the wrong variable.
+fn residency() -> Option<String> {
+    match env::var(RESIDENCY) {
+        Err(env::VarError::NotPresent) => None,
+        Ok(value) if value.is_empty() => None,
+        Ok(value) if RESIDENCIES.contains(&value.as_str()) => Some(format!("residency {value}")),
+        _ => Some(format!(
+            "{RESIDENCY} names none of {}; its value is not printed",
+            RESIDENCIES.join(", ")
+        )),
+    }
+}
+
+/// The hosted calls of one run, per provider, as the lane prints them before it calls anything;
+/// `residency` is what the count says of [`RESIDENCY`] beside the provider it reaches.
+fn count(voice: bool, residency: Option<&str>) -> String {
     let mut text = String::from(
         "quality-live: the hosted calls of one run, per provider; each is billed by its provider\n",
     );
@@ -257,10 +292,13 @@ fn count(voice: bool) -> String {
             .filter(runs)
             .map(|measure| measure.calls)
             .sum();
-        text.push_str(&format!(
-            "  {}, key {}: {calls} calls\n",
-            provider.name, provider.key
-        ));
+        let name = match residency {
+            Some(said) if provider.own.contains(&RESIDENCY) => {
+                format!("{} ({said})", provider.name)
+            }
+            _ => provider.name.to_owned(),
+        };
+        text.push_str(&format!("  {name}, key {}: {calls} calls\n", provider.key));
         for measure in provider.measures {
             let line = if !runs(&measure) {
                 format!("skipped, {VOICE} is unset")
@@ -449,14 +487,27 @@ fn lookup(username: &str, bound: Duration) -> Result<String, String> {
     if let Some(mut stdout) = child.stdout.take() {
         stdout.read_to_end(&mut bytes).map_err(|_| missing())?;
     }
-    let mut key = String::from_utf8(bytes).map_err(|_| missing())?;
+    value_of(bytes).ok_or_else(missing)
+}
+
+/// The value of a keychain entry as `secretsctl` writes it, or `None`: the entry is the format
+/// byte [`ENTRY_FORMAT`], a 16-byte version and the value (`secrets-keychain` at the tag the
+/// adapters pin, `crates/secrets-keychain/src/lib.rs`: `FORMAT`, `HEADER`, `seal` and `open`).
+/// An entry shorter than [`ENTRY_HEADER`] or with another first byte is refused as `open` refuses
+/// it; the version is skipped and never read. The value is UTF-8 with trailing line ends dropped,
+/// since `secret-tool` may end its answer with one, and a value of whitespace alone is none.
+fn value_of(entry: Vec<u8>) -> Option<String> {
+    if entry.len() < ENTRY_HEADER || entry[0] != ENTRY_FORMAT {
+        return None;
+    }
+    let mut key = String::from_utf8(entry[ENTRY_HEADER..].to_vec()).ok()?;
     while key.ends_with(['\n', '\r']) {
         key.pop();
     }
     if key.trim().is_empty() {
-        return Err(missing());
+        return None;
     }
-    Ok(key)
+    Some(key)
 }
 
 /// `line` with every occurrence of `key` replaced by [`REDACTED`], and whether there was one.
@@ -738,6 +789,11 @@ fn capture(
     }
     for (variable, _) in provider.also {
         command.env_remove(variable);
+    }
+    for other in PROVIDERS.iter().filter(|other| other.name != provider.name) {
+        for variable in other.own {
+            command.env_remove(variable);
+        }
     }
     command.env(provider.variable, key);
     for (variable, value) in provider.also {
