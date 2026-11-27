@@ -1307,3 +1307,266 @@ async fn speak_with_over_a_synthesiser_that_fails_mid_way_returns_and_lets_go_of
     }
     closes_since(&before, 1, "the session speak_with opened").await;
 }
+
+// Adversary pass on story:tool-loop-bound-counts-rounds-per-input: the bound counted per input
+// across several turns, at the bound, with several calls per reply; a reply that names a tool
+// the model node was not given.
+
+/// A model that reads each text of a conversation as `<replies>,<calls>`: it answers the text
+/// with `replies` replies, one after the results of the one before, each ending with `calls`
+/// calls of its one tool, and then with the text `<replies> replies of <calls>`. Each reply that
+/// ends with calls says `.`.
+struct RoundsPerText {
+    provenance: Provenance,
+    capabilities: Capabilities,
+    tool: ToolId,
+}
+
+impl llm_core::Model for RoundsPerText {
+    fn provenance(&self) -> &Provenance {
+        &self.provenance
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
+    fn turn<'a>(
+        &'a self,
+        request: &'a TurnRequest,
+        sink: &'a mut dyn StreamSink,
+        _: &'a Cancel,
+    ) -> BoxFuture<'a, Result<TurnOutcome, llm_core::Error>> {
+        Box::pin(async move {
+            let called = request
+                .items
+                .iter()
+                .filter(|item| matches!(item, Item::ToolCall(_)))
+                .count();
+            let asked = request
+                .items
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(at, item)| match item {
+                    Item::UserText { text, .. } => Some((at, text.clone())),
+                    _ => None,
+                });
+            let (at, text) = asked.unwrap_or((0, String::new()));
+            let (replies, per_reply) = text
+                .split_once(',')
+                .and_then(|(replies, calls)| Some((replies.parse().ok()?, calls.parse().ok()?)))
+                .unwrap_or((0_usize, 1_usize));
+            let since = request.items[at..]
+                .iter()
+                .filter(|item| matches!(item, Item::ToolCall(_)))
+                .count();
+            let done = since / per_reply.max(1);
+            let calls: Vec<ModelCall> = if done < replies {
+                (0..per_reply)
+                    .map(|index| ModelCall {
+                        call_id: CallId::new(format!("call-{}", called + index))
+                            .expect("a printable identifier"),
+                        name: tool_name(self.tool),
+                        arguments: city("Berlin"),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let text = if calls.is_empty() {
+                format!("{replies} replies of {per_reply}")
+            } else {
+                ".".to_owned()
+            };
+            sink.emit(ModelEvent::TextDelta { text: text.clone() })
+                .await?;
+            let stop_reason = if calls.is_empty() {
+                StopReason::EndTurn
+            } else {
+                StopReason::ToolCalls
+            };
+            let mut items = vec![Item::assistant(text)];
+            items.extend(calls.into_iter().map(Item::ToolCall));
+            Ok(TurnOutcome {
+                stop_reason,
+                items,
+                observation: TurnObservation {
+                    usage: None,
+                    final_usage: true,
+                    ..TurnObservation::new(self.provenance.clone())
+                },
+            })
+        })
+    }
+}
+
+/// A generator over [`RoundsPerText`], claiming streaming, concurrent input and tool calling.
+fn rounds_per_text(tool: ToolId) -> Generator {
+    let (adapter, _) = Adapter::declare(DeclareAdapter {
+        model_id: ModelId::generate(),
+        backend: "a model that answers each text with replies of calls".to_owned(),
+        contract_revision: CONTRACT_REVISION.to_owned(),
+        execution_form: ExecutionForm::InProcess,
+        locality: Locality::SameProcess,
+        capabilities: vec![
+            Capability::OutputStreaming,
+            Capability::ConcurrentInputOutput,
+            Capability::ToolCalling,
+        ],
+        max_concurrency: 1,
+        descriptor: AdapterDescriptor::default(),
+    })
+    .expect("a maximum concurrency of one is positive");
+    let id = |value: &str| Id::new(value).expect("a printable identifier");
+    let model = RoundsPerText {
+        provenance: Provenance {
+            protocol: Protocol::Responses,
+            provider: id("adversary"),
+            account: id("test"),
+            endpoint: id("in-process"),
+            model: id("rounds-per-text"),
+            binding_revision: id("1"),
+        },
+        capabilities: Capabilities {
+            tools: true,
+            tool_choice: true,
+            ..Capabilities::text(1 << 20, 1 << 16).with_output_streaming(true)
+        },
+        tool,
+    };
+    Generator::new(adapter, Arc::new(model) as Arc<dyn llm_core::Model>)
+        .expect("the model declares what the adapter claims")
+}
+
+/// The bound counts "replies with calls per input" (`ess/domains/graph.yaml`, the feedback loop
+/// declaration; `MAX_TOOL_ITERATIONS`, 4). Three texts, each answered with four replies of two
+/// calls: every text is answered over one session, 24 calls. A fourth text whose model returns
+/// calls a fifth time, three calls a reply, ends the session with the bound's error: the four
+/// replies within the bound ran, and none of the three calls of the fifth.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_answers_each_text_with_four_replies_of_calls_and_ends_at_a_fifth() {
+    let _held = SESSIONS.lock().await;
+    let tool = lookup(false);
+    let calls = Arc::default();
+    let before = rows();
+    let mut chat = Chat::new_with(&chatting(rounds_per_text(tool.tool_id())))
+        .expect("plans")
+        .tool((tool, recording(&calls)))
+        .expect("plans with the tool");
+
+    for turn in 1..=3 {
+        let reply = tokio::time::timeout(LIMIT, chat.send("4,2"))
+            .await
+            .expect("send returns within the limit");
+        match reply {
+            Ok(reply) => assert_eq!(reply, "....4 replies of 2", "turn {turn}"),
+            Err(error) => panic!(
+                "turn {turn} of four replies of two calls failed: {:?}: {error}; the executor \
+                 ran {} calls",
+                error.kind(),
+                ran(&calls).len()
+            ),
+        }
+    }
+    assert_eq!(ran(&calls).len(), 24, "three texts of four replies of two");
+    assert_eq!(opened_since(&before).len(), 1, "one session took all three");
+
+    let past = tokio::time::timeout(LIMIT, chat.send("5,3"))
+        .await
+        .expect("send returns within the limit");
+    let error = past.expect_err("the fifth reply with calls to one text is past the bound");
+    assert_eq!(error.kind(), inference::ErrorKind::Closed, "{error}");
+    assert_eq!(
+        ran(&calls).len(),
+        24 + 12,
+        "the four replies within the bound ran, and none of the three calls of the fifth"
+    );
+    let _ = tokio::time::timeout(LIMIT, chat.close()).await;
+}
+
+/// A mock generator with no script whose first model request of a conversation ends with
+/// `round`, the calls of one reply.
+fn proposing(round: Vec<ToolProposal>) -> MockGenerator {
+    MockGenerator::new(
+        llm::MockConfiguration::StreamingAndConcurrentInput,
+        ModelId::generate(),
+        Vec::<String>::new(),
+    )
+    .proposing_round(round, 1)
+}
+
+/// The round bound of `chat` counts "the calls to send" (`crates/inference-pipeline/src/nodes/
+/// llm.rs`): a call naming a tool the node was not given is answered `denied` at once and never
+/// sent. A reply of eight calls of the given tool and one of a tool not given holds no more than
+/// the feedback edge's 8: the executor runs the eight and `send` returns the model's reply, in
+/// each of 10 conversations.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_of_eight_calls_and_one_to_a_tool_not_given_runs_the_eight() {
+    let _held = SESSIONS.lock().await;
+    let mut wrong = Vec::new();
+    for conversation in 0..10 {
+        let tool = lookup(false);
+        let mut round: Vec<ToolProposal> = (0..8)
+            .map(|_| ToolProposal {
+                tool_id: tool.tool_id(),
+                arguments: city("Berlin"),
+            })
+            .collect();
+        round.push(ToolProposal {
+            tool_id: ToolId::generate(),
+            arguments: city("Paris"),
+        });
+        let calls = Arc::default();
+        let mut chat = Chat::new_with(&chatting(proposing(round)))
+            .expect("plans")
+            .tool((tool, recording(&calls)))
+            .expect("plans with the tool");
+        let sent = tokio::time::timeout(LIMIT, chat.send(PROMPT)).await;
+        let ran = ran(&calls).len();
+        match sent {
+            Ok(Ok(_)) if ran == 8 => {}
+            Ok(sent) => wrong.push(format!(
+                "conversation {conversation}: {sent:?}; the executor ran {ran} of 8 calls"
+            )),
+            Err(_) => wrong.push(format!(
+                "conversation {conversation}: send did not return within {LIMIT:?}; the \
+                 executor ran {ran} of 8 calls"
+            )),
+        }
+        let _ = tokio::time::timeout(LIMIT, chat.close()).await;
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// "A call naming a tool the node was not given is dropped: the node answers it at once as
+/// rejected `denied` ... and the generation continues without it" (`crates/inference-pipeline/
+/// src/nodes/llm.rs`, module documentation). A reply whose one call names a tool the chat was
+/// not given: `send` returns the model's reply to the denial, within the limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_whose_one_call_names_a_tool_not_given_is_answered() {
+    let _held = SESSIONS.lock().await;
+    let tool = lookup(false);
+    let calls = Arc::default();
+    let mut chat = Chat::new_with(&chatting(proposing(vec![ToolProposal {
+        tool_id: ToolId::generate(),
+        arguments: city("Paris"),
+    }])))
+    .expect("plans")
+    .tool((tool, recording(&calls)))
+    .expect("plans with the tool");
+
+    let sent = tokio::time::timeout(LIMIT, chat.send(PROMPT)).await;
+
+    let closed = tokio::time::timeout(LIMIT, chat.close()).await;
+    let Ok(sent) = sent else {
+        panic!(
+            "send did not return within {LIMIT:?} of a reply whose one call names a tool not \
+             given; the executor ran {} calls; a close then came to {closed:?}",
+            ran(&calls).len()
+        );
+    };
+    let reply = sent.expect("the model answers the denied call");
+    assert!(reply.starts_with(PROMPT), "{reply}");
+    assert!(ran(&calls).is_empty(), "the executor ran no call");
+}
