@@ -1223,3 +1223,5 @@ fn an_entry_gives_the_command_of_its_plan_and_stands_once() {
         },
     );
 }
+
+mod adversary_u4;
