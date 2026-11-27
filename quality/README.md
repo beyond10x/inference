@@ -122,8 +122,77 @@ On a push to `main` it uploads `target/quality-records/` as one artifact named
 gh run download <run id> -R beyond10x/inference -n quality-records-<commit>
 ```
 
-The forge keeps an artifact for the retention time of the repository; no series of records is
-kept yet.
+The forge keeps an artifact for the retention time of the repository; the series below keeps the
+records past it.
+
+## The series of records on `main`
+
+The workflow `quality series` (`.github/workflows/quality-series.yml`) keeps the records of every
+check run on `main` as a series on the ref `refs/ratchet/records`, outside the branches of the
+repository. It runs when a run of `check` for a push to `main` ended with success, one run at a
+time: its concurrency group never cancels a running run, and a run that starts while another
+runs waits. The forge keeps one waiting run per group: a third run replaces the waiting one,
+whose records are then not appended. It has two jobs, and each trusts different code:
+
+- `append` runs the code of the tree. It checks out the commit of the check run, the run's head
+  commit and not the head of `main`, without keeping credentials, and builds `inference-docs`
+  from it. It downloads the artifact `quality-records-<commit>` of the check run with
+  `gh run download`, fetches the ref without a token (the repository is public) or starts the
+  series as a commit with no parent when the ref does not exist, runs
+  `inference-docs series-append`, which writes each record that is not in the series yet, and
+  commits what it added as `github-actions[bot]`, with a message that names the check run and the
+  commit. Its permissions are `contents: read` and `actions: read`; the token reaches only the
+  step that downloads the artifact, never the step that runs the program built from the tree. It
+  hands the commit on as job outputs: a `git bundle` of it in base64, and the commit of the ref it
+  was made on. A bundle over 120000 bytes in base64 fails the job.
+- `push` runs no code of the tree: no checkout, no action, no build, no task, no program or
+  script of the repository, only `git` and the runner's tools. It is the one writer of the
+  series and the only job of any workflow with `contents: write`. It fetches the ref without a
+  token, and pushes nothing when the ref is no longer at the commit `append` worked on, when the
+  bundle is not one commit on that commit, or when that commit changes or removes a file or adds
+  anything but `<plan>/<assessment>/<64 hex digits>.evidence.json`. Otherwise it pushes the
+  commit to the ref without force. The token is in the environment of `git push` alone.
+
+A run whose records are all in the series already runs no `push`. A push the forge refuses, also
+because another writer moved the ref in between, fails the job, and its log names the refusal;
+nothing is pushed again. The records of that run reach the series only when its workflow run is
+run again: its job `append` then appends them to the ref as it is at that time. The ref is
+unproven on the forge: until the first run of the workflow after its merge, no series exists,
+and that run shows whether the forge lets the job's token create a ref outside the branches. A
+refused push is not worked around.
+
+The series holds one file per record, `<plan>/<assessment>/<SHA-256 of its bytes>.evidence.json`,
+byte for byte as `task quality-records` wrote it. A record whose bytes are in the series already
+is not added again, and no file of the series is changed or removed. `inference-docs
+series-append --from <dir> --series <checkout> --root .` refuses, writes nothing and names the
+file and the reason on stderr for each of these:
+
+- a file or directory of the artifact that is not `<plan>/<assessment>.evidence.json` of an
+  assessment `inference-docs junit-assessments` lists, or a link;
+- a record that is not JSON, or whose `format` is not `ratchet-evidence/1`, whose project is not
+  the plan files' or whose assessment is not the one its name says;
+- a file of the series at the path of a record that holds other bytes, or a link or a directory
+  there.
+
+It exits 0 with one line per record, `added` or `in the series already`, 1 with the refusals, 2
+for a wrong call, and 3 when a plan file cannot be read or a record cannot be written; the
+records that call wrote are then removed again.
+
+To read the series:
+
+```sh
+task quality-history ASSESSMENT=workspace-tests MEASURE=slowest-test
+```
+
+The task fetches the ref from `origin` into `FETCH_HEAD` alone, so it writes no ref into the git
+directory, writes the tree of `FETCH_HEAD` to `target/quality-series` and runs `inference-docs history --series target/quality-series
+--root . <assessment> [<measurement>]`. Without `MEASURE` it prints every measurement of the
+assessment. It prints one line per record, ordered by the id of the check run its source names,
+which the forge counts up: the run, the revision, and each value as `<measurement>=<value>
+<unit>`, with `[<package>]` after the name for a measurement with one value per package. An
+assertion prints `holds` or `fails`. An assessment with no record in the series prints no line
+and says so on stderr. The program exits 2 for an assessment or a measurement the plan files do
+not declare, and 3 when a record of the series cannot be read.
 
 ## Adopting the records of a run on `main`
 
@@ -172,12 +241,94 @@ records of the run or none. The records the artifact does not hold stay as they 
 name the values of the records; after an adoption they change with it, and the test below fails
 until they do.
 
+## The keyed live lane on this machine
+
+`task quality-live` runs the live measures of OpenAI and ElevenLabs on this machine, with
+`inference-docs live` (`crates/inference-docs/src/live.rs`). It is outside `task check` and
+outside every workflow, and nothing schedules it.
+
+Each run spends money, and each run needs the owner's yes to its count of hosted calls, the
+first run and every later one. The lane prints the count before it starts anything. Without
+`YES=1` it stops there and starts no build, no command and no `secret-tool`. The program exits
+2; `task` reports that as a failed task and exits 201, and `task -x quality-live` passes the 2
+through:
+
+```sh
+task quality-live          # prints the count, calls nothing
+YES=1 task quality-live    # only after the owner's yes to that count
+```
+
+What one run spends, each call billed by its provider:
+
+| Provider | Key: `username` in the Secret Service, service `b10x-secrets` | Measure | Hosted calls |
+| --- | --- | --- | --- |
+| OpenAI | `default/default/default/openai-api-key` | `openai-speech-live` | 1 request |
+| OpenAI | the same | `openai-gpt-live` | 3 sessions, billed per second of session |
+| ElevenLabs | `default/default/default/elevenlabs-api-key` | `elevenlabs-live-example` | 2 connections |
+| ElevenLabs | the same | `elevenlabs-cancel-probe` | 4 connections |
+
+A key stays on this machine, so the lane builds and runs each measure apart. The build goes to
+the build pool as plain `cargo`, without either key variable. The run is the executable that
+cargo's JSON names for the `--test` or `--example` of the plan's command, started here with
+`slot --local`, which keeps the environment it is given and never sends the run to a build
+node. The executable gets the arguments the plan's command gives after `--`, and starts where
+cargo starts it: a test in its package's directory, the example in the root. From the commands
+of `adapters.ratchet.yaml` the lane builds:
+
+```sh
+cargo test --no-run --message-format=json-render-diagnostics -p inference-openai --features live,speech --test speech_live
+cargo test --no-run --message-format=json-render-diagnostics -p inference-openai --features live,gpt-live --test live_gpt
+cargo build --message-format=json-render-diagnostics -p inference-elevenlabs --features live --example live
+cargo test --no-run --message-format=json-render-diagnostics -p inference-elevenlabs --features live --test tts_cancel_live
+```
+
+and runs `slot --local <executable> --ignored --nocapture` for each of the three tests and
+`slot --local <executable>` for the example.
+
+- The lane reads each key with `secret-tool lookup service b10x-secrets username <key>`, once
+  per run and only for a provider with a measure to run, into the environment of that
+  provider's runs only: `OPENAI_API_KEY` and `INFERENCE_OPENAI_KEY_SOURCE=env` for OpenAI,
+  `ELEVENLABS_API_KEY` for ElevenLabs. Every run starts without the other provider's variable,
+  and no build gets either.
+- `secret-tool` has 10 s to answer (`--key-timeout-ms` of the program names another bound);
+  past it the lane ends it.
+- No key is printed, passed as an argument or written to a file. A line of a run's output that
+  holds its key is kept with `[key]` in its place, and the lane says so.
+- A key that is missing or empty, a `secret-tool` that cannot be started and one that does not
+  answer in time skip the provider's measures with a line that names the key and the measures.
+  The other measures run.
+- `ELEVENLABS_VOICE_ID` comes from the environment. Both ElevenLabs commands read it, so without
+  it both are skipped by name, their key is not read, and the count says so.
+- A build pool that builds on a node and copies the executables of a build back leaves the
+  executable here. One that does not, but can copy a path back after a job, is asked to: for an
+  executable under `target/` of the root that is not here, the lane runs one job
+  `slot --fetch <its path from the root> true`, without a key, before the run.
+- A build that fails, or that names an executable that is still not on this machine, runs
+  nothing, and its measure counts as failed.
+- The output of each run, standard output and error in one file, is kept at
+  `.ratchet/runs/<run id>/<assessment>.out`. Its record is written from that file by
+  `inference-docs assess --class local` to
+  `.ratchet/records/<plan>/<assessment>/<run id>.evidence.json`. The run id is the time of the
+  start in UTC, without `-` and `:`; a later run in the same second adds `-02` to `-99`, so
+  that the ids sort in the order of the runs.
+- `inference-docs assess` reads no record of `elevenlabs-live-example`: its example prints the
+  measure once per output format (see above). The lane runs it, keeps its output and writes no
+  record of it, and the count says so.
+- Nothing the lane writes is committed: `.ratchet/` is in `.gitignore`. A local value is not a
+  baseline, and the entries on [adapters.md](adapters.md) keep theirs.
+- The program exits 0 when every measure that ran gave its record (the example: exited 0), 1
+  when one did not, with the measure and why, 2 without `YES=1`, and 3 when a plan file cannot
+  be read.
+- The tests in `crates/inference-docs/tests/live/` hold the lane without a hosted call, without
+  a build and without a key: fakes of `secret-tool`, `cargo` and `slot` first on `PATH`, and
+  stubs as the executables the fake `cargo` names.
+
 ## The test that keeps the documents true
 
 `crates/inference-docs/tests/quality/`, part of `task test-run`: `mod.rs`, for the rules about
 adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for
-`task quality-records`, its list and its commands, `records.rs`. It is not
-`ratchet validate`. It fails when:
+`task quality-records`, its list and its commands, `records.rs`, and for the series
+`series.rs`. It is not `ratchet validate`. It fails when:
 
 - a file stops parsing, has another format or names another project, a name is declared in two
   files, an assessor declaration or a record is not in the file named after it, or
@@ -262,7 +413,38 @@ adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for
   of the forge run without its variables or the report's with them, keep a record of an earlier
   run, or exit 0 with a refused record or an empty list;
 - `inference-docs junit-assessments` lists an assessment of another profile or of an assessor
-  that reads no report, or leaves out one of a reader of the report that names no profile.
+  that reads no report, or leaves out one of a reader of the report that names no profile;
+- `inference-docs series-append`, run on the fixture artifact under
+  `crates/inference-docs/tests/fixtures/adopt/` and a series in a directory, does not write each
+  record byte for byte under the digest of its bytes, adds a record a second time, changes a file
+  of the series, adds more than the record whose bytes changed, or writes anything on a refusal
+  of the section "The series of records on `main`" (nine plants in the artifact and a link there
+  to a record of its own assessment; a file of other bytes, a link at the path of a record and a
+  link where a directory of records stands in the series), or leaves a record of a call whose
+  record could not be written;
+- `inference-docs history` does not list the values of a measurement oldest run first, records
+  of one run by their start and a record whose source names no forge run last, does not
+  name the package of each value of a measurement with one value per package, prints a line for
+  an assessment with no record, or does not exit 2 for an assessment or a measurement the plan
+  files do not declare.
+
+The workflow `quality series` is held by `crates/inference-docs/tests/workflows.rs`, which fails
+when it is triggered otherwise than by a completed run of `check` for a push to `main` that
+succeeded; when it has other jobs than `append` and then `push`, when `append` has other
+permissions than `contents: read` and `actions: read`, `push` others than `contents: write`, or
+any other job of any workflow grants `contents: write`, or a workflow sets no permissions; when
+a step of `append` other than the download, or the env of a job or of the workflow, holds the
+token; when the checkout of `append` names another commit than the head of the check run or
+keeps credentials; when a step of `push` uses an action, runs in a directory of the tree, or
+runs a build, a task, the program built from the tree or a script; when `push` does not need
+`append` or runs on another condition than its output `appended`; when its concurrency cancels
+a run; when it takes an action that `check.yml` does not pin by its commit; when it names the
+ref other than once; or when its steps, run with `sh` against a bare repository in a directory
+and stand-ins of `gh` and `git`, do not start the series as a commit with no parent, push a
+commit for records the series holds, add more than one file for one changed record, fail
+without pushing again after another writer moved the ref, push a commit that changes, removes
+or adds anything but a record, exit 0 after a refused push or a refusal of `series-append`,
+print the token, or hand the token to the program built from the tree.
 
 One command stands in no `cmds` list of `Taskfile.yml` and names no test or example of a
 package, so the test holds it against nothing. A change of the workflow step that runs it goes

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-27T11:37:20Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-records-series-on-a-ref",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source exit 0 (74 s), task test-build exit 0 (166 s), task test-run exit 0 (76 s, Summary [62.484s] 3415 tests run: 3415 passed, 73 skipped), task quality-records exit 0, at 9a30d0332 through the shared build pool",
+    "reference": "inference-docs 189 tests at ac4956097 (series-append adds, skips and refuses; history order; the workflow's two jobs: append without write permission, push the only writer running no code of the tree; the token reaches no binary of the tree), 10 of 10 runs. Not yet: the first push to main appending to refs/ratchet/records on the forge"
+  }
+}

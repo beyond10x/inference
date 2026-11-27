@@ -24,12 +24,18 @@
 //! run left behind ([`assess`]). `junit-assessments` prints the assessments whose record is read
 //! from the JUnit report of `task test-run`, the list `task quality-records` calls `assess` for.
 //! `adopt-records` copies the records of a check run on `main`, downloaded by the caller, into
-//! `quality/records/` after it has checked all of them ([`assess::adopt`]).
+//! `quality/records/` after it has checked all of them ([`assess::adopt`]). `series-append` adds
+//! the records of such a run, once each, to a checkout of the series ref, and `history` prints
+//! the values of a measure from it ([`assess::series`]).
+//!
+//! `live` is the lane `task quality-live` runs on this machine: the keyed live measures of OpenAI
+//! and ElevenLabs, their count first, nothing without `YES=1` ([`live`]).
 
 mod adapters;
 mod assess;
 mod crates;
 mod errors;
+mod live;
 mod pages;
 mod status;
 mod terminal;
@@ -105,6 +111,25 @@ enum Action {
     /// wrong call, 3 when a plan file cannot be read or a record cannot be written; it writes all
     /// records or none.
     AdoptRecords(assess::adopt::Arguments),
+    /// Append the records of a check run on `main`, from the directory its artifact
+    /// `quality-records-<commit>` was downloaded to, to a checkout of the series: each record not
+    /// in it yet as `<plan>/<assessment>/<SHA-256 of its bytes>.evidence.json`. Never changes or
+    /// removes a file. Exit 0 with a line per record, 1 when a file of the artifact or of the
+    /// series is refused and nothing is written, 2 for a wrong call, 3 when a plan file cannot be
+    /// read or a record cannot be written.
+    SeriesAppend(assess::series::AppendArguments),
+    /// Print one line per record of an assessment in a checkout of the series, oldest run first:
+    /// its run, its revision and the value of each measurement or of the one given. Exit 0, also
+    /// with no record; 2 for an assessment or measurement the plan files do not declare; 3 when a
+    /// plan file or a record cannot be read.
+    History(assess::series::HistoryArguments),
+    /// Run the keyed live measures of OpenAI and ElevenLabs on this machine: print the hosted
+    /// calls of one run per provider, and without `YES=1` in the environment call nothing and
+    /// exit 2. With it, read each key from the Secret Service into its commands' environment only,
+    /// keep each output under `.ratchet/runs/` and write each record with `assess --class local`
+    /// under `.ratchet/records/`. Exit 0 when every measure that ran gave its record, 1 when one
+    /// did not, 3 when the plan cannot be read.
+    Live(live::Arguments),
 }
 
 /// Generated files keyed by their path relative to the repository root.
@@ -205,6 +230,9 @@ fn main() -> ExitCode {
         Action::Assess(arguments) => return assess::run(&arguments),
         Action::JunitAssessments(arguments) => return assess::list(&arguments),
         Action::AdoptRecords(arguments) => return assess::adopt::run(&arguments),
+        Action::SeriesAppend(arguments) => return assess::series::run_append(&arguments),
+        Action::History(arguments) => return assess::series::run_history(&arguments),
+        Action::Live(arguments) => return live::run(&arguments),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

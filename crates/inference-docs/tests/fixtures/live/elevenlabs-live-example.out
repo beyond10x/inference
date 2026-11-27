@@ -1,0 +1,4 @@
+    Finished `dev` profile [unoptimized] target(s) in 0.40s
+     Running `target/debug/examples/live`
+ulaw_8000: first audio after 412 ms, 30 frames, 1.20 s of audio, all mu-law at 8000 Hz mono
+pcm_24000: first audio after 380 ms, 30 frames, 1.20 s of audio, all 16-bit little-endian PCM at 24000 Hz mono

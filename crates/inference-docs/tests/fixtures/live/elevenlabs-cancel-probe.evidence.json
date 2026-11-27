@@ -1,0 +1,47 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "elevenlabs-cancel-probe",
+    "assessor": "printed-duration@1",
+    "target": {
+      "kind": "build",
+      "class": "local"
+    },
+    "completion": "completed",
+    "conditions": {
+      "tools": {
+        "rustc": "1.100.0"
+      }
+    },
+    "coverage": {
+      "unit": "run",
+      "executed": 1,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "duration",
+        "kind": "sampled",
+        "scope": "run",
+        "boundary": "text_sent_to_first_audio",
+        "value_type": "number",
+        "value": "312",
+        "unit": "ms",
+        "samples": 1
+      }
+    ],
+    "source": {
+      "kind": "build_pool_log",
+      "location": ".ratchet/runs/RUN/elevenlabs-cancel-probe.out"
+    }
+  },
+  "run": {
+    "started_at": "STARTED",
+    "ended_at": "ENDED"
+  }
+}

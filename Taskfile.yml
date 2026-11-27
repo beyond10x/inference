@@ -109,6 +109,25 @@ tasks:
     cmds:
       - cargo run -q -p inference-docs -- adopt-records --run "{{.RUN}}" --run-json "{{.RUN_JSON}}" --from "{{.DIR}}" --root .
 
+  quality-history:
+    desc: Prints the values of the measurements of the assessment ASSESSMENT, or of its measurement MEASURE, from the series of quality records, one line per check run on main, oldest first, with inference-docs history; fetches the ref refs/ratchet/records from origin into FETCH_HEAD alone, writing no ref, and writes its tree to target/quality-series.
+    requires:
+      vars: [ASSESSMENT]
+    cmds:
+      - git fetch -q --no-tags origin refs/ratchet/records
+      - rm -rf target/quality-series
+      - mkdir -p target/quality-series
+      - git archive FETCH_HEAD | tar -x -C target/quality-series
+      - cargo run -q -p inference-docs -- history --series target/quality-series --root . "{{.ASSESSMENT}}" {{if .MEASURE}}"{{.MEASURE}}"{{end}}
+
+  quality-live:
+    desc: The keyed live measures of OpenAI and ElevenLabs on this machine, outside check and every workflow, with inference-docs live. Prints the hosted calls of one run per provider and, without YES=1, calls nothing; the program then exits 2, which task exits 201 for (task -x quality-live passes the 2 through). With YES=1, given only after the owner's yes to that count, it builds each measure through the pool without a key, runs its executable here under slot --local with its own key from the Secret Service in that run's environment only, and writes each record with inference-docs assess --class local to .ratchet/records/<plan>/<assessment>/<run id>.evidence.json, which git ignores.
+    env:
+      YES: '{{.YES}}'
+    cmds:
+      - cargo build -q -p inference-docs
+      - target/debug/inference-docs live --root .
+
   test-slow:
     desc: The slow lane, every trybuild case of the inference crate in one trybuild run, under the slow nextest profile; runs again only when one of its sources changed.
     sources:
