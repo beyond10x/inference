@@ -122,8 +122,65 @@ On a push to `main` it uploads `target/quality-records/` as one artifact named
 gh run download <run id> -R beyond10x/inference -n quality-records-<commit>
 ```
 
-The forge keeps an artifact for the retention time of the repository; no series of records is
-kept yet.
+The forge keeps an artifact for the retention time of the repository; the series below keeps the
+records past it.
+
+## The series of records on `main`
+
+The workflow `quality series` (`.github/workflows/quality-series.yml`) keeps the records of every
+check run on `main` as a series on the ref `refs/ratchet/records`, outside the branches of the
+repository. It is the only writer of that ref. It runs when a run of `check` for a push to
+`main` ended with success, one run at a time: its concurrency group never cancels a running
+run, and a run that starts while another runs waits. The forge keeps one waiting run per group:
+a third run replaces the waiting one, whose records are then not appended. Its one job alone
+has `contents: write`, to push the ref, and `actions: read`, to download the artifact; no other
+workflow grants `contents: write`. The job:
+
+1. downloads the artifact `quality-records-<commit>` of the check run with `gh run download`;
+2. fetches the ref, or starts the series as a commit with no parent when the ref does not exist;
+3. runs `inference-docs series-append`, which writes each record that is not in the series yet;
+4. commits what it added as `github-actions[bot]`, with a message that names the check run and
+   the commit, and pushes the ref without force.
+
+A run whose records are all in the series already pushes nothing. When the push is refused and
+the ref has moved since the fetch, the job fetches it and appends once more; when that push is
+refused too, or the push is refused while the ref has not moved, the job fails and its log names
+the refusal. The ref is unproven on the forge: until the first run of the workflow after its
+merge, no series exists, and that run shows whether the forge lets the job's token create a ref
+outside the branches. A refused push is not worked around.
+
+The series holds one file per record, `<plan>/<assessment>/<SHA-256 of its bytes>.evidence.json`,
+byte for byte as `task quality-records` wrote it. A record whose bytes are in the series already
+is not added again, and no file of the series is changed or removed. `inference-docs
+series-append --from <dir> --series <checkout> --root .` refuses, writes nothing and names the
+file and the reason on stderr for each of these:
+
+- a file or directory of the artifact that is not `<plan>/<assessment>.evidence.json` of an
+  assessment `inference-docs junit-assessments` lists, or a link;
+- a record that is not JSON, or whose `format` is not `ratchet-evidence/1`, whose project is not
+  the plan files' or whose assessment is not the one its name says;
+- a file of the series at the path of a record that holds other bytes, or a link or a directory
+  there.
+
+It exits 0 with one line per record, `added` or `in the series already`, 1 with the refusals, 2
+for a wrong call, and 3 when a plan file cannot be read or a record cannot be written; the
+records that call wrote are then removed again.
+
+To read the series:
+
+```sh
+task quality-history ASSESSMENT=workspace-tests MEASURE=slowest-test
+```
+
+The task fetches the ref from `origin` into the local ref `refs/ratchet/records`, writes its tree
+to `target/quality-series` and runs `inference-docs history --series target/quality-series
+--root . <assessment> [<measurement>]`. Without `MEASURE` it prints every measurement of the
+assessment. It prints one line per record, ordered by the id of the check run its source names,
+which the forge counts up: the run, the revision, and each value as `<measurement>=<value>
+<unit>`, with `[<package>]` after the name for a measurement with one value per package. An
+assertion prints `holds` or `fails`. An assessment with no record in the series prints no line
+and says so on stderr. The program exits 2 for an assessment or a measurement the plan files do
+not declare, and 3 when a record of the series cannot be read.
 
 ## Adopting the records of a run on `main`
 
@@ -176,8 +233,8 @@ until they do.
 
 `crates/inference-docs/tests/quality/`, part of `task test-run`: `mod.rs`, for the rules about
 adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for
-`task quality-records`, its list and its commands, `records.rs`. It is not
-`ratchet validate`. It fails when:
+`task quality-records`, its list and its commands, `records.rs`, and for the series
+`series.rs`. It is not `ratchet validate`. It fails when:
 
 - a file stops parsing, has another format or names another project, a name is declared in two
   files, an assessor declaration or a record is not in the file named after it, or
@@ -262,7 +319,27 @@ adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for
   of the forge run without its variables or the report's with them, keep a record of an earlier
   run, or exit 0 with a refused record or an empty list;
 - `inference-docs junit-assessments` lists an assessment of another profile or of an assessor
-  that reads no report, or leaves out one of a reader of the report that names no profile.
+  that reads no report, or leaves out one of a reader of the report that names no profile;
+- `inference-docs series-append`, run on the fixture artifact under
+  `crates/inference-docs/tests/fixtures/adopt/` and a series in a directory, does not write each
+  record byte for byte under the digest of its bytes, adds a record a second time, changes a file
+  of the series, adds more than the record whose bytes changed, or writes anything on a refusal
+  of the section "The series of records on `main`" (nine plants in the artifact, a file of other
+  bytes and a link in the series);
+- `inference-docs history` does not list the values of a measurement oldest run first, does not
+  name the package of each value of a measurement with one value per package, prints a line for
+  an assessment with no record, or does not exit 2 for an assessment or a measurement the plan
+  files do not declare.
+
+The workflow `quality series` is held by `crates/inference-docs/tests/workflows.rs`, which fails
+when it is triggered otherwise than by a completed run of `check` for a push to `main` that
+succeeded, when a job other than its one job or any other workflow grants `contents: write` or
+a workflow sets no permissions, when its concurrency cancels a run, when it takes an action that
+`check.yml` does not pin by its commit, when it names the ref other than once, or when its steps,
+run with `sh` against a bare repository in a directory and stand-ins of `gh` and `git`, do not
+start the series as a commit with no parent, push a commit for records the series holds, add
+more than one file for one changed record, append once more and only once after another writer
+moved the ref, or exit 0 after a refused push.
 
 One command stands in no `cmds` list of `Taskfile.yml` and names no test or example of a
 package, so the test holds it against nothing. A change of the workflow step that runs it goes

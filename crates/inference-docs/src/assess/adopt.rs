@@ -338,7 +338,7 @@ fn full_commit(text: &str) -> bool {
 
 /// The `project` of the first plan file `ratchet.toml` names; `PlanFiles::read` holds the others
 /// to it.
-fn project(root: &Path) -> Outcome<String> {
+pub(super) fn project(root: &Path) -> Outcome<String> {
     let config: Value = toml::from_str(&read_text(root, "ratchet.toml")?)
         .map_err(|error| Failure::Broken(format!("ratchet.toml: does not parse: {error}")))?;
     let paths = strings(config.pointer("/spec/paths")).unwrap_or_default();
@@ -355,7 +355,7 @@ fn project(root: &Path) -> Outcome<String> {
 
 /// Every entry under `from`, by its path from it with `/`, and whether it is a plain file: a
 /// link is neither a file nor a directory and is not followed.
-fn artifact_files(from: &Path) -> Outcome<Vec<(String, bool)>> {
+pub(super) fn artifact_files(from: &Path) -> Outcome<Vec<(String, bool)>> {
     let mut found = Vec::new();
     let mut open = vec![(from.to_path_buf(), String::new())];
     while let Some((directory, prefix)) = open.pop() {

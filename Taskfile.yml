@@ -109,6 +109,17 @@ tasks:
     cmds:
       - cargo run -q -p inference-docs -- adopt-records --run "{{.RUN}}" --run-json "{{.RUN_JSON}}" --from "{{.DIR}}" --root .
 
+  quality-history:
+    desc: Prints the values of the measurements of the assessment ASSESSMENT, or of its measurement MEASURE, from the series of quality records, one line per check run on main, oldest first, with inference-docs history; fetches the ref refs/ratchet/records from origin and writes its tree to target/quality-series.
+    requires:
+      vars: [ASSESSMENT]
+    cmds:
+      - git fetch -q --no-tags origin refs/ratchet/records:refs/ratchet/records
+      - rm -rf target/quality-series
+      - mkdir -p target/quality-series
+      - git archive refs/ratchet/records | tar -x -C target/quality-series
+      - cargo run -q -p inference-docs -- history --series target/quality-series --root . "{{.ASSESSMENT}}" {{if .MEASURE}}"{{.MEASURE}}"{{end}}
+
   test-slow:
     desc: The slow lane, every trybuild case of the inference crate in one trybuild run, under the slow nextest profile; runs again only when one of its sources changed.
     sources:

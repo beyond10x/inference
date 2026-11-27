@@ -1,0 +1,129 @@
+name: quality series
+
+on:
+  workflow_run:
+    workflows: [check]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-series
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  SERIES_REF: refs/ratchet/records
+
+jobs:
+  append:
+    name: append the quality records of main to the series
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install the Rust toolchain rust-toolchain.toml pins
+        shell: sh
+        run: |
+          set -eu
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+          rustc --version
+
+      - name: Build inference-docs
+        shell: sh
+        run: cargo build --locked -q -p inference-docs
+
+      - name: Download the records of the check run
+        id: download
+        shell: sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -eu
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "quality-records-$HEAD_SHA" --dir "$RUNNER_TEMP/records"
+
+      - name: Append the records to the series and push it
+        id: append
+        shell: sh
+        env:
+          TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DOCS: target/debug/inference-docs
+        run: |
+          set -eu
+          records="$RUNNER_TEMP/records"
+          series="$RUNNER_TEMP/series"
+          message="$RUNNER_TEMP/series-message"
+          remote="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
+          basic=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$basic"
+          printf '%s\n' "Append the quality records of the check run $RUN_ID" "" \
+            "The records the check run $run wrote for the commit" \
+            "$HEAD_SHA on main, each added once under the digest of its bytes." > "$message"
+
+          forge() {
+            git -C "$series" -c "http.extraheader=AUTHORIZATION: basic $basic" "$@"
+          }
+
+          append() {
+            rm -rf "$series"
+            git -c init.defaultBranch=series init -q "$series"
+            found=0
+            forge ls-remote --exit-code "$remote" "$SERIES_REF" > /dev/null || found=$?
+            if [ "$found" -eq 0 ]; then
+              forge fetch -q --no-tags "$remote" "$SERIES_REF"
+              git -C "$series" checkout -q --detach FETCH_HEAD
+              parent=$(git -C "$series" rev-parse HEAD)
+            elif [ "$found" -eq 2 ]; then
+              parent=
+              echo "quality-series: $SERIES_REF does not exist yet; this run starts it"
+            else
+              echo "quality-series: $SERIES_REF of $remote cannot be read" >&2
+              exit 1
+            fi
+            "$DOCS" series-append --from "$records" --series "$series" --root .
+            git -C "$series" add -A
+            if [ -z "$(git -C "$series" status --porcelain)" ]; then
+              echo "quality-series: the series holds every record of the check run $RUN_ID already"
+              exit 0
+            fi
+            git -C "$series" -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -F "$message"
+            pushed=0
+            forge push "$remote" "HEAD:$SERIES_REF" || pushed=$?
+          }
+
+          append
+          if [ "$pushed" -ne 0 ]; then
+            moved=$(forge ls-remote "$remote" "$SERIES_REF" | cut -f1)
+            if [ "$moved" = "$parent" ]; then
+              echo "quality-series: the forge refused the push of $SERIES_REF; the series is not changed" >&2
+              exit 1
+            fi
+            echo "quality-series: $SERIES_REF moved to $moved while this run appended; appending once more"
+            append
+            if [ "$pushed" -ne 0 ]; then
+              echo "quality-series: the forge refused the push of $SERIES_REF again; the series is not changed by this run" >&2
+              exit 1
+            fi
+          fi

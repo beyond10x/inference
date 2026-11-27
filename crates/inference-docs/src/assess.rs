@@ -45,6 +45,7 @@
 pub(crate) mod adopt;
 mod junit;
 mod printed;
+pub(crate) mod series;
 
 use std::{
     fs,

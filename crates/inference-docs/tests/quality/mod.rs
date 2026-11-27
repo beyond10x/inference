@@ -21,6 +21,7 @@ mod adversary_q1;
 mod adversary_q2;
 mod assess;
 mod records;
+mod series;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
