@@ -1,0 +1,59 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "audio-device-time-bounds",
+    "assessor": "named-tests@1",
+    "candidate": "49dc71e3a86733911d6d0a5642285286ebcafb46",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "49dc71e3a86733911d6d0a5642285286ebcafb46"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-audio-device"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-audio-device/tests/acknowledging.rs::a_speaker_whose_callback_stopped_fails_the_drain_within_the_stated_patience",
+          "adapters/inference-audio-device/tests/adversary_rf1_acknowledging.rs::a_speaker_that_stops_while_a_frame_waits_for_room_fails_the_drain_within_the_patience"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 2,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 2,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-audio-device/tests/acknowledging.rs::a_speaker_whose_callback_stopped_fails_the_drain_within_the_stated_patience",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-audio-device/tests/adversary_rf1_acknowledging.rs::a_speaker_that_stops_while_a_frame_waits_for_room_fails_the_drain_within_the_patience",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46003460144"
+    }
+  }
+}

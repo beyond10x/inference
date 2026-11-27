@@ -1,0 +1,44 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "sherpa-onnx-stt-record",
+    "assessor": "capability-record@1",
+    "candidate": "sha256:6d8dadb5aa7ff2f9fba6ae6ecb116563903e8c162c686e04fe24cb53afffc16b",
+    "target": {
+      "kind": "document",
+      "class": "ci",
+      "selection": "candidate",
+      "identifiers": {
+        "path": "adapters/inference-sherpa-onnx/records/stt-i9-10900k-cpu.json",
+        "digest": "sha256:6d8dadb5aa7ff2f9fba6ae6ecb116563903e8c162c686e04fe24cb53afffc16b",
+        "digest_form": "bytes"
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "record",
+      "executed": 1,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "cpu_real_time_factor",
+        "kind": "exact",
+        "scope": "run",
+        "value_type": "number",
+        "value": "131",
+        "unit": "thousandths"
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46003460144"
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "llama-server-time-bounds",
+    "assessor": "named-tests@1",
+    "candidate": "49dc71e3a86733911d6d0a5642285286ebcafb46",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "49dc71e3a86733911d6d0a5642285286ebcafb46"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-llama-server"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-llama-server/tests/cancellation.rs::a_server_silent_past_the_idle_limit_cancels_the_generation_with_the_deadline_error"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 1,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-llama-server/tests/cancellation.rs::a_server_silent_past_the_idle_limit_cancels_the_generation_with_the_deadline_error",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46003460144"
+    }
+  }
+}

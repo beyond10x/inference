@@ -1,0 +1,77 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "aws-time-bounds",
+    "assessor": "named-tests@1",
+    "candidate": "49dc71e3a86733911d6d0a5642285286ebcafb46",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "49dc71e3a86733911d6d0a5642285286ebcafb46"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-aws"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-aws/tests/nova_sonic_stall_and_bounds.rs::the_open_deadline_is_stated",
+          "adapters/inference-aws/tests/nova_sonic_stall_and_bounds.rs::start_against_a_server_that_never_answers_fails_within_its_deadline",
+          "adapters/inference-aws/tests/nova_sonic_session.rs::a_silent_service_is_a_stall_after_the_read_timeout",
+          "adapters/inference-aws/tests/nova_sonic_duplex.rs::a_silent_provider_yields_a_stall_failure_at_the_bound"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 4,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 4,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-aws/tests/nova_sonic_stall_and_bounds.rs::the_open_deadline_is_stated",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-aws/tests/nova_sonic_stall_and_bounds.rs::start_against_a_server_that_never_answers_fails_within_its_deadline",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-aws/tests/nova_sonic_session.rs::a_silent_service_is_a_stall_after_the_read_timeout",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-aws/tests/nova_sonic_duplex.rs::a_silent_provider_yields_a_stall_failure_at_the_bound",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46003460144"
+    }
+  }
+}
