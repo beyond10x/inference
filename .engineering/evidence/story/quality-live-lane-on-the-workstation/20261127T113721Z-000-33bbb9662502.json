@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-27T11:37:21Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-live-lane-on-the-workstation",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source exit 0 (74 s), task test-build exit 0 (166 s), task test-run exit 0 (76 s, Summary [62.484s] 3415 tests run: 3415 passed, 73 skipped), task quality-records exit 0, at 9a30d0332 through the shared build pool",
+    "reference": "inference-docs 173 tests at fae488350 (count without YES=1 and nothing called; each command only its own key; no key in output, record or build; builds through the pool without a key, runs under slot --local; fetch of an executable left on the build node; secret-tool bound; missing key or voice id skips by name), 10 of 10 runs; one real build of the speech_live executable fetched here and listed, no key, no run"
+  }
+}
