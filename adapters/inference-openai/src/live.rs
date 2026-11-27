@@ -101,7 +101,8 @@ pub const LIVE_MODEL: &str = "gpt-live-1";
 pub const LIVE_URL: &str = "wss://api.openai.com/v1/live/sessions";
 
 /// How long [`LiveClient::close`] waits for `session.closed`, in all, when the endpoint's read
-/// timeout is shorter: the guide's examples wait 15 seconds.
+/// timeout is shorter: the guide's examples wait 15 seconds. It is the close timeout of a client
+/// that [`LiveClient::with_close_timeout`] gave no other.
 pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl Endpoint {
@@ -741,6 +742,9 @@ pub struct LiveSender {
 pub struct LiveReceiver {
     stream: SocketStream,
     read_timeout: Duration,
+    /// The close timeout of the client this half is of ([`LiveClient::close_timeout`]); it is
+    /// kept here so that it stays with the session across a split.
+    close_timeout: Duration,
     /// When the last message was read, the end of the handshake before the first: the stall
     /// bound runs from it, across reads.
     last_message: tokio::time::Instant,
@@ -830,6 +834,7 @@ impl LiveClient {
         let mut receiver = LiveReceiver {
             stream,
             read_timeout: endpoint.read_timeout,
+            close_timeout: CLOSE_TIMEOUT,
             last_message: tokio::time::Instant::now(),
             session: Value::Null,
             pending: VecDeque::new(),
@@ -878,6 +883,21 @@ impl LiveClient {
         } else {
             Err(Box::new(ReuniteError { sender, receiver }))
         }
+    }
+
+    /// This client with another close timeout: how long [`LiveClient::close`] waits for
+    /// `session.closed`, in all, when the endpoint's read timeout is shorter. It stays with the
+    /// session across [`LiveClient::into_split`] and [`LiveClient::reunite`].
+    #[must_use]
+    pub fn with_close_timeout(mut self, close_timeout: Duration) -> Self {
+        self.receiver.close_timeout = close_timeout;
+        self
+    }
+
+    /// The close timeout, [`CLOSE_TIMEOUT`] unless [`LiveClient::with_close_timeout`] set
+    /// another.
+    pub fn close_timeout(&self) -> Duration {
+        self.receiver.close_timeout
     }
 
     /// The session as `session.started` resolved it.
@@ -1021,9 +1041,10 @@ impl LiveClient {
     /// GPT-Live events: the client reads on past them.
     ///
     /// The whole close, the write of `session.close`, every read and the closing of the
-    /// connection, takes at most the longer of the endpoint's read timeout and [`CLOSE_TIMEOUT`],
-    /// however often the server sends and whether or not it drains the socket. That bound, not
-    /// the endpoint's write deadline, governs the write of `session.close`.
+    /// connection, takes at most the longer of the endpoint's read timeout and the client's close
+    /// timeout ([`LiveClient::close_timeout`], [`CLOSE_TIMEOUT`] unless another was set), however
+    /// often the server sends and whether or not it drains the socket. That bound, not the
+    /// endpoint's write deadline, governs the write of `session.close`.
     ///
     /// # Errors
     /// The errors of [`LiveClient::next_event`] when the connection ends before
@@ -1039,7 +1060,7 @@ impl LiveClient {
         mut self,
         mut seen: impl FnMut(Result<LiveEvent, RealtimeError>),
     ) -> Result<LiveClosed, RealtimeError> {
-        let bound = self.receiver.read_timeout.max(CLOSE_TIMEOUT);
+        let bound = self.receiver.read_timeout.max(self.receiver.close_timeout);
         let started = tokio::time::Instant::now();
         self.receiver.read_timeout = bound;
         self.receiver.last_message = started;

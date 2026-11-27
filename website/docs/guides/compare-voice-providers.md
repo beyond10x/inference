@@ -54,6 +54,12 @@ barge-in utterance is the 16-bit PCM WAV file in `INFERENCE_COMPARE_BARGE_IN_WAV
 barge-in is sent and that column stays empty. A provider whose model cannot be made, or whose first
 session does not open, is skipped with the reason.
 
+The `elevenlabs` provider talks to the public agent `ELEVENLABS_AGENT_ID` names, or to a private
+agent through the signed URL in `ELEVENLABS_AGENT_SIGNED_URL`, which is taken when both are set
+([Environment](../reference/environment.md)). On main, in the next release, a signed URL opens one
+session: the arm measures its first run and records every later run with the refusal,
+`agent::AgentError::SignedUrlSpent`, as its note.
+
 The `cascade` provider speaks with ElevenLabs and reads these values:
 
 | what | from | when missing or not taken |

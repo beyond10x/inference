@@ -1,13 +1,15 @@
 //! Runs the synthesized suite of `ess/` against the testkit's conformance target and asks
 //! `ess verify conform report` for the verdict.
 //!
-//! The suite is synthesized at test time into a fresh directory under `CARGO_TARGET_TMPDIR`, run
-//! in process by `ess_conformance::Runner`, and its per-scenario statuses written as an
+//! The suite is the one `suite/mod.rs` keeps under `CARGO_TARGET_TMPDIR`, synthesized once for
+//! every test that reads it. This test copies it into a fresh directory there, runs it in process
+//! by `ess_conformance::Runner`, and writes its per-scenario statuses as an
 //! `ess-conformance-results/1` document beside it. `ess verify conform report` then admits the
 //! suite, checks the results against it and writes the `ess-conformance-report/2` the assertions
 //! read. The directory is left in place, red or green, and its path printed: `suite.json` and
 //! `report.json` in it are the evidence of the run. `ess` must be on `PATH`, as for `task check`.
 
+mod suite;
 mod target;
 
 use std::collections::BTreeSet;
@@ -676,22 +678,8 @@ fn the_suite_runs_against_the_testkit_target() {
     let results_path = dir.join("results.json");
     let report_path = dir.join("report.json");
 
-    ess(
-        &root,
-        &[
-            "verify",
-            "conform",
-            "synthesize",
-            "--path",
-            "ess",
-            "--scenarios",
-            "ess/scenarios",
-            "--out",
-            path_arg(&suite_path),
-        ],
-    );
-
-    let original = fs::read_to_string(&suite_path).expect("suite.json is readable");
+    let original = suite::synthesized(suite::Product::Authored);
+    fs::write(&suite_path, &original).expect("suite.json is written");
     let admitted = AdmittedSuite::from_json(&original)
         .unwrap_or_else(|error| panic!("the synthesized suite is admitted: {error:?}"));
     let run =

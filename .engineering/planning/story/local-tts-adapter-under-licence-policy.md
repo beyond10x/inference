@@ -20,6 +20,8 @@ scope:
   path: adapters/inference-sherpa-onnx
 - confidence: inferred
   path: adapters/inference-sherpa-onnx-tts
+- confidence: cited
+  path: adapters/inference-sherpa-onnx/src/lib.rs
 - confidence: inferred
   path: crates/inference-docs/src/adapters.rs
 - confidence: inferred
@@ -42,10 +44,10 @@ scope:
   path: website/docs/status/limitations.md
 - confidence: inferred
   path: website/product.json
-revision: 23
+revision: 24
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-24T13:08:07Z", actor: "human:timo", revision: 3}
-- {from: "proposed", to: "active", at: "2026-11-24T13:08:07Z", actor: "human:timo", revision: 4}
+- {from: "draft", to: "proposed", at: "2026-11-24T13:08:07Z", actor: "human:operator", revision: 3}
+- {from: "proposed", to: "active", at: "2026-11-24T13:08:07Z", actor: "human:operator", revision: 4}
 ---
 ## Context
 

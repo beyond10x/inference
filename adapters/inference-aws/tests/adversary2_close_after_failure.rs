@@ -6,26 +6,32 @@
 //! credential.
 #![cfg(feature = "duplex")]
 
+#[allow(dead_code)]
+mod wait;
+
 use std::future::Future;
 use std::num::{NonZeroU16, NonZeroU32};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use inference_aws::duplex::{Connector, NovaSonicSpeech};
 use inference_aws::nova_sonic::{DEFAULT_MODEL_ID, NovaSonicError, Session, SessionConfig};
 use inference_duplex::inference_audio::{AudioEncoding, AudioFormat};
 use inference_duplex::{
-    NativeSpeechModel, Quantity, QuantityKind, SessionConfig as SpeechConfig, SessionEvent,
-    SpeechSessionHandle, SpeechSessionState, TurnDetection, TurnTuning,
+    NativeSpeechModel, Quantity, QuantityKind, SessionConfig as SpeechConfig, SpeechSessionHandle,
+    SpeechSessionState, TurnDetection, TurnTuning,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+use wait::{completed, ended, until_sent};
 
-const WAIT: Duration = Duration::from_millis(100);
-
-/// A provider that sends `frames` in order once the session opens, then stays open.
+/// A provider that sends `frames` in order once the session opens, then stays open; `sent` counts
+/// the frames it sent.
 #[derive(Debug, Clone)]
 struct Scripted {
     frames: Vec<Vec<u8>>,
+    sent: Arc<AtomicUsize>,
 }
 
 impl Connector for Scripted {
@@ -38,6 +44,7 @@ impl Connector for Scripted {
         config: SessionConfig,
     ) -> impl Future<Output = Result<Session, NovaSonicError>> + Send + 'static {
         let script = self.frames.clone();
+        let sent = Arc::clone(&self.sent);
         async move {
             let (input, mut received) = mpsc::channel::<Vec<u8>>(256);
             let (frames, output) = mpsc::channel(256);
@@ -47,6 +54,7 @@ impl Connector for Scripted {
                     if frames.send(Ok(frame)).await.is_err() {
                         return;
                     }
+                    sent.fetch_add(1, Ordering::SeqCst);
                 }
                 while received.recv().await.is_some() {}
             });
@@ -139,8 +147,8 @@ fn total(session: &impl SpeechSessionHandle, kind: QuantityKind) -> (i64, bool) 
 
 /// One turn with 8 output text tokens after the response, then a frame that is not JSON, then a
 /// further delta of 5 output text tokens. The caller reads to the response's end, waits until
-/// all of it reached the binding, then closes: 13 output text tokens were received before the
-/// close.
+/// the provider sent all of it and 300 ms more, so it reached the binding, then closes: 13 output
+/// text tokens were received before the close, which the caller did not read.
 #[test]
 fn close_counts_usage_received_after_an_undecodable_frame() {
     let mut script: Vec<Vec<u8>> = Vec::new();
@@ -157,28 +165,22 @@ fn close_counts_usage_received_after_an_undecodable_frame() {
     script.push(b"not json".to_vec());
     script.push(usage([0, 0, 0, 5]).to_string().into_bytes());
 
-    let mut session = NovaSonicSpeech::with_connector(Scripted { frames: script })
-        .expect("the binding's runtime starts")
-        .open(config())
-        .expect("opens");
-    let mut events = Vec::new();
-    loop {
-        let event = session.next_event(WAIT).expect("the response completes");
-        let completed = matches!(event, SessionEvent::ResponseCompleted(_));
-        events.push(event);
-        if completed {
-            break;
-        }
-        assert!(events.len() < 500, "the response never completed");
-    }
+    let count = script.len();
+    let sent = Arc::new(AtomicUsize::new(0));
+    let mut session = NovaSonicSpeech::with_connector(Scripted {
+        frames: script,
+        sent: Arc::clone(&sent),
+    })
+    .expect("the binding's runtime starts")
+    .open(config())
+    .expect("opens");
+    let mut events = completed(&mut session);
+    until_sent(|| sent.load(Ordering::SeqCst), count);
     std::thread::sleep(Duration::from_millis(300));
     session
         .close()
         .expect("closing an open session succeeds whatever already arrived");
-    while let Some(event) = session.next_event(WAIT) {
-        events.push(event);
-        assert!(events.len() < 500, "the session never went quiet");
-    }
+    events.extend(ended(&mut session));
     assert_eq!(
         session.ledger().session().state(),
         SpeechSessionState::Closed,

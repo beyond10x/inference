@@ -14,6 +14,7 @@
 
 #![allow(clippy::duplicate_mod)]
 
+mod suite;
 mod target;
 
 #[allow(dead_code)]
@@ -21,10 +22,6 @@ mod target;
 mod stream;
 
 use std::cell::RefCell;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ess_conformance::scenario::{CommandRef, EventRef, OutcomeRef};
 use ess_conformance::target::{
@@ -208,35 +205,7 @@ fn deferred(id: &str) -> bool {
 }
 
 fn synthesized_suite() -> Value {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the repository root resolves");
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock is past the epoch")
-        .as_millis();
-    let dir: PathBuf = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("adversary2-stream-{millis}-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("the directory is created");
-    let suite = dir.join("suite.json");
-    let output = Command::new("ess")
-        .args([
-            "verify",
-            "conform",
-            "synthesize",
-            "--path",
-            "ess",
-            "--scenarios",
-            "ess/scenarios",
-            "--out",
-            suite.to_str().expect("UTF-8"),
-        ])
-        .current_dir(&root)
-        .output()
-        .expect("`ess` runs");
-    assert!(output.status.success(), "ess synthesize: {output:?}");
-    serde_json::from_str(&fs::read_to_string(&suite).expect("suite.json")).expect("JSON")
+    serde_json::from_str(&suite::synthesized(suite::Product::Authored)).expect("JSON")
 }
 
 #[test]

@@ -4,13 +4,15 @@
 //! `transcribe` and `speak` declares a port [`USAGE_PORT`], exposed as the egress `usage`, on
 //! which it sends the usage record of each model call; each of `voice_cascade`'s three model
 //! nodes declares one too, exposed as `stt_usage`, `agent_usage` and `tts_usage`, as egress
-//! names are unique in a pipeline; `native_voice`'s records travel on its `events`.
+//! names are unique in a pipeline; `native_voice`'s records travel on its `events`. `chat` given
+//! tools declares the tool loop `native_voice` declares, around its model node, and one more
+//! egress, [`TOOL_EVENTS`], which carries each call its model proposes.
 
 use std::num::NonZeroUsize;
 
 use inference_core::model::Capability;
 use inference_pipeline::{
-    Delivery, Essentiality, NodeRole, OverloadPolicy, PortTraits, USAGE_PORT, modality,
+    Delivery, Essentiality, NodeHandle, NodeRole, OverloadPolicy, PortTraits, USAGE_PORT, modality,
 };
 
 use super::MAX_TOOL_ITERATIONS;
@@ -23,8 +25,14 @@ pub(super) type Requirement<'r> = dyn Fn(Role, &[Capability]) -> Vec<Capability>
 /// The capacity of the cascade's internal edges and its playback loops' bound.
 const EDGE_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(63);
 
-/// The capacity of the tool loop's edges.
+/// The capacity of the tool loop's edges that pause: those the authority and the executor send
+/// on.
 const TOOL_CAPACITY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
+
+/// The capacity of the tool loop's feedback edge, the one edge of the loop that fails on
+/// overload: 8, twice [`MAX_TOOL_ITERATIONS`]. See [`tool_loop`].
+const FEEDBACK_CAPACITY: NonZeroUsize =
+    MAX_TOOL_ITERATIONS.saturating_mul(NonZeroUsize::MIN.saturating_add(1));
 
 const STREAM: PortTraits = PortTraits {
     essentiality: Essentiality::Essential,
@@ -41,24 +49,97 @@ const USAGE: PortTraits = PortTraits {
     ..STREAM
 };
 
+/// A port of the tool loop: one event per step of a call, optional to its node.
+const TOOL: PortTraits = PortTraits {
+    essentiality: Essentiality::Optional,
+    incremental: false,
+    ..STREAM
+};
+
 const PAUSE: OverloadPolicy = OverloadPolicy::Pause;
 
+/// The port of `chat`'s model node, given tools, on which the run sends each call the model
+/// proposes, and the egress of the same name it is exposed as.
+pub(super) const TOOL_EVENTS: &str = "tool_events";
+
+/// `chat`'s topology. With `tools`, the recipe was given tools: its model node then requires
+/// `tool_calling` beside streaming, is wired to the runtime's tool nodes by [`tool_loop`], and
+/// declares the port [`TOOL_EVENTS`], exposed as the egress of that name: each call the model
+/// proposes is sent on it before it reaches the authority, as `native_voice`'s speech node sends
+/// its calls on `events`, so the session tells a call before it is held, run or answered.
 pub(super) fn chat(
     pipeline: &mut Builder<'_, '_>,
     capacity: NonZeroUsize,
     requirement: &Requirement<'_>,
+    tools: bool,
 ) {
-    let agent = pipeline.node(
-        "agent",
-        NodeRole::Model,
-        requirement(Role::Llm, &[Capability::OutputStreaming]),
-    );
+    let streaming: &[Capability] = if tools {
+        &[Capability::OutputStreaming, Capability::ToolCalling]
+    } else {
+        &[Capability::OutputStreaming]
+    };
+    let agent = pipeline.node("agent", NodeRole::Model, requirement(Role::Llm, streaming));
     let input = pipeline.input::<modality::Text>(&agent, "user_input", STREAM);
     let output = pipeline.output::<modality::Text>(&agent, "committed_text", STREAM);
     let usage = pipeline.output::<modality::Structured>(&agent, USAGE_PORT, USAGE);
+    let events = tools.then(|| {
+        tool_loop(pipeline, &agent);
+        pipeline.output::<modality::Structured>(&agent, TOOL_EVENTS, TOOL)
+    });
     pipeline.expose(&input, "user_input", capacity, PAUSE);
     pipeline.expose(&output, "assistant_text", capacity, PAUSE);
     pipeline.expose(&usage, USAGE_PORT, capacity, PAUSE);
+    if let Some(events) = events {
+        pipeline.expose(&events, TOOL_EVENTS, capacity, PAUSE);
+    }
+}
+
+/// The runtime's tool nodes around `model`, wired as
+/// `crates/inference-runtime/tests/tool_feedback_loop.rs` wires them around a model: the model's
+/// `tool_call` output reaches the `authority` node's `proposed` input through a feedback edge
+/// bounded at [`MAX_TOOL_ITERATIONS`], the authority's `authorized` output reaches the `executor`
+/// node, and the executor's `outcomes` and the authority's `rejected` both return to the model's
+/// `tool_result` input.
+///
+/// The three edges the authority and the executor send on pause their producer when they are
+/// full, so nothing the authority decides and no step of a call can fail an edge: the executor
+/// sends two envelopes for each call, and a reply that ends with several calls puts all of them
+/// on these edges before the model reads the first. The feedback edge alone fails on overload,
+/// so the model's sends on it never wait and the model always comes to read `tool_result`: no
+/// pause of the loop can hold itself. Its capacity is [`FEEDBACK_CAPACITY`]. The authority counts
+/// the calls of one reply as one time round the loop, so it does not bound how many calls one
+/// reply ends with; the edge does. The model sends a reply's calls only once the authority read
+/// every call of the reply before, as it awaits their outcomes first, so the calls of one reply
+/// are all the edge holds of them. `chat`'s model node is therefore given the edge's capacity as
+/// the most calls one reply may end with (`ModelNode::with_round_bound`): a reply with more
+/// fails the node, and so the run, with an error naming the capacity, before any of its calls is
+/// sent. An interruption of the generation sent behind a reply of 8 calls the authority has not
+/// read yet still finds the edge full; the model's node then fails, and so does the run, with
+/// the error of the full edge. `native_voice`'s speech node is
+/// given no such bound: the authority counts its calls one by one, and admits at most
+/// [`MAX_TOOL_ITERATIONS`] of a generation.
+fn tool_loop<'b>(pipeline: &mut Builder<'_, 'b>, model: &NodeHandle<'b>) {
+    let structured = TOOL;
+    let fail = OverloadPolicy::Fail;
+    let authority = pipeline.node("authority", NodeRole::Policy, Vec::new());
+    let executor = pipeline.node("executor", NodeRole::Tool, Vec::new());
+    let tool_call = pipeline.output::<modality::Structured>(model, "tool_call", structured);
+    let tool_result = pipeline.input::<modality::Structured>(model, "tool_result", structured);
+    let proposed = pipeline.input::<modality::Structured>(&authority, "proposed", structured);
+    let authorized = pipeline.output::<modality::Structured>(&authority, "authorized", structured);
+    let rejected = pipeline.output::<modality::Structured>(&authority, "rejected", structured);
+    let calls = pipeline.input::<modality::Structured>(&executor, "authorized", structured);
+    let outcomes = pipeline.output::<modality::Structured>(&executor, "outcomes", structured);
+    pipeline.connect_feedback(
+        &tool_call,
+        &proposed,
+        FEEDBACK_CAPACITY,
+        fail,
+        MAX_TOOL_ITERATIONS,
+    );
+    pipeline.connect(&authorized, &calls, TOOL_CAPACITY, PAUSE);
+    pipeline.connect(&outcomes, &tool_result, TOOL_CAPACITY, PAUSE);
+    pipeline.connect(&rejected, &tool_result, TOOL_CAPACITY, PAUSE);
 }
 
 pub(super) fn transcribe(
@@ -187,8 +268,7 @@ pub(super) fn voice_cascade(
     }
 }
 
-/// The native speech model's node and the runtime's tool nodes, wired as
-/// `crates/inference-runtime/tests/tool_feedback_loop.rs` wires them around a model.
+/// The native speech model's node and the runtime's tool nodes, wired by [`tool_loop`].
 pub(super) fn native_voice(
     pipeline: &mut Builder<'_, '_>,
     capacity: NonZeroUsize,
@@ -199,39 +279,15 @@ pub(super) fn native_voice(
         incremental: false,
         ..STREAM
     };
-    let structured = PortTraits {
-        essentiality: Essentiality::Optional,
-        incremental: false,
-        ..STREAM
-    };
-    let fail = OverloadPolicy::Fail;
     let speech = pipeline.node(
         "speech",
         NodeRole::Model,
         requirement(Role::Speech, &[Capability::ConcurrentInputOutput]),
     );
-    let authority = pipeline.node("authority", NodeRole::Policy, Vec::new());
-    let executor = pipeline.node("executor", NodeRole::Tool, Vec::new());
     let audio = pipeline.input::<modality::Audio>(&speech, "audio", STREAM);
     let control_in = pipeline.input::<modality::Control>(&speech, "control", control);
     let events = pipeline.output::<modality::Structured>(&speech, "events", STREAM);
-    let tool_call = pipeline.output::<modality::Structured>(&speech, "tool_call", structured);
-    let tool_result = pipeline.input::<modality::Structured>(&speech, "tool_result", structured);
-    let proposed = pipeline.input::<modality::Structured>(&authority, "proposed", structured);
-    let authorized = pipeline.output::<modality::Structured>(&authority, "authorized", structured);
-    let rejected = pipeline.output::<modality::Structured>(&authority, "rejected", structured);
-    let calls = pipeline.input::<modality::Structured>(&executor, "authorized", structured);
-    let outcomes = pipeline.output::<modality::Structured>(&executor, "outcomes", structured);
-    pipeline.connect_feedback(
-        &tool_call,
-        &proposed,
-        TOOL_CAPACITY,
-        fail,
-        MAX_TOOL_ITERATIONS,
-    );
-    pipeline.connect(&authorized, &calls, TOOL_CAPACITY, fail);
-    pipeline.connect(&outcomes, &tool_result, TOOL_CAPACITY, fail);
-    pipeline.connect(&rejected, &tool_result, TOOL_CAPACITY, fail);
+    tool_loop(pipeline, &speech);
     pipeline.expose(&audio, "audio", capacity, PAUSE);
     pipeline.expose(&control_in, "control", capacity, PAUSE);
     pipeline.expose(&events, "events", capacity, PAUSE);

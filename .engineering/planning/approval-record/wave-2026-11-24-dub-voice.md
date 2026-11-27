@@ -9,7 +9,7 @@ relations:
 - decides: story:synthesiser-drop-inside-runtime
 - decides: story:local-tts-adapter-under-licence-policy
 - decides: story:signed-url-token-copies
-revision: 4
+revision: 8
 ---
 ## Decision
 
@@ -54,8 +54,9 @@ wave of the trajectory once the operator accepts them.
 
 ## Check
 
-`aep plan artifact waves --kind story --status active` on the wave's branch, run again after the
-scope of story:local-tts-adapter-under-licence-policy was written, printed:
+`aep plan artifact waves --kind story --status active` on the wave's branch, run again after
+story:ticker-tests-hold-on-a-loaded-host was accepted
+(approval-record:ticker-tests-accepted-2026-11-24), printed:
 
 ```
 wave 1
@@ -64,20 +65,26 @@ wave 1
   story:local-tts-adapter-under-licence-policy (inferred)
   story:sdk-one-call (inferred)
   story:signed-url-token-copies (inferred)
+  story:ticker-tests-hold-on-a-loaded-host
 wave 2
   story:realtime-voice-demo (inferred)
   story:synthesiser-drop-inside-runtime (inferred)
 collision: story:signed-url-token-copies story:synthesiser-drop-inside-runtime CHANGELOG.md (inferred)
 collision: story:signed-url-token-copies story:synthesiser-drop-inside-runtime adapters/inference-elevenlabs/src/lib.rs
+collision: story:synthesiser-drop-inside-runtime story:ticker-tests-hold-on-a-loaded-host adapters/inference-elevenlabs/tests/async_handles.rs (inferred)
 unassessed: story:sentence-clips-with-durations
 unassessed: story:speak-text-file-to-audio-file
-2 wave(s), 2 collision(s), 2 unassessed
+2 wave(s), 3 collision(s), 2 unassessed
 ```
 
 - U2 and U3 collide on `adapters/inference-elevenlabs/src/lib.rs` (U2 lines 41 and 52-55, U3 lines
-  71-88) and on `CHANGELOG.md`. They do not run at once: U3 runs first, and U2 is forked from the
-  integration branch after U3 has merged into it.
-- U4 is placed beside U1 and U3 and starts now.
+  71-88) and on `CHANGELOG.md`. They do not run at once in that file: U3 runs first, and the
+  integration branch is merged into U2's branch after U3 has merged, before U2 touches `src`.
+- story:ticker-tests-hold-on-a-loaded-host and story:synthesiser-drop-inside-runtime collide on
+  `adapters/inference-elevenlabs/tests/async_handles.rs`. One unit, U2, builds both, one after the
+  other: the ticker story first (it edits only that test file, so it runs beside U3), then the drop
+  story.
+- U4 is placed beside U1 and U3.
 - `CHANGELOG.md` is the coordinator's: each unit hands its lines over in its report.
 - `website/docs/reference/environment.md` is held for the coordinator where U4 needs it: U3 edits
   one sentence there, U4 hands its text over.
@@ -116,11 +123,29 @@ release.
 
 ## Integration
 
-Branch `wave/2026-11-24-dub-voice`, from `origin/main` at `21cab7876`.
+Branch `wave/2026-11-24-dub-voice`, from `origin/main` at `21cab7876`; `origin/main` at
+`fb7192ac8` merged in on 2026-11-25 (`c6a4e9a91`).
 
-| unit | branch | worktree id | build directory | scratch | stage |
-|---|---|---|---|---|---|
-| U1 | `impl/sdk-one-call` | `inference-w2-u1-one-call` | `target/` in the unit's worktree | `wave2/u1` under the session scratch | implementor running |
-| U2 | `impl/synthesiser-drop-inside-runtime` | `inference-w2-u2-drop` | `target/` in the unit's worktree | `wave2/u2` under the session scratch | waits for U3's merge |
-| U3 | `impl/signed-url-token-copies` | `inference-w2-u3-token` | `target/` in the unit's worktree | `wave2/u3` under the session scratch | implementor running |
-| U4 | `impl/local-tts-adapter` | `inference-w2-u4-local-tts` | `target/` in the unit's worktree | `wave2/u4` under the session scratch | scope written, implementor dispatched |
+State on 2026-11-25. The wave's pull request carries U2 and U3. U1 and U4 are not in it: each
+waits for a ruling of the owner and follows as a pull request of its own.
+
+| unit | stories | branch | stage |
+|---|---|---|---|
+| U1 | story:sdk-one-call | `impl/sdk-one-call` | not merged. At `2fb2f9ae2` one case is red: the bound of the tool loop. The specification's sentence on that bound has to be amended before the code, in a commit of its own, and that edit waits for the owner's yes. The `Chat`, `Transcriber` and `Voice` handles are therefore not in the wave's pull request. |
+| U2 | story:ticker-tests-hold-on-a-loaded-host, story:synthesiser-drop-inside-runtime | `impl/synthesiser-drop-inside-runtime` | merged at `e4d23dcdd` (`894e900e6`). One adversary pass on the ticker story, two on the drop story, each recorded with its outcome. |
+| U3 | story:signed-url-token-copies | `impl/signed-url-token-copies` | merged at `ba1870be0` (`e04621e9f`). Two adversary passes, each recorded with its outcome. |
+| U4 | story:local-tts-adapter-under-licence-policy, story:sherpa-onnx-linked-libraries-licences-read | `impl/local-tts-adapter` | not merged; the branch is at `c281a8b4c`. Two adversary passes, each recorded with its outcome. The branch also records what story:sherpa-onnx-linked-libraries-licences-read read: 29 code-licence entries for the archive built with text-to-speech and 25 for the archive built without, each held against the build script of the pinned `sherpa-onnx-sys`. Libraries in the linked archives carry licences outside the list of `AGENTS.md`; whether the adapter ships, and how, is the owner's ruling. |
+
+Open in U4's branch, for its merge:
+
+- `CHANGELOG.md` has no entry of the unit yet, and one case of `inference-docs` is red until it
+  has (`every_binding_is_since_the_release_whose_changelog_section_introduced_it`).
+- `website/product.json` names the licence of espeak-ng as GPL-3.0; the pages of the branch say
+  GPL-3.0-or-later.
+- Neither story has its verification, its test result or its scope as built; they are recorded
+  when the branch is merged.
+- The 16 cases on the weights are run by no task, and three cases against a loopback
+  llama-server were not run after their answer length changed
+  (story:local-tts-weights-cases-run-in-a-lane).
+
+No release is tagged from this wave before both rulings.

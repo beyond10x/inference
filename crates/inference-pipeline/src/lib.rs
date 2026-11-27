@@ -1197,11 +1197,18 @@ impl NodeDescriptor {
 
 /// `inference.graph.FeedbackLoop`: a feedback edge of a pipeline with the iteration rule that
 /// bounds the loop it closes: how many times one generation may go round the loop along the edge
-/// before the loop terminates. Each proposal of the generation that arrives along the edge goes
-/// round once, so a generation proposing several calls at once uses one iteration per call, not
-/// one per round of calls: the tool authority counts it so
-/// ([`nodes::ToolAuthority::bounded_by`]). The edge's capacity is the loop's queue bound. Its
-/// maximum is at least one by type, the invariant `max_iterations > 0` of graph.yaml.
+/// for one input before the loop terminates. The proposals of one generation whose envelopes
+/// name the same triggering event (`causation_id`) and rest on the same span are the calls of one
+/// reply: they go round together and count once, and their input is that span, so each input of
+/// a generation is counted anew. A proposal that names no triggering event goes round by itself,
+/// and its generation is counted as one input whatever span it rests on. A proposal past the rule
+/// is rejected `exhausted`, and the other proposals of its reply with it: the tool authority
+/// counts it so ([`nodes::ToolAuthority::bounded_by`]). The edge's capacity is the loop's queue
+/// bound. Since a reply goes round once whatever its size, the rule does not bound how many calls
+/// one reply ends with; the edge does: the model node of the recipe `chat` is given the edge's
+/// capacity as its round bound (`ModelNode::with_round_bound`), and a reply with more calls than
+/// the edge holds fails the node before any of its calls is sent. Its maximum is at least one by
+/// type, the invariant `max_iterations > 0` of graph.yaml.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FeedbackLoop {
     feedback_id: FeedbackLoopId,

@@ -2,6 +2,250 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- `inference-elevenlabs` (feature `duplex`): a model built with `ElevenLabsAgent::signed` gives its
+  signed URL up to the first open that gets past its configuration and its runtime, whatever happens
+  next: the session opened, no request could be built from the URL, the open was cancelled before
+  the handshake was first polled, the connection could not be made, the server refused the upgrade,
+  the handshake timed out or was cancelled, or the agent's formats were not the session's. Every
+  later open that gets past its configuration and its runtime fails as the new variant
+  `agent::AgentError::SignedUrlSpent` (`SessionFailureKind::Rejected`) before anything connects, so
+  a failed connect and a format refusal spend the URL too: build a model with a new signed URL for
+  the next open. Only an open refused for its configuration, or whose runtime could not be built,
+  leaves the URL with the model. A public agent's model is unchanged.
+
+### Added
+
+- `inference-docs` (not published): `inference-docs adopt-records` and `task quality-adopt RUN=…
+  DIR=… RUN_JSON=…` copy the records of a check run on `main`, downloaded by the caller from its
+  artifact `quality-records-<commit>` and described by the saved output of `gh run view <id> --json
+  databaseId,headBranch,headSha,event,workflowName`, into `quality/records/` byte for byte. They
+  download nothing; refuse a run that is not a push to `main` of the workflow `check`, a record of
+  another run or commit, a missing or extra record, a record of another project, assessor or class
+  than `ci`, a target `assess` would not write, a record holding a key twice and a record the record
+  rules of the quality documents refuse, naming each file and reason; and write all records or
+  none. The committed records are not adopted yet.
+- `inference-docs` (not published): a test of the documentation crate reads every `#[ignore]`
+  (also a `#[cfg_attr(…)]` over several lines) of the workspace and refuses one without a reason or
+  with a reason of no kind `AGENTS.md` admits (billed, local, by hand, child, limit), and one in a
+  test target built only with feature `live` without `billed`, naming the file, the line and the
+  reason; it runs in `task test-run`.
+- `inference-elevenlabs`, `inference-cartesia`: `CLOSE_GRACE` (5 ms), the most a drop of a
+  synthesis inside a Tokio runtime waits for its close on the dropping thread.
+- `inference-openai`: `LiveClient::with_close_timeout` and `LiveClient::close_timeout`, and
+  `OpenAiLive::with_close_timeout` and `OpenAiLive::close_timeout`: the most a graceful close of a
+  GPT-Live session waits for the provider's last messages. Unset, it is `CLOSE_TIMEOUT`, 15
+  seconds, as before; a close takes at most the longer of it and the endpoint's read timeout.
+- `repo-podcast` (example, not published): `Settings::silent_turn`, how long a model that creates
+  its own responses may send nothing before its turn is given up; 10 seconds by default, as before.
+  A `Settings` written as a struct literal without `..Settings::default()` has to name the field.
+- `inference-docs` (not published): the command `assess` writes the record of one assessment of
+  `quality/` from a file a run left behind, a JUnit report of cargo-nextest or the captured output
+  of a command that prints a duration, in the form Ratchet's specification gives a record. It runs
+  no measure. It exits 1 and writes nothing when the file does not hold what the assessment
+  reads: a named test that did not run, a failed run, a run whose output ends before its closing
+  line, counts that disagree with the report's own.
+  `quality/README.md` says which assessments it reads and how it is called. The committed records
+  are still the ones written by hand. No crate's API changes.
+- `realtime-voice` (example, not published): `elevenlabs::resolves_within(source, wait)`, the key
+  check with its wait as an argument; `elevenlabs::resolves` calls it with `KEY_WAIT`, 8 seconds,
+  as before.
+- `quality/` and `ratchet.toml`: the quality of the repository, written in the formats of Ratchet
+  at its commit `f139eccc17a548444f0f4e1dc06520120c28739f`: 44 measures with their command, unit,
+  direction, bound and baseline (`quality/README.md`), what is not measured
+  (`quality/not-measured.md`), and a test in `task test-run` that fails when the documents stop
+  agreeing with each other, with `Taskfile.yml` or with that page. No Ratchet command works at
+  that commit; the documents add no gate and change none. No crate's API changes.
+- `quality/adapters.md`: the quality definition per adapter crate, one section per directory under
+  `adapters/`: the tests run and passed and the slowest test in the check run, the time bounds its
+  tests hold (nine adapters), the records its tests hold (eight adapters), and 26 measures of
+  latency and connect time that name their command, clock, unit and direction and carry no
+  baseline, because no run of those commands is kept. `quality/README.md` gains what a release
+  holds; `quality/not-measured.md` gains what no test fires, per binding. The test of the quality
+  documents now also fails when a section and an adapter directory disagree, when a named test is
+  no function of its file, when a `cargo test` or `cargo run` command names a package, a target or
+  a feature that does not exist, when a measurement names a boundary its assessor does not
+  declare, when the coverage of a record counts something else than its plan and its assessor
+  name, and when an entry without a baseline carries a number, a record or a requirement. The
+  documents add no gate and change none. No crate's API changes.
+- The documentation site: the adapter reference gains the section "Opens, closes and drops", per
+  binding what an open, a close or a drop gives a caller where this release changed it: the close
+  timeout of GPT-Live, the drop of an ElevenLabs and of a Cartesia synthesis, the signed URL of an
+  ElevenLabs agent model. `inference-docs` reads the value of each constant a note names from the
+  adapter's source and refuses a note its sources do not hold. The error reference says that an
+  adapter's own error types are not on it. The guides "Run the checks", "Compare voice providers"
+  and "Talk to a hosted voice model" and the page of the `repo-podcast` example say these changes
+  where their reader meets them. No crate's API changes.
+- `inference`: the one-call functions `transcribe(path)`, `chat(prompt)`, `speak(text)` and
+  `talk()`, each over the stack the process names, and their forms over a given stack,
+  `transcribe_with(&stack, path)`, `chat_with(&stack, prompt)`, `speak_with(&stack, text, host)`
+  and `talk_with(&stack, host)`. Each opens one session and closes it. `speak_with` and `talk_with`
+  sit behind `audio-host`, `speak` and `talk` behind `audio-device`.
+- `inference`: the handles `Chat`, `Transcriber` and `Voice`, each built by `new()` or
+  `new_with(&stack)`, each with `describe()`, `session()` and `pipeline()`. `Chat::send` returns a
+  reply and `Chat::stream` its text deltas, over one session that keeps the conversation until
+  `Chat::close`; `Chat::tool` gives the model a tool. `Transcriber::transcribe_frames` and
+  `Transcriber::transcribe_file` return the committed spans of audio frames or of a WAV file of
+  16-bit integer or 32-bit float PCM. `Voice::synthesise` returns the frames of a text and
+  `Voice::play` plays them on an `AudioHost` without opening a microphone.
+- `inference`: `Voice::synthesise_clips` returns one `Clip` per sentence of a text: the sentence,
+  the frames of that sentence synthesised alone and their duration (samples per channel at the
+  sample rate). A sentence ends at one or more of `.`, `!` and `?` followed by whitespace or the
+  end of the text; there is no abbreviation list. An empty or whitespace-only text returns no clip
+  and opens no session. `Voice::synthesise_clips_to` writes the clips as `clip-001.wav` onwards
+  into an existing directory and returns each path with its duration (`ClipFile`). It refuses a
+  missing directory, an existing file of those names and a text of more than 999 sentences before
+  any session opens, and refuses `pcm_mulaw` and `pcm_alaw` audio by name; it never overwrites a
+  file, and removes the files it wrote when a later write fails.
+- `inference`: the recipe `chat` given tools (`Recipe::tools`, `AgentBuilder::tool`,
+  `Chat::tool`) declares the tool loop `native_voice` declares around its model node, the nodes
+  `authority` and `executor` bounded at `MAX_TOOL_ITERATIONS`, and then requires `tool_calling` of
+  its `llm` binding. It then has one more egress, `tool_events`, which carries each call the model
+  proposes before the authority takes it, and a call held for confirmation when its session
+  closes is denied, as in `native_voice`. Without tools its topology is unchanged.
+- `inference`: `Chat::tool`, `AgentBuilder::tool` and `docs/design/sdk.md` §5 say where a tool's
+  future runs: on a thread of the run, outside any Tokio runtime. A tool that needs one holds a
+  `tokio::runtime::Handle`, spawns its work onto it and awaits the join handle. A tool that
+  awaits a Tokio timer or socket directly panics ("there is no reactor running"), which fails
+  that call with the panic's message; the model is given the failure and answers it.
+- `inference-docs` (not published) and CI: the records of each `check` run of a push to `main`
+  that succeeded are appended to a series on the ref `refs/ratchet/records` by the new workflow
+  `quality series`. Its job `append` (no write permission) runs `inference-docs series-append` on
+  the run's artifact and commits; its job `push`, which runs no code of the tree and is the ref's
+  one writer and the only job with `contents: write`, pushes that commit without force after
+  checking it only adds records. `series-append` writes each record not in the series yet to
+  `<plan>/<assessment>/<SHA-256 of its bytes>.evidence.json`, never changes a file, and refuses,
+  writing nothing, a file of the artifact that is no record of a listed assessment.
+  `inference-docs history` and `task quality-history ASSESSMENT=… [MEASURE=…]` print a measure's
+  values over the runs, oldest first. The ref is unproven on the forge until the first run after
+  the merge.
+- `inference-docs` (not published): `task quality-live` runs the keyed live measures of OpenAI
+  and ElevenLabs on the workstation, outside `task check` and every workflow. It prints the hosted
+  calls of a run per provider and calls nothing without `YES=1`. It builds each measure through
+  the build pool without a key, then runs the built test or example locally under `slot --local`
+  with only its own key, read from the Secret Service with a bound of 10 s. It writes records with
+  `inference-docs assess --class local` to the git-ignored `.ratchet/records/`; the output of
+  `elevenlabs-live-example` is kept and has no record yet.
+
+### Changed
+
+- `task check` runs `task quality-records` after `task test-run`: it writes the record of every
+  assessment of `quality/` that reads the run's JUnit report to
+  `target/quality-records/<plan>/<assessment>.evidence.json`, and fails naming each assessment the
+  report does not hold. The workflow `check` runs the same step and uploads those records from each
+  push to `main` as the artifact `quality-records-<commit>`. `inference-docs junit-assessments`
+  lists the assessments it writes. No crate's API changes.
+- `task test-build` ends with `task test-fixtures`, which synthesizes the conformance suites the
+  tests of `inference-testkit` read once, into a cache keyed by the digest of their sources, so
+  `task test-run` waits for no synthesis. The default cargo-nextest profile runs 8 tests at once;
+  `NEXTEST_TEST_THREADS` wins over it. Six slow tests keep their inputs and assertions at a lower
+  cost.
+- Tests: the drop tests of `inference-cartesia` and `inference-elevenlabs` hold the close bound to
+  numbers written out: 1 s, and outside a runtime at most 100 ms more once the host's scheduler
+  delay is taken out. A changed `CLOSE_BOUND` fails them. The ElevenLabs drop tests that wait for
+  the bound end at a limit of their own, 10 s. A Cartesia test reaches the bound on the close of a
+  connection alone, through a synthesis that fails on a backed-up connection, and holds it to
+  900 ms to 1.2 s after the stall.
+- Tests: four tests that failed on a loaded host now wait for the event they need, or take the
+  host's scheduler delay out of the time they measure: the Deepgram keep-alive test (which still
+  fails when two KeepAlives take 2 s at an interval of 100 ms), two Nova Sonic duplex tests, and
+  the Cartesia and ElevenLabs tests of the hold of a drop inside a runtime. The Nova Sonic wait for
+  an event ends with its own message after 20 s.
+- Tests: the ElevenLabs ticker tests plant 200 ms of processor time and fail on it beside a load
+  pinned to their processor, and fail with their own message when the kernel counts a sleep as
+  ready to run; the Nova Sonic tests of eight files wait for the event they assert instead of for
+  100 ms of quiet.
+- `task test-run` prints `task test-run was ended at its bound of 120 s` also when a part outlived
+  the first signal and was killed, and its list of the ten slowest tests is of the run that just
+  ended: `no test ran` when that run left no report. `task` exits 201 when the bound ends the step.
+- `task test-run` runs the stack test under the cargo-nextest profile `stack`, so that
+  `target/nextest/default/junit.xml` stays the report of the workspace run after the step.
+- `quality/`: the assessor `nextest-run@1` no longer reports `skipped`, and the record of
+  `workspace-tests` holds 0 there instead of 72. cargo-nextest 0.9.143 writes no ignored test into
+  its JUnit report, so a record written from that report cannot hold the count;
+  `quality/README.md` says that the 72 come from the `Summary` line of the run.
+- The `check` workflow runs the full gate for a pull request that changes a file under
+  `quality/`, also a `*.md` file: the test of the quality documents reads them.
+- `realtime-voice`, example `compare`: with `ELEVENLABS_AGENT_SIGNED_URL` the ElevenLabs arm measures
+  its first run and records every later run with the refusal as its note; with `ELEVENLABS_AGENT_ID`
+  it runs them all, as before.
+- Specification (`ess/domains/graph.yaml`): a feedback loop's iteration rule counts rounds per
+  input. The proposals of one reply (one triggering event, one span) go round together and count
+  once; their input is the span they rest on, so a generation that answers several inputs is
+  counted anew for each; a proposal that names no triggering event goes round by itself and its
+  generation counts as one input; an interruption starts no new input. Prose only: no entity,
+  field or relation changes.
+- `inference-pipeline`: the tool authority counts the replies with calls of one generation per
+  input, as the specification says. A model node's proposals of one reply carry the reply's
+  triggering event as `causation_id`; proposals without one count per generation as before, so
+  `native_voice` and the runtime's tests keep their bound. `ModelNode::with_round_bound` makes a
+  reply with more calls than the feedback edge holds fail the node before any call is sent, with
+  an error that names the bound.
+- `inference`: `MAX_TOOL_ITERATIONS` (4) of `chat` given tools counts the replies that end with
+  calls, per text the chat is sent: a chat whose model calls a tool in every turn keeps its
+  conversation, and the fifth reply with calls to one text ends the session with
+  `Error::Closed`, as before. Before, it counted every call of the conversation, so the fifth call
+  ended the session whichever turn proposed it. `chat` sets the round bound to the feedback edge's
+  capacity, 8: a reply with up to 8 calls runs them all; one with more ends the run with that
+  error and runs none of them.
+- `inference`: the tool loop of `native_voice`, and of `chat` given tools, holds a reply that
+  ends with several calls. The three edges its authority and its executor send on now pause
+  their producer when they are full (they failed the run at 4 envelopes, which a reply with
+  three calls reached, since the executor sends two envelopes per call); the feedback edge from
+  the model to the authority still fails on overload and holds 8 envelopes (it held 4).
+- `inference`: `Event::ToolCalled` carries its call's arguments in every conversation, on
+  `chat` given tools and on `native_voice`. They are taken from the event that tells the call;
+  before, they were read from the tool authority's record, which often did not hold the call
+  yet, and were then `null`. An agent over `chat` yields a call's `ToolCalled` before the
+  `Event::Said` of the text its model wrote after the call, and yields it once.
+- `inference`: an agent over `chat` that was given tools (`Agent::text().tool(..)`) kept them
+  unused and now offers them to the model and runs its calls; its `llm` binding must then claim
+  `tool_calling`, or the agent does not start. Its event stream yields `Event::ToolCalled` for
+  each call and `Event::ConfirmationRequested` for a call of a tool that requires confirmation,
+  which `Agent::confirm` and `Agent::reject` answer.
+- `inference-pipeline`: a tool whose executor panics, as it is invoked or as its future is
+  polled, fails that call: `ToolExecutorNode` ends the call Failed with an `execution_error`
+  naming the panic, as it does for a tool that returns an error, does not attempt the call again
+  and goes on with the next call. Before, the panic ended the node's exchange, the call was left
+  Started with no result, and the node's drain failed naming the panic. A model over a tool loop
+  (`native_voice`, `chat` given tools) is now given the failure as the call's result and answers
+  it.
+
+### Fixed
+
+- `inference-docs` (not published): `task quality-live` reads the value of a Secret Service
+  entry written by `secretsctl`, a format byte `1` and a 16-byte version before the value, as
+  the keychain backend of `secrets` reads it. Before, it took the whole entry as the key, found
+  it not UTF-8 and skipped the provider. An entry in another layout gives no key. The runs of
+  OpenAI start without `ELEVENLABS_RESIDENCY`, and the count names the residency when it is set.
+
+- `inference-elevenlabs` (feature `duplex`): the signed URL of a private agent, whose token is a
+  credential, is no longer kept by the model past the handshake. The handshake request's URI is the
+  signed URL's own buffer instead of a copy, and the buffer is zeroized when the open's handshake
+  ends or is dropped, however it ends. The crate documentation lists every copy of the token.
+- `inference-elevenlabs`, `inference-cartesia`: dropping a synthesis inside a Tokio runtime holds
+  the dropping thread at most `CLOSE_GRACE` (5 ms). Before, the drop held it until the close was
+  written, at most `CLOSE_BOUND` (1 s). A close that ended within the grace has been sent when the
+  drop returns, as before: `close_socket` for ElevenLabs, then a close frame. A close not written
+  within it runs to its end on the handle's own thread, bounded by `CLOSE_BOUND`, and that thread
+  then ends its runtime. A process that ends while such a close still runs ends the socket without
+  the close frame; for ElevenLabs the server may have received `close_socket` alone or neither.
+  Outside a Tokio runtime the drop waits for its close as before, at most `CLOSE_BOUND`; the drop
+  asks Tokio, so inside another executor it waits as it does outside a runtime. The crate docs
+  say what the server sees after a drop: the close from an idle handle, the end of the socket
+  without a close frame from a handle whose async form waits for a message.
+- `inference`: a run whose tool loop fails ends its caller's wait. `Chat::send` returns the
+  error of the failed run, a text agent's stream yields `Event::Error`, `Chat::close` and
+  `Agent::close` return, and the driver of a run opened through `Instantiation::open` ends.
+  Before, a reply ending with three or more calls could fail the executor's edge unnoticed:
+  `Chat::send` and then `Chat::close` did not return, a text agent went silent, and a direct
+  run's driver never ended.
+- `inference`: the recipe `transcribe` opens. Its `stt` node declares no port `turns`, and the STT
+  node starts a recognition only at a turn's opening, so `Instantiation::open` failed with
+  `Error::Layer`. An STT node whose pipeline declares no `turns` is now given one turn of the run's
+  own and recognises the whole of its audio as that turn.
+
 ## [0.33.0] — 2026-11-23
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T07:21:00Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-per-adapter-and-latency-defined",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-docs",
+    "reference": "VERIFIED: baseline at 864f27355 with the seven cases of quality::adversary_q2 added (7 tests run: 0 passed, 7 failed, 65 skipped; the whole package 72 tests run: 65 passed, 7 failed) vs treatment at 5117842f0 on the build node (three runs, each 74 tests run: 74 passed, 0 skipped; the seven cases alone 7 tests run: 7 passed, 67 skipped, no assertion of them changed); cargo clippy -p inference-docs --all-targets -- -D warnings, cargo fmt --all --check and cargo run -q -p inference-docs -- generate --check exit 0"
+  }
+}

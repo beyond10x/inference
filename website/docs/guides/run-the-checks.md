@@ -1,9 +1,9 @@
 ---
 title: Run the checks
 sidebar_position: 7
-description: What task check runs, in which order, how to run the conformance suite on its own, and which tests are ignored without a model, a server or a key.
+description: What task check runs, in which order, how to run the conformance suite on its own, which tests are ignored without a model, a server or a key, and the quality documents a test of task test-run keeps true.
 lede: One command validates the specification, the plan and the generated documentation, then formats, lints and tests the workspace, as CI does on every pull request.
-source: Taskfile.yml, ess/, crates/inference-testkit (tests/conform.rs), crates/inference-docs
+source: Taskfile.yml, ess/, crates/inference-testkit (tests/conform.rs), crates/inference-docs (tests/quality/), quality/, ratchet.toml, .github/workflows/check.yml
 ---
 
 # Run the checks
@@ -33,18 +33,38 @@ It runs, in order, and stops at the first failure:
 | format | `cargo fmt --all --check` |
 | lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
 | the API documentation | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` |
-| the build of the tests | `task test-build`, which runs no test |
-| tests | `task test-run`: `cargo nextest run --workspace --all-features`, then the stack test without default features and the doc tests |
+| the build of the tests | `task test-build`, which builds the tests and then runs `task test-fixtures`: one test that synthesizes the conformance suites the testkit tests read, so that no test of the next step waits for `ess` |
+| tests | `task test-run`, which runs `task test-run-parts` under `timeout`: `cargo nextest run --workspace --all-features`, then the stack test without default features and the doc tests |
+| the quality records | `task quality-records`, which writes the record of each assessment of `quality/` that reads the report of the tests to `target/quality-records/` |
 
-The first seven steps are `task check-source`. Under `.config/nextest.toml` a test that runs over 60
-seconds is killed and fails, and the test step prints its ten slowest tests, also when one failed.
+The first seven steps are `task check-source`. Under `.config/nextest.toml` the tests of the
+workspace run 8 at once, or as many as the environment variable `NEXTEST_TEST_THREADS` names when
+it is set, which wins over the file; a test that runs over 60 seconds is killed and fails, and the
+test step prints its ten slowest tests, also when one failed, or `no test ran` when the run left no
+report. The test step itself is ended after 120 seconds and fails then: `task test-run` exits 201,
+as it does when a test fails, and prints the line `task test-run was ended at its bound of 120 s`,
+which a run that only has a failing test does not print.
 
-CI runs the same three tasks, `task check-source`, `task test-build` and `task test-run`, as
-separate steps of the required check `inference / task check`. A pull request whose changed files
-are all under `.engineering/` or are `*.md` files outside `website/` and `ess/`, other than
-`CHANGELOG.md`, only validates the planning store, and the check passes without a build.
+The bound is two signals. After 120 seconds `timeout` sends the step a first signal: the tests are
+ended, and the step prints the list of its slowest tests and the line. A part that is still running
+10 seconds later is killed by a second signal: the step then ends 130 seconds after it started, and
+prints the line but not the list of its slowest tests. The `timeout` of GNU coreutils kills its
+whole process group at the second signal. One that kills only its own child there, as the `timeout`
+of uutils coreutils on the image of the CI runner does, can leave a part that ignored the first
+signal running until the job ends.
 
-The steps as `task --dry check` lists them in this tree:
+CI runs the same four tasks, `task check-source`, `task test-build`, `task test-run` and
+`task quality-records`, as separate steps of the required check `inference / task check`, and on
+a push to `main` keeps the records as the artifact `quality-records-<commit>`
+([The quality of this repository](https://github.com/beyond10x/inference/blob/main/quality/README.md#the-records-of-a-check-run)
+says how to download them). A pull request whose changed files
+are all under `.engineering/` or are `*.md` files outside `website/`, `ess/` and `quality/`, other
+than `CHANGELOG.md`, only validates the planning store, and the check passes without a build. A
+change to a file under `quality/`, a `*.md` file too, runs the full check: a test of
+`task test-run` reads those files, as [The quality documents](#the-quality-documents) says.
+
+The steps as `task --dry check` lists them in this tree, the script of `quality-records` cut after
+its first line (the whole script is in `Taskfile.yml`):
 
 ```text
 task: Task "sherpa-onnx-archive" is up to date
@@ -56,11 +76,23 @@ task: [check-source] cargo clippy --workspace --all-targets --all-features -- -D
 task: [check-source] RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 task: [test-build] cargo nextest run --workspace --all-features --no-run
 task: [test-build] cargo nextest run -p inference --no-default-features --test stack --no-run
+task: [test-fixtures] cargo nextest run -p inference-testkit --all-features --test conformance_suite --profile setup -E 'test(=every_suite_the_tests_read_is_kept)'
+task: [test-run] timeout --kill-after=10s 120s task test-run-parts || { status=$?; if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then echo "task test-run was ended at its bound of 120 s"; fi; exit "$status"; }
+task: [quality-records] rm -rf target/quality-records target/quality-records.list
+task: [quality-records] mkdir -p target/quality-records
+task: [quality-records] cargo run -q -p inference-docs -- junit-assessments > target/quality-records.list
+task: [quality-records] report=target/nextest/default/junit.xml
+```
+
+And the parts of the test step, as `task --dry test-run-parts` lists them:
+
+```text
+task: [test-workspace] rm -f target/nextest/default/junit.xml
 task: [test-workspace] cargo nextest run --workspace --all-features
 task: [test-slowest] echo "the ten slowest tests, in seconds:"
-task: [test-slowest] grep '<testcase ' target/nextest/default/junit.xml | sed -E 's/.* name="([^"]*)" classname="([^"]*)".* time="([^"]*)".*/\3 \2 \1/' | sort -rn | head -n 10
-task: [test-run] cargo nextest run -p inference --no-default-features --test stack
-task: [test-run] cargo test --workspace --all-features --doc
+task: [test-slowest] if [ -f target/nextest/default/junit.xml ]; then grep '<testcase ' target/nextest/default/junit.xml | sed -E 's/.* name="([^"]*)" classname="([^"]*)".* time="([^"]*)".*/\3 \2 \1/' | sort -rn | head -n 10; else echo "no test ran"; fi
+task: [test-run-parts] cargo nextest run -p inference --no-default-features --test stack --profile stack
+task: [test-run-parts] cargo test --workspace --all-features --doc
 ```
 
 ## The slow lane
@@ -107,7 +139,7 @@ The last lines of the test run:
 ```text
 test the_suite_runs_against_the_testkit_target ... ok
 
-test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.72s
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.28s
 ```
 
 ## Tests that need a model, a server or a key
@@ -127,11 +159,41 @@ with none of them. To run them:
 
 Every variable is in [Environment](../reference/environment.md).
 
+## The quality documents
+
+The directory [`quality/`](https://github.com/beyond10x/inference/tree/main/quality) and the file
+[`ratchet.toml`](https://github.com/beyond10x/inference/blob/main/ratchet.toml) say what counts as
+the quality of this repository, what each value is today and where it comes from:
+
+| File | Holds |
+|---|---|
+| `quality/README.md` | the measures of the gate, the tests, the specification, the turnaround, the documentation site, the local speech-to-text adapters and a release, each with its command, unit, direction, bound and baseline, and the CI runs the baselines were read from |
+| `quality/adapters.md` | one section per crate under `adapters/`: the tests run and passed and the slowest test, the time bounds and the records its tests hold, and the commands that print a latency, which have no baseline |
+| `quality/not-measured.md` | what is not measured, and what would produce the value |
+| `ratchet.toml`, `quality/*.ratchet.yaml`, `quality/assessors/`, `quality/records/` | the same measures in the formats of Ratchet (`beyond10x/ratchet`), what each assessor reports, and one record per assessment whose baseline was read from a CI run |
+
+The formats are those of the Ratchet specification at the commit `quality/README.md` names. No
+Ratchet command works at that commit, so Ratchet runs none of the files. They are a gate all the
+same: a step of `task check` and of the required check `inference / task check` reads them, and
+`task quality-records` fails when a plan file cannot be read, when the plan files list no
+assessment it writes a record for, when the declaration of an assessor is missing or cannot be
+read, when `inference-docs assess` refuses its call for an assessment or cannot write the
+record, or when a record is refused because the report of the tests lacks what its assessment
+reads. Beyond that step they describe what `task check`, `task test-slow` and the workflows
+under `.github/workflows/` enforce.
+
+The tests of `crates/inference-docs/tests/quality/` run in `task test-run`. They fail when the
+YAML files and records stop agreeing with each other, with `Taskfile.yml`, with the tree, or with
+the pages that describe them, `quality/README.md` and `quality/adapters.md`: a measure without its
+entry, a baseline that differs from its record, a command that calls a task `Taskfile.yml` does
+not have, a test or an adapter directory a page names that does not exist. `quality/README.md` lists every rule under "The test
+that keeps the documents true".
+
 ## The generated pages
 
 The crate list, the adapter matrix, the error list and the status data of this site are generated
-from the workspace metadata, the adapter records, the specification and the test list. After a
-change to any of them:
+from the workspace metadata, the adapter records and sources, the specification and the test
+list. After a change to any of them:
 
 ```sh
 task docs-generate

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T17:11:25Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-records-written-by-a-program",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-docs through the shared build pool, each time with the tests of a change applied to the code before it and then with the change",
+    "reference": "VERIFIED: baseline vs treatment, three times. Correction 1 (1f1efb601): its tests on the code before, 95 tests run: 82 passed, 13 failed; with it, 95 passed. Correction 2 (c85bf6d8f), first round: its tests on the code of 32949b8bb, 105 tests run: 89 passed, 16 failed, the 16 tests the implementor named before any run; with it, 105 passed. Second round, one more input of the same class (the closing line of another test binary passed a run that was killed): the new test on the state of the first round, 106 tests run: 105 passed, 1 failed (the_closing_line_of_another_test_binary_does_not_pass_the_run); with the change, 106 tests run: 106 passed, 0 skipped. cargo fmt --all --check exits 0; cargo clippy -p inference-docs --all-targets --all-features -- -D warnings exits 0. The second adversary pass ran the binary of correction 1 on its own inputs and on a real report of cargo-nextest 0.9.143 with a flaky test, a test failed twice, a test killed at its timeout and an ignored test"
+  }
+}

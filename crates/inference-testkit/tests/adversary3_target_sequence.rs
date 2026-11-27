@@ -14,6 +14,10 @@
 
 #![allow(clippy::duplicate_mod)]
 
+#[allow(
+    dead_code,
+    reason = "these cases drive the stores through the two modules below, not through the target"
+)]
 mod target;
 
 #[allow(dead_code)]

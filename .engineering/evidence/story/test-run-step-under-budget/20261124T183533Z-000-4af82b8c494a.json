@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-24T18:35:33Z",
+  "actor": "human:operator",
+  "artifact": "story:test-run-step-under-budget",
+  "kind": "story",
+  "revision": 28,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:test-run-step-under-budget-adversary-2",
+    "review": "review-result:test-run-step-under-budget-adversary-2",
+    "outcome": "fixed"
+  }
+}

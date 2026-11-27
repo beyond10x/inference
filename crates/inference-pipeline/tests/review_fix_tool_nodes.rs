@@ -709,3 +709,74 @@ fn a_closed_hook_denies_every_call_it_holds_and_the_drain_ends() {
         "the closed hook answers nothing"
     );
 }
+
+/// Adversary pass on story:tool-loop-bound-counts-rounds-per-input. "A proposal whose envelope
+/// names no triggering event ... goes round by itself, and its generation is counted as answering
+/// one input, whatever span the proposal rests on; the two kinds are counted apart"
+/// (`ess/domains/graph.yaml`, the feedback loop declaration). Through the authority's node, with
+/// a rule of 4: four proposals of one generation naming no triggering event, each resting on a
+/// span of its own, are authorized; a proposal naming one is authorized beside them; the fifth
+/// naming none, on a span of its own again, is rejected `exhausted`.
+#[test]
+fn proposals_naming_no_triggering_event_count_per_generation_whatever_span_they_rest_on() {
+    let lookup = tool(false);
+    let one = generation();
+    let unmarked: Vec<ToolCall> = (0..5).map(|_| proposed(&lookup, &one)).collect();
+    let marked = proposed(&lookup, &one);
+    let (declaration, node_id) = declared(NodeRole::Policy);
+    let mut authority = ToolAuthority::new(RunId::generate(), [lookup])
+        .with_iteration_bound(NonZeroUsize::new(4).expect("four is not zero"));
+    let hook = authority.handle();
+    let script = Script::default();
+    for call in &unmarked[..4] {
+        script.push(Step::Envelope(proposal(call)));
+    }
+    let mut naming = proposal(&marked);
+    naming.causation_id = Some(EventId::generate());
+    script.push(Step::Envelope(naming));
+    script.push(Step::Envelope(proposal(&unmarked[4])));
+    block_on(NodeImplementation::<Payload>::describe(
+        &mut authority,
+        declaration.node(node_id).expect("declared"),
+    ));
+    block_on(NodeImplementation::<Payload>::prepare(&mut authority)).expect("prepares");
+    block_on(NodeImplementation::<Payload>::start(
+        &mut authority,
+        endpoints(script.clone(), Taken::default()),
+    ))
+    .expect("starts");
+
+    assert!(
+        eventually(Duration::from_secs(3), || hook.decisions().len() == 6),
+        "the authority decides all six proposals"
+    );
+    let verdict = |call: &ToolCall| {
+        hook.decisions()
+            .iter()
+            .find(|decision| decision.call.call_id() == call.call_id())
+            .map(|decision| match &decision.outcome {
+                AuthorityOutcome::Authorized(_) => Ok(()),
+                AuthorityOutcome::Rejected(rejected) => Err(Some(rejected.reason)),
+                _ => Err(None),
+            })
+    };
+    let verdicts: Vec<_> = unmarked.iter().chain([&marked]).map(verdict).collect();
+    assert_eq!(
+        verdicts,
+        [
+            Some(Ok(())),
+            Some(Ok(())),
+            Some(Ok(())),
+            Some(Ok(())),
+            Some(Err(Some(RejectionReason::Exhausted))),
+            Some(Ok(())),
+        ],
+        "the four unmarked proposals and the marked one are authorized, the fifth unmarked one \
+         is exhausted"
+    );
+    script.push(Step::Envelope(stop()));
+    let drained = ends_within(Duration::from_secs(5), move || {
+        block_on(NodeImplementation::<Payload>::drain(&mut authority))
+    });
+    assert_eq!(drained, Some(Ok(())), "the drain ends");
+}

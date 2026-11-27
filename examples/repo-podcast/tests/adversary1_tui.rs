@@ -50,16 +50,30 @@ fn speaking_board() -> Board {
     board
 }
 
+/// Each width draws its heights on a thread of its own: a draw of the long transcript in a test
+/// build takes milliseconds, no draw reads another's terminal, and the board is only read.
 #[test]
 fn every_small_terminal_size_draws() {
     let board = speaking_board();
-    for width in 0..=40_u16 {
-        for height in 0..=20_u16 {
-            let mut terminal =
-                Terminal::new(TestBackend::new(width, height)).expect("the test backend");
-            terminal
-                .draw(|frame| draw(frame, &board))
-                .unwrap_or_else(|error| panic!("{width}x{height}: {error}"));
+    std::thread::scope(|scope| {
+        let board = &board;
+        let widths: Vec<_> = (0..=40_u16)
+            .map(|width| {
+                scope.spawn(move || {
+                    for height in 0..=20_u16 {
+                        let mut terminal = Terminal::new(TestBackend::new(width, height))
+                            .expect("the test backend");
+                        terminal
+                            .draw(|frame| draw(frame, board))
+                            .unwrap_or_else(|error| panic!("{width}x{height}: {error}"));
+                    }
+                })
+            })
+            .collect();
+        for width in widths {
+            if let Err(panic) = width.join() {
+                std::panic::resume_unwind(panic);
+            }
         }
-    }
+    });
 }

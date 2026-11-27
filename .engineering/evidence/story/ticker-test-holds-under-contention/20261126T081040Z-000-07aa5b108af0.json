@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T08:10:40Z",
+  "actor": "human:operator",
+  "artifact": "story:ticker-test-holds-under-contention",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run per package through the shared build pool, the cases on the code before each change, then with it",
+    "reference": "VERIFIED: baseline vs treatment. The new cases against the old ticker beside 8 spinners: 7 run, 5 passed, 2 failed (busy loop gap 30.04 ms, yields 11.22 ms). The half rule of the first build against the 15 ms control: 7 run, 6 passed, 1 failed (gap 90.09 ms); dropped. Final: 7 run, 7 passed, 1 skipped (computing gap 210.16 ms, control 22.86 ms, sleep 200.24 ms). A planted ticker that takes out twice the ready count: 7 run, 4 passed, 3 failed. 10 loaded runs of the ticker file and the async tests of three crates: 27 passed each"
+  }
+}

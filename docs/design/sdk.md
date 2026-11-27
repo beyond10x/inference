@@ -402,6 +402,13 @@ and a tool that is not read-only is refused on provisional input
 sets `requires_confirmation`, and `crates/inference-pipeline/src/nodes/tool_authority.rs` holds the
 call until the host confirms it.
 
+A tool's future is polled on a thread of the run (the executor node's,
+`crates/inference-pipeline/src/nodes/tool_executor.rs`), outside any Tokio runtime, the
+application's included. A tool that needs one holds a `tokio::runtime::Handle`, spawns its work
+onto it (`Handle::spawn`) and awaits the join handle. A tool that awaits a Tokio timer or socket
+directly panics there ("there is no reactor running"); the executor turns the panic into the
+failure of that call, with the panic's message, and the model is given it as the call's result.
+
 ## 6. Testing (T4)
 
 `inference::testing` is the testkit behind one door:

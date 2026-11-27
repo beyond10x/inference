@@ -5,51 +5,17 @@
 //! the other values, so a target that drops or fixes one of them fails here.
 #![cfg(feature = "run")]
 
+mod suite;
 mod target;
-
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ess_conformance::{AdmittedSuite, Runner, Status};
 use serde_json::{Value, json};
 
 use target::Target;
 
-/// The synthesized suite of `ess/`, synthesized into a fresh directory of this test.
-fn synthesized_suite(case: &str) -> Value {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the repository root resolves");
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock is past the epoch")
-        .as_millis();
-    let dir: PathBuf = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "adversary1-tools-{case}-{millis}-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).expect("the directory is created");
-    let suite = dir.join("suite.json");
-    let output = Command::new("ess")
-        .args([
-            "verify",
-            "conform",
-            "synthesize",
-            "--path",
-            "ess",
-            "--scenarios",
-            "ess/scenarios",
-            "--out",
-            suite.to_str().expect("UTF-8"),
-        ])
-        .current_dir(&root)
-        .output()
-        .expect("`ess` runs");
-    assert!(output.status.success(), "ess synthesize: {output:?}");
-    serde_json::from_str(&fs::read_to_string(&suite).expect("suite.json")).expect("JSON")
+/// The synthesized suite of `ess/`, read through `suite/mod.rs`.
+fn synthesized_suite() -> Value {
+    serde_json::from_str(&suite::synthesized(suite::Product::Authored)).expect("JSON")
 }
 
 /// Runs the scenario `id` of `suite` with its steps edited by `edit`, and returns the status and
@@ -96,7 +62,7 @@ fn captured_after(steps: &[Value], after: usize, event: &str) -> String {
 /// §23.1 test 5 through the target: the proposal is barred and the barrier carries that class.
 #[test]
 fn a_side_effecting_proposal_on_a_hypothesis_is_barred_with_its_class_through_the_target() {
-    let suite = synthesized_suite("barred");
+    let suite = synthesized_suite();
     let id = "inference.tools.ProposeToolCall/outcome/barred";
     let (control, messages) = run_edited(&suite, id, |_| {});
     assert_eq!(control, Status::Passed, "the unedited scenario: {messages}");
@@ -129,7 +95,7 @@ fn a_side_effecting_proposal_on_a_hypothesis_is_barred_with_its_class_through_th
 /// tool's class.
 #[test]
 fn a_side_effecting_proposal_on_a_committed_span_is_proposed_with_its_class_through_the_target() {
-    let suite = synthesized_suite("proposed");
+    let suite = synthesized_suite();
     let id = "inference.tools.ProposeToolCall/outcome/proposed";
     let (status, messages) = run_edited(&suite, id, |steps| {
         let write = command_step(
@@ -167,7 +133,7 @@ fn a_side_effecting_proposal_on_a_committed_span_is_proposed_with_its_class_thro
 /// `false`, the `inference.tools.Tools` row carries `false`.
 #[test]
 fn a_tool_declared_without_confirmation_reads_back_false_through_the_target() {
-    let suite = synthesized_suite("declared");
+    let suite = synthesized_suite();
     let id = "inference.tools.DeclareTool/outcome/declared";
     let (status, messages) = run_edited(&suite, id, |steps| {
         for step in steps.iter_mut() {

@@ -1,0 +1,57 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "openai-gpt-live",
+    "assessor": "printed-duration@1",
+    "target": {
+      "kind": "build",
+      "class": "local"
+    },
+    "completion": "completed",
+    "conditions": {
+      "tools": {
+        "rustc": "1.100.0"
+      }
+    },
+    "coverage": {
+      "unit": "run",
+      "executed": 1,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "duration",
+        "kind": "sampled",
+        "scope": "run",
+        "boundary": "connect_call",
+        "value_type": "number",
+        "value": "812",
+        "unit": "ms",
+        "samples": 1
+      },
+      {
+        "output": "duration",
+        "kind": "sampled",
+        "scope": "run",
+        "boundary": "close_call",
+        "value_type": "number",
+        "value": "95",
+        "unit": "ms",
+        "samples": 1
+      }
+    ],
+    "source": {
+      "kind": "build_pool_log",
+      "location": ".ratchet/runs/RUN/openai-gpt-live.out"
+    }
+  },
+  "run": {
+    "started_at": "STARTED",
+    "ended_at": "ENDED"
+  }
+}

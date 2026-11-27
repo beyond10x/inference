@@ -1,0 +1,12 @@
+format: ratchet-assessor/1
+name: ess-conformance
+version: "1"
+targets: [revision]
+coverage_unit: scenario
+coverage: [executed, unsupported, passed, failed]
+outputs:
+  passing_scenarios:
+    value_type: identity_set
+    kind: exact
+    scopes: []
+    identity_key: [scenario]

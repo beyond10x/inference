@@ -5,6 +5,9 @@
 //! in-process channels, no network, no credential.
 #![cfg(feature = "duplex")]
 
+#[allow(dead_code)]
+mod wait;
+
 use std::future::Future;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::Duration;
@@ -23,8 +26,7 @@ use inference_duplex::{
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-
-const WAIT: Duration = Duration::from_millis(100);
+use wait::{completed, drain, ended};
 
 /// The pause that lets the scripted provider's tasks and the binding's writer settle.
 const SETTLE: Duration = Duration::from_millis(300);
@@ -232,15 +234,6 @@ fn silence(position: u64) -> AudioFrame {
     }
 }
 
-fn drain(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
-    let mut events = Vec::new();
-    while let Some(event) = session.next_event(WAIT) {
-        events.push(event);
-        assert!(events.len() < 500, "the session never went quiet");
-    }
-    events
-}
-
 /// The values of `kind` over the session's usage records, one per record that carries it.
 fn values(session: &impl SpeechSessionHandle, kind: QuantityKind) -> Vec<Option<i64>> {
     session
@@ -296,16 +289,7 @@ fn measure(after: After, next: Next) -> (Measured, Result<(), inference_duplex::
     .expect("the binding's runtime starts")
     .open(config)
     .expect("opens");
-    let mut events = Vec::new();
-    loop {
-        let event = session.next_event(WAIT).expect("the response completes");
-        let completed = matches!(event, SessionEvent::ResponseCompleted(_));
-        events.push(event);
-        if completed {
-            break;
-        }
-        assert!(events.len() < 500, "the response never completed");
-    }
+    let mut events = completed(&mut session);
     assert_eq!(
         values(&session, QuantityKind::OutputTextTokens),
         Vec::<Option<i64>>::new(),
@@ -327,7 +311,7 @@ fn measure(after: After, next: Next) -> (Measured, Result<(), inference_duplex::
             json!({"celsius": 21}),
         ),
     };
-    events.extend(drain(&mut session));
+    events.extend(ended(&mut session));
     (
         Measured {
             events,
@@ -466,6 +450,7 @@ fn commands_after_the_failure_record_nothing_more() {
     let result = measured
         .session
         .submit_tool_result(&call_id, json!({"celsius": 21}));
+    // Quiet: nothing more is recorded or delivered after the failure.
     let later = drain(&mut measured.session);
     assert!(audio.is_err() && result.is_err(), "{audio:?} {result:?}");
     assert_eq!(

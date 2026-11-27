@@ -43,13 +43,20 @@
 //! started, and its `ToolCallStarted` sent, before the cancel, or neither started nor executed:
 //! the move to Started is made under the same lock, and an executor is not invoked or polled once
 //! the cancel was taken. A cancel that comes while the `ToolCallStarted` still waits for room on
-//! a full edge drops that send and puts the call back Authorized, as it was before the move. An
-//! executor that panics ends the node's exchange, and the node's drain fails naming the panic.
+//! a full edge drops that send and puts the call back Authorized, as it was before the move.
+//!
+//! An executor that panics, as it is invoked or as its future is polled, fails the call it was
+//! given: the call ends Failed with an `execution_error` naming the panic, the form a tool that
+//! returns an error gives it, and the node goes on with the next call. A call that panicked is
+//! not attempted again, whatever the node's [`RetryPolicy`]: a panic is a defect of the tool,
+//! not a transient failure, and says nothing of what the tool did before it.
 
+use std::any::Any;
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::future::{self, Future};
 use std::num::NonZeroUsize;
+use std::panic::{self, AssertUnwindSafe};
 use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -186,6 +193,20 @@ fn within_watching<F: Future>(
             }
             None => thread::park(),
         }
+    }
+}
+
+/// The failure of a call whose executor panicked with `panic`: an `execution_error` naming the
+/// panic's message, when it carries one.
+fn defect(panic: &(dyn Any + Send)) -> ToolFailure {
+    let message = panic
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic without a message".to_owned());
+    ToolFailure {
+        kind: ToolFailureKind::ExecutionError,
+        detail: format!("the tool's executor panicked: {message}"),
     }
 }
 
@@ -435,7 +456,23 @@ impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
                 return None;
             }
             attempts += 1;
-            let execution = executor.execute(call, given, &signal);
+            let mut panicked = false;
+            let invoked =
+                panic::catch_unwind(AssertUnwindSafe(|| executor.execute(call, given, &signal)));
+            let mut invoked = invoked.map_err(|panic| defect(panic.as_ref()));
+            let execution = future::poll_fn(|cx| {
+                let polled = match invoked.as_mut() {
+                    Ok(execution) => {
+                        panic::catch_unwind(AssertUnwindSafe(|| execution.as_mut().poll(cx)))
+                            .map_err(|panic| defect(panic.as_ref()))
+                    }
+                    Err(failure) => Err(failure.clone()),
+                };
+                polled.unwrap_or_else(|failure| {
+                    panicked = true;
+                    Poll::Ready(Err(failure))
+                })
+            });
             let watch = |cx: &mut Context<'_>| {
                 read_ahead(
                     input.as_mut(),
@@ -456,7 +493,8 @@ impl<P: ToolPayload, E: ToolExecutor + ?Sized> Exchanging<P, E> {
             };
             let again = match &outcome {
                 Err(failure) => {
-                    attempts < limit
+                    !panicked
+                        && attempts < limit
                         && retries.retries(failure)
                         && !signal.is_cancelled()
                         && deadline.is_none_or(|deadline| Instant::now() < deadline)

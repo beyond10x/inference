@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T04:33:24Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-records-written-by-each-check-run",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-docs through the shared build pool, the tests of each change on the code before it, then with the change",
+    "reference": "VERIFIED: baseline vs treatment, three times. First build (687ca69ca): its tests on the code before, 118 tests run: 113 passed, 5 failed; with it, 118 passed. Correction 1 (2ffdc5c3e): its tests on the code of 1c0f41984, 122 tests run: 121 passed, 1 failed; with it, 122 passed; problems() of the documents test on four ci records gave the same 72 lines before and after the split of the record checks. Correction 2 (9928acbb4): its tests on the code of 2ffdc5c3e, 123 tests run: 122 passed, 1 failed (record_problems_refuses_a_record_without_the_result_of_a_measure); with it, 123 passed. Mutants killed by the final tests: the exit 1 of the refused branch deleted, ci and local swapped, git rev-parse HEAD^, continue-on-error on the step and on the job, the profile filter of junit-assessments dropped. cargo fmt and cargo clippy -D warnings exit 0"
+  }
+}

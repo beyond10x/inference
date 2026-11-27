@@ -111,7 +111,7 @@ fn model() -> NovaSonicSpeech {
 }
 
 #[test]
-#[ignore = "calls Amazon Bedrock: needs credentials, model access and AWS_REGION, and costs money"]
+#[ignore = "calls Amazon Bedrock and is billed: needs credentials, model access and AWS_REGION"]
 fn one_audio_in_audio_out_session_through_the_contract() {
     let mut model = model();
     let mut session = model
@@ -202,7 +202,7 @@ fn one_audio_in_audio_out_session_through_the_contract() {
 /// probe runs with the provider's own, and input during output cancels the response and is
 /// answered in a new one. The adapter claims `native_duplex` only if it gave the evidence.
 #[test]
-#[ignore = "calls Amazon Bedrock: needs credentials, model access and AWS_REGION, and costs money"]
+#[ignore = "calls Amazon Bedrock and is billed: needs credentials, model access and AWS_REGION"]
 fn native_duplex_evidence_agrees_with_the_claim() {
     let mut model = model();
     let question = clip_pcm("question-16k.wav");

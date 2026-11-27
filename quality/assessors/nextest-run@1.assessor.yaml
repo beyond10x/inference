@@ -1,0 +1,13 @@
+format: ratchet-assessor/1
+name: nextest-run
+version: "1"
+targets: [revision]
+inputs:
+  profile: {type: string, required: true}
+coverage_unit: test
+coverage: [executed, passed, failed]
+outputs:
+  duration:
+    {value_type: number, kind: sampled, scopes: [], unit: s, boundaries: [run_time]}
+  slowest_test:
+    {value_type: number, kind: sampled, scopes: [], unit: s}

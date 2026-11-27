@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T06:28:38Z",
+  "actor": "human:operator",
+  "artifact": "story:drop-tests-own-limit-and-stated-bound",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run per package through the shared build pool, each test against a defect planted in the library and restored byte for byte, before and after the change",
+    "reference": "VERIFIED: baseline vs treatment. CLOSE_BOUND at 3 s: Cartesia 47 run, 43 passed, 4 failed; ElevenLabs 208 run, 201 passed, 7 failed. After correction 1, every application at 1.4 s: Cartesia 5 run, 3 passed, 2 failed; ElevenLabs 5 run, 3 passed, 2 failed; Connection::close alone at 1.4 s: 5 run, 4 passed, 1 failed (the stall case, ended 2.405s); at 0.6 s: 5 run, 2 passed, 3 failed; without a plant 5 passed in each crate. cargo fmt and clippy -D warnings of the four packages exit 0"
+  }
+}

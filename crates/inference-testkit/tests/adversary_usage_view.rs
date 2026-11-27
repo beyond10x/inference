@@ -12,16 +12,17 @@
 //! - `drop_quantities`: every row's `quantities` is published empty. A control: it shows the
 //!   harness reaches the view, and is expected to be caught.
 //!
-//! The suite is synthesized with `ess` from `ess/`, as `conform.rs` does; `ess` must be on PATH.
+//! The suite is the one `ess` synthesizes from `ess/`, read through `suite/mod.rs` as `conform.rs`
+//! reads it, cut to the scenarios that name `UsageRecords`; `ess` must be on PATH. A mutant
+//! rewrites only the rows of that view, so a scenario that does not name it runs alike against
+//! the target and against every mutant, and the cut leaves out no scenario that could catch one.
+//! Admitting the whole suite takes seconds; that the target passes all of it is `conform.rs`'s
+//! case.
 
 #![allow(clippy::duplicate_mod)]
 
+mod suite;
 mod target;
-
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ess_conformance::target::{
     ConformanceTarget, EventObservationRequest, ExternalOutcomeControl, ImplementationIdentity,
@@ -126,47 +127,13 @@ impl ConformanceTarget for Mutant {
     }
 }
 
-fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the repository root resolves")
-}
-
+/// The scenarios of the synthesized suite that name [`USAGE_RECORDS`].
 fn synthesized() -> AdmittedSuite {
-    let root = repository_root();
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock is past the epoch")
-        .as_millis();
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "adversary-usage-view-{millis}-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).expect("the run directory is created");
-    let suite = dir.join("suite.json");
-    let output = Command::new("ess")
-        .args([
-            "verify",
-            "conform",
-            "synthesize",
-            "--path",
-            "ess",
-            "--scenarios",
-            "ess/scenarios",
-            "--out",
-            suite.to_str().expect("UTF-8"),
-        ])
-        .current_dir(&root)
-        .output()
-        .expect("`ess` runs; it must be on PATH");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let cut = suite::cut_by(
+        &suite::synthesized(suite::Product::Authored),
+        |_, scenario| scenario.to_string().contains(USAGE_RECORDS),
     );
-    let text = fs::read_to_string(&suite).expect("suite.json is readable");
-    AdmittedSuite::from_json(&text).expect("the synthesized suite is admitted")
+    AdmittedSuite::from_json(&cut).expect("the cut suite is admitted")
 }
 
 /// Every scenario of the suite that does not pass against `target`.
@@ -185,7 +152,7 @@ fn the_suite_rejects_a_view_that_reads_an_unknown_quantity_as_zero() {
     let control = failing(&admitted, &Mutant::new(Mutation::None));
     assert!(
         control.is_empty(),
-        "the unmutated target passes every scenario: {control:?}"
+        "the unmutated target passes every scenario that names the view: {control:?}"
     );
     let dropped = failing(&admitted, &Mutant::new(Mutation::DropQuantities));
     assert!(
@@ -195,7 +162,8 @@ fn the_suite_rejects_a_view_that_reads_an_unknown_quantity_as_zero() {
     let zeroed = failing(&admitted, &Mutant::new(Mutation::ZeroUnknown));
     assert!(
         !zeroed.is_empty(),
-        "a view that publishes an unknown quantity with value 0 survives the whole suite: no \
+        "a view that publishes an unknown quantity with value 0 survives every scenario that \
+         names the view: no \
          scenario records a quantity of source `unknown`, so the invariant \
          `source != unknown or not defined(value)` is checked only where it holds trivially"
     );

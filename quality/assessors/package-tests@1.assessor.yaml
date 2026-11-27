@@ -1,0 +1,16 @@
+format: ratchet-assessor/1
+name: package-tests
+version: "1"
+targets: [revision]
+inputs:
+  profile: {type: string, required: true}
+  packages: {type: string, list: true, required: true}
+coverage_unit: test
+coverage: [executed, passed, failed]
+outputs:
+  tests_run:
+    {value_type: number, kind: exact, scopes: [package], unit: tests}
+  tests_passed:
+    {value_type: number, kind: exact, scopes: [package], unit: tests}
+  slowest_test:
+    {value_type: number, kind: sampled, scopes: [package], unit: s}

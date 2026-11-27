@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-27T09:18:12Z",
+  "actor": "human:operator",
+  "artifact": "story:sdk-one-call",
+  "kind": "story",
+  "revision": 24,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source exit 0 (62 s), task test-build exit 0 (141 s), task test-run exit 0 (30 s, Summary [19.133s] 3363 tests run: 3363 passed, 73 skipped), task quality-records exit 0 (23 tests run: 23 passed), at e75fef25f through the shared build pool",
+    "reference": "the one-call functions and the Chat, Transcriber and Voice handles over the testkit's stacks, crates/inference/tests/oneshot.rs and the adversary files of both passes, all green at e75fef25f"
+  }
+}

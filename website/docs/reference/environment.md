@@ -34,7 +34,7 @@ the live tests read the same ones and are ignored without them.
 | `INFERENCE_ELEVENLABS_STT_CLIP` | `inference-elevenlabs` test `stt_live` (features `live` and `stt`) | a German speech clip of about 30 s in G.711 μ-law at 8 kHz, mono, as a WAV file of format 7 or bare μ-law bytes, which the live check transcribes | none: the test panics |
 | `ELEVENLABS_VOICE_ID` | `inference-elevenlabs`, example `live`; `realtime-voice`, examples `compare` and `talk` (`--provider elevenlabs-cascade`) | the voice the live check, the cascade arm of `compare` and the ElevenLabs cascade of `talk` speak with; with the ElevenLabs key it configures the cascade arm's hosted TTS | none: the example `live` and `talk` exit with status 2 and the cascade arm is skipped |
 | `ELEVENLABS_AGENT_ID` | `inference-elevenlabs` test `agent_duplex_live`, `realtime-voice` example `compare` | the ElevenLabs agent the live check and `compare` talk to | none: one of it and `ELEVENLABS_AGENT_SIGNED_URL` is required |
-| `ELEVENLABS_AGENT_SIGNED_URL` | as above | a signed conversation URL, used instead of the agent id and the key | none |
+| `ELEVENLABS_AGENT_SIGNED_URL` | as above | a signed conversation URL, used instead of the agent id and the key; a model opens one session with it, so `compare` measures its first run and records each later run as refused | none |
 | `DEEPGRAM_API_KEY` | `inference-deepgram` (`EnvironmentSource::deepgram`), its live tests | the Deepgram key, sent only as `Authorization: Token` in the handshake | none; with feature `keychain`, `KeychainSource` reads the OS keychain |
 | `INFERENCE_DEEPGRAM_STT_CLIP` | `inference-deepgram` test `live` | a 16-bit mono WAV file the live check transcribes | none: the test panics |
 

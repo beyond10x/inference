@@ -1,0 +1,34 @@
+format: ratchet-assessor/1
+name: printed-duration
+version: "1"
+targets: [build]
+coverage_unit: run
+coverage: [executed, passed, failed]
+outputs:
+  duration:
+    value_type: number
+    kind: sampled
+    scopes: [provider]
+    unit: ms
+    boundaries:
+      - end_of_utterance_to_first_audio
+      - start_to_first_event
+      - text_sent_to_first_audio
+      - start_to_first_audio
+      - connect_call
+      - close_call
+      - start_to_first_delta
+      - start_to_completed
+      - cancel_to_idle_slots
+      - start_to_tool_proposal
+      - end_of_input_speech_to_first_audio
+      - end_of_input_speech_to_first_transcript
+      - end_of_input_speech_to_response_end
+      - barge_in_sent_to_playout_end
+      - end_of_input_speech_to_final_transcript
+      - end_of_input_speech_to_first_token
+      - end_of_input_speech_to_tts_first_audio
+      - first_segment_offer_to_first_frame
+      - segment_offer_to_first_frame
+      - turn_completion_to_first_playable_audio
+      - interruption_to_playback_stop

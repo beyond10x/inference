@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T06:32:40Z",
+  "actor": "human:operator",
+  "artifact": "story:tests-that-fail-on-a-loaded-machine",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source, task test-build, task test-run and task quality-records through the shared build pool, at 7e68d154b, the wave branch wave/2026-11-26-quality",
+    "reference": "check-source exit 0 wall 22 s; test-build exit 0 wall 16 s; test-run exit 0 wall 87 s; quality-records exit 0 wall 11 s. The workspace run of test-run: Summary [  67.935s] 3238 tests run: 3238 passed, 73 skipped. task quality-records wrote 22 records"
+  }
+}

@@ -2269,7 +2269,11 @@ dependencies = [
  "inference-core",
  "serde",
  "serde_json",
+ "serde_norway",
+ "sha2",
  "stt-only",
+ "toml",
+ "xmlparser",
 ]
 
 [[package]]
@@ -2491,6 +2495,7 @@ dependencies = [
  "inference-tts",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "uuid",
