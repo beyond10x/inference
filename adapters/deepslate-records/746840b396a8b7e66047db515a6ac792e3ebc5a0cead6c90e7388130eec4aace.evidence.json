@@ -1,0 +1,50 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "deepslate-records",
+    "assessor": "named-tests@1",
+    "candidate": "6b4a2eb46ae38f668290a63c402a240e932ff662",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "6b4a2eb46ae38f668290a63c402a240e932ff662"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-deepslate"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-deepslate/tests/claims_record.rs::the_opal_record_holds_the_claims_of_the_binding"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 1,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepslate/tests/claims_record.rs::the_opal_record_holds_the_claims_of_the_binding",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46038817678"
+    }
+  }
+}

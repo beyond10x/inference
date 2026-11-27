@@ -1,0 +1,77 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "deepslate-time-bounds",
+    "assessor": "named-tests@1",
+    "candidate": "6b4a2eb46ae38f668290a63c402a240e932ff662",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "6b4a2eb46ae38f668290a63c402a240e932ff662"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-deepslate"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-deepslate/tests/opal_duplex.rs::a_refused_or_failed_opening_opens_nothing",
+          "adapters/inference-deepslate/tests/opal_duplex.rs::a_ping_goes_out_at_the_interval_and_a_pong_is_no_answer_from_the_model",
+          "adapters/inference-deepslate/tests/opal_duplex.rs::closing_cancels_the_response_in_progress_and_closes_the_connection",
+          "adapters/inference-deepslate/src/config.rs::a_read_timeout_not_past_the_ping_interval_is_refused"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 4,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 4,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepslate/tests/opal_duplex.rs::a_refused_or_failed_opening_opens_nothing",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepslate/tests/opal_duplex.rs::a_ping_goes_out_at_the_interval_and_a_pong_is_no_answer_from_the_model",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepslate/tests/opal_duplex.rs::closing_cancels_the_response_in_progress_and_closes_the_connection",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepslate/src/config.rs::a_read_timeout_not_past_the_ping_interval_is_refused",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46038817678"
+    }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "release-statuses",
+    "assessor": "named-tests@1",
+    "candidate": "6b4a2eb46ae38f668290a63c402a240e932ff662",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "6b4a2eb46ae38f668290a63c402a240e932ff662"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-docs"
+      },
+      "tests": {
+        "value": [
+          "crates/inference-docs/src/adapters.rs::every_binding_is_since_the_release_whose_changelog_section_introduced_it",
+          "crates/inference-docs/src/adapters.rs::a_binding_is_on_main_only_while_its_entry_is_unreleased",
+          "crates/inference-docs/src/status.rs::every_hosted_binding_is_a_shipped_item_since_the_release_of_its_adapter_row",
+          "crates/inference-docs/src/status.rs::a_hosted_binding_on_main_is_a_next_item_and_one_since_a_release_a_shipped_item"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 4,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 4,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "crates/inference-docs/src/adapters.rs::every_binding_is_since_the_release_whose_changelog_section_introduced_it",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "crates/inference-docs/src/adapters.rs::a_binding_is_on_main_only_while_its_entry_is_unreleased",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "crates/inference-docs/src/status.rs::every_hosted_binding_is_a_shipped_item_since_the_release_of_its_adapter_row",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "crates/inference-docs/src/status.rs::a_hosted_binding_on_main_is_a_next_item_and_one_since_a_release_a_shipped_item",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46038817678"
+    }
+  }
+}
