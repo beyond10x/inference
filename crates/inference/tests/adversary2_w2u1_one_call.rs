@@ -591,6 +591,60 @@ async fn a_chat_whose_model_calls_its_tool_once_a_turn_answers_four_turns() {
     chat.close().await.expect("closes");
 }
 
+/// The bound of `native_voice` under the counting per input: its speech node answers each user
+/// turn in a response of its own, a generation of its own, and its proposals name no triggering
+/// event, so each generation is counted as one input of its own. Six turns of one call each over
+/// one session run all six calls, in order, and each is answered with the tool's result.
+#[tokio::test(flavor = "multi_thread")]
+async fn six_turns_of_one_call_each_over_native_voice_run_all_six_calls() {
+    let _held = SESSIONS.lock().await;
+    let cities = ["Berlin", "Paris", "Rome", "Oslo", "Wien", "Bern"];
+    let script = cities
+        .iter()
+        .map(|name| ScriptedTurn {
+            heard: format!("where is {name}"),
+            reply: Reply::Call {
+                tool: "lookup".to_owned(),
+                arguments: city(name),
+                then: "It is {result}".to_owned(),
+            },
+        })
+        .collect();
+    let calls = Arc::default();
+    let agent =
+        Agent::voice_with(Stack::new().bind(Binding::speech(MockSpeechModel::native(script))))
+            .tool((lookup(false), recording(&calls)))
+            .start()
+            .await
+            .expect("starts");
+    let mut events = agent.events();
+    let mut at = 0;
+    for (answered, name) in cities.into_iter().enumerate() {
+        let spoken = utterance(pcm(24_000), at);
+        for frame in spoken.frames() {
+            agent.send_audio(frame).await.expect("sent");
+        }
+        at = spoken.next();
+        let (seen, came) = read_to_said(&mut events, "It is").await;
+        assert!(
+            came,
+            "turn {} ({name}) was not answered after {answered} turns; the executor ran {} \
+             calls: {}",
+            answered + 1,
+            ran(&calls).len(),
+            lines(&seen)
+        );
+    }
+
+    let expected: Vec<Json> = cities.iter().map(|name| city(name)).collect();
+    assert_eq!(
+        ran(&calls),
+        expected,
+        "the executor ran every call, in order"
+    );
+    agent.close().await.expect("closes");
+}
+
 /// What one invocation of [`Faulty`] does.
 #[derive(Clone, Copy)]
 enum Fault {

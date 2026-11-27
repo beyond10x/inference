@@ -732,23 +732,33 @@ fn answering() -> Box<dyn inference::tools::ToolExecutor> {
 const LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// A reply that ends with eight calls fills no edge of the tool loop, in each of 30
-/// conversations: all eight reach the authority, which admits four calls of a generation and
-/// answers the fifth as exhausted, so `send` returns the error of the loop's bound, never that of
-/// a failed run, and never hangs.
+/// conversations: all eight reach the authority, which counts the calls of one reply as one time
+/// round the loop and admits them, so the executor runs all eight and `send` returns the reply to
+/// their results, never the error of a failed run, and never hangs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_round_of_eight_calls_fills_no_edge_of_the_tool_loop() {
     let _held = SESSIONS.lock().await;
+    let answer = inference::__private::serde_json::json!({"temperature": 21});
     let mut wrong = Vec::new();
     for conversation in 0..30 {
         let tool = lookup();
         let stack = chatting(&calling_round(&tool, 8));
+        let calls = std::sync::Arc::default();
+        let executor: Box<dyn inference::tools::ToolExecutor> = Box::new(Recording {
+            answer: answer.clone(),
+            calls: std::sync::Arc::clone(&calls),
+        });
         let mut chat = Chat::new_with(&stack)
             .expect("plans")
-            .tool((tool, answering()))
+            .tool((tool, executor))
             .expect("plans with the tool");
-        match tokio::time::timeout(LIMIT, chat.send("the weather in Berlin")).await {
-            Ok(Err(error)) if error.kind() == inference::ErrorKind::Closed => {}
-            Ok(sent) => wrong.push(format!("conversation {conversation}: {sent:?}")),
+        let sent = tokio::time::timeout(LIMIT, chat.send("the weather in Berlin")).await;
+        let ran = calls.lock().expect("no test panicked holding it").len();
+        match sent {
+            Ok(Ok(reply)) if reply.contains(&answer.to_string()) && ran == 8 => {}
+            Ok(sent) => wrong.push(format!(
+                "conversation {conversation}: {sent:?}; the executor ran {ran} of 8 calls"
+            )),
             Err(_) => wrong.push(format!("conversation {conversation}: send did not return")),
         }
         let closed = tokio::time::timeout(LIMIT, chat.close()).await;
@@ -757,13 +767,53 @@ async fn a_round_of_eight_calls_fills_no_edge_of_the_tool_loop() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// How many calls the reply of the cases below ends with: more than the tool loop can hold
-/// between its model and its authority, so the feedback edge is full before the round is sent
-/// and fails the model's node.
+/// What the error of a run says whose model's reply ended with more calls than the feedback edge
+/// of the tool loop holds, 8.
+const OVERFULL: &str = "more than the 8 the edge leaving the model's port `tool_call` holds";
+
+/// A reply that ends with nine calls, one more than the feedback edge holds, in each of 30
+/// conversations: `send` returns the error of the failed run, which names the edge's 8, the
+/// executor runs none of the calls, and nothing hangs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_of_more_calls_than_the_feedback_edge_holds_ends_with_an_error_naming_it() {
+    let _held = SESSIONS.lock().await;
+    let mut wrong = Vec::new();
+    for conversation in 0..30 {
+        let tool = lookup();
+        let stack = chatting(&calling_round(&tool, 9));
+        let calls = std::sync::Arc::default();
+        let executor: Box<dyn inference::tools::ToolExecutor> = Box::new(Recording {
+            answer: inference::__private::serde_json::json!({"temperature": 21}),
+            calls: std::sync::Arc::clone(&calls),
+        });
+        let mut chat = Chat::new_with(&stack)
+            .expect("plans")
+            .tool((tool, executor))
+            .expect("plans with the tool");
+        let sent = tokio::time::timeout(LIMIT, chat.send("the weather in Berlin")).await;
+        let ran = calls.lock().expect("no test panicked holding it").len();
+        match sent {
+            Ok(Err(error))
+                if error.to_string().contains("ended with 9 tool calls")
+                    && error.to_string().contains(OVERFULL)
+                    && ran == 0 => {}
+            Ok(sent) => wrong.push(format!(
+                "conversation {conversation}: {sent:?}; the executor ran {ran} calls"
+            )),
+            Err(_) => wrong.push(format!("conversation {conversation}: send did not return")),
+        }
+        let closed = tokio::time::timeout(LIMIT, chat.close()).await;
+        assert!(closed.is_ok(), "conversation {conversation}: close returns");
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// How many calls the reply of the cases below ends with: more than the feedback edge of the
+/// tool loop holds, so the model's node fails before it sends any of them.
 const OVERFLOWING: usize = 24;
 
-/// What the error of a run failed by the full feedback edge says.
-const FULL: &str = "the edge is full and fails on overload";
+/// What the error of a run failed by a reply the feedback edge cannot hold says.
+const FULL: &str = OVERFULL;
 
 /// A chat whose tool loop failed an edge: `send` returns the error of the failed run, and
 /// `close` returns.
