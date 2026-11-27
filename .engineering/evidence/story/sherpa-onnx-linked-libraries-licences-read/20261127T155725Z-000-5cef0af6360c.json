@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-27T15:57:25Z",
+  "actor": "human:operator",
+  "artifact": "story:sherpa-onnx-linked-libraries-licences-read",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local gate at 7c0625a0e (main 24531c00e merged): check-source, test-build, test-run (3503 passed, 101 skipped), quality-records, all exit 0; task test-slow exit 0",
+    "reference": "licence tests of both sherpa-onnx crates: every code-licence entry inside the rule or admitted by the owner, and every admitted entry named in the licence bullet of AGENTS.md (red before the admission: the 5 entries named)"
+  }
+}

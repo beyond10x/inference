@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:sherpa-onnx-linked-libraries-licences-read
 kind: story
-status: active
+status: implemented
 title: The licence of every library the sherpa-onnx archive links is read and recorded
 tags:
 - from-finding
 relations:
 - informed_by: review-result:local-tts-adapter-security-1
 - serves: vision:inference
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-25T03:08:46Z", actor: "human:operator", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-25T03:08:46Z", actor: "human:operator", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-27T15:57:25Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Context
 
