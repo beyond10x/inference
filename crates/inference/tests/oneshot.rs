@@ -1248,3 +1248,263 @@ async fn talk_with_returns_once_the_model_closed_and_lets_go_of_both_devices() {
     assert_eq!(played, reply, "{:#?}", host.played());
     one_closed_session_since(&before);
 }
+
+/// Adversary cases of story:sentence-clips-with-durations: the clip durations at a rate that does
+/// not divide a frame and in stereo, the `pcm_f32le` file form, the splitter on whitespace,
+/// marks and multi-byte text, the name check on links and later names, and the removal of the
+/// files already written when a later file cannot be created.
+mod adversary {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+
+    /// A stack binding `tts` to a mock synthesiser of frames in `format`.
+    fn speaking_in(format: AudioFormat) -> Stack {
+        Stack::new().bind(Binding::tts(MockSynthesiser::new(
+            tts::MockConfiguration::IncrementalStreaming,
+            ModelId::generate(),
+            format,
+        )))
+    }
+
+    fn format(encoding: AudioEncoding, rate: u32, channels: u16) -> AudioFormat {
+        AudioFormat {
+            encoding,
+            sample_rate: NonZeroU32::new(rate).expect("a rate"),
+            channels: NonZeroU16::new(channels).expect("channels"),
+        }
+    }
+
+    /// 44.1 kHz stereo: 160 samples per channel do not divide a second into whole nanoseconds,
+    /// so the clip's duration truncates once over the clip, and counts samples per channel.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adversary_stereo_clips_at_44100_hz_last_their_samples_per_channel_truncated_once() {
+        let _held = SESSIONS.lock().await;
+        let stack = speaking_in(format(AudioEncoding::PcmS16le, 44_100, 2));
+        let mut voice = Voice::new_with(&stack).expect("plans");
+        let dir = tempfile::tempdir().expect("a directory");
+
+        let clips = voice
+            .synthesise_clips(three_sentences())
+            .await
+            .expect("synthesises");
+        let durations: Vec<Duration> = clips.iter().map(|clip| clip.duration).collect();
+        // 480, 320 and 160 samples per channel at 44 100 Hz, truncated to whole nanoseconds.
+        let expected = [
+            Duration::from_nanos(10_884_353),
+            Duration::from_nanos(7_256_235),
+            Duration::from_nanos(3_628_117),
+        ];
+        assert_eq!(durations, expected);
+
+        let written = voice
+            .synthesise_clips_to(three_sentences(), dir.path())
+            .await
+            .expect("writes");
+        let returned: Vec<Duration> = written.iter().map(|file| file.duration).collect();
+        assert_eq!(returned, expected);
+        for file in &written {
+            let reader = hound::WavReader::open(&file.path).expect("a WAV file");
+            let spec = reader.spec();
+            assert_eq!((spec.channels, spec.sample_rate), (2, 44_100));
+            let nanos = u64::from(reader.duration()) * 1_000_000_000 / 44_100;
+            assert_eq!(
+                Duration::from_nanos(nanos),
+                file.duration,
+                "{}",
+                file.path.display()
+            );
+        }
+    }
+
+    /// `pcm_f32le` audio is written as 32-bit float samples, every sample of every frame.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adversary_f32_clips_are_written_as_32_bit_float_files_of_their_samples() {
+        let _held = SESSIONS.lock().await;
+        let stack = speaking_in(format(AudioEncoding::PcmF32le, 22_050, 2));
+        let mut voice = Voice::new_with(&stack).expect("plans");
+        let dir = tempfile::tempdir().expect("a directory");
+
+        let written = voice
+            .synthesise_clips_to(three_sentences(), dir.path())
+            .await
+            .expect("f32 audio is written");
+        let clips = voice
+            .synthesise_clips(three_sentences())
+            .await
+            .expect("synthesises");
+        assert_eq!(written.len(), 3);
+        for (file, clip) in written.iter().zip(&clips) {
+            let mut reader = hound::WavReader::open(&file.path).expect("a WAV file");
+            let spec = reader.spec();
+            assert_eq!(
+                (
+                    spec.channels,
+                    spec.sample_rate,
+                    spec.bits_per_sample,
+                    spec.sample_format
+                ),
+                (2, 22_050, 32, hound::SampleFormat::Float)
+            );
+            let samples: Vec<u32> = reader
+                .samples::<f32>()
+                .map(|sample| sample.expect("a sample").to_bits())
+                .collect();
+            let frames: Vec<u32> = clip
+                .frames
+                .iter()
+                .flat_map(|frame| {
+                    frame
+                        .data
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|b| f32::from_le_bytes(*b).to_bits())
+                        .collect::<Vec<u32>>()
+                })
+                .collect();
+            assert_eq!(samples, frames, "{}", file.path.display());
+            assert_eq!(file.duration, clip.duration);
+        }
+    }
+
+    /// The splitter's rule over whitespace that is not a space, marks inside words, marks before
+    /// a quote, a text of marks alone and multi-byte characters beside a mark.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adversary_the_splitter_follows_its_rule_on_unicode_whitespace_and_marks() {
+        let _held = SESSIONS.lock().await;
+        let stack = speaking();
+        let mut voice = Voice::new_with(&stack).expect("plans");
+        let cases: [(&str, &[&str]); 6] = [
+            (
+                "Ça va?\u{a0}Oui.\u{3000}3.14 est π.\nFin",
+                &["Ça va?", "Oui.", "3.14 est π.", "Fin"],
+            ),
+            ("e.g.x is one", &["e.g.x is one"]),
+            ("\"Hi.\" She left.", &["\"Hi.\" She left."]),
+            ("Wait...\r\nWhat?!", &["Wait...", "What?!"]),
+            ("...", &["..."]),
+            ("Grüß dich!Ü ö.ä", &["Grüß dich!Ü ö.ä"]),
+        ];
+        for (text, expected) in cases {
+            let clips = voice.synthesise_clips(text).await.expect("synthesises");
+            let texts: Vec<&str> = clips.iter().map(|clip| clip.text.as_str()).collect();
+            assert_eq!(texts, expected, "{text:?}");
+        }
+    }
+
+    /// A name the text needs that is taken by a dangling link, or a later name taken while the
+    /// first is free, is refused before any session opens, and the directory is unchanged.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adversary_a_later_name_or_a_dangling_link_is_refused_before_any_session() {
+        let _held = SESSIONS.lock().await;
+        let stack = speaking();
+        let mut voice = Voice::new_with(&stack).expect("plans");
+        let before = rows();
+
+        let dir = tempfile::tempdir().expect("a directory");
+        std::fs::write(dir.path().join("clip-003.wav"), b"kept").expect("written");
+        let error = voice
+            .synthesise_clips_to(three_sentences(), dir.path())
+            .await
+            .expect_err("an existing clip-003.wav is refused");
+        assert!(error.to_string().contains("clip-003.wav"), "{error}");
+        assert_eq!(names_in(dir.path()), ["clip-003.wav"]);
+
+        let dir = tempfile::tempdir().expect("a directory");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), dir.path().join("clip-002.wav"))
+            .expect("linked");
+        let error = voice
+            .synthesise_clips_to(three_sentences(), dir.path())
+            .await
+            .expect_err("a dangling clip-002.wav is refused");
+        assert!(error.to_string().contains("clip-002.wav"), "{error}");
+        assert_eq!(names_in(dir.path()), ["clip-002.wav"]);
+
+        let file = dir.path().join("plain");
+        std::fs::write(&file, b"x").expect("written");
+        let error = voice
+            .synthesise_clips_to(three_sentences(), &file)
+            .await
+            .expect_err("a file is no directory");
+        assert!(error.to_string().contains("plain"), "{error}");
+        assert_eq!(rows().len(), before.len(), "no session opened");
+    }
+
+    /// `clip-002.wav` appears after the names were checked and before the files are written:
+    /// the call fails naming it, removes `clip-001.wav` it wrote, and leaves the other file.
+    /// The file is made by a thread once the call's first session is a row of the view; a try
+    /// whose thread came after the call wrote `clip-002.wav` itself proves nothing and repeats.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adversary_a_name_taken_during_synthesis_fails_the_call_and_removes_its_files() {
+        let _held = SESSIONS.lock().await;
+        let stack = speaking();
+        let mut voice = Voice::new_with(&stack).expect("plans");
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().expect("a directory");
+            let second = dir.path().join("clip-002.wav");
+            let before = rows().len();
+            let stop = Arc::new(AtomicBool::new(false));
+            let taker = {
+                let stop = Arc::clone(&stop);
+                let second = second.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        if inference::sessions().sessions_view().len() > before {
+                            return std::fs::OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .open(&second)
+                                .is_ok();
+                        }
+                        std::thread::yield_now();
+                    }
+                    false
+                })
+            };
+            let result = voice
+                .synthesise_clips_to(three_sentences(), dir.path())
+                .await;
+            stop.store(true, Ordering::Release);
+            let took = taker.join().expect("the thread ends");
+            if !took {
+                continue;
+            }
+            let error = result.expect_err("a taken clip-002.wav fails the call");
+            assert!(error.to_string().contains("clip-002.wav"), "{error}");
+            assert_eq!(
+                names_in(dir.path()),
+                ["clip-002.wav"],
+                "the call removed the file it wrote and kept the other"
+            );
+            assert!(
+                std::fs::read(&second).expect("read").is_empty(),
+                "not overwritten"
+            );
+            return;
+        }
+        panic!("the thread never took clip-002.wav before the call wrote it");
+    }
+
+    /// The file form of an empty or whitespace-only text: no file, no error, no session.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adversary_an_empty_text_written_to_a_directory_is_no_file_no_error_no_session() {
+        let _held = SESSIONS.lock().await;
+        let stack = speaking();
+        let mut voice = Voice::new_with(&stack).expect("plans");
+        let dir = tempfile::tempdir().expect("a directory");
+        let before = rows();
+
+        for empty in ["", " \n\t "] {
+            let written = voice
+                .synthesise_clips_to(empty, dir.path())
+                .await
+                .expect("an empty text is no error");
+            assert!(written.is_empty(), "{empty:?}: {written:#?}");
+        }
+        assert!(names_in(dir.path()).is_empty(), "nothing written");
+        assert_eq!(rows().len(), before.len(), "no session opened");
+    }
+}
