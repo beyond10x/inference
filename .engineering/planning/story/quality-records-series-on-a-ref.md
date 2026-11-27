@@ -2,14 +2,15 @@
 format: aep.planning-md/3
 id: story:quality-records-series-on-a-ref
 kind: story
-status: active
+status: implemented
 title: Each main run's quality records are appended once to a series on a ref CI alone writes
 relations:
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-27T10:16:47Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-27T10:16:47Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-27T13:38:02Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}}
 ---
 ## Context
 

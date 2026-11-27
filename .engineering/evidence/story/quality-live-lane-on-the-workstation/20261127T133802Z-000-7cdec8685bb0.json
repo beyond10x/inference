@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-27T13:38:02Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-live-lane-on-the-workstation",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate at 6d007dc93's files: check-source, test-build, test-run (3418 passed), quality-records, all exit 0",
+    "reference": "defect found before the first live run: the lane took the whole secretsctl entry (format byte, 16-byte version, value) as the key; red 5 of 21 live tests, green 21 of 21 (inference-docs 210 passed)"
+  }
+}

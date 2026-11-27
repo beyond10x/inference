@@ -214,6 +214,12 @@
 
 ### Fixed
 
+- `inference-docs` (not published): `task quality-live` reads the value of a Secret Service
+  entry written by `secretsctl`, a format byte `1` and a 16-byte version before the value, as
+  the keychain backend of `secrets` reads it. Before, it took the whole entry as the key, found
+  it not UTF-8 and skipped the provider. An entry in another layout gives no key. The runs of
+  OpenAI start without `ELEVENLABS_RESIDENCY`, and the count names the residency when it is set.
+
 - `inference-elevenlabs` (feature `duplex`): the signed URL of a private agent, whose token is a
   credential, is no longer kept by the model past the handshake. The handshake request's URI is the
   signed URL's own buffer instead of a copy, and the buffer is zeroized when the open's handshake
