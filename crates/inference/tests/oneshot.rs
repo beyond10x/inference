@@ -539,6 +539,27 @@ async fn a_missing_directory_or_an_existing_first_clip_is_refused_and_changes_no
     assert_eq!(rows().len(), before.len(), "no session opened");
 }
 
+/// The file names have three digits, so a text of a thousand sentences is refused before any
+/// session opens.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_text_of_more_than_999_sentences_is_refused_naming_the_limit_and_writes_nothing() {
+    let _held = SESSIONS.lock().await;
+    let stack = speaking();
+    let mut voice = Voice::new_with(&stack).expect("plans");
+    let dir = tempfile::tempdir().expect("a directory");
+    let before = rows();
+
+    let error = voice
+        .synthesise_clips_to("Go. ".repeat(1000), dir.path())
+        .await
+        .expect_err("a thousand sentences are refused");
+
+    assert!(error.to_string().contains("999"), "{error}");
+    assert!(error.to_string().contains("1000"), "{error}");
+    assert!(names_in(dir.path()).is_empty(), "nothing written");
+    assert_eq!(rows().len(), before.len(), "no session opened");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn clips_in_mu_law_or_a_law_are_refused_naming_the_encoding_and_write_nothing() {
     let _held = SESSIONS.lock().await;

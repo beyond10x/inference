@@ -39,8 +39,13 @@ pub struct ClipFile {
     pub duration: Duration,
 }
 
-/// The marks that end a sentence, one or more of them followed by whitespace or the end.
+/// The marks that end a sentence, one or more of them followed by whitespace or the end. A run
+/// of marks needs no handling of its own: only its last mark is followed by whitespace.
 const SENTENCE_ENDS: [char; 3] = ['.', '!', '?'];
+
+/// The most clips [`Voice::synthesise_clips_to`] writes: their names have three digits,
+/// `clip-001.wav` to `clip-999.wav`.
+const MAX_CLIP_FILES: usize = 999;
 
 /// The sentences of `text`, in order. A sentence ends at one or more of `.`, `!` and `?`
 /// followed by whitespace or the end of the text; the text between ends is trimmed, and a part
@@ -53,10 +58,6 @@ fn sentences(text: &str) -> Vec<&str> {
         if !SENTENCE_ENDS.contains(&mark) {
             continue;
         }
-        while chars
-            .next_if(|(_, next)| SENTENCE_ENDS.contains(next))
-            .is_some()
-        {}
         if let Some(&(at, next)) = chars.peek()
             && next.is_whitespace()
         {
@@ -312,9 +313,10 @@ impl Voice {
     /// # Errors
     ///
     /// An [`Error::Layer`] naming the path when `dir` is no existing directory or one of the
-    /// files the text needs exists already, both before any session opens; naming the encoding
-    /// when the audio is `pcm_mulaw` or `pcm_alaw`, before any file is written; and naming the
-    /// file when one cannot be written, after removing the files this call wrote. Those of
+    /// files the text needs exists already, and naming the limit when the text has more than 999
+    /// sentences, all before any session opens; naming the encoding when the audio is
+    /// `pcm_mulaw` or `pcm_alaw`, before any file is written; and naming the file when one
+    /// cannot be written, after removing the files this call wrote. Those of
     /// [`Voice::synthesise_clips`].
     pub async fn synthesise_clips_to(
         &mut self,
@@ -326,7 +328,18 @@ impl Voice {
         if !dir.is_dir() {
             return Err(refused(dir, "no such directory; make it first", None));
         }
-        let paths: Vec<PathBuf> = (1..=sentences(&text).len())
+        let count = sentences(&text).len();
+        if count > MAX_CLIP_FILES {
+            return Err(refused(
+                dir,
+                &format!(
+                    "the text has {count} sentences and at most {MAX_CLIP_FILES} clips are \
+                     written, clip-001.wav to clip-{MAX_CLIP_FILES}.wav; split the text"
+                ),
+                None,
+            ));
+        }
+        let paths: Vec<PathBuf> = (1..=count)
             .map(|n| dir.join(format!("clip-{n:03}.wav")))
             .collect();
         if let Some(taken) = paths.iter().find(|path| path.symlink_metadata().is_ok()) {
@@ -408,7 +421,11 @@ impl Voice {
 
 #[cfg(test)]
 mod tests {
-    use super::sentences;
+    use std::num::{NonZeroU16, NonZeroU32};
+
+    use inference_audio::{AudioEncoding, AudioFormat, AudioFrame, SampleClockPosition};
+
+    use super::{sentences, wav_spec, write_wav};
 
     #[test]
     fn a_sentence_ends_at_its_marks_before_whitespace_or_the_end() {
@@ -429,5 +446,77 @@ mod tests {
         assert!(sentences(" \n\t ").is_empty());
         assert_eq!(sentences("no end at all"), ["no end at all"]);
         assert_eq!(sentences("?! . Hi."), ["?!", ".", "Hi."]);
+    }
+
+    /// Two stereo frames of three samples per channel in `encoding`, the samples' bytes given.
+    fn stereo(encoding: AudioEncoding, bytes: &[Vec<u8>; 2]) -> Vec<AudioFrame> {
+        let format = AudioFormat {
+            encoding,
+            sample_rate: NonZeroU32::new(22_050).expect("a rate"),
+            channels: NonZeroU16::new(2).expect("two channels"),
+        };
+        bytes
+            .iter()
+            .enumerate()
+            .map(|(index, data)| AudioFrame {
+                format,
+                position: SampleClockPosition::new(3 * index as u64).expect("a position"),
+                sample_count: 3,
+                data: data.clone(),
+            })
+            .collect()
+    }
+
+    /// Writes `frames` with [`wav_spec`] and [`write_wav`] into a new file and reads it back.
+    fn written(frames: &[AudioFrame]) -> hound::WavReader<std::io::BufReader<std::fs::File>> {
+        let dir = tempfile::tempdir().expect("a directory");
+        let path = dir.path().join("clip.wav");
+        let spec = wav_spec(frames.iter()).expect("a WAV format");
+        write_wav(&path, spec, frames).expect("written");
+        let reader = hound::WavReader::open(&path).expect("a WAV file");
+        let spec = reader.spec();
+        assert_eq!((spec.channels, spec.sample_rate), (2, 22_050));
+        reader
+    }
+
+    #[test]
+    fn integer_samples_in_stereo_are_written_sample_for_sample() {
+        let samples: [[i16; 6]; 2] = [
+            [1, -1, 12_345, -12_345, i16::MAX, i16::MIN],
+            [258, -258, 7, -7, 1_000, -32_000],
+        ];
+        let bytes = samples.map(|frame| frame.iter().flat_map(|s| s.to_le_bytes()).collect());
+        let mut reader = written(&stereo(AudioEncoding::PcmS16le, &bytes));
+        let spec = reader.spec();
+        assert_eq!(
+            (spec.bits_per_sample, spec.sample_format),
+            (16, hound::SampleFormat::Int)
+        );
+        let read: Vec<i16> = reader
+            .samples::<i16>()
+            .map(|s| s.expect("a sample"))
+            .collect();
+        assert_eq!(read, samples.concat());
+    }
+
+    #[test]
+    fn float_samples_in_stereo_are_written_sample_for_sample() {
+        let samples: [[f32; 6]; 2] = [
+            [0.5, -0.5, 0.25, -0.75, 1.0, -1.0],
+            [0.125, -0.0625, 0.333, -0.999, 1.0e-3, -2.5e-4],
+        ];
+        let bytes = samples.map(|frame| frame.iter().flat_map(|s| s.to_le_bytes()).collect());
+        let mut reader = written(&stereo(AudioEncoding::PcmF32le, &bytes));
+        let spec = reader.spec();
+        assert_eq!(
+            (spec.bits_per_sample, spec.sample_format),
+            (32, hound::SampleFormat::Float)
+        );
+        let read: Vec<u32> = reader
+            .samples::<f32>()
+            .map(|s| s.expect("a sample").to_bits())
+            .collect();
+        let expected: Vec<u32> = samples.concat().iter().map(|s| s.to_bits()).collect();
+        assert_eq!(read, expected, "bit for bit");
     }
 }
