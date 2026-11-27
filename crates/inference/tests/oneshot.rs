@@ -332,6 +332,243 @@ async fn a_voice_without_a_synthesiser_is_refused_when_it_is_built() {
     assert_eq!(rows().len(), before.len(), "nothing opened");
 }
 
+/// Three sentences: the mock speaks three, two and one frames of them, one frame per word.
+const SENTENCES: [&str; 3] = ["One two three.", "Four five!!", "Six?"];
+
+/// The text of [`SENTENCES`], with the spacing a caller might leave.
+fn three_sentences() -> String {
+    format!("  {}\n{}   {} ", SENTENCES[0], SENTENCES[1], SENTENCES[2])
+}
+
+/// The time `samples` samples take at `rate` hertz, truncated to whole nanoseconds.
+fn samples_at(samples: u64, rate: u32) -> std::time::Duration {
+    let nanos = u128::from(samples) * 1_000_000_000 / u128::from(rate);
+    std::time::Duration::from_nanos(u64::try_from(nanos).expect("fits"))
+}
+
+/// The samples per channel of `frames`, which share one sample rate, and that rate.
+fn samples_and_rate(frames: &[inference::audio::AudioFrame]) -> (u64, u32) {
+    let rate = frames[0].format.sample_rate.get();
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.format.sample_rate.get() == rate)
+    );
+    let samples = frames
+        .iter()
+        .map(|frame| u64::from(frame.sample_count))
+        .sum();
+    (samples, rate)
+}
+
+/// The names in `dir`, sorted.
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("the directory is read")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .into_string()
+                .expect("a UTF-8 name")
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_text_of_three_sentences_becomes_three_clips_of_their_own_frames_in_order() {
+    let _held = SESSIONS.lock().await;
+    let stack = speaking();
+    let mut voice = Voice::new_with(&stack).expect("plans");
+    let before = rows();
+
+    let clips = voice
+        .synthesise_clips(three_sentences())
+        .await
+        .expect("synthesises");
+
+    let texts: Vec<&str> = clips.iter().map(|clip| clip.text.as_str()).collect();
+    assert_eq!(texts, SENTENCES);
+    let counts: Vec<usize> = clips.iter().map(|clip| clip.frames.len()).collect();
+    assert_eq!(counts, [3, 2, 1], "{clips:#?}");
+    for clip in &clips {
+        let (samples, rate) = samples_and_rate(&clip.frames);
+        assert_eq!(clip.duration, samples_at(samples, rate), "{}", clip.text);
+        let alone = voice.synthesise(clip.text.clone()).await.expect("alone");
+        assert_eq!(clip.frames, alone, "{}", clip.text);
+    }
+    let after = rows();
+    assert_eq!(
+        after.len(),
+        before.len() + 6,
+        "one session per sentence and call"
+    );
+    assert!(
+        after
+            .iter()
+            .filter(|row| !before.iter().any(|old| old.session_id == row.session_id))
+            .all(|row| row.state == SessionState::Closed),
+        "every session of the clips is closed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_text_with_no_sentence_end_is_one_clip_and_an_empty_text_none_with_no_session() {
+    let _held = SESSIONS.lock().await;
+    let stack = speaking();
+    let mut voice = Voice::new_with(&stack).expect("plans");
+    let before = rows();
+
+    for empty in ["", "   ", " \n\t "] {
+        let clips = voice
+            .synthesise_clips(empty)
+            .await
+            .expect("an empty text is no error");
+        assert!(clips.is_empty(), "{empty:?}: {clips:#?}");
+    }
+    assert_eq!(rows().len(), before.len(), "no session opened");
+    assert!(voice.session().is_none(), "no call opened a session");
+
+    let clips = voice
+        .synthesise_clips(" version 3.5 is out ")
+        .await
+        .expect("synthesises");
+    assert_eq!(clips.len(), 1, "{clips:#?}");
+    assert_eq!(clips[0].text, "version 3.5 is out");
+    assert_eq!(clips[0].frames.len(), 4);
+    one_closed_session_since(&before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clips_written_to_a_directory_are_numbered_files_as_long_as_their_durations() {
+    let _held = SESSIONS.lock().await;
+    let stack = speaking();
+    let mut voice = Voice::new_with(&stack).expect("plans");
+    let dir = tempfile::tempdir().expect("a directory");
+
+    let written = voice
+        .synthesise_clips_to(three_sentences(), dir.path())
+        .await
+        .expect("writes");
+
+    let names = ["clip-001.wav", "clip-002.wav", "clip-003.wav"];
+    assert_eq!(names_in(dir.path()), names);
+    let paths: Vec<std::path::PathBuf> = written.iter().map(|file| file.path.clone()).collect();
+    let expected: Vec<std::path::PathBuf> =
+        names.iter().map(|name| dir.path().join(name)).collect();
+    assert_eq!(paths, expected);
+
+    let mut read_back = std::time::Duration::ZERO;
+    for file in &written {
+        let reader = hound::WavReader::open(&file.path).expect("a WAV file");
+        let spec = reader.spec();
+        assert_eq!(
+            (spec.channels, spec.bits_per_sample, spec.sample_format),
+            (1, 16, hound::SampleFormat::Int)
+        );
+        let length = samples_at(u64::from(reader.duration()), spec.sample_rate);
+        assert_eq!(length, file.duration, "{}", file.path.display());
+        read_back += length;
+    }
+    let returned: std::time::Duration = written.iter().map(|file| file.duration).sum();
+    assert_eq!(returned, read_back);
+    assert_eq!(
+        returned,
+        samples_at(6 * 160, 16_000),
+        "six frames of 160 samples"
+    );
+
+    let clips = voice
+        .synthesise_clips(three_sentences())
+        .await
+        .expect("synthesises");
+    for (file, clip) in written.iter().zip(&clips) {
+        let mut reader = hound::WavReader::open(&file.path).expect("a WAV file");
+        let samples: Vec<i16> = reader
+            .samples::<i16>()
+            .map(|s| s.expect("a sample"))
+            .collect();
+        let frames: Vec<i16> = clip
+            .frames
+            .iter()
+            .flat_map(|frame| {
+                frame
+                    .data
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| i16::from_le_bytes(*b))
+            })
+            .collect();
+        assert_eq!(samples, frames, "the file holds the clip's samples");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_directory_or_an_existing_first_clip_is_refused_and_changes_nothing() {
+    let _held = SESSIONS.lock().await;
+    let stack = speaking();
+    let mut voice = Voice::new_with(&stack).expect("plans");
+    let dir = tempfile::tempdir().expect("a directory");
+    let before = rows();
+
+    let absent = dir.path().join("absent");
+    let error = voice
+        .synthesise_clips_to(three_sentences(), &absent)
+        .await
+        .expect_err("a missing directory is refused");
+    assert!(error.to_string().contains("absent"), "{error}");
+    assert!(!absent.exists(), "the directory is not made");
+    assert!(names_in(dir.path()).is_empty());
+
+    let first = dir.path().join("clip-001.wav");
+    std::fs::write(&first, b"kept").expect("written");
+    let error = voice
+        .synthesise_clips_to(three_sentences(), dir.path())
+        .await
+        .expect_err("an existing clip-001.wav is refused");
+    assert!(error.to_string().contains("clip-001.wav"), "{error}");
+    assert_eq!(names_in(dir.path()), ["clip-001.wav"]);
+    assert_eq!(
+        std::fs::read(&first).expect("read"),
+        b"kept",
+        "not overwritten"
+    );
+    assert_eq!(rows().len(), before.len(), "no session opened");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clips_in_mu_law_or_a_law_are_refused_naming_the_encoding_and_write_nothing() {
+    let _held = SESSIONS.lock().await;
+    for (encoding, name) in [
+        (AudioEncoding::PcmMulaw, "pcm_mulaw"),
+        (AudioEncoding::PcmAlaw, "pcm_alaw"),
+    ] {
+        let format = AudioFormat {
+            encoding,
+            sample_rate: NonZeroU32::new(8_000).expect("a rate"),
+            channels: NonZeroU16::MIN,
+        };
+        let stack = Stack::new().bind(Binding::tts(MockSynthesiser::new(
+            tts::MockConfiguration::IncrementalStreaming,
+            ModelId::generate(),
+            format,
+        )));
+        let mut voice = Voice::new_with(&stack).expect("plans");
+        let dir = tempfile::tempdir().expect("a directory");
+
+        let error = voice
+            .synthesise_clips_to(three_sentences(), dir.path())
+            .await
+            .expect_err("companded frames are refused");
+
+        assert!(error.to_string().contains(name), "{error}");
+        assert!(names_in(dir.path()).is_empty(), "{name}: nothing written");
+    }
+}
+
 /// The pieces the mock generator streams as the first reply of a conversation.
 const PIECES: [&str; 3] = ["Hello", " from", " the mock"];
 
