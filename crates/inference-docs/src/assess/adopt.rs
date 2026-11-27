@@ -551,6 +551,13 @@ fn of_the_run(
 /// packages and the coverage sums of a plan that names packages; one result per test of a plan
 /// that lists tests. A test of `tests/quality/adopt.rs` plants a defect of each rule in a record
 /// and holds both to refuse it.
+///
+/// One rule of `record_problems` is not held here: it leaves out a package whose section of
+/// `quality/adapters.md` says that no adopted record holds the crate and that the record's own
+/// run did not plan, so that the committed record written before the plan named the crate
+/// stands. This program reads no page and refuses such a record: the record of a run on `main`
+/// of a tree whose plan names the crate holds it, and one without it is of an older plan. A test
+/// of `tests/quality/adopt.rs` holds that difference.
 fn record_rules(project: &str, plan: &Plan, record: &Value) -> Vec<String> {
     let mut problems = Vec::new();
     let evidence = record.get("evidence").unwrap_or(&Value::Null);

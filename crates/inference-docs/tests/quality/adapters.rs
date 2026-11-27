@@ -501,8 +501,11 @@ fn says_no_record_yet(model: &Model, adapter: &str) -> bool {
         .is_some_and(|section| section.text.contains(NO_RECORD_YET))
 }
 
-/// The packages of `packages` whose section says [`NO_RECORD_YET`] and of which `record` holds
-/// no result at all. The rules of a record against its plan leave these out, and no other.
+/// The packages of `packages` whose section says [`NO_RECORD_YET`], which the packages of
+/// `record`'s own run (`evidence.inputs.packages`) do not name, and of which `record` holds no
+/// result at all: the record was written before its plan named the crate. The rules of a record
+/// against its plan leave these out, and no other. A record whose run named the crate and holds
+/// none of its results is not excused.
 pub(super) fn awaiting_a_record<'a>(
     model: &Model,
     packages: impl IntoIterator<Item = &'a str>,
@@ -515,9 +518,20 @@ pub(super) fn awaiting_a_record<'a>(
         .flatten()
         .filter_map(|result| text(result, "item"))
         .collect();
+    let planned_by_its_run: BTreeSet<&str> = record
+        .pointer("/evidence/inputs/packages/value")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
     packages
         .into_iter()
-        .filter(|package| !held.contains(package) && says_no_record_yet(model, package))
+        .filter(|package| {
+            !held.contains(package)
+                && !planned_by_its_run.contains(package)
+                && says_no_record_yet(model, package)
+        })
         .collect()
 }
 
@@ -553,11 +567,6 @@ fn check_crate_rows(model: &Model, problems: &mut Vec<String>) {
             for (adapter, section) in &model.page.sections {
                 let row = section.rows.iter().find(|row| row.first() == Some(&key));
                 if section.text.contains(NO_RECORD_YET) {
-                    if row.is_some() {
-                        problems.push(format!(
-                            "{ADAPTERS_PAGE}: the section `{adapter}` says that no adopted record holds the crate and has a row for the measure {key}"
-                        ));
-                    }
                     if results
                         .iter()
                         .any(|result| text(result, "item") == Some(adapter))
@@ -611,10 +620,17 @@ fn check_crate_rows(model: &Model, problems: &mut Vec<String>) {
         }
     }
     for (adapter, section) in &model.page.sections {
-        if section.text.contains(NO_RECORD_YET) && !planned.contains(adapter.as_str()) {
-            problems.push(format!(
-                "{ADAPTERS_PAGE}: the section `{adapter}` says that no adopted record holds the crate, and no plan with one value per package names it"
-            ));
+        if section.text.contains(NO_RECORD_YET) {
+            if !planned.contains(adapter.as_str()) {
+                problems.push(format!(
+                    "{ADAPTERS_PAGE}: the section `{adapter}` says that no adopted record holds the crate, and no plan with one value per package names it"
+                ));
+            }
+            for row in &section.rows {
+                problems.push(format!(
+                    "{ADAPTERS_PAGE}: the section `{adapter}` says that no adopted record holds the crate and has the table row {row:?}"
+                ));
+            }
         }
         for measure in section.rows.iter().filter_map(|row| row.first()) {
             if measure.starts_with('`') && !measures.contains(measure) {
@@ -1060,7 +1076,7 @@ fn a_coverage_counts_the_packages_of_its_plan_and_what_its_assessor_reports() {
 const ADAPTER_TESTS: &str = "quality/records/adapter-tests.evidence.json";
 
 /// The committed record of `adapter-tests` without the results of `adapter`, its coverage
-/// counting the rest: the record of a run before `adapter` was added.
+/// counting the rest; its inputs still name `adapter`, so its run planned the crate.
 fn record_without(documents: &mut Documents, adapter: &str) {
     let mut record: Value = serde_json::from_str(&documents.records[ADAPTER_TESTS]).unwrap();
     let results = record
@@ -1084,6 +1100,28 @@ fn record_without(documents: &mut Documents, adapter: &str) {
             .expect("the record has a coverage");
         *at = Value::from(at.as_u64().unwrap() - less);
     }
+    documents.records.insert(
+        ADAPTER_TESTS.to_owned(),
+        serde_json::to_string_pretty(&record).unwrap(),
+    );
+}
+
+/// [`record_without`], and `adapter` taken out of the packages its inputs name: the record of a
+/// run before `adapter` was added to the plan.
+fn record_before(documents: &mut Documents, adapter: &str) {
+    record_without(documents, adapter);
+    let mut record: Value = serde_json::from_str(&documents.records[ADAPTER_TESTS]).unwrap();
+    let packages = record
+        .pointer_mut("/evidence/inputs/packages/value")
+        .and_then(Value::as_array_mut)
+        .expect("the record names the packages of its run");
+    let before = packages.len();
+    packages.retain(|package| package != adapter);
+    assert_eq!(
+        packages.len() + 1,
+        before,
+        "the run of the record planned {adapter}"
+    );
     documents.records.insert(
         ADAPTER_TESTS.to_owned(),
         serde_json::to_string_pretty(&record).unwrap(),
@@ -1116,7 +1154,7 @@ fn sentence_for_rows(documents: &mut Documents, adapter: &str) {
 #[test]
 fn a_crate_the_plan_names_and_no_adopted_record_holds_stands_with_the_sentence_and_no_rows() {
     let mut documents = load();
-    record_without(&mut documents, "inference-whispercpp");
+    record_before(&mut documents, "inference-whispercpp");
     sentence_for_rows(&mut documents, "inference-whispercpp");
     let found = problems(&documents);
     assert!(found.is_empty(), "{}", report(&found));
@@ -1128,7 +1166,7 @@ fn a_crate_the_plan_names_and_no_adopted_record_holds_stands_with_the_sentence_a
 fn the_sentence_on_a_crate_the_record_holds_or_the_plan_does_not_name_is_refused() {
     assert_problems(
         &[
-            "the section `inference-aws` says that no adopted record holds the crate and has a row for the measure `adapter-tests/tests-run`",
+            "the section `inference-aws` says that no adopted record holds the crate and has the table row [\"`adapter-tests/tests-run`\", \"134 tests\", \"Check run\"]",
             "the section `inference-aws` says that no adopted record holds the crate, and quality/records/adapter-tests.evidence.json has a result of `adapter-tests/slowest-test` for it",
             "the section `inference-cartesia` says that no adopted record holds the crate, and quality/records/adapter-tests.evidence.json has a result of `adapter-tests/tests-passed` for it",
             "the section `inference-whispercpp` says that no adopted record holds the crate, and no plan with one value per package names it",
@@ -1140,7 +1178,7 @@ fn the_sentence_on_a_crate_the_record_holds_or_the_plan_does_not_name_is_refused
                 &format!("## `inference-aws`\n\n{NO_RECORD_YET}\n"),
             );
             sentence_for_rows(documents, "inference-cartesia");
-            record_without(documents, "inference-whispercpp");
+            record_before(documents, "inference-whispercpp");
             sentence_for_rows(documents, "inference-whispercpp");
             in_plans(documents, "        - inference-whispercpp\n", "");
         },
@@ -1150,7 +1188,7 @@ fn the_sentence_on_a_crate_the_record_holds_or_the_plan_does_not_name_is_refused
 #[test]
 fn rows_for_a_crate_the_record_does_not_hold_are_refused() {
     let mut documents = load();
-    record_without(&mut documents, "inference-whispercpp");
+    record_before(&mut documents, "inference-whispercpp");
     let found = problems(&documents);
     for expected in [
         "quality/records/adapter-tests.evidence.json: no result of `adapter-tests/tests-run` for inference-whispercpp",
@@ -1179,7 +1217,7 @@ fn a_package_of_the_record_the_plan_does_not_name_is_refused_with_a_crate_awaiti
             "quality/records/adapter-tests.evidence.json: the `tests_run` results are of {\"inference-audio-device\", \"inference-aws\"",
         ],
         |documents| {
-            record_without(documents, "inference-whispercpp");
+            record_before(documents, "inference-whispercpp");
             sentence_for_rows(documents, "inference-whispercpp");
             in_plans(documents, "        - inference-aws\n", "");
         },

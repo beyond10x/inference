@@ -12,7 +12,7 @@ use crate::quality::{load, problems, record_problems, report};
 /// excuse it, whatever its section says.
 #[test]
 fn a_record_whose_own_run_planned_the_crate_and_holds_no_result_of_it_is_refused_with_the_sentence()
- {
+{
     let mut documents = load();
     record_without(&mut documents, "inference-aws");
     sentence_for_rows(&mut documents, "inference-aws");
@@ -23,13 +23,18 @@ fn a_record_whose_own_run_planned_the_crate_and_holds_no_result_of_it_is_refused
         .expect("the record names the packages of its run")
         .iter()
         .any(|package| package == "inference-aws");
-    assert!(planned_by_its_run, "the run of the record planned inference-aws");
+    assert!(
+        planned_by_its_run,
+        "the run of the record planned inference-aws"
+    );
     for (rules, found) in [
         ("problems", problems(&documents)),
         ("record_problems", record_problems(&documents)),
     ] {
         assert!(
-            found.iter().any(|problem| problem.contains("inference-aws")),
+            found
+                .iter()
+                .any(|problem| problem.contains("inference-aws")),
             "{rules}() names no problem of inference-aws, whose results were taken out of a record \
              that says its run planned it; {}",
             report(&found)

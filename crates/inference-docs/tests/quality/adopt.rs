@@ -517,14 +517,49 @@ fn results(record: &mut Value) -> &mut Vec<Value> {
         .expect("the record has results")
 }
 
+/// The record `text` of `adapter-tests` as a run before `package` was added to the plan writes
+/// it: no result of `package`, `package` not among the packages of its inputs, and the coverage
+/// counting the rest.
+fn without_the_package(text: &str, package: &str) -> String {
+    changed_record(text, |record| {
+        let of = |record: &Value, output: &str| -> u64 {
+            record["evidence"]["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|result| result["item"] == package && result["output"] == output)
+                .filter_map(|result| result["value"].as_str()?.parse::<u64>().ok())
+                .sum()
+        };
+        let (run, passed) = (of(record, "tests_run"), of(record, "tests_passed"));
+        assert!(run > 0, "the record holds {package}");
+        results(record).retain(|result| result["item"] != package);
+        record
+            .pointer_mut("/evidence/inputs/packages/value")
+            .and_then(Value::as_array_mut)
+            .expect("the record names the packages of its run")
+            .retain(|named| named != package);
+        for (field, less) in [("executed", run), ("passed", passed)] {
+            let count = record["evidence"]["coverage"][field].as_u64().unwrap();
+            record["evidence"]["coverage"][field] = (count - less).into();
+        }
+    })
+}
+
 /// A defect of one rule of a record: the record of the artifact it is planted in, the change
 /// of its text, and the words `record_problems` and the program both name it with.
 type Plant = (&'static str, fn(&str) -> String, &'static str);
 
 /// One plant for each rule `record_problems` holds a record to, then a second plant of the rules
 /// a copy could narrow without the first one seeing it: a missing value where the first changes
-/// one, another count of the coverage, the other sum of the packages.
-const PLANTS: [Plant; 21] = [
+/// one, another count of the coverage, the other sum of the packages, and a whole package taken
+/// out of a record, its inputs included, for a crate whose section has its rows.
+const PLANTS: [Plant; 22] = [
+    (
+        "adapters/adapter-tests.evidence.json",
+        |text| without_the_package(text, "inference-aws"),
+        "no result of `adapter-tests/tests-run` for the package inference-aws",
+    ),
     (
         "adapters/phonic-records.evidence.json",
         |_| "{ not JSON".to_owned(),
@@ -750,7 +785,7 @@ fn a_record_the_record_rules_refuse_is_refused_by_the_program_in_the_same_words(
             None => rounds.push(vec![plant]),
         }
     }
-    assert_eq!(rounds.len(), 4, "adapter-tests holds four plants");
+    assert_eq!(rounds.len(), 5, "adapter-tests holds five plants");
     let loaded = load();
     for round in rounds {
         let case = Case::new();
@@ -778,6 +813,37 @@ fn a_record_the_record_rules_refuse_is_refused_by_the_program_in_the_same_words(
             .collect();
         case.refused(&outcome, &lines);
     }
+}
+
+/// The one rule of `record_problems` the program does not hold: a crate whose section says that
+/// no adopted record holds it and that the record's own run did not plan is left out of the
+/// record rules, so the committed record written before the plan named the crate stands. The
+/// program reads no page and refuses such a record of a run: a run on `main` of a tree whose
+/// plan names the crate holds it, so a record without it is of an older plan and is not adopted.
+#[test]
+fn a_record_without_a_crate_awaiting_its_record_is_left_by_the_record_rules_and_refused_by_the_program()
+ {
+    let package = "inference-sherpa-onnx-tts";
+    let path = "adapters/adapter-tests.evidence.json";
+    let case = Case::new();
+    let text = without_the_package(&case.record(path), package);
+    fs::write(case.artifact().join(path), &text).unwrap();
+    let mut documents = load();
+    documents.records.insert(committed_path(path), text);
+    let found = record_problems(&documents);
+    assert!(
+        !found.iter().any(|problem| problem.contains(package)),
+        "{}",
+        report(&found)
+    );
+    let outcome = case.adopt();
+    case.refused(
+        &outcome,
+        &[(
+            path,
+            "no result of `adapter-tests/tests-run` for the package inference-sherpa-onnx-tts",
+        )],
+    );
 }
 
 /// The last assessment `inference-docs junit-assessments` lists, which the program writes last.

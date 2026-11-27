@@ -331,7 +331,9 @@ fn the_code_licence_list_is_the_29_libraries_read_for_the_archive_with_text_to_s
 }
 
 /// The identifiers of the reading the repository's licence rule for local adapters admits for
-/// backend code (`AGENTS.md`): Apache-2.0, MIT or more permissive.
+/// backend code (`AGENTS.md`): Apache-2.0, MIT or more permissive. The list of
+/// `inference-sherpa-onnx` lacks Unlicense and Unicode-DFS-2016, which no entry of its archive
+/// carries, and stays that strict.
 const INSIDE_THE_RULE: [&str; 8] = [
     "Apache-2.0",
     "MIT",
@@ -346,18 +348,54 @@ const INSIDE_THE_RULE: [&str; 8] = [
 /// The entries outside that rule the owner admitted, each only as built into the upstream
 /// archives the build fetches (`AGENTS.md`): espeak-ng by its named exception, the rest by the
 /// owner's decision of 2026-11-27, ucd-tools as part of the espeak-ng exception and the
-/// toolchain pieces under their runtime and linking exceptions.
-const ADMITTED_OUTSIDE_THE_RULE: [(&str, &str); 6] = [
-    ("espeak-ng", "GPL-3.0-or-later"),
-    ("Eigen", "MPL-2.0"),
-    ("ucd-tools", "GPL-3.0-or-later AND Unicode-DFS-2016"),
-    ("Eigen in onnxruntime", "MPL-2.0"),
+/// toolchain pieces under their runtime and linking exceptions. Each with the name the licence
+/// bullet of `AGENTS.md` gives it.
+const ADMITTED_OUTSIDE_THE_RULE: [(&str, &str, &str); 6] = [
+    ("espeak-ng", "GPL-3.0-or-later", "espeak-ng"),
+    ("Eigen", "MPL-2.0", "Eigen"),
+    (
+        "ucd-tools",
+        "GPL-3.0-or-later AND Unicode-DFS-2016",
+        "ucd-tools",
+    ),
+    ("Eigen in onnxruntime", "MPL-2.0", "Eigen"),
     (
         "libstdc++ and libgcc",
         "GPL-3.0-or-later WITH GCC-exception-3.1",
+        "GCC runtime",
     ),
-    ("glibc", "LGPL-2.1-or-later"),
+    ("glibc", "LGPL-2.1-or-later", "glibc"),
 ];
+
+/// The bullet of `AGENTS.md` that states the licence rule for local adapters, its lines joined
+/// by one space.
+fn licence_bullet() -> String {
+    let agents = read(&repository().join("AGENTS.md"));
+    let mut lines = agents
+        .lines()
+        .skip_while(|line| !line.starts_with("- A local adapter's backend code"));
+    let first = lines.next().expect("AGENTS.md states the licence rule");
+    std::iter::once(first)
+        .chain(lines.take_while(|line| line.starts_with("  ")))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn every_entry_admitted_outside_the_licence_rule_is_named_by_the_rule_in_agents_md() {
+    let bullet = licence_bullet();
+    let not_named: Vec<&str> = ADMITTED_OUTSIDE_THE_RULE
+        .iter()
+        .map(|(_, _, named)| *named)
+        .filter(|named| !bullet.contains(named))
+        .collect();
+    assert!(
+        not_named.is_empty(),
+        "the licence bullet of AGENTS.md names every entry admitted outside the rule; not \
+         {not_named:?}: {bullet}"
+    );
+}
 
 #[test]
 fn every_code_licence_entry_is_inside_the_licence_rule_or_admitted_by_the_owner() {
@@ -371,7 +409,13 @@ fn every_code_licence_entry_is_inside_the_licence_rule_or_admitted_by_the_owner(
                 .all(|identifier| INSIDE_THE_RULE.contains(&identifier))
         })
         .map(|entry| (entry.component, entry.license))
-        .filter(|entry| !ADMITTED_OUTSIDE_THE_RULE.contains(entry))
+        .filter(|(component, license)| {
+            !ADMITTED_OUTSIDE_THE_RULE
+                .iter()
+                .any(|(admitted, admitted_license, _)| {
+                    admitted == component && admitted_license == license
+                })
+        })
         .collect();
     assert!(
         outside.is_empty(),
