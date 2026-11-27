@@ -350,16 +350,74 @@ fn a_printed_output_gives_one_value_per_measure_in_milliseconds() {
 
 /// The acceptance of the story: a document the program wrote stands in the place of the
 /// committed record of its assessment, and the test of the quality documents finds no problem.
+/// The pages state the run of the committed records and the slowest test of `workspace-tests`,
+/// so each call names the run and the commit its committed record names, and the report is the
+/// fixture with its slowest test at the time of that committed record.
 #[test]
 fn written_documents_in_the_place_of_the_committed_records_leave_the_documents_without_a_problem() {
     let root_directory = scratch_root();
-    let junit = fixture("report.junit.xml");
     let mut documents = load();
+    let committed = |assessment: &str| -> Value {
+        let path = format!("quality/records/{assessment}.evidence.json");
+        let text = documents
+            .records
+            .get(&path)
+            .unwrap_or_else(|| panic!("{assessment} has a committed record"));
+        serde_json::from_str(text).expect("the committed record is JSON")
+    };
+    let field = |record: &Value, pointer: &str| -> String {
+        record
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("the committed record has {pointer}"))
+            .to_owned()
+    };
+    let slowest = field(&committed("workspace-tests"), "/evidence/results/0/value");
+    let fixture_report = fixture_text("report.junit.xml");
+    assert_eq!(
+        fixture_report.matches("time=\"8.011\"").count(),
+        1,
+        "the fixture report has its slowest test at 8.011 s"
+    );
+    place(
+        &root_directory,
+        "target/report.junit.xml",
+        &fixture_report.replace("time=\"8.011\"", &format!("time=\"{slowest}\"")),
+    );
+    let junit = root_directory.join("target/report.junit.xml");
+    let mut written = Vec::new();
     for assessment in ["workspace-tests", "release-statuses"] {
-        let written = from_check_run(&root_directory, assessment, &junit).written();
+        let record = committed(assessment);
+        let revision = field(&record, "/evidence/target/revision");
+        let source = field(&record, "/evidence/source/location");
+        let document = assess(
+            &root_directory,
+            &[
+                "--project",
+                "inference",
+                "--assessment",
+                assessment,
+                "--class",
+                "ci",
+                "--revision",
+                &revision,
+                "--from",
+                path(&junit),
+                "--source",
+                &source,
+            ],
+        )
+        .written();
+        written.push((assessment, document));
+    }
+    let sherpa_source = field(
+        &committed("sherpa-onnx-stt-record"),
+        "/evidence/source/location",
+    );
+    for (assessment, document) in written {
         let path = format!("quality/records/{assessment}.evidence.json");
         assert!(
-            documents.records.insert(path, written).is_some(),
+            documents.records.insert(path, document).is_some(),
             "{assessment} has a committed record"
         );
     }
@@ -375,7 +433,7 @@ fn written_documents_in_the_place_of_the_committed_records_leave_the_documents_w
             "--from",
             path(&junit),
             "--source",
-            CHECK_RUN,
+            &sherpa_source,
         ],
     )
     .written();

@@ -4,12 +4,12 @@
     "project": "inference",
     "assessment": "release-statuses",
     "assessor": "named-tests@1",
-    "candidate": "59b8f4a858ab9c4eef94bc21de8e7bb85f90ddad",
+    "candidate": "0ac1e2f7b74f60b8019a25e5a98bc2460841ecd7",
     "target": {
       "kind": "revision",
       "class": "ci",
       "selection": "candidate",
-      "revision": "59b8f4a858ab9c4eef94bc21de8e7bb85f90ddad"
+      "revision": "0ac1e2f7b74f60b8019a25e5a98bc2460841ecd7"
     },
     "inputs": {
       "package": {
@@ -71,7 +71,7 @@
     ],
     "source": {
       "kind": "forge_runs",
-      "location": "https://github.com/beyond10x/inference/actions/runs/45474241015"
+      "location": "https://github.com/beyond10x/inference/actions/runs/45771353687"
     }
   }
 }

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-27T15:22:48Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-records-adopted-from-a-main-run",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task quality-adopt RUN=45771353687 exit 0 (22 records adopted, each equal to the artifact by cmp); inference-docs 210 of 210 at c4f8488b6",
+    "reference": "local workspace test-run ended at its 120 s bound twice on the shared build node under load (1424 and 2155 of 3418 tests run, none failed); the forge's check run of the pull request is the gate of record"
+  }
+}

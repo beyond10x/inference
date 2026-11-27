@@ -733,39 +733,39 @@ fn the_sections_are_the_adapter_crates_once_each_and_in_their_order() {
 fn a_section_says_what_the_record_and_the_tree_hold_for_its_adapter() {
     assert_problems(
         &[
-            "the section `inference-aws` has Some(\"135 tests\") for `adapter-tests/tests-run`, the record has \"134 tests\"",
+            "the section `inference-aws` has Some(\"137 tests\") for `adapter-tests/tests-run`, the record has \"136 tests\"",
             "the section `inference-cartesia` has no row for the measure `adapter-tests/tests-passed`",
             "the section `inference-deepgram` names Some(\"Slow run\") as the source of `adapter-tests/tests-run`",
             "the section `inference-deepslate` has a row for `adapter-tests/tests-skipped`, which is no measure with one value per package",
-            "for `adapter-tests/slowest-test`, the record has \"0.494 s, `inference-sherpa-onnx::stt_network the_archive_download_is_reached_only_through_build_dependencies`\"",
+            "for `adapter-tests/slowest-test`, the record has \"1.181 s, `inference-sherpa-onnx::licence no_gpl_phonemiser_is_linked`\"",
             "the section `inference-phonic` does not name the committed record `adapters/inference-phonic/records/claims-new.json`",
             "the section `inference-llama-server` does not name the committed record `adapters/inference-llama-server/capability/reference-machine-cpu-tools.json`",
         ],
         |documents| {
             on_page(
                 documents,
-                "| `adapter-tests/tests-run` | 134 tests | Check run |",
-                "| `adapter-tests/tests-run` | 135 tests | Check run |",
+                "| `adapter-tests/tests-run` | 136 tests | Adopted run |",
+                "| `adapter-tests/tests-run` | 137 tests | Adopted run |",
             );
             on_page(
                 documents,
-                "| `adapter-tests/tests-passed` | 37 tests | Check run |\n",
+                "| `adapter-tests/tests-passed` | 47 tests | Adopted run |\n",
                 "",
             );
             on_page(
                 documents,
-                "| `adapter-tests/tests-run` | 126 tests | Check run |",
-                "| `adapter-tests/tests-run` | 126 tests | Slow run |",
+                "| `adapter-tests/tests-run` | 131 tests | Adopted run |",
+                "| `adapter-tests/tests-run` | 131 tests | Slow run |",
             );
             on_page(
                 documents,
-                "| `adapter-tests/tests-passed` | 70 tests | Check run |",
-                "| `adapter-tests/tests-skipped` | 70 tests | Check run |",
+                "| `adapter-tests/tests-passed` | 72 tests | Adopted run |",
+                "| `adapter-tests/tests-skipped` | 72 tests | Adopted run |",
             );
             on_page(
                 documents,
-                "| 0.494 s, `inference-sherpa-onnx::stt_network the_archive_download",
-                "| 0.494 s, `inference-sherpa-onnx::stt_network the_archive",
+                "| 1.181 s, `inference-sherpa-onnx::licence no_gpl_phonemiser_is_linked",
+                "| 1.181 s, `inference-sherpa-onnx::licence no_gpl_phonemiser",
             );
             documents
                 .adapter_records
@@ -948,8 +948,8 @@ fn a_coverage_counts_the_packages_of_its_plan_and_what_its_assessor_reports() {
     let record = "quality/records/adapter-tests.evidence.json";
     assert_problems(
         &[
-            "quality/records/adapter-tests.evidence.json: the coverage counts Some(3059) executed tests, and the `tests_run` results of the packages of assessments.adapter-tests sum to 1166",
-            "quality/records/adapter-tests.evidence.json: the coverage counts Some(1165) passed tests, and the `tests_passed` results of the packages of assessments.adapter-tests sum to 1166",
+            "quality/records/adapter-tests.evidence.json: the coverage counts Some(3059) executed tests, and the `tests_run` results of the packages of assessments.adapter-tests sum to 1239",
+            "quality/records/adapter-tests.evidence.json: the coverage counts Some(1238) passed tests, and the `tests_passed` results of the packages of assessments.adapter-tests sum to 1239",
             "quality/records/adapter-tests.evidence.json: the coverage has Some(72) for `skipped`, a count package-tests@1 does not report; such a count is 0",
             "the `tests_run` results are of {\"inference-audio-device\", \"inference-aws\"",
             "assessments.adapter-tests names the packages {\"inference-audio-device\", \"inference-aws\", \"inference-cartesia\", \"inference-deepgram\", \"inference-deepslate\", \"inference-elevenlabs\", \"inference-llama-server\", \"inference-new\"",
@@ -958,14 +958,14 @@ fn a_coverage_counts_the_packages_of_its_plan_and_what_its_assessor_reports() {
             change(
                 &mut documents.records,
                 record,
-                "\"executed\": 1166",
+                "\"executed\": 1239",
                 "\"executed\": 3059",
             );
             change(
                 &mut documents.records,
                 record,
-                "\"passed\": 1166",
-                "\"passed\": 1165",
+                "\"passed\": 1239",
+                "\"passed\": 1238",
             );
             change(
                 &mut documents.records,
