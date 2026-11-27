@@ -287,17 +287,24 @@ async fn serve(
     let head = Arc::new(Mutex::new((String::new(), String::new(), None)));
     let callback_head = Arc::clone(&head);
     let refuse = plan.next_script() == Script::Refuse;
+    let callback_seen = Arc::clone(&seen);
     let callback = move |request: &Request, response: Response| {
         let key = request
             .headers()
             .get("xi-api-key")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        *callback_head.lock().unwrap() = (
-            request.uri().path().to_owned(),
-            request.uri().query().unwrap_or_default().to_owned(),
-            key,
-        );
+        let path = request.uri().path().to_owned();
+        let query = request.uri().query().unwrap_or_default().to_owned();
+        // Recorded before the response is written, so a client that has its answer, a refusal
+        // included, finds the head of its request in `seen`.
+        {
+            let mut seen = callback_seen.lock().unwrap();
+            seen[index].path.clone_from(&path);
+            seen[index].query.clone_from(&query);
+            seen[index].key.clone_from(&key);
+        }
+        *callback_head.lock().unwrap() = (path, query, key);
         if refuse {
             let mut refusal = ErrorResponse::new(Some("invalid_api_key".to_owned()));
             *refusal.status_mut() = StatusCode::UNAUTHORIZED;
@@ -307,11 +314,6 @@ async fn serve(
     };
     let accepted = tokio_tungstenite::accept_hdr_async(stream, callback).await;
     let (path, query, key) = head.lock().unwrap().clone();
-    record(&|seen| {
-        seen.path.clone_from(&path);
-        seen.query.clone_from(&query);
-        seen.key.clone_from(&key);
-    });
     let Ok(socket) = accepted else { return };
     let mut violations = Vec::new();
     if key.as_deref() != Some(KEY) {
