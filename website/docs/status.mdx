@@ -13,15 +13,15 @@ import status from '@site/data/status.json';
 
 # Status
 
-The current release is `0.33.0`, a source release at that Git tag; nothing is on a registry. The [changelog](https://github.com/beyond10x/inference/blob/main/CHANGELOG.md) records every change a consumer can see. **Shipped** means in a release, with a test on `main` that holds it: an item that says "Since" is in that release and every one after it. **Planned** means not built. What is on `main` and in no release yet is not counted as shipped; it is listed under [On main, in the next release](#on-main-in-the-next-release). Checked on 2026-11-12: 44 shipped, 11 planned, and 1 on main for the next release.
+The current release is `0.34.0`, a source release at that Git tag; nothing is on a registry. The [changelog](https://github.com/beyond10x/inference/blob/main/CHANGELOG.md) records every change a consumer can see. **Shipped** means in a release, with a test on `main` that holds it: an item that says "Since" is in that release and every one after it. **Planned** means not built. What is on `main` and in no release yet is not counted as shipped; it is listed under [On main, in the next release](#on-main-in-the-next-release). Checked on 2026-11-12: 45 shipped, 11 planned, and 0 on main for the next release.
 
 <StatusTable data={status} />
 
 ## On main, in the next release
 
-Built and tested on `main`, and in no release yet: a dependency on the `0.33.0` tag does not have these.
+Built and tested on `main`, and in no release yet: a dependency on the `0.34.0` tag does not have these.
 
-- **[sherpa-onnx TTS](/docs/reference/adapters)** (Adapters). A local text-to-speech adapter over sherpa-onnx and the pinned Kokoro-82M v0.19 checkpoint; the offline cascade speaks through it. Opt-in: its phonemiser, espeak-ng, is GPL-3.0-or-later. Test: [`the_record_of_the_measured_machine_loads_and_evidences_exactly_the_claims`](https://github.com/beyond10x/inference/blob/main/adapters/inference-sherpa-onnx-tts/tests/record.rs).
+Nothing yet: everything on `main` is in `0.34.0`.
 
 ## The test behind each item
 

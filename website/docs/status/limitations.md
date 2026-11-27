@@ -48,7 +48,7 @@ The three native speech adapters are hosted services. A self-hosted native speec
 - **sherpa-onnx speech recognition** links the release archive built without TTS, so no
   GPL-licensed phonemiser is linked. The checkpoint is trained on read audiobook speech and does
   not recognise synthetic speech reliably. The native archive is for Linux x86_64.
-- **sherpa-onnx text-to-speech** (`inference-sherpa-onnx-tts`, on `main` and in no release yet)
+- **sherpa-onnx text-to-speech** (`inference-sherpa-onnx-tts`, since 0.34.0)
   speaks only in a process started on the sherpa-onnx library built with TTS, which carries the
   phonemiser espeak-ng, GPL-3.0-or-later; the pinned checkpoint carries espeak-ng's phoneme data.
   The repository commits and distributes neither: a task fetches them to your machine, and whoever

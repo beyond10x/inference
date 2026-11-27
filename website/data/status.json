@@ -221,6 +221,13 @@
     },
     {
       "area": "Adapters",
+      "detail": "Since 0.34.0: a local text-to-speech adapter over sherpa-onnx and the pinned Kokoro-82M v0.19 checkpoint; the offline cascade speaks through it. Opt-in: its phonemiser, espeak-ng, is GPL-3.0-or-later.",
+      "href": "/docs/reference/adapters",
+      "label": "sherpa-onnx TTS",
+      "status": "shipped"
+    },
+    {
+      "area": "Adapters",
       "detail": "A native speech model that runs on your own machine.",
       "href": "/docs/status/limitations",
       "label": "Self-hosted native speech model",

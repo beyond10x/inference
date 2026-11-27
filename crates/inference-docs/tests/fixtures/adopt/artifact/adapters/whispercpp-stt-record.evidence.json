@@ -4,14 +4,14 @@
     "project": "inference",
     "assessment": "whispercpp-stt-record",
     "assessor": "capability-record@1",
-    "candidate": "sha256:7d7f92e78c6d43931f9356d820c03571b6792c767f76e6fb9fde9820dba4604c",
+    "candidate": "sha256:0dd07298d86ea371e40463bfceac7d4ef44c7a3209f8ecc1eb9dd5ce1e6e5e93",
     "target": {
       "kind": "document",
       "class": "ci",
       "selection": "candidate",
       "identifiers": {
         "path": "adapters/inference-whispercpp/records/stt-i9-10900k-cpu.json",
-        "digest": "sha256:7d7f92e78c6d43931f9356d820c03571b6792c767f76e6fb9fde9820dba4604c",
+        "digest": "sha256:0dd07298d86ea371e40463bfceac7d4ef44c7a3209f8ecc1eb9dd5ce1e6e5e93",
         "digest_form": "bytes"
       }
     },

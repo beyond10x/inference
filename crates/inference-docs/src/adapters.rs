@@ -279,7 +279,7 @@ const BINDINGS: &[Binding] = &[
         ),
         environment: "`INFERENCE_SHERPA_ONNX_TTS_DIR`",
         licence: "code in the 29 libraries the native archive with text-to-speech links, each in the crate's `CODE_LICENSES` with the licence read: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, BSL-1.0, Zlib, Unlicense OR MIT (uni-algo), MPL-2.0 (Eigen, twice), GPL-3.0-or-later (espeak-ng, admitted for this adapter alone by the owner's exception), GPL-3.0-or-later AND Unicode-DFS-2016 (ucd-tools), GPL-3.0-or-later WITH GCC-exception-3.1 (pieces of libstdc++ and libgcc), LGPL-2.1-or-later (pieces of glibc); weights and voices Apache-2.0; the checkpoint carries espeak-ng's phoneme data, GPL-3.0",
-        release: Release::Next,
+        release: Release::Since("0.34.0"),
     },
 ];
 
@@ -308,7 +308,7 @@ pub const AGENT_CONVERSATION: &str = "ElevenLabs agent conversation";
 const NOTES: &[Note] = &[
     Note {
         binding: "OpenAI GPT-Live",
-        release: Release::Next,
+        release: Release::Since("0.34.0"),
         constants: &[
             ("CLOSE_TIMEOUT", "live.rs"),
             ("DEFAULT_READ_TIMEOUT", "config.rs"),
@@ -329,7 +329,7 @@ const NOTES: &[Note] = &[
     },
     Note {
         binding: "ElevenLabs streaming TTS",
-        release: Release::Next,
+        release: Release::Since("0.34.0"),
         constants: &[
             ("CLOSE_BOUND", "connection.rs"),
             ("CLOSE_GRACE", "synthesiser.rs"),
@@ -347,7 +347,7 @@ const NOTES: &[Note] = &[
     },
     Note {
         binding: AGENT_CONVERSATION,
-        release: Release::Next,
+        release: Release::Since("0.34.0"),
         constants: &[],
         text: "A model built with `ElevenLabsAgent::signed` opens at most one session. Its first \
                open that the binding does not refuse for its configuration, and whose runtime \
@@ -364,7 +364,7 @@ const NOTES: &[Note] = &[
     },
     Note {
         binding: "Cartesia Sonic streaming TTS",
-        release: Release::Next,
+        release: Release::Since("0.34.0"),
         constants: &[
             ("CLOSE_BOUND", "connection.rs"),
             ("CLOSE_GRACE", "synthesiser.rs"),
@@ -1343,17 +1343,17 @@ mod tests {
             .unwrap()
             .0;
         for expected in [
-            "- **ElevenLabs agent conversation** (On main, in the next release). A model built \
+            "- **ElevenLabs agent conversation** (Since 0.34.0). A model built \
              with `ElevenLabsAgent::signed` opens at most one session.",
             "`agent::AgentError::SignedUrlSpent`",
-            "- **OpenAI GPT-Live** (On main, in the next release). `LiveClient::with_close_timeout`",
+            "- **OpenAI GPT-Live** (Since 0.34.0). `LiveClient::with_close_timeout`",
             "`CLOSE_TIMEOUT` (15 s)",
             "`DEFAULT_READ_TIMEOUT` (30 s)",
             "With that default, a close timeout of 30 s or less changes nothing",
             "A graceful close waits for the server's closing event, `session.closed`, at most",
-            "- **ElevenLabs streaming TTS** (On main, in the next release). Dropping an \
+            "- **ElevenLabs streaming TTS** (Since 0.34.0). Dropping an \
              `ElevenLabsSynthesis`",
-            "- **Cartesia Sonic streaming TTS** (On main, in the next release). Dropping a \
+            "- **Cartesia Sonic streaming TTS** (Since 0.34.0). Dropping a \
              `CartesiaSynthesis`",
             "`CLOSE_GRACE` (5 ms)",
             "`CLOSE_BOUND` (1 s)",

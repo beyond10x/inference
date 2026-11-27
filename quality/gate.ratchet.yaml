@@ -91,7 +91,7 @@ assessments:
       command: ess specify validate --path ess
       conditions:
         ci:
-          tools: {ess: {version: "0.98.0"}}
+          tools: {ess: {version: "0.99.8"}}
     measurements:
       valid: {kind: exact, output: valid, scope: run}
       scenarios: {kind: exact, output: scenarios, scope: run, unit: scenarios, better: higher}
@@ -105,7 +105,7 @@ assessments:
       command: cargo test -p inference-testkit --features run --test conform
       conditions:
         ci:
-          tools: {ess: {version: "0.98.0"}}
+          tools: {ess: {version: "0.99.8"}}
     measurements:
       passing-scenarios:
         kind: exact
