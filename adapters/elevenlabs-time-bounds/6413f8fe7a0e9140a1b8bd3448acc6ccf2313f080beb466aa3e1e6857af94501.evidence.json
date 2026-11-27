@@ -1,0 +1,95 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "elevenlabs-time-bounds",
+    "assessor": "named-tests@1",
+    "candidate": "259a402961423fa89d4af4d2aa49849258940087",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "259a402961423fa89d4af4d2aa49849258940087"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-elevenlabs"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-elevenlabs/tests/closed_stream.rs::a_silent_server_is_a_stall_within_the_read_timeout",
+          "adapters/inference-elevenlabs/tests/stt.rs::a_handshake_never_answered_fails_within_the_connect_timeout",
+          "adapters/inference-elevenlabs/tests/stt.rs::a_server_silent_after_the_end_of_input_with_a_span_open_fails_as_stalled_within_the_bound",
+          "adapters/inference-elevenlabs/tests/agent_duplex.rs::no_metadata_within_the_deadline_fails_the_open_and_closes",
+          "adapters/inference-elevenlabs/tests/agent_duplex.rs::a_silent_connection_fails_the_session_at_its_read_deadline",
+          "adapters/inference-elevenlabs/tests/agent_duplex.rs::dropping_a_session_mid_stream_closes_the_connection_within_the_close_bound"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 6,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 6,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-elevenlabs/tests/closed_stream.rs::a_silent_server_is_a_stall_within_the_read_timeout",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-elevenlabs/tests/stt.rs::a_handshake_never_answered_fails_within_the_connect_timeout",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-elevenlabs/tests/stt.rs::a_server_silent_after_the_end_of_input_with_a_span_open_fails_as_stalled_within_the_bound",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-elevenlabs/tests/agent_duplex.rs::no_metadata_within_the_deadline_fails_the_open_and_closes",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-elevenlabs/tests/agent_duplex.rs::a_silent_connection_fails_the_session_at_its_read_deadline",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-elevenlabs/tests/agent_duplex.rs::dropping_a_session_mid_stream_closes_the_connection_within_the_close_bound",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46068915890"
+    }
+  }
+}

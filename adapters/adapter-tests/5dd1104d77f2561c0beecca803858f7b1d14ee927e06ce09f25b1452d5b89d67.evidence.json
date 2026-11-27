@@ -1,0 +1,434 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "adapter-tests",
+    "assessor": "package-tests@1",
+    "candidate": "259a402961423fa89d4af4d2aa49849258940087",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "259a402961423fa89d4af4d2aa49849258940087"
+    },
+    "inputs": {
+      "profile": {
+        "value": "default"
+      },
+      "packages": {
+        "value": [
+          "inference-audio-device",
+          "inference-aws",
+          "inference-cartesia",
+          "inference-deepgram",
+          "inference-deepslate",
+          "inference-elevenlabs",
+          "inference-llama-server",
+          "inference-openai",
+          "inference-phonic",
+          "inference-sherpa-onnx",
+          "inference-sherpa-onnx-tts",
+          "inference-whispercpp"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {
+      "tools": {
+        "rustc": "1.100.0",
+        "cargo-nextest": "0.9.143"
+      }
+    },
+    "coverage": {
+      "unit": "test",
+      "executed": 1308,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 1308,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-audio-device",
+        "value_type": "number",
+        "value": "129",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-audio-device",
+        "value_type": "number",
+        "value": "129",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-audio-device",
+        "value_type": "number",
+        "value": "2.028",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-audio-device::acknowledging a_sink_given_no_patience_waits_the_stated_two_seconds_for_a_stalled_speaker"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-aws",
+        "value_type": "number",
+        "value": "137",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-aws",
+        "value_type": "number",
+        "value": "137",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-aws",
+        "value_type": "number",
+        "value": "2.086",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-aws::nova_sonic_duplex until_fails_with_its_message_on_a_slow_stream_that_never_brings_the_event"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-cartesia",
+        "value_type": "number",
+        "value": "47",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-cartesia",
+        "value_type": "number",
+        "value": "47",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-cartesia",
+        "value_type": "number",
+        "value": "2.145",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-cartesia::adversary_w2_drop_backed_up a_synthesis_that_fails_on_a_backed_up_connection_ends_at_the_close_bound"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-deepgram",
+        "value_type": "number",
+        "value": "131",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-deepgram",
+        "value_type": "number",
+        "value": "131",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-deepgram",
+        "value_type": "number",
+        "value": "3.015",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-deepgram::bounds messages_trickling_in_after_close_stream_do_not_stretch_the_summary_deadline"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-deepslate",
+        "value_type": "number",
+        "value": "72",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-deepslate",
+        "value_type": "number",
+        "value": "72",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-deepslate",
+        "value_type": "number",
+        "value": "2.594",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-deepslate::adversary_rf1_tool_turn an_answer_in_a_new_turn_leaves_nothing_owed"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-elevenlabs",
+        "value_type": "number",
+        "value": "210",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-elevenlabs",
+        "value_type": "number",
+        "value": "210",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-elevenlabs",
+        "value_type": "number",
+        "value": "4.006",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-elevenlabs::security_u1_stt a_handshake_still_pending_when_the_read_timeout_after_input_passes_fails_the_recognition"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-llama-server",
+        "value_type": "number",
+        "value": "48",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-llama-server",
+        "value_type": "number",
+        "value": "48",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-llama-server",
+        "value_type": "number",
+        "value": "0.321",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-llama-server::cancellation a_server_silent_past_the_idle_limit_cancels_the_generation_with_the_deadline_error"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-openai",
+        "value_type": "number",
+        "value": "352",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-openai",
+        "value_type": "number",
+        "value": "352",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-openai",
+        "value_type": "number",
+        "value": "2.711",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-openai::adversary16_u1_live_split adversary16_live_close_after_a_stalled_write_keeps_its_documented_bound"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-phonic",
+        "value_type": "number",
+        "value": "34",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-phonic",
+        "value_type": "number",
+        "value": "34",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-phonic",
+        "value_type": "number",
+        "value": "1.864",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-phonic::adversary_rf1_phonic adversary_rf1_a_caller_running_its_tool_past_the_idle_limit_is_not_a_stalled_provider"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-sherpa-onnx",
+        "value_type": "number",
+        "value": "46",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-sherpa-onnx",
+        "value_type": "number",
+        "value": "46",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-sherpa-onnx",
+        "value_type": "number",
+        "value": "1.042",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-sherpa-onnx::licence no_gpl_phonemiser_is_linked"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-sherpa-onnx-tts",
+        "value_type": "number",
+        "value": "60",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-sherpa-onnx-tts",
+        "value_type": "number",
+        "value": "60",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-sherpa-onnx-tts",
+        "value_type": "number",
+        "value": "0.372",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-sherpa-onnx-tts::main open::opening_a_voice_on_a_library_without_tts_is_refused_naming_the_library"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-whispercpp",
+        "value_type": "number",
+        "value": "42",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-whispercpp",
+        "value_type": "number",
+        "value": "42",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-whispercpp",
+        "value_type": "number",
+        "value": "0.488",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-whispercpp::stt_network the_normal_dependency_tree_names_no_network_crate"
+        }
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46068915890"
+    }
+  },
+  "run": {
+    "started_at": "2026-11-27T21:23:58Z",
+    "ended_at": "2026-11-27T21:25:04Z"
+  }
+}

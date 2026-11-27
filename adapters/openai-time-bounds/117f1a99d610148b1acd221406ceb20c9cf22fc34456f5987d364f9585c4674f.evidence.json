@@ -1,0 +1,140 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "openai-time-bounds",
+    "assessor": "named-tests@1",
+    "candidate": "259a402961423fa89d4af4d2aa49849258940087",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "259a402961423fa89d4af4d2aa49849258940087"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-openai"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-openai/tests/transport_deadlines.rs::the_deadlines_are_stated_and_settable",
+          "adapters/inference-openai/tests/transport_deadlines.rs::a_server_that_never_answers_the_upgrade_fails_connect_within_the_deadline",
+          "adapters/inference-openai/tests/transport_deadlines.rs::a_server_that_never_answers_the_upgrade_fails_live_connect_within_the_deadline",
+          "adapters/inference-openai/tests/transport_deadlines.rs::a_peer_that_stops_reading_fails_a_write_within_the_deadline",
+          "adapters/inference-openai/tests/endpoint_literal.rs::endpoint_is_built_and_destructured_with_its_0_16_0_fields",
+          "adapters/inference-openai/tests/stall_bound.rs::realtime_stall_bound_holds_across_dropped_reads",
+          "adapters/inference-openai/tests/gpt_live_stall_bound.rs::live_stall_bound_holds_across_dropped_reads",
+          "adapters/inference-openai/tests/duplex.rs::a_silent_provider_fails_the_session_as_stalled_at_the_bound",
+          "adapters/inference-openai/tests/gpt_live.rs::a_client_keeps_the_documented_close_timeout_unless_given_another",
+          "adapters/inference-openai/tests/gpt_live.rs::close_gives_up_at_its_bound_across_every_read",
+          "adapters/inference-openai/tests/adversary_rf1_speech_transport.rs::a_server_that_never_answers_stalls_within_the_read_timeout"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 11,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 11,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/transport_deadlines.rs::the_deadlines_are_stated_and_settable",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/transport_deadlines.rs::a_server_that_never_answers_the_upgrade_fails_connect_within_the_deadline",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/transport_deadlines.rs::a_server_that_never_answers_the_upgrade_fails_live_connect_within_the_deadline",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/transport_deadlines.rs::a_peer_that_stops_reading_fails_a_write_within_the_deadline",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/endpoint_literal.rs::endpoint_is_built_and_destructured_with_its_0_16_0_fields",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/stall_bound.rs::realtime_stall_bound_holds_across_dropped_reads",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/gpt_live_stall_bound.rs::live_stall_bound_holds_across_dropped_reads",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/duplex.rs::a_silent_provider_fails_the_session_as_stalled_at_the_bound",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/gpt_live.rs::a_client_keeps_the_documented_close_timeout_unless_given_another",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/gpt_live.rs::close_gives_up_at_its_bound_across_every_read",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-openai/tests/adversary_rf1_speech_transport.rs::a_server_that_never_answers_stalls_within_the_read_timeout",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46068915890"
+    }
+  }
+}
