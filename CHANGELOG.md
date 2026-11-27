@@ -109,6 +109,24 @@
   `tokio::runtime::Handle`, spawns its work onto it and awaits the join handle. A tool that
   awaits a Tokio timer or socket directly panics ("there is no reactor running"), which fails
   that call with the panic's message; the model is given the failure and answers it.
+- `inference-docs` (not published) and CI: the records of each `check` run of a push to `main`
+  that succeeded are appended to a series on the ref `refs/ratchet/records` by the new workflow
+  `quality series`. Its job `append` (no write permission) runs `inference-docs series-append` on
+  the run's artifact and commits; its job `push`, which runs no code of the tree and is the ref's
+  one writer and the only job with `contents: write`, pushes that commit without force after
+  checking it only adds records. `series-append` writes each record not in the series yet to
+  `<plan>/<assessment>/<SHA-256 of its bytes>.evidence.json`, never changes a file, and refuses,
+  writing nothing, a file of the artifact that is no record of a listed assessment.
+  `inference-docs history` and `task quality-history ASSESSMENT=… [MEASURE=…]` print a measure's
+  values over the runs, oldest first. The ref is unproven on the forge until the first run after
+  the merge.
+- `inference-docs` (not published): `task quality-live` runs the keyed live measures of OpenAI
+  and ElevenLabs on the workstation, outside `task check` and every workflow. It prints the hosted
+  calls of a run per provider and calls nothing without `YES=1`. It builds each measure through
+  the build pool without a key, then runs the built test or example locally under `slot --local`
+  with only its own key, read from the Secret Service with a bound of 10 s. It writes records with
+  `inference-docs assess --class local` to the git-ignored `.ratchet/records/`; the output of
+  `elevenlabs-live-example` is kept and has no record yet.
 
 ### Changed
 
