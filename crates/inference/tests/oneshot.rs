@@ -815,10 +815,11 @@ const OVERFLOWING: usize = 24;
 /// What the error of a run failed by a reply the feedback edge cannot hold says.
 const FULL: &str = OVERFULL;
 
-/// A chat whose tool loop failed an edge: `send` returns the error of the failed run, and
+/// A chat whose model's reply ends with more calls than the feedback edge holds: the model's
+/// node fails before it sends any of them, `send` returns the error of the failed run, and
 /// `close` returns.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_chat_whose_tool_loop_fails_an_edge_returns_the_error_and_closes() {
+async fn a_chat_whose_reply_exceeds_the_feedback_edge_returns_the_error_and_closes() {
     let _held = SESSIONS.lock().await;
     let tool = lookup();
     let stack = chatting(&calling_round(&tool, OVERFLOWING));
@@ -841,10 +842,10 @@ async fn a_chat_whose_tool_loop_fails_an_edge_returns_the_error_and_closes() {
     one_closed_session_since(&before);
 }
 
-/// A text agent whose tool loop failed an edge: its stream yields `Event::Error` naming the
-/// failed run, and `close` returns.
+/// A text agent whose model's reply ends with more calls than the feedback edge holds: its
+/// stream yields `Event::Error` naming the failed run, and `close` returns.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_text_agent_whose_tool_loop_fails_an_edge_tells_the_error_and_closes() {
+async fn a_text_agent_whose_reply_exceeds_the_feedback_edge_tells_the_error_and_closes() {
     use futures_util::StreamExt;
     use inference::{Agent, Event};
 
@@ -884,10 +885,11 @@ async fn a_text_agent_whose_tool_loop_fails_an_edge_tells_the_error_and_closes()
         .expect("close returns within the limit");
 }
 
-/// A `chat` run opened one layer down whose tool loop failed an edge: its driver ends with the
-/// failed run, with no close asked for, and the session's stream ends.
+/// A `chat` run opened one layer down whose model's reply ends with more calls than the
+/// feedback edge holds: its driver ends with the failed run, with no close asked for, and the
+/// session's stream ends.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_chat_run_whose_tool_loop_fails_an_edge_ends_its_driver() {
+async fn a_chat_run_whose_reply_exceeds_the_feedback_edge_ends_its_driver() {
     use inference::core::envelope::{EventEnvelope, EventId, Timebase};
     use inference::core::id::{NodeId, StreamId};
     use inference::facade::live::LiveSessions;

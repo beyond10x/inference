@@ -240,8 +240,9 @@ const SHORT: Duration = Duration::from_secs(1);
 /// What a chat whose model's first request ends with one round of `count` calls came to, in
 /// each of `conversations` conversations that did not answer the round within [`SHORT`], up to
 /// the third of them: the
-/// tool loop "may return a call to the model" four times (`MAX_TOOL_ITERATIONS`), and a round of
-/// two is answered (`tests/adversary_w2u1_one_call.rs`).
+/// tool loop "may return calls to the model for one input" four times (`MAX_TOOL_ITERATIONS`),
+/// the calls of one reply counted once, and a round of two is answered
+/// (`tests/adversary_w2u1_one_call.rs`).
 async fn rounds_not_answered(count: usize, conversations: usize) -> Vec<String> {
     let cities = &["Berlin", "Paris", "Rome", "Oslo"][..count];
     let whole = format!("{PROMPT}{}", answer().to_string().repeat(count));

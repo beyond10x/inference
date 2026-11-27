@@ -760,11 +760,7 @@ fn proposals_naming_no_triggering_event_count_per_generation_whatever_span_they_
                 _ => Err(None),
             })
     };
-    let verdicts: Vec<_> = unmarked
-        .iter()
-        .chain([&marked])
-        .map(|call| verdict(call))
-        .collect();
+    let verdicts: Vec<_> = unmarked.iter().chain([&marked]).map(verdict).collect();
     assert_eq!(
         verdicts,
         [
