@@ -496,7 +496,7 @@ fn a_report_that_does_not_hold_what_the_assessment_reads_is_refused() {
             "classname=\"inference-whispercpp::stt_record\" timestamp=\"2026-11-24T21:02:07.000+01:00\" time=\"0.334\"/>",
             "classname=\"inference-whispercpp::stt_record\" timestamp=\"2026-11-24T21:02:07.000+01:00\" time=\"0.000\"><skipped/></testcase>",
         )
-        .replace("tests=\"21\" skipped=\"1\"", "tests=\"21\" skipped=\"2\""),
+        .replace("tests=\"22\" skipped=\"1\"", "tests=\"22\" skipped=\"2\""),
     )
     .expect("the report is written");
     let record_test = "adapters/inference-whispercpp/tests/stt_record.rs::the_resource_profile_is_a_measured_cpu_profile";
@@ -543,7 +543,7 @@ fn a_report_that_does_not_hold_what_the_assessment_reads_is_refused() {
         + "</testsuite>\n".len();
     fs::write(
         &no_phonic,
-        format!("{}{}", &full[..start], &full[end..]).replace("tests=\"21\"", "tests=\"20\""),
+        format!("{}{}", &full[..start], &full[end..]).replace("tests=\"22\"", "tests=\"21\""),
     )
     .expect("the report is written");
     from_check_run(&root, "adapter-tests", &no_phonic).ended(
@@ -1539,22 +1539,22 @@ fn a_report_whose_root_counts_disagree_with_the_cases_read_is_refused() {
         ],
     );
     let full = fixture_text("report.junit.xml");
-    let root_line = "tests=\"21\" skipped=\"1\" failures=\"1\" errors=\"0\"";
+    let root_line = "tests=\"22\" skipped=\"1\" failures=\"1\" errors=\"0\"";
     for (counts, said) in [
         (
-            "tests=\"22\" skipped=\"1\" failures=\"1\" errors=\"0\"",
-            "its root says tests=\"22\", and it holds 21 test cases",
+            "tests=\"23\" skipped=\"1\" failures=\"1\" errors=\"0\"",
+            "its root says tests=\"23\", and it holds 22 test cases",
         ),
         (
-            "tests=\"21\" skipped=\"0\" failures=\"1\" errors=\"0\"",
+            "tests=\"22\" skipped=\"0\" failures=\"1\" errors=\"0\"",
             "its root says skipped=\"0\", and it holds 1 test case with <skipped>",
         ),
         (
-            "tests=\"21\" skipped=\"1\" failures=\"2\" errors=\"0\"",
+            "tests=\"22\" skipped=\"1\" failures=\"2\" errors=\"0\"",
             "its root says failures=\"2\", and it holds 1 test case with <failure>",
         ),
         (
-            "tests=\"21\" skipped=\"1\" failures=\"1\" errors=\"1\"",
+            "tests=\"22\" skipped=\"1\" failures=\"1\" errors=\"1\"",
             "its root says errors=\"1\", and it holds 0 test cases with <error>",
         ),
     ] {

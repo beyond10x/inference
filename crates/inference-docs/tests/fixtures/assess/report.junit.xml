@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuites name="nextest-run" tests="21" skipped="1" failures="1" errors="0" uuid="0b5c8a52-4f1e-4d7a-9c3e-2a6f1d0e7b11" timestamp="2026-11-24T21:02:05.400+01:00" time="101.000">
+<testsuites name="nextest-run" tests="22" skipped="1" failures="1" errors="0" uuid="0b5c8a52-4f1e-4d7a-9c3e-2a6f1d0e7b11" timestamp="2026-11-24T21:02:05.400+01:00" time="101.000">
     <testsuite name="inference-core" tests="2" skipped="0" errors="0" failures="0">
         <testcase name="audio::tests::a_frame_keeps_its_rate" classname="inference-core" timestamp="2026-11-24T21:02:05.500+01:00" time="0.002"/>
         <testcase name="stream::tests::a_slow_consumer_sees_every_item" classname="inference-core" timestamp="2026-11-24T21:02:05.500+01:00" time="8.011"/>
@@ -55,6 +55,9 @@ assertion `left == right` failed: the recognition &lt;failed&gt; &amp; ended</fa
     </testsuite>
     <testsuite name="inference-sherpa-onnx::stt_record" tests="1" skipped="0" errors="0" failures="0">
         <testcase name="the_resource_profile_is_a_measured_cpu_profile" classname="inference-sherpa-onnx::stt_record" timestamp="2026-11-24T21:02:06.900+01:00" time="0.494"/>
+    </testsuite>
+    <testsuite name="inference-sherpa-onnx-tts::main" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="licence::every_code_licence_entry_is_inside_the_licence_rule_or_admitted_by_the_owner" classname="inference-sherpa-onnx-tts::main" timestamp="2026-11-24T21:02:06.950+01:00" time="0.015"/>
     </testsuite>
     <testsuite name="inference-whispercpp::stt_record" tests="1" skipped="0" errors="0" failures="0">
         <testcase name="the_resource_profile_is_a_measured_cpu_profile" classname="inference-whispercpp::stt_record" timestamp="2026-11-24T21:02:07.000+01:00" time="0.334"/>

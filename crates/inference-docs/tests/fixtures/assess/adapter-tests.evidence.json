@@ -27,6 +27,7 @@
           "inference-openai",
           "inference-phonic",
           "inference-sherpa-onnx",
+          "inference-sherpa-onnx-tts",
           "inference-whispercpp"
         ]
       }
@@ -40,11 +41,11 @@
     },
     "coverage": {
       "unit": "test",
-      "executed": 14,
+      "executed": 15,
       "skipped": 0,
       "not_run": 0,
       "unsupported": 0,
-      "passed": 13,
+      "passed": 14,
       "failed": 1
     },
     "results": [
@@ -356,6 +357,37 @@
         "samples": 1,
         "details": {
           "test": "inference-sherpa-onnx::stt_record the_resource_profile_is_a_measured_cpu_profile"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-sherpa-onnx-tts",
+        "value_type": "number",
+        "value": "1",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-sherpa-onnx-tts",
+        "value_type": "number",
+        "value": "1",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-sherpa-onnx-tts",
+        "value_type": "number",
+        "value": "0.015",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-sherpa-onnx-tts::main licence::every_code_licence_entry_is_inside_the_licence_rule_or_admitted_by_the_owner"
         }
       },
       {

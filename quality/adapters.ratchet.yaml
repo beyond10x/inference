@@ -96,6 +96,7 @@ assessments:
         - inference-openai
         - inference-phonic
         - inference-sherpa-onnx
+        - inference-sherpa-onnx-tts
         - inference-whispercpp
     target: {kind: revision, environments: [local, ci], selection: candidate}
     observation:

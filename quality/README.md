@@ -381,7 +381,11 @@ adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for
   are not in the order of the directories;
 - a section does not name a file committed under `records/` or `capability/` of its adapter;
 - the table of a section lacks a row for a measure with one value per package, or a row differs
-  from the record: the value, the unit, the test, or the run it was read from;
+  from the record: the value, the unit, the test, or the run it was read from. A crate the plan
+  names and the committed record does not hold yet has, in the place of its rows, the sentence
+  "No adopted record holds this crate yet: its rows come with the next run adopted from
+  `main`."; the sentence with a row, the sentence for a crate the record holds or the plan does
+  not name, and a row for a crate the record does not hold are each refused;
 - one of the three pages names a test, by its function and its file, and the file does not
   exist or has no line that starts a function of that name: `fn`, the name and `(`, with
   nothing before them but `pub`, `async`, `const` or `unsafe`. The name in a comment or in a
