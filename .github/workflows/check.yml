@@ -93,8 +93,8 @@ jobs:
       - name: Install ess
         if: steps.scope.outputs.gate == 'full'
         env:
-          ESS_VERSION: "0.99.8"
-          ESS_SHA256: 1ecbdde674334ecfff7ec1f442910c83baaeeda4c5b23f84aba7549306999e28
+          ESS_VERSION: "0.99.9"
+          ESS_SHA256: 7cb54944d7f421c3da4b95c9f3ca59e79da4b62352e0f92f5d7ebac83b1588d5
         run: |
           set -euo pipefail
           asset="ess-$ESS_VERSION-x86_64-unknown-linux-gnu.tar.gz"

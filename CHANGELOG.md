@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `ess` pin moves from 0.99.8 to 0.99.9: CI, the documentation workflow and the testkit's
+  `ess-conformance` and `ess-primitives` tags.
+
 ## [0.34.0] — 2026-11-27
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these
