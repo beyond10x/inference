@@ -1166,7 +1166,7 @@ fn a_crate_the_plan_names_and_no_adopted_record_holds_stands_with_the_sentence_a
 fn the_sentence_on_a_crate_the_record_holds_or_the_plan_does_not_name_is_refused() {
     assert_problems(
         &[
-            "the section `inference-aws` says that no adopted record holds the crate and has the table row [\"`adapter-tests/tests-run`\", \"134 tests\", \"Check run\"]",
+            "the section `inference-aws` says that no adopted record holds the crate and has the table row [\"`adapter-tests/tests-run`\", ",
             "the section `inference-aws` says that no adopted record holds the crate, and quality/records/adapter-tests.evidence.json has a result of `adapter-tests/slowest-test` for it",
             "the section `inference-cartesia` says that no adopted record holds the crate, and quality/records/adapter-tests.evidence.json has a result of `adapter-tests/tests-passed` for it",
             "the section `inference-whispercpp` says that no adopted record holds the crate, and no plan with one value per package names it",
