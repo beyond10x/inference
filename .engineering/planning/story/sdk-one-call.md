@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sdk-one-call
 kind: story
-status: active
+status: implemented
 title: transcribe, chat, speak and talk work in one call, with Chat, Transcriber and Voice handles
 relations:
 - decomposes: epic:sdk
@@ -27,10 +27,11 @@ scope:
   path: crates/inference/src/voice.rs
 - confidence: cited
   path: crates/inference/tests/oneshot.rs
-revision: 24
+revision: 25
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-24T13:08:07Z", actor: "human:operator", revision: 12}
 - {from: "proposed", to: "active", at: "2026-11-24T13:08:07Z", actor: "human:operator", revision: 13}
+- {from: "active", to: "implemented", at: "2026-11-27T09:18:12Z", actor: "human:operator", revision: 25, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 ## Context
 
