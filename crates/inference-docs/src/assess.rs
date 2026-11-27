@@ -1445,7 +1445,7 @@ fn instant(text: &str) -> Option<i128> {
 }
 
 /// `nanos` since 1970 as a UTC time to the second, `2026-11-24T20:02:05Z`.
-fn utc(nanos: i128) -> String {
+pub(crate) fn utc(nanos: i128) -> String {
     let seconds = i64::try_from(nanos.div_euclid(1_000_000_000)).unwrap_or_default();
     let (days, second) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
     let (year, month, day) = civil_from_days(days);

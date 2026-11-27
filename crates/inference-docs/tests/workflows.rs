@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod ignores;
+mod live;
 mod quality;
 
 fn root() -> PathBuf {

@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized] target(s) in 0.42s
+     Running tests/live_gpt.rs (target/debug/deps/live_gpt-1b2c3d4e5f678901)
+
+running 3 tests
+started in 812 ms: s-1
+t=0.9 audio 4800 bytes, peak 2100
+t=1.1 transcript "Paris."
+closed in 95 ms: Ok(Closed)
+heard: "What is the capital of France?"
+said: "Paris."
+audio: 96000 bytes (2000 ms), voiced 48000 bytes (1000 ms)
+last running usage: Some(6.0) s
+final usage: 6.0 s, reason "client"
+test the_client_hears_speech_and_answers_with_audio_and_transcript ... ok
+heard: "What is the capital of France?"
+answered: "Paris." (48000 samples at 24 kHz, 1 response)
+voice seconds while open: 6.0
+final usage: 6.0 voice seconds, reason "client"
+backend usage: none reported (no delegation)
+test one_spoken_exchange_through_the_duplex_contract ... ok
+native_duplex evidence: Tested { marker_heard: true }
+test native_duplex_evidence_of_gpt_live ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.20s
+
