@@ -406,6 +406,51 @@ fn the_code_licence_list_is_the_25_libraries_read_for_the_archive_without_text_t
     );
 }
 
+/// The identifiers of the reading the repository's licence rule for local adapters admits for
+/// backend code (`AGENTS.md`): Apache-2.0, MIT or more permissive.
+const INSIDE_THE_RULE: [&str; 6] = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "Zlib",
+];
+
+/// The entries outside that rule the owner admitted, each only as built into the upstream
+/// archives the build fetches (`AGENTS.md`, the owner's decision of 2026-11-27): Eigen, and the
+/// toolchain pieces under their runtime and linking exceptions.
+const ADMITTED_OUTSIDE_THE_RULE: [(&str, &str); 4] = [
+    ("Eigen", "MPL-2.0"),
+    ("Eigen in onnxruntime", "MPL-2.0"),
+    (
+        "libstdc++ and libgcc",
+        "GPL-3.0-or-later WITH GCC-exception-3.1",
+    ),
+    ("glibc", "LGPL-2.1-or-later"),
+];
+
+#[test]
+fn every_code_licence_entry_is_inside_the_licence_rule_or_admitted_by_the_owner() {
+    let outside: Vec<(&str, &str)> = CODE_LICENSES
+        .iter()
+        .filter(|entry| {
+            !entry
+                .license
+                .split(' ')
+                .filter(|token| !matches!(*token, "AND" | "OR"))
+                .all(|identifier| INSIDE_THE_RULE.contains(&identifier))
+        })
+        .map(|entry| (entry.component, entry.license))
+        .filter(|entry| !ADMITTED_OUTSIDE_THE_RULE.contains(entry))
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "every entry is under {INSIDE_THE_RULE:?} alone or admitted by the owner as \
+         {ADMITTED_OUTSIDE_THE_RULE:?}; not so: {outside:?}"
+    );
+}
+
 #[test]
 fn the_code_licence_constant_is_the_list_joined() {
     let joined = CODE_LICENSES

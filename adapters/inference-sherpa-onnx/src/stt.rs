@@ -156,6 +156,12 @@ pub struct CodeLicense {
 ///   "unlimited permission to link the compiled version of this file with other programs, and
 ///   to distribute those programs without any restriction coming from the use of this file"
 ///   (header of `stdlib/atexit.c` at the tag).
+/// * Eigen (MPL-2.0), the pieces of the compiler's runtime and those of the C library are outside
+///   the repository's licence rule for local adapters, Apache-2.0, MIT or more permissive. The
+///   owner's decision of 2026-11-27 admits them only as built into the upstream archives the
+///   build fetches, never committed or distributed by this repository; the compiler's runtime
+///   and the C library under their runtime and linking exceptions. Every other entry is inside
+///   the rule.
 ///
 /// What the reading did not determine: the versions are those the build files of sherpa-onnx
 /// 1.13.8 and of the onnxruntime commit name, read from those files and not observed in a

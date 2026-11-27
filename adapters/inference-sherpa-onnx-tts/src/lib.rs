@@ -203,6 +203,13 @@ pub struct CodeLicense {
 ///   "unlimited permission to link the compiled version of this file with other programs, and
 ///   to distribute those programs without any restriction coming from the use of this file"
 ///   (header of `stdlib/atexit.c` at the tag).
+/// * Besides espeak-ng, Eigen (MPL-2.0), ucd-tools, the pieces of the compiler's runtime and
+///   those of the C library are outside the repository's licence rule for local adapters,
+///   Apache-2.0, MIT or more permissive. The owner's decision of 2026-11-27 admits them only as
+///   built into the upstream archives the build fetches, never committed or distributed by this
+///   repository: ucd-tools as part of the espeak-ng exception, under its conditions, and the
+///   compiler's runtime and the C library under their runtime and linking exceptions. Every
+///   other entry is inside the rule.
 ///
 /// The crate documentation says what the reading did not determine.
 pub const CODE_LICENSES: [CodeLicense; 29] = [

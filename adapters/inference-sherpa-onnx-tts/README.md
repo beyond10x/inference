@@ -115,6 +115,12 @@ approval-record:sherpa-tts-gpl-phonemiser, with these bounds:
   `code_license` of the model the synthesiser declares. That field names every row above, each as
   `<licence> (<component>)`.
 
+Five more rows are outside that rule: Eigen and Eigen in onnxruntime (MPL-2.0), ucd-tools,
+libstdc++ and libgcc, and glibc. The owner's decision of 2026-11-27 admits them only as built into
+the upstream archives the build fetches, never committed or distributed by this repository:
+ucd-tools as part of the espeak-ng exception, under the bounds above, and the compiler's runtime
+and the C library under their runtime and linking exceptions. Every other row is inside the rule.
+
 Who builds a program on this adapter and distributes it with that library distributes code under
 the GPL, version 3 or later, and decides for themselves what follows from it.
 

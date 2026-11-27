@@ -119,6 +119,15 @@ If you need isolation, run the process in a network namespace or behind a firewa
   it was read and the URL of its text; the README has the table and says what the reading did
   not determine. The speech-recognition adapter lists the 25 libraries of the archive built
   without TTS the same way.
+- Some libraries built into the upstream sherpa-onnx and onnxruntime archives are under other
+  licences and are admitted only as built into those archives, which your build fetches; none is
+  committed to or distributed by this repository. Eigen, MPL-2.0, is in both archives, so both
+  sherpa-onnx adapters link it. ucd-tools, GPL-3.0-or-later, is a directory of the espeak-ng
+  sources in the archive built with TTS and falls under the espeak-ng exception. The pieces of
+  the GCC runtime (GPL-3.0-or-later with the GCC runtime library exception) and the static pieces
+  of glibc (LGPL-2.1-or-later) are admitted under their runtime and linking exceptions. Each is a
+  licence entry of its own in the lists above. Any other licence of backend code needs an
+  explicit decision.
 - Pinned weights are CC BY 4.0, or more permissive.
 - Each checkpoint's licence, source URL and hash go into the adapter's capability record when it is
   adopted. Any other licence needs an explicit decision for that checkpoint.
