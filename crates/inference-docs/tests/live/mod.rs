@@ -1,7 +1,8 @@
 //! `task quality-live`, the lane that runs the keyed live measures of
 //! `quality/adapters.ratchet.yaml` on this machine (`inference-docs live`), held without a hosted
 //! call and without a key: a fake `secret-tool` first on `PATH` answers the attributes of the two
-//! keys with fixed values that are no keys and fails for any other call; a fake `cargo` writes
+//! keys with keychain entries of fixed values that are no keys, in the layout `secretsctl` writes
+//! (a format byte, a 16-byte version, the value), and fails for any other call; a fake `cargo` writes
 //! down each build and its environment and answers with cargo's JSON, naming a stub as the
 //! executable of each measure; a fake `slot` writes down each run and starts the rest of its
 //! arguments after `--local`; the stubs print the outputs under `tests/fixtures/live/`, print the
@@ -30,6 +31,25 @@ const OPENAI_VALUE: &str = "not-a-key-openai-0001";
 const ELEVENLABS_VALUE: &str = "not-a-key-elevenlabs-0002";
 /// What the shell of a case holds in the two key variables before the lane starts.
 const SHELL_VALUE: &str = "not-a-key-from-the-shell-0003";
+/// The version of every entry the fake `secret-tool` gives: 16 bytes, where `secretsctl` writes
+/// a UUIDv7, here a fixed text that no output, record or environment may hold.
+const VERSION: &[u8; 16] = b"v7-fixed-version";
+/// The variable `inference-elevenlabs` reads the host of a key's data from.
+const RESIDENCY: &str = "ELEVENLABS_RESIDENCY";
+
+/// A keychain entry as `secretsctl` writes one (`secrets-keychain`, `seal`): the format byte
+/// `format` (1 there), [`VERSION`] and `value`.
+fn entry(format: u8, value: &[u8]) -> Vec<u8> {
+    let mut entry = vec![format];
+    entry.extend_from_slice(VERSION);
+    entry.extend_from_slice(value);
+    entry
+}
+
+/// [`VERSION`] as text, to look for in outputs.
+fn version() -> &'static str {
+    std::str::from_utf8(VERSION).expect("the version is text")
+}
 
 /// The four measures, the key variable each command reads, and whether the lane writes a record
 /// of it.
@@ -120,9 +140,13 @@ fn executable(path: &Path, text: &str) {
 }
 
 /// What a key lookup of the fake `secret-tool` answers.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Key {
+    /// The entry `secretsctl` writes for this value: format byte 1, [`VERSION`], the value.
     Given(&'static str),
+    /// These bytes as the whole entry.
+    Entry(Vec<u8>),
+    /// Exit 0 with nothing on standard output.
     Empty,
     Missing,
 }
@@ -177,10 +201,16 @@ impl Case {
             &fs::read_to_string(fixture("assess/toolchain.toml")).expect("the pin is read"),
         );
         let calls = dir.join("calls");
-        let answer = |key: Key| match key {
-            Key::Given(value) => format!("printf '%s' '{value}'"),
-            Key::Empty => "exit 0".to_owned(),
-            Key::Missing => "exit 1".to_owned(),
+        let answer = |key: Key, name: &str| {
+            let bytes = match key {
+                Key::Given(value) => entry(1, value.as_bytes()),
+                Key::Entry(bytes) => bytes,
+                Key::Empty => return "exit 0".to_owned(),
+                Key::Missing => return "exit 1".to_owned(),
+            };
+            let file = dir.join(format!("entry-{name}"));
+            fs::write(&file, bytes).expect("the entry is written");
+            format!("cat '{}'", file.display())
         };
         executable(
             &dir.join("bin/secret-tool"),
@@ -192,8 +222,8 @@ impl Case {
                  {ELEVENLABS_KEY}) {} ;;\n\
                  *) exit 1 ;;\n\
                  esac\n",
-                answer(openai),
-                answer(elevenlabs),
+                answer(openai, "openai"),
+                answer(elevenlabs, "elevenlabs"),
                 calls = calls.display(),
             ),
         );
@@ -202,8 +232,8 @@ impl Case {
                 &dir.join("stubs").join(measure),
                 &format!(
                     "#!/bin/sh\nprintf '%s\\n' '{measure}' >> '{calls}'\n\
-                     printf 'OPENAI_API_KEY=%s\\nELEVENLABS_API_KEY=%s\\nINFERENCE_OPENAI_KEY_SOURCE=%s\\n' \
-                     \"${{OPENAI_API_KEY-<unset>}}\" \"${{ELEVENLABS_API_KEY-<unset>}}\" \"${{INFERENCE_OPENAI_KEY_SOURCE-<unset>}}\" > '{seen}'\n\
+                     printf 'OPENAI_API_KEY=%s\\nELEVENLABS_API_KEY=%s\\nINFERENCE_OPENAI_KEY_SOURCE=%s\\n{RESIDENCY}=%s\\n' \
+                     \"${{OPENAI_API_KEY-<unset>}}\" \"${{ELEVENLABS_API_KEY-<unset>}}\" \"${{INFERENCE_OPENAI_KEY_SOURCE-<unset>}}\" \"${{{RESIDENCY}-<unset>}}\" > '{seen}'\n\
                      printf 'PWD=%s\\n' \"$(pwd)\" >> '{seen}'\n\
                      printf 'the key given: %s\\n' \"${{{variable}-}}\" >&2\n\
                      cat '{output}'\n",
@@ -294,6 +324,17 @@ impl Case {
 
     /// [`Case::run`] with `more` arguments.
     fn run_with(&self, yes: Option<&str>, voice: Option<&str>, more: &[&str]) -> Lane {
+        self.run_in(yes, voice, more, &[])
+    }
+
+    /// [`Case::run_with`] with the variables `set` in the lane's environment besides.
+    fn run_in(
+        &self,
+        yes: Option<&str>,
+        voice: Option<&str>,
+        more: &[&str],
+        set: &[(&str, &str)],
+    ) -> Lane {
         let path = format!(
             "{}:{}",
             self.dir.join("bin").display(),
@@ -310,7 +351,9 @@ impl Case {
             .env("ELEVENLABS_API_KEY", SHELL_VALUE)
             .env_remove("INFERENCE_OPENAI_KEY_SOURCE")
             .env_remove("YES")
-            .env_remove("ELEVENLABS_VOICE_ID");
+            .env_remove("ELEVENLABS_VOICE_ID")
+            .env_remove(RESIDENCY)
+            .envs(set.iter().copied());
         if let Some(yes) = yes {
             command.env("YES", yes);
         }
@@ -810,21 +853,26 @@ fn two_runs_keep_two_run_directories_and_neither_overwrites_the_other() {
     }
 }
 
-/// A key the Secret Service gives with a line end, spaces and `=` reaches its command as it is
-/// stored, without the line end, and stays out of every output.
+/// A key the Secret Service gives with a line end after its entry, spaces and `=` reaches its
+/// command as it is stored, without the line end, and stays out of every output.
 #[test]
 fn a_key_given_with_a_line_end_reaches_its_command_exactly() {
     const SPACED: &str = "not a=key 0004";
-    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Missing);
-    executable(
-        &case.dir.join("bin/secret-tool"),
-        &format!("#!/bin/sh\n[ \"$5\" = '{OPENAI_KEY}' ] || exit 1\nprintf '%s\\n' '{SPACED}'\n"),
+    for end in ["\n", "\r\n"] {
+        a_key_given_with(end, SPACED);
+    }
+}
+
+fn a_key_given_with(end: &str, spaced: &'static str) {
+    let case = Case::new(
+        Key::Entry(entry(1, format!("{spaced}{end}").as_bytes())),
+        Key::Missing,
     );
     let exact = case.dir.join("exact");
     executable(
         &case.dir.join("stubs/openai-speech-live"),
         &format!(
-            "#!/bin/sh\nif [ \"$OPENAI_API_KEY\" = '{SPACED}' ]; then echo exact; else echo other; fi > '{}'\n\
+            "#!/bin/sh\nif [ \"$OPENAI_API_KEY\" = '{spaced}' ]; then echo exact; else echo other; fi > '{}'\n\
              printf 'the key given: %s\\n' \"$OPENAI_API_KEY\" >&2\ncat '{}'\n",
             exact.display(),
             fixture("live/openai-speech-live.out").display()
@@ -837,9 +885,9 @@ fn a_key_given_with_a_line_end_reaches_its_command_exactly() {
         "exact",
         "the command sees the key without the line end"
     );
-    assert!(!lane.stdout.contains(SPACED) && !lane.stderr.contains(SPACED));
+    assert!(!lane.stdout.contains(spaced) && !lane.stderr.contains(spaced));
     for (path, text) in case.kept() {
-        assert!(!text.contains(SPACED), "{} holds the key", path.display());
+        assert!(!text.contains(spaced), "{} holds the key", path.display());
     }
 }
 
@@ -1169,8 +1217,9 @@ fn a_secret_tool_that_does_not_answer_within_its_bound_skips_its_provider_by_nam
         &format!(
             "#!/bin/sh\nprintf 'secret-tool %s\\n' \"$*\" >> '{calls}'\n\
              [ \"$5\" = '{OPENAI_KEY}' ] && exec sleep 30\n\
-             [ \"$5\" = '{ELEVENLABS_KEY}' ] && printf '%s' '{ELEVENLABS_VALUE}'\n",
-            calls = case.dir.join("calls").display()
+             [ \"$5\" = '{ELEVENLABS_KEY}' ] && cat '{entry}'\n",
+            calls = case.dir.join("calls").display(),
+            entry = case.dir.join("entry-elevenlabs").display(),
         ),
     );
     let started = std::time::Instant::now();
@@ -1195,4 +1244,167 @@ fn a_secret_tool_that_does_not_answer_within_its_bound_skips_its_provider_by_nam
         help.contains("--key-timeout-ms") && help.contains("[default: 10000]"),
         "{help}"
     );
+}
+
+/// The text of every file a case left, besides the entries the fake `secret-tool` gives, with
+/// its path, and the lane's standard output and error.
+fn everything(case: &Case, lane: &Lane) -> Vec<(String, String)> {
+    fn walk(directory: &Path, into: &mut Vec<(String, String)>) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                walk(&path, into);
+            } else if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("entry-"))
+            {
+                let text =
+                    String::from_utf8_lossy(&fs::read(&path).expect("a file is read")).into_owned();
+                into.push((path.display().to_string(), text));
+            }
+        }
+    }
+    let mut all = vec![
+        ("stdout".to_owned(), lane.stdout.clone()),
+        ("stderr".to_owned(), lane.stderr.clone()),
+    ];
+    walk(&case.dir, &mut all);
+    all
+}
+
+/// `secretsctl` stores a key as one keychain entry: the format byte 1, a 16-byte version and the
+/// value. Each command gets the value alone, and the version reaches no output, record, build,
+/// fetch or run.
+#[test]
+fn a_keychain_entry_gives_its_command_exactly_its_value_and_its_version_reaches_nothing() {
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    let lane = case.run(Some("1"), Some("voice-0001"));
+    assert_eq!(
+        lane.status,
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        lane.stdout,
+        lane.stderr
+    );
+    for (measure, variable, _) in MEASURES {
+        let value = if variable == "OPENAI_API_KEY" {
+            OPENAI_VALUE
+        } else {
+            ELEVENLABS_VALUE
+        };
+        assert_eq!(
+            case.seen(measure)[variable],
+            value,
+            "{measure} sees its value"
+        );
+    }
+    lane.says(
+        "quality-live: 3 records written under .ratchet/records/, 0 measures skipped, 0 failed",
+    );
+    for (path, text) in everything(&case, &lane) {
+        assert!(!text.contains(version()), "{path} holds the version");
+    }
+}
+
+/// An entry `secretsctl` could not have written, or one without a value, gives no key: its
+/// provider's measures are skipped with the line that names the username, nothing of theirs is
+/// built or run, no byte of the entry is printed or written, and the other provider runs.
+#[test]
+fn an_entry_in_another_layout_or_without_a_value_gives_no_key_and_nothing_is_called() {
+    const MALFORMED: &str = "not-a-key-malformed-0006";
+    let short = entry(1, b"")[..16].to_vec();
+    let cases: [(&str, Vec<u8>); 7] = [
+        ("format byte 0", entry(0, MALFORMED.as_bytes())),
+        ("format byte 2", entry(2, MALFORMED.as_bytes())),
+        ("16 bytes", short),
+        ("an empty value", entry(1, b"")),
+        ("a value of a line end only", entry(1, b"\r\n")),
+        ("a value of spaces only", entry(1, b"   ")),
+        (
+            "a value that is not UTF-8",
+            entry(1, &[MALFORMED.as_bytes(), b"\xff\xfe"].concat()),
+        ),
+    ];
+    for (what, bytes) in cases {
+        let case = Case::new(Key::Entry(bytes), Key::Given(ELEVENLABS_VALUE));
+        let lane = case.run(Some("1"), Some("voice-0001"));
+        assert_eq!(
+            lane.status,
+            Some(0),
+            "{what}: stdout:\n{}\nstderr:\n{}",
+            lane.stdout,
+            lane.stderr
+        );
+        lane.says(&format!(
+            "quality-live: skipped openai-speech-live, openai-gpt-live: the Secret Service gives no key for {OPENAI_KEY}"
+        ));
+        let mut expected = vec![
+            format!("secret-tool lookup service b10x-secrets username {OPENAI_KEY}"),
+            format!("secret-tool lookup service b10x-secrets username {ELEVENLABS_KEY}"),
+        ];
+        expected.extend(case.steps("elevenlabs-live-example"));
+        expected.extend(case.steps("elevenlabs-cancel-probe"));
+        assert_eq!(
+            case.calls(),
+            expected,
+            "{what}: nothing of OpenAI is called"
+        );
+        assert!(case.records("openai-speech-live").is_empty(), "{what}");
+        assert!(case.records("openai-gpt-live").is_empty(), "{what}");
+        lane.says(
+            "quality-live: 1 records written under .ratchet/records/, 2 measures skipped, 0 failed",
+        );
+        for (path, text) in everything(&case, &lane) {
+            assert!(
+                !text.contains(version()),
+                "{what}: {path} holds the version"
+            );
+            assert!(!text.contains(MALFORMED), "{what}: {path} holds the value");
+        }
+    }
+}
+
+/// `ELEVENLABS_RESIDENCY` in the lane's environment reaches each ElevenLabs run and no OpenAI run,
+/// and the count names it; a value `inference-elevenlabs` does not take is named as such and not
+/// printed, since it may be a key set in the wrong variable.
+#[test]
+fn the_residency_reaches_the_elevenlabs_runs_only_and_the_count_names_it() {
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    let lane = case.run_in(Some("1"), Some("voice-0001"), &[], &[(RESIDENCY, "eu")]);
+    assert_eq!(
+        lane.status,
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        lane.stdout,
+        lane.stderr
+    );
+    let named = COUNT.replace("  ElevenLabs, key", "  ElevenLabs (residency eu), key");
+    assert!(lane.stdout.starts_with(&named), "stdout:\n{}", lane.stdout);
+    for (measure, variable, _) in MEASURES {
+        let expected = if variable == "ELEVENLABS_API_KEY" {
+            "eu"
+        } else {
+            "<unset>"
+        };
+        assert_eq!(case.seen(measure)[RESIDENCY], expected, "{measure}");
+    }
+
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    let lane = case.run(Some("1"), Some("voice-0001"));
+    assert!(lane.stdout.starts_with(COUNT), "stdout:\n{}", lane.stdout);
+    for (measure, _, _) in MEASURES {
+        assert_eq!(case.seen(measure)[RESIDENCY], "<unset>", "{measure}");
+    }
+
+    const REFUSED: &str = "not-a-residency-0007";
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    let lane = case.run_in(None, Some("voice-0001"), &[], &[(RESIDENCY, REFUSED)]);
+    assert_eq!(lane.status, Some(2), "stderr: {}", lane.stderr);
+    lane.says("  ElevenLabs (ELEVENLABS_RESIDENCY names none of global, us, eu, in, sg; its value is not printed), key default/default/default/elevenlabs-api-key: 6 calls\n");
+    assert!(!lane.stdout.contains(REFUSED) && !lane.stderr.contains(REFUSED));
+    case.called_nothing();
 }

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-27T13:38:02Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-records-series-on-a-ref",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "beyond10x/inference actions run 46005826592 (workflow quality series, main 49dc71e3a): jobs append and push success",
+    "reference": "refs/ratchet/records = 0bf0c588bec096b8097260397bcede15b675f24e, author github-actions[bot], 22 records of check run 46003460144; pushed with GITHUB_TOKEN, no ruleset change"
+  }
+}
