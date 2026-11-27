@@ -45,8 +45,8 @@ The three measures below have one value per crate. The values are in the table o
 Tests that are ignored have no count per crate. The log holds one number for the whole
 workspace. See [not-measured.md](not-measured.md).
 
-The coverage of the record of `adapter-tests` counts the tests of the eleven crates and of no
-other package. Its `skipped` is 0 because the assessor does not report that count. It is not
+The coverage of the record of `adapter-tests` counts the tests of the twelve crates, of those an
+adopted record holds, and of no other package. Its `skipped` is 0 because the assessor does not report that count. It is not
 the number of ignored tests.
 
 ## How a time bound is written
@@ -791,6 +791,15 @@ memory are in [README.md](README.md#local-speech-to-text-adapters), with the com
 `adapters/inference-sherpa-onnx/tests/stt_record.rs` compares the `adapter_revision` of that
 record with the version of the crate, and `task docs-check` compares it with the version of the
 workspace. `sherpa-onnx-stt-record/real-time-factor` holds the bound on its real-time factor.
+
+## `inference-sherpa-onnx-tts`
+
+Turns text into speech on the local CPU with sherpa-onnx's offline TTS, one call per text.
+
+No adopted record holds this crate yet: its rows come with the next run adopted from `main`.
+
+The crate has no time bound as a constant. Its committed record on the reference machine is
+`adapters/inference-sherpa-onnx-tts/records/tts-xeon-8375c-cpu.json`.
 
 ## `inference-whispercpp`
 

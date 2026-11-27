@@ -2,7 +2,7 @@
 title: Local voice cascade
 sidebar_position: 2
 description: The cascade's nodes, its two commit gates, how a barge-in travels through it, and how the same declaration binds to mocks or to local adapters.
-lede: One pipeline declaration under offline_strict - mocks without the local feature, sherpa-onnx or whisper.cpp and a loopback llama-server with it.
+lede: One pipeline declaration under offline_strict - mocks without the local feature; sherpa-onnx or whisper.cpp, a loopback llama-server and a sherpa-onnx synthesiser with it.
 source: examples/local-voice-cascade (src/lib.rs, src/local.rs, tests/gates.rs, tests/barge_in.rs), crates/inference-testkit
 ---
 
@@ -35,7 +35,7 @@ pauses on overload.
 |---|---|---|
 | `stt` | the testkit's mock recogniser | sherpa-onnx or whisper.cpp, chosen by `INFERENCE_CASCADE_STT` ([guide](../guides/swap-the-recogniser-by-configuration.md)) |
 | `agent` | the testkit's mock generator | `llama-server` on loopback, a local worker |
-| `tts` | the testkit's mock synthesiser | still the mock synthesiser: a local TTS adapter is planned |
+| `tts` | the testkit's mock synthesiser | `inference-sherpa-onnx-tts` over its pinned Kokoro-82M checkpoint, in a process started on the sherpa-onnx library built with text-to-speech ([guide](../guides/run-the-local-voice-cascade-offline.md#3-get-the-synthesisers-library-and-checkpoint)) |
 
 The `stt` node requires no capability, so a batch recogniser that claims neither incremental input
 nor output streaming plans there as a streaming one does. The cascade's effective capabilities are

@@ -17,6 +17,9 @@
 
 ### Added
 
+- `inference-sherpa-onnx-tts`: a new adapter crate, `SherpaOnnxSynthesiser`, a local
+  text-to-speech synthesiser over sherpa-onnx's offline TTS as native FFI, opt-in, over the
+  pinned Kokoro-82M v0.19 checkpoint or a caller's own Piper voice.
 - `inference-docs` (not published): `inference-docs adopt-records` and `task quality-adopt RUN=…
   DIR=… RUN_JSON=…` copy the records of a check run on `main`, downloaded by the caller from its
   artifact `quality-records-<commit>` and described by the saved output of `gh run view <id> --json

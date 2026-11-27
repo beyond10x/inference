@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | `stt` | the recogniser [`STT_VARIABLE`] selects ([`SttBackend`]): `inference-sherpa-onnx`'s streaming recogniser over its pinned checkpoint, the default, or `inference-whispercpp`'s batch recogniser over its pinned checkpoint | `same_process` |
 //! | `agent` | `inference-llama-server`'s generator over a `llama-server` on loopback | `local_worker` |
-//! | `tts` | the testkit's mock synthesiser, until a local TTS adapter exists | `same_process` |
+//! | `tts` | `inference-sherpa-onnx-tts`'s synthesiser over its pinned checkpoint, Kokoro-82M v0.19 at 24 kHz | `same_process` |
 //!
 //! under the `offline_strict` profile with egress denied admitting [`ADMITTED`], both localities.
 //! The connection to the server is compute on the machine, not egress: [`LocalModels::open`]
@@ -26,9 +26,24 @@
 //!
 //! [`LocalConfig::from_env`] reads the backend from [`STT_VARIABLE`], its checkpoint from
 //! [`STT_DIR_VARIABLE`] or [`WHISPERCPP_MODEL_VARIABLE`], and the server from
-//! [`SERVER_URL_VARIABLE`] and [`SERVER_MODEL_VARIABLE`], naming the first that is missing. The
-//! mock synthesiser speaks one 10 ms frame of silence per word, so `talk` plays silence where the
-//! answer will be heard once the TTS adapter replaces it at the same binding.
+//! [`SERVER_URL_VARIABLE`] and [`SERVER_MODEL_VARIABLE`], naming the first that is missing.
+//!
+//! The synthesiser is opened on its own, by [`synthesiser`] on the directory
+//! [`TTS_DIR_VARIABLE`] names, and is no part of [`LocalConfig`] or [`LocalModels`]: a cascade
+//! that listens and answers locally and speaks through another synthesiser, as the `compare`
+//! example of `realtime-voice` does, opens those two alone and needs neither the synthesiser's
+//! checkpoint nor its library. The synthesiser speaks only in a process started on the
+//! sherpa-onnx native library built with text-to-speech, which carries espeak-ng
+//! (GPL-3.0-or-later); the workspace builds against the one without, and [`synthesiser`] on that
+//! one is refused, naming the library. The README of `inference-sherpa-onnx-tts` says how the
+//! process is started.
+//!
+//! The synthesiser speaks each segment on its own, and each delta of the server is a segment: an
+//! answer is spoken delta by delta, each with the prosody of a text of its own, a segment of
+//! punctuation alone without audio. A reply spoken that way lasts longer than the reply spoken
+//! whole (measured: 7133 ms against 3186 ms for a 12-word sentence in 13 deltas), and each such
+//! segment is delivered whole, once it is generated. The speaker resamples the synthesiser's 24 kHz to the
+//! device's rate.
 //!
 //! The LLM node is `inference-pipeline`'s `AgentNode`, which answers a turn's committed spans
 //! with the generator's answer to their text ([`identity`]). The server's adapter claims output
@@ -44,28 +59,27 @@
 
 use std::error::Error;
 use std::fmt;
-use std::num::{NonZeroU16, NonZeroU32};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use inference_audio::{AudioEncoding, AudioFormat, AudioFrame};
+use inference_audio::AudioFrame;
 use inference_audio_device::{AudioHost, DeviceError, DeviceSelector, PlayoutConfig};
 use inference_core::envelope::EventEnvelope;
 use inference_core::id::RunId;
-use inference_core::model::{Adapter, Locality, Model, ModelId};
+use inference_core::model::{Adapter, Locality, Model};
 use inference_llama_server::{Config, LlamaServer, declare_adapter, declare_model};
 use inference_llm::Generator;
 use inference_pipeline::Declaration;
 use inference_pipeline::nodes::vad::VadConfig;
 use inference_sherpa_onnx::stt::{SherpaOnnxRecogniser, SherpaOnnxRecognition};
+use inference_sherpa_onnx_tts::SherpaOnnxSynthesiser;
 use inference_testkit::cascade::{CascadeRefused, TurnStore};
 use inference_testkit::graph::RunLog;
 use inference_testkit::stt::inference_stt::{
     ConcurrencyLimitReached, InputEnded, Recogniser, RecognitionHandle, RecognitionRequest,
     RevisionRefused, TranscriptEvent, TranscriptOutput,
 };
-use inference_testkit::tts::{MockConfiguration, MockSynthesiser};
 use inference_text::ReviseSpan;
 use inference_tts::Synthesiser;
 use inference_whispercpp::stt::{WhisperCppRecogniser, WhisperCppRecognition};
@@ -83,6 +97,10 @@ pub const STT_DIR_VARIABLE: &str = "INFERENCE_SHERPA_ONNX_STT_DIR";
 /// The variable naming the pinned checkpoint file of the whisper.cpp recogniser,
 /// `ggml-base.en.bin`.
 pub const WHISPERCPP_MODEL_VARIABLE: &str = "INFERENCE_WHISPERCPP_STT_MODEL";
+
+/// The variable naming the directory of the unpacked pinned checkpoint of the sherpa-onnx
+/// synthesiser, `kokoro-en-v0_19`.
+pub const TTS_DIR_VARIABLE: &str = "INFERENCE_SHERPA_ONNX_TTS_DIR";
 
 /// The variable naming the base URL of the server's OpenAI-compatible API, such as
 /// `http://127.0.0.1:8080/v1`.
@@ -229,8 +247,8 @@ impl SttConfig {
     }
 }
 
-/// Where the local adapters are: the recogniser and its checkpoint, and the server, its served
-/// model and the most tokens of one answer.
+/// Where the local adapters that listen and answer are: the recogniser and its checkpoint, and
+/// the server, its served model and the most tokens of one answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalConfig {
     pub stt: SttConfig,
@@ -251,7 +269,8 @@ impl LocalConfig {
 
     /// The configuration `lookup` answers for each variable, with [`MAX_OUTPUT_TOKENS`]: the
     /// backend [`STT_VARIABLE`] selects, [`SttBackend::SherpaOnnx`] when it answers none, the
-    /// backend's checkpoint, [`SttBackend::variable`], and the server.
+    /// backend's checkpoint, [`SttBackend::variable`], and the server. It does not ask for
+    /// [`TTS_DIR_VARIABLE`].
     ///
     /// # Errors
     ///
@@ -348,19 +367,36 @@ pub fn loopback(url: &str) -> Result<(), LocalRefused> {
     })
 }
 
-/// The mock synthesiser bound at `tts`: streaming each segment as it takes it, in 16 kHz mono
-/// `pcm_s16le`.
+/// The synthesiser bound at `tts`: `inference-sherpa-onnx-tts`'s over its pinned checkpoint
+/// unpacked in `dir`, which [`TTS_DIR_VARIABLE`] names, streaming each segment as it takes it, in
+/// 24 kHz mono `pcm_s16le`.
+///
+/// # Errors
+///
+/// The adapter's refusal to open the checkpoint: a file that is missing or differs from its pin,
+/// or a process that loaded the sherpa-onnx native library built without text-to-speech.
+pub fn synthesiser(
+    dir: &Path,
+) -> Result<SherpaOnnxSynthesiser, inference_sherpa_onnx_tts::OpenRefused> {
+    SherpaOnnxSynthesiser::open(dir)
+}
+
+/// The adapter record the synthesiser declares when it opens its checkpoint, at its default
+/// maximum concurrency, declared without the checkpoint: its capabilities, execution form and
+/// locality are the opened synthesiser's, its model and adapter ids its own.
+///
+/// # Panics
+///
+/// Never: the default maximum concurrency of the adapter is positive.
 #[must_use]
-pub fn synthesiser() -> MockSynthesiser {
-    MockSynthesiser::new(
-        MockConfiguration::IncrementalStreaming,
-        ModelId::generate(),
-        AudioFormat {
-            encoding: AudioEncoding::PcmS16le,
-            sample_rate: NonZeroU32::new(16_000).unwrap_or(NonZeroU32::MIN),
-            channels: NonZeroU16::MIN,
-        },
+pub fn synthesiser_adapter() -> Adapter {
+    let (model, _) = inference_sherpa_onnx_tts::declare_model();
+    inference_sherpa_onnx_tts::declare_adapter(
+        model.model_id(),
+        inference_sherpa_onnx_tts::DEFAULT_MAX_CONCURRENCY,
     )
+    .expect("a positive default concurrency")
+    .0
 }
 
 /// The adapter of the server `server` configures, declared without a request to it.
@@ -493,18 +529,18 @@ impl RecognitionHandle for LocalRecognition {
     }
 }
 
-/// The models of the local cascade's three model nodes.
+/// The models the local cascade listens and answers with, at its nodes `stt` and `agent`. The
+/// model of `tts` is opened by [`synthesiser`].
 #[derive(Debug, Clone)]
 pub struct LocalModels {
     pub recogniser: LocalRecogniser,
     pub generator: Generator,
-    pub synthesiser: MockSynthesiser,
 }
 
 impl LocalModels {
     /// Opens the recogniser `config.stt` selects on its checkpoint and the generator of the
-    /// server `config` names, once its URL is found loopback, and makes the mock synthesiser.
-    /// Nothing is sent to the server before the first turn.
+    /// server `config` names, once its URL is found loopback. Nothing is sent to the server
+    /// before the first turn.
     ///
     /// # Errors
     ///
@@ -524,13 +560,12 @@ impl LocalModels {
         Ok(Self {
             recogniser,
             generator,
-            synthesiser: synthesiser(),
         })
     }
 }
 
-/// Declares the cascade in `declaration`, its model nodes bound to the adapters of `models`,
-/// under the profile admitting [`ADMITTED`], and validates and plans it.
+/// Declares the cascade in `declaration`, its model nodes bound to the adapters of `models` and
+/// of `synthesiser`, under the profile admitting [`ADMITTED`], and validates and plans it.
 ///
 /// # Errors
 ///
@@ -539,13 +574,14 @@ impl LocalModels {
 pub fn declare_local(
     declaration: &mut Declaration,
     models: &LocalModels,
+    synthesiser: &SherpaOnnxSynthesiser,
 ) -> Result<LocalCascade, CascadeRefused> {
     declare_local_adapters(
         declaration,
         [
             models.recogniser.adapter().clone(),
             models.generator.adapter().clone(),
-            models.synthesiser.adapter().clone(),
+            synthesiser.adapter().clone(),
         ],
     )
 }
@@ -567,8 +603,8 @@ pub fn declare_local_adapters(
 }
 
 impl LocalCascade {
-    /// The implementations of the nodes of the run `run_id` over the local `models`, the
-    /// detector [`SPEECH_VAD`], the LLM node asking [`identity`], the turn policy's commands
+    /// The implementations of the nodes of the run `run_id` over the local `models` and
+    /// `synthesiser`, the detector [`SPEECH_VAD`], the LLM node asking [`identity`], the turn policy's commands
     /// answered by `turns`, what the nodes emit recorded in `log`, and the speaker the output
     /// device `device` of `host` plays, queuing `playout`.
     ///
@@ -580,6 +616,7 @@ impl LocalCascade {
         &self,
         run_id: RunId,
         models: LocalModels,
+        synthesiser: SherpaOnnxSynthesiser,
         turns: TurnStore,
         log: &RunLog,
         host: &dyn AudioHost,
@@ -590,7 +627,7 @@ impl LocalCascade {
             recogniser: models.recogniser,
             generator: models.generator,
             reply: identity,
-            synthesiser: models.synthesiser,
+            synthesiser,
         };
         let output = Output {
             host,

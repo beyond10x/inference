@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:local-tts-adapter-under-licence-policy
 kind: story
-status: active
+status: implemented
 title: A local TTS adapter whose backend fits the licence policy, spoken by the offline cascade
 relations:
 - decomposes: epic:local-tts-adapter
@@ -44,10 +44,11 @@ scope:
   path: website/docs/status/limitations.md
 - confidence: inferred
   path: website/product.json
-revision: 24
+revision: 25
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-24T13:08:07Z", actor: "human:operator", revision: 3}
 - {from: "proposed", to: "active", at: "2026-11-24T13:08:07Z", actor: "human:operator", revision: 4}
+- {from: "active", to: "implemented", at: "2026-11-27T15:57:25Z", actor: "human:operator", revision: 25, decided_on: {"recorded":{"test_result":1,"review_outcome":4}}}
 ---
 ## Context
 

@@ -229,7 +229,7 @@ const BINDINGS: &[Binding] = &[
             "streaming Zipformer, English",
         ),
         environment: "`INFERENCE_SHERPA_ONNX_STT_DIR`",
-        licence: "code Apache-2.0 (sherpa-onnx 1.13.8), MIT (onnxruntime); weights Apache-2.0, trained on LibriSpeech (CC BY 4.0)",
+        licence: "code in the 25 libraries the native archive without text-to-speech links, each in `CODE_LICENSES` of the crate's module `stt` with the licence read: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, BSL-1.0, Zlib, MPL-2.0 (Eigen, twice), GPL-3.0-or-later WITH GCC-exception-3.1 (pieces of libstdc++ and libgcc), LGPL-2.1-or-later (pieces of glibc); weights Apache-2.0, trained on LibriSpeech (CC BY 4.0)",
         release: Release::Since("0.6.0"),
     },
     Binding {
@@ -267,6 +267,19 @@ const BINDINGS: &[Binding] = &[
         environment: "`INFERENCE_LLAMA_SERVER_URL`, `INFERENCE_LLAMA_SERVER_MODEL`",
         licence: "code MIT (llama.cpp); weights Apache-2.0",
         release: Release::Since("0.6.0"),
+    },
+    Binding {
+        name: "sherpa-onnx TTS",
+        package: "inference-sherpa-onnx-tts",
+        runs: "TTS, streaming part by part: one part per sentence, and a sentence of more than about 510 phoneme tokens in several (139 characters arrived as one part, 679 characters as 2); a segment of one part is delivered whole, after it is generated, and every segment of the local cascade is one; in process, native library built with text-to-speech",
+        features: &[],
+        record: Record::Capability(
+            "records/tts-xeon-8375c-cpu.json",
+            "Kokoro-82M v0.19, English",
+        ),
+        environment: "`INFERENCE_SHERPA_ONNX_TTS_DIR`",
+        licence: "code in the 29 libraries the native archive with text-to-speech links, each in the crate's `CODE_LICENSES` with the licence read: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, BSL-1.0, Zlib, Unlicense OR MIT (uni-algo), MPL-2.0 (Eigen, twice), GPL-3.0-or-later (espeak-ng, admitted for this adapter alone by the owner's exception), GPL-3.0-or-later AND Unicode-DFS-2016 (ucd-tools), GPL-3.0-or-later WITH GCC-exception-3.1 (pieces of libstdc++ and libgcc), LGPL-2.1-or-later (pieces of glibc); weights and voices Apache-2.0; the checkpoint carries espeak-ng's phoneme data, GPL-3.0",
+        release: Release::Next,
     },
 ];
 
@@ -1110,6 +1123,10 @@ mod tests {
         (
             "llama-server LLM, tools on",
             "tool proposals as structured events, and one capability record per configuration",
+        ),
+        (
+            "sherpa-onnx TTS",
+            "`inference-sherpa-onnx-tts`: a new adapter crate",
         ),
     ];
 

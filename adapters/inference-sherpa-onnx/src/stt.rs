@@ -90,9 +90,266 @@ pub const SOURCE_URL: &str =
 /// The revision of [`SOURCE_URL`] the pinned files and their licence were read at.
 pub const SOURCE_REVISION: &str = "672fbf1b30579d6585301139bb363f42a0ad4a24";
 
-/// The licences of the code that runs the checkpoint: sherpa-onnx and onnxruntime, the native
-/// library this crate links.
-pub const CODE_LICENSE: &str = "Apache-2.0 (sherpa-onnx 1.13.8), MIT (onnxruntime)";
+/// The licences of the code that runs the checkpoint, as the [`Model`] of [`declare_model`]
+/// carries them: `<licence> (<component>)` for each entry of [`CODE_LICENSES`], joined by `, `.
+///
+/// Before the licences of the archive were read, the constant named sherpa-onnx and
+/// onnxruntime alone.
+pub const CODE_LICENSE: &str = "Apache-2.0 (sherpa-onnx), Apache-2.0 (kaldi-native-fbank), \
+     BSD-3-Clause (kissfft), Apache-2.0 (kaldi-decoder), Apache-2.0 (kaldifst), \
+     Apache-2.0 (openfst), MPL-2.0 (Eigen), \
+     Apache-2.0 AND BSD-2-Clause AND Zlib (simple-sentencepiece), MIT (nlohmann/json), \
+     BSD-2-Clause (hclust-cpp), MIT (onnxruntime), Apache-2.0 (abseil-cpp), Apache-2.0 (onnx), \
+     BSD-3-Clause (protobuf), BSD-3-Clause (re2), Apache-2.0 (flatbuffers), \
+     MPL-2.0 (Eigen in onnxruntime), MIT (GSL), MIT (nlohmann/json in onnxruntime), MIT (date), \
+     BSL-1.0 (Boost.Mp11), MIT (SafeInt), BSD-2-Clause (cpuinfo), \
+     GPL-3.0-or-later WITH GCC-exception-3.1 (libstdc++ and libgcc), LGPL-2.1-or-later (glibc)";
+
+/// One library of the code that runs the checkpoint, with its licence as it was read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CodeLicense {
+    /// The library, by the name of its project. No two entries of a list share it.
+    pub component: &'static str,
+    /// The version, tag or commit the licence was read at; [`CodeLicense::source`] names it.
+    pub revision: &'static str,
+    /// The licence as an SPDX expression.
+    pub license: &'static str,
+    /// The URL the licence text was read at, pinned to [`CodeLicense::revision`].
+    pub source: &'static str,
+    /// The names in the library list of the `sherpa-onnx-sys` build script that are this
+    /// library; empty for a library that list does not name.
+    pub libraries: &'static [&'static str],
+}
+
+/// The licences of the code that runs the checkpoint: one entry per library that the
+/// sherpa-onnx native archive built without text-to-speech links, 25 of them, each with the
+/// licence read on 2026-11-25 at the version, tag or commit named and the URL of the text read.
+///
+/// The archive holds three objects. `libsherpa-onnx-c-api.so` is sherpa-onnx with the next nine
+/// entries built in; `libsherpa-onnx-cxx-api.so` is sherpa-onnx's own C++ wrapper;
+/// `libonnxruntime.so` is onnxruntime with the twelve entries from abseil-cpp to cpuinfo built
+/// in. The last two entries are pieces of the compiler's runtime, in all three objects, and of
+/// the C library, in the first. The build script of `sherpa-onnx-sys` names thirteen libraries
+/// (`build.rs:16-30` at 1.13.8): [`CodeLicense::libraries`] says which entry each of them is.
+/// Three of the thirteen have no entry, because this archive does not carry them: the
+/// phonemiser, its Unicode tables and the library that calls it are built in only with
+/// text-to-speech. A test of this crate compares the list with the build script, so a pin that
+/// moves is red until the list follows.
+///
+/// What an entry's identifier does not say:
+///
+/// * `Apache-2.0 AND BSD-2-Clause AND Zlib` for simple-sentencepiece is this repository's
+///   reading of the texts, not an expression a file states. The files read: `LICENSE`, the
+///   Apache License 2.0; `ssentencepiece/csrc/darts.h`, the bundled darts-clone, whose header
+///   names "The BSD 2-clause license"; and `ssentencepiece/csrc/threadpool.h`, the bundled
+///   thread pool, whose header carries the wording SPDX names Zlib ("This software is provided
+///   'as-is'") and no name for it. Both bundled files are in the object.
+/// * onnxruntime is not built by sherpa-onnx: the object is the one of the prebuilt
+///   `onnxruntime-linux-x64-glibc2_17-Release-1.28.2.zip` that sherpa-onnx 1.13.8 pins
+///   (`cmake/onnxruntime-linux-x86_64.cmake`), sha256
+///   `c4f8994d56191d9d2c92a961b39fe790459f2c5d155f912b239506ea31359534`, version 1.28.2, built
+///   from the commit the entry names. The text was read at a fork that holds that commit and is
+///   byte for byte the `LICENSE` of the zip; the upstream repository did not answer that day.
+/// * Boost.Mp11 has no licence file in its own repository at the tag; its header names the Boost
+///   Software License 1.0, read in the Boost super-project at the same tag.
+/// * The glibc files carry, beside the LGPL, a permission that has no SPDX identifier:
+///   "unlimited permission to link the compiled version of this file with other programs, and
+///   to distribute those programs without any restriction coming from the use of this file"
+///   (header of `stdlib/atexit.c` at the tag).
+/// * Eigen (MPL-2.0), the pieces of the compiler's runtime and those of the C library are outside
+///   the repository's licence rule for local adapters, Apache-2.0, MIT or more permissive. The
+///   owner's decision of 2026-11-27 admits them only as built into the upstream archives the
+///   build fetches, never committed or distributed by this repository; the compiler's runtime
+///   and the C library under their runtime and linking exceptions. Every other entry is inside
+///   the rule.
+///
+/// What the reading did not determine: the versions are those the build files of sherpa-onnx
+/// 1.13.8 and of the onnxruntime commit name, read from those files and not observed in a
+/// build, so which Eigen and openfst went into the sherpa-onnx object, and whether the
+/// onnxruntime object was built from exactly the versions its `cmake/deps.txt` names, is open.
+/// The pieces of the compiler's runtime and of the C library were read at the upstream releases
+/// nearest to what the objects say, GCC 11.2.0 for a compiler string of 11.2.1 and glibc 2.17
+/// by the name of the build container, not in the sources of the container's packages. Files
+/// with a licence of their own inside the trees were not audited one by one, the revision of
+/// the project that sherpa-onnx's tashkeel tokenizer was adapted from is not pinned,
+/// and what the sherpa-onnx build fetches but this archive does not link was not read.
+pub const CODE_LICENSES: [CodeLicense; 25] = [
+    CodeLicense {
+        component: "sherpa-onnx",
+        revision: "v1.13.8",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.8/LICENSE",
+        libraries: &["sherpa-onnx-c-api", "sherpa-onnx-core"],
+    },
+    CodeLicense {
+        component: "kaldi-native-fbank",
+        revision: "v1.22.3",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/csukuangfj/kaldi-native-fbank/v1.22.3/LICENSE",
+        libraries: &["kaldi-native-fbank-core"],
+    },
+    CodeLicense {
+        component: "kissfft",
+        revision: "febd4caeed32e33ad8b2e0bb5ea77542c40f18ec",
+        license: "BSD-3-Clause",
+        source: "https://raw.githubusercontent.com/mborgerding/kissfft/febd4caeed32e33ad8b2e0bb5ea77542c40f18ec/COPYING",
+        libraries: &["kissfft-float"],
+    },
+    CodeLicense {
+        component: "kaldi-decoder",
+        revision: "v0.3.0",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/k2-fsa/kaldi-decoder/v0.3.0/LICENSE",
+        libraries: &["kaldi-decoder-core"],
+    },
+    CodeLicense {
+        component: "kaldifst",
+        revision: "v1.8.0",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/k2-fsa/kaldifst/v1.8.0/LICENSE",
+        libraries: &["sherpa-onnx-kaldifst-core"],
+    },
+    CodeLicense {
+        component: "openfst",
+        revision: "v1.8.5-2026-07-09",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/csukuangfj/openfst/v1.8.5-2026-07-09/COPYING",
+        libraries: &["sherpa-onnx-fstfar", "sherpa-onnx-fst"],
+    },
+    CodeLicense {
+        component: "Eigen",
+        revision: "5.0.1",
+        license: "MPL-2.0",
+        source: "https://gitlab.com/libeigen/eigen/-/raw/5.0.1/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "simple-sentencepiece",
+        revision: "v0.7",
+        license: "Apache-2.0 AND BSD-2-Clause AND Zlib",
+        source: "https://raw.githubusercontent.com/pkufool/simple-sentencepiece/v0.7/LICENSE",
+        libraries: &["ssentencepiece_core"],
+    },
+    CodeLicense {
+        component: "nlohmann/json",
+        revision: "v3.12.0",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "hclust-cpp",
+        revision: "2026-02-25",
+        license: "BSD-2-Clause",
+        source: "https://raw.githubusercontent.com/csukuangfj/hclust-cpp/2026-02-25/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "onnxruntime",
+        revision: "33ca9628233dc8f002435e868d4c2e9f82766ca1",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/csukuangfj/onnxruntime/33ca9628233dc8f002435e868d4c2e9f82766ca1/LICENSE",
+        libraries: &["onnxruntime"],
+    },
+    CodeLicense {
+        component: "abseil-cpp",
+        revision: "20250814.0",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/abseil/abseil-cpp/20250814.0/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "onnx",
+        revision: "v1.22.0",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/onnx/onnx/v1.22.0/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "protobuf",
+        revision: "v21.12",
+        license: "BSD-3-Clause",
+        source: "https://raw.githubusercontent.com/protocolbuffers/protobuf/v21.12/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "re2",
+        revision: "2024-07-02",
+        license: "BSD-3-Clause",
+        source: "https://raw.githubusercontent.com/google/re2/2024-07-02/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "flatbuffers",
+        revision: "v23.5.26",
+        license: "Apache-2.0",
+        source: "https://raw.githubusercontent.com/google/flatbuffers/v23.5.26/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "Eigen in onnxruntime",
+        revision: "1d8b82b0740839c0de7f1242a3585e3390ff5f33",
+        license: "MPL-2.0",
+        source: "https://raw.githubusercontent.com/eigen-mirror/eigen/1d8b82b0740839c0de7f1242a3585e3390ff5f33/COPYING.MPL2",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "GSL",
+        revision: "v4.2.1",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/microsoft/GSL/v4.2.1/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "nlohmann/json in onnxruntime",
+        revision: "v3.11.3",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/nlohmann/json/v3.11.3/LICENSE.MIT",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "date",
+        revision: "v3.0.1",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/HowardHinnant/date/v3.0.1/LICENSE.txt",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "Boost.Mp11",
+        revision: "boost-1.82.0",
+        license: "BSL-1.0",
+        source: "https://raw.githubusercontent.com/boostorg/boost/boost-1.82.0/LICENSE_1_0.txt",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "SafeInt",
+        revision: "3.0.28",
+        license: "MIT",
+        source: "https://raw.githubusercontent.com/dcleblanc/SafeInt/3.0.28/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "cpuinfo",
+        revision: "4628dc060ce4e82345dc166bbac875609db4ff69",
+        license: "BSD-2-Clause",
+        source: "https://raw.githubusercontent.com/pytorch/cpuinfo/4628dc060ce4e82345dc166bbac875609db4ff69/LICENSE",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "libstdc++ and libgcc",
+        revision: "releases/gcc-11.2.0",
+        license: "GPL-3.0-or-later WITH GCC-exception-3.1",
+        source: "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-11.2.0/COPYING.RUNTIME",
+        libraries: &[],
+    },
+    CodeLicense {
+        component: "glibc",
+        revision: "glibc-2.17",
+        license: "LGPL-2.1-or-later",
+        source: "https://sourceware.org/git/?p=glibc.git;a=blob_plain;f=COPYING.LIB;hb=refs/tags/glibc-2.17",
+        libraries: &[],
+    },
+];
 
 /// The licence of the weights, as the model card at [`SOURCE_REVISION`] declares it.
 pub const WEIGHT_LICENSE: &str = "Apache-2.0";

@@ -26,9 +26,9 @@
 //!
 //! With feature `local`, the module `local` binds the same declaration to the local adapters
 //! (A-05, 1140): at `stt` the recogniser its configuration selects, sherpa-onnx's streaming one or
-//! whisper.cpp's batch one, the generator of a loopback `llama-server` at `agent` and, until a
-//! local TTS adapter exists, the mock synthesiser at `tts`, under an `offline_strict` profile
-//! that also admits local workers.
+//! whisper.cpp's batch one, the generator of a loopback `llama-server` at `agent` and the
+//! synthesiser of `inference-sherpa-onnx-tts` over its pinned checkpoint at `tts`, under an
+//! `offline_strict` profile that also admits local workers.
 //!
 //! The input gate passes the committed spans and, behind the spans of each turn, its turn events
 //! to the LLM on one edge, and the turn events to the speaker on another, and holds back the

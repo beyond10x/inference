@@ -17,11 +17,10 @@ use inference_testkit::stt::inference_stt::{
     Recogniser, RecognitionHandle, RecognitionRequest, TranscriptEvent,
 };
 use inference_text::TurnId;
-use inference_tts::Synthesiser;
 use local_voice_cascade::local::{
     LocalConfig, LocalModels, LocalRecogniser, LocalRefused, SERVER_MODEL_VARIABLE,
     SERVER_URL_VARIABLE, STT_DIR_VARIABLE, STT_VARIABLE, SttBackend, SttConfig,
-    declare_local_adapters, server_adapter, synthesiser,
+    declare_local_adapters, server_adapter, synthesiser_adapter,
 };
 
 /// A loopback server; nothing is sent to it before the first turn.
@@ -222,7 +221,7 @@ fn the_lowered_stt_node_still_refuses_a_recogniser_at_a_locality_the_profile_doe
                 [
                     relocated(backend, locality),
                     server.clone(),
-                    synthesiser().adapter().clone(),
+                    synthesiser_adapter(),
                 ],
             )
             .expect_err("offline_strict admits neither");
@@ -246,7 +245,7 @@ fn the_lowered_stt_node_still_refuses_a_recogniser_at_a_locality_the_profile_doe
                 [
                     relocated(backend, locality),
                     server.clone(),
-                    synthesiser().adapter().clone(),
+                    synthesiser_adapter(),
                 ],
             )
             .unwrap_or_else(|refused| panic!("{backend} at {locality:?}: {refused}"));

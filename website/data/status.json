@@ -221,13 +221,6 @@
     },
     {
       "area": "Adapters",
-      "detail": "The backend-neutral TTS checks exist; no local TTS adapter does, so the offline cascade speaks through a mock.",
-      "href": "/docs/status/limitations",
-      "label": "Local text-to-speech",
-      "status": "planned"
-    },
-    {
-      "area": "Adapters",
       "detail": "A native speech model that runs on your own machine.",
       "href": "/docs/status/limitations",
       "label": "Self-hosted native speech model",

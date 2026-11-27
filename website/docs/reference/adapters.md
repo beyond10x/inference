@@ -33,6 +33,7 @@ Status names the release whose [changelog](https://github.com/beyond10x/inferenc
 | whisper.cpp batch STT | [`inference-whispercpp`](https://github.com/beyond10x/inference/tree/main/adapters/inference-whispercpp) | STT, batch; in process, native library, CPU | `Whisper base.en` | none | Since 0.6.0 |
 | llama-server LLM | [`inference-llama-server`](https://github.com/beyond10x/inference/tree/main/adapters/inference-llama-server) | LLM; local worker, loopback HTTP | `Qwen2.5-1.5B-Instruct q4_k_m` | none | Since 0.6.0 |
 | llama-server LLM, tools on | [`inference-llama-server`](https://github.com/beyond10x/inference/tree/main/adapters/inference-llama-server) | LLM; local worker, loopback HTTP, server started with `--jinja` | `Qwen2.5-1.5B-Instruct q4_k_m` | `tools` | Since 0.6.0 |
+| sherpa-onnx TTS | [`inference-sherpa-onnx-tts`](https://github.com/beyond10x/inference/tree/main/adapters/inference-sherpa-onnx-tts) | TTS, streaming part by part: one part per sentence, and a sentence of more than about 510 phoneme tokens in several (139 characters arrived as one part, 679 characters as 2); a segment of one part is delivered whole, after it is generated, and every segment of the local cascade is one; in process, native library built with text-to-speech | `Kokoro-82M v0.19, English` | none | On main, in the next release |
 
 ## Environment, licences and records
 
@@ -50,10 +51,11 @@ What each binding reads from the environment, the licences of its code and weigh
 - **Deepgram Voice Agent**. Environment: `DEEPGRAM_API_KEY` with Voice Agent access, or the keychain secret `deepgram-api-key` with feature `keychain`. Licences or data: hosted service: audio leaves the machine. Record: [claims-voice-agent.json](https://github.com/beyond10x/inference/blob/main/adapters/inference-deepgram/records/claims-voice-agent.json).
 - **Phonic speech-to-speech**. Environment: `PHONIC_API_KEY`, or the keychain secret `phonic-api-key` with feature `keychain`. Licences or data: hosted service: audio leaves the machine. Record: [claims-duplex.json](https://github.com/beyond10x/inference/blob/main/adapters/inference-phonic/records/claims-duplex.json).
 - **Deepslate Opal**. Environment: `DEEPSLATE_API_KEY`, or the keychain secret `deepslate-api-key` with feature `keychain`; `DEEPSLATE_VENDOR_ID`, `DEEPSLATE_ORGANIZATION_ID`, and `DEEPSLATE_VOICE_ID` for spoken output. Licences or data: hosted service: audio leaves the machine. Record: [claims-opal.json](https://github.com/beyond10x/inference/blob/main/adapters/inference-deepslate/records/claims-opal.json).
-- **sherpa-onnx streaming STT**. Environment: `INFERENCE_SHERPA_ONNX_STT_DIR`. Licences or data: code Apache-2.0 (sherpa-onnx 1.13.8), MIT (onnxruntime); weights Apache-2.0, trained on LibriSpeech (CC BY 4.0). Record: [stt-i9-10900k-cpu.json](https://github.com/beyond10x/inference/blob/main/adapters/inference-sherpa-onnx/records/stt-i9-10900k-cpu.json).
+- **sherpa-onnx streaming STT**. Environment: `INFERENCE_SHERPA_ONNX_STT_DIR`. Licences or data: code in the 25 libraries the native archive without text-to-speech links, each in `CODE_LICENSES` of the crate's module `stt` with the licence read: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, BSL-1.0, Zlib, MPL-2.0 (Eigen, twice), GPL-3.0-or-later WITH GCC-exception-3.1 (pieces of libstdc++ and libgcc), LGPL-2.1-or-later (pieces of glibc); weights Apache-2.0, trained on LibriSpeech (CC BY 4.0). Record: [stt-i9-10900k-cpu.json](https://github.com/beyond10x/inference/blob/main/adapters/inference-sherpa-onnx/records/stt-i9-10900k-cpu.json).
 - **whisper.cpp batch STT**. Environment: `INFERENCE_WHISPERCPP_STT_MODEL`. Licences or data: code MIT (whisper.cpp), Unlicense (whisper-rs); weights MIT. Record: [stt-i9-10900k-cpu.json](https://github.com/beyond10x/inference/blob/main/adapters/inference-whispercpp/records/stt-i9-10900k-cpu.json).
 - **llama-server LLM**. Environment: `INFERENCE_LLAMA_SERVER_URL`, `INFERENCE_LLAMA_SERVER_MODEL`. Licences or data: code MIT (llama.cpp); weights Apache-2.0. Record: [reference-machine-cpu.json](https://github.com/beyond10x/inference/blob/main/adapters/inference-llama-server/capability/reference-machine-cpu.json).
 - **llama-server LLM, tools on**. Environment: `INFERENCE_LLAMA_SERVER_URL`, `INFERENCE_LLAMA_SERVER_MODEL`. Licences or data: code MIT (llama.cpp); weights Apache-2.0. Record: [reference-machine-cpu-tools.json](https://github.com/beyond10x/inference/blob/main/adapters/inference-llama-server/capability/reference-machine-cpu-tools.json).
+- **sherpa-onnx TTS**. Environment: `INFERENCE_SHERPA_ONNX_TTS_DIR`. Licences or data: code in the 29 libraries the native archive with text-to-speech links, each in the crate's `CODE_LICENSES` with the licence read: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, BSL-1.0, Zlib, Unlicense OR MIT (uni-algo), MPL-2.0 (Eigen, twice), GPL-3.0-or-later (espeak-ng, admitted for this adapter alone by the owner's exception), GPL-3.0-or-later AND Unicode-DFS-2016 (ucd-tools), GPL-3.0-or-later WITH GCC-exception-3.1 (pieces of libstdc++ and libgcc), LGPL-2.1-or-later (pieces of glibc); weights and voices Apache-2.0; the checkpoint carries espeak-ng's phoneme data, GPL-3.0. Record: [tts-xeon-8375c-cpu.json](https://github.com/beyond10x/inference/blob/main/adapters/inference-sherpa-onnx-tts/records/tts-xeon-8375c-cpu.json).
 
 ## Opens, closes and drops
 
@@ -70,8 +72,8 @@ Every capability of the contract and the bindings that claim it, separated by se
 
 | Capability | Claimed by |
 |---|---|
-| `output_streaming` | OpenAI Realtime; OpenAI GPT-Live; Amazon Nova Sonic on Bedrock; ElevenLabs streaming TTS; OpenAI streamed speech TTS; ElevenLabs agent conversation; Cartesia Sonic streaming TTS; Deepgram streaming STT; ElevenLabs realtime STT; Deepgram Voice Agent; Phonic speech-to-speech; Deepslate Opal; sherpa-onnx streaming STT; llama-server LLM; llama-server LLM, tools on |
-| `incremental_input` | OpenAI Realtime; OpenAI GPT-Live; Amazon Nova Sonic on Bedrock; ElevenLabs streaming TTS; OpenAI streamed speech TTS; ElevenLabs agent conversation; Cartesia Sonic streaming TTS; Deepgram streaming STT; ElevenLabs realtime STT; Deepgram Voice Agent; Phonic speech-to-speech; Deepslate Opal; sherpa-onnx streaming STT |
+| `output_streaming` | OpenAI Realtime; OpenAI GPT-Live; Amazon Nova Sonic on Bedrock; ElevenLabs streaming TTS; OpenAI streamed speech TTS; ElevenLabs agent conversation; Cartesia Sonic streaming TTS; Deepgram streaming STT; ElevenLabs realtime STT; Deepgram Voice Agent; Phonic speech-to-speech; Deepslate Opal; sherpa-onnx streaming STT; llama-server LLM; llama-server LLM, tools on; sherpa-onnx TTS |
+| `incremental_input` | OpenAI Realtime; OpenAI GPT-Live; Amazon Nova Sonic on Bedrock; ElevenLabs streaming TTS; OpenAI streamed speech TTS; ElevenLabs agent conversation; Cartesia Sonic streaming TTS; Deepgram streaming STT; ElevenLabs realtime STT; Deepgram Voice Agent; Phonic speech-to-speech; Deepslate Opal; sherpa-onnx streaming STT; sherpa-onnx TTS |
 | `concurrent_input_output` | OpenAI Realtime; OpenAI GPT-Live; Amazon Nova Sonic on Bedrock; ElevenLabs agent conversation; Deepgram Voice Agent; Phonic speech-to-speech; Deepslate Opal |
 | `native_duplex` | OpenAI GPT-Live |
 | `revisable_input` | none |
@@ -91,6 +93,7 @@ From each local binding's capability record. The CPU real-time factor is compute
 | whisper.cpp batch STT | 337 MiB | 630 ms | 0.202 | none |
 | llama-server LLM | 1,839 MiB | 13,911 ms | n/a | none |
 | llama-server LLM, tools on | 1,839 MiB | 13,911 ms | n/a | none |
+| sherpa-onnx TTS | 483 MiB | 8,050 ms | 0.553 | none |
 
 The machines, as the records name them:
 
@@ -98,3 +101,4 @@ The machines, as the records name them:
 - reference machine: Intel Core i9-10900K (10 cores, 20 threads), 62 GiB RAM, x86_64 Linux; CPU execution, whisper.cpp 1.8.3 built without GPU backends on 4 threads, the NVIDIA RTX 3090 unused
 - reference machine: Intel Core i9-10900K (10 cores, 20 threads), 62 GiB, Linux x86_64; CPU only, no layer offloaded (-ngl 0); llama.cpp prebuilt release b11752 (commit 7879491cf), linux x64 CPU build, -c 4096 -np 1
 - reference machine: Intel Core i9-10900K (10 cores, 20 threads), 62 GiB, Linux x86_64; CPU only, no layer offloaded (-ngl 0); llama.cpp prebuilt release b11752 (commit 7879491cf), linux x64 CPU build, -c 4096 -np 1 --jinja
+- build node: Intel Xeon Platinum 8375C (64 vCPU), 123 GiB RAM, x86_64 Linux; CPU execution, four onnxruntime threads, no GPU; unoptimised test build, the load time includes hashing the checkpoint

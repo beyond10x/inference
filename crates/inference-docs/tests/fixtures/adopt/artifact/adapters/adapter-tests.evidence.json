@@ -27,6 +27,7 @@
           "inference-openai",
           "inference-phonic",
           "inference-sherpa-onnx",
+          "inference-sherpa-onnx-tts",
           "inference-whispercpp"
         ]
       }
@@ -40,11 +41,11 @@
     },
     "coverage": {
       "unit": "test",
-      "executed": 1166,
+      "executed": 1205,
       "skipped": 0,
       "not_run": 0,
       "unsupported": 0,
-      "passed": 1166,
+      "passed": 1205,
       "failed": 0
     },
     "results": [
@@ -356,6 +357,37 @@
         "samples": 1,
         "details": {
           "test": "inference-sherpa-onnx::stt_network the_archive_download_is_reached_only_through_build_dependencies"
+        }
+      },
+      {
+        "output": "tests_run",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-sherpa-onnx-tts",
+        "value_type": "number",
+        "value": "39",
+        "unit": "tests"
+      },
+      {
+        "output": "tests_passed",
+        "kind": "exact",
+        "scope": "package",
+        "item": "inference-sherpa-onnx-tts",
+        "value_type": "number",
+        "value": "39",
+        "unit": "tests"
+      },
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "package",
+        "item": "inference-sherpa-onnx-tts",
+        "value_type": "number",
+        "value": "0.158",
+        "unit": "s",
+        "samples": 1,
+        "details": {
+          "test": "inference-sherpa-onnx-tts::main open::opening_a_voice_on_a_library_without_tts_is_refused_naming_the_library"
         }
       },
       {

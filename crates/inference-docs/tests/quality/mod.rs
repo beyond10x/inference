@@ -1089,7 +1089,8 @@ fn problems(documents: &Documents) -> Vec<String> {
 /// with one value per package a result for each package the plan names. `problems` holds the
 /// same through the pages: an entry that names a run needs a value of its measure in the record
 /// (`check_entry`), and a section of `quality/adapters.md` a result for its adapter
-/// (`adapters::check_crate_rows`). This rule reads the plan alone.
+/// (`adapters::check_crate_rows`). This rule reads the plan, and the page only for a package
+/// awaiting a record (`adapters::awaiting_a_record`), which needs no result.
 fn check_measure_results(model: &Model, problems: &mut Vec<String>) {
     for (id, assessment) in model.all("assessments") {
         let Some(record) = model.record(id) else {
@@ -1103,6 +1104,7 @@ fn check_measure_results(model: &Model, problems: &mut Vec<String>) {
             .flatten()
             .filter_map(Value::as_str)
             .collect();
+        let awaiting = adapters::awaiting_a_record(model, packages.iter().copied(), record);
         for (name, measurement) in entries(assessment, "measurements") {
             let key = format!("{id}/{name}");
             let found = results(record, measurement);
@@ -1113,7 +1115,10 @@ fn check_measure_results(model: &Model, problems: &mut Vec<String>) {
             if !adapters::per_crate(measurement) {
                 continue;
             }
-            for package in &packages {
+            for package in packages
+                .iter()
+                .filter(|package| !awaiting.contains(*package))
+            {
                 if !found
                     .iter()
                     .any(|result| text(result, "item") == Some(package))
@@ -1132,7 +1137,8 @@ fn check_measure_results(model: &Model, problems: &mut Vec<String>) {
 /// coverage (`check_records`); a result for each measure of its plan, and for each package of a
 /// measure with one value per package (`check_measure_results`); the packages and the coverage
 /// sums of a plan that names packages, and one result per test of a plan that lists tests
-/// (`adapters::check_records`). The baselines, tables and runs the pages state are left out.
+/// (`adapters::check_records`). The baselines, tables and runs the pages state are left out; of
+/// a page only the sentence of a section awaiting a record is read.
 fn record_problems(documents: &Documents) -> Vec<String> {
     let mut parsed = Vec::new();
     let model = model(documents, &mut parsed);

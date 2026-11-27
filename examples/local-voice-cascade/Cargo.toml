@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [features]
-local = ["dep:inference-llama-server", "dep:inference-sherpa-onnx", "dep:inference-whispercpp"]
+local = ["dep:inference-llama-server", "dep:inference-sherpa-onnx", "dep:inference-sherpa-onnx-tts", "dep:inference-whispercpp"]
 
 [dependencies]
 inference = { path = "../../crates/inference", features = ["audio-host"] }
@@ -20,6 +20,7 @@ inference-llama-server = { path = "../../adapters/inference-llama-server", optio
 inference-llm = { path = "../../crates/inference-llm" }
 inference-pipeline = { path = "../../crates/inference-pipeline" }
 inference-sherpa-onnx = { path = "../../adapters/inference-sherpa-onnx", features = ["stt"], optional = true }
+inference-sherpa-onnx-tts = { path = "../../adapters/inference-sherpa-onnx-tts", optional = true }
 inference-testkit = { path = "../../crates/inference-testkit", features = ["llm", "run", "stt", "tts"] }
 inference-text = { path = "../../crates/inference-text" }
 inference-tts = { path = "../../crates/inference-tts" }

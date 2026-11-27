@@ -170,3 +170,32 @@ tasks:
       - echo "{{.SHA256}}  {{.CACHE}}/{{.ARCHIVE}}.tar.bz2.part" | sha256sum --check --strict
       - mv {{.CACHE}}/{{.ARCHIVE}}.tar.bz2.part {{.CACHE}}/{{.ARCHIVE}}.tar.bz2
       - tar -xjf {{.CACHE}}/{{.ARCHIVE}}.tar.bz2 -C {{.CACHE}}
+
+  sherpa-onnx-tts:
+    desc: Fetches the sherpa-onnx native library archive with TTS, which carries espeak-ng (GPL-3.0-or-later), and the Kokoro checkpoint the TTS adapter pins, checks each against its pinned sha256 before unpacking and unpacks each into a directory of its own under target/sherpa-onnx-tts. No test and no other task runs it, and no build links the library; a process that speaks is started on it by a cargo target runner that sets LD_LIBRARY_PATH, as the README of adapters/inference-sherpa-onnx-tts shows.
+    vars:
+      NATIVE: sherpa-onnx-v1.13.8-linux-x64-shared-lib
+      NATIVE_SHA256: 3892d184be41027e18165e67f549cd4e4cdd8dcd73ac5579e97afd55e14e30b6
+      NATIVE_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-linux-x64-shared-lib.tar.bz2
+      CHECKPOINT: kokoro-en-v0_19
+      CHECKPOINT_SHA256: 912804855a04745fa77a30be545b3f9a5d15c4d66db00b88cbcd4921df605ac7
+      CHECKPOINT_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2
+      CACHE: target/sherpa-onnx-tts
+    status:
+      - echo "{{.NATIVE_SHA256}}  {{.CACHE}}/{{.NATIVE}}.tar.bz2" | sha256sum --check --status --strict
+      - test -f {{.CACHE}}/native/{{.NATIVE}}/lib/libsherpa-onnx-c-api.so
+      - echo "{{.CHECKPOINT_SHA256}}  {{.CACHE}}/{{.CHECKPOINT}}.tar.bz2" | sha256sum --check --status --strict
+      - test -f {{.CACHE}}/checkpoint/{{.CHECKPOINT}}/model.onnx
+    cmds:
+      - mkdir -p {{.CACHE}}
+      - rm -rf {{.CACHE}}/native {{.CACHE}}/checkpoint {{.CACHE}}/{{.NATIVE}}.tar.bz2 {{.CACHE}}/{{.NATIVE}}.tar.bz2.part {{.CACHE}}/{{.CHECKPOINT}}.tar.bz2 {{.CACHE}}/{{.CHECKPOINT}}.tar.bz2.part
+      - curl --fail --silent --show-error --location --output {{.CACHE}}/{{.NATIVE}}.tar.bz2.part {{.NATIVE_URL}}
+      - echo "{{.NATIVE_SHA256}}  {{.CACHE}}/{{.NATIVE}}.tar.bz2.part" | sha256sum --check --strict
+      - mv {{.CACHE}}/{{.NATIVE}}.tar.bz2.part {{.CACHE}}/{{.NATIVE}}.tar.bz2
+      - mkdir -p {{.CACHE}}/native
+      - tar -xjf {{.CACHE}}/{{.NATIVE}}.tar.bz2 -C {{.CACHE}}/native
+      - curl --fail --silent --show-error --location --output {{.CACHE}}/{{.CHECKPOINT}}.tar.bz2.part {{.CHECKPOINT_URL}}
+      - echo "{{.CHECKPOINT_SHA256}}  {{.CACHE}}/{{.CHECKPOINT}}.tar.bz2.part" | sha256sum --check --strict
+      - mv {{.CACHE}}/{{.CHECKPOINT}}.tar.bz2.part {{.CACHE}}/{{.CHECKPOINT}}.tar.bz2
+      - mkdir -p {{.CACHE}}/checkpoint
+      - tar -xjf {{.CACHE}}/{{.CHECKPOINT}}.tar.bz2 -C {{.CACHE}}/checkpoint

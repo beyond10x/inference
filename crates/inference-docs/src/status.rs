@@ -344,11 +344,12 @@ pub const CAPABILITIES: &[Capability] = &[
         "adapters/inference-audio-device/tests/nodes.rs::the_sink_plays_the_frames_it_receives_and_a_cancel_event_stops_the_speaker_at_once",
         "/docs/examples",
     ),
-    planned(
+    next(
         "Adapters",
-        "Local text-to-speech",
-        "The backend-neutral TTS checks exist; no local TTS adapter does, so the offline cascade speaks through a mock.",
-        "/docs/status/limitations",
+        "sherpa-onnx TTS",
+        "A local text-to-speech adapter over sherpa-onnx and the pinned Kokoro-82M v0.19 checkpoint; the offline cascade speaks through it. Opt-in: its phonemiser, espeak-ng, is GPL-3.0-or-later.",
+        "adapters/inference-sherpa-onnx-tts/tests/record.rs::the_record_of_the_measured_machine_loads_and_evidences_exactly_the_claims",
+        "/docs/reference/adapters",
     ),
     planned(
         "Adapters",
